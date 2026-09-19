@@ -25,6 +25,13 @@ public sealed class LensRecipe : IArchitectureRecipe
     /// packing, so a masked path would need a blend that does not exist yet.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.LensTransformer"/> names its blocks <c>transformer_blocks.{i}</c>, an already-recognized canonical diffusers root. The merge runs through <see cref="LensPipelineFactory.LoadFromComfyFiles"/>'s <c>onTransformerWeights</c> hook rather than beside a LoadWeights call — Lens is the only family whose transformer weights are loaded inside the Diffusion package.</para></remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner | ImageFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: Lens' GPT-OSS tokenizer disables
+    /// weights (<c>gpt_oss.py:475</c>), so the prompt is encoded at weight 1 and each token's conditioning row is
+    /// scaled afterwards — across all four captured encoder layers, which are one sequence at four depths.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lens", StringComparison.OrdinalIgnoreCase);
 

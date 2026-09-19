@@ -6,6 +6,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -87,6 +88,12 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
         (int snapW2, int snapH2) = (snappedW, snappedH);
         using Img2ImgResolver.Img2ImgSpec? refEdit = RecipeImg2ImgBinder.Resolve(request, snapW2, snapH2);
         bool needNeg = textGuidance > 1.0f || refEdit is not null;
+        // Declaring CondScale is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar
+        // now. The cache below is keyed on the prompt STRING, so a weighted and an unweighted prompt are already
+        // different keys — but a repeat of the SAME weighted prompt would hit, so the scale still has to land on
+        // a per-request copy or it would compound generation after generation.
+        WeightedTokenSequence instrSequence = EncodeWeighted(prompt);
+        WeightedTokenSequence negSequence = EncodeWeighted(negative);
         bool instrHit = _cachedInstr is not null && _cachedInstrKey == prompt;
         bool negHit = !needNeg || (_cachedNeg is not null && _cachedNegKey == negative);
         if (!instrHit || !negHit)
@@ -94,8 +101,7 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
             _pipeline.EvictResidentWeights();
             if (!instrHit)
             {
-                int[] tokens = BuildTemplatedTokens(_tokenizer, SystemPromptT2I, prompt);
-                Tensor instrNew = _textEncoder.Encode(_backend, new[] { tokens });
+                Tensor instrNew = _textEncoder.Encode(_backend, new[] { instrSequence.Tokens });
                 _ = instrNew.DataPointer;   // host-materialize: survives FreeActivations
                 _cachedInstr?.Dispose();
                 _cachedInstr = instrNew;
@@ -103,8 +109,7 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
             }
             if (needNeg && (_cachedNeg is null || _cachedNegKey != negative))
             {
-                int[] negTokens = BuildTemplatedTokens(_tokenizer, SystemPromptT2I, negative);
-                Tensor negNew = _textEncoder.Encode(_backend, new[] { negTokens });
+                Tensor negNew = _textEncoder.Encode(_backend, new[] { negSequence.Tokens });
                 _ = negNew.DataPointer;
                 _cachedNeg?.Dispose();
                 _cachedNeg = negNew;
@@ -117,14 +122,22 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
 
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
+        Tensor? weightedInstr = CondTokenWeights.Apply(_backend, _cachedInstr!, null, instrSequence).Cond;
+        Tensor instrEmbeddings = weightedInstr ?? _cachedInstr!;
+        Tensor? weightedNeg = needNeg && _cachedNeg is not null
+            ? CondTokenWeights.Apply(_backend, _cachedNeg, null, negSequence).Cond : null;
+        Tensor? negEmbeddings = weightedNeg ?? (needNeg ? _cachedNeg : null);
+        try
+        {
+
         // IP2P image guidance: drop-text and drop-all share the same "no text" embedding with the text-only
         // encoder; the image drop happens transformer-side via refLatents: null on the drop-all forward.
         float imageGuidance = (float)(request.InstructPix2PixCfg ?? 1.0);
         (byte[] rgb, int outW, int outH, int usedSeed) = refEdit is null
             ? _pipeline.GenerateFromEmbeddings(
-                _cachedInstr!, inner, textGuidance, needNeg ? _cachedNeg : null, bridge)
+                instrEmbeddings, inner, textGuidance, negEmbeddings, bridge)
             : _pipeline.EditFromEmbeddings(
-                _cachedInstr!, _cachedNeg!, dropAllEmbeddings: imageGuidance > 1f ? _cachedNeg : null,
+                instrEmbeddings, negEmbeddings!, dropAllEmbeddings: imageGuidance > 1f ? negEmbeddings : null,
                 [refEdit.SourceTensor], inner,
                 textGuidanceScale: textGuidance, imageGuidanceScale: imageGuidance, onProgress: bridge);
 
@@ -143,24 +156,50 @@ public sealed unsafe class BooguImageRecipePipeline(BooguImagePipeline pipeline,
                 ["cfg"] = textGuidance.ToString(CultureInfo.InvariantCulture),
             },
         };
+        }
+        finally
+        {
+            // Per-request copies, not the cached originals.
+            weightedInstr?.Dispose();
+            weightedNeg?.Dispose();
+        }
+    }
+
+    /// <summary>The Boogu chat-templated sequence plus its per-token weights. Boogu already tokenizes the
+    /// instruction separately from the template text, so the weighted build reproduces the unweighted ids
+    /// exactly; routing through <see cref="TemplatedPromptTokens"/> keeps that a guarantee rather than a
+    /// coincidence of how <see cref="BuildTemplatedTokens"/> happens to be written.</summary>
+    private WeightedTokenSequence EncodeWeighted(string prompt)
+    {
+        (int[] prefix, int[] suffix) = TemplateIds(_tokenizer, SystemPromptT2I);
+        return TemplatedPromptTokens.Build(PromptTagFlattening.Flatten(prompt),
+            t => BuildTemplatedTokens(_tokenizer, SystemPromptT2I, t), _tokenizer.EncodeRaw, prefix, suffix);
+    }
+
+    /// <summary>The ids <see cref="BuildTemplatedTokens"/> puts either side of the instruction.</summary>
+    private static (int[] Prefix, int[] Suffix) TemplateIds(Qwen3Tokenizer tok, string system)
+    {
+        List<int> prefix = new List<int>(256) { Qwen3Tokenizer.ImStartId };
+        AppendRaw(prefix, tok, "system\n" + system);
+        prefix.Add(Qwen3Tokenizer.ImEndId);
+        AppendRaw(prefix, tok, "\n");
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        AppendRaw(prefix, tok, "user\n");
+        List<int> suffix = new List<int>(8) { Qwen3Tokenizer.ImEndId };
+        AppendRaw(suffix, tok, "\n");
+        suffix.Add(Qwen3Tokenizer.ImStartId);
+        AppendRaw(suffix, tok, "assistant\n");
+        return (prefix.ToArray(), suffix.ToArray());
     }
 
     /// <summary>Builds the Qwen3-VL chat-templated token sequence (system preamble, user instruction, assistant header). Text fragments use the raw BPE; structural tokens are the Qwen special ids. The vision-start/image-pad span the edit path adds is omitted — this is the text-to-image form.</summary>
     private static int[] BuildTemplatedTokens(Qwen3Tokenizer tok, string system, string instruction)
     {
-        List<int> ids = new List<int>(256);
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        AppendRaw(ids, tok, "system\n" + system);
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        AppendRaw(ids, tok, "\n");
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        AppendRaw(ids, tok, "user\n");
-        AppendRaw(ids, tok, instruction ?? "");
-        ids.Add(Qwen3Tokenizer.ImEndId);
-        AppendRaw(ids, tok, "\n");
-        ids.Add(Qwen3Tokenizer.ImStartId);
-        AppendRaw(ids, tok, "assistant\n");
-        return ids.ToArray();
+        // Assembled from TemplateIds rather than repeating it, so the weighted path — which splices the prompt
+        // between those same two halves — cannot drift from this one. The instruction was always its own
+        // EncodeRaw call, which is why splicing reproduces these ids exactly.
+        (int[] prefix, int[] suffix) = TemplateIds(tok, system);
+        return [.. prefix, .. tok.EncodeRaw(instruction ?? ""), .. suffix];
     }
 
     /// <summary>Appends the byte-level BPE ids for <paramref name="text"/> (no special-token handling).</summary>

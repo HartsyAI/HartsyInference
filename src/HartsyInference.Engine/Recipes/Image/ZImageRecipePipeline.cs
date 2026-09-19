@@ -112,26 +112,49 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         // Upstream Z-Image requests enable_thinking=true. Qwen's template then stops at the assistant prefix;
         // includeThinkBlock is deliberately inverse-named because the empty block is emitted only when thinking
         // is disabled.
-        (int[] paddedTokenIds, int tokenCount) =
-            _tokenizer.EncodeChatWithLength(prompt, includeThinkBlock: false);
-        int[] tokenIds = paddedTokenIds[..tokenCount];
+        // Declaring CondScale is what stops ImagesService collapsing `(word:N)`, so the recipe now owns the
+        // grammar. Region tags complicate it: the base encode covers them, so a region's own weight would surface
+        // as a base weight — RegionalPromptWeightSplit is where that question lives.
+        bool hasRegionParts = RegionalPromptResolver.HasRegionParts(prompt);
+        if (hasRegionParts && RegionalPromptWeightSplit.BaseTextCarriesWeight(prompt))
+        {
+            throw new NotSupportedException(
+                "Z-Image cannot weight the base prompt and a region in the same request: the base encode covers "
+                + "the region tags too, so the two sets of weights would land on the same conditioning rows. "
+                + "Move the emphasis inside the region, or drop the region tags.");
+        }
+        WeightedTokenSequence positiveSequence =
+            EncodeWeighted(RegionalPromptWeightSplit.BaseText(prompt, hasRegionParts));
+        int[] tokenIds = positiveSequence.Tokens;
+        WeightedTokenSequence? negativeSequence = null;
         int[]? negTokens = null;
         if (needNegative)
         {
             // Encode even an empty negative — the reference passes "" through the encoder, yielding the short but
             // valid unconditional embedding CFG needs.
-            (int[] paddedNegativeIds, int negativeCount) =
-                _tokenizer.EncodeChatWithLength(negative, includeThinkBlock: false);
-            negTokens = paddedNegativeIds[..negativeCount];
+            negativeSequence = EncodeWeighted(PromptTagFlattening.Flatten(negative));
+            negTokens = negativeSequence.Tokens;
         }
 
         RegionalPlan? regionalPlan = null;
+        Tensor? weightedPositive = null;
+        Tensor? weightedNegative = null;
         try
         {
             regionalPlan = EnsurePromptCache(
                 tokenIds, negTokens, needNegative, penultimateIdx, prompt, reqWidth, reqHeight, steps);
             Tensor positiveEmbeddings = _cachedPositive!;
             Tensor? negativeEmbeddings = needNegative ? _cachedNegative : null;
+            // On a per-request COPY: the cache above is keyed on token ids, and a weighted prompt tokenizes to
+            // the same ids once the grammar is off, so scaling the cached tensor would hand the next plain
+            // request this one's emphasis.
+            weightedPositive = CondTokenWeights.Apply(_backend, positiveEmbeddings, null, positiveSequence).Cond;
+            if (weightedPositive is not null) positiveEmbeddings = weightedPositive;
+            if (negativeEmbeddings is not null && negativeSequence is not null)
+            {
+                weightedNegative = CondTokenWeights.Apply(_backend, negativeEmbeddings, null, negativeSequence).Cond;
+                if (weightedNegative is not null) negativeEmbeddings = weightedNegative;
+            }
 
             Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
 
@@ -161,7 +184,26 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
         }
         finally
         {
+            weightedPositive?.Dispose();
+            weightedNegative?.Dispose();
             RegionalPromptResolver.DisposeRegions(regionalPlan);
+        }
+    }
+
+    /// <summary>The Z-Image chat-templated sequence plus its per-token weights. An unweighted prompt keeps
+    /// <see cref="Qwen3Tokenizer.EncodeChatWithLength"/> so its ids are exactly what they were before weighting
+    /// existed — the template merges <c>user\n</c> with the prompt in one BPE call, which a per-span build cannot
+    /// reproduce for a prompt that starts with whitespace.</summary>
+    private WeightedTokenSequence EncodeWeighted(string prompt)
+    {
+        (int[] prefix, int[] suffix) = _tokenizer.ChatTemplateIds(includeThinkBlock: false);
+        return TemplatedPromptTokens.Build(prompt, Templated, _tokenizer.EncodeRaw, prefix, suffix)
+            .Truncate(_tokenizer.MaxLength);
+
+        int[] Templated(string text)
+        {
+            (int[] padded, int count) = _tokenizer.EncodeChatWithLength(text, includeThinkBlock: false);
+            return padded[..count];
         }
     }
 
@@ -228,9 +270,20 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
                     regionalPlan = RegionalPromptResolver.Resolve(
                         rawPrompt, baseConditioning, width, height, steps, encodeRegion: text =>
                         {
-                            (int[] paddedRegionIds, int regionCount) =
-                                _tokenizer.EncodeChatWithLength(text, includeThinkBlock: false);
-                            Tensor region = EncodePrompt(paddedRegionIds[..regionCount], layerIndex);
+                            // Each region is its own leaf and carries its own emphasis, which is what SwarmUI's
+                            // encode_leaves does per region. Nothing caches these, so the scale can replace the
+                            // tensor outright.
+                            // On _textBackend, not _backend: this runs inside the encoder phase while Qwen's
+                            // weights are still resident there, whereas the base prompt is scaled after that
+                            // phase has been torn down. On the common single-device path they are the same
+                            // object anyway.
+                            WeightedTokenSequence sequence = EncodeWeighted(PromptTagFlattening.Flatten(text));
+                            Tensor region = EncodePrompt(sequence.Tokens, layerIndex);
+                            if (CondTokenWeights.Apply(_textBackend, region, null, sequence).Cond is Tensor scaled)
+                            {
+                                region.Dispose();
+                                region = scaled;
+                            }
                             regionalCandidates!.Add(region);
                             _ = region.DataPointer;
                             return region;

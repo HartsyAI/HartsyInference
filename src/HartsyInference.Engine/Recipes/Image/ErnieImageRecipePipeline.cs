@@ -3,6 +3,7 @@ using System.Globalization;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -37,8 +38,10 @@ public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieT
         // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet, IP-Adapter, refiner, regional prompting and
         // ImageRequest.Components overrides are deferred — text-to-image only.
         // The negative is only consumed when cfg > 1, but it tokenizes cheaply either way.
-        int[] promptTokens = _tokenizer.Encode(prompt);
-        int[] negTokens = _tokenizer.Encode(negative);
+        WeightedTokenSequence promptSequence = EncodeWeighted(prompt);
+        WeightedTokenSequence negSequence = EncodeWeighted(negative);
+        int[] promptTokens = promptSequence.Tokens;
+        int[] negTokens = negSequence.Tokens;
 
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
@@ -64,7 +67,8 @@ public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieT
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
-            promptTokens, negTokens, promptTokens.Length, negTokens.Length, inner, bridge);
+            promptTokens, negTokens, promptTokens.Length, negTokens.Length, inner, bridge,
+            promptWeights: promptSequence, negativeWeights: negSequence);
 
         return new ImageResult
         {
@@ -81,6 +85,28 @@ public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieT
                 ["cfg"] = cfg.ToString(CultureInfo.InvariantCulture),
             },
         };
+    }
+
+    /// <summary>The ERNIE sequence plus its per-token weights. ERNIE has no chat template — the prompt is BPE'd
+    /// alone between BOS and EOS — so the weighted build reproduces the unweighted ids exactly; the split still
+    /// exists because <see cref="ErnieTokenizer.Encode"/> caps the TEXT and keeps its specials, which a tail
+    /// truncation of the assembled sequence would not do.</summary>
+    private WeightedTokenSequence EncodeWeighted(string prompt)
+    {
+        string text = PromptTagFlattening.Flatten(prompt);
+        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(text);
+        if (!PromptWeighting.HasWeights(spans))
+        {
+            // Join, not `text`: a unit weight does nothing, but its grammar would still reach the encoder as
+            // prose. `(fox:1.0)` has to produce the same image as `fox`.
+            int[] ids = _tokenizer.Encode(PromptWeighting.Join(spans));
+            float[] ones = new float[ids.Length];
+            Array.Fill(ones, 1f);
+            return new WeightedTokenSequence(ids, ones) { UniformWeight = 1f };
+        }
+        return WeightedTokenBuilder.Build(spans, _tokenizer.EncodeRaw, [], [])
+            .Truncate(ErnieTokenizer.MaxLength - 2)
+            .Wrap([ErnieTokenizer.BosId], [ErnieTokenizer.EosId]);
     }
 
     /// <inheritdoc/>

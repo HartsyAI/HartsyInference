@@ -163,11 +163,11 @@ public sealed class PromptWeightingModeLedgerTests
     /// both halves, so the partial declaration it carried first was refused here rather than accepted.</para></summary>
     private static readonly string[] NotYetWired =
     [
-        "anima", "auraflow", "boogu", "chroma", "chroma-radiance", "ernie-image", "flux1", "hidream",
-        "hunyuan-image", "hunyuan-video", "ideogram4", "kandinsky5", "kandinsky5-video", "lens",
+        "anima", "auraflow", "chroma", "chroma-radiance", "flux1", "hidream",
+        "hunyuan-image", "hunyuan-video", "kandinsky5", "kandinsky5-video",
         "ltx-2.5-distilled", "ltx-video", "ltx-video-2", "lumina2", "minimax-h3", "omnigen2",
         "sd3", "sdxl-refiner", "wan-animate",
-        "wan-animate-2", "wan-s2v", "wan-vace", "zeta-chroma", "zimage",
+        "wan-animate-2", "wan-s2v", "wan-vace",
     ];
 
     private readonly ITestOutputHelper _output;

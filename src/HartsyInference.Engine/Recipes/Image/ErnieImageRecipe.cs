@@ -33,6 +33,12 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
     /// <remarks>ERNIE-Image shares the Flux.2 VAE; the encoder half is built alongside the decoder.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.ErnieImageTransformer"/> names its blocks <c>layers.{i}</c>, a root the bare-root LoRA detector only started recognizing in the same change.</para></remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:2404</c> →
+    /// <c>ernie.ErnieTokenizer</c>, whose Mistral3 arm sets <c>disable_weights</c> (<c>ernie.py:14</c>).</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ernie-image", StringComparison.OrdinalIgnoreCase);
 

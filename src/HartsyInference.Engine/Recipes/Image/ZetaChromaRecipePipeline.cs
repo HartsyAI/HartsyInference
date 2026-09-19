@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -46,21 +47,8 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
         // Bulk-upload the Qwen3 weights, encode, then free them — the same staging Z-Image uses for this encoder.
         _backend.PreloadWeights(_qwen.EnumerateWeights());
 
-        int[] tokenIds = _tokenizer.EncodeChat(prompt);
-        int realLen = ComputeRealLength(tokenIds);
-        Tensor encodedFull = _qwen.EncodeMultiLayer(_backend, new[] { tokenIds }, new[] { penultimateIdx });
-        Tensor positiveEmbeddings = SliceFirstSeqF32(encodedFull, realLen);
-        encodedFull.Dispose();
-
-        Tensor? negativeEmbeddings = null;
-        if (cfg > 1.0f)
-        {
-            int[] negTokens = _tokenizer.EncodeChat(negative);
-            int negRealLen = ComputeRealLength(negTokens);
-            Tensor negEncodedFull = _qwen.EncodeMultiLayer(_backend, new[] { negTokens }, new[] { penultimateIdx });
-            negativeEmbeddings = SliceFirstSeqF32(negEncodedFull, negRealLen);
-            negEncodedFull.Dispose();
-        }
+        Tensor positiveEmbeddings = EncodeWeighted(prompt, penultimateIdx);
+        Tensor? negativeEmbeddings = cfg > 1.0f ? EncodeWeighted(negative, penultimateIdx) : null;
 
         _backend.FreeWeights(_qwen.EnumerateWeights());
 
@@ -117,6 +105,51 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
             positiveEmbeddings.Dispose();
             negativeEmbeddings?.Dispose();
         }
+    }
+
+    /// <summary>Encodes one prompt and applies its per-token weights. Nothing caches this conditioning, so the
+    /// scale replaces the tensor outright rather than needing a per-request copy.</summary>
+    /// <remarks>An unweighted prompt keeps <see cref="Qwen3Tokenizer.EncodeChat"/> verbatim, so its ids and its
+    /// encoder shape are exactly what they were before weighting existed. The weighted build is padded back to
+    /// the same window for the reason given at the call site.</remarks>
+    private Tensor EncodeWeighted(string prompt, int layerIndex)
+    {
+        (int[] prefix, int[] suffix) = _tokenizer.ChatTemplateIds();
+        WeightedTokenSequence sequence = TemplatedPromptTokens.Build(
+            PromptTagFlattening.Flatten(prompt), t => _tokenizer.EncodeChat(t), _tokenizer.EncodeRaw, prefix, suffix)
+            .Truncate(_tokenizer.MaxLength);
+        // EncodeChat right-pads to the 256-token window; the weighted build produces the real tokens alone. Pad
+        // it back so the encoder sees the SAME shape either way. Causal attention means a real token's hidden
+        // state cannot depend on padding that follows it, so the short form would be correct in exact arithmetic
+        // — but F16 attention at a different sequence length is free to differ in the last bit, and that would
+        // make a weighted generation differ from its baseline for two reasons instead of one.
+        int realLen = ComputeRealLength(sequence.Tokens);
+        int[] tokens = PadToWindow(sequence.Tokens, _tokenizer.MaxLength);
+        Tensor encodedFull = _qwen.EncodeMultiLayer(_backend, new[] { tokens }, new[] { layerIndex });
+        Tensor embeddings = SliceFirstSeqF32(encodedFull, realLen);
+        encodedFull.Dispose();
+        // Right-aligned against the SLICED rows, which is why the slice happens first: the weights describe the
+        // real tokens, and padding that is no longer there cannot shift them.
+        if (CondTokenWeights.Apply(_backend, embeddings, null, sequence).Cond is Tensor scaled)
+        {
+            embeddings.Dispose();
+            embeddings = scaled;
+        }
+        return embeddings;
+    }
+
+    /// <summary>Right-pads to the encoder's fixed window with <see cref="Qwen3PadTokenId"/>, the same padding
+    /// <see cref="Qwen3Tokenizer.EncodeChat"/> applies. Already-padded input is returned unchanged.</summary>
+    private static int[] PadToWindow(int[] tokens, int window)
+    {
+        if (tokens.Length >= window)
+        {
+            return tokens;
+        }
+        int[] padded = new int[window];
+        tokens.CopyTo(padded, 0);
+        Array.Fill(padded, Qwen3PadTokenId, tokens.Length, window - tokens.Length);
+        return padded;
     }
 
     /// <summary>The real token count: the length is the index of the first <see cref="Qwen3PadTokenId"/> (or the full array when there is none).</summary>

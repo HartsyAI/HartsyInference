@@ -69,18 +69,30 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
         // includeThinkBlock:false — Ideogram's encoder is Qwen3-VL-8B-Instruct, whose chat template ends the
         // generation prompt at "<|im_start|>assistant\n" with no <think> block. EncodeChat right-pads to maxLength
         // with BOS; feeding ~2048 mostly-pad tokens would dilute conditioning and multiply attention cost.
-        int[] padded = _tokenizer.EncodeChat(prompt, includeThinkBlock: false);
-        int[] promptTokens = TrimRightPad(padded, Qwen3Tokenizer.BosTokenId);
+        // Declaring CondScale is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar.
+        // The base encode covers the region tags too, so a region's own weight would surface as a base weight —
+        // RegionalPromptWeightSplit is where that question lives.
+        bool hasRegionParts = RegionalPromptResolver.HasRegionParts(prompt);
+        if (hasRegionParts && RegionalPromptWeightSplit.BaseTextCarriesWeight(prompt))
+        {
+            throw new NotSupportedException(
+                "Ideogram 4 cannot weight the base prompt and a region in the same request: the base encode "
+                + "covers the region tags too, so the two sets of weights would land on the same conditioning "
+                + "rows. Move the emphasis inside the region, or drop the region tags.");
+        }
+        WeightedTokenSequence promptSequence =
+            EncodeWeighted(RegionalPromptWeightSplit.BaseText(prompt, hasRegionParts));
+        int[] promptTokens = promptSequence.Tokens;
 
         // Regional/object prompt parts, chat-templated + encoded via the SAME Qwen3-VL multi-layer tap
         // configuration as the base prompt above (Ideogram4Pipeline.EncodeRegionText).
-        using Tensor? baseCondPlaceholder = RegionalPromptResolver.HasRegionParts(prompt) ? new Tensor(new TensorShape(1), DType.F32) : null;
+        using Tensor? baseCondPlaceholder = hasRegionParts ? new Tensor(new TensorShape(1), DType.F32) : null;
         RegionalPlan? regionalPlan = baseCondPlaceholder is null ? null
             : RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, snappedW, snappedH, preset.NumSteps, encodeRegion: text =>
             {
-                int[] regionPadded = _tokenizer.EncodeChat(text, includeThinkBlock: false);
-                int[] regionTokens = TrimRightPad(regionPadded, Qwen3Tokenizer.BosTokenId);
-                return _pipeline.EncodeRegionText(regionTokens);
+                // Each region is its own leaf carrying its own emphasis, as encode_leaves does per region.
+                WeightedTokenSequence region = EncodeWeighted(PromptTagFlattening.Flatten(text));
+                return _pipeline.EncodeRegionText(region.Tokens, region);
             });
 
         // TODO(E-IMG-4): img2img/inpaint, LoRA, ControlNet, IP-Adapter, refiner and ImageRequest.Components
@@ -111,7 +123,8 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
         byte[] rgb; int outW, outH, usedSeed;
         try
         {
-            (rgb, outW, outH, usedSeed) = _pipeline.GenerateFromTokens(promptTokens, inner, preset, bridge, regionalPlan: regionalPlan);
+            (rgb, outW, outH, usedSeed) = _pipeline.GenerateFromTokens(
+                promptTokens, inner, preset, bridge, regionalPlan: regionalPlan, promptWeights: promptSequence);
         }
         finally
         {
@@ -144,6 +157,20 @@ public sealed class Ideogram4RecipePipeline(Ideogram4Pipeline pipeline, Qwen3Tok
             end--;
         }
         return end == tokens.Length ? tokens : tokens[..end];
+    }
+
+    /// <summary>The Ideogram 4 chat-templated sequence plus its per-token weights. An unweighted prompt keeps
+    /// <see cref="Qwen3Tokenizer.EncodeChat"/> (right-pad trimmed, as before) so its ids are exactly what they
+    /// were before weighting existed — the template merges <c>user\n</c> with the prompt in one BPE call, which a
+    /// per-span build cannot reproduce for a prompt that starts with whitespace.</summary>
+    private WeightedTokenSequence EncodeWeighted(string prompt)
+    {
+        (int[] prefix, int[] suffix) = _tokenizer.ChatTemplateIds(includeThinkBlock: false);
+        return TemplatedPromptTokens.Build(prompt, Templated, _tokenizer.EncodeRaw, prefix, suffix)
+            .Truncate(_tokenizer.MaxLength);
+
+        int[] Templated(string text) =>
+            TrimRightPad(_tokenizer.EncodeChat(text, includeThinkBlock: false), Qwen3Tokenizer.BosTokenId);
     }
 
     /// <inheritdoc/>

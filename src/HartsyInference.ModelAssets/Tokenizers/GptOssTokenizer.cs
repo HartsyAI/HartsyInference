@@ -103,6 +103,37 @@ public sealed class GptOssTokenizer : IDisposable
     /// <summary>Pad token id (<c>&lt;|endoftext|&gt;</c> for the reference pipeline).</summary>
     public int PadTokenId => _padTokenId;
 
+    /// <summary>The window <see cref="BuildChatInputs"/> truncates to.</summary>
+    public int MaxLength => _maxLength;
+
+    /// <summary>The Harmony wrapper ids <see cref="BuildChatInputs"/> puts around the prompt, so a caller that
+    /// needs per-token prompt weights can tokenize the prompt itself and still reproduce the template.</summary>
+    /// <remarks><para>Splitting is exact here, unlike the Qwen3 chat template: the prompt sits immediately after
+    /// the <c>&lt;|message|&gt;</c> marker and immediately before <c>&lt;|end|&gt;</c>, and
+    /// <see cref="EncodeWithSpecials"/> already breaks its plain-text runs at every marker — so the prompt is its
+    /// own segment whether or not the halves are encoded separately.</para>
+    /// <para><see cref="DefaultTxtOffset"/> counts the PREFIX alone, not the whole wrapper: it is what the encoder
+    /// strips off the front of the hidden states, and the suffix after the prompt is retained.
+    /// <see cref="ValidateWrapperTokenCount"/> makes the same split for the same reason, so the two agree by
+    /// construction and the assertion below is what keeps them agreeing.</para></remarks>
+    public (int[] Prefix, int[] Suffix) ChatTemplateIds()
+    {
+        ThrowIfDisposed();
+        ValidateWrapperTokenCount();
+        const string PromptMarker = "<|start|>user<|message|>";
+        string rendered = RenderChatTemplate("");
+        int split = rendered.IndexOf(PromptMarker, StringComparison.Ordinal) + PromptMarker.Length;
+        int[] prefix = [.. EncodeWithSpecials(rendered[..split])];
+        int[] suffix = [.. EncodeWithSpecials(rendered[split..])];
+        if (prefix.Length != DefaultTxtOffset)
+        {
+            throw new InvalidOperationException(
+                $"The Harmony prefix split to {prefix.Length} tokens but the encoder strips a fixed "
+                + $"{DefaultTxtOffset}; a drift there would silently mis-align every prompt weight.");
+        }
+        return (prefix, suffix);
+    }
+
     /// <summary>Renders the Lens Harmony chat template around a user prompt. Verbatim structure from the reference pipeline — every byte matters because the encoder output is offset by the wrapper's fixed 97-token length.</summary>
     public static string RenderChatTemplate(string prompt) =>
         "<|start|>system<|message|>" +
