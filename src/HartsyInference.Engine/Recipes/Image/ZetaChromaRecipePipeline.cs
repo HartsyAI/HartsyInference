@@ -109,18 +109,23 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
 
     /// <summary>Encodes one prompt and applies its per-token weights. Nothing caches this conditioning, so the
     /// scale replaces the tensor outright rather than needing a per-request copy.</summary>
-    /// <remarks>An unweighted prompt keeps <see cref="Qwen3Tokenizer.EncodeChat"/>, which right-pads to the
-    /// 256-token window; the weighted build produces the real tokens alone. Both end up sliced to the same real
-    /// length, and under causal attention a real token's hidden state cannot depend on padding that follows it,
-    /// so the two agree — the weighted path simply does not pay for the pad positions.</remarks>
+    /// <remarks>An unweighted prompt keeps <see cref="Qwen3Tokenizer.EncodeChat"/> verbatim, so its ids and its
+    /// encoder shape are exactly what they were before weighting existed. The weighted build is padded back to
+    /// the same window for the reason given at the call site.</remarks>
     private Tensor EncodeWeighted(string prompt, int layerIndex)
     {
         (int[] prefix, int[] suffix) = _tokenizer.ChatTemplateIds();
         WeightedTokenSequence sequence = TemplatedPromptTokens.Build(
             PromptTagFlattening.Flatten(prompt), t => _tokenizer.EncodeChat(t), _tokenizer.EncodeRaw, prefix, suffix)
             .Truncate(_tokenizer.MaxLength);
+        // EncodeChat right-pads to the 256-token window; the weighted build produces the real tokens alone. Pad
+        // it back so the encoder sees the SAME shape either way. Causal attention means a real token's hidden
+        // state cannot depend on padding that follows it, so the short form would be correct in exact arithmetic
+        // — but F16 attention at a different sequence length is free to differ in the last bit, and that would
+        // make a weighted generation differ from its baseline for two reasons instead of one.
         int realLen = ComputeRealLength(sequence.Tokens);
-        Tensor encodedFull = _qwen.EncodeMultiLayer(_backend, new[] { sequence.Tokens }, new[] { layerIndex });
+        int[] tokens = PadToWindow(sequence.Tokens, _tokenizer.MaxLength);
+        Tensor encodedFull = _qwen.EncodeMultiLayer(_backend, new[] { tokens }, new[] { layerIndex });
         Tensor embeddings = SliceFirstSeqF32(encodedFull, realLen);
         encodedFull.Dispose();
         // Right-aligned against the SLICED rows, which is why the slice happens first: the weights describe the
@@ -131,6 +136,20 @@ public sealed unsafe class ZetaChromaRecipePipeline(ZetaChromaPipeline pipeline,
             embeddings = scaled;
         }
         return embeddings;
+    }
+
+    /// <summary>Right-pads to the encoder's fixed window with <see cref="Qwen3PadTokenId"/>, the same padding
+    /// <see cref="Qwen3Tokenizer.EncodeChat"/> applies. Already-padded input is returned unchanged.</summary>
+    private static int[] PadToWindow(int[] tokens, int window)
+    {
+        if (tokens.Length >= window)
+        {
+            return tokens;
+        }
+        int[] padded = new int[window];
+        tokens.CopyTo(padded, 0);
+        Array.Fill(padded, Qwen3PadTokenId, tokens.Length, window - tokens.Length);
+        return padded;
     }
 
     /// <summary>The real token count: the length is the index of the first <see cref="Qwen3PadTokenId"/> (or the full array when there is none).</summary>

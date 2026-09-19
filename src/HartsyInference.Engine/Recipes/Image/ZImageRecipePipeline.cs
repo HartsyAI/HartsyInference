@@ -273,6 +273,10 @@ public sealed unsafe class ZImageRecipePipeline : IRecipePipeline
                             // Each region is its own leaf and carries its own emphasis, which is what SwarmUI's
                             // encode_leaves does per region. Nothing caches these, so the scale can replace the
                             // tensor outright.
+                            // On _textBackend, not _backend: this runs inside the encoder phase while Qwen's
+                            // weights are still resident there, whereas the base prompt is scaled after that
+                            // phase has been torn down. On the common single-device path they are the same
+                            // object anyway.
                             WeightedTokenSequence sequence = EncodeWeighted(PromptTagFlattening.Flatten(text));
                             Tensor region = EncodePrompt(sequence.Tokens, layerIndex);
                             if (CondTokenWeights.Apply(_textBackend, region, null, sequence).Cond is Tensor scaled)
