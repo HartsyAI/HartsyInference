@@ -2722,6 +2722,135 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     #region Activations
 
+    /// <summary>Elementwise <c>out = xScale·x + yScale·y</c>.</summary>
+    /// <remarks>One kernel rather than scale-scale-add: the intermediates are activation-sized, so composing it
+    /// costs three full reads and three writes where this costs two reads and one write.</remarks>
+    public void AffineMix(Tensor output, Tensor x, Tensor y, float xScale, float yScale)
+    {
+        using OpScope _op = EnterOp();
+        if (output.DType != DType.F32 || x.DType != DType.F32 || y.DType != DType.F32)
+        {
+            IBackend.AffineMixReference(output, x, y, xScale, yScale);
+            return;
+        }
+        long count = MixContract.ValidateAffineMix(output, x, y, xScale, yScale);
+        VulkanBuffer xBuf = GetBuffer(x);
+        VulkanBuffer yBuf = GetBuffer(y);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(count * sizeof(float)));
+        try
+        {
+            VulkanKernel kernel = GetKernel("affine_mix", storageBufferCount: 3, _default1DSpec);
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)count);
+            pc.F32(xScale);
+            pc.F32(yScale);
+            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, yBuf.Handle, outBuf.Handle };
+            Dispatch(kernel, bufs, pc.Written, GroupCount(count, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan AffineMix dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Sets every output element to its channel's bias, or to zero when there is none.</summary>
+    public void FillBias(Tensor output, Tensor? bias)
+    {
+        using OpScope _op = EnterOp();
+        if (output.DType != DType.F32 || (bias is not null && bias.DType != DType.F32))
+        {
+            IBackend.FillBiasReference(output, bias);
+            return;
+        }
+        int cOut = (int)output.Shape[1];
+        int tOut = (int)output.Shape[2];
+        long hw = output.ElementCount / ((long)cOut * tOut);
+        long total = output.ElementCount;
+
+        // The shader binds two buffers either way; an absent bias binds the output and the spec constant turns
+        // the read off, since a null binding is not legal and an unbound slot reads whatever bound it last.
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
+        VulkanBuffer biasBuf = bias is null ? outBuf : GetBuffer(bias);
+        try
+        {
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+                SpecConstant.Bool(3, bias is not null),
+            };
+            VulkanKernel kernel = GetKernel("fill_bias", storageBufferCount: 2, spec);
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)cOut);
+            pc.U32((uint)tOut);
+            pc.U32((uint)hw);
+            pc.U32((uint)total);
+            Span<ulong> bufs = stackalloc ulong[] { biasBuf.Handle, outBuf.Handle };
+            Dispatch(kernel, bufs, pc.Written, GroupCount(total, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan FillBias dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Depth-to-space over a 5-D volume: <c>[N, cOut·r², D, H, W]</c> to <c>[N, cOut, D, H·r, W·r]</c>.</summary>
+    public void PixelShuffle2d(Tensor output, Tensor input, int ratio)
+    {
+        using OpScope _op = EnterOp();
+        if (input.DType != DType.F32 || output.DType != DType.F32 || input.Shape.Rank != 5)
+        {
+            IBackend.PixelShuffle2dReference(output, input, ratio);
+            return;
+        }
+        int batch = (int)input.Shape[0];
+        int cIn = (int)input.Shape[1];
+        int depth = (int)input.Shape[2];
+        int inH = (int)input.Shape[3];
+        int inW = (int)input.Shape[4];
+        int r2 = ratio * ratio;
+        int cOut = cIn / r2;
+        if ((long)cOut * r2 != cIn || output.Shape[1] != cOut
+            || output.Shape[3] != inH * ratio || output.Shape[4] != inW * ratio)
+        {
+            throw new ArgumentException(
+                $"PixelShuffle2d ratio {ratio}: input {input.Shape} does not shuffle into {output.Shape}.");
+        }
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        long total = output.ElementCount;
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
+        try
+        {
+            VulkanKernel kernel = GetKernel("pixel_shuffle2d", storageBufferCount: 2, _default1DSpec);
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)batch);
+            pc.U32((uint)cOut);
+            pc.U32((uint)depth);
+            pc.U32((uint)inH);
+            pc.U32((uint)inW);
+            pc.U32((uint)ratio);
+            pc.U32((uint)total);
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
+            Dispatch(kernel, bufs, pc.Written, GroupCount(total, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan PixelShuffle2d dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     /// <summary>Exact (erf) GELU — PyTorch's <c>nn.GELU()</c>; <see cref="Gelu"/> is the tanh approximation.</summary>
     public void GeluErf(Tensor output, Tensor input)
     {
