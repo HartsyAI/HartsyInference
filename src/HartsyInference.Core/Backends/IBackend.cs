@@ -2112,6 +2112,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Non-affine LayerNorm over the last dim: per row, zero mean and unit variance (biased var), no learned scale/bias.</summary>
     unsafe void LayerNormNoAffine(Tensor output, Tensor input, float eps)
+        => LayerNormNoAffineReference(output, input, eps);
+
+    /// <summary>The managed <see cref="LayerNormNoAffine"/> body, callable directly. A backend override must call
+    /// THIS to fall back — <c>((IBackend)this).LayerNormNoAffine(...)</c> re-enters the override through interface
+    /// dispatch and recurses until the stack overflows.</summary>
+    static unsafe void LayerNormNoAffineReference(Tensor output, Tensor input, float eps)
     {
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("LayerNormNoAffine default fallback only supports F32.");

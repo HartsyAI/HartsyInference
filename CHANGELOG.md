@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.119
+
+- **`LayerNormNoAffine` runs on Vulkan.** It had no override there, so every call fell through to `IBackend`'s host
+  default — which refuses anything but F32 outright. That is what a Flux generation on an AMD card hit: the DiT
+  runs its block activations in F16 by default (`numerics.ditF16`), so the pre-modulation norm handed the default an
+  F16 tensor and the generation failed with "LayerNormNoAffine default fallback only supports F32". Every DiT
+  normalizes before modulating, so the op is on the hot path of the whole family, not a corner of it.
+- The shader is deliberately its own kernel rather than `layernorm` with an identity weight. The identity would
+  cost a per-element multiply-add and, more to the point, two device buffers that do not exist at the call site —
+  every caller would have to allocate and fill them per call.
+- `IBackend.LayerNormNoAffineReference` joins the other reference statics, so the host default and any backend
+  falling back share one implementation. An override cannot reach the default through `((IBackend)this)`: that
+  re-enters the override and recurses until the stack ends.
+- Verified against the CPU reference at four shapes, including a row count that is not a multiple of the workgroup
+  and a dim that is not a multiple of the subgroup, since the cross-subgroup fold is where a norm like this goes
+  wrong on small-subgroup hardware. Max absolute error 1.4e-6 in F32, 4.9e-4 in F16 — the latter being F16's own
+  precision rather than a disagreement.
+
 ## alpha.118
 
 - **A quantized video build keeps the semantics of the build it came from.** Video planning resolves by exact
