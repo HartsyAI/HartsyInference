@@ -26,6 +26,14 @@ public sealed class ZImageRecipe : IArchitectureRecipe
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:1228</c> →
+    /// <c>z_image.ZImageTokenizer</c>, which sets <c>disable_weights</c> (<c>z_image.py:23</c>). The weights do
+    /// not survive tokenization, so the prompt is encoded at weight 1 and each token's conditioning row is scaled
+    /// afterwards.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zimage", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Z-Image Turbo's official sampling settings: 8 steps, guidance-free (CFG 1.0), 1024x1024 (<c>GenerationDefaults.ZImageTurbo</c>).</summary>

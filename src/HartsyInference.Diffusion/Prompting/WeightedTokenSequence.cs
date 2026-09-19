@@ -33,4 +33,25 @@ public sealed record WeightedTokenSequence(int[] Tokens, float[] Weights)
         Tokens.Length <= maxTokens
             ? this
             : new WeightedTokenSequence(Tokens[..maxTokens], Weights[..maxTokens]) { UniformWeight = UniformWeight };
+
+    /// <summary>Surrounds the sequence with template ids, which always carry weight <c>1</c>.</summary>
+    /// <remarks>Separate from <see cref="WeightedTokenBuilder"/>'s own wrapping so a caller can truncate the BODY
+    /// first. A tokenizer that caps the text and keeps its specials — <c>ErnieTokenizer.Encode</c> reserves room
+    /// for BOS/EOS — cannot be reproduced by building the whole thing and cutting the tail, which would drop the
+    /// terminator the encoder expects.</remarks>
+    public WeightedTokenSequence Wrap(ReadOnlySpan<int> prefix, ReadOnlySpan<int> suffix)
+    {
+        if (prefix.IsEmpty && suffix.IsEmpty)
+        {
+            return this;
+        }
+        int[] tokens = new int[prefix.Length + Tokens.Length + suffix.Length];
+        float[] weights = new float[tokens.Length];
+        Array.Fill(weights, 1f);
+        prefix.CopyTo(tokens);
+        Tokens.CopyTo(tokens, prefix.Length);
+        Weights.CopyTo(weights, prefix.Length);
+        suffix.CopyTo(tokens.AsSpan(prefix.Length + Tokens.Length));
+        return new WeightedTokenSequence(tokens, weights) { UniformWeight = UniformWeight };
+    }
 }

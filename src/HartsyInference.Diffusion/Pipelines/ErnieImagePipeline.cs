@@ -89,15 +89,24 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     /// <see cref="VaeEncoder"/> on construction. A <c>Mask</c> additionally enables blend-on-vanilla inpaint
     /// (per-step latent blend at the 16×-downscaled grid + final pixel recomposite). Strength=0 short-circuits to
     /// byte-identical pass-through.</para></summary>
+    /// <param name="promptWeights">Per-token weights for <paramref name="promptTokenIds"/>, or null for an
+    /// unweighted prompt. Applied to a per-request COPY of the conditioning: the cache below is keyed on token
+    /// ids, which are identical with and without weights, so scaling the cached tensor would hand the next plain
+    /// request this one's emphasis.</param>
+    /// <param name="negativeWeights">The same for <paramref name="negativePromptTokenIds"/>.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         int[] negativePromptTokenIds,
         int promptRealLen,
         int negativeRealLen,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        Prompting.WeightedTokenSequence? promptWeights = null,
+        Prompting.WeightedTokenSequence? negativeWeights = null)
     {
         ThrowIfDisposed();
+        RequireMatchingWeights(promptTokenIds, promptWeights, nameof(promptWeights));
+        RequireMatchingWeights(negativePromptTokenIds, negativeWeights, nameof(negativeWeights));
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         bool isImg2Img = request is ImageToImageRequest;
@@ -203,6 +212,14 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
                 _cachedUncondLens = uncondLens;
             }
         }
+
+        // Weighting lands on a per-request copy, after the cache store, for the reason on the parameter.
+        Tensor? weightedCond = promptWeights is null
+            ? null : Prompting.CondTokenWeights.Apply(Backend, condEmb!, null, promptWeights).Cond;
+        if (weightedCond is not null) condEmb = weightedCond;
+        Tensor? weightedUncond = uncondEmb is null || negativeWeights is null
+            ? null : Prompting.CondTokenWeights.Apply(Backend, uncondEmb, null, negativeWeights).Cond;
+        if (weightedUncond is not null) uncondEmb = weightedUncond;
 
         // ── 2. Flow-match Euler scheduler ─────────────────────────────────
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
@@ -425,9 +442,22 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         // host-materialized at store time, so this cannot revert them to stale memory.
         Backend.FreeActivations();
 
+        // The weighted copies are per-request and not the cached originals, so they are ours to release.
+        weightedCond?.Dispose();
+        weightedUncond?.Dispose();
+
         sw.Stop();
         Logs.Info($"ERNIE-Image {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");
         return (rgb, width, height, seed);
+    }
+
+    /// <summary>Token weights are matched to conditioning rows by position, so a weight array that does not
+    /// describe the tokens it arrived with shifts every emphasis onto a neighbouring word rather than failing.</summary>
+    private static void RequireMatchingWeights(int[] tokenIds, Prompting.WeightedTokenSequence? weights, string name)
+    {
+        if (weights is not null && weights.Weights.Length != tokenIds.Length)
+            throw new ArgumentException(
+                $"Weights describe {weights.Weights.Length} tokens but {tokenIds.Length} were passed.", name);
     }
 
     /// <summary>Reports a canonical 32-channel Flux.2 preview without mutating the working normalized latent.</summary>
