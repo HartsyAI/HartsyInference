@@ -6,6 +6,42 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.129
+
+- **Six more families honour `(word:N)` prompt weighting: Z-Image, Boogu, Zeta-Chroma, Lens, ERNIE-Image and
+  Ideogram 4.** All six disable weights in their ComfyUI tokenizer, so the mechanism is `CondScale` — the prompt
+  is encoded at weight 1 and each token's conditioning row is scaled afterwards, right-aligned so a trimmed
+  template prefix takes its weights with it. That leaves 22 registered families deliberately unwired, each with
+  its reason recorded in `PromptWeightingModeLedgerTests`.
+- **`TemplatedPromptTokens` is the decision these recipes would otherwise each have to remember.** A chat-template
+  renderer usually BPEs the prompt together with the text immediately before it — `Qwen3Tokenizer` concatenates
+  `"user\n"` with the prompt in ONE call, deliberately, so that a prompt beginning with whitespace merges its
+  newline with the template's. Tokenizing the prompt on its own puts a pre-tokenization boundary there and can
+  produce different ids for the same text. SwarmUI has the same property and accepts it, because splicing
+  template ids around a separately tokenized leaf is what `calc_leaf` does — but only where a weight actually
+  exists. An unweighted prompt keeps the family's own encode, so wiring weighting moves no existing generation.
+- **A weight of exactly 1 is stripped, not encoded.** Caught by the Z-Image real-weight gate rather than by any
+  test: the unweighted path was byte-identical before and after the change, yet `(fox:1.0)` was not byte-identical
+  to plain `fox` — it was reaching the encoder as literal parens. Flattening does not remove them; it rewrites
+  SwarmUI's `<weight[N]:>` tag, while a literal `(word:N)` typed at a CLI arrives untouched. It is the first thing
+  a weighting gate checks and the first thing a user tries, so it is now a unit test as well.
+- **Every family scales a per-request COPY.** Four of the six cache conditioning across generations keyed on token
+  ids, and a weighted prompt tokenizes to the same ids once the grammar is off — scaling in place would hand the
+  next plain request the previous one's emphasis. Boogu's cache is keyed on the prompt string instead, which
+  separates the two, but a repeat of the SAME weighted prompt would still compound.
+- `WeightedTokenSequence.Wrap` composes with `Truncate` for a tokenizer that caps the TEXT and keeps its specials:
+  `ErnieTokenizer.Encode` reserves room for BOS/EOS, so building the whole sequence and cutting the tail would
+  drop the terminator the encoder expects.
+- `GptOssTokenizer.ChatTemplateIds` splits the Harmony wrapper where the prompt sits. Splitting is exact there,
+  unlike the Qwen3 template, because `EncodeWithSpecials` already breaks its plain-text runs at every marker. The
+  prefix is checked against the fixed 97-token offset the encoder strips — the first real run reported `97+22`
+  against an assertion that expected the two halves to sum to 97, which is what established that the constant
+  counts the prefix alone and the suffix after the prompt is retained.
+- Lens passes the FULL weight array rather than a sliced one: `ScaleRightAligned` right-aligns, so the 97 entries
+  covering the stripped prefix land at negative positions and drop out by themselves.
+- Z-Image and Ideogram 4 weight their regions per leaf and refuse a base prompt weighted alongside one, because
+  the base encode covers the region tags and the two sets of weights would land on the same conditioning rows.
+
 ## alpha.128
 
 - **Krea 2 honours `(word:N)` prompt weighting, both halves of it.** Krea 2 is the one family whose SwarmUI

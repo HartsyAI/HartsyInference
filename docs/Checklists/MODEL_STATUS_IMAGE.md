@@ -201,6 +201,20 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
+- [x] **Six more families weight prompts — DONE 2026-09-19 (alpha.129): Z-Image, Boogu, Zeta-Chroma, Lens,
+  ERNIE-Image, Ideogram 4.** All six disable weights in their ComfyUI tokenizer, so the mechanism is `CondScale`.
+  The shared piece is `TemplatedPromptTokens`: a chat-template renderer usually BPEs the prompt together with the
+  text before it (`Qwen3Tokenizer` concatenates `"user\n"` with the prompt in ONE call, so a whitespace-leading
+  prompt merges its newline), and tokenizing the prompt alone puts a boundary there. SwarmUI accepts that where a
+  weight exists — splicing template ids around a separately tokenized leaf is what `calc_leaf` does — but an
+  UNWEIGHTED prompt keeps the family's own encode, so wiring weighting moves no existing generation. Each family
+  scales a per-request copy; four cache conditioning keyed on token ids, which are identical with and without
+  weights once the grammar is off. **The gate found a bug no test had:** the unweighted path was byte-identical
+  before and after the change, but `(fox:1.0)` was NOT byte-identical to plain `fox` — it reached the encoder as
+  literal parens, because flattening rewrites SwarmUI's `<weight[N]:>` tag while a literal `(word:N)` typed at a
+  CLI arrives untouched. Real-weight verified per family at 768², seed 1 (see the PR for the table); Z-Image also
+  on its true-CFG path with a weighted negative. Lens' `ChatTemplateIds` assertion caught a second wrong
+  assumption on its first run — `DefaultTxtOffset` counts the stripped PREFIX alone, not the whole wrapper.
 - [x] **Krea 2 prompt weighting, both mechanisms — DONE 2026-09-19 (alpha.128).** Krea 2 is the only family whose
   SwarmUI workflow inserts `SwarmAttnTokenWeights` (`WorkflowGenerator.cs:965-972`) on top of the ordinary cond
   scaling, so `CondScaleWithAttention` is not two alternatives but two things applied together; the mode ledger
