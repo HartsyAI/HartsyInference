@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.109
+
+- **LTX (0.9.x and 2.x) and HunyuanVideo open through the container.** Wan was flipped in Phase A; these three
+  still opened their checkpoints with `SafeTensorsLoader` directly, so a GGUF was invisible to them and a
+  `fp8_scaled` or `int8` build had its companion scales left unfolded unless a converter happened to fold them
+  itself. Their loader lists hold `IDisposable` now, because what owns the mapping depends on the format.
+- HunyuanVideo's side-component loader drops its explicit `ApplyFp8ScaledDequant`. The container folds companions
+  on open, and leaving the call in would have implied it does not.
+
 ## alpha.108
 
 - **`hartsy quantize` writes a quantized copy of a checkpoint offline.** The engine still never quantizes at load,
