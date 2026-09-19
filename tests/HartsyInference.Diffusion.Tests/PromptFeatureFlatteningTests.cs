@@ -88,4 +88,20 @@ public sealed class PromptFeatureFlatteningTests
     [InlineData("<alternate:fox, whale>", "fox")]
     public void SchedulingFlattensToItsStepZeroText(string prompt, string expected) =>
         Assert.Equal(expected, PromptFeatureFlattening.Prepare(prompt, PromptWeightingMode.CondScale));
+
+    /// <summary>Declaring <see cref="ImageFeatures.PromptScheduling"/> is what STOPS <c>ImagesService</c> collapsing
+    /// <c>&lt;alternate:&gt;</c>/<c>&lt;fromto[N]:&gt;</c>, so the raw tag text reaches the recipe. A recipe that
+    /// declares it without building a <c>ScheduledPrompt</c> — and without flattening for its own base ids — hands
+    /// the encoder the literal tag as prose, which is exactly the bug the Flux.2 gate caught. That cannot be checked
+    /// from here, so the bit is ledgered instead: adding a family to this list is the moment to confirm its pipeline
+    /// really consumes a schedule.</summary>
+    [Fact]
+    public void OnlyFamiliesWhosePipelineConsumesAScheduleDeclareIt()
+    {
+        string[] expected = ["flux2", "mage-flow", "qwen-image", "sd15", "sdxl"];
+        string[] declared = [.. RecipeRegistry.DefaultNames
+            .Where(family => (RecipeRegistry.Resolve(family)!.Supports & ImageFeatures.PromptScheduling) != 0)
+            .Order(StringComparer.Ordinal)];
+        Assert.Equal(expected, declared);
+    }
 }

@@ -44,10 +44,13 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         int height, int steps, float cfgScale, long seed, Tensor? editRefPixels = null, string? seamlessTiling = null,
         long variationSeed = -1, double variationSeedStrength = 0, string? samplerSelection = null,
         Action<GenerationProgress>? onProgress = null, Prompting.WeightedTokenSequence? condWeights = null,
-        Prompting.WeightedTokenSequence? uncondWeights = null)
+        Prompting.WeightedTokenSequence? uncondWeights = null,
+        Prompting.ScheduledPrompt? promptSchedule = null)
     {
         ThrowIfDisposed();
         RequireMatchingWeights(condTokens, condWeights, nameof(condWeights));
+        // A schedule whose branches collapse to one text is not scheduled and stays on the single-encode path.
+        bool scheduled = promptSchedule is { IsScheduled: true };
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. Passed
         // explicitly rather than read off a request — this pipeline takes primitives, not a TextToImageRequest.
         using IDisposable seamlessScope = BeginSeamlessTiling(seamlessTiling);
@@ -58,7 +61,21 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         }
 
         // 1. Text conditioning: Qwen3-VL-4B last_hidden_state, system prefix dropped.
-        Tensor condHidden = ApplyTokenWeights(EncodeDropped(condTokens, condDrop), condWeights);
+        // One encode per distinct scheduled variant, each weighted by its OWN branch's emphasis. The drop index is
+        // the template prefix length, which does not vary with the prompt, so every variant shares it.
+        List<Tensor>? scheduledCond = null;
+        if (scheduled)
+        {
+            scheduledCond = [];
+            foreach (Prompting.WeightedTokenSequence variant in promptSchedule!.Variants)
+            {
+                scheduledCond.Add(ApplyTokenWeights(EncodeDropped(variant.Tokens, condDrop),
+                    variant.IsUniformlyUnweighted ? null : variant));
+            }
+        }
+        Tensor condHidden = scheduled
+            ? scheduledCond![promptSchedule!.IndexForStep(0)]
+            : ApplyTokenWeights(EncodeDropped(condTokens, condDrop), condWeights);
         Tensor? uncondHidden = useCfg
             ? ApplyTokenWeights(EncodeDropped(uncondTokens!, uncondDrop), uncondWeights) : null;
 
@@ -141,6 +158,11 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         sampler.Reset(packed.Shape);
         for (int i = 0; i < steps; i++)
         {
+            // The predictor closes over condHidden, so reassigning it here is what the next forward reads.
+            if (scheduled)
+            {
+                condHidden = scheduledCond![promptSchedule!.IndexForStep(i)];
+            }
             sampler.Step(Backend, packed, predictor, i);
             if (onProgress is not null)
             {
@@ -153,7 +175,14 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
                 previewLatent.Dispose();
             }
         }
-        condHidden.Dispose();
+        if (scheduledCond is not null)
+        {
+            foreach (Tensor variantHidden in scheduledCond) variantHidden.Dispose();
+        }
+        else
+        {
+            condHidden.Dispose();
+        }
         uncondHidden?.Dispose();
         refTokens?.Dispose();
 

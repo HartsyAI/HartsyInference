@@ -30,7 +30,11 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
     /// packed-latent masked path, and Qwen-Image-Edit reference conditioning over up to
     /// <see cref="QwenImageEditConditioning.MaxReferences"/> images. <c>Img2Img.Mode</c> selects; Auto prefers classic
     /// unless <c>ImageRequest.ReferenceImages</c> is set, which only edit conditioning can consume.</remarks>
-    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora | ImageFeatures.ControlNet;
+    public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora | ImageFeatures.ControlNet
+        // Declared only because QwenImageRecipePipeline builds a ScheduledPrompt and QwenImagePipeline selects per
+        // step. The bit is what keeps <alternate:>/<fromto[N]:> in the prompt at all, so declaring it without
+        // consuming one would hand the encoder the literal tag text as prose.
+        | ImageFeatures.PromptScheduling;
 
     /// <inheritdoc/>
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>. The Qwen tokenizer discards weights, so the

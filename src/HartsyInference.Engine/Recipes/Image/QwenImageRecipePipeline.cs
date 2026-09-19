@@ -76,12 +76,26 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         using QwenImageEditConditioning.References? references = refEdit
             ? QwenImageEditConditioning.Resolve(request.Img2Img?.InitImage, request.ReferenceImages) : null;
         bool editVision = references is not null && _multimodalEncoder is not null;
+        IReadOnlyList<int> visionTokens = references is not null ? CountVisionTokens(references) : [];
+        // One tokenizer for the base ids and for every scheduled variant, so a variant cannot drift from the
+        // template the base was built with — the edit path splices vision placeholders the plain path does not.
+        WeightedTokenSequence Tokenize(string text) => editVision
+            ? QwenImageEditConditioning.BuildTokens(_tokenizer, text, visionTokens).Tokens
+            : EncodeWithTemplate(_tokenizer, text).tokens;
+        // ImagesService now leaves <alternate:>/<fromto[N]:> raw for this recipe, so everything outside the
+        // schedule builder needs them collapsed to their step-0 value or the literal tag text is tokenized as
+        // prose. Same split SdxlRecipePipeline and Flux2RecipePipeline make, for the same reason.
+        string flatPrompt = PromptTagFlattening.Flatten(prompt);
+        string flatNegative = PromptTagFlattening.Flatten(negative);
         (WeightedTokenSequence promptTokens, int promptDrop) = editVision
-            ? QwenImageEditConditioning.BuildTokens(_tokenizer, prompt, CountVisionTokens(references!))
-            : EncodeWithTemplate(_tokenizer, prompt);
+            ? QwenImageEditConditioning.BuildTokens(_tokenizer, flatPrompt, visionTokens)
+            : EncodeWithTemplate(_tokenizer, flatPrompt);
         (WeightedTokenSequence negTokens, int negDrop) = editVision
-            ? QwenImageEditConditioning.BuildTokens(_tokenizer, negative, CountVisionTokens(references!))
-            : EncodeWithTemplate(_tokenizer, negative);
+            ? QwenImageEditConditioning.BuildTokens(_tokenizer, flatNegative, visionTokens)
+            : EncodeWithTemplate(_tokenizer, flatNegative);
+        // Only the positive prompt schedules: SwarmUI's scheduling tags are emitted into the prompt the user
+        // wrote, and the negative is a separate field it does not rewrite.
+        ScheduledPrompt? promptSchedule = ScheduledPrompt.TryBuild(prompt, steps, Tokenize);
 
         using QwenImageControlNetResolver.ResolvedSpec? controlNets = QwenImageControlNetResolver.Resolve(
             request.ControlNets, reqWidth, reqHeight,
@@ -114,7 +128,7 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
             editRefTimestepZero: references is not null && _refTimestepZero,
             editRefVisionImages: editVision ? references!.Vision : null,
             controlNets: controlNets?.Conditionings,
-            promptWeights: promptTokens, negativeWeights: negTokens);
+            promptWeights: promptTokens, negativeWeights: negTokens, promptSchedule: promptSchedule);
 
         return new ImageResult
         {
