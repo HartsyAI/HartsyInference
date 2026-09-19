@@ -69,6 +69,7 @@ DTYPE_KERNELS=(
     qkv_split_norm
     layernorm_modulate
     apply_rope_single
+    unpatchify_tokens
     rmsnorm
     softmax
     im2col

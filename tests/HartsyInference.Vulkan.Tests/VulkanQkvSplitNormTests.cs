@@ -242,6 +242,41 @@ public sealed class VulkanQkvSplitNormTests
         Assert.True(worst < 1e-5, $"GatedResidualRowIndexed diverges: {worst:E3}");
     }
 
+    /// <summary>Token sequence back to an image plane.</summary>
+    /// <remarks>Both packings are covered because both are in use and neither is a default: an implementation that
+    /// hardcoded one produces a plausible image with the patch interior transposed, which is the kind of wrong that
+    /// survives a smoke test. Non-square packed grids catch an h/w swap for the same reason.</remarks>
+    [Theory]
+    [InlineData(1, 4, 2, 2, 2, true)]
+    [InlineData(1, 4, 2, 2, 2, false)]
+    [InlineData(2, 3, 3, 5, 2, true)]     // non-square packed grid
+    [InlineData(1, 8, 4, 4, 1, false)]    // patch 1: the degenerate case that must still route correctly
+    public void UnpatchifyTokens_MatchesCpuReference(int batch, int channels, int hPacked, int wPacked, int patch, bool innerChannelFastest)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        int seq = hPacked * wPacked;
+        int patchVolume = channels * patch * patch;
+        int h = hPacked * patch, w = wPacked * patch;
+
+        using Tensor tokens = Filled(new TensorShape(batch, seq, patchVolume), seed: 81);
+        using Tensor got = new(new TensorShape(batch, channels, h, w), DType.F32);
+        using Tensor want = new(new TensorShape(batch, channels, h, w), DType.F32);
+
+        gpu.UnpatchifyTokens(got, tokens, channels, hPacked, wPacked, patch, innerChannelFastest);
+        cpu.UnpatchifyTokens(want, tokens, channels, hPacked, wPacked, patch, innerChannelFastest);
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"[{batch}b {channels}c {hPacked}x{wPacked} p{patch} inner={innerChannelFastest}] err = {worst:E3}");
+        // A shuffle moves values without arithmetic, so anything but exact means the indexing disagrees.
+        Assert.True(worst == 0.0, $"UnpatchifyTokens is a pure shuffle and must match exactly; got {worst:E3}");
+    }
+
     private static double Worst(Tensor a, Tensor b)
     {
         ReadOnlySpan<float> x = a.AsReadOnlySpan<float>();
