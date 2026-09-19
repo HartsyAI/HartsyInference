@@ -1729,6 +1729,136 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         DispatchPerRowNorm(shader, 4, output, input, weight, bias, eps, normDim, totalRows);
     }
 
+    /// <summary>In-place rotary position embedding on one tensor <c>x [B, L, H, D]</c>.</summary>
+    /// <remarks>Partial rotary rotates only the first <paramref name="rotaryDim"/> dims and leaves the rest
+    /// untouched; cos/sin keep the full headDim stride either way, so one kernel serves partial and full.</remarks>
+    public void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+    {
+        using OpScope _op = EnterOp();
+        if (x.Shape.Rank != 4 || (x.DType != DType.F32 && x.DType != DType.F16))
+        {
+            IBackend.ApplyRopeSingleReference(x, cos, sin, rotaryDim);
+            return;
+        }
+        int batch = (int)x.Shape[0];
+        int seqLen = (int)x.Shape[1];
+        int numHeads = (int)x.Shape[2];
+        int headDim = (int)x.Shape[3];
+        int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
+        int half = rdim / 2;
+        if (half == 0)
+        {
+            return;
+        }
+
+        VulkanBuffer xBuf = GetBuffer(x);
+        VulkanBuffer cosBuf = GetBuffer(cos);
+        VulkanBuffer sinBuf = GetBuffer(sin);
+        VulkanBuffer? cosOwned = null, sinOwned = null;
+        VulkanBuffer cosEff = cosBuf, sinEff = sinBuf;
+        if (cos.DType != DType.F32) (cosEff, cosOwned) = CastIfNeeded(cos, cosBuf, DType.F32);
+        if (sin.DType != DType.F32) (sinEff, sinOwned) = CastIfNeeded(sin, sinBuf, DType.F32);
+
+        try
+        {
+            const uint local = 256;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+            };
+            VulkanKernel kernel = GetKernel("apply_rope_single" + DtypeSuffix(x.DType), storageBufferCount: 3, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)batch);
+            pc.U32((uint)seqLen);
+            pc.U32((uint)numHeads);
+            pc.U32((uint)headDim);
+            pc.U32((uint)half);
+
+            long total = (long)batch * seqLen * numHeads * half;
+            Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosEff.Handle, sinEff.Handle };
+            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
+            // In place, and re-caching the SAME buffer is still required: the rebind is what tells the tensor its
+            // device copy is now authoritative, so a later host read syncs it back instead of returning the stale
+            // host buffer. Without this the op appears to do nothing at all from the host's point of view.
+            CacheOutput(x, xBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ApplyRopeSingle dispatch failed", ex);
+            throw;
+        }
+        finally
+        {
+            if (cosOwned is not null) _xfer.FreeDevice(cosOwned);
+            if (sinOwned is not null) _xfer.FreeDevice(sinOwned);
+        }
+    }
+
+    /// <summary>Per-row LayerNorm with no learned affine, then a per-batch modulation:
+    /// <c>y = norm(x) * (1 + scale[b]) + shift[b]</c>.</summary>
+    /// <remarks>Another true host fallback on the DiT path, not a composition: the default reads
+    /// <c>DataPointer</c> on four tensors. Every DiT block modulates right after normalizing, so it ran once per
+    /// block per step with a device round-trip each time.</remarks>
+    public void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
+    {
+        using OpScope _op = EnterOp();
+        if (input.DType != output.DType || (input.DType != DType.F32 && input.DType != DType.F16))
+        {
+            IBackend.LayerNormModulateReference(output, input, scale, shift, eps);
+            return;
+        }
+        int rank = input.Shape.Rank;
+        int normDim = (int)input.Shape[rank - 1];
+        int seqLen = rank >= 2 ? (int)input.Shape[rank - 2] : 1;
+        int totalRows = (int)(input.ElementCount / normDim);
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer scBuf = GetBuffer(scale);
+        VulkanBuffer shBuf = GetBuffer(shift);
+        // The modulation vectors are FP32 in the shader signature whatever the activation dtype is, as the other
+        // norms do — they are per-channel and tiny, so the cast costs nothing next to the activation stream.
+        VulkanBuffer? scOwned = null, shOwned = null;
+        VulkanBuffer scEff = scBuf, shEff = shBuf;
+        if (scale.DType != DType.F32) (scEff, scOwned) = CastIfNeeded(scale, scBuf, DType.F32);
+        if (shift.DType != DType.F32) (shEff, shOwned) = CastIfNeeded(shift, shBuf, DType.F32);
+
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            const uint local = 256;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+            };
+            VulkanKernel kernel = GetKernel("layernorm_modulate" + DtypeSuffix(input.DType), storageBufferCount: 4, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)normDim);
+            pc.U32((uint)totalRows);
+            pc.U32((uint)Math.Max(1, seqLen));
+            pc.F32(eps);
+
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, scEff.Handle, shEff.Handle, outBuf.Handle };
+            Dispatch(kernel, bufs, pc.Written, (uint)totalRows, 1, 1);
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan LayerNormModulate dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (scOwned is not null) _xfer.FreeDevice(scOwned);
+            if (shOwned is not null) _xfer.FreeDevice(shOwned);
+        }
+    }
+
     /// <summary>Fused QKV split with per-head QK-RMSNorm: <c>qkv[.,3w]</c> to q/k/v each <c>[.,w]</c>.</summary>
     /// <remarks>The one op on the Flux/DiT path whose host default is a TRUE fallback rather than composition: it
     /// reads <c>DataPointer</c> on six tensors, so every call was a device-to-host sync, a scalar loop over every
