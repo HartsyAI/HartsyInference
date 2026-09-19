@@ -1,3 +1,4 @@
+using HartsyInference.ModelAssets.Checkpoints;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
@@ -85,7 +86,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): LoRA, image-to-video conditioning, and a VideoRequest.Components Gemma/VAE override are deferred.
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        // IDisposable rather than SafeTensorsLoader: the container owns the mapping whatever the format is.
+        List<IDisposable> loaders = new List<IDisposable>();
         Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);
         try
         {
@@ -109,8 +111,9 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             // BEFORE any side model is fetched — that is exactly what tells a split "diffusion_models"-only LTX-2.5
             // checkpoint apart from a split LTX-2.3 one, so the auto-download below reaches for the right side files
             // instead of guessing 2.3 (the family this recipe originally shipped for).
-            IReadOnlyDictionary<string, string>? metadata = loaders
-                .FirstOrDefault(l => l.Descriptors.Keys.Any(LtxVideo2CheckpointConverter.IsTransformerKey))?.Metadata;
+            IReadOnlyDictionary<string, string>? metadata = loaders.OfType<CheckpointSource>()
+                .FirstOrDefault(l => l.Header.Descriptors.Keys.Any(LtxVideo2CheckpointConverter.IsTransformerKey))
+                ?.Header.Metadata;
             LtxVideo2Config config = LtxVideo2VariantDetector.Detect(metadata, conv.Transformer.ContainsKey);
             bool isV25 = config.UseKeyframesAbsPosEmbedding;
 
@@ -322,7 +325,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         catch (Exception ex)
         {
             Logs.Error("[LtxVideo2Recipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -348,7 +351,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// and, if missing, auto-downloaded with no confirmation prompt — same "starts, then fetches the refiner"
     /// behavior as SwarmUI's ComfyUI backend. (These knobs are NOT environment variables — the engine stopped
     /// reading its config from the process environment; see <c>KnobStore</c>/<c>KnobFile</c>.)</summary>
-    private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<SafeTensorsLoader> loaders)
+    private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<IDisposable> loaders)
     {
         if (!(EngineKnobs.Ltx2TwoStage.Value ?? config.TwoStage))
         {
@@ -413,14 +416,15 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     }
 
     /// <summary>Merges one safetensors file (or every shard under a directory) into the routing dictionary.</summary>
-    private static void AddFile(string path, List<SafeTensorsLoader> loaders, Dictionary<string, Tensor> merged)
+    /// <summary>Merges one checkpoint file — or every shard of a directory — into <paramref name="merged"/>, through
+    /// the container, so either format works and fp8/int8 companions are folded before the converter sees them.</summary>
+    private static void AddFile(string path, List<IDisposable> loaders, Dictionary<string, Tensor> merged)
     {
         if (File.Exists(path))
         {
-            SafeTensorsLoader loader = new SafeTensorsLoader();
-            loader.Load(path);
-            loaders.Add(loader);
-            foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
+            CheckpointSource source = CheckpointSource.Open(path);
+            loaders.Add(source);
+            foreach (KeyValuePair<string, Tensor> kv in source.Weights)
             {
                 merged[kv.Key] = kv.Value;
             }
@@ -435,10 +439,9 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             }
             foreach (string shard in shards)
             {
-                SafeTensorsLoader loader = new SafeTensorsLoader();
-                loader.Load(shard);
+                CheckpointSource loader = CheckpointSource.Open(shard);
                 loaders.Add(loader);
-                foreach (KeyValuePair<string, Tensor> kv in loader.GetAllTensors())
+                foreach (KeyValuePair<string, Tensor> kv in loader.Weights)
                 {
                     merged[kv.Key] = kv.Value;
                 }
