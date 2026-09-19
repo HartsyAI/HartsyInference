@@ -267,14 +267,15 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
                 $"Vision tower has {deepstack} deepstack mergers; the known Qwen3-VL tap layout has " +
                 $"{baseConfig.DeepstackVisualIndexes.Length}.");
 
+        int hiddenSize = (int)weights["visual.patch_embed.proj.bias"].ElementCount;
         _visionConfig = baseConfig with
         {
             Depth = depth,
-            HiddenSize = (int)weights["visual.patch_embed.proj.bias"].ElementCount,
+            HiddenSize = hiddenSize,
             IntermediateSize = (int)weights["visual.blocks.0.mlp.linear_fc1.bias"].ElementCount,
-            InChannels = (int)patchProj.Shape[1],
-            TemporalPatchSize = (int)patchProj.Shape[2],
-            PatchSize = (int)patchProj.Shape[4],
+            InChannels = PatchEmbedInChannels(patchProj, hiddenSize),
+            TemporalPatchSize = (int)patchProj.Shape[patchProj.Shape.Rank - 3],
+            PatchSize = (int)patchProj.Shape[patchProj.Shape.Rank - 1],
             NumPositionEmbeddings = (int)weights["visual.pos_embed.weight"].Shape[0],
             OutHiddenSize = (int)mergerOut.Shape[0],
         };
@@ -286,6 +287,27 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
 
         _vision = new Qwen3VlVisionEncoder(_visionConfig);
         _vision.LoadWeights(visual);
+    }
+
+    /// <summary>The patch embedding's input channel count, read from the weight's size rather than its rank. The
+    /// tensor is logically <c>[hidden, inChannels, t, h, w]</c>, but GGUF cannot express rank 5 — ggml caps a tensor
+    /// at <c>GGML_MAX_DIMS = 4</c> — so a GGUF build delivers the same bytes labelled <c>[hidden·inChannels, t, h, w]</c>.
+    /// Dividing the element count by everything that is unambiguous gets the same answer from either label, where
+    /// reading <c>Shape[1]</c> would silently return the temporal patch size for one of them.</summary>
+    internal static int PatchEmbedInChannels(Tensor patchProj, int hiddenSize)
+    {
+        TensorShape shape = patchProj.Shape;
+        if (shape.Rank is not (4 or 5))
+            throw new InvalidOperationException(
+                $"Vision patch embedding has rank {shape.Rank}; expected [hidden, inChannels, t, h, w] or the "
+                + "rank-4 form a GGUF build folds it into.");
+        long tail = shape[shape.Rank - 3] * shape[shape.Rank - 2] * shape[shape.Rank - 1];
+        long divisor = checked(hiddenSize * tail);
+        if (divisor <= 0 || patchProj.ElementCount % divisor != 0)
+            throw new InvalidOperationException(
+                $"Vision patch embedding {shape} does not divide into {hiddenSize} output channels; the weight and "
+                + "its bias disagree about the tower's hidden size.");
+        return (int)(patchProj.ElementCount / divisor);
     }
 
     private VisionResult[] RunVisionTower(IBackend backend,

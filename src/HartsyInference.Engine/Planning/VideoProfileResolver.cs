@@ -2507,7 +2507,7 @@ internal static class VideoProfileResolver
         }
     }
 
-    private static void ValidateComponentStructure(string role,
+    internal static void ValidateComponentStructure(string role,
         IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors, List<VideoPlanIssue> issues)
     {
         switch (role)
@@ -2716,7 +2716,7 @@ internal static class VideoProfileResolver
             ValidateTextLinear(descriptors, layer + ".mlp.down_proj", 5120, 25600, role, issues);
         }
         ValidateComponentIndexedFamily(descriptors.Keys, "model.layers.", 50, role, issues);
-        ValidateComponentShape(descriptors, "visual.patch_embed.proj.weight", role, issues, 1152, 3, 2, 16, 16);
+        ValidateConvShapeOrGgufFold(descriptors, "visual.patch_embed.proj.weight", role, issues, 1152, 3, 2, 16, 16);
         ValidateComponentShape(descriptors, "visual.merger.norm.weight", role, issues, 1152);
         ValidateComponentShape(descriptors, "visual.merger.linear_fc1.weight", role, issues, 4608, 4608);
         ValidateComponentShape(descriptors, "visual.merger.linear_fc2.weight", role, issues, 5120, 4608);
@@ -2787,6 +2787,30 @@ internal static class VideoProfileResolver
                 $"Component '{role}' tensor '{key}' must be [{string.Join(',', expected)}], got {descriptor.Shape}.",
                 role));
         }
+    }
+
+    /// <summary>Validates a 3-D convolution weight that may legitimately arrive with its two leading dimensions
+    /// folded together. GGUF cannot express rank 5 — ggml caps a tensor at <c>GGML_MAX_DIMS = 4</c> — so every
+    /// published GGUF repack stores <c>[out, in, t, h, w]</c> as <c>[out·in, t, h, w]</c>. Row-major, the two are the
+    /// same bytes in the same order, so the fold is a relabeling and nothing needs converting; but it is accepted
+    /// ONLY in that exact form, because a rank-4 weight whose leading dimension merely happens to multiply out is a
+    /// different tensor and must still be refused.</summary>
+    private static void ValidateConvShapeOrGgufFold(IReadOnlyDictionary<string, SafeTensorDescriptor> descriptors,
+        string key, string role, List<VideoPlanIssue> issues, params long[] expected)
+    {
+        if (!descriptors.TryGetValue(key, out SafeTensorDescriptor? descriptor))
+        {
+            issues.Add(Error("video.component.tensor_missing", $"Component '{role}' is missing '{key}'.", role));
+            return;
+        }
+        long[] folded = [expected[0] * expected[1], .. expected[2..]];
+        if (ShapeEquals(descriptor, expected) || ShapeEquals(descriptor, folded))
+        {
+            return;
+        }
+        issues.Add(Error("video.component.tensor_shape_invalid",
+            $"Component '{role}' tensor '{key}' must be [{string.Join(',', expected)}], or [{string.Join(',', folded)}] "
+            + $"for a GGUF build that folded the leading pair, got {descriptor.Shape}.", role));
     }
 
     private static void ValidateComponentIndexedFamily(IEnumerable<string> keys, string prefix, int expectedCount,

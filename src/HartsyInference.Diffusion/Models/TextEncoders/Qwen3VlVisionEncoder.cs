@@ -205,8 +205,16 @@ public sealed unsafe class Qwen3VlVisionEncoder : IDisposable
         return outp;
     }
 
+    /// <summary>Relabels the conv weight as the linear <c>[outDim, inDim]</c> it is multiplied as. Any rank works —
+    /// safetensors ship rank 5, a GGUF build folds the leading pair to rank 4, and the tests build it already flat —
+    /// because row-major they are all the same bytes; what may never differ is the element COUNT, since this copies a
+    /// fixed span and a short source would silently serve a truncated weight.</summary>
     private static Tensor ReshapeConvToLinear(Tensor conv, int outDim, int inDim)
     {
+        if (conv.ElementCount != (long)outDim * inDim)
+            throw new InvalidOperationException(
+                $"Vision patch embedding {conv.Shape} holds {conv.ElementCount} elements; the tower expects "
+                + $"{(long)outDim * inDim} for a [{outDim}, {inDim}] projection.");
         Tensor src = TensorCasts.EnsureF32(conv);
         Tensor outp = new Tensor(new TensorShape(outDim, inDim), DType.F32);
         long bytes = (long)outDim * inDim * sizeof(float);
