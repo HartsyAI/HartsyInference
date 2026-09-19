@@ -97,7 +97,9 @@ public sealed class ErnieImageRecipePipeline(ErnieImagePipeline pipeline, ErnieT
         IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(text);
         if (!PromptWeighting.HasWeights(spans))
         {
-            int[] ids = _tokenizer.Encode(text);
+            // Join, not `text`: a unit weight does nothing, but its grammar would still reach the encoder as
+            // prose. `(fox:1.0)` has to produce the same image as `fox`.
+            int[] ids = _tokenizer.Encode(PromptWeighting.Join(spans));
             float[] ones = new float[ids.Length];
             Array.Fill(ones, 1f);
             return new WeightedTokenSequence(ids, ones) { UniformWeight = 1f };

@@ -29,7 +29,11 @@ public static class TemplatedPromptTokens
         {
             return WeightedTokenBuilder.Build(spans, encodeRaw, templatePrefix, templateSuffix);
         }
-        int[] ids = encodeTemplated(text)
+        // Join, not `text`: a weight of exactly 1 does nothing, but the grammar that expressed it is still in the
+        // string and would reach the encoder as prose — `(fox:1.0)` must produce the same image as `fox`, which is
+        // the invariant the real-weight gate checks first. Flattening does not do this: it rewrites SwarmUI's
+        // `<weight[N]:>` tag, while a literal `(word:N)` typed at a CLI arrives untouched.
+        int[] ids = encodeTemplated(PromptWeighting.Join(spans))
             ?? throw new InvalidOperationException("The templated encoder returned null for a prompt.");
         float[] weights = new float[ids.Length];
         Array.Fill(weights, 1f);
