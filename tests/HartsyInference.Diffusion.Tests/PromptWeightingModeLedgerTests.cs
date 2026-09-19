@@ -164,7 +164,7 @@ public sealed class PromptWeightingModeLedgerTests
     private static readonly string[] NotYetWired =
     [
         "anima", "auraflow", "chroma", "chroma-radiance", "flux1", "hidream",
-        "hunyuan-image", "hunyuan-video", "ideogram4", "kandinsky5", "kandinsky5-video",
+        "hunyuan-image", "hunyuan-video", "kandinsky5", "kandinsky5-video",
         "ltx-2.5-distilled", "ltx-video", "ltx-video-2", "lumina2", "minimax-h3", "omnigen2",
         "sd3", "sdxl-refiner", "wan-animate",
         "wan-animate-2", "wan-s2v", "wan-vace",

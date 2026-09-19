@@ -84,8 +84,19 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Encodes arbitrary chat-templated text through this pipeline's own Qwen3-VL encoder — the identical multi-layer, interleaved tap-layer configuration (<see cref="Ideogram4Config.QwenActivationLayersHf"/>) the base prompt uses in <see cref="GenerateFromTokens"/>, so the feature dimension and layout match exactly. For regional/object prompt conditioning built by the caller (<see cref="Prompting.RegionalPromptResolver"/>'s <c>encodeRegion</c> delegate) — runs outside this method's own preload/free bracket around <see cref="_textEncoder"/>, so the caller pays a cold-weight touch if the encoder isn't already resident; correctness-only for this first pass, not a residency optimization. Returns a <c>[1, L, LlmFeaturesDim]</c> tensor; disposal is the caller's responsibility.</summary>
-    public Tensor EncodeRegionText(int[] tokenIds) =>
-        _textEncoder.EncodeMultiLayer(Backend, [tokenIds], Ideogram4Config.QwenActivationLayersHf, interleavedLayout: true);
+    /// <param name="weights">Per-token weights for <paramref name="tokenIds"/>, or null for an unweighted region.
+    /// Nothing caches a region's conditioning, so the scale replaces the tensor outright.</param>
+    public Tensor EncodeRegionText(int[] tokenIds, Prompting.WeightedTokenSequence? weights = null)
+    {
+        Tensor cond = _textEncoder.EncodeMultiLayer(
+            Backend, [tokenIds], Ideogram4Config.QwenActivationLayersHf, interleavedLayout: true);
+        if (weights is null || Prompting.CondTokenWeights.Apply(Backend, cond, null, weights).Cond is not Tensor scaled)
+        {
+            return cond;
+        }
+        cond.Dispose();
+        return scaled;
+    }
 
     /// <summary>Generates an image from chat-templated prompt token ids (the Qwen3 chat template must already be applied). The negative branch needs no tokens — Ideogram's CFG zeroes the text features.
     /// <para>An <see cref="ImageToImageRequest"/> selects img2img: the source goes VAE-encode (32-ch latent) → 2×2
@@ -98,14 +109,28 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     /// <param name="request">Width/Height/Seed (Steps and CfgScale come from <paramref name="preset"/>). Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint (strength maps onto the preset's step grid).</param>
     /// <param name="preset">Sampler preset (steps + guidance schedule + logit-normal mu/std). Defaults to <see cref="Ideogram4SamplerPreset.Default20"/>.</param>
     /// <param name="onProgress">Optional per-step callback.</param>
+    /// <param name="promptWeights">Per-token weights for <paramref name="promptTokenIds"/>, or null for an
+    /// unweighted prompt. Applied to a per-request COPY: the cache below is keyed on token ids, which are
+    /// identical with and without weights, so scaling the cached tensor would hand the next plain request this
+    /// one's emphasis. There is no negative counterpart — Ideogram's asymmetric CFG zeroes the text features
+    /// rather than encoding a negative prompt.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIds,
         TextToImageRequest request,
         Ideogram4SamplerPreset? preset = null,
         Action<GenerationProgress>? onProgress = null,
-        RegionalPlan? regionalPlan = null)
+        RegionalPlan? regionalPlan = null,
+        Prompting.WeightedTokenSequence? promptWeights = null)
     {
         ThrowIfDisposed();
+        if (promptWeights is not null && promptWeights.Weights.Length != promptTokenIds.Length)
+        {
+            // Weights are matched to conditioning rows by position, so a mismatched array shifts every emphasis
+            // onto a neighbouring word rather than failing.
+            throw new ArgumentException(
+                $"Weights describe {promptWeights.Weights.Length} tokens but {promptTokenIds.Length} were passed.",
+                nameof(promptWeights));
+        }
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         preset ??= Ideogram4SamplerPreset.Default20;
@@ -203,6 +228,11 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             _cachedPromptKey = (int[])promptTokenIds.Clone();
         }
         Logs.Info($"Prompt encoded in {sw.ElapsedMilliseconds}ms");
+
+        // Weighting lands on a per-request copy, after the cache store, for the reason on the parameter.
+        Tensor? weightedText = promptWeights is null
+            ? null : Prompting.CondTokenWeights.Apply(Backend, textFeatures, null, promptWeights).Cond;
+        if (weightedText is not null) textFeatures = weightedText;
 
         // ── 2. Build the unified-sequence conditioning tensors ──
         // Regional conditioning appends each region's encoded features after the base text tokens
@@ -542,6 +572,9 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         // Final reclaim: in a long-lived host (SwarmUI), VAE-decode intermediates otherwise sit in device
         // memory until GC finalization and shrink the budget of whatever generation runs next.
         Backend.FreeActivations();
+
+        // A per-request copy, not the cached original.
+        weightedText?.Dispose();
 
         sw.Stop();
         Logs.Info($"Ideogram 4 {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

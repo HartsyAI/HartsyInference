@@ -35,6 +35,13 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:1965</c> →
+    /// <c>ideogram4.Ideogram4Tokenizer</c>, which disables weights (<c>ideogram4.py:42</c>). Positive only —
+    /// Ideogram's asymmetric CFG zeroes the text features rather than encoding a negative prompt.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "ideogram4", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Ideogram 4's official sampling settings: 20 steps, 1024x1024. The step count picks the nearest official sampler preset, which carries its own per-step asymmetric-CFG schedule, so the guidance value here is inert.</summary>
