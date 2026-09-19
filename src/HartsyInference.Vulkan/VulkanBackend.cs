@@ -257,6 +257,32 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         ReadOnlySpan<byte> pushConstants,
         uint groupX, uint groupY = 1, uint groupZ = 1)
     {
+        // Three correspondences that were maintained by hand and checked by nothing. Each fails silently when it
+        // is wrong — a short buffer list binds a stale descriptor from a previous dispatch, an over-long push
+        // block is truncated at the layout's range, and a dispatch outside an op scope can be auto-flushed
+        // mid-sequence by the batching in OnOpEnd. Checked here because this is the one place every op passes.
+        if (bufferHandles.Length != kernel.StorageBufferCount)
+        {
+            throw new InvalidOperationException(
+                $"Kernel '{kernel.Name}' was built for {kernel.StorageBufferCount} storage buffers but the "
+                + $"dispatch passed {bufferHandles.Length}. The count in GetKernel and the buffer list have to "
+                + "agree; a shorter list leaves the remaining bindings pointing at whatever bound them last.");
+        }
+        if (pushConstants.Length > VulkanDescriptorManager.PushConstantRangeBytes)
+        {
+            throw new InvalidOperationException(
+                $"Kernel '{kernel.Name}' pushed {pushConstants.Length} constant bytes, over the "
+                + $"{VulkanDescriptorManager.PushConstantRangeBytes}-byte range every layout reserves. Anything "
+                + "larger belongs in a storage buffer.");
+        }
+        if (!InOp)
+        {
+            throw new InvalidOperationException(
+                $"Kernel '{kernel.Name}' dispatched outside an op scope. Every public backend op must open one "
+                + "(`using OpScope _ = EnterOp();`): the scope is what suppresses the batched auto-flush, and a "
+                + "flush between two dispatches of the same op frees transients the later ones still read.");
+        }
+
         // Step-graph capture: record onto the graph's own persistent command buffer instead of the normal
         // stream, and ALWAYS push-descriptor-bind (regardless of the process's default eager-mode strategy —
         // see VulkanStepGraph's doc comment for why a pool-allocated set is unsafe for a replayed buffer).
@@ -552,6 +578,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     internal bool TryDispatchCoopmatBlockedDiagnostic(
         Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint wm = 32, uint wn = 32)
     {
+        using OpScope _op = EnterOp();
         if (!Vk.HasCooperativeMatrix) return false;
         int N = transposeB ? (int)b.Shape[0] : (int)b.Shape[b.Shape.Rank - 1];
         int M = (int)(output.ElementCount / N);
@@ -648,6 +675,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     internal bool TryDispatchCoopMat2(
         Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint bk = 0)
     {
+        using OpScope _op = EnterOp();
         if (!Vk.HasCooperativeMatrix2) return false;
         if (transposeA || !transposeB)
             throw new NotSupportedException("TryDispatchCoopMat2 only supports transposeA=false, transposeB=true (the production Linear-layer convention).");
@@ -975,6 +1003,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b)
     {
+        using OpScope _op = EnterOp();
         LowRankAdjunctGemm.RefuseAdjunct(a, "VulkanBackend.BatchedMatMul");
         LowRankAdjunctGemm.RefuseAdjunct(b, "VulkanBackend.BatchedMatMul");
         long batch = a.Shape[0];
@@ -1593,11 +1622,13 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void GroupNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
     {
+        using OpScope _op = EnterOp();
         DispatchGroupNorm(output, input, weight, bias, groups, eps, fused: false);
     }
 
     public void GroupNormSilu(Tensor output, Tensor input, Tensor weight, Tensor bias, int groups, float eps)
     {
+        using OpScope _op = EnterOp();
         DispatchGroupNorm(output, input, weight, bias, groups, eps, fused: true);
     }
 
@@ -1658,6 +1689,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void LayerNorm(Tensor output, Tensor input, Tensor weight, Tensor bias, float eps)
     {
+        using OpScope _op = EnterOp();
         int normDim = (int)input.Shape[input.Shape.Rank - 1];
         int totalRows = (int)(input.ElementCount / normDim);
         string shader = "layernorm" + DtypeSuffix(input.DType);
@@ -1666,6 +1698,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps)
     {
+        using OpScope _op = EnterOp();
         int normDim = (int)input.Shape[input.Shape.Rank - 1];
         int totalRows = (int)(input.ElementCount / normDim);
         string shader = "rmsnorm" + DtypeSuffix(input.DType);
@@ -1795,11 +1828,13 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void AdaInstanceNorm1d(Tensor output, Tensor input, Tensor gamma, Tensor beta, float eps)
     {
+        using OpScope _op = EnterOp();
         throw new NotImplementedException("VulkanBackend.AdaInstanceNorm1d not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2 prosody and decoder paths.");
     }
 
     public void LeakyRelu(Tensor output, Tensor input, float slope)
     {
+        using OpScope _op = EnterOp();
         throw new NotImplementedException("VulkanBackend.LeakyRelu not yet implemented. Use the CPU backend for Kokoro / StyleTTS 2.");
     }
 
@@ -2226,17 +2261,27 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     #region Activations
 
-    public void Gelu(Tensor output, Tensor input) => DispatchElementwise(5u /* gelu_tanh */, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
-    public void Silu(Tensor output, Tensor input) => DispatchElementwise(3u, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
+    public void Gelu(Tensor output, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(5u /* gelu_tanh */, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
+    }
+    public void Silu(Tensor output, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(3u, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
+    }
 
     public void Sigmoid(Tensor output, Tensor input)
     {
+        using OpScope _op = EnterOp();
         // Op 6 in the existing elementwise.comp.glsl — already baked into elementwise_f32.spv.
         DispatchElementwise(6u, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
     }
 
     public void Tanh(Tensor output, Tensor input)
     {
+        using OpScope _op = EnterOp();
         // Op 8 — requires elementwise.comp.glsl recompile (source updated; SPIR-V will be
         // regenerated by the build pipeline). Until then this dispatches to an op code
         // that doesn't exist in the current .spv and will produce zeros — the test mock
@@ -2246,6 +2291,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void Elu(Tensor output, Tensor input, float alpha)
     {
+        using OpScope _op = EnterOp();
         // Op 9 — alpha goes through the existing `scalar` push-constant slot.
         DispatchElementwise(9u, output, input, null, scalar: alpha, minVal: 0, maxVal: 0);
     }
@@ -2377,14 +2423,33 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     #region Element-wise
 
-    public void Add(Tensor output, Tensor a, Tensor b) => DispatchElementwise(0u, output, a, b, scalar: 0, minVal: 0, maxVal: 0);
-    public void Mul(Tensor output, Tensor a, Tensor b) => DispatchElementwise(1u, output, a, b, scalar: 0, minVal: 0, maxVal: 0);
-    public void Scale(Tensor output, Tensor input, float scalar) => DispatchElementwise(2u, output, input, null, scalar, minVal: 0, maxVal: 0);
+    public void Add(Tensor output, Tensor a, Tensor b)
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(0u, output, a, b, scalar: 0, minVal: 0, maxVal: 0);
+    }
+    public void Mul(Tensor output, Tensor a, Tensor b)
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(1u, output, a, b, scalar: 0, minVal: 0, maxVal: 0);
+    }
+    public void Scale(Tensor output, Tensor input, float scalar)
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(2u, output, input, null, scalar, minVal: 0, maxVal: 0);
+    }
     public void Clamp(Tensor output, Tensor input, float min, float max)
-        => DispatchElementwise(7u, output, input, null, scalar: 0, minVal: min, maxVal: max);
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(7u, output, input, null, scalar: 0, minVal: min, maxVal: max);
+    }
 
     /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): no <c>VulkanBackend</c> override existed, so every call fell through to <c>IBackend</c>'s CPU-loop default — found capture-illegal via a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run (<c>DiTUtils.Modulate</c>'s <c>AddScalar(scale, +1)</c>, called TWICE per block × 28 blocks per forward pass — the (1+scale) modulation convention every DiT block uses) and, independent of graph mode, a D2H sync 56 times per denoise step regardless.</summary>
-    public void AddScalar(Tensor output, Tensor input, float scalar) => DispatchElementwise(10u, output, input, null, scalar, minVal: 0, maxVal: 0);
+    public void AddScalar(Tensor output, Tensor input, float scalar)
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(10u, output, input, null, scalar, minVal: 0, maxVal: 0);
+    }
 
     private void DispatchElementwise(uint op, Tensor output, Tensor a, Tensor? b, float scalar, float minVal, float maxVal)
     {
@@ -2427,6 +2492,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void Transpose2D(Tensor output, Tensor input, int d1, int d2)
     {
+        using OpScope _op = EnterOp();
         int rank = input.Shape.Rank;
         int B = (int)(input.ElementCount / (d1 * d2));
         VulkanBuffer inBuf = GetBuffer(input);
@@ -2454,6 +2520,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void Permute0213(Tensor output, Tensor input, int s, int h, int d)
     {
+        using OpScope _op = EnterOp();
         int B = (int)(input.ElementCount / ((long)s * h * d));
         VulkanBuffer inBuf = GetBuffer(input);
         ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
@@ -2481,6 +2548,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void GeGlu(Tensor output, Tensor input)
     {
+        using OpScope _op = EnterOp();
         long lastDim = input.Shape[input.Shape.Rank - 1];
         long D = lastDim / 2;
         long outerCount = input.ElementCount / lastDim;
@@ -2509,6 +2577,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public void BroadcastAdd(Tensor hidden, Tensor bias, int channels, int spatial)
     {
+        using OpScope _op = EnterOp();
         VulkanBuffer hBuf = GetBuffer(hidden);
         VulkanBuffer bBuf = GetBuffer(bias);
 
@@ -2545,6 +2614,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Device-resident concat along <paramref name="dim"/>: one <c>vkCmdCopyBuffer</c> (multi-region when <c>dim</c> isn't the leading axis) per input, straight into <paramref name="output"/>'s buffer at the right byte offset — no compute shader needed, concatenation with contiguous inner strides is pure data movement. Overrides <c>IBackend</c>'s CPU-loop default (found capture-illegal via a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run: `ForwardCore`'s `Concat(joint, [txt, img], dim: 1)` — the text+image sequence join every DiT forward pass — read both inputs' <c>DataPointer</c> directly, which is capture-illegal and, outside capture, forced a D2H sync on every forward regardless of graph mode). Capture-aware, matching <see cref="CopyInto"/>'s pattern.</summary>
     public unsafe void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
     {
+        using OpScope _op = EnterOp();
         long elemSize = output.DType.SizeInBytes;
         long innerStride = 1;
         for (int d = dim + 1; d < output.Shape.Rank; d++) innerStride *= output.Shape[d];
@@ -2597,6 +2667,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public unsafe void Split(ReadOnlySpan<Tensor> outputs, Tensor input, int dim)
     {
+        using OpScope _op = EnterOp();
         SplitGeometry geometry = SplitContract.Validate(outputs, input, dim);
         // CPU fallback
         long elemSize = geometry.ElementSize;
@@ -2624,10 +2695,16 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     #region Sampling
 
     public void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW)
-        => DispatchUpsample("upsample_nearest2d", output, input, scaleH, scaleW);
+    {
+        using OpScope _op = EnterOp();
+        DispatchUpsample("upsample_nearest2d", output, input, scaleH, scaleW);
+    }
 
     public void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW)
-        => DispatchUpsample("upsample_bilinear2d", output, input, scaleH, scaleW);
+    {
+        using OpScope _op = EnterOp();
+        DispatchUpsample("upsample_bilinear2d", output, input, scaleH, scaleW);
+    }
 
     private void DispatchUpsample(string baseName, Tensor output, Tensor input, int scaleH, int scaleW)
     {
@@ -3045,6 +3122,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public unsafe void Fill(Tensor tensor, float value)
     {
+        using OpScope _op = EnterOp();
         long count = tensor.ElementCount;
         if (tensor.DType == DType.F32)
         {
@@ -3082,6 +3160,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public unsafe void CastToF16(Tensor output, Tensor input)
     {
+        using OpScope _op = EnterOp();
         if ((input.DType == DType.F32 || input.DType == DType.F8E4M3) && output.DType == DType.F16)
         {
             VulkanBuffer src = GetBuffer(input);
@@ -3095,6 +3174,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     public unsafe void CastToF32(Tensor output, Tensor input)
     {
+        using OpScope _op = EnterOp();
         if (input.DType == DType.F16 && output.DType == DType.F32)
         {
             VulkanBuffer src = GetBuffer(input);

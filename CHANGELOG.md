@@ -6,6 +6,29 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.117
+
+- **Twenty-seven Vulkan ops were dispatching outside an op scope.** The scope is what suppresses the batched
+  auto-flush, so without one a flush could land between two dispatches of the same op and free the transients the
+  later dispatches still read — the per-slice loops are exactly that shape. `Silu`, `Add`, `RmsNorm`, `LayerNorm`,
+  `Concat`, `Split`, `BatchedMatMul` and twenty more were missing it, including the internal entry points the
+  coopmat benchmarks call directly. They were not failing yet because the flush threshold is eight dispatches.
+- **The dispatch path checks three correspondences that were maintained by hand and verified by nothing.** The
+  storage-buffer count against the count the kernel was built for, the push-constant size against the range every
+  layout reserves, and that an op scope is open. Each failed silently when wrong: a short buffer list leaves the
+  remaining bindings pointing at whatever bound them last, an over-long push block is truncated at the layout, and
+  the flush hazard above. Turning the check on is what found the twenty-seven.
+- `PushConstants` builds a push block by appending, so byte offsets are not written by hand. An op used to
+  `stackalloc byte[9 * 4]` and write nine offsets that had to agree with a GLSL struct in another file and with
+  each other; inserting a field meant renumbering every line below it, and an error does not fail — the shader
+  reads a plausible number from the wrong place. It is a MUTATING ref struct deliberately: chaining by value would
+  copy it, and every field would land at offset zero.
+- `VulkanDescriptorManager.PushConstantRangeBytes` names the 128-byte floor that was a bare literal in the layout
+  and an implicit assumption in every op's `stackalloc`, with nothing connecting the two.
+- A source lint enforces both rules without a GPU: no override reaching its own interface default (which recurses
+  to a stack overflow), and every dispatching op opening a scope. The runtime guard only fires on a path some test
+  runs, and Vulkan's least-covered ops are the ones most likely to be written next.
+
 ## alpha.116
 
 - **`(word:1.5)` works on Wan.** umT5 keeps token weights, so Wan is a ComfyBlend family: the prompt is encoded at

@@ -73,6 +73,12 @@ public sealed class VulkanDescriptorManager : IDisposable
         return cached;
     }
 
+    /// <summary>Push-constant bytes every pipeline layout reserves for the compute stage.</summary>
+    /// <remarks>128 is the floor the Vulkan spec guarantees, so a block that fits here fits everywhere. Named
+    /// because it was written as a bare 128 in the layout and as an implicit assumption in every op's
+    /// <c>stackalloc</c>, with nothing connecting the two.</remarks>
+    public const uint PushConstantRangeBytes = 128;
+
     /// <summary>Returns (or creates) a pipeline layout = (set layout for n SSBOs) + 128-byte compute push-constant range.</summary>
     public ulong GetPipelineLayout(int storageBufferCount, bool forPush = false)
     {
@@ -86,7 +92,7 @@ public sealed class VulkanDescriptorManager : IDisposable
             {
                 stageFlags = VkShaderStageFlags.Compute,
                 offset = 0,
-                size = 128,
+                size = PushConstantRangeBytes,
             };
             VkPipelineLayoutCreateInfo ci = new()
             {
