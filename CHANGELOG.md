@@ -30,6 +30,30 @@ stable release will require. Dates are UTC.
   knob to reach the code. The opt-out is gone and every sink resolves per access, which also removes a
   created-once flag that would have sent later dumps to a directory it never made.
 
+- **And a third shape, in a lazily-initialized static.** `Hunyuan3DDebugDump` resolved its dump directory behind a
+  double-checked flag, so the first `Enabled` read in the process decided it for every later one. The lint could not
+  see that either — the read sits in a property body, which is normally the safe place for one — so it now also
+  flags a knob read whose result is assigned to a static field, wherever that assignment lives. It gained a second
+  detection at the same time: a namespace-qualified `Configuration.EngineKnobs.X.Value` was invisible to it, and
+  though no read in `src/` is written that way today, a check with a way around it is worth less than the diff that
+  closes it. Both rules were mutation-tested — a planted violation of each fails the build, and a live read in a
+  property still passes.
+- `WanVideoDebugDump.SetTag(null)` pinned an empty prefix instead of handing the choice back to the setting, so the
+  CFG pipeline's first clear masked the configured tag for the rest of the process. Three places said it should do
+  the opposite, including the doc comment directly above it.
+
+- **A fourth shape, and the one that reached real numerics: an instance field on a cached object.**
+  `MiniMaxMusic3ArPipeline` bound `numerics.mm3CfgBatch` into a `readonly` field in its constructor, and that
+  pipeline is built during model load and then cached and reused by `MusicService`, so every request after the
+  first inherited whatever the loading request happened to see — its own `KnobProfileScope` override could not
+  reach it. The value is now read once per generation rather than per use, deliberately: the two call sites must
+  agree, since the feedback is built with two rows exactly when the batched step consumes two, so reading live at
+  each would let them tear. The lint flags an instance field initializer now as well; a syntax tree cannot know
+  which objects outlive a request, and presuming the freeze costs nothing when no legitimate instance exists.
+- `WanVideoDebugDump`'s tag override is `AsyncLocal`, for the reason `KnobProfileScope` is. The CFG pipeline sets it
+  around each branch forward, so on a plain static two generations on two devices would relabel each other's dumps.
+  Only filenames are at stake, but a dump whose name lies about which branch produced it is worth nothing.
+
 ## alpha.101
 
 - **MiniMax-H3 runs from a GGUF, verified by generation.** The `unsloth/MiniMax-H3-GGUF` Q4_K build renders the

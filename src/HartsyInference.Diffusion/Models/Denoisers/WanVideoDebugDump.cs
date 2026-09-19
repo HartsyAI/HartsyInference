@@ -3,9 +3,9 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers;
 
-/// <summary>Optional layer-by-layer debug dump for Wan-family DiTs. When <c>WAN_DEBUG_DIR</c> is set, writes each
+/// <summary>Optional layer-by-layer debug dump for Wan-family DiTs. When <c>diagnostics.wanDebugDir</c> is set, writes each
 /// named tensor as raw little-endian F32 to <c>{dir}/layers/{tag}_{safe_name}.bin</c> plus a <c>shapes.txt</c>
-/// sidecar; zero-cost otherwise. The tag (initially <c>WAN_DEBUG_TAG</c>, overridable via <see cref="SetTag"/>)
+/// sidecar; zero-cost otherwise. The tag (<c>diagnostics.wanDebugTag</c>, overridable via <see cref="SetTag"/>)
 /// keeps the CFG cond/uncond forwards of the same step from colliding. For Python layer-diff validation.</summary>
 public static unsafe class WanVideoDebugDump
 {
@@ -13,22 +13,27 @@ public static unsafe class WanVideoDebugDump
     /// <summary>Explicitly set prefix, or null to let the setting decide.</summary>
     /// <remarks>Seeded from the knob at type-initialization before, which froze it: a per-request value could
     /// never reach it, and the first generation in the process named every later one's dumps.</remarks>
-    private static string? _tagOverride;
+    /// <remarks><c>AsyncLocal</c> for the same reason <see cref="KnobProfileScope"/> is: the CFG pipeline sets this
+    /// around each branch forward, so on a plain static two generations on two devices would relabel each other's
+    /// dumps. Only filenames are at stake here, but a dump whose name lies about which branch produced it is worth
+    /// nothing, which is the whole point of the tag.</remarks>
+    private static readonly AsyncLocal<string?> _tagOverride = new();
 
-    private static string Tag => _tagOverride
+    private static string Tag => _tagOverride.Value
         ?? (EngineKnobs.WanDebugTag.Value is { Length: > 0 } t ? t + "_" : "");
     private static readonly object _lock = new();
     private static readonly HashSet<string> _shapesWritten = new();
 
-    /// <summary>True when <c>WAN_DEBUG_DIR</c> is set — callers gate any dump-only tensor prep on this.</summary>
+    /// <summary>True when <c>diagnostics.wanDebugDir</c> is set — callers gate any dump-only tensor prep on this.</summary>
     public static bool Enabled => _sink.Enabled;
 
-    /// <summary>Prefixes subsequent dump names with <c>{tag}_</c> (null/empty clears). The CFG pipeline sets
+    /// <summary>Prefixes subsequent dump names with <c>{tag}_</c>; null or empty hands the choice back to
+    /// the setting rather than pinning an empty prefix for the rest of the process. The CFG pipeline sets
     /// <c>cond</c>/<c>uncond</c> around each branch forward. No-op when dumping is disabled.</summary>
     public static void SetTag(string? tag)
     {
         if (!_sink.Enabled) return;
-        _tagOverride = string.IsNullOrEmpty(tag) ? "" : tag + "_";
+        _tagOverride.Value = string.IsNullOrEmpty(tag) ? null : tag + "_";
     }
 
     public static void Dump(string name, Tensor t)

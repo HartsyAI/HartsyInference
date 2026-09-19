@@ -40,7 +40,6 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
 
     private readonly MiniMaxMusic3GlobalLm _languageModel;
     private readonly MiniMaxMusic3DepthDecoder _depthDecoder;
-    private readonly bool _batchCfg = EngineKnobs.Mm3CfgBatch.Value;
     private int _disposed;
 
     public MiniMaxMusic3ArPipeline(MiniMaxMusic3GlobalLm languageModel, MiniMaxMusic3DepthDecoder depthDecoder)
@@ -85,6 +84,12 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
         // Phase attribution for the perf grind. CUDA launches are async, so each phase is billed at the next host
         // read that forces a sync -- good enough to rank the phases, not to trust to the millisecond.
         long lmTicks = 0, depthTicks = 0, sampleTicks = 0, feedbackTicks = 0;
+        // Read once here, not per use: the two call sites below must agree — the feedback is built with two rows
+        // exactly when the batched step consumes two — so a live read at each would let them tear if a concurrent
+        // request changed the setting between them. Once per generation is also what the knob's Runtime scope
+        // means; this was a readonly field bound in the constructor, and the pipeline is built during model load
+        // and then cached and reused, so every later request inherited whatever the first load happened to see.
+        bool batchCfg = EngineKnobs.Mm3CfgBatch.Value;
         int codebooks = MiniMaxMusic3DepthDecoder.NumCodebooks;
         int hidden = MiniMaxMusic3GlobalLm.HiddenSize;
         List<float[]> frames = new List<float[]>(Math.Min(frameLimit, 1024));
@@ -142,10 +147,10 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
                 }
 
                 phase = Stopwatch.GetTimestamp();
-                using Tensor feedback = BuildFeedback(frameCodes, _batchCfg ? CfgRows : 1);
+                using Tensor feedback = BuildFeedback(frameCodes, batchCfg ? CfgRows : 1);
                 feedbackTicks += Stopwatch.GetTimestamp() - phase;
                 phase = Stopwatch.GetTimestamp();
-                Tensor next = _batchCfg
+                Tensor next = batchCfg
                     ? _languageModel.ForwardCfgStep(backend, feedback, conditionalCache, unconditionalCache)
                     : ForwardBranches(backend, feedback, conditionalCache, unconditionalCache, hidden);
                 lmTicks += Stopwatch.GetTimestamp() - phase;

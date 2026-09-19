@@ -22,8 +22,9 @@ namespace HartsyInference.Core.Tests;
 /// was a regex requiring <c>EngineKnobs</c> immediately after the <c>=</c>, and it missed a live instance three
 /// lines from one it caught: <c>static readonly bool AutoPromoteWeights = !EngineKnobs.NoAutopromote.Value;</c>,
 /// where a single <c>!</c> was enough to hide a frozen Runtime knob. A syntax tree has no such blind spots, so the
-/// negated initializer, the multi-line one, the <see cref="Lazy{T}"/> wrapper and the static constructor are all the
-/// same shape to it: a knob read reached from storage that is written once.</para>
+/// negated initializer, the multi-line one, the <see cref="Lazy{T}"/> wrapper, the static constructor, the
+/// namespace-qualified owner and the double-checked lazy init that parks the value in a static are all the same
+/// shape to it: a knob read reached from storage that is written once.</para>
 ///
 /// <para>There is deliberately no allowlist file. The knob's own declared scope is the allowlist: mark it
 /// <see cref="KnobScope.Construction"/> and freezing is legal, because that scope says the value is baked in. That
@@ -51,10 +52,12 @@ public sealed class KnobScopeIsEnforcedTests
     {
         foreach (MemberAccessExpressionSyntax access in root.DescendantNodes().OfType<MemberAccessExpressionSyntax>())
         {
+            // The owner may be written bare or qualified (`Configuration.EngineKnobs.X.Value`), and only the last
+            // segment names the type. Matching the bare form alone left a way to write a frozen read the lint
+            // could not see — no such read exists in src/ today, which is exactly when it is cheap to close.
             if (access.Name.Identifier.ValueText != nameof(Knob<int>.Value)
                 || access.Expression is not MemberAccessExpressionSyntax knob
-                || knob.Expression is not IdentifierNameSyntax owner
-                || owner.Identifier.ValueText != nameof(EngineKnobs))
+                || OwnerName(knob.Expression) != nameof(EngineKnobs))
             {
                 continue;
             }
@@ -62,15 +65,60 @@ public sealed class KnobScopeIsEnforcedTests
         }
     }
 
+    /// <summary>The type name an expression ends in, so a bare and a namespace-qualified owner read alike.</summary>
+    private static string? OwnerName(ExpressionSyntax expression) => expression switch
+    {
+        IdentifierNameSyntax name => name.Identifier.ValueText,
+        MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
+        _ => null,
+    };
+
+    /// <summary>Names of the static fields declared by the type that lexically encloses <paramref name="node"/>.</summary>
+    private static HashSet<string> EnclosingStaticFields(SyntaxNode node)
+    {
+        HashSet<string> names = new(StringComparer.Ordinal);
+        if (node.Ancestors().OfType<TypeDeclarationSyntax>().FirstOrDefault() is not TypeDeclarationSyntax type)
+        {
+            return names;
+        }
+        foreach (FieldDeclarationSyntax field in type.Members.OfType<FieldDeclarationSyntax>())
+        {
+            if (field.Modifiers.Any(SyntaxKind.StaticKeyword))
+            {
+                foreach (VariableDeclaratorSyntax variable in field.Declaration.Variables)
+                {
+                    names.Add(variable.Identifier.ValueText);
+                }
+            }
+        }
+        return names;
+    }
+
+    /// <summary>The name a simple assignment targets, ignoring a <c>this.</c> or type-name qualifier.</summary>
+    private static string? AssignmentTarget(ExpressionSyntax left) => left switch
+    {
+        IdentifierNameSyntax name => name.Identifier.ValueText,
+        MemberAccessExpressionSyntax member => member.Name.Identifier.ValueText,
+        _ => null,
+    };
+
     /// <summary>Why this read is frozen, or null when it is evaluated afresh each time.</summary>
-    /// <remarks>All three shapes are "written once, read forever". A property getter, a method body or a local is
-    /// re-evaluated per call and is therefore fine — which is what the fix turned every violation into.</remarks>
+    /// <remarks>Every shape is "written once, read forever". A property getter, a method body or a local is
+    /// re-evaluated per call and is therefore fine — which is what the fix turned every violation into. The one
+    /// exception is a body that stashes the value in a static, which is a freeze wearing a method's clothes.</remarks>
     private static string? FreezeReason(SyntaxNode read)
     {
         foreach (SyntaxNode node in read.Ancestors())
         {
             switch (node)
             {
+                // A knob read inside a method is fine UNLESS its result is being parked in a static. A
+                // double-checked lazy init is the usual disguise, and it freezes the value at whatever the first
+                // caller saw just as firmly as a field initializer does.
+                case AssignmentExpressionSyntax assignment
+                    when AssignmentTarget(assignment.Left) is string target
+                        && EnclosingStaticFields(assignment).Contains(target):
+                    return $"a static field ({target}) assigned from a method body";
                 // `readonly` is deliberately NOT required. A mutable static initialized from a knob is bound at
                 // type-initialization exactly the same way, and is worse rather than better: it is process-wide
                 // mutable state with no per-request isolation, and the only thing that ever wrote to the three
@@ -79,6 +127,13 @@ public sealed class KnobScopeIsEnforcedTests
                     return field.Modifiers.Any(SyntaxKind.ReadOnlyKeyword)
                         ? "a static readonly field initializer"
                         : "a mutable static field initializer";
+                // An instance field is frozen too whenever its object outlives a request, and a syntax tree cannot
+                // know which objects those are. The one that existed was a pipeline built during model load and
+                // then cached by the service, so every later request inherited the first load's value. Presuming
+                // the freeze costs nothing — there are no legitimate instances — and a genuinely per-request
+                // object can read live (`bool X => EngineKnobs.K.Value;`) just as cheaply.
+                case FieldDeclarationSyntax:
+                    return "an instance field initializer";
                 case ConstructorDeclarationSyntax ctor when ctor.Modifiers.Any(SyntaxKind.StaticKeyword):
                     return "a static constructor";
                 case ObjectCreationExpressionSyntax creation
