@@ -21,7 +21,7 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
 {
     private readonly StableDiffusion15Pipeline _pipeline;
     private readonly ClipTokenizer _tokenizer;
-    private readonly SafeTensorsLoader _checkpointLoader;
+    private readonly IDisposable _checkpointLoader;
     private readonly IBackend _backend;
     private readonly ClipTextEncoder _textEncoder;
     private readonly MergedLoraStack? _loraStack;
@@ -31,7 +31,7 @@ public sealed class Sd15RecipePipeline : IRecipePipeline
     public Sd15RecipePipeline(
         StableDiffusion15Pipeline pipeline,
         ClipTokenizer tokenizer,
-        SafeTensorsLoader checkpointLoader,
+        IDisposable checkpointLoader,
         IBackend backend,
         ClipTextEncoder textEncoder,
         MergedLoraStack? loraStack)
