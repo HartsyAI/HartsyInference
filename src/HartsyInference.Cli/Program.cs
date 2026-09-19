@@ -139,6 +139,9 @@ public static class Program
             config.AddCommand<InspectCommand>("inspect")
                 .WithDescription("Inspect a checkpoint header and resolve its execution profile without loading weights.")
                 .WithExample("inspect", "--modality", "video", "--model-path", "/models/h3.safetensors", "--json");
+            config.AddCommand<QuantizeCommand>("quantize")
+                .WithDescription("Write a quantized GGUF copy of a checkpoint. Offline — the engine never quantizes at load.")
+                .WithExample("quantize", "--model-path", "/models/flux2-klein.safetensors", "-o", "/models/klein-Q8_0.gguf", "--quant", "Q8_0");
         });
 
         return app.Run(args);

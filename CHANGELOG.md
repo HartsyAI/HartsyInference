@@ -6,6 +6,20 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.108
+
+- **`hartsy quantize` writes a quantized copy of a checkpoint offline.** The engine still never quantizes at load,
+  so what a generation runs is the file on disk rather than a runtime decision about it; this is how the smaller
+  file comes to exist.
+- **It reads through the container, which is the part that matters.** `GgufQuantizer` could already write a GGUF,
+  but only from a raw `SafeTensorsLoader` dictionary — and a `fp8_scaled` or `int8` checkpoint keeps its scales in
+  companion tensors, so quantizing those bytes without folding them first writes a file wrong by exactly those
+  scales. A plausible file, not an error. Reading through `CheckpointSource` folds them, and also means a GGUF can
+  be re-quantized into a smaller one.
+- Each tensor is materialized to F32 by the route its own form needs, because picking the wrong one is silent:
+  `CastTo` folds an fp8 scale into the values but refuses a block-quantized source by design, and an int8 weight
+  carrying no descriptor has an unknowable scale and is refused by name rather than guessed at.
+
 ## alpha.107
 
 - **Qwen-Image and Mage-Flow schedule their conditioning per step**, finishing C.2 for every family that applies

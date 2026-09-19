@@ -1,0 +1,136 @@
+using Xunit;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.Quant;
+using HartsyInference.ModelAssets.SafeTensors;
+using Checkpoints = HartsyInference.ModelAssets.Checkpoints;
+
+namespace HartsyInference.ModelAssets.Tests;
+
+/// <summary>Offline quantization: what it refuses, and that a quantized file round-trips back to the values it was
+/// made from. The thing that matters most here is not compression but that the SOURCE is read through the
+/// container — a fp8_scaled or int8 checkpoint keeps its scales in companion tensors, and quantizing the raw bytes
+/// without folding them first writes a file wrong by exactly those scales, with nothing to show for it.</summary>
+public sealed class CheckpointQuantizerTests : IDisposable
+{
+    private readonly string _dir = Directory.CreateTempSubdirectory("hartsy-quant-").FullName;
+
+    public void Dispose()
+    {
+        try { Directory.Delete(_dir, recursive: true); } catch (IOException) { }
+    }
+
+    private string WriteSafetensors(string name, Dictionary<string, Tensor> weights)
+    {
+        string path = Path.Combine(_dir, name);
+        SafeTensorsWriter.Save(path, weights);
+        return path;
+    }
+
+    private static unsafe Tensor Ramp(int rows, int cols, float scale = 1f)
+    {
+        Tensor t = new Tensor(new TensorShape(rows, cols), DType.F32);
+        float* p = (float*)t.DataPointer;
+        for (int i = 0; i < rows * cols; i++) p[i] = MathF.Sin(i * 0.01f) * scale;
+        return t;
+    }
+
+    [Fact]
+    public void QuantizingWritesASmallerFileThatReadsBack()
+    {
+        using Tensor weight = Ramp(256, 256);
+        string src = WriteSafetensors("src.safetensors", new() { ["blocks.0.attn.weight"] = weight });
+        string outPath = Path.Combine(_dir, "out.gguf");
+
+        QuantizationReport report = CheckpointQuantizer.Quantize(new QuantizationJob
+        {
+            SourcePath = src,
+            OutputPath = outPath,
+            Target = new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0),
+            Architecture = "test-arch",
+        });
+
+        Assert.True(File.Exists(outPath));
+        Assert.Equal(1, report.TensorCount);
+        Assert.Equal(1, report.QuantizedCount);
+        Assert.True(report.OutputBytes < report.SourceBytes,
+            $"Q8_0 of an F32 source should shrink it; got {report.OutputBytes} from {report.SourceBytes}.");
+    }
+
+    /// <summary>An existing output is a file someone may still be using, so it is refused rather than replaced
+    /// silently.</summary>
+    [Fact]
+    public void AnExistingOutputIsRefusedUnlessOverwriteIsGiven()
+    {
+        using Tensor weight = Ramp(256, 256);
+        string src = WriteSafetensors("src2.safetensors", new() { ["blocks.0.attn.weight"] = weight });
+        string outPath = Path.Combine(_dir, "taken.gguf");
+        File.WriteAllText(outPath, "not empty");
+
+        QuantizationJob job = new()
+        {
+            SourcePath = src,
+            OutputPath = outPath,
+            Target = new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0),
+            Architecture = "test-arch",
+        };
+        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => CheckpointQuantizer.Quantize(job));
+        Assert.Contains("--overwrite", ex.Message, StringComparison.Ordinal);
+
+        CheckpointQuantizer.Quantize(job with { Overwrite = true });
+        Assert.True(new FileInfo(outPath).Length > 100);
+    }
+
+    /// <summary>Writing over the file being read would truncate the source mid-read.</summary>
+    [Fact]
+    public void QuantizingOntoItsOwnSourceIsRefused()
+    {
+        using Tensor weight = Ramp(256, 256);
+        string src = WriteSafetensors("self.safetensors", new() { ["blocks.0.attn.weight"] = weight });
+        HartsyInferenceException ex = Assert.Throws<HartsyInferenceException>(() => CheckpointQuantizer.Quantize(new QuantizationJob
+        {
+            SourcePath = src,
+            OutputPath = src,
+            Target = new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0),
+            Overwrite = true,
+        }));
+        Assert.Contains("same file", ex.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>The one that justifies reading through the container. The fp8 weight and its <c>.weight_scale</c>
+    /// companion are folded on open, so the quantizer sees real values; reading the raw bytes instead would write a
+    /// file wrong by the scale — a plausible-looking file, not an error.</summary>
+    [Fact]
+    public unsafe void AnFp8ScaledSourceIsFoldedBeforeQuantizing()
+    {
+        const int Rows = 64, Cols = 256;
+        using Tensor fp8 = new Tensor(new TensorShape(Rows, Cols), DType.F8E4M3);
+        byte* raw = (byte*)fp8.DataPointer;
+        for (int i = 0; i < Rows * Cols; i++) raw[i] = 0x38;   // fp8 e4m3 1.0
+        using Tensor scale = new Tensor(new TensorShape(1), DType.F32);
+        ((float*)scale.DataPointer)[0] = 4.0f;
+
+        string src = WriteSafetensors("fp8.safetensors", new()
+        {
+            ["blocks.0.attn.weight"] = fp8,
+            ["blocks.0.attn.weight_scale"] = scale,
+        });
+        string outPath = Path.Combine(_dir, "fp8.gguf");
+        CheckpointQuantizer.Quantize(new QuantizationJob
+        {
+            SourcePath = src,
+            OutputPath = outPath,
+            Target = new QuantizationTarget(QuantizationTargetKind.Gguf, GgufQuantPolicy.Q8_0),
+            Architecture = "test-arch",
+        });
+
+        using Checkpoints.CheckpointSource readSource = Checkpoints.CheckpointSource.Open(outPath);
+        Tensor readBack = readSource.Weights["blocks.0.attn.weight"];
+        using Tensor dense = readBack.DType.IsQuantized
+            ? GgufDequantizer.Dequantize(readBack, DType.F32) : readBack.CastTo(DType.F32);
+        float first = ((float*)dense.DataPointer)[0];
+        // 1.0 decoded times a scale of 4 — not the 1.0 an unfolded read would have written.
+        Assert.InRange(first, 3.9f, 4.1f);
+    }
+}
