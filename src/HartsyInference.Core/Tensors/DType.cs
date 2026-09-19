@@ -1,5 +1,7 @@
 using System.Diagnostics;
 
+using HartsyInference.Core.Exceptions;
+
 namespace HartsyInference.Core.Tensors;
 
 /// <summary>Describes a tensor element data type with inline metadata for quantized block formats.</summary>
@@ -136,8 +138,16 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     {
         if (IsQuantized)
         {
-            Debug.Assert(elementCount % BlockElementCount == 0,
-                $"Element count {elementCount} must be a multiple of block element count {BlockElementCount} for {Name}.");
+            // Throws rather than asserts: a Debug.Assert is compiled out of Release, and the integer division
+            // below then silently returns a buffer one block too small for what a codec is about to write. That
+            // is a heap overrun in the build people actually run, and it surfaces far away as an allocator abort.
+            if (elementCount % BlockElementCount != 0)
+            {
+                throw new HartsyInferenceException(
+                    $"{Name} stores {BlockElementCount} elements per block, so a {elementCount}-element tensor "
+                    + $"does not fit a whole number of them ({elementCount % BlockElementCount} left over). "
+                    + "Keep this tensor at F16, or pad it to a block boundary before quantizing.");
+            }
             return (elementCount / BlockElementCount) * BlockByteSize;
         }
 

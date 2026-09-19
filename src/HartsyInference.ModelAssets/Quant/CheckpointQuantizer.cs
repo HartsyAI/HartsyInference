@@ -98,29 +98,29 @@ public static class CheckpointQuantizer
         Logs.Info($"[Quantize] {Path.GetFileName(job.SourcePath)} ({source.Format}, {source.Weights.Count} tensors) "
             + $"→ {targetLabel}.");
 
-        RefuseIfWorkingSetWontFit(source, job.SourcePath);
+        // Only the safetensors targets still widen the whole checkpoint at once; GGUF streams, so it is exempt.
+        if (job.Target.Kind != QuantizationTargetKind.Gguf)
+        {
+            RefuseIfWorkingSetWontFit(source, job.SourcePath);
+        }
 
         Dictionary<string, Tensor> dense = new(source.Weights.Count, StringComparer.Ordinal);
         List<Tensor> owned = new();
         try
         {
-            foreach (KeyValuePair<string, Tensor> kv in source.Weights)
-            {
-                cancel.ThrowIfCancellationRequested();
-                Tensor wide = MaterializeF32(kv.Value, kv.Key, owned);
-                dense[kv.Key] = wide;
-            }
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(job.OutputPath))!);
             int written, quantized;
             if (job.Target.Kind == QuantizationTargetKind.Gguf)
             {
-                GgufQuantizationReport inner = GgufQuantizer.ConvertDictionaryToGguf(
-                    dense, job.OutputPath, job.Target.Policy!, architecture);
-                written = inner.QuantizedCount + inner.PassthroughCount + inner.CastCount;
-                quantized = inner.QuantizedCount;
+                (written, quantized) = WriteGguf(job, source, architecture, cancel);
             }
             else
             {
+                foreach (KeyValuePair<string, Tensor> kv in source.Weights)
+                {
+                    cancel.ThrowIfCancellationRequested();
+                    dense[kv.Key] = MaterializeF32(kv.Value, kv.Key, owned);
+                }
                 (written, quantized) = WriteSafetensors(job, dense, owned);
             }
             return new QuantizationReport
@@ -135,6 +135,54 @@ public static class CheckpointQuantizer
         {
             foreach (Tensor t in owned) t.Dispose();
         }
+    }
+
+    /// <summary>Quantizes straight into the writer, one tensor at a time.
+    /// <para>Interleaving is what makes a large source possible at all. Widening every tensor first needs the
+    /// WHOLE checkpoint as F32 at once — a 13 GB Q4_K build wants about 74 GiB and the process is OOM-killed
+    /// rather than slow. Materializing per tensor and freeing each wide copy the moment its quantized form exists
+    /// holds one instead of all of them; what remains is the output, which the writer keeps until <c>Flush</c>
+    /// by design.</para></summary>
+    private static (int Written, int Quantized) WriteGguf(
+        QuantizationJob job, CheckpointSource source, string architecture, CancellationToken cancel)
+    {
+        GgufQuantPolicy policy = job.Target.Policy!;
+        using GgufWriter writer = new(job.OutputPath);
+        writer.SetMetadata("general.architecture", architecture);
+        writer.SetMetadata("general.name", $"{architecture} (HartsyInference quantized)");
+        List<Tensor> pending = new();
+        int written = 0, quantized = 0;
+        try
+        {
+            foreach (KeyValuePair<string, Tensor> kv in source.Weights)
+            {
+                cancel.ThrowIfCancellationRequested();
+                List<Tensor> scratch = new(1);
+                Tensor wide = MaterializeF32(kv.Value, kv.Key, scratch);
+                DType target = policy.ResolveTargetDType(kv.Key, wide);
+                Tensor toWrite = target == wide.DType ? wide
+                    : target.IsQuantized ? GgufQuantizer.Quantize(wide, target)
+                    : wide.CastTo(target);
+                if (target.IsQuantized) quantized++;
+                writer.AddTensor(kv.Key, toWrite);
+                // `scratch` holds only what MaterializeF32 CREATED — empty when the tensor was already F32, in
+                // which case `wide` is the container's mmap view and freeing it would pull the mapping out from
+                // under the writer.
+                foreach (Tensor created in scratch)
+                {
+                    if (ReferenceEquals(created, toWrite)) pending.Add(created);
+                    else created.Dispose();
+                }
+                if (!ReferenceEquals(toWrite, wide)) pending.Add(toWrite);
+                written++;
+            }
+            writer.Flush();
+        }
+        finally
+        {
+            foreach (Tensor t in pending) t.Dispose();
+        }
+        return (written, quantized);
     }
 
     /// <summary>Refuses a source whose F32 working set will not fit, by name and with the numbers.

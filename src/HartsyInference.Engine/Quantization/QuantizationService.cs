@@ -13,6 +13,31 @@ namespace HartsyInference.Engine.Quantization;
 /// itself cannot fix that; it does not know what a video profile is. This does.</para></summary>
 public static class QuantizationService
 {
+    /// <summary>Builds the sidecar for a requantized artifact. Separated so the field mapping — which has one
+    /// non-obvious rule in it — can be tested without quantizing a multi-gigabyte file.</summary>
+    internal static VideoProfileSidecar BuildSidecar(VideoKnownArtifact source, string outputHash) =>
+        new()
+        {
+            Sha256 = outputHash,
+            ProfileId = source.Id + "-requant",
+            DisplayName = source.DisplayName + " (HartsyInference requantized)",
+            Task = source.Task,
+            Acceleration = source.Acceleration,
+            Attention = source.Attention,
+            // 30 rather than 0, and not because zero is untidy: the resolver REFUSES a sidecar whose Steps is not
+            // positive (`sidecar.Steps <= 0`), so a zero here produces a file that the planner it exists to feed
+            // throws away — the requantized build would plan as an unknown base after all. The sidecar format has
+            // no way to say "use the base recipe's number", so the base is written explicitly; 30 is the same
+            // fallback the manifest path applies to an artifact that declares none.
+            Steps = source.Steps ?? 30,
+            FlowShift = source.FlowShift ?? 12f,
+            AudioFlowShift = source.AudioFlowShift ?? 3f,
+            Width = source.Width,
+            Height = source.Height,
+            ReferenceSizing = source.ReferenceSizing,
+            ProvenanceUrl = source.ProvenanceUrl,
+        };
+
     /// <summary>Runs <paramref name="job"/> and writes <c>&lt;output&gt;.hartsy-video-profile.json</c> beside the
     /// result when the source's hash resolves to a known video artifact.</summary>
     /// <returns>The quantizer's report and the sidecar path, or null when the source was not a recognized video
@@ -35,24 +60,7 @@ public static class QuantizationService
         }
 
         string outputHash = await VideoCheckpointHashCache.GetSha256Async(job.OutputPath, cancel).ConfigureAwait(false);
-        VideoProfileSidecar sidecar = new()
-        {
-            Sha256 = outputHash,
-            ProfileId = source.Id + "-requant",
-            DisplayName = source.DisplayName + " (HartsyInference requantized)",
-            Task = source.Task,
-            Acceleration = source.Acceleration,
-            Attention = source.Attention,
-            // Where the artifact declares nothing the base recipe supplies it, and the sidecar's own defaults are
-            // that same base — so a null becomes the default rather than zero, which would lock a real value.
-            Steps = source.Steps ?? 0,
-            FlowShift = source.FlowShift ?? 12f,
-            AudioFlowShift = source.AudioFlowShift ?? 3f,
-            Width = source.Width,
-            Height = source.Height,
-            ReferenceSizing = source.ReferenceSizing,
-            ProvenanceUrl = source.ProvenanceUrl,
-        };
+        VideoProfileSidecar sidecar = BuildSidecar(source, outputHash);
         string sidecarPath = job.OutputPath + ".hartsy-video-profile.json";
         await using (FileStream stream = File.Create(sidecarPath))
         {
