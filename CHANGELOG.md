@@ -6,6 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.127
+
+- **`AffineMix`, `FillBias` and `PixelShuffle2d` run on Vulkan.** All three were host fallbacks costing a device
+  round-trip per call.
+- `AffineMix` is one kernel rather than scale-scale-add because the intermediates are activation-sized: composing
+  it costs three full reads and three writes where the fused form costs two reads and one write.
+- `FillBias` writes zero when there is no bias rather than treating that as a caller's problem — an unbiased
+  convolution still needs its output cleared before the taps accumulate into it. The absent case binds the output
+  buffer and turns the read off with a spec constant, because a null binding is not legal and an unbound slot
+  reads whatever bound it last.
+- `PixelShuffle2d` is driven from the output, one invocation per output element, so writes are contiguous. Its
+  channel packing is `(c·r + p1)·r + p2`; read the other way round it produces a plausible image with the
+  sub-pixel grid scrambled, so the tests include a ratio above 2 — at r=2 with few channels the two orders can
+  coincide.
+- `PixelShuffle2d`'s reference no longer drains the whole device before reading. Reading `DataPointer` forces that
+  tensor's own lazy sync, which is the dependency that matters; the full drain was wider than the op needs.
+
 ## alpha.126
 
 - **`GeluErf`, `GegluErf`, `Mish` and `Prelu` run on Vulkan.** All four were host fallbacks, so each cost a device

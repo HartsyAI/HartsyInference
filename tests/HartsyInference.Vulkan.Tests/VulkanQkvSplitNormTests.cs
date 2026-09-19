@@ -367,6 +367,89 @@ public sealed class VulkanQkvSplitNormTests
         Assert.True(worst < 2e-5, $"GegluErf diverges: {worst:E3}");
     }
 
+    [Theory]
+    [InlineData(1025, 0.25f, -1.5f)]
+    [InlineData(64, 1.0f, 0.0f)]
+    public void AffineMix_MatchesCpuReference(int count, float xScale, float yScale)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        using Tensor x = Filled(new TensorShape(count), seed: 101);
+        using Tensor y = Filled(new TensorShape(count), seed: 102);
+        using Tensor got = new(new TensorShape(count), DType.F32);
+        using Tensor want = new(new TensorShape(count), DType.F32);
+
+        gpu.AffineMix(got, x, y, xScale, yScale);
+        cpu.AffineMix(want, x, y, xScale, yScale);
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"AffineMix [{count}] {xScale}/{yScale}: err = {worst:E3}");
+        Assert.True(worst < 1e-6, $"AffineMix diverges: {worst:E3}");
+    }
+
+    /// <summary>Bias fill, with and without a bias — the absent case must zero rather than leave the buffer as it
+    /// found it, since an unbiased convolution still needs its output cleared before the taps accumulate.</summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void FillBias_MatchesCpuReference(bool withBias)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        const int batch = 1, cOut = 4, tOut = 3, h = 5, w = 7;
+        using Tensor bias = Filled(new TensorShape(cOut), seed: 103);
+        using Tensor got = new(new TensorShape([batch, cOut, tOut, h, w]), DType.F32);
+        using Tensor want = new(new TensorShape([batch, cOut, tOut, h, w]), DType.F32);
+
+        gpu.FillBias(got, withBias ? bias : null);
+        cpu.FillBias(want, withBias ? bias : null);
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"FillBias withBias={withBias}: err = {worst:E3}");
+        Assert.True(worst == 0.0, $"FillBias writes exact values; got {worst:E3}");
+    }
+
+    /// <summary>Depth-to-space. A ratio above 2 is included because the channel packing is
+    /// <c>(c*r + p1)*r + p2</c> — read as <c>c + (p1*r + p2)*cOut</c> it produces a plausible image with the
+    /// sub-pixel grid scrambled, and at r=2 with few channels the two orders can coincide.</summary>
+    [Theory]
+    [InlineData(2, 2)]
+    [InlineData(3, 2)]
+    [InlineData(1, 4)]
+    public void PixelShuffle2d_MatchesCpuReference(int ratio, int cOut)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        const int batch = 2, depth = 3, inH = 4, inW = 5;
+        int cIn = cOut * ratio * ratio;
+        using Tensor input = Filled(new TensorShape([batch, cIn, depth, inH, inW]), seed: 104);
+        TensorShape outShape = new([batch, cOut, depth, inH * ratio, inW * ratio]);
+        using Tensor got = new(outShape, DType.F32);
+        using Tensor want = new(outShape, DType.F32);
+
+        gpu.PixelShuffle2d(got, input, ratio);
+        cpu.PixelShuffle2d(want, input, ratio);
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"PixelShuffle2d r={ratio} cOut={cOut}: err = {worst:E3}");
+        Assert.True(worst == 0.0, $"PixelShuffle2d is a pure shuffle and must match exactly; got {worst:E3}");
+    }
+
     private static double Worst(Tensor a, Tensor b)
     {
         ReadOnlySpan<float> x = a.AsReadOnlySpan<float>();

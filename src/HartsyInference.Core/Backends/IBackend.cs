@@ -736,6 +736,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Elementwise affine mix: <c>output = xScale·x + yScale·y</c>. Inputs may alias each other, but neither input storage may overlap <paramref name="output"/>. All tensors are F32, nonempty, and identically shaped.</summary>
     unsafe void AffineMix(Tensor output, Tensor x, Tensor y, float xScale, float yScale)
+        => AffineMixReference(output, x, y, xScale, yScale);
+
+    /// <summary>The managed <see cref="AffineMix"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).AffineMix(...)</c> re-enters the override and
+    /// recurses until the stack overflows.</summary>
+    static unsafe void AffineMixReference(Tensor output, Tensor x, Tensor y, float xScale, float yScale)
     {
         long count = MixContract.ValidateAffineMix(output, x, y, xScale, yScale);
         float* outputPointer = (float*)output.DataPointer;
@@ -1451,6 +1457,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Fills <paramref name="output"/> <c>[1,cOut,tout,H,W]</c> with per-channel bias (or 0 when null).</summary>
     unsafe void FillBias(Tensor output, Tensor? bias)
+        => FillBiasReference(output, bias);
+
+    /// <summary>The managed <see cref="FillBias"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).FillBias(...)</c> re-enters the override and
+    /// recurses until the stack overflows.</summary>
+    static unsafe void FillBiasReference(Tensor output, Tensor? bias)
     {
         int cOut = (int)output.Shape[1], tout = (int)output.Shape[2];
         long hw = output.ElementCount / ((long)cOut * tout);
@@ -2973,10 +2985,18 @@ public interface IBackend : IDisposable
     /// <c>[N,C·r²,D,H,W] → [N,C,D,rH,rW]</c> with source channel <c>c·r² + p1·r + p2</c>. Channel-OUTER nesting —
     /// <see cref="SeedVr2PixelShuffle"/> nests the other way and is not interchangeable. Default is the host reference.</summary>
     unsafe void PixelShuffle2d(Tensor output, Tensor input, int ratio)
+        => PixelShuffle2dReference(output, input, ratio);
+
+    /// <summary>The managed <see cref="PixelShuffle2d"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).PixelShuffle2d(...)</c> re-enters the override and
+    /// recurses until the stack overflows.</summary>
+    static unsafe void PixelShuffle2dReference(Tensor output, Tensor input, int ratio)
     {
         if (input.DType != DType.F32 || output.DType != DType.F32)
             throw new NotSupportedException("PixelShuffle2d default fallback only supports F32.");
-        Sync();
+        // The instance default used to drain the whole device here. Reading DataPointer below already forces
+        // this tensor's own lazy sync, which is the dependency that actually matters; a full drain was wider
+        // than the op needs and is not available from a static.
         int n = (int)input.Shape[0], cIn = (int)input.Shape[1];
         int d = (int)input.Shape[2], iH = (int)input.Shape[3], iW = (int)input.Shape[4];
         int r = ratio, r2 = r * r, cOut = cIn / r2;

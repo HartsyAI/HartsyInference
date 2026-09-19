@@ -96,6 +96,9 @@ DTYPE_KERNELS=(
 )
 
 SINGLE_KERNELS=(
+    affine_mix
+    fill_bias
+    pixel_shuffle2d
     modulation_split4
     affine_broadcast_row_indexed
     gated_residual_row_indexed
