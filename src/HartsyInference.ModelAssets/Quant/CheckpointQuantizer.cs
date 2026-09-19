@@ -143,7 +143,8 @@ public static class CheckpointQuantizer
     /// wants about 50 GB and gets the process OOM-killed — no message, no partial file, nothing to read. An
     /// up-front refusal that names the requirement is worth more than a kill, and this is measured from the real
     /// element counts rather than the file size, because a block-quantized source is several times its own size
-    /// once widened.</para>
+    /// once widened. Passing it is a necessary condition, not a guarantee: another process can take the memory
+    /// between this check and the allocation.</para>
     /// <para>Interleaving the widen with the write would hold one tensor instead of all of them and lift this
     /// entirely. That is the right fix and is not this one: a first attempt at it aborted in the allocator, and a
     /// memory rewrite wants verification time rather than confidence.</para></summary>
@@ -156,7 +157,7 @@ public static class CheckpointQuantizer
         }
         // The output roughly tracks the source on disk; the F32 intermediate is what actually varies.
         long needed = f32Bytes + new FileInfo(sourcePath).Length;
-        long available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        long available = AvailableMemoryBytes();
         if (available <= 0 || needed <= available)
         {
             return;
@@ -164,8 +165,32 @@ public static class CheckpointQuantizer
         throw new HartsyInferenceException(
             $"Quantizing '{Path.GetFileName(sourcePath)}' needs about {needed / (1024L * 1024 * 1024)} GiB of RAM — "
             + $"every tensor is widened to F32 first, and this checkpoint is {f32Bytes / (1024L * 1024 * 1024)} GiB "
-            + $"wide — but only about {available / (1024L * 1024 * 1024)} GiB is available. Quantize from a smaller "
+            + $"wide — but only about {available / (1024L * 1024 * 1024)} GiB is free. Quantize from a smaller "
             + "source, or from the dense build this one was made from.");
+    }
+
+    /// <summary>Memory this process could actually get, not what the machine has.
+    /// <para><c>GC.GetGCMemoryInfo().TotalAvailableMemoryBytes</c> is the wrong number here: with no cgroup limit
+    /// it reports total physical RAM, so on a box with several GB already resident it promises a fit it cannot
+    /// deliver and the caller is OOM-killed anyway — the failure this check exists to replace. Linux publishes
+    /// the honest figure as <c>MemAvailable</c>; elsewhere the GC's number is used with the same caveat, which is
+    /// why passing this check is a necessary condition rather than a guarantee.</para></summary>
+    private static long AvailableMemoryBytes()
+    {
+        try
+        {
+            foreach (string line in File.ReadLines("/proc/meminfo"))
+            {
+                if (!line.StartsWith("MemAvailable:", StringComparison.Ordinal)) continue;
+                string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 2 && long.TryParse(parts[1], out long kb)) return kb * 1024;
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            // Not Linux, or /proc is not readable. Fall through.
+        }
+        return GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
     }
 
     /// <summary>Writes the two ComfyUI safetensors shapes. Both quantize only what they can: a weight that is not
@@ -185,11 +210,20 @@ public static class CheckpointQuantizer
                 // weight turns out ineligible.
                 Tensor half = kv.Value.DType == DType.BF16 ? kv.Value : kv.Value.CastTo(DType.BF16);
                 if (!ReferenceEquals(half, kv.Value)) owned.Add(half);
+                // Claim ownership of exactly what THIS call added, by diffing against the keys already present.
+                // Rescanning the whole output instead both re-registered every earlier companion on each pass and
+                // missed the fp8 weight itself — it reuses the source's key, so a "not already in dense" test
+                // excludes it and nothing ever frees it.
+                string[] before = [.. output.Keys];
                 if (CheckpointConverters.Utils.CheckpointConvertUtils.TryQuantizeWeightToFp8(output, kv.Key, half))
                 {
-                    foreach (string added in output.Keys)
+                    HashSet<string> existing = new(before, StringComparer.Ordinal);
+                    foreach (KeyValuePair<string, Tensor> produced in output)
                     {
-                        if (!ReferenceEquals(output[added], half) && !dense.ContainsKey(added)) owned.Add(output[added]);
+                        if (!existing.Contains(produced.Key) && !ReferenceEquals(produced.Value, half))
+                        {
+                            owned.Add(produced.Value);
+                        }
                     }
                     quantized++;
                     continue;

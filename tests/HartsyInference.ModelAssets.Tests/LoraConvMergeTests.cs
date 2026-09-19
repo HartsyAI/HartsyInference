@@ -156,4 +156,32 @@ public sealed class LoraConvMergeTests : IDisposable
         writer.Write(blob);
         return filePath;
     }
+
+    /// <summary>A half-precision convolution base, which is what an SD1.5 fp16 checkpoint actually has. The merge
+    /// runs in F32 and the result has to come back at the base's own dtype AND its own rank — a conv weight
+    /// returned as F32, or flattened, is not something the conv kernels can read.</summary>
+    [Fact]
+    public void AHalfPrecisionConvolutionBaseComesBackAtItsOwnDtypeAndRank()
+    {
+        string path = ConvLora("conv-bf16");
+        using Tensor baseW = new Tensor(new TensorShape(OutCh, InCh, K, K), DType.F32);
+        Span<float> span = baseW.AsSpan<float>();
+        for (int i = 0; i < span.Length; i++) span[i] = BaseValue(i);
+        using Tensor bf16Base = baseW.CastTo(DType.BF16);
+
+        Dictionary<string, Tensor> weights = new() { ["blocks.0.conv.weight"] = bf16Base };
+        using LoraStack stack = new LoraStack();
+        using CpuBackend backend = new CpuBackend();
+        stack.AddFromPath(path, strength: 1.0f);
+        Assert.Equal(1, stack.ApplyTo(weights, LoraTarget.Transformer, backend));
+
+        Tensor merged = weights["blocks.0.conv.weight"];
+        Assert.Equal(DType.BF16, merged.DType);
+        Assert.Equal(4, merged.Shape.Rank);
+        Assert.Equal(InCh, (int)merged.Shape[1]);
+        // BF16 carries about three decimal digits, so the delta has to be visible well above that.
+        using Tensor asF32 = merged.CastTo(DType.F32);
+        float expected = BaseValue(0) + (Rank * DownValue * UpValue);
+        Assert.Equal(expected, Read(asF32)[0], 2);
+    }
 }

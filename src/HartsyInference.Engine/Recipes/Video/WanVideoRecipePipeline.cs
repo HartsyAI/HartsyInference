@@ -83,39 +83,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
             (width, height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
         }
 
-        // umT5 keeps token weights (ComfyUI sets no disable_weights on its tokenizer), so Wan is a ComfyBlend
-        // family: the prompt is encoded at face value and the OUTPUT is blended toward the empty-prompt encode,
-        // z = (z - z_empty)*w + z_empty. Both sides get it — ComfyUI weights the negative conditioning too.
-        //
-        // The emphasis grammar must come OFF the text either way. Declaring a weighting mode is what stops the
-        // service stripping `(word:1.5)` upstream, so the parens now arrive here; tokenizing them literally would
-        // feed the digits to umT5 as prose, which is what a weight of exactly 1.0 would otherwise do.
-        IReadOnlyList<WeightedSpan> promptSpans = PromptWeighting.Parse(prompt);
-        IReadOnlyList<WeightedSpan> negativeSpans = PromptWeighting.Parse(negative);
-        (int[] promptTokens, float[]? promptWeights) = TokenizeWeighted(promptSpans);
-        (int[] negTokens, float[]? negativeWeights) = TokenizeWeighted(negativeSpans);
-
-        // umT5 runs on the (possibly separate) text backend; the helper's host-side slice/zero passes ARE the
-        // cross-device boundary — they force the embeddings to host, so the denoiser's backend re-uploads from
-        // there. Load-bearing for TextEncoderDevice placement: keep them host-side.
-        Tensor promptEmbeds, negEmbeds;
-        if (promptWeights is null && negativeWeights is null)
-        {
-            (promptEmbeds, negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
-                _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
-        }
-        else
-        {
-            // The empty encode rides the SAME batch rather than a second pass: ComfyUI's baseline is this encoder
-            // on its own empty-token batch, so it has to share the padding and the layer selection exactly.
-            (promptEmbeds, negEmbeds, Tensor emptyEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
-                _textBackend, _umt5, _config.TextDim, promptTokens, negTokens, _tokenizer.Encode(""));
-            using (emptyEmbeds)
-            {
-                Blend(ref promptEmbeds, emptyEmbeds, promptWeights);
-                Blend(ref negEmbeds, emptyEmbeds, negativeWeights);
-            }
-        }
+        (Tensor promptEmbeds, Tensor negEmbeds) = EncodeWeightedPrompts(prompt, negative);
 
         VideoGenerationRequest inner = new VideoGenerationRequest
         {
@@ -236,10 +204,7 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
         float cfgScale = request.CfgScale ?? _config.GuidanceScale;
         (int width, int height) = VideoRecipeUtils.ResolveResolution(request, _config.VaeSpatialCompression);
 
-        int[] promptTokens = _tokenizer.Encode(prompt);
-        int[] negTokens = _tokenizer.Encode(negative);
-        (Tensor promptEmbeds, Tensor negEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
-            _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
+        (Tensor promptEmbeds, Tensor negEmbeds) = EncodeWeightedPrompts(prompt, negative);
 
         VideoGenerationRequest inner = new VideoGenerationRequest
         {
@@ -294,6 +259,39 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
         {
             loader.Dispose();
         }
+    }
+
+    /// <summary>Encodes the prompt pair, applying this family's prompt weighting.
+    /// <para>umT5 keeps token weights (ComfyUI sets no <c>disable_weights</c> on its tokenizer chain), so Wan is a
+    /// ComfyBlend family: the prompt is encoded at face value and the OUTPUT blended toward the empty-prompt
+    /// encode, <c>z = (z − z_empty)·w + z_empty</c>. Both sides get it — ComfyUI weights the negative too. The
+    /// empty baseline rides the SAME batch rather than a second pass, because it has to share the padding and the
+    /// layer selection exactly.</para>
+    /// <para>Shared by the batch and streaming entry points on purpose. They each encoded their own prompt before,
+    /// and weighting one of them would have made <c>(word:1.5)</c> mean different things depending on whether the
+    /// caller streamed.</para></summary>
+    private (Tensor Prompt, Tensor Negative) EncodeWeightedPrompts(string prompt, string negative)
+    {
+        // The emphasis grammar must come OFF the text either way. Declaring a weighting mode is what stops the
+        // service stripping `(word:1.5)` upstream, so the parens arrive here; tokenizing them literally would
+        // feed the digits to umT5 as prose, which is what a weight of exactly 1.0 would otherwise do.
+        (int[] promptTokens, float[]? promptWeights) = TokenizeWeighted(PromptWeighting.Parse(prompt));
+        (int[] negTokens, float[]? negativeWeights) = TokenizeWeighted(PromptWeighting.Parse(negative));
+        // umT5 runs on the (possibly separate) text backend; the helper's host-side slice/zero passes ARE the
+        // cross-device boundary, so the embeddings land on the host for the denoiser's backend to re-upload.
+        if (promptWeights is null && negativeWeights is null)
+        {
+            return VideoRecipeUtils.EncodeWanPrompts(
+                _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
+        }
+        (Tensor promptEmbeds, Tensor negEmbeds, Tensor emptyEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
+            _textBackend, _umt5, _config.TextDim, promptTokens, negTokens, _tokenizer.Encode(""));
+        using (emptyEmbeds)
+        {
+            Blend(ref promptEmbeds, emptyEmbeds, promptWeights);
+            Blend(ref negEmbeds, emptyEmbeds, negativeWeights);
+        }
+        return (promptEmbeds, negEmbeds);
     }
 
     /// <summary>Tokenizes spans the way <see cref="T5Tokenizer.Encode"/> does — EOS then pad to the fixed window
