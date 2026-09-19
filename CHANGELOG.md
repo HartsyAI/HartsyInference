@@ -25,9 +25,11 @@ stable release will require. Dates are UTC.
   `Kandinsky5TEModel.encode_token_weights` returns the Qwen conditioning plus CLIP-L's pooled vector and discards
   the blended hidden states, so the weights never reach the model. Implementing the blend there would have broken
   parity rather than achieved it.
-- The refiner hand-off re-resolves a prompt prepared for the base family. A weighting base's `(text:N)` grammar
-  used to reach a refiner whose encoder reads parens as prose; flattening the tags is not enough once they are
-  already gone, so the parens themselves are what has to go.
+- **The refiner prepares the caller's prompt for its own family**, rather than inheriting whatever the base was
+  left with. Preparation is destructive in both directions: a weighting base's `(text:N)` grammar would reach a
+  refiner whose encoder reads parens as prose, and — the direction easier to miss — an unweighted base collapses
+  `<weight[1.5]:x>` to `x` before a refiner that *can* weight ever sees it, so the emphasis is silently gone.
+  Neither is recoverable from a prompt already resolved for someone else.
 
 ## alpha.98
 

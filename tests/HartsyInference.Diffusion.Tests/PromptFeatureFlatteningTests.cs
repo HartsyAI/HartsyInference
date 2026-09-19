@@ -1,4 +1,5 @@
 using HartsyInference.Diffusion.Prompting;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Recipes;
 using Xunit;
 
@@ -34,18 +35,28 @@ public sealed class PromptFeatureFlatteningTests
     public void ANullPromptFlattensToEmptyRatherThanThrowing() =>
         Assert.Equal("", PromptFeatureFlattening.Prepare(null, PromptWeightingMode.ComfyBlend));
 
-    /// <summary>The generic refiner runs a DIFFERENT family over the base's pixels with the base's prompt. A refiner
-    /// that cannot weight must not inherit the base's emphasis parens, and by then the tags are gone — so it is the
-    /// parens themselves that have to be resolved, which tag flattening alone would not touch.</summary>
+    /// <summary>The generic refiner runs a DIFFERENT family over the base's pixels, and the two need not agree about
+    /// weighting. Preparation is destructive in both directions, so the refiner is given the CALLER's prompt and
+    /// resolves it against its own mode rather than inheriting whatever the base was left with.</summary>
     [Fact]
-    public void RebindingForAnUnweightedRefinerStripsTheBasesEmphasisParens() =>
+    public void ARefinerThatCannotWeightDoesNotInheritTheBasesEmphasis() =>
         Assert.Equal("an orange cat",
-            PromptFeatureFlattening.Rebind("an (orange:1.5) cat", PromptWeightingMode.None));
+            RefinerStage.PrepareForRefiner("an <weight[1.5]:orange> cat", PromptWeightingMode.None, false));
 
+    /// <summary>The direction the first cut of this missed: an unweighted base had already collapsed the tag, so a
+    /// refiner that CAN weight silently received no emphasis at all.</summary>
     [Fact]
-    public void RebindingForAWeightingRefinerKeepsTheEmphasisIntact() =>
+    public void ARefinerThatCanWeightGetsTheEmphasisEvenWhenTheBaseCouldNot() =>
         Assert.Equal("an (orange:1.5) cat",
-            PromptFeatureFlattening.Rebind("an (orange:1.5) cat", PromptWeightingMode.ComfyBlend));
+            RefinerStage.PrepareForRefiner("an <weight[1.5]:orange> cat", PromptWeightingMode.CondScale, false));
+
+    /// <summary>A segment's sub-prompt belongs to its own masked denoise. The refiner is a full-canvas pass, so it is
+    /// stripped there for the same reason the base pass strips it.</summary>
+    [Fact]
+    public void ARefinerDoesNotInheritASegmentsSubPrompt() =>
+        Assert.DoesNotContain("tabby",
+            RefinerStage.PrepareForRefiner("a cat <segment:face> tabby", PromptWeightingMode.None, false)!,
+            StringComparison.Ordinal);
 
     /// <summary>The feature bit is derived from the mode in one place, so no recipe may set it by hand — a recipe that
     /// did would keep the emphasis parens in its prompt without anything downstream acting on them.</summary>

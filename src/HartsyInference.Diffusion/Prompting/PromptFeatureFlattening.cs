@@ -13,12 +13,4 @@ public static class PromptFeatureFlattening
     /// <see cref="ConditioningSchedule"/>; everything else collapses the tag to its step-0 value.</param>
     public static string Prepare(string? prompt, PromptWeightingMode mode, bool preserveScheduling = false) =>
         PromptTagFlattening.Flatten(prompt, !preserveScheduling, mode != PromptWeightingMode.None);
-
-    /// <summary>Re-resolves a prompt already prepared for one family so a SECOND family can consume it — the generic
-    /// refiner hand-off, where a weighting base's <c>(text:N)</c> grammar would otherwise reach a refiner whose
-    /// encoder reads the parens and digits as prose. Tag flattening is not enough here: the tags are long gone and it
-    /// is the parens that have to go.</summary>
-    public static string Rebind(string? prompt, PromptWeightingMode mode) =>
-        mode == PromptWeightingMode.None
-            ? PromptWeighting.Join(PromptWeighting.Parse(prompt ?? "")) : prompt ?? "";
 }

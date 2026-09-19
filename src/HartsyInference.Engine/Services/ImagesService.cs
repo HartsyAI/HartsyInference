@@ -47,6 +47,10 @@ public sealed class ImagesService : IImagesService
                 ImageFeatures promptFeatures = _engine.SupportedFeatures(spec);
                 bool schedulingSupported = (promptFeatures & ImageFeatures.PromptScheduling) != 0;
                 PromptWeightingMode weightingMode = _engine.PromptWeightingFor(spec);
+                // Kept because preparation is per-family and destructive: once the base's mode has collapsed
+                // <weight[N]:x> to x, a refiner from a family that CAN weight has nothing left to weight.
+                string rawPrompt = resolved.Prompt;
+                string? rawNegativePrompt = resolved.NegativePrompt;
                 resolved = resolved with
                 {
                     Prompt = PromptFeatureFlattening.Prepare(resolved.Prompt, weightingMode, schedulingSupported),
@@ -75,7 +79,8 @@ public sealed class ImagesService : IImagesService
                 // the refiner family's img2img init. Runs BEFORE segment refinement, matching Comfy's stage order.
                 // The classic SDXL-on-SDXL pair is skipped here — SdxlRecipePipeline keeps that internally, with
                 // RefinerStage.IsSdxlInternalPair as the single routing decision both sides consult.
-                result = RefinerStage.Apply(_engine, spec, basePass, result, progress, cancel);
+                result = RefinerStage.Apply(
+                    _engine, spec, basePass, result, progress, cancel, rawPrompt, rawNegativePrompt);
 
                 // Tier 3.2: <segment:X> runs AFTER pixels exist (it needs to segment the decoded image), so it
                 // composes on top of whatever the ordinary inpaint-only-masked path above already produced —
