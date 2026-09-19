@@ -826,7 +826,27 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Encodes one region's prompt text (Tier 3.7) through the SAME tapped-layer encode the base prompt uses — the caller (recipe layer) must template + drop-index the region text identically to the base prompt (<c>Krea2RecipePipeline.EncodeWithTemplate</c>), since <see cref="EncodeTapped"/> has no template logic of its own.</summary>
-    public Tensor EncodeRegionText(int[] tokenIds, int dropIndex) => EncodeTapped(tokenIds, dropIndex);
+    /// <param name="weights">Per-token weights for <paramref name="tokenIds"/>, or null for an unweighted region.
+    /// Regions are scaled here rather than by the caller because the template trim happens inside
+    /// <see cref="EncodeTapped"/>, and the weights are right-aligned against the rows that survive it. Only the
+    /// cond-scale half applies: a region already owns the attention bias, so there is no slot left for the patch.
+    /// </param>
+    public Tensor EncodeRegionText(int[] tokenIds, int dropIndex, Prompting.WeightedTokenSequence? weights = null)
+    {
+        RequireMatchingWeights(tokenIds, weights, nameof(weights));
+        Tensor cond = EncodeTapped(tokenIds, dropIndex);
+        if (weights is null)
+        {
+            return cond;
+        }
+        Tensor? scaled = Prompting.CondTokenWeights.Apply(Backend, cond, null, weights).Cond;
+        if (scaled is null)
+        {
+            return cond;
+        }
+        cond.Dispose();
+        return scaled;
+    }
 
     /// <summary>Encodes a token sequence, stacks the 12 selected layers (tap-major <c>[1, S, 12·2560]</c>) and drops the first <paramref name="dropIndex"/> token positions (the chat-template system prefix).</summary>
     private unsafe Tensor EncodeTapped(int[] tokenIds, int dropIndex)

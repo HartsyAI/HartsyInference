@@ -140,8 +140,12 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
         using Tensor baseCondPlaceholder = new Tensor(new TensorShape(1), DType.F32);
         return RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, width, height, steps, encodeRegion: text =>
         {
-            (WeightedTokenSequence regionTokens, int regionDrop) = EncodeWithTemplate(_tokenizer, text);
-            return _pipeline.EncodeRegionText(regionTokens.Tokens, regionDrop);
+            // Region text carries its own emphasis and is encoded as its own leaf, which is what SwarmUI's
+            // encode_leaves does per region. Only the cond-scale half reaches it: the region already owns the
+            // attention bias, and the pipeline refuses regions combined with the base prompt's attention weights.
+            (WeightedTokenSequence regionTokens, int regionDrop) =
+                EncodeWithTemplate(_tokenizer, PromptTagFlattening.Flatten(text));
+            return _pipeline.EncodeRegionText(regionTokens.Tokens, regionDrop, regionTokens);
         });
     }
 

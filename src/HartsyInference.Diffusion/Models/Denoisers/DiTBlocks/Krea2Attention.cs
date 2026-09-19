@@ -92,6 +92,13 @@ public sealed unsafe class Krea2Attention
         backend.Linear(v, x, _toV!, null);
         if (vRowScale is not null)
         {
+            if (vRowScale.ElementCount != v.ElementCount || vRowScale.DType != act)
+            {
+                // The caller expands the scale from the config's kv geometry; a block built with different
+                // geometry would make Mul read past the end of the smaller buffer rather than fail.
+                throw new ArgumentException(
+                    $"Value-row scale is {vRowScale.Shape} {vRowScale.DType} but v is {v.Shape} {act}.", nameof(vRowScale));
+            }
             // Post-projection and before the head permute: [B, S, H_kv, D] is byte-identical to the [B, S, H_kv*D]
             // that SwarmUI indexes, so scaling a token position scales it across every kv head, as the patch does.
             // Elementwise Mul rather than MaskRows because MaskRows is F32-only and this activation is F16 on the

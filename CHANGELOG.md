@@ -6,6 +6,36 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.128
+
+- **Krea 2 honours `(word:N)` prompt weighting, both halves of it.** Krea 2 is the one family whose SwarmUI
+  workflow inserts `SwarmAttnTokenWeights` on top of the ordinary cond scaling (`WorkflowGenerator.cs:965-972`),
+  so the two mechanisms are not alternatives here — declaring only the first would look like parity while
+  under-emphasizing every weighted word. The mode ledger refused the partial declaration, which is what it is for.
+- The cond-scale half encodes the prompt at weight 1 and then scales each token's conditioning row, right-aligned
+  so a dropped template prefix takes its weights with it. It runs on a per-request COPY: the prompt-embedding
+  cache is keyed on token ids alone, and a weighted prompt tokenizes to the same ids, so scaling the cached tensor
+  would hand the next plain request the previous one's emphasis.
+- The attention half splits by direction the way `SwarmText.py:281-312` does, because the two are not the same
+  operation scaled differently. Below 1 multiplies that token's attention VALUE rows post-projection — it removes
+  what the token contributes. Above 1 adds `(w-1)*2` to every query's logit for that KEY position — it makes the
+  other tokens look at it harder. Neither is expressible as the other.
+- Cond slots only, mirroring the patch's own `cond_or_uncond` filter: Krea 2's negative pass is a separate forward
+  that already runs unbiased, so passing the scale on the cond call alone IS that filter rather than an
+  approximation of it. Text leads Krea 2's joint concat, so a conditioning row index is already a joint-sequence
+  index — the same layout SwarmUI's `seq == img_slice[1]` guard establishes before it applies anything.
+- The value scale is an elementwise multiply against a buffer expanded once per forward and shared by all 28
+  blocks, not a per-row op: `MaskRows` is F32-only and the DiT activation is F16 on the fast path. The key bias is
+  a `[1,1,1,Skv]` additive mask, which SDPA broadcasts over every query without materializing the Sq x Skv
+  duplicate. Like the regional bias, a live weight excludes the step cache, the captured graph and DiT sharding.
+- **Two combinations are refused by name instead of silently dropped.** Regional prompting plus attention weights
+  drive the same attention bias, and SwarmUI resolves that clash by overwriting `attn_mask` — which would discard
+  the regional conditioning with no sign of it. img2img and masked inpaint reach the transformer through the
+  pixel-space route, which has no bias surface at all. Both read as "emphasis is weak" when they fail quietly.
+- `ModelSpecificEnhancements` is now a request field, defaulting on to match
+  `UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)`, with `hartsy image --no-model-enhancements` to
+  turn it off.
+
 ## alpha.127
 
 - **`AffineMix`, `FillBias` and `PixelShuffle2d` run on Vulkan.** All three were host fallbacks costing a device
