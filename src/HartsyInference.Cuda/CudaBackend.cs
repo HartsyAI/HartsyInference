@@ -2220,7 +2220,7 @@ public sealed class CudaBackend : IBackend
             }
             else if (cacheWeightCast && CacheWeightCasts && !hipUpcast && GpuTransferHelper.IsWeightCached(weight))
             {
-                if (!GpuTransferHelper.TryGetWeightCast(weight, out weightPtr))
+                if (!GpuTransferHelper.TryGetWeightCast(weight, gemmDtype, out weightPtr))
                 {
                     nuint castBytes = (nuint)(weight.ElementCount * gemmDtype.SizeInBytes);
                     // Budget gate: an unbounded cast cache keeps an F16 copy of EVERY preloaded quant weight —
@@ -2246,7 +2246,7 @@ public sealed class CudaBackend : IBackend
                         System.Threading.Interlocked.Increment(ref _castCachedNew);
                         weightPtr = GpuTransferHelper.AllocateDevice(castBytes);
                         MaterializeWeight(weightPtr, pWeight, weight, gemmDtype, nvfp4Scales);
-                        GpuTransferHelper.CacheWeightCast(weight, weightPtr, castBytes);
+                        GpuTransferHelper.CacheWeightCast(weight, gemmDtype, weightPtr, castBytes);
                     }
                 }
             }
@@ -10481,11 +10481,7 @@ public sealed class CudaBackend : IBackend
     /// <summary>This backend's cached device pointer for <paramref name="tensor"/> (weight or activation shadow), or 0 when none. Read-only peek for the peer-copy boundary; the owning backend must be quiescent (the per-device gate / stage sequencing guarantees the producing stage finished issuing work).</summary>
     internal ulong TryGetDevicePointer(Tensor tensor)
     {
-        if (_transferState.WeightCache.TryGetValue(tensor, out ulong weightPtr))
-        {
-            return weightPtr;
-        }
-        return _transferState.ActivationCache.TryGetValue(tensor, out (ulong gpuPtr, nuint bytes) cached) ? cached.gpuPtr : 0;
+        return _transferState.TryGetCached(tensor, out ulong cached) ? cached : 0;
     }
 
     /// <summary>Count of copies that took the direct peer path.</summary>

@@ -182,7 +182,7 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
                 using Tensor output = new Tensor(new TensorShape(K, N), DType.F32);
                 backend.Linear(output, identity, resident, null);
                 backend.Sync();
-                bool cast = GpuTransferHelper.TryGetWeightCast(resident, out ulong _);
+                bool cast = GpuTransferHelper.TryGetWeightCast(resident, DType.F16, out ulong _);
                 (long mismatches, long signedZeroOnly) = CompareBitExact(output.AsReadOnlySpan<float>(), reference, N, K);
                 _output.WriteLine($"cached-cast pass {pass}: cast-cached={cast} real mismatches={mismatches} "
                     + $"signed-zero-only={signedZeroOnly}");
