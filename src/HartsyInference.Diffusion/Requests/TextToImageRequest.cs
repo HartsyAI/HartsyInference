@@ -41,6 +41,11 @@ public record TextToImageRequest
     /// <summary>Seamless-tileable axis: <c>null</c>/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/<c>"Y-Only"</c> = one axis; same vocabulary as SwarmUI core's <c>SeamlessTileable</c> param (shared, carries its own <c>"seamless"</c> feature flag). When set, every conv in the request pads that axis with wrapped edge pixels instead of zeros so the output tiles continuously along it. Only consumed by pipelines that wire it in (SDXL as of 2026-08-11); ignored elsewhere.</summary>
     public string? SeamlessTiling { get; init; }
 
+    /// <summary>SwarmUI's <c>ModelSpecificEnhancements</c> toggle, default on to match its own
+    /// <c>UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)</c>. Gates Krea 2's joint-attention
+    /// token-weight patch (<c>WorkflowGenerator.cs:965-972</c>); ignored by families with no such extra.</summary>
+    public bool ModelSpecificEnhancements { get; init; } = true;
+
     /// <summary>Optional pre-built initial noise tensor. When non-null, overrides the seed-based noise generator — used for cross-runtime parity tests where the same noise tensor must flow into both PyTorch and HartsyInference (PyTorch's <c>torch.Generator.manual_seed</c> and HartsyInference's <c>SeedGenerator</c> use different RNGs and don't agree bit-for-bit on the same seed). Pipeline takes ownership and disposes after use. Shape must match the pipeline's expected initial latent shape (txt2img path; for img2img use <see cref="ImageToImageRequest.SourceImage"/>).</summary>
     public Tensor? InitialNoise { get; init; }
 

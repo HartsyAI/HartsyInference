@@ -304,8 +304,13 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
     /// unpatchify once after) lets the scheduler step run on-device (Scale+Add), so a denoise step never reads any
     /// tensor's <c>DataPointer</c> and the host can queue all steps without the per-step D2H pipeline drain that
     /// otherwise serialized host dispatch against GPU execution.</summary>
+    /// <param name="vRowScale">One value-row multiplier per JOINT-sequence position (SwarmUI's
+    /// <c>attn1_token_weight_patch</c>, down-weights only), or empty for the ordinary path. Expanded to the
+    /// attention's own dtype once here and shared by every block; like <paramref name="attnBias"/> it is
+    /// per-request, so it excludes the step cache and the captured graph.</param>
     public Tensor ForwardPatched(IBackend backend, Tensor patchLatent, float timestep, Tensor encoderHidden,
-        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null)
+        int hPacked, int wPacked, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null,
+        ReadOnlyMemory<float> vRowScale = default)
     {
         ThrowIfDisposed();
         const int batch = 1;
@@ -363,12 +368,12 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
         // FULLY RESIDENT only (BeforeBlockForward null): block streaming re-points every block's weights each
         // forward, so a graph that baked their device pointers would replay against freed memory — a CUDA 700 that
         // poisons the whole context. Same guard as HunyuanVideoDit / LtxVideo2Transformer.
-        bool graphMode = stepCache is null && attnBias is null && BeforeBlockForward is null
+        bool graphMode = stepCache is null && attnBias is null && vRowScale.IsEmpty && BeforeBlockForward is null
             && DiTBlocks.DitStepGraph.Enabled && backend.StepGraphSupported
             && !_graphDead && ReferenceEquals(patchLatent, _latentFixed);
         if (!graphMode)
         {
-            Tensor eager = ForwardCore(backend, patchLatent, txt, temb, tembMod, batch, imgSeq, txtSeq, hidden, stepCache, attnBias);
+            Tensor eager = ForwardCore(backend, patchLatent, txt, temb, tembMod, batch, imgSeq, txtSeq, hidden, stepCache, attnBias, vRowScale);
             tembMod.Dispose();
             temb.Dispose();
             return eager;
@@ -509,10 +514,14 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
     /// (F32 cast) → final layer. Identical op sequence every step for a given (txt, resolution) — the property
     /// that makes it CUDA-graph-capturable. Caller owns temb/tembMod.</summary>
     private Tensor ForwardCore(IBackend backend, Tensor patchLatent, Tensor txt, Tensor temb, Tensor tembMod,
-        int batch, int imgSeq, int txtSeq, int hidden, Utilities.DeviceFeatureCache? stepCache = null, Tensor? attnBias = null)
+        int batch, int imgSeq, int txtSeq, int hidden, Utilities.DeviceFeatureCache? stepCache = null,
+        Tensor? attnBias = null, ReadOnlyMemory<float> vRowScale = default)
     {
         int jointSeq = txtSeq + imgSeq;
         Tensor joint = ForwardEmbedIn(backend, patchLatent, txt, batch, imgSeq, txtSeq, hidden);
+        // Built after the embed so it takes the F16 cast's dtype, and once rather than per block: the same 14 MB
+        // buffer feeds all 28 attentions, and reusing one object also means a single H2D upload.
+        using Tensor? vScaleExpanded = ExpandValueRowScale(vRowScale.Span, batch, jointSeq, joint.DType);
 
         // Across-step First-Block cache (QwenImageTransformer wiring; see DeviceFeatureCache): block 0 always
         // runs as the gate indicator; hit ⇒ blocks 1..N−1 replaced by block0 + previous residual; miss ⇒ the
@@ -520,10 +529,10 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
         // attnBias (regional prompting) is per-step-variable — excluded from the cache path same as Flux/Flux.2.
         Tensor? cacheAnchor = null;
         int startBlock = 0;
-        if (stepCache is not null && attnBias is null && _blocks.Length > 1)
+        if (stepCache is not null && attnBias is null && vScaleExpanded is null && _blocks.Length > 1)
         {
             BeforeBlockForward?.Invoke(0);
-            Tensor block0 = _blocks[0].Forward(backend, joint, tembMod, _rope, batch, jointSeq, attnBias);
+            Tensor block0 = _blocks[0].Forward(backend, joint, tembMod, _rope, batch, jointSeq, attnBias, vScaleExpanded);
             joint.Dispose();
             joint = block0;
             startBlock = 1;
@@ -546,7 +555,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
             // The controller simply keeps whatever it had prefetched (bounded by the prefetch window) and the next
             // miss resumes from there — residency is per-block state, not a position in a sequence.
             BeforeBlockForward?.Invoke(i);
-            Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq, attnBias);
+            Tensor next = _blocks[i].Forward(backend, joint, tembMod, _rope, batch, jointSeq, attnBias, vScaleExpanded);
             if (joint != cacheAnchor) joint.Dispose();
             joint = next;
         }
@@ -558,6 +567,42 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
         }
 
         return ForwardHeadOut(backend, joint, temb, batch, txtSeq, imgSeq, hidden);
+    }
+
+    /// <summary>Broadcasts one multiplier per joint-sequence position across every kv head and head dimension, so
+    /// attention can apply the patch with a plain elementwise multiply. Shape and dtype match the <c>v</c> that
+    /// <see cref="DiTBlocks.Krea2Attention"/> projects; null in, null out.</summary>
+    private Tensor? ExpandValueRowScale(ReadOnlySpan<float> perPosition, int batch, int jointSeq, DType dtype)
+    {
+        if (perPosition.IsEmpty)
+        {
+            return null;
+        }
+        if (perPosition.Length != jointSeq)
+        {
+            throw new ArgumentException(
+                $"Value-row scale covers {perPosition.Length} positions but the joint sequence is {jointSeq}; "
+                + "a length mismatch would silently shift every emphasis onto a neighbouring token.", nameof(perPosition));
+        }
+        int kvWidth = _config.NumKvHeads * _config.AttentionHeadDim;
+        TensorShape shape = new TensorShape(batch, jointSeq, _config.NumKvHeads, _config.AttentionHeadDim);
+        Tensor f32 = new Tensor(shape, DType.F32);
+        Span<float> rows = f32.AsSpan<float>();
+        for (int b = 0; b < batch; b++)
+        {
+            for (int s = 0; s < jointSeq; s++)
+            {
+                rows.Slice(((b * jointSeq) + s) * kvWidth, kvWidth).Fill(perPosition[s]);
+            }
+        }
+        if (dtype == DType.F32)
+        {
+            return f32;
+        }
+        using (f32)
+        {
+            return f32.CastTo(dtype);
+        }
     }
 
     /// <summary>img_in → concat[text, image] → (F16 cast). The prefix of <see cref="ForwardCore"/> that never

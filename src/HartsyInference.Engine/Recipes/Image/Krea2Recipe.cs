@@ -46,6 +46,16 @@ public sealed class Krea2Recipe : IArchitectureRecipe
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.Regional | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <remarks>Both halves, because SwarmUI applies both: the tokenizer disables weights, so the prompt is
+    /// encoded at weight 1 and each token's cond row is scaled afterwards (<c>CondScale</c>), and Krea 2 is the one
+    /// family whose workflow also inserts <c>SwarmAttnTokenWeights</c> (<c>WorkflowGenerator.cs:965-972</c>) —
+    /// value-row scaling for <c>w &lt; 1</c> and a key logit bias for <c>w &gt; 1</c>, on the cond slots of the
+    /// joint attention. Declaring the cond-scale half alone would look like parity while under-emphasizing every
+    /// weighted word, which is why the ledger pins the pair.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScaleWithAttention;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "krea2", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Krea 2 Base's official sampling settings: 28 steps at CFG 4.5, 1024x1024 (<c>Krea2Config.Base</c>); a Turbo/TDM checkpoint narrows this to 8 guidance-free steps via <see cref="Krea2RecipePipeline.VariantDefaults"/>.</summary>

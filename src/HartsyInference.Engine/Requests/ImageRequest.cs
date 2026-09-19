@@ -33,6 +33,12 @@ public sealed record ImageRequest
     /// <summary>Seamless-tileable axis: <c>null</c>/<c>"false"</c> = off, <c>"true"</c> = both axes, <c>"X-Only"</c>/<c>"Y-Only"</c> = one axis. Same vocabulary as SwarmUI core's shared <c>SeamlessTileable</c> param. Only consumed by recipes that wire it in (SDXL as of 2026-08-11); ignored elsewhere.</summary>
     public string? SeamlessTiling { get; init; }
 
+    /// <summary>SwarmUI's <c>ModelSpecificEnhancements</c> toggle, default on to match
+    /// <c>UserInput.Get(T2IParamTypes.ModelSpecificEnhancements, true)</c>. Gates the per-family extras SwarmUI
+    /// wires only when it is set — today, Krea 2's joint-attention token-weight patch
+    /// (<c>WorkflowGenerator.cs:965-972</c>). Ignored by recipes that have no such extra.</summary>
+    public bool ModelSpecificEnhancements { get; init; } = true;
+
     /// <summary>RNG seed; negative means a random seed is chosen per request.</summary>
     public long Seed { get; init; } = -1;
 
