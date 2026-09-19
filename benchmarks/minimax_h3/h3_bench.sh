@@ -92,7 +92,9 @@ grep -oE "step [0-9]+/$STEPS: [0-9]+ ms" "$LOG" | awk -v steps="$STEPS" '
       if (idx >= 4) { s += ms; n++; if (n == 1 || ms < lo) lo = ms; if (ms > hi) hi = ms } }
     END {
         if (n > 0) printf "MEAN steps 4..%d: %.1f ms  (n=%d, range %d-%d)\n", steps, s / n, n, lo, hi
-        else print "MEAN: n/a (need >=4 steps for a reportable figure)"
+        else if (steps < 4) print "MEAN: n/a (need >=4 steps for a reportable figure)"
+        else print "MEAN: n/a — NO per-step lines in the log at all. The CLI prints `denoise [n/m]` with no timing, \
+so this harness cannot report s/step. Derive it from two runs instead: (T_30 - T_10) / 20 cancels load and decode."
     }'
 
 [ "$RC" != "0" ] && { echo "RUN FAILED — tail of $LOG:"; tail -25 "$LOG"; }

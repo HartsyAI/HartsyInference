@@ -32,6 +32,13 @@ internal static class VideoProfileManifest
             Main("f86f2f79ebd2d76eb8eeb46091e83982e6ff51d255747e7b16e92834b392b8e9",
                 "minimax-h3-ref2va-base-fp8-scaled", "MiniMax-H3 Ref2VA pruned fp8 scaled", VideoTaskFamily.Ref2Va,
                 provenanceUrl: "https://huggingface.co/Comfy-Org/MiniMax-H3"),
+            // Verified here by generation, which is what this manifest asks of a community hash: 141f 512x288 seed 1
+            // at 30 steps renders the same scene as the fp8 build it is a requant of. The Q2_K sibling from the same
+            // repack does NOT and is deliberately absent — an unrecognized hash plans as UnknownBaseProfile, which is
+            // the right answer for a build nobody has run.
+            Main("dd948e08ad0ba3c71bd42f368e283dd82e790f5122a63b276e22a3e0283d0c10",
+                "minimax-h3-fl2va-base-q4-k-gguf", "MiniMax-H3 FL2VA pruned Q4_K GGUF", VideoTaskFamily.Fl2Va,
+                provenanceUrl: "https://huggingface.co/unsloth/MiniMax-H3-GGUF"),
             Main("9ad5c98b533894c122050d32804a14f49fca8edc16c52564a281cdc5825ac934",
                 "minimax-h3-fl2va-pulpcut-turbo8", "PulpCut MiniMax-H3 FL2VA baked Turbo", VideoTaskFamily.Fl2Va,
                 VideoAccelerationKind.Turbo, steps: 8, flowShift: 12f, audioFlowShift: 3f,
