@@ -87,7 +87,7 @@ public sealed unsafe class CudaBackendLifecycleTests
             Assert.Equal(0, stateB.ActivationCount);
             Assert.Equal(0, stateB.WeightCastCount);
             Assert.Equal(0, stateB.CachedBufferCount);
-            Assert.Empty(stateB.PendingOrphans);
+            Assert.Equal(0, stateB.PendingOrphanCount);
             Assert.Equal(0, stateB.PinnedActivationCount);
             Assert.Empty(stateB.SidecarCache);
             Assert.Equal(0, stateB.CachedBytes);

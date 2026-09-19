@@ -6,6 +6,37 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.111
+
+- **CUDA's residency cache is the shared one now.** `GpuTransferHelper.State` derives from
+  `GpuResidencyCache<ulong>`, so the weight/activation/cast collections, the four-step rebind, weight demotion,
+  the keyed bindings, orphan parking, bulk offload and teardown exist once instead of twice. Every static signature
+  is unchanged — the 1399 call sites in `CudaBackend` did not move — and what is genuinely CUDA's rides the
+  overrides: the graph-capture arena in `AllocateDevice`, the persistent weight allocator in `AllocateWeight`, the
+  stream-ordered copy and H2D profiling in `Upload`, Q8_1 sidecars in `OnActivationEvicted`, auto-promotion in
+  `TryMakeResidentOnMiss`, and re-promotion blocking in `OnWeightDemoted`/`OnActivationOffloaded`.
+- **Five behaviours the shared algorithm did not have, each found by a failing test rather than by reading.** The
+  CUDA suite went 71 failures to 0 as they were fixed, and they are what "one implementation" actually costs:
+  - *Arena-backed buffers must be recorded at allocation time.* Asking "is this address in a live arena?" at free
+    time is a different question: a captured graph's arena leaves the live list when the graph is disposed, and
+    after that every buffer it handed out looks ordinary, so teardown frees memory the driver already reclaimed.
+  - *The orphan sweep may not run during a stream capture.* `cuMemFreeAsync` on a buffer allocated before the
+    capture began is rejected outright — the guard existed, naming the three tests it fixed, and the port lost it.
+  - *Teardown frees synchronously on a drained stream.* Mid-op a transient goes back to the pool so the free is
+    ordered after the work that used it; at teardown that ordering is meaningless and the stream is about to go.
+  - *A demoted weight is parked as an orphan OR queued for the persistent free, never both.* Both freed one
+    pointer twice.
+  - *`CachedBytes` is computed, not accumulated.* It was maintained by hand at half a dozen sites, and delegating
+    those silently stopped updating it. A counter that drifts to zero while the memory is still resident is worse
+    than no counter.
+- **Bulk offload's pinned policy is stated rather than assumed, and the two backends assumed opposite things.** The
+  shared cache skipped pinned activations; CUDA paged them out first. CUDA is right and its reason is in the type
+  now: a pin means "survive `FreeActivations`", which DESTROYS the device copy, whereas offloading is
+  non-destructive — contents go to host and come back on the next read. The low-VRAM lever's whole target is that
+  cross-step state, so `MayOffload` is a hook with the conservative default and CUDA overrides it.
+- `TryGetWeightCast`/`CacheWeightCast` take the target dtype. CUDA kept one cast per weight while the shared cache
+  keys per (weight, dtype) — a superset — and both call sites already knew the GEMM dtype.
+
 ## alpha.110
 
 - **SD1.5 and SDXL open through the container**, the last two recipes still calling `SafeTensorsLoader` directly.

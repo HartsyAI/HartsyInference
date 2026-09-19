@@ -168,6 +168,20 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     /// <summary>Releases whatever <see cref="TryEnterCallback"/> took. Runs in a <c>finally</c>.</summary>
     protected virtual void ExitCallback() { }
 
+    /// <summary>Whether a bulk <see cref="OffloadActivations"/> may page this activation out.</summary>
+    /// <remarks>Pinned by default, and the default is the conservative reading rather than the obvious one. Paging
+    /// out is NOT destructive — the contents go to host and come back on the next read — so a pin, which exists to
+    /// survive the destructive bulk free, does not have to block it. A backend whose low-VRAM lever depends on
+    /// reclaiming exactly this cross-step state says so by overriding.</remarks>
+    protected virtual bool MayOffload(Tensor tensor) => !Pinned.Contains(tensor);
+
+    /// <summary>Called for each activation a BULK <see cref="OffloadActivations"/> reclaims.</summary>
+    /// <remarks>Bulk offload is memory pressure: the device copy is the thing being given up, so a backend that
+    /// promotes tensors on its own initiative must not immediately promote this one back. A single-tensor offload
+    /// deliberately does not fire this — the cross-step caches that use it are re-uploaded unchanged every step and
+    /// are meant to become resident again.</remarks>
+    protected virtual void OnActivationOffloaded(Tensor tensor) { }
+
     /// <summary>Called as a resident weight is demoted because an op bound its tensor to an activation buffer. The
     /// weight's own buffer may need releasing through a different allocator than an activation's, and a backend that
     /// promotes weights automatically has to stop re-promoting this one.</summary>
@@ -465,6 +479,44 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         }
     }
 
+    /// <summary>Releases every cached conversion of every weight, and reports the bytes reclaimed.</summary>
+    /// <remarks>For a backend that evicts weights outside <see cref="FreeWeights"/> — streamed blocks are dropped
+    /// one at a time and their casts would otherwise be orphaned, since a cast is keyed by its weight and only
+    /// reclaimed alongside it. Measured on a streamed 12B fp8 DiT: ~19 GB of dead casts by VAE-decode time.</remarks>
+    public long ReleaseAllWeightCasts()
+    {
+        long freed = 0;
+        foreach (Dictionary<DType, (TBuffer Buffer, long Bytes)> casts in WeightCasts.Values)
+        {
+            foreach ((TBuffer cast, long bytes) in casts.Values)
+            {
+                CachedBuffers.Remove(cast);
+                ReleaseBuffer(cast, bytes);
+                freed += bytes;
+            }
+        }
+        WeightCasts.Clear();
+        return freed;
+    }
+
+    /// <summary>Removes one weight from the cache and hands its buffer back to the caller, which becomes
+    /// responsible for freeing it. Also drops every cached conversion of that weight.</summary>
+    /// <remarks>The caller taking the buffer is the point: a streaming cache frees on its own schedule and against
+    /// its own stream.</remarks>
+    public bool TryEvictWeight(Tensor weight, out TBuffer? buffer)
+    {
+        ReleaseWeightCasts(weight);
+        if (!Weights.Remove(weight, out TBuffer? evicted))
+        {
+            buffer = default;
+            return false;
+        }
+        weight.ClearGpuBinding(BindingKey);
+        CachedBuffers.Remove(evicted!);
+        buffer = evicted;
+        return true;
+    }
+
     /// <summary>Whether a conversion of this tensor is worth keeping. True only for a resident weight: an activation
     /// is different next step, so its entry would never be hit again.</summary>
     public bool ShouldCacheCast(Tensor weight) => CacheWeightCasts && Weights.ContainsKey(weight);
@@ -647,10 +699,17 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             return 0;
         }
+        // Snapshot before touching anything: every offload mutates the collection being walked. Buffers something
+        // else owns wholesale are never candidates — paging one out would free an address inside a live arena.
+        // Pinned entries sort FIRST within a size class where the backend allows them at all: they are the
+        // cross-step, read-once-per-step class this is defensible for, while an unpinned transient dies at the next
+        // bulk free anyway, so paging it spends a round trip on bytes that were about to be free.
         (Tensor Tensor, long Bytes)[] candidates = [.. Activations
-            .Where(entry => !Pinned.Contains(entry.Key))
-            .Select(entry => (entry.Key, entry.Value.Bytes))
-            .OrderByDescending(entry => entry.Bytes)];
+            .Where(entry => MayOffload(entry.Key) && !IsExternallyOwned(entry.Value.Buffer))
+            .Select(entry => (entry.Key, entry.Value.Bytes, Pinned: Pinned.Contains(entry.Key)))
+            .OrderByDescending(entry => entry.Bytes)
+            .ThenByDescending(entry => entry.Pinned)
+            .Select(entry => (entry.Key, entry.Bytes))];
 
         long freed = 0;
         foreach ((Tensor tensor, long bytes) in candidates)
@@ -665,6 +724,7 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             {
                 _ = tensor.DataPointer;
             }
+            OnActivationOffloaded(tensor);
             freed += bytes;
         }
         return freed;
