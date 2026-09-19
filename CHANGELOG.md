@@ -8,6 +8,18 @@ stable release will require. Dates are UTC.
 
 ## alpha.111
 
+## alpha.112
+
+- **`hartsy quantize --format` writes ComfyUI's two safetensors quant shapes as well as GGUF.** `fp8-scaled`
+  stores each eligible weight as F8E4M3 beside the scalar it was divided by; `int8-convrot` stores it as I8 beside
+  a `[rows,1]` row scale and a `.comfy_quant` descriptor.
+- Two details that exist only because interoperating with published files is the point. The row scale is written
+  `[rows,1]` rather than the codec's flat `[rows]`, which is the shape real repacks carry — our own reader goes by
+  element count either way. And the descriptor uses ComfyUI's key names, where `convrot` gates `convrot_groupsize`:
+  a group size written without that flag reads back as zero.
+- Verified by loading what we wrote back through the container and checking the `QuantInfo` it attaches, rather
+  than only that the bytes parse.
+
 - **CUDA's residency cache is the shared one now.** `GpuTransferHelper.State` derives from
   `GpuResidencyCache<ulong>`, so the weight/activation/cast collections, the four-step rebind, weight demotion,
   the keyed bindings, orphan parking, bulk offload and teardown exist once instead of twice. Every static signature
@@ -36,6 +48,7 @@ stable release will require. Dates are UTC.
   cross-step state, so `MayOffload` is a hook with the conservative default and CUDA overrides it.
 - `TryGetWeightCast`/`CacheWeightCast` take the target dtype. CUDA kept one cast per weight while the shared cache
   keys per (weight, dtype) — a superset — and both call sites already knew the GEMM dtype.
+
 
 ## alpha.110
 
