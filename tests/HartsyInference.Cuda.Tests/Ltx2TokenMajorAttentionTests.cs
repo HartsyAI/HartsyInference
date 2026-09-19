@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -165,23 +166,21 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
         using Tensor qSin = Random(new TensorShape(sq, inner / 2), seed: 314);
         using Tensor kCos = Random(new TensorShape(sk, inner / 2), seed: 315);
         using Tensor kSin = Random(new TensorShape(sk, inner / 2), seed: 316);
-
-        bool saved = LtxVideo2Attention.TokenMajorAttention;
         float[] headMajor, tokenMajor;
         try
         {
-            LtxVideo2Attention.TokenMajorAttention = false;
+            KnobStore.Set(EngineKnobs.Ltx2Tokenmajor, false);
             using Tensor a = attn.Forward(cuda, qIn0, kvIn0, rope, qCos, qSin, rope, kCos, kSin, null);
             cuda.Sync();
             headMajor = ToF32(a);
-            LtxVideo2Attention.TokenMajorAttention = true;
+            KnobStore.Set(EngineKnobs.Ltx2Tokenmajor, true);
             using Tensor b = attn.Forward(cuda, qIn0, kvIn0, rope, qCos, qSin, rope, kCos, kSin, null);
             cuda.Sync();
             tokenMajor = ToF32(b);
         }
         finally
         {
-            LtxVideo2Attention.TokenMajorAttention = saved;
+            KnobStore.Clear(EngineKnobs.Ltx2Tokenmajor);
             foreach (Tensor t in w.Values) t.Dispose();
         }
         AssertRelClose(headMajor, tokenMajor, tol, $"LtxVideo2Attention.Forward ({act})");

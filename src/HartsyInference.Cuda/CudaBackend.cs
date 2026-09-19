@@ -1370,7 +1370,7 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Kill switch for the fused GEMM+dequant mma kernel (<c>HARTSY_INT8_FUSED_MMA=0</c>). ON by default: −10.5 ms/step end-to-end (4 interleaved reps, all pairs same-sign, paired t = 4.15). It only got there once <see cref="UseFusedMmaGemm"/> was narrowed to the shapes it actually wins on — wired in less carefully it measured +38.7 ms/step, and +6.9 with only a row floor.</summary>
-    internal static bool FusedMmaGemm = EngineKnobs.Int8FusedMma.Value;
+    internal static bool FusedMmaGemm => EngineKnobs.Int8FusedMma.Value;
 
     /// <summary>Rows below which the fused mma GEMM is not used. Its block tile is 128×256, so a few hundred rows is two M-blocks — a grid that covers a fraction of one wave across 128 SMs, where cuBLASLt's small-m heuristic wins outright. Every measured win is at m ≥ 1543 (ffn_up's smaller row chunk); everything below this floor — audio attention and FFN, the text-side k/v projections — was never measured and must not be assumed. Wiring the fused path in WITHOUT this floor cost +38.7 ms/step end-to-end while winning +5.2% on the three shapes the microbenchmark covered.</summary>
     private const int FusedMmaMinRows = 1024;
@@ -1542,7 +1542,7 @@ public sealed class CudaBackend : IBackend
         => LinearImpl(output, input, weight, bias, cacheWeightCast: true);
 
     /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization (<c>HARTSY_LTX2_GATEFUSE=0</c>).</summary>
-    internal static bool FuseHeadGateIntoQuant = EngineKnobs.Ltx2Gatefuse.Value;
+    internal static bool FuseHeadGateIntoQuant => EngineKnobs.Ltx2Gatefuse.Value;
 
     /// <summary><c>Linear(gate(input))</c> where <c>gate</c> is LTX-2's per-head output scaling — folded into the activation's rotate+quant pass when the resident int8 chain can serve it, so the gate costs no traffic of its own. Falls back to the explicit gate-then-Linear pair, which mutates <paramref name="input"/> in place exactly as the caller's own sequence did.</summary>
     /// <remarks>The gate is a full read AND write of a <c>[seq, heads·headDim]</c> tensor — 81.8 MB per call at
@@ -1592,7 +1592,7 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>Kill switch for grouped resident-int8 Linears (<c>HARTSY_GROUPED_LINEAR=0</c>). Also the seam the bit-identity test flips to run the grouped and per-op routes against one another on one backend.</summary>
-    internal static bool GroupedLinear = EngineKnobs.GroupedLinear.Value;
+    internal static bool GroupedLinear => EngineKnobs.GroupedLinear.Value;
 
     /// <summary>Projections sharing one input, sharing one activation rotate+quant pass. Ops the resident int8 chain cannot serve — or that disagree on k or on the ConvRot group, since those decide the quantized bytes — fall out to an ordinary <see cref="Linear"/> each, so a mixed group is served, not refused.</summary>
     public unsafe void LinearMulti(Tensor input, ReadOnlySpan<LinearOp> ops)

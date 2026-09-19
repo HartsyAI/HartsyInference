@@ -6,6 +6,54 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.102
+
+- **Six more Runtime knobs were frozen, in mutable statics the previous check did not look at.** The scope lint
+  required `readonly`, so `internal static bool FusedMmaGemm = EngineKnobs.Int8FusedMma.Value;` and five like it
+  slipped through — bound at type-initialization exactly as a readonly field is, and worse rather than better, since
+  a mutable process-wide static has no per-request isolation at all. The lint no longer asks for `readonly`: a
+  static field initialized from a knob is frozen, full stop.
+
+  The tell was who wrote to them. Every one of the writable ones was assigned only by tests, reaching past a knob
+  that could not reach the code — `CudaBackend.FusedMmaGemm`, `FuseHeadGateIntoQuant`, `GroupedLinear` and
+  `LtxVideo2Attention.TokenMajorAttention`. Those are live reads now and the tests set the knob instead, so what
+  they exercise is the path a real request would take.
+
+  `WanVideoDebugDump` kept its runtime setter, which is legitimate, but seeded it from the knob at
+  type-initialization — so the first generation in a process named every later one's dumps. An explicit tag now wins
+  and the setting decides when nobody set one.
+
+- **The dump directory next to that tag was frozen too, one hop further out.** `DebugDumpSink` resolved its knob in
+  its constructor, and all nineteen dump sinks are held in `static readonly` fields, so eighteen of them bound the
+  directory at type-initialization. The lint cannot see this shape — the read is inside an instance constructor —
+  but the tell was there again: the one sink that opted out of caching was the one whose parity tests needed the
+  knob to reach the code. The opt-out is gone and every sink resolves per access, which also removes a
+  created-once flag that would have sent later dumps to a directory it never made.
+
+- **And a third shape, in a lazily-initialized static.** `Hunyuan3DDebugDump` resolved its dump directory behind a
+  double-checked flag, so the first `Enabled` read in the process decided it for every later one. The lint could not
+  see that either — the read sits in a property body, which is normally the safe place for one — so it now also
+  flags a knob read whose result is assigned to a static field, wherever that assignment lives. It gained a second
+  detection at the same time: a namespace-qualified `Configuration.EngineKnobs.X.Value` was invisible to it, and
+  though no read in `src/` is written that way today, a check with a way around it is worth less than the diff that
+  closes it. Both rules were mutation-tested — a planted violation of each fails the build, and a live read in a
+  property still passes.
+- `WanVideoDebugDump.SetTag(null)` pinned an empty prefix instead of handing the choice back to the setting, so the
+  CFG pipeline's first clear masked the configured tag for the rest of the process. Three places said it should do
+  the opposite, including the doc comment directly above it.
+
+- **A fourth shape, and the one that reached real numerics: an instance field on a cached object.**
+  `MiniMaxMusic3ArPipeline` bound `numerics.mm3CfgBatch` into a `readonly` field in its constructor, and that
+  pipeline is built during model load and then cached and reused by `MusicService`, so every request after the
+  first inherited whatever the loading request happened to see — its own `KnobProfileScope` override could not
+  reach it. The value is now read once per generation rather than per use, deliberately: the two call sites must
+  agree, since the feedback is built with two rows exactly when the batched step consumes two, so reading live at
+  each would let them tear. The lint flags an instance field initializer now as well; a syntax tree cannot know
+  which objects outlive a request, and presuming the freeze costs nothing when no legitimate instance exists.
+- `WanVideoDebugDump`'s tag override is `AsyncLocal`, for the reason `KnobProfileScope` is. The CFG pipeline sets it
+  around each branch forward, so on a plain static two generations on two devices would relabel each other's dumps.
+  Only filenames are at stake, but a dump whose name lies about which branch produced it is worth nothing.
+
 ## alpha.101
 
 - **MiniMax-H3 runs from a GGUF, verified by generation.** The `unsloth/MiniMax-H3-GGUF` Q4_K build renders the
