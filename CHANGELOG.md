@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.122
+
+- **`LayerNormModulate` and `ApplyRopeSingle` run on Vulkan.** Both were true host fallbacks on the DiT path, not
+  compositions: each reads `DataPointer`, so every call meant a device round-trip. Every DiT block modulates right
+  after normalizing, and applies rotary to q and k, so both ran once per block per step.
+- **Correcting the previous entry's count.** It said seven of the eight Phase-3 ops the Flux path calls were GPU
+  composition and only `QkvSplitNorm` left the device. Reading the defaults properly rather than their opening
+  lines, **six of the eight are host fallbacks** — `LayerNormModulate`, `ModulationSplit4`,
+  `AffineBroadcastRowIndexed`, `GatedResidualRowIndexed`, `UnpatchifyTokens` and `ApplyRopeSingle`. Only
+  `LinearMulti` composes. The remaining work on that path is larger than the earlier note implied.
+- `LayerNormModulate` keeps the `(1 + scale)` convention explicit in the shader, because it is load-bearing: scale
+  is a residual around identity, so a zero modulation must leave the normalized value alone rather than zero it.
+- `ApplyRopeSingle` handles partial rotary in the same kernel as full — cos/sin keep the full headDim stride either
+  way, and only the first `rotaryDim` dims rotate.
+- **An in-place op still has to re-cache its buffer**, and the parity test is what said so. The first version
+  dispatched, wrote the device buffer and returned without rebinding, so a later host read got the untouched host
+  copy and the op looked like it did nothing — a 3.3 absolute error against the reference, versus 2e-7 after.
+
 ## alpha.121
 
 - **The fp8 quantize path leaked every weight it wrote.** It worked out what it owned by rescanning the whole

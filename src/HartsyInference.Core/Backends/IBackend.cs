@@ -232,6 +232,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Fused adaLN modulation for DiT NormModulate: <c>out = (1+scale)·LayerNormNoAffine(in) + shift</c>.</summary>
     unsafe void LayerNormModulate(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
+        => LayerNormModulateReference(output, input, scale, shift, eps);
+
+    /// <summary>The managed <see cref="LayerNormModulate"/> body, callable directly. A backend override must call
+    /// THIS to fall back — <c>((IBackend)this).LayerNormModulate(...)</c> re-enters the override through interface
+    /// dispatch and recurses until the stack overflows.</summary>
+    static unsafe void LayerNormModulateReference(Tensor output, Tensor input, Tensor scale, Tensor shift, float eps)
     {
         if (output.DType != DType.F32 || input.DType != DType.F32 || scale.DType != DType.F32 || shift.DType != DType.F32)
             throw new NotSupportedException("LayerNormModulate default fallback only supports F32.");
@@ -1780,6 +1786,12 @@ public interface IBackend : IDisposable
 
     /// <summary>In-place rotary on <c>x [B,L,numHeads,headDim]</c> — same math as <see cref="ApplyRope"/>, for GQA head-count mismatch.</summary>
     unsafe void ApplyRopeSingle(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+        => ApplyRopeSingleReference(x, cos, sin, rotaryDim);
+
+    /// <summary>The managed <see cref="ApplyRopeSingle"/> body, callable directly. A backend override must call
+    /// THIS to fall back — <c>((IBackend)this).ApplyRopeSingle(...)</c> re-enters the override through interface
+    /// dispatch and recurses until the stack overflows.</summary>
+    static unsafe void ApplyRopeSingleReference(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("ApplyRopeSingle default fallback only supports F32.");
