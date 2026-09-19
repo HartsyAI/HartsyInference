@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.123
+
+- **`ModulationSplit4`, `AffineBroadcastRowIndexed` and `GatedResidualRowIndexed` run on Vulkan.** All three were
+  host fallbacks reading `DataPointer`, so each cost a device round-trip per call on the DiT path. With these,
+  five of the six true fallbacks the Flux path reaches are implemented; `UnpatchifyTokens` is the remaining one.
+- The `1+x` on scales and `tanh(x)` on gates are stated in the shader rather than assumed, because they are not
+  interchangeable: a scale is a residual around identity so zero must mean "leave it alone", while a gate is
+  bounded so a block can be turned off smoothly. Swapping them yields plausible output that is wrong everywhere,
+  which is why the test checks all four outputs rather than the first.
+- An absent shift table binds the scale table and turns the read off with a spec constant. A null binding is not
+  legal in Vulkan, and leaving the slot unbound would read whatever bound it last — the failure the dispatch
+  guards now catch, avoided here by construction.
+- The row-indexed tests use a deliberately non-identity, repeating index. An implementation that ignored the
+  gather and read row *r* of the table passes an identity index and is wrong for every real call, since the whole
+  point is that many rows share few modulation vectors.
+
 ## alpha.122
 
 - **`LayerNormModulate` and `ApplyRopeSingle` run on Vulkan.** Both were true host fallbacks on the DiT path, not

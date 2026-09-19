@@ -94,6 +94,9 @@ DTYPE_KERNELS=(
 )
 
 SINGLE_KERNELS=(
+    modulation_split4
+    affine_broadcast_row_indexed
+    gated_residual_row_indexed
     cfg_euler
     wan_rms_norm_channel
     cast_f32_f16

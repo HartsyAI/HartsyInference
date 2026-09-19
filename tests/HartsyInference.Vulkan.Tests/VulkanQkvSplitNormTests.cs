@@ -136,6 +136,112 @@ public sealed class VulkanQkvSplitNormTests
         Assert.True(worst < 1e-5, $"ApplyRopeSingle diverges: {worst:E3}");
     }
 
+    /// <summary>AdaLN modulation split. The scales get 1+x and the gates get tanh(x), and swapping them produces
+    /// plausible output that is wrong everywhere — so all four outputs are checked, not just the first.</summary>
+    [Theory]
+    [InlineData(1, 320)]
+    [InlineData(4, 128)]
+    public void ModulationSplit4_MatchesCpuReference(int batch, int dim)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        using Tensor proj = Filled(new TensorShape(batch, 4 * dim), seed: 51, centre: 0.2);
+        TensorShape outShape = new(batch, dim);
+        Tensor[] got = [new(outShape, DType.F32), new(outShape, DType.F32), new(outShape, DType.F32), new(outShape, DType.F32)];
+        Tensor[] want = [new(outShape, DType.F32), new(outShape, DType.F32), new(outShape, DType.F32), new(outShape, DType.F32)];
+
+        gpu.ModulationSplit4(got[0], got[1], got[2], got[3], proj);
+        cpu.ModulationSplit4(want[0], want[1], want[2], want[3], proj);
+
+        string[] names = ["scaleMsa", "gateMsa", "scaleMlp", "gateMlp"];
+        for (int i = 0; i < 4; i++)
+        {
+            double worst = Worst(got[i], want[i]);
+            _output.WriteLine($"[{batch}b x {dim}d] {names[i]} err = {worst:E3}");
+            Assert.True(worst < 1e-5, $"{names[i]} diverges: {worst:E3}");
+        }
+        foreach (Tensor tensor in got.Concat(want))
+        {
+            tensor.Dispose();
+        }
+    }
+
+    /// <summary>The two row-indexed ops, whose parameters are gathered through a per-row index.</summary>
+    /// <remarks>The index is deliberately non-identity and repeats rows: an implementation that ignored it and read
+    /// row r of the table would pass an identity index and be wrong for every real call, since the whole point is
+    /// that many rows share few modulation vectors.</remarks>
+    [Theory]
+    [InlineData(6, 128, true)]
+    [InlineData(6, 128, false)]
+    [InlineData(3, 64, true)]
+    public void AffineBroadcastRowIndexed_MatchesCpuReference(int rows, int dim, bool withShift)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        const int tableRows = 2;
+        using Tensor input = Filled(new TensorShape(rows, dim), seed: 61, centre: 0.5);
+        using Tensor scaleTable = Filled(new TensorShape(tableRows, dim), seed: 62);
+        using Tensor shiftTable = Filled(new TensorShape(tableRows, dim), seed: 63);
+        using Tensor rowIndex = new(new TensorShape(rows), DType.I32);
+        Span<int> idx = rowIndex.AsSpan<int>();
+        for (int i = 0; i < rows; i++)
+        {
+            idx[i] = (i * 7) % tableRows;   // non-identity, repeating
+        }
+        using Tensor got = new(new TensorShape(rows, dim), DType.F32);
+        using Tensor want = new(new TensorShape(rows, dim), DType.F32);
+
+        gpu.AffineBroadcastRowIndexed(got, input, scaleTable, withShift ? shiftTable : null, rowIndex);
+        cpu.AffineBroadcastRowIndexed(want, input, scaleTable, withShift ? shiftTable : null, rowIndex);
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"[{rows}r x {dim}d shift={withShift}] err = {worst:E3}");
+        Assert.True(worst < 1e-5, $"AffineBroadcastRowIndexed diverges: {worst:E3}");
+    }
+
+    [Theory]
+    [InlineData(6, 128)]
+    [InlineData(5, 64)]
+    public void GatedResidualRowIndexed_MatchesCpuReference(int rows, int dim)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        const int tableRows = 3;
+        using Tensor residual = Filled(new TensorShape(rows, dim), seed: 71, centre: 0.2);
+        using Tensor value = Filled(new TensorShape(rows, dim), seed: 72, centre: -0.3);
+        using Tensor gateTable = Filled(new TensorShape(tableRows, dim), seed: 73);
+        using Tensor rowIndex = new(new TensorShape(rows), DType.I32);
+        Span<int> idx = rowIndex.AsSpan<int>();
+        for (int i = 0; i < rows; i++)
+        {
+            idx[i] = (i * 5) % tableRows;
+        }
+        using Tensor got = new(new TensorShape(rows, dim), DType.F32);
+        using Tensor want = new(new TensorShape(rows, dim), DType.F32);
+
+        gpu.GatedResidualRowIndexed(got, residual, value, gateTable, rowIndex);
+        cpu.GatedResidualRowIndexed(want, residual, value, gateTable, rowIndex);
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"[{rows}r x {dim}d] err = {worst:E3}");
+        Assert.True(worst < 1e-5, $"GatedResidualRowIndexed diverges: {worst:E3}");
+    }
+
     private static double Worst(Tensor a, Tensor b)
     {
         ReadOnlySpan<float> x = a.AsReadOnlySpan<float>();
