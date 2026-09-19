@@ -99,7 +99,9 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
         _transformer.Dispose();
         _connectors.Dispose();
         (_vocoder as IDisposable)?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        // IDisposable, not SafeTensorsLoader: the list holds a CheckpointSource since the container flip, and an
+        // element-typed foreach casts — it threw on every teardown, after the output was already written.
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

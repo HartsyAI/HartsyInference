@@ -163,7 +163,10 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         _tokenizer.Dispose();
         _t5.Dispose();
         _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        // IDisposable, not SafeTensorsLoader: the list has held a CheckpointSource since the container flip, and
+        // an element-typed foreach casts — so every generation threw here AFTER writing its output, surfacing as
+        // a non-zero exit on an otherwise complete video.
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }
