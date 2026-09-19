@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using System.Globalization;
 using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.Engine.Quantization;
 using HartsyInference.ModelAssets.Quant;
 using Spectre.Console;
 using Spectre.Console.Cli;
@@ -99,12 +100,19 @@ public sealed class QuantizeCommand : Command<QuantizeCommand.Settings>
             Architecture = settings.Architecture,
             Overwrite = settings.Overwrite,
         };
-        QuantizationReport report = CheckpointQuantizer.Quantize(job);
+        // Through the service rather than the quantizer directly: a video build the engine recognizes gets its
+        // execution semantics carried onto the output, which planning reads back by hash.
+        (QuantizationReport report, string? sidecar) = QuantizationService
+            .QuantizeAsync(job, CancellationToken.None).GetAwaiter().GetResult();
         AnsiConsole.MarkupLine(
             $"[green]Wrote[/] {settings.Out}\n"
             + $"  {report.TensorCount} tensors, {report.QuantizedCount} quantized\n"
             + $"  {Gib(report.SourceBytes)} → {Gib(report.OutputBytes)} "
             + $"({report.Ratio.ToString("P1", CultureInfo.InvariantCulture)} of source)");
+        if (sidecar is not null)
+        {
+            AnsiConsole.MarkupLine($"  [green]bound[/] the video profile via {Path.GetFileName(sidecar)}");
+        }
         return 0;
     }
 
