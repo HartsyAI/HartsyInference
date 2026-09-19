@@ -27,9 +27,18 @@ public sealed record GgufQuantPolicy
         if (tensor.Shape.ElementCount < MinElementsToQuantize) return DType.F16;
         if (ShouldKeepF16 is not null && ShouldKeepF16(tensorName, tensor)) return DType.F16;
         if (IsHighFidelity is not null && IsHighFidelity(tensorName) && HighFidelityDType is not null)
-            return HighFidelityDType.Value;
-        return BackboneDType;
+            return Aligned(HighFidelityDType.Value, tensor);
+        return Aligned(BackboneDType, tensor);
     }
+
+    /// <summary>Falls back to F16 for a tensor that does not fill a whole number of blocks.
+    /// <para>A block quant stores a fixed element count per block, so a tensor that is not a multiple of it has no
+    /// valid packed form — MiniMax-H3's <c>adaln_t_table</c> is <c>[8, 1025]</c>, which is 8200 elements and eight
+    /// short of the 33rd Q4_K block. Quantizing it anyway allocated 32 blocks and wrote 33, which corrupts the
+    /// heap and surfaces later as an allocator abort somewhere unrelated. F16 costs a few bytes on one tensor.
+    /// </para></summary>
+    private static DType Aligned(DType target, Tensor tensor) =>
+        target.IsQuantized && tensor.Shape.ElementCount % target.BlockElementCount != 0 ? DType.F16 : target;
 
     /// <summary>Q8_0 — uniform 8-bit quant on the backbone, F16 for norms/biases/small. ~50% size of F16, very low quality loss. The conservative default.</summary>
     public static GgufQuantPolicy Q8_0 => new()

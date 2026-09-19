@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using Xunit;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Quantization;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Quant;
@@ -76,5 +77,46 @@ public sealed class QuantizationSidecarTests : IDisposable
         // written that claims to describe the output.
         string[] strays = Directory.GetFiles(_dir, "*.hartsy-video-profile.json");
         Assert.Empty(strays);
+    }
+
+    /// <summary>A sidecar the resolver would throw away is worse than none: it costs a full hash of a multi-GB
+    /// output and then plans as an unknown base anyway. <c>ValidateSidecar</c> refuses <c>Steps &lt;= 0</c>, and an
+    /// artifact that declares no step count is the ordinary case — the base number has to be written out, because
+    /// the format cannot say "use the recipe's".</summary>
+    [Fact]
+    public void AnArtifactWithNoDeclaredStepsStillGetsAStepCountTheResolverAccepts()
+    {
+        VideoKnownArtifact source = new()
+        {
+            Sha256 = new string('a', 64),
+            Id = "test-artifact",
+            DisplayName = "Test",
+            Role = VideoProfileArtifactRole.Main,
+            Task = VideoTaskFamily.Fl2Va,
+            Acceleration = VideoAccelerationKind.None,
+            Steps = null,
+        };
+        VideoProfileSidecar sidecar = QuantizationService.BuildSidecar(source, new string('b', 64));
+        Assert.True(sidecar.Steps > 0, $"Steps was {sidecar.Steps}; the resolver refuses anything <= 0.");
+        Assert.Equal(VideoTaskFamily.Fl2Va, sidecar.Task);
+        // The OUTPUT's hash, not the source's — binding the source's would describe a different file.
+        Assert.Equal(new string('b', 64), sidecar.Sha256);
+    }
+
+    /// <summary>A declared step count is carried rather than replaced by the fallback.</summary>
+    [Fact]
+    public void ADeclaredStepCountIsCarriedThrough()
+    {
+        VideoKnownArtifact source = new()
+        {
+            Sha256 = new string('a', 64),
+            Id = "turbo",
+            DisplayName = "Turbo",
+            Role = VideoProfileArtifactRole.Main,
+            Task = VideoTaskFamily.Fl2Va,
+            Acceleration = VideoAccelerationKind.Turbo,
+            Steps = 8,
+        };
+        Assert.Equal(8, QuantizationService.BuildSidecar(source, new string('b', 64)).Steps);
     }
 }
