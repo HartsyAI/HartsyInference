@@ -60,11 +60,14 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
         //
         // The threshold is therefore now only enforced when streaming is unavailable — HARTSY_LOWVRAM=off, or a
         // backend with no streaming cache. Otherwise the planner decides per generation against real free VRAM.
-        if (context.Backend is CudaBackend cuda)
+        // Asked of the backend, not of its class: any GPU backend that reports memory can answer this, and the
+        // preflight is about how much VRAM there is rather than about which vendor supplies it.
+        (long freeBytes, long totalBytes) = context.Backend.GetVramInfo();
+        if (totalBytes > 0)
         {
-            (nuint freeBytes, nuint totalBytes) = cuda.Context.GetMemoryInfo();
             double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
-            bool canStream = cuda.StreamingCache is not null && LowVramPolicy.Resolve(cuda) != LowVramMode.ForceOff;
+            bool canStream = context.Backend.StreamingCache is not null
+                && LowVramPolicy.Resolve(context.Backend) != LowVramMode.ForceOff;
             if (freeGb < MinRequiredVramGb && !canStream)
             {
                 throw new InvalidOperationException(

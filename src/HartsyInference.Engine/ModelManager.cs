@@ -117,8 +117,11 @@ public sealed class ModelManager : IDisposable
         }
         if (ggufArch is not null && IsLikelyLlmArchitecture(ggufArch))
         {
-            GgufLanguageModel model = GgufLanguageModel.Load(localPath, dequantizeToF32: _backend is not Cuda.CudaBackend);
-            if (_backend is Cuda.CudaBackend cuda) cuda.PreloadWeights(model.Transformer.EnumerateWeights());
+            // Same two questions as TextService asks, answered the same way: can this backend read quantized
+            // weights, and does it want them resident. Both are properties of the backend, not of its class.
+            GgufLanguageModel model = GgufLanguageModel.Load(
+                localPath, dequantizeToF32: !_backend.Capabilities.SupportsQuantized);
+            _backend.PreloadWeights(model.Transformer.EnumerateWeights());
 
             TransformerConfig cfg = model.Config;
             int[] headDimPerLayer = new int[cfg.NumLayers];
