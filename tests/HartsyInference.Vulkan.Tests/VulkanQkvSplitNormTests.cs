@@ -277,6 +277,96 @@ public sealed class VulkanQkvSplitNormTests
         Assert.True(worst == 0.0, $"UnpatchifyTokens is a pure shuffle and must match exactly; got {worst:E3}");
     }
 
+    /// <summary>The activation set: exact-erf GELU, erf itself, Mish, PReLU and erf-gated GEGLU.</summary>
+    /// <remarks>Inputs span the tails on purpose. The two GELUs agree near zero and diverge by about 1e-3 further
+    /// out, so a kernel wired to the tanh approximation when the exact one was asked for passes any test that only
+    /// samples the middle. Mish's softplus is the other tail hazard: the naive form overflows exp for large x.</remarks>
+    [Theory]
+    [InlineData("GeluErf")]
+    [InlineData("Mish")]
+    public void Activations_MatchCpuReference(string op)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        TensorShape shape = new(4, 257);           // not a multiple of the workgroup
+        using Tensor input = new(shape, DType.F32);
+        Span<float> span = input.AsSpan<float>();
+        Random rng = new(91);
+        for (int i = 0; i < span.Length; i++)
+        {
+            // Wide: +/-12 reaches where the GELU variants disagree and where a naive softplus overflows.
+            span[i] = (float)(rng.NextDouble() * 24.0 - 12.0);
+        }
+        using Tensor got = new(shape, DType.F32);
+        using Tensor want = new(shape, DType.F32);
+
+        switch (op)
+        {
+            case "GeluErf": gpu.GeluErf(got, input); cpu.GeluErf(want, input); break;
+            default: gpu.Mish(got, input); cpu.Mish(want, input); break;
+        }
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"{op}: max abs err = {worst:E3}");
+        // The erf approximation carries ~1.5e-7 of its own, and GELU multiplies it by x.
+        Assert.True(worst < 2e-5, $"{op} diverges: {worst:E3}");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Prelu_MatchesCpuReference(bool perChannel)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        const int batch = 2, channels = 5, timeDim = 33;
+        using Tensor input = Filled(new TensorShape(batch, channels, timeDim), seed: 92);
+        using Tensor alpha = Filled(new TensorShape(perChannel ? channels : 1), seed: 93);
+        using Tensor got = new(new TensorShape(batch, channels, timeDim), DType.F32);
+        using Tensor want = new(new TensorShape(batch, channels, timeDim), DType.F32);
+
+        gpu.Prelu(got, input, alpha);
+        cpu.Prelu(want, input, alpha);
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"Prelu perChannel={perChannel}: max abs err = {worst:E3}");
+        Assert.True(worst == 0.0, $"Prelu is a select and a multiply; it must match exactly, got {worst:E3}");
+    }
+
+    [Theory]
+    [InlineData(4, 96)]
+    [InlineData(3, 65)]
+    public void GegluErf_MatchesCpuReference(int rows, int inner)
+    {
+        if (!VulkanAvailable(out string? reason))
+        {
+            _output.WriteLine($"SKIPPED: {reason}");
+            return;
+        }
+        using VulkanBackend gpu = new(0, SpirvDir());
+        IBackend cpu = new CpuBackend();
+        using Tensor proj = Filled(new TensorShape(rows, 2 * inner), seed: 94, centre: 1.5);
+        using Tensor got = new(new TensorShape(rows, inner), DType.F32);
+        using Tensor want = new(new TensorShape(rows, inner), DType.F32);
+
+        gpu.GegluErf(got, proj, rows, inner);
+        cpu.GegluErf(want, proj, rows, inner);
+
+        double worst = Worst(got, want);
+        _output.WriteLine($"GegluErf [{rows}r x {inner}]: max abs err = {worst:E3}");
+        Assert.True(worst < 2e-5, $"GegluErf diverges: {worst:E3}");
+    }
+
     private static double Worst(Tensor a, Tensor b)
     {
         ReadOnlySpan<float> x = a.AsReadOnlySpan<float>();

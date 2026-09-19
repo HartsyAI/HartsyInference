@@ -559,6 +559,12 @@ public interface IBackend : IDisposable
 
     /// <summary>GEGLU with exact (erf) GELU gate: <c>output[rows,inner] = proj[:,:inner] · gelu_erf(proj[:,inner:])</c>, fused split+gate.</summary>
     unsafe void GegluErf(Tensor output, Tensor proj, long rows, int inner)
+        => GegluErfReference(output, proj, rows, inner);
+
+    /// <summary>The managed <see cref="GegluErf"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).GegluErf(...)</c> re-enters the override and
+    /// recurses until the stack overflows.</summary>
+    static unsafe void GegluErfReference(Tensor output, Tensor proj, long rows, int inner)
     {
         if (output.DType != DType.F32 || proj.DType != DType.F32)
             throw new NotSupportedException("GegluErf default fallback only supports F32.");
@@ -2638,6 +2644,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Parametric ReLU: <c>x if x&gt;=0 else alpha*x</c>, alpha per-channel (<c>ElementCount==C</c>) or a single shared value.</summary>
     unsafe void Prelu(Tensor output, Tensor input, Tensor alpha)
+        => PreluReference(output, input, alpha);
+
+    /// <summary>The managed <see cref="Prelu"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).Prelu(...)</c> re-enters the override and
+    /// recurses until the stack overflows.</summary>
+    static unsafe void PreluReference(Tensor output, Tensor input, Tensor alpha)
     {
         int batch = (int)input.Shape[0], channels = (int)input.Shape[1], timeDim = (int)input.Shape[2];
         float* op = (float*)output.DataPointer, ip = (float*)input.DataPointer, ap = (float*)alpha.DataPointer;
