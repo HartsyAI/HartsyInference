@@ -49,8 +49,18 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         float guidance = _config.GuidanceEmbed ? 3.5f : 0f;
 
         // TODO(E-IMG-4/5): img2img, NegativePrompt/CfgScale mapping, and user component overrides are deferred.
-        WeightedTokenSequence tokens = Tokenize(prompt);
+        // <alternate:>/<fromto[N]:> now survive ImagesService, because this recipe declares
+        // ImageFeatures.PromptScheduling. Everything OUTSIDE the schedule builder therefore needs them collapsed to
+        // their step-0 value first, or the literal tag text is tokenized as prose — the same split SdxlRecipePipeline
+        // makes for the same reason. Idempotent when nothing schedules, and a no-op on the weight tags ImagesService
+        // already turned into parens.
+        string flatPrompt = PromptTagFlattening.Flatten(prompt);
+        WeightedTokenSequence tokens = Tokenize(flatPrompt);
         WeightedTokenSequence? promptWeights = tokens.IsUniformlyUnweighted ? null : tokens;
+        // Each distinct step-text goes through the SAME Tokenize, so a branch carrying its own emphasis is weighted
+        // per branch. Null when the prompt schedules nothing, which keeps an ordinary request on the single-encode
+        // path; a schedule that collapses to one variant also lands there, on the flattened ids above.
+        ScheduledPrompt? promptSchedule = ScheduledPrompt.TryBuild(prompt, steps, Tokenize);
 
         // Resolved at the 16-rounded size Flux2Pipeline validates against.
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, width, height);
@@ -80,7 +90,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
 
             (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
                 tokens.Tokens, inner, guidanceScale: guidance, onProgress: bridge, regionalPlan: regionalPlan,
-                promptWeights: promptWeights);
+                promptWeights: promptWeights, promptSchedule: promptSchedule);
 
             return new ImageResult
             {
