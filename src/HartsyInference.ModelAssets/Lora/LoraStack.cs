@@ -522,9 +522,13 @@ public sealed class LoraStack : IDisposable
         return quantized;
     }
 
-    /// <summary>Whether this layer's ΔW is the shape of the weight it would be added to. Rank-2 only: a quantized or dense convolution target is not wired yet, and a flattened delta added to a rank-4 weight would land on the wrong elements.</summary>
+    /// <summary>Whether this layer's ΔW is the shape of the weight it would be added to.
+    /// <para>Rank 2 is a Linear; rank 4 is a convolution, where the delta arrives flattened to
+    /// <c>[out, in·kh·kw]</c>. Those are the SAME memory in row-major order — element <c>(o, i, kh, kw)</c> of the
+    /// weight sits at the same offset as <c>(o, i·kh·kw + …)</c> of the delta — so the add lands on the right
+    /// elements once the shapes are made to agree. Anything else is refused.</para></summary>
     private static bool DeltaShapeMatches(LoraLayer layer, Tensor baseW) =>
-        baseW.Shape.Rank == 2 && layer.Delta.MatchesShape(baseW);
+        baseW.Shape.Rank is 2 or 4 && layer.Delta.MatchesShape(baseW);
 
     /// <summary>Folds one layer's ΔW into <paramref name="accumF32"/>, which holds the weight itself rather than a delta.</summary>
     /// <remarks>A DoRA adapter is not additive — the magnitude vector rescales the whole LoRA'd weight row- or
@@ -534,18 +538,37 @@ public sealed class LoraStack : IDisposable
     private static void AccumulateDelta(IBackend backend, Tensor accumF32, LoraDelta delta, float strength)
     {
         Tensor deltaF32 = delta.ComputeF32(backend);
+        Tensor? flatView = null;
         try
         {
             if (delta.DoraScale is not null)
             {
+                if (accumF32.Shape.Rank != 2)
+                {
+                    // The magnitude vector normalizes by a row norm of the weight-as-a-matrix. A convolution has no
+                    // such matrix until it is flattened, and which axis the vector describes is the file's choice,
+                    // not ours — so this is refused rather than guessed at.
+                    throw new NotSupportedException(
+                        "A DoRA adapter targets a convolution weight. Its magnitude rescaling is defined over a "
+                        + "2-D weight, so it cannot be applied to a rank-4 one. Use a plain LoRA for this model.");
+                }
                 LoraDoraDecompose.Apply(accumF32, deltaF32, delta.DoraScale, delta.Scale, strength);
                 return;
             }
             backend.Scale(deltaF32, deltaF32, strength * delta.Scale);
-            backend.Add(accumF32, accumF32, deltaF32);
+            // A convolution's ΔW arrives flattened to [out, in·kh·kw] while the weight is [out, in, kh, kw]. Same
+            // bytes in the same order, so the add only needs the two to agree on a shape; the view costs nothing.
+            Tensor addend = deltaF32;
+            if (accumF32.Shape.Rank != deltaF32.Shape.Rank)
+            {
+                flatView = deltaF32.Reshape(accumF32.Shape);
+                addend = flatView;
+            }
+            backend.Add(accumF32, accumF32, addend);
         }
         finally
         {
+            flatView?.Dispose();
             deltaF32.Dispose();
         }
     }
