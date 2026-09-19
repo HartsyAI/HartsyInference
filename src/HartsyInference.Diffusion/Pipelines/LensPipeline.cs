@@ -71,11 +71,16 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
     /// <param name="negativeTokenIds">Chat-templated tokens for the negative prompt. Required when <c>request.CfgScale &gt; 1.0</c>; pass <c>null</c> when CFG is disabled (Lens-Turbo).</param>
     /// <param name="request">Generation parameters.</param>
     /// <param name="onProgress">Optional per-step progress callback.</param>
+    /// <param name="promptWeights">Per-token weights for <paramref name="positiveTokenIds"/>, or null when the
+    /// prompt carries no emphasis. Nothing caches Lens conditioning, so the captures are scaled in place.</param>
+    /// <param name="negativeWeights">The same for <paramref name="negativeTokenIds"/>.</param>
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] positiveTokenIds,
         int[]? negativeTokenIds,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        Prompting.WeightedTokenSequence? promptWeights = null,
+        Prompting.WeightedTokenSequence? negativeWeights = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
@@ -95,6 +100,12 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
         List<Tensor> positiveLayers = _textEncoder.EncodeForLens(Backend, positiveTokenIds);
         List<Tensor>? negativeLayers = null;
         if (useCfg) negativeLayers = _textEncoder.EncodeForLens(Backend, negativeTokenIds!);
+        // Every capture is the same sequence at a different depth, so one weight lands on four rows. The encoder
+        // has already stripped the Harmony wrapper's fixed 97-token prefix, and ScaleRightAligned right-aligns —
+        // so passing the FULL weight array is what puts each weight on its own token: the first 97 entries fall
+        // at negative positions and drop out, exactly as a trimmed template prefix should.
+        ScaleLayers(positiveLayers, promptWeights);
+        ScaleLayers(negativeLayers, negativeWeights);
         encSw.Stop();
         Logs.Info($"Text encoding done in {encSw.ElapsedMilliseconds}ms (S_txt+={positiveLayers[0].Shape[1]}, " +
                   $"S_txt-={negativeLayers?[0].Shape[1] ?? 0})");
@@ -113,6 +124,24 @@ public sealed unsafe class LensPipeline : DiffusionPipelineBase
             for (int i = 0; i < positiveLayers.Count; i++) positiveLayers[i].Dispose();
             if (negativeLayers is not null)
                 for (int i = 0; i < negativeLayers.Count; i++) negativeLayers[i].Dispose();
+        }
+    }
+
+    /// <summary>Applies one token-weight array to every layer capture, replacing each tensor it changes. A
+    /// no-op when there is nothing weighted, so an ordinary prompt allocates nothing.</summary>
+    private void ScaleLayers(List<Tensor>? layers, Prompting.WeightedTokenSequence? weights)
+    {
+        if (layers is null || weights is null)
+        {
+            return;
+        }
+        for (int i = 0; i < layers.Count; i++)
+        {
+            if (Prompting.CondTokenWeights.Apply(Backend, layers[i], null, weights).Cond is Tensor scaled)
+            {
+                layers[i].Dispose();
+                layers[i] = scaled;
+            }
         }
     }
 

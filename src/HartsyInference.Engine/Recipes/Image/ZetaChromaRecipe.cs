@@ -24,6 +24,13 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: the <c>dec_net.*</c> head makes ComfyUI
+    /// stamp <c>zimage_pixel</c>, which inherits <c>ZImage.clip_target</c> → <c>z_image.ZImageTokenizer</c> and its
+    /// <c>disable_weights</c> (<c>z_image.py:23</c>).</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "zeta-chroma", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Zeta-Chroma's official sampling settings: 50 steps at guidance 3.0, 1024x1024 (<c>ZetaChromaConfig.DefaultSteps</c>/<c>DefaultCfgScale</c>).</summary>

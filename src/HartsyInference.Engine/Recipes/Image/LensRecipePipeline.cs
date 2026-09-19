@@ -3,6 +3,7 @@ using System.Globalization;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -33,9 +34,11 @@ public sealed class LensRecipePipeline(LensPipelineBundle bundle, LensConfig con
         float cfgScale = request.CfgScale ?? _config.DefaultCfgScale;
 
 
-        (int[] posTokens, _) = _tokenizer.BuildChatInputs(prompt);
+        WeightedTokenSequence posSequence = EncodeWeighted(prompt);
+        int[] posTokens = posSequence.Tokens;
         // Negative tokens only matter when CFG is live; Lens-Turbo (cfg 1) skips the second pass.
-        int[]? negTokens = cfgScale > 1f ? _tokenizer.BuildChatInputs(negative).tokenIds : null;
+        WeightedTokenSequence? negSequence = cfgScale > 1f ? EncodeWeighted(negative) : null;
+        int[]? negTokens = negSequence?.Tokens;
 
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth / 16 * 16, reqHeight / 16 * 16);
@@ -60,7 +63,8 @@ public sealed class LensRecipePipeline(LensPipelineBundle bundle, LensConfig con
 
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
-        (byte[] rgb, int outW, int outH, int usedSeed) = _bundle.Pipeline.GenerateFromTokens(posTokens, negTokens, inner, bridge);
+        (byte[] rgb, int outW, int outH, int usedSeed) = _bundle.Pipeline.GenerateFromTokens(
+            posTokens, negTokens, inner, bridge, promptWeights: posSequence, negativeWeights: negSequence);
 
         return new ImageResult
         {
@@ -77,6 +81,18 @@ public sealed class LensRecipePipeline(LensPipelineBundle bundle, LensConfig con
                 ["cfg"] = cfgScale.ToString(CultureInfo.InvariantCulture),
             },
         };
+    }
+
+    /// <inheritdoc/>
+    /// <summary>The Harmony-templated sequence plus its per-token weights. An unweighted prompt keeps
+    /// <see cref="GptOssTokenizer.BuildChatInputs"/> so its ids are exactly what they were before weighting
+    /// existed.</summary>
+    private WeightedTokenSequence EncodeWeighted(string prompt)
+    {
+        (int[] prefix, int[] suffix) = _tokenizer.ChatTemplateIds();
+        return TemplatedPromptTokens.Build(PromptTagFlattening.Flatten(prompt),
+            t => _tokenizer.BuildChatInputs(t).tokenIds, _tokenizer.EncodeRaw, prefix, suffix)
+            .Truncate(_tokenizer.MaxLength);
     }
 
     /// <inheritdoc/>
