@@ -1729,6 +1729,155 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         DispatchPerRowNorm(shader, 4, output, input, weight, bias, eps, normDim, totalRows);
     }
 
+    /// <summary>AdaLN modulation split: <c>proj [B,4D]</c> into four <c>[B,D]</c>, <c>1+x</c> for scales and
+    /// <c>tanh(x)</c> for gates.</summary>
+    public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
+    {
+        using OpScope _op = EnterOp();
+        if (proj.DType != DType.F32 || scaleMsa.DType != DType.F32)
+        {
+            IBackend.ModulationSplit4Reference(scaleMsa, gateMsa, scaleMlp, gateMlp, proj);
+            return;
+        }
+        int dim = (int)scaleMsa.Shape[scaleMsa.Shape.Rank - 1];
+        int batch = (int)(scaleMsa.ElementCount / dim);
+        long total = (long)batch * dim;
+
+        VulkanBuffer projBuf = GetBuffer(proj);
+        ulong outBytes = (ulong)(total * sizeof(float));
+        VulkanBuffer sa = _xfer.AllocateDevice(outBytes);
+        VulkanBuffer ga = _xfer.AllocateDevice(outBytes);
+        VulkanBuffer sl = _xfer.AllocateDevice(outBytes);
+        VulkanBuffer gl = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            const uint local = 256;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+            };
+            VulkanKernel kernel = GetKernel("modulation_split4", storageBufferCount: 5, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)dim);
+            pc.U32((uint)batch);
+
+            Span<ulong> bufs = stackalloc ulong[] { projBuf.Handle, sa.Handle, ga.Handle, sl.Handle, gl.Handle };
+            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
+            CacheOutput(scaleMsa, sa);
+            CacheOutput(gateMsa, ga);
+            CacheOutput(scaleMlp, sl);
+            CacheOutput(gateMlp, gl);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ModulationSplit4 dispatch failed", ex);
+            sa.Dispose();
+            ga.Dispose();
+            sl.Dispose();
+            gl.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Per-row affine whose scale and shift are gathered by a per-row index.</summary>
+    public void AffineBroadcastRowIndexed(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
+    {
+        using OpScope _op = EnterOp();
+        if (output.DType != DType.F32 || input.DType != DType.F32 || scaleTable.DType != DType.F32
+            || (shiftTable is not null && shiftTable.DType != DType.F32) || rowIndex.DType != DType.I32)
+        {
+            IBackend.AffineBroadcastRowIndexedReference(output, input, scaleTable, shiftTable, rowIndex);
+            return;
+        }
+        int dim = (int)input.Shape[input.Shape.Rank - 1];
+        long total = input.ElementCount;
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer scaleBuf = GetBuffer(scaleTable);
+        // The shader always binds five buffers, so an absent shift binds the scale table and a spec constant
+        // turns the read off — a null binding is not legal, and binding a stale descriptor would read garbage.
+        VulkanBuffer shiftBuf = shiftTable is null ? scaleBuf : GetBuffer(shiftTable);
+        VulkanBuffer idxBuf = GetBuffer(rowIndex);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
+        try
+        {
+            const uint local = 256;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+                SpecConstant.Bool(3, shiftTable is not null),
+            };
+            VulkanKernel kernel = GetKernel("affine_broadcast_row_indexed", storageBufferCount: 5, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)dim);
+            pc.U32((uint)total);
+
+            Span<ulong> bufs = stackalloc ulong[]
+            {
+                inBuf.Handle, scaleBuf.Handle, shiftBuf.Handle, idxBuf.Handle, outBuf.Handle,
+            };
+            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan AffineBroadcastRowIndexed dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>Per-token gated residual with the gate gather fused in.</summary>
+    public void GatedResidualRowIndexed(Tensor output, Tensor residual, Tensor value, Tensor gateTable, Tensor rowIndex)
+    {
+        using OpScope _op = EnterOp();
+        if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32
+            || gateTable.DType != DType.F32 || rowIndex.DType != DType.I32)
+        {
+            IBackend.GatedResidualRowIndexedReference(output, residual, value, gateTable, rowIndex);
+            return;
+        }
+        int dim = (int)value.Shape[value.Shape.Rank - 1];
+        long total = value.ElementCount;
+
+        VulkanBuffer resBuf = GetBuffer(residual);
+        VulkanBuffer valBuf = GetBuffer(value);
+        VulkanBuffer gateBuf = GetBuffer(gateTable);
+        VulkanBuffer idxBuf = GetBuffer(rowIndex);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * sizeof(float)));
+        try
+        {
+            const uint local = 256;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+            };
+            VulkanKernel kernel = GetKernel("gated_residual_row_indexed", storageBufferCount: 5, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)dim);
+            pc.U32((uint)total);
+
+            Span<ulong> bufs = stackalloc ulong[]
+            {
+                resBuf.Handle, valBuf.Handle, gateBuf.Handle, idxBuf.Handle, outBuf.Handle,
+            };
+            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan GatedResidualRowIndexed dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     /// <summary>In-place rotary position embedding on one tensor <c>x [B, L, H, D]</c>.</summary>
     /// <remarks>Partial rotary rotates only the first <paramref name="rotaryDim"/> dims and leaves the rest
     /// untouched; cos/sin keep the full headDim stride either way, so one kernel serves partial and full.</remarks>

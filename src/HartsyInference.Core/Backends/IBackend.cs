@@ -181,6 +181,12 @@ public interface IBackend : IDisposable
     /// <param name="shiftTable">Small <c>[modRows, D]</c> table, or null for scale-only.</param>
     /// <param name="rowIndex">I32 <c>[rows]</c> — one table row per token; replaces materializing the gathered <c>[rows, D]</c> scale/shift.</param>
     unsafe void AffineBroadcastRowIndexed(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
+        => AffineBroadcastRowIndexedReference(output, input, scaleTable, shiftTable, rowIndex);
+
+    /// <summary>The managed <see cref="AffineBroadcastRowIndexed"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).AffineBroadcastRowIndexed(...)</c> re-enters the override through
+    /// interface dispatch and recurses until the stack overflows.</summary>
+    static unsafe void AffineBroadcastRowIndexedReference(Tensor output, Tensor input, Tensor scaleTable, Tensor? shiftTable, Tensor rowIndex)
     {
         if (output.DType != DType.F32 || input.DType != DType.F32 || scaleTable.DType != DType.F32 || (shiftTable is not null && shiftTable.DType != DType.F32))
             throw new NotSupportedException($"AffineBroadcastRowIndexed default fallback only supports F32 — got output={output.DType}, input={input.DType}, scaleTable={scaleTable.DType}, shiftTable={shiftTable?.DType.Name ?? "null"}.");
@@ -208,6 +214,12 @@ public interface IBackend : IDisposable
     /// <summary>Per-token gated residual with the gate gather fused in: <c>out[r,d] = residual[r,d] + gateTable[rowIndex[r],d]*value[r,d]</c>.</summary>
     /// <param name="gateTable">Small <c>[modRows, D]</c> gate table, indexed per token instead of expanded to <c>[rows, D]</c>.</param>
     unsafe void GatedResidualRowIndexed(Tensor output, Tensor residual, Tensor value, Tensor gateTable, Tensor rowIndex)
+        => GatedResidualRowIndexedReference(output, residual, value, gateTable, rowIndex);
+
+    /// <summary>The managed <see cref="GatedResidualRowIndexed"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).GatedResidualRowIndexed(...)</c> re-enters the override through
+    /// interface dispatch and recurses until the stack overflows.</summary>
+    static unsafe void GatedResidualRowIndexedReference(Tensor output, Tensor residual, Tensor value, Tensor gateTable, Tensor rowIndex)
     {
         if (output.DType != DType.F32 || residual.DType != DType.F32 || value.DType != DType.F32 || gateTable.DType != DType.F32)
             throw new NotSupportedException($"GatedResidualRowIndexed default fallback only supports F32 — got output={output.DType}, residual={residual.DType}, value={value.DType}, gateTable={gateTable.DType}.");
@@ -589,6 +601,12 @@ public interface IBackend : IDisposable
 
     /// <summary>AdaLN modulation split: chunks <c>proj [B,4D]</c> into 4 <c>[B,D]</c>, <c>1+x</c> for scales, <c>tanh(x)</c> for gates.</summary>
     unsafe void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
+        => ModulationSplit4Reference(scaleMsa, gateMsa, scaleMlp, gateMlp, proj);
+
+    /// <summary>The managed <see cref="ModulationSplit4"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).ModulationSplit4(...)</c> re-enters the override through
+    /// interface dispatch and recurses until the stack overflows.</summary>
+    static unsafe void ModulationSplit4Reference(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
     {
         if (proj.DType != DType.F32)
             throw new NotSupportedException("ModulationSplit4 default fallback only supports F32.");
