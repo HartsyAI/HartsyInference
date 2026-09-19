@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.120
+
+- **`QkvSplitNorm` runs on Vulkan**, the one op on the Flux/DiT path whose host default was a TRUE fallback rather
+  than composition. It reads `DataPointer` on six tensors, so every call meant a device-to-host sync, a scalar loop
+  over every token and head, and an upload of the results. Flux runs 19 double plus 38 single blocks per forward,
+  each calling it once per step, so the round-trip was paid 57 times a step.
+- Chosen by measurement rather than by working down the list: of the eight Phase-3 ops the Flux path calls, seven
+  have defaults that compose other GPU ops — correct, just extra dispatches — and this was the only one that left
+  the device.
+- **The cross-subgroup fold is not optional here even though the reduction is only headDim wide.** `subgroupAdd`
+  reduces within a subgroup, and subgroup width is hardware: 32 on NVIDIA, 64 on AMD, as low as 8 on Intel. A
+  workgroup spanning more than one would have normalized by the wrong denominator and still produced plausible
+  output — the failure worth spending shared memory to avoid, and the one that would have shown up first on the
+  AMD card this work is for.
+- Verified against the CPU reference at four head geometries chosen to straddle every plausible subgroup width,
+  including a 256-wide head that spans several. Max absolute error 4.8e-7 on q and k; `v` is a straight copy and is
+  exact. And on a real generation — Flux.1-dev fp8, 512x512, 4 steps, seed 42 — the decoded image is byte-identical
+  to the same run through the host fallback.
+
 ## alpha.119
 
 - **`LayerNormNoAffine` runs on Vulkan.** It had no override there, so every call fell through to `IBackend`'s host

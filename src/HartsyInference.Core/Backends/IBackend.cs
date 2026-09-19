@@ -255,6 +255,12 @@ public interface IBackend : IDisposable
 
     /// <summary>Fused QKV split + per-head QK-RMSNorm: qkv <c>[.,3w]</c> → q/k/v each <c>[.,w]</c>; RMS-norms q/k (w=heads·headDim).</summary>
     unsafe void QkvSplitNorm(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+        => QkvSplitNormReference(q, k, v, qkv, qWeight, kWeight, eps);
+
+    /// <summary>The managed <see cref="QkvSplitNorm"/> body, callable directly. A backend override must call THIS
+    /// to fall back — <c>((IBackend)this).QkvSplitNorm(...)</c> re-enters the override through interface dispatch
+    /// and recurses until the stack overflows.</summary>
+    static unsafe void QkvSplitNormReference(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
     {
         if (q.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("QkvSplitNorm default fallback only supports F32.");
         int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
