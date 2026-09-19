@@ -4,6 +4,10 @@ using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Services;
 using Microsoft.Extensions.DependencyInjection;
 
+using HartsyInference.ModelAssets.Quant;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.Core.Exceptions;
+
 namespace HartsyInference.API.Endpoints;
 
 /// <summary>Model catalog, disk cache, resident-model, and backend/queue admin endpoints.</summary>
@@ -61,6 +65,62 @@ public static class AdminEndpoints
             }
 
             return Results.Ok(new { model = entry.Id, pulled = true, files = missing.Count });
+        });
+
+        // Offline quantization. Deliberately synchronous and blocking rather than a background job: a caller that
+        // gets 200 has a finished file on disk, and a multi-GB write that reports success before it is durable is
+        // the sort of thing nobody notices until the file is loaded.
+        app.MapPost("/admin/models/quantize", (QuantizeModelRequest req, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.ModelPath) || string.IsNullOrWhiteSpace(req.Out))
+            {
+                return HartsyInferenceServiceExtensions.Problem(
+                    StatusCodes.Status400BadRequest, "Fields 'modelPath' and 'out' are required.", "invalid_request_error");
+            }
+            if (!QuantizeFormats.TryGetValue(req.Format, out QuantizationTargetKind kind))
+            {
+                return HartsyInferenceServiceExtensions.Problem(
+                    StatusCodes.Status400BadRequest,
+                    $"Unknown format '{req.Format}'. Known: {string.Join(", ", QuantizeFormats.Keys)}.",
+                    "invalid_request_error");
+            }
+            GgufQuantPolicy? policy = null;
+            if (kind == QuantizationTargetKind.Gguf && !QuantizePolicies.TryGetValue(req.Quant, out policy))
+            {
+                return HartsyInferenceServiceExtensions.Problem(
+                    StatusCodes.Status400BadRequest,
+                    $"Unknown quant '{req.Quant}'. Known: {string.Join(", ", QuantizePolicies.Keys)}.",
+                    "invalid_request_error");
+            }
+            try
+            {
+                QuantizationReport report = CheckpointQuantizer.Quantize(new QuantizationJob
+                {
+                    SourcePath = req.ModelPath,
+                    OutputPath = req.Out,
+                    Target = new QuantizationTarget(kind, policy),
+                    Architecture = req.Architecture,
+                    Overwrite = req.Overwrite,
+                }, ct);
+                return Results.Ok(new
+                {
+                    output = req.Out,
+                    tensors = report.TensorCount,
+                    quantized = report.QuantizedCount,
+                    sourceBytes = report.SourceBytes,
+                    outputBytes = report.OutputBytes,
+                });
+            }
+            catch (FileNotFoundException ex)
+            {
+                return HartsyInferenceServiceExtensions.Problem(
+                    StatusCodes.Status404NotFound, ex.Message, "invalid_request_error");
+            }
+            catch (Exception ex) when (ex is HartsyInferenceException or NotSupportedException)
+            {
+                return HartsyInferenceServiceExtensions.Problem(
+                    StatusCodes.Status400BadRequest, ex.Message, "invalid_request_error");
+            }
         });
 
         app.MapGet("/admin/cache", (HartsyInferenceServerOptions options) =>
@@ -165,4 +225,23 @@ public static class AdminEndpoints
 
     private static ModelCacheStore OpenCache(HartsyInferenceServerOptions options) =>
         string.IsNullOrWhiteSpace(options.ModelCacheDirectory) ? new ModelCacheStore() : new ModelCacheStore(options.ModelCacheDirectory);
+
+    /// <summary>Output formats the quantize endpoint accepts, matched case-insensitively. Mirrors the CLI's list
+    /// so a caller does not have to learn two vocabularies for the same operation.</summary>
+    private static readonly Dictionary<string, QuantizationTargetKind> QuantizeFormats = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["gguf"] = QuantizationTargetKind.Gguf,
+        ["fp8-scaled"] = QuantizationTargetKind.Fp8Scaled,
+        ["int8-convrot"] = QuantizationTargetKind.Int8ConvRot,
+    };
+
+    /// <summary>GGUF precision presets the quantize endpoint accepts.</summary>
+    private static readonly Dictionary<string, GgufQuantPolicy> QuantizePolicies = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Q8_0"] = GgufQuantPolicy.Q8_0,
+        ["Q6_K"] = GgufQuantPolicy.Q6_K,
+        ["Q5_K_M"] = GgufQuantPolicy.Q5_K_M,
+        ["Q4_K_M"] = GgufQuantPolicy.Q4_K_M,
+        ["Q4_K_S"] = GgufQuantPolicy.Q4_K_S,
+    };
 }

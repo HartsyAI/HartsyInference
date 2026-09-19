@@ -153,6 +153,34 @@ public sealed class SkeletonEndpointsTests : IClassFixture<WebApplicationFactory
         Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
     }
 
+    /// <summary>The quantize endpoint validates before it touches the filesystem, so a bad request is a 400 rather
+    /// than a partially-written multi-GB file.</summary>
+    [Theory]
+    [InlineData("{\"modelPath\":\"\",\"out\":\"/tmp/x.gguf\"}")]
+    [InlineData("{\"modelPath\":\"/tmp/in.safetensors\",\"out\":\"\"}")]
+    [InlineData("{\"modelPath\":\"/tmp/in.safetensors\",\"out\":\"/tmp/x.gguf\",\"format\":\"not-a-format\"}")]
+    [InlineData("{\"modelPath\":\"/tmp/in.safetensors\",\"out\":\"/tmp/x.gguf\",\"quant\":\"Q9_Z\"}")]
+    public async Task AdminModelsQuantize_BadRequest_Returns400(string body)
+    {
+        using HttpClient client = _factory.CreateClient();
+        using StringContent content = new(body, System.Text.Encoding.UTF8, "application/json");
+        HttpResponseMessage resp = await client.PostAsync("/admin/models/quantize", content);
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    /// <summary>A source that is not there is the caller's mistake, not a server fault.</summary>
+    [Fact]
+    public async Task AdminModelsQuantize_MissingSource_Returns404()
+    {
+        using HttpClient client = _factory.CreateClient();
+        HttpResponseMessage resp = await client.PostAsJsonAsync("/admin/models/quantize", new
+        {
+            modelPath = "/tmp/definitely-not-here-" + Guid.NewGuid().ToString("N") + ".safetensors",
+            @out = "/tmp/out-" + Guid.NewGuid().ToString("N") + ".gguf",
+        });
+        Assert.Equal(HttpStatusCode.NotFound, resp.StatusCode);
+    }
+
     [Fact]
     public async Task AdminMemoryFree_NoBody_DefaultsToSoftFree()
     {
