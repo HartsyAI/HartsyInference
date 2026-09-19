@@ -82,6 +82,51 @@ public sealed class GpuResidencyCacheTests
             _seen[source] = buffer;
         }
 
+        /// <summary>Stands in for CUDA, which promotes on the MISS — before any transient exists — into a buffer
+        /// from a different allocator than a transient would use.</summary>
+        public bool PromoteOnSecondMiss { get; set; }
+
+        /// <summary>Buffers that came from the weight allocator rather than the transient one.</summary>
+        public List<Buffer> WeightAllocations { get; } = [];
+
+        private readonly Dictionary<Tensor, int> _misses = new(ReferenceEqualityComparer.Instance);
+
+        protected override Buffer AllocateWeight(long bytes)
+        {
+            Buffer buffer = new(++_nextId, bytes);
+            Allocated.Add(buffer);
+            WeightAllocations.Add(buffer);
+            return buffer;
+        }
+
+        protected override bool TryMakeResidentOnMiss(Tensor tensor, long bytes, out Buffer? buffer)
+        {
+            buffer = default;
+            if (!PromoteOnSecondMiss)
+            {
+                return false;
+            }
+            _misses[tensor] = _misses.GetValueOrDefault(tensor) + 1;
+            if (_misses[tensor] < 2)
+            {
+                return false;
+            }
+            buffer = AllocateWeight(bytes);
+            Upload(buffer, tensor, bytes);
+            PromoteToWeight(tensor, buffer);
+            return true;
+        }
+
+        /// <summary>Drives <see cref="GpuResidencyCache{TBuffer}.PromoteToWeight"/> directly, for the case a real
+        /// backend reaches only through its own miss path.</summary>
+        public void ForcePromote(Tensor tensor, long bytes)
+        {
+            Buffer buffer = AllocateWeight(bytes);
+            PromoteToWeight(tensor, buffer);
+        }
+
+        public bool IsPinnedForTest(Tensor tensor) => Pinned.Contains(tensor);
+
         /// <summary>Allocation without an upload, for tests exercising the cache's bookkeeping rather than transfers.</summary>
         public Buffer AllocateForTest(long bytes) => AllocateDevice(bytes);
     }
@@ -574,5 +619,73 @@ public sealed class GpuResidencyCacheTests
 
         Assert.All(cache.Allocated, buffer => Assert.True(buffer.Freed));
         cache.Dispose();   // idempotent
+    }
+
+    /// <summary>A weight and a transient may come from different allocators, and the cache must ask for each by
+    /// name. CUDA is why: a preloaded weight is <c>cuMemAlloc</c>'d and freed synchronously, deliberately outside
+    /// the stream-ordered pool every transient uses, so routing weights through the transient allocator would hand
+    /// a pool block to a synchronous free.</summary>
+    [Fact]
+    public void PreloadWeight_UsesTheWeightAllocator_AndAMissDoesNot()
+    {
+        using FakeCache cache = new();
+        using Tensor weight = NewTensor(8);
+        using Tensor activation = NewTensor(8);
+
+        cache.PreloadWeight(weight);
+        cache.ReleaseIfNotCached(cache.CopyToDevice(activation), Size(activation));
+
+        FakeCache.Buffer weightBuffer = Assert.Single(cache.WeightAllocations);
+        Assert.True(cache.TryGetCached(weight, out FakeCache.Buffer? resident));
+        Assert.Same(weightBuffer, resident);
+        Assert.DoesNotContain(cache.Allocated.Where(b => !cache.WeightAllocations.Contains(b)),
+            b => ReferenceEquals(b, weightBuffer));
+    }
+
+    /// <summary>The hook CUDA's auto-promotion actually needs: it fires on the miss, before a transient is
+    /// allocated, and the buffer it returns is the one the caller gets.</summary>
+    [Fact]
+    public void TryMakeResidentOnMiss_ShortCircuitsTheTransientUpload()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor(16);
+        cache.PromoteOnSecondMiss = true;
+
+        FakeCache.Buffer first = cache.CopyToDevice(tensor);
+        cache.ReleaseIfNotCached(first, Size(tensor));
+        int allocationsAfterFirst = cache.Allocated.Count;
+
+        FakeCache.Buffer promoted = cache.CopyToDevice(tensor);
+
+        // Exactly one more allocation, and it came from the WEIGHT allocator — no transient was made and thrown
+        // away, which is what a post-upload hook would have forced.
+        Assert.Equal(allocationsAfterFirst + 1, cache.Allocated.Count);
+        Assert.Same(Assert.Single(cache.WeightAllocations), promoted);
+        Assert.Same(promoted, cache.CopyToDevice(tensor));
+        cache.ReleaseIfNotCached(promoted, Size(tensor));
+        Assert.False(promoted.Freed, "the promoted weight was freed by the caller's own cleanup");
+    }
+
+    /// <summary>Promotion must not leave the tensor resident in both tiers. A lookup checks weights first, so an
+    /// activation left behind would be shadowed by the weight on every later read — the device write silently
+    /// discarded.</summary>
+    [Fact]
+    public void PromoteToWeight_DropsAnActivationForTheSameTensor()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor(16);
+
+        FakeCache.Buffer stale = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, stale, Size(tensor));
+        cache.PinActivation(tensor);
+
+        cache.PromoteOnSecondMiss = true;
+        cache.ForcePromote(tensor, Size(tensor));
+
+        Assert.True(cache.TryGetCached(tensor, out FakeCache.Buffer? resident));
+        Assert.NotSame(stale, resident);
+        Assert.False(cache.IsPinnedForTest(tensor), "the displaced activation kept its pin");
+        cache.SweepOrphans();
+        Assert.True(stale.Freed, "the displaced activation buffer was never reclaimed");
     }
 }

@@ -6,6 +6,26 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.106
+
+- **The shared residency cache learns that weights and transients can need different allocators.** A new
+  `AllocateWeight` seam, defaulting to the transient allocator so a backend with one allocator ignores it. CUDA is
+  the case that forces it: a preloaded weight comes from `cuMemAlloc` and is released with `cuMemFree`,
+  deliberately outside the stream-ordered pool every transient uses, and routing weights through the transient
+  allocator would hand a pool block to a synchronous free — an error on that API, not a style question.
+- **And that a cache miss can be satisfied by the backend itself.** `TryMakeResidentOnMiss` fires after the miss is
+  counted and BEFORE a transient is allocated. The original design mapped CUDA's auto-promotion onto the
+  post-upload `OnTransientUploaded` hook; measured, those are different moments and different buffers — promotion
+  happens before any transient exists and allocates a fresh persistent buffer — so a post-upload hook could only
+  have promoted the pool block it was handed, or uploaded the same bytes twice. Both hooks now exist, each with one
+  caller and one clear moment.
+- `PromoteToWeight` drops any activation for the same tensor rather than assuming there is none. A lookup checks
+  weights first, so an activation left behind is shadowed by the weight on every later read — the device write
+  silently discarded. Today's only caller fires on a miss, where the tensor is in neither tier, but it is a general
+  seam and the invariant is cheaper to keep than to assume.
+- The weight-cast cache keys conversions by `DType` instead of by `DType.Name`. `DType` is a `readonly record
+  struct` with structural equality; projecting it to a string to use as a key was stringly-typed for no gain.
+
 ## alpha.105
 
 - **Swapping one model for another in a single process is now tested, and the test can fail.** Load, generate,
