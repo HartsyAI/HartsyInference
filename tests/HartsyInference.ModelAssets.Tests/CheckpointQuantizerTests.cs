@@ -133,4 +133,72 @@ public sealed class CheckpointQuantizerTests : IDisposable
         // 1.0 decoded times a scale of 4 — not the 1.0 an unfolded read would have written.
         Assert.InRange(first, 3.9f, 4.1f);
     }
+
+    /// <summary>The fp8 shape: each eligible weight stored as F8E4M3 beside the scalar it was divided by. Read back
+    /// through the container, which folds that companion, so what comes out is the value that went in — within what
+    /// four exponent bits and three mantissa bits can carry.</summary>
+    [Fact]
+    public unsafe void TheFp8TargetRoundTripsThroughItsCompanionScale()
+    {
+        using Tensor weight = Ramp(1024, 1024, scale: 2f);
+        string src = WriteSafetensors("fp8src.safetensors", new() { ["blocks.0.attn.weight"] = weight });
+        string outPath = Path.Combine(_dir, "fp8out.safetensors");
+
+        QuantizationReport report = CheckpointQuantizer.Quantize(new QuantizationJob
+        {
+            SourcePath = src,
+            OutputPath = outPath,
+            Target = new QuantizationTarget(QuantizationTargetKind.Fp8Scaled),
+        });
+        Assert.Equal(1, report.QuantizedCount);
+
+        using Checkpoints.CheckpointSource read = Checkpoints.CheckpointSource.Open(outPath);
+        Tensor stored = read.Weights["blocks.0.attn.weight"];
+        Assert.Equal(DType.F8E4M3, stored.DType);
+        using Tensor back = stored.CastTo(DType.F32);   // folds the companion the container attached
+        ReadOnlySpan<float> got = new((void*)back.DataPointer, 16);
+        ReadOnlySpan<float> want = new((void*)weight.DataPointer, 16);
+        for (int i = 0; i < 16; i++) Assert.InRange(got[i] - want[i], -0.12f, 0.12f);
+    }
+
+    /// <summary>The int8 shape, and the part a reader actually trusts: the per-layer <c>.comfy_quant</c> blob names
+    /// the format, rather than the file-level metadata mirror.</summary>
+    [Fact]
+    public void TheInt8TargetWritesItsScaleAndItsDescriptor()
+    {
+        using Tensor weight = Ramp(1024, 1024, scale: 2f);
+        string src = WriteSafetensors("i8src.safetensors", new() { ["blocks.0.attn.weight"] = weight });
+        string outPath = Path.Combine(_dir, "i8out.safetensors");
+
+        QuantizationReport report = CheckpointQuantizer.Quantize(new QuantizationJob
+        {
+            SourcePath = src,
+            OutputPath = outPath,
+            Target = new QuantizationTarget(QuantizationTargetKind.Int8ConvRot),
+        });
+        Assert.Equal(1, report.QuantizedCount);
+
+        using SafeTensorsLoader raw = new();
+        raw.Load(outPath);
+        Dictionary<string, Tensor> all = raw.GetAllTensors();
+        Assert.Equal(DType.I8, all["blocks.0.attn.weight"].DType);
+        TensorShape scaleShape = all["blocks.0.attn.weight_scale"].Shape;
+        Assert.Equal(2, scaleShape.Rank);
+        Assert.Equal(1024L, scaleShape[0]);
+        Assert.Equal(1L, scaleShape[1]);
+        ComfyQuantDescriptor? descriptor =
+            ComfyQuantDescriptor.TryParse(all["blocks.0.attn" + ComfyQuantDescriptor.Suffix].AsReadOnlySpan<byte>());
+        Assert.NotNull(descriptor);
+        Assert.Equal("int8_tensorwise", descriptor!.Format);
+        Assert.Equal(256, descriptor.ConvRotGroupSize);
+
+        // The round trip that matters: the container must recognise what we wrote and attach the descriptor, so a
+        // file this tool produces is loadable rather than merely well-formed.
+        using Checkpoints.CheckpointSource read = Checkpoints.CheckpointSource.Open(outPath);
+        Tensor loaded = read.Weights["blocks.0.attn.weight"];
+        Assert.Equal(DType.I8, loaded.DType);
+        Assert.NotNull(loaded.QuantInfo);
+        Assert.Equal("int8_tensorwise", loaded.QuantInfo!.Format);
+        Assert.Equal(256, loaded.QuantInfo.ConvRotGroupSize);
+    }
 }

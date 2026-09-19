@@ -25,10 +25,15 @@ public sealed class QuantizeCommand : Command<QuantizeCommand.Settings>
         [Description("Output .gguf path.")]
         public string Out { get; init; } = "";
 
-        /// <summary>Precision preset.</summary>
+        /// <summary>Precision preset; GGUF targets only.</summary>
         [CommandOption("--quant")]
-        [Description("Precision: Q8_0, Q6_K, Q5_K_M, Q4_K_M or Q4_K_S.")]
+        [Description("GGUF precision: Q8_0, Q6_K, Q5_K_M, Q4_K_M or Q4_K_S.")]
         public string Quant { get; init; } = "Q8_0";
+
+        /// <summary>Output container and scheme.</summary>
+        [CommandOption("--format")]
+        [Description("Output format: gguf, fp8-scaled or int8-convrot.")]
+        public string Format { get; init; } = "gguf";
 
         /// <summary>Value for the output's <c>general.architecture</c>, which is how a reader picks a key mapper.</summary>
         [CommandOption("--arch")]
@@ -40,6 +45,14 @@ public sealed class QuantizeCommand : Command<QuantizeCommand.Settings>
         [Description("Replace the output file if it already exists.")]
         public bool Overwrite { get; init; }
     }
+
+    /// <summary>Output formats, matched case-insensitively.</summary>
+    private static readonly Dictionary<string, QuantizationTargetKind> _formats = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["gguf"] = QuantizationTargetKind.Gguf,
+        ["fp8-scaled"] = QuantizationTargetKind.Fp8Scaled,
+        ["int8-convrot"] = QuantizationTargetKind.Int8ConvRot,
+    };
 
     /// <summary>Named presets, matched case-insensitively so <c>q4_k_m</c> works as well as <c>Q4_K_M</c>.</summary>
     private static readonly Dictionary<string, GgufQuantPolicy> _policies = new(StringComparer.OrdinalIgnoreCase)
@@ -64,7 +77,14 @@ public sealed class QuantizeCommand : Command<QuantizeCommand.Settings>
             AnsiConsole.MarkupLine("[red]Error:[/] -o/--out is required.");
             return 1;
         }
-        if (!_policies.TryGetValue(settings.Quant, out GgufQuantPolicy? policy))
+        if (!_formats.TryGetValue(settings.Format, out QuantizationTargetKind kind))
+        {
+            AnsiConsole.MarkupLine(
+                $"[red]Error:[/] unknown --format '{settings.Format}'. Known: {string.Join(", ", _formats.Keys)}.");
+            return 1;
+        }
+        GgufQuantPolicy? policy = null;
+        if (kind == QuantizationTargetKind.Gguf && !_policies.TryGetValue(settings.Quant, out policy))
         {
             AnsiConsole.MarkupLine(
                 $"[red]Error:[/] unknown --quant '{settings.Quant}'. Known: {string.Join(", ", _policies.Keys)}.");
@@ -75,7 +95,7 @@ public sealed class QuantizeCommand : Command<QuantizeCommand.Settings>
         {
             SourcePath = settings.ModelPath,
             OutputPath = settings.Out,
-            Target = new QuantizationTarget(QuantizationTargetKind.Gguf, policy),
+            Target = new QuantizationTarget(kind, policy),
             Architecture = settings.Architecture,
             Overwrite = settings.Overwrite,
         };

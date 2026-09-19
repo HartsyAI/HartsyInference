@@ -75,4 +75,21 @@ public sealed record ComfyQuantDescriptor
         }
         return fallback;
     }
+
+    /// <summary>The bytes a <c>.comfy_quant</c> companion holds. Written as a U8 tensor beside the weight, which is
+    /// how ComfyUI stores it — the per-layer blob is authoritative, not the file-level metadata mirror.</summary>
+    public byte[] Serialize()
+    {
+        // Key names are ComfyUI's, not ours: TryParse above was written against real published files, so this is
+        // the shape that round-trips through it AND through ComfyUI. `convrot` is the gate — a groupsize without
+        // it reads back as 0.
+        Dictionary<string, object> fields = new(StringComparer.Ordinal) { ["format"] = Format };
+        if (ConvRotGroupSize > 0)
+        {
+            fields["convrot"] = true;
+            fields["convrot_groupsize"] = ConvRotGroupSize;
+        }
+        if (FullPrecisionMatMul) fields["full_precision_matrix_mult"] = true;
+        return System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(fields);
+    }
 }

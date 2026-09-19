@@ -3,6 +3,7 @@ using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.Quant;
 
@@ -11,6 +12,15 @@ public enum QuantizationTargetKind
 {
     /// <summary>A GGUF file, per-tensor precision chosen by a <see cref="GgufQuantPolicy"/>.</summary>
     Gguf,
+
+    /// <summary>A safetensors file in ComfyUI's <c>fp8_scaled</c> shape: each eligible weight stored as F8E4M3
+    /// beside a <c>.scale_weight</c> companion holding the scalar it was divided by.</summary>
+    Fp8Scaled,
+
+    /// <summary>A safetensors file in ComfyUI's <c>int8</c> shape with the convolution rotation applied: each
+    /// eligible weight stored as I8 beside a <c>[rows,1]</c> <c>.weight_scale</c> and a <c>.comfy_quant</c>
+    /// descriptor naming the format, which is what a reader trusts rather than the file-level mirror.</summary>
+    Int8ConvRot,
 }
 
 /// <summary>The output format for a <see cref="QuantizationJob"/>.</summary>
@@ -74,18 +84,19 @@ public static class CheckpointQuantizer
                 $"'{job.OutputPath}' already exists. Pass --overwrite to replace it.");
         if (Path.GetFullPath(job.SourcePath) == Path.GetFullPath(job.OutputPath))
             throw new HartsyInferenceException("Source and output are the same file.");
-        if (job.Target.Kind != QuantizationTargetKind.Gguf)
-            throw new NotSupportedException($"Quantization target '{job.Target.Kind}' is not implemented yet.");
-        GgufQuantPolicy policy = job.Target.Policy
-            ?? throw new HartsyInferenceException("A GGUF target needs a quantization policy.");
+        if (job.Target.Kind == QuantizationTargetKind.Gguf && job.Target.Policy is null)
+            throw new HartsyInferenceException("A GGUF target needs a quantization policy.");
 
         // Through the container, not SafeTensorsLoader: a fp8_scaled or int8 checkpoint carries its scales in
         // companion tensors, and quantizing the raw values without folding them first produces a file that is
         // wrong by whatever those scales were. Opening this way also lets a GGUF be re-quantized.
         using CheckpointSource source = CheckpointSource.Open(job.SourcePath);
         string architecture = job.Architecture ?? "unknown";
+        string targetLabel = job.Target.Kind == QuantizationTargetKind.Gguf
+            ? $"{job.Target.Policy!.BackboneDType.Name} GGUF (architecture '{architecture}')"
+            : job.Target.Kind.ToString();
         Logs.Info($"[Quantize] {Path.GetFileName(job.SourcePath)} ({source.Format}, {source.Weights.Count} tensors) "
-            + $"→ {policy.BackboneDType.Name} GGUF, architecture '{architecture}'.");
+            + $"→ {targetLabel}.");
 
         Dictionary<string, Tensor> dense = new(source.Weights.Count, StringComparer.Ordinal);
         List<Tensor> owned = new();
@@ -98,12 +109,22 @@ public static class CheckpointQuantizer
                 dense[kv.Key] = wide;
             }
             Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(job.OutputPath))!);
-            GgufQuantizationReport inner =
-                GgufQuantizer.ConvertDictionaryToGguf(dense, job.OutputPath, policy, architecture);
+            int written, quantized;
+            if (job.Target.Kind == QuantizationTargetKind.Gguf)
+            {
+                GgufQuantizationReport inner = GgufQuantizer.ConvertDictionaryToGguf(
+                    dense, job.OutputPath, job.Target.Policy!, architecture);
+                written = inner.QuantizedCount + inner.PassthroughCount + inner.CastCount;
+                quantized = inner.QuantizedCount;
+            }
+            else
+            {
+                (written, quantized) = WriteSafetensors(job, dense, owned);
+            }
             return new QuantizationReport
             {
-                TensorCount = inner.QuantizedCount + inner.PassthroughCount + inner.CastCount,
-                QuantizedCount = inner.QuantizedCount,
+                TensorCount = written,
+                QuantizedCount = quantized,
                 SourceBytes = new FileInfo(job.SourcePath).Length,
                 OutputBytes = new FileInfo(job.OutputPath).Length,
             };
@@ -113,6 +134,80 @@ public static class CheckpointQuantizer
             foreach (Tensor t in owned) t.Dispose();
         }
     }
+
+    /// <summary>Writes the two ComfyUI safetensors shapes. Both quantize only what they can: a weight that is not
+    /// an eligible rank-2 <c>.weight</c>, or is too small to be worth it, is written wide rather than forced — the
+    /// same rule the GGUF policy applies, and the reason a quantized file still carries F32 norms and biases.</summary>
+    private static (int Written, int Quantized) WriteSafetensors(
+        QuantizationJob job, Dictionary<string, Tensor> dense, List<Tensor> owned)
+    {
+        Dictionary<string, Tensor> output = new(dense.Count, StringComparer.Ordinal);
+        int quantized = 0;
+        foreach (KeyValuePair<string, Tensor> kv in dense)
+        {
+            if (job.Target.Kind == QuantizationTargetKind.Fp8Scaled)
+            {
+                // The helper takes BF16/F16 because that is what a published fp8_scaled build is made from; our
+                // dense copy is F32, so it is narrowed first and the narrowed copy is what gets stored if the
+                // weight turns out ineligible.
+                Tensor half = kv.Value.DType == DType.BF16 ? kv.Value : kv.Value.CastTo(DType.BF16);
+                if (!ReferenceEquals(half, kv.Value)) owned.Add(half);
+                if (CheckpointConverters.Utils.CheckpointConvertUtils.TryQuantizeWeightToFp8(output, kv.Key, half))
+                {
+                    foreach (string added in output.Keys)
+                    {
+                        if (!ReferenceEquals(output[added], half) && !dense.ContainsKey(added)) owned.Add(output[added]);
+                    }
+                    quantized++;
+                    continue;
+                }
+                output[kv.Key] = half;
+                continue;
+            }
+            if (IsInt8Eligible(kv.Key, kv.Value))
+            {
+                // QuantizeFromF32 rotates in place, so it gets a copy rather than the container's mapped tensor.
+                Tensor scratch = kv.Value.CastTo(DType.F32);
+                (Tensor weight, Tensor rowScale) = Core.Tensors.Int8ConvRotCodec.QuantizeFromF32(scratch, ConvRotGroup);
+                scratch.Dispose();
+                owned.Add(weight);
+                owned.Add(rowScale);
+                // [rows,1] rather than the codec's flat [rows]: that is the shape published ComfyUI int8 repacks
+                // carry, and interoperating with those is the whole reason to write this format. Our own reader
+                // goes by element count either way.
+                Tensor shapedScale = rowScale.Reshape(new TensorShape(rowScale.ElementCount, 1));
+                owned.Add(shapedScale);
+                output[kv.Key] = weight;
+                output[kv.Key[..^".weight".Length] + ".weight_scale"] = shapedScale;
+                byte[] blob = new ComfyQuantDescriptor
+                {
+                    Format = "int8_tensorwise",
+                    ConvRotGroupSize = ConvRotGroup,
+                }.Serialize();
+                Tensor descriptor = new Tensor(new TensorShape(blob.Length), DType.U8);
+                blob.CopyTo(descriptor.AsSpan<byte>());
+                owned.Add(descriptor);
+                output[kv.Key[..^".weight".Length] + ComfyQuantDescriptor.Suffix] = descriptor;
+                quantized++;
+                continue;
+            }
+            output[kv.Key] = kv.Value;
+        }
+        SafeTensorsWriter.Save(job.OutputPath, output);
+        return (output.Count, quantized);
+    }
+
+    /// <summary>ConvRot's group size. 256 is what the published ComfyUI int8 repacks use, and a reader takes it
+    /// from the descriptor rather than assuming, so this only has to be self-consistent with what we write.</summary>
+    private const int ConvRotGroup = 256;
+
+    /// <summary>Whether a tensor is worth storing as int8: a rank-2 <c>.weight</c> whose row length divides the
+    /// rotation group, since a partial group cannot be rotated.</summary>
+    private static bool IsInt8Eligible(string key, Tensor tensor) =>
+        key.EndsWith(".weight", StringComparison.Ordinal)
+        && tensor.Shape.Rank == 2
+        && tensor.ElementCount >= (1L << 20)
+        && tensor.Shape[1] % ConvRotGroup == 0;
 
     /// <summary>Gets a tensor to plain F32 whatever form it arrived in, so the quantizer only ever sees real values.
     /// <para>The three forms need three different routes and picking the wrong one is silent: <c>CastTo</c> folds an
