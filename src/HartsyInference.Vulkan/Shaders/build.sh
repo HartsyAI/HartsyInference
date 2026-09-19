@@ -65,6 +65,7 @@ DTYPE_KERNELS=(
     groupnorm
     groupnorm_silu
     layernorm
+    layernorm_noaffine
     rmsnorm
     softmax
     im2col

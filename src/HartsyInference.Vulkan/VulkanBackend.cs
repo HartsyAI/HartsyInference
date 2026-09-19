@@ -1553,6 +1553,39 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     #region Normalization
 
+    /// <summary>Dispatches a per-row norm that takes no weight or bias: one workgroup per row, two buffers.</summary>
+    private void DispatchNoAffineNorm(string shader, Tensor output, Tensor input, float eps, int normDim, int totalRows)
+    {
+        VulkanBuffer inBuf = GetBuffer(input);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            const uint local = 256;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+            };
+            VulkanKernel k = GetKernel(shader, storageBufferCount: 2, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)normDim);
+            pc.U32((uint)totalRows);
+            pc.F32(eps);
+
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
+            Dispatch(k, bufs, pc.Written, (uint)totalRows, 1, 1);
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan DispatchNoAffineNorm dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     private void DispatchPerRowNorm(
         string shader,
         int storageBufs,
@@ -1694,6 +1727,25 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         int totalRows = (int)(input.ElementCount / normDim);
         string shader = "layernorm" + DtypeSuffix(input.DType);
         DispatchPerRowNorm(shader, 4, output, input, weight, bias, eps, normDim, totalRows);
+    }
+
+    /// <summary>Per-row LayerNorm with no learned scale or bias.</summary>
+    /// <remarks>No override existed, so every call fell through to <see cref="IBackend"/>'s host default — which
+    /// refuses anything but F32 outright. That is what a Flux generation on Vulkan hit: the DiT runs its block
+    /// activations in F16 by default (<c>numerics.ditF16</c>), so the final pre-modulation norm handed the default
+    /// an F16 tensor and the generation failed with "LayerNormNoAffine default fallback only supports F32".
+    /// Every DiT normalizes before modulating, so this is on the hot path of the whole family.</remarks>
+    public void LayerNormNoAffine(Tensor output, Tensor input, float eps)
+    {
+        using OpScope _op = EnterOp();
+        if (input.DType != output.DType || (input.DType != DType.F32 && input.DType != DType.F16))
+        {
+            IBackend.LayerNormNoAffineReference(output, input, eps);
+            return;
+        }
+        int normDim = (int)input.Shape[input.Shape.Rank - 1];
+        int totalRows = (int)(input.ElementCount / normDim);
+        DispatchNoAffineNorm("layernorm_noaffine" + DtypeSuffix(input.DType), output, input, eps, normDim, totalRows);
     }
 
     public void RmsNorm(Tensor output, Tensor input, Tensor weight, float eps)
