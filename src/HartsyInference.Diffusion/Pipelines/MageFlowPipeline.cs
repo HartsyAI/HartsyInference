@@ -47,10 +47,15 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
         Prompting.WeightedTokenSequence? uncondWeights = null)
     {
         ThrowIfDisposed();
+        RequireMatchingWeights(condTokens, condWeights, nameof(condWeights));
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. Passed
         // explicitly rather than read off a request — this pipeline takes primitives, not a TextToImageRequest.
         using IDisposable seamlessScope = BeginSeamlessTiling(seamlessTiling);
         bool useCfg = cfgScale > 1f && uncondTokens is not null;
+        if (useCfg)
+        {
+            RequireMatchingWeights(uncondTokens!, uncondWeights, nameof(uncondWeights));
+        }
 
         // 1. Text conditioning: Qwen3-VL-4B last_hidden_state, system prefix dropped.
         Tensor condHidden = ApplyTokenWeights(EncodeDropped(condTokens, condDrop), condWeights);
@@ -164,6 +169,17 @@ public sealed unsafe class MageFlowPipeline : DiffusionPipelineBase
     /// <summary>Scales each token's cond row by its weight AFTER the system-prefix drop — SwarmUI's CondScale
     /// mechanism, whose right-alignment offset is negative here because of that drop. Adopts and disposes
     /// <paramref name="hidden"/>, so the caller keeps exactly one tensor to release.</summary>
+    /// <summary>Token weights are matched to conditioning rows by position — right-aligned — so a weight array that
+    /// does not describe the tokens it arrived with would not fail, it would shift every emphasis onto a neighbouring
+    /// word. This pipeline is public and takes primitives, so the pairing is the caller's to get right and ours to
+    /// check; Qwen-Image and Flux.2 already refuse the same mismatch.</summary>
+    private static void RequireMatchingWeights(int[] tokenIds, Prompting.WeightedTokenSequence? weights, string name)
+    {
+        if (weights is not null && weights.Weights.Length != tokenIds.Length)
+            throw new ArgumentException(
+                $"Weights describe {weights.Weights.Length} tokens but {tokenIds.Length} were passed.", name);
+    }
+
     private Tensor ApplyTokenWeights(Tensor hidden, Prompting.WeightedTokenSequence? weights)
     {
         Tensor? scaled = weights is null

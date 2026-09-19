@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Collections.Generic;
 using HartsyInference.Diffusion.Prompting;
 using Xunit;
@@ -105,5 +106,42 @@ public sealed class WeightedTokenBuilderTests
         WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, Encode, [], []);
         int[] expected = [.. Encode("red"), .. Encode(" cat")];
         Assert.Equal(expected, built.Tokens);
+    }
+
+    /// <summary>The acceptance criterion the plan states for every weighted family: a weight of 1.0 must be
+    /// byte-identical to the plain prompt. Per-span tokenization breaks that on its own, because a byte-level BPE
+    /// merges a leading space into the following word — so `a `/`red`/` cat` encoded separately is not `a red cat`.
+    /// The scaling would then be a correct no-op applied to conditioning that had already changed.</summary>
+    [Theory]
+    [InlineData("a (red:1.0) cat")]
+    [InlineData("(a:1.0) (red:1.0) (cat:1.0)")]
+    public void EmphasisThatWeighsOneTokenizesExactlyLikeThePlainPrompt(string prompt)
+    {
+        List<string> calls = [];
+        IReadOnlyList<int> Encode(string text)
+        {
+            calls.Add(text);
+            return [.. text.Select(c => (int)c)];
+        }
+
+        WeightedTokenSequence weighted = WeightedTokenBuilder.Build(prompt, Encode, [], []);
+        Assert.Equal(["a red cat"], calls);
+        Assert.Equal("a red cat".Select(c => (int)c), weighted.Tokens);
+        Assert.All(weighted.Weights, w => Assert.Equal(1f, w));
+    }
+
+    /// <summary>The control: a weight that does something still splits, which is the parity behaviour.</summary>
+    [Fact]
+    public void ARealWeightStillTokenizesItsSpanAlone()
+    {
+        List<string> calls = [];
+        IReadOnlyList<int> Encode(string text)
+        {
+            calls.Add(text);
+            return [.. text.Select(c => (int)c)];
+        }
+
+        WeightedTokenBuilder.Build("a (red:1.5) cat", Encode, [], []);
+        Assert.Equal(["a ", "red", " cat"], calls);
     }
 }

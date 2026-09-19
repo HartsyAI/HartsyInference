@@ -10,8 +10,9 @@ namespace HartsyInference.Diffusion.Prompting;
 /// possible at all.</summary>
 /// <remarks>Per-span tokenization is the parity behaviour, not an approximation, but it does mean a BPE/SPM merge can
 /// no longer span a weight boundary: <c>(cat:1.2)flap</c> tokenizes differently from <c>catflap</c>. SwarmUI has the
-/// same property. The invariant that matters is the one callers gate on — a prompt with no weighting syntax produces
-/// exactly one span and therefore exactly the plain <c>EncodeRaw</c> ids.</remarks>
+/// same property. It only applies where a weight is actually present: spans that all weigh 1 are rejoined and
+/// tokenized in one call, so a prompt with no emphasis — or with none that does anything, like <c>(red:1.0)</c> —
+/// produces exactly the plain <c>EncodeRaw</c> ids.</remarks>
 public static class WeightedTokenBuilder
 {
     /// <summary>Builds the templated id/weight sequence for <paramref name="spans"/>.</summary>
@@ -23,6 +24,15 @@ public static class WeightedTokenBuilder
     {
         ArgumentNullException.ThrowIfNull(spans);
         ArgumentNullException.ThrowIfNull(encodeRaw);
+        // Per-span tokenization is only correct when a span actually carries a weight. `a (red:1.0) cat` parses into
+        // three spans that all weigh 1, and encoding them separately would hand the model different ids than
+        // `a red cat` for a byte-level tokenizer, which merges a leading space into the following word. The scaling
+        // would then be a correct no-op on conditioning that had already changed. Collapsing here rather than at each
+        // call site is what makes the invariant hold for a caller that forgets to check.
+        if (!PromptWeighting.HasWeights(spans))
+        {
+            spans = [new WeightedSpan(PromptWeighting.Join(spans), 1f)];
+        }
         List<int> tokens = new List<int>(templatePrefix.Length + templateSuffix.Length + 64);
         List<float> weights = new List<float>(tokens.Capacity);
         foreach (int id in templatePrefix)
