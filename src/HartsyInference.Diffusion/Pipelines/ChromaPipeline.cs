@@ -51,10 +51,6 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         return blended;
     }
 
-    /// <summary>Whether two weight arrays describe the same emphasis. Part of the conditioning cache key.</summary>
-    private static bool WeightsEqual(float[]? a, float[]? b) =>
-        a is null ? b is null : b is not null && a.AsSpan().SequenceEqual(b);
-
     private int[]? _cachedCondKey;
     private Tensor? _cachedCond;
     private Tensor? _cachedCondMask;
@@ -164,11 +160,9 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // Prompt-embedding cache: identical token ids reuse the previous gen's hidden states + derived masks —
         // the whole T5 phase (preload + encode + free) vanishes for repeat prompts (seed-only changes).
         bool condHit = _cachedCond is not null
-            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsT5)
-            && WeightsEqual(_cachedCondWeights, promptWeights);
+            && Prompting.ConditioningCacheKey.Matches(_cachedCondKey, _cachedCondWeights, promptTokenIdsT5, promptWeights);
         bool uncondHit = !useCfg || (_cachedUncond is not null
-            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5)
-            && WeightsEqual(_cachedUncondWeights, negativeWeights));
+            && Prompting.ConditioningCacheKey.Matches(_cachedUncondKey, _cachedUncondWeights, negativePromptTokenIdsT5, negativeWeights));
         Tensor condContext;
         Tensor? condMask;
         Tensor? uncondContext = null;

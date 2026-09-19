@@ -50,10 +50,6 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         return blended;
     }
 
-    /// <summary>Whether two weight arrays describe the same emphasis. Part of the conditioning cache key.</summary>
-    private static bool WeightsEqual(float[]? a, float[]? b) =>
-        a is null ? b is null : b is not null && a.AsSpan().SequenceEqual(b);
-
     /// <summary>Creates a new Chroma Radiance pipeline with all components pre-loaded.</summary>
     /// <param name="backend">Compute backend.</param>
     /// <param name="t5">T5-XXL text encoder (joint_attention_dim = 4096, max length 512).</param>
@@ -142,11 +138,9 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         // Prompt-embedding cache: identical token ids reuse the previous gen's hidden states — the whole T5
         // phase (DiT evict + T5 preload + encode + free) vanishes for repeat prompts (seed-only changes).
         bool condHit = _cachedCond is not null
-            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsT5)
-            && WeightsEqual(_cachedCondWeights, promptWeights);
+            && Prompting.ConditioningCacheKey.Matches(_cachedCondKey, _cachedCondWeights, promptTokenIdsT5, promptWeights);
         bool uncondHit = !useCfg || (_cachedUncond is not null
-            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5)
-            && WeightsEqual(_cachedUncondWeights, negativeWeights));
+            && Prompting.ConditioningCacheKey.Matches(_cachedUncondKey, _cachedUncondWeights, negativePromptTokenIdsT5, negativeWeights));
         Tensor condContext;
         Tensor? uncondContext = null;
         if (condHit && uncondHit)
