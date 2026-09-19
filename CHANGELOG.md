@@ -6,6 +6,45 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.130
+
+- **Nine more families honour `(word:N)`**, taking the deliberately-unwired ledger from 22 registered families
+  to 14.
+- **The four Wan variant recipes: Wan-Animate, Wan-Animate-2, Wan S2V and Wan VACE.** Each is a separate recipe
+  class from `WanVideoRecipe` with its own prompt path, which is why declaring the mode on the parent never
+  reached them. That is the whole Wan family wired.
+- **The blend is hoisted into `VideoRecipeUtils` rather than copied four times**, and `WanVideoRecipePipeline`
+  delegates to it, so there is one definition of how this family weights a prompt instead of five that can drift.
+- Wan-Animate-2 carries a third conditioning stream — the driving clip's own prompt — and it is weighted as its
+  own leaf, which is what SwarmUI's `encode_leaves` does per leaf. Its empty baseline rides the same four-row
+  batch, for the reason the two-stream form already gave: the baseline has to share the padding and the layer
+  selection exactly, and a second pass cannot guarantee that.
+- umT5 pads to a fixed window, so ONE empty encode matches any prompt's shape. That is what makes ComfyBlend
+  cheap for this family, and it is not true of every ComfyBlend family — a family whose conditioning length
+  tracks its prompt needs a per-prompt baseline instead.
+- **Four ComfyBlend families follow: AuraFlow, LTX-Video, Chroma and Chroma-Radiance.** `T5WeightedConditioning`
+  is to the T5-style encoders what `WeightedConditioning` already is to CLIP, and it owns the two things a
+  ComfyBlend caller gets wrong. First, the empty baseline is subtracted row by row, so it must match the
+  conditioning's shape exactly — a tokenizer that pads to a fixed window makes that free, and every family here
+  has one. Second, a conditioning cache keyed on token ids will serve the wrong tensor: once the recipe has taken
+  the emphasis off the text, `(cat:1.5)` and `cat` tokenize identically, so the second generation hits the cache.
+- **The four split into two opposite caching strategies, and the trim is what decides it.** AuraFlow has none, so
+  its cached conditioning still shares the baseline's shape: it caches the PLAIN encode and blends a per-request
+  copy after the fetch. Chroma and Chroma-Radiance trim to the prompt's kept tokens before caching, so the
+  full-window baseline is no longer subtractable from what they stored — they blend before the trim and carry the
+  weights IN the cache key instead.
+- LTX-Video's baseline rides the same three-row encode batch as its prompt and negative, and the blend lands at
+  the full 128-token window before the pad drop. Both are the same rule: the weights describe the padded rows,
+  and the baseline is only subtractable while both still have them.
+- **A disposal bug the unit tests could not have found.** AuraFlow's first weighted generation died with "Cannot
+  access a disposed object": the baseline was being released inside the cache-eviction block, immediately after
+  being encoded, because that is where the sibling `_cachedUncond?.Dispose()` lives. `w = 1.0` passed throughout —
+  only a weighted run reaches it. It belongs in `DisposeCore`, which `AuraFlowPipeline` did not override at all,
+  so its two existing cached tensors were already leaking; the override now covers all three.
+- The token/weight pairing is now unit-tested once for all five recipes. The invariant worth naming: EOS and pad
+  rows weigh exactly 1. They are not part of the prompt, and blending them would pull the padding toward the
+  empty encode along with the words — a whole-sequence drift that reads as the weighting being far too strong.
+
 ## alpha.129
 
 - **Six more families honour `(word:N)` prompt weighting: Z-Image, Boogu, Zeta-Chroma, Lens, ERNIE-Image and

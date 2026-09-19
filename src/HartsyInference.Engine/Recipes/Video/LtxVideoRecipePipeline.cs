@@ -64,20 +64,40 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         int frameRate = request.Fps ?? 24;
         float cfgScale = request.CfgScale ?? _config.GuidanceScale;
 
-        int[] promptTokens = _tokenizer.Encode(prompt);
-        int[] negTokens = _tokenizer.Encode(negative);
+        // Declaring ComfyBlend is what stops VideoService collapsing `(word:N)`, so the recipe owns the grammar
+        // now. T5 pads to a fixed 128 here, so the empty baseline the blend subtracts shares the prompt's shape
+        // and can ride the SAME batch — which is what guarantees identical padding and layer selection.
+        (int[] promptTokens, float[]? promptWeights) = T5WeightedConditioning.Tokenize(_tokenizer, prompt);
+        (int[] negTokens, float[]? negativeWeights) = T5WeightedConditioning.Tokenize(_tokenizer, negative);
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
+        bool weighted = promptWeights is not null || negativeWeights is not null;
         // T5 runs on the (possibly separate) text backend; the host-side SliceBatchElementPrefix passes below ARE
         // the cross-device boundary — they force the embeddings to host, so the denoiser's backend re-uploads from
         // there. Load-bearing for TextEncoderDevice placement: keep them host-side.
-        Tensor batch = _t5.Encode(_textBackend, [promptTokens, negTokens], [promptMask, negMask]);
+        int[] emptyTokens = T5WeightedConditioning.EmptyTokens(_tokenizer);
+        Tensor batch = weighted
+            ? _t5.Encode(_textBackend, [promptTokens, negTokens, emptyTokens],
+                [promptMask, negMask, T5Tokenizer.CreateAttentionMask(emptyTokens)])
+            : _t5.Encode(_textBackend, [promptTokens, negTokens], [promptMask, negMask]);
         // Drop right-padding: feed cross-attention only the real (non-pad) T5 tokens — attending the pad rows
         // unmasked dilutes the caption (LtxVideoGenerationTests' proven fix; zeroing the pad rows in place, the
         // Engine's earlier approach, still attends them and was NOT the fix that made LTX-Video coherent).
         int promptLen = promptMask.Sum(), negLen = negMask.Sum();
-        Tensor promptEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 0, promptTokens.Length, promptLen, _config.CaptionChannels);
-        Tensor negEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 1, negTokens.Length, negLen, _config.CaptionChannels);
+        Tensor promptEmbeds, negEmbeds;
+        if (weighted)
+        {
+            // Blend at the FULL window, before the pad drop: the weights describe all 128 rows, and the baseline
+            // is only subtractable row for row while both still have them.
+            using Tensor empty = CfgHelper.SliceBatchElement(batch, 2, emptyTokens.Length, _config.CaptionChannels);
+            promptEmbeds = BlendThenTrim(batch, 0, promptTokens.Length, promptLen, empty, promptWeights);
+            negEmbeds = BlendThenTrim(batch, 1, negTokens.Length, negLen, empty, negativeWeights);
+        }
+        else
+        {
+            promptEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 0, promptTokens.Length, promptLen, _config.CaptionChannels);
+            negEmbeds = CfgHelper.SliceBatchElementPrefix(batch, 1, negTokens.Length, negLen, _config.CaptionChannels);
+        }
         batch.Dispose();
         _textBackend.Sync();
         _textBackend.FreeWeights(_t5.EnumerateWeights());
@@ -143,11 +163,27 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
         _tokenizer.Dispose();
         _t5.Dispose();
         _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        // IDisposable, not SafeTensorsLoader: the list has held a CheckpointSource since the container flip, and
+        // an element-typed foreach casts — so every generation threw here AFTER writing its output, surfacing as
+        // a non-zero exit on an otherwise complete video.
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }
         // Last: the stack owns the merged weight tensors the transformer was serving.
         _loraStack?.Dispose();
+    }
+
+    /// <summary>Takes one row out of the encoded batch at its full padded width, blends it toward the empty
+    /// baseline, then drops the right-padding — in that order, because the weights describe the padded rows and
+    /// the baseline is only subtractable row for row while both still have them.</summary>
+    private Tensor BlendThenTrim(Tensor batch, int batchIdx, int fullLen, int realLen, Tensor empty, float[]? weights)
+    {
+        Tensor full = CfgHelper.SliceBatchElement(batch, batchIdx, fullLen, _config.CaptionChannels);
+        T5WeightedConditioning.Blend(_textBackend, ref full, empty, weights);
+        using (full)
+        {
+            return CfgHelper.SliceBatchElementPrefix(full, 0, fullLen, realLen, _config.CaptionChannels);
+        }
     }
 }

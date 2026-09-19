@@ -29,6 +29,15 @@ public sealed class WanVaceRecipe : IVideoRecipe
     /// <inheritdoc/>
     /// <remarks>VACE requires a control image/video — it throws without one, so the init image is mandatory rather than optional.</remarks>
     /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20, matching the plain Wan family that already had it — same original-Wan module naming, so the existing <c>KohyaWan</c> / <c>DiffusersWan</c> mappers cover it unchanged.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: every Wan variant class
+    /// resolves to <c>wan.WanT5Tokenizer</c> → <c>UMT5XXlTokenizer</c>, which does NOT disable weights,
+    /// so the mechanism is the encoder-output blend rather than a cond scale. Wan VACE is a separate
+    /// recipe class from <c>WanVideoRecipe</c> with its own prompt path, which is why it needed its own
+    /// wiring rather than inheriting one.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);

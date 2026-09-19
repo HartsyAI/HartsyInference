@@ -107,11 +107,8 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
 
         // Three contexts, one batched encode: the generation stream's prompt, its negative, and the driving
         // stream's own prompt. Only these are hoisted out of the chunk loop.
-        int[] promptTokens = _tokenizer.Encode(request.Prompt);
-        int[] negTokens = _tokenizer.Encode(negative);
-        int[] drivingTokens = _tokenizer.Encode(drivingPrompt);
-        (Tensor promptEmbeds, Tensor negEmbeds, Tensor drivingEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
-            _backend, _umt5, _config.TextDim, promptTokens, negTokens, drivingTokens);
+        (Tensor promptEmbeds, Tensor negEmbeds, Tensor drivingEmbeds) = VideoRecipeUtils.EncodeWeightedWanPrompts(
+            _backend, _umt5, _tokenizer, _config.TextDim, request.Prompt, negative, drivingPrompt);
 
         Tensor? referenceRgb = null, referenceClip = null;
         try

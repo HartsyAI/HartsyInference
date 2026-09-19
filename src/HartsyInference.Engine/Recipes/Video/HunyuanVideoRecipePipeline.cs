@@ -113,7 +113,9 @@ public sealed class HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPip
         _llava.Dispose();
         _clipTokenizer.Dispose();
         _dit.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        // IDisposable, not SafeTensorsLoader: the list holds a CheckpointSource since the container flip, and an
+        // element-typed foreach casts — it threw on every teardown, after the output was already written.
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }

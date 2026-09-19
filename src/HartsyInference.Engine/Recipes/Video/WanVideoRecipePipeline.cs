@@ -270,65 +270,9 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     /// <para>Shared by the batch and streaming entry points on purpose. They each encoded their own prompt before,
     /// and weighting one of them would have made <c>(word:1.5)</c> mean different things depending on whether the
     /// caller streamed.</para></summary>
-    private (Tensor Prompt, Tensor Negative) EncodeWeightedPrompts(string prompt, string negative)
-    {
-        // The emphasis grammar must come OFF the text either way. Declaring a weighting mode is what stops the
-        // service stripping `(word:1.5)` upstream, so the parens arrive here; tokenizing them literally would
-        // feed the digits to umT5 as prose, which is what a weight of exactly 1.0 would otherwise do.
-        (int[] promptTokens, float[]? promptWeights) = TokenizeWeighted(PromptWeighting.Parse(prompt));
-        (int[] negTokens, float[]? negativeWeights) = TokenizeWeighted(PromptWeighting.Parse(negative));
-        // umT5 runs on the (possibly separate) text backend; the helper's host-side slice/zero passes ARE the
-        // cross-device boundary, so the embeddings land on the host for the denoiser's backend to re-upload.
-        if (promptWeights is null && negativeWeights is null)
-        {
-            return VideoRecipeUtils.EncodeWanPrompts(
-                _textBackend, _umt5, _config.TextDim, promptTokens, negTokens);
-        }
-        (Tensor promptEmbeds, Tensor negEmbeds, Tensor emptyEmbeds) = VideoRecipeUtils.EncodeWanPrompts(
-            _textBackend, _umt5, _config.TextDim, promptTokens, negTokens, _tokenizer.Encode(""));
-        using (emptyEmbeds)
-        {
-            Blend(ref promptEmbeds, emptyEmbeds, promptWeights);
-            Blend(ref negEmbeds, emptyEmbeds, negativeWeights);
-        }
-        return (promptEmbeds, negEmbeds);
-    }
+    /// <summary>The family's ComfyBlend weighting, shared with the Animate/S2V/VACE variants.</summary>
+    private (Tensor Prompt, Tensor Negative) EncodeWeightedPrompts(string prompt, string negative) =>
+        VideoRecipeUtils.EncodeWeightedWanPrompts(_textBackend, _umt5, _tokenizer, _config.TextDim, prompt, negative);
 
-    /// <summary>Tokenizes spans the way <see cref="T5Tokenizer.Encode"/> does — EOS then pad to the fixed window
-    /// — returning per-token weights only when some span actually carries one. A null weight array means "nothing
-    /// to blend", and is what keeps an ordinary prompt on the original single-encode path.
-    /// <para>The unweighted case still goes through the spans rather than the raw string, because the emphasis
-    /// grammar has to come off the text whether or not it does anything: <c>(red:1.0)</c> weighs 1 but its parens
-    /// are not part of the prompt.</para></summary>
-    private (int[] Tokens, float[]? Weights) TokenizeWeighted(IReadOnlyList<WeightedSpan> spans)
-    {
-        if (!PromptWeighting.HasWeights(spans))
-        {
-            return (_tokenizer.Encode(PromptWeighting.Join(spans)), null);
-        }
-        WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, _tokenizer.EncodeRaw, [], []);
-        int window = _tokenizer.MaxLength;
-        int[] tokens = new int[window];
-        float[] weights = new float[window];
-        Array.Fill(weights, 1f);
-        // Pad and EOS rows weigh 1: they are not part of the prompt, and blending them would pull the padding
-        // toward the empty encode along with the words.
-        int real = Math.Min(built.Tokens.Length, window - 1);
-        Array.Copy(built.Tokens, tokens, real);
-        Array.Copy(built.Weights, weights, real);
-        tokens[real] = T5Tokenizer.EosTokenId;
-        for (int i = real + 1; i < window; i++) tokens[i] = T5Tokenizer.PadTokenId;
-        return (tokens, weights);
-    }
-
-    /// <summary>Replaces <paramref name="embeds"/> with its blend toward the empty encode, when there is one.</summary>
-    private void Blend(ref Tensor embeds, Tensor empty, float[]? weights)
-    {
-        if (weights is null) return;
-        Tensor? blended = ComfyBlend.Apply(_textBackend, embeds, empty, weights);
-        if (blended is null) return;
-        embeds.Dispose();
-        embeds = blended;
-    }
 
 }

@@ -27,8 +27,11 @@ public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenize
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
 
-        int[] promptTokens = _tokenizer.Encode(prompt);
-        int[] negTokens = _tokenizer.Encode(negative);
+        // Declaring ComfyBlend is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar
+        // now. Pile-T5 pads to a fixed 256, so the empty baseline the blend subtracts is prompt-independent and
+        // the pipeline encodes it once.
+        (int[] promptTokens, float[]? promptWeights) = T5WeightedConditioning.Tokenize(_tokenizer, prompt);
+        (int[] negTokens, float[]? negativeWeights) = T5WeightedConditioning.Tokenize(_tokenizer, negative);
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
 
@@ -39,7 +42,8 @@ public sealed class AuraFlowRecipePipeline(AuraFlowPipeline pipeline, T5Tokenize
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
-            promptTokens, negTokens, promptMask, negMask, inner, bridge);
+            promptTokens, negTokens, promptMask, negMask, inner, bridge,
+            promptWeights, negativeWeights, T5WeightedConditioning.EmptyTokens(_tokenizer));
 
         return new ImageResult
         {
