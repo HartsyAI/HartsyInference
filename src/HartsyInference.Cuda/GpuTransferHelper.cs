@@ -1091,6 +1091,23 @@ internal static unsafe class GpuTransferHelper
     internal static void RegisterCachedWeight(Tensor weight, ulong dptr, nuint byteSize)
     {
         State s = Resolve();
+        // A tensor may not become a weight while it is still a live activation: CopyToDevice checks the weight
+        // cache first, so the activation's bytes — what an op just wrote — would be shadowed by this upload on
+        // every later read, which is the auto-promote-discards-device-writes bug arriving from the other side.
+        //
+        // Every caller already satisfies this, but incidentally rather than by intent: each reads DataPointer to
+        // find the host bytes to upload, and that fires the activation's sync callback, which evicts the entry.
+        // An invariant held by a side effect of an unrelated read is one line away from being lost — a caller that
+        // uploads from a pinned or mapped buffer would never touch DataPointer, and CudaStreamingWeightCache is
+        // already most of the way there. So it is checked where it is established rather than where it would be
+        // observed: this is the write that would corrupt the read, and weight registration is a load-time path.
+        if (s.ActivationCache.ContainsKey(weight))
+        {
+            throw new InvalidOperationException(
+                $"Tensor {weight.Shape} {weight.DType} is being registered as a weight on state {s.Key} while it "
+                + "is still cached as an activation. Materialize or evict the activation first (reading "
+                + "DataPointer does both); registering now would shadow the activation on every later read.");
+        }
         s.WeightCache[weight] = dptr;
         s.CachedPointers.Add(dptr);
         s.CachedBytes += (long)byteSize;

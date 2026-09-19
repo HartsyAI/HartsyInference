@@ -25,6 +25,13 @@ stable release will require. Dates are UTC.
   the production lookups deliberately: a guard at the weight-cast call site would fire after `CopyToDevice` had
   already served the stale bytes, crashing the generation somewhere unrelated to the cause. Guarding the read
   itself is a design call for the migration, not for this PR.
+- **The write that could create that state is guarded, at the write.** `RegisterCachedWeight` refuses to make a
+  tensor a weight while it is still a live activation. Nothing could reach that state today, but only by accident:
+  all three callers read `DataPointer` to find the host bytes to upload, which fires the activation's sync callback
+  and evicts the entry. An invariant held by a side effect of an unrelated read is one line from being lost — a
+  caller uploading from a pinned or mapped buffer would never touch `DataPointer`, and `CudaStreamingWeightCache`
+  is already most of the way there. The check sits where the state would be established rather than where it would
+  be noticed, and weight registration is a load-time path, so it costs a dictionary probe per weight.
 - `HartsyInference.Cuda` references `HartsyInference.Gpu` for the first time. Nothing depends on it yet beyond the
   enum — it is landed here, on its own, so the package-graph change is proven separately from the cache migration
   that needs it. Verified by packing rather than by building: `HartsyInference.Cuda.nupkg` declares
