@@ -24,6 +24,15 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
     /// <remarks>A driving video and a reference character image, and nothing else. Unlike V1 there is no pose, face,
     /// background or mask branch to override — <see cref="WanAnimate2RecipePipeline"/> refuses those clips by name
     /// rather than accepting and dropping them.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: every Wan variant class
+    /// resolves to <c>wan.WanT5Tokenizer</c> → <c>UMT5XXlTokenizer</c>, which does NOT disable weights,
+    /// so the mechanism is the encoder-output blend rather than a cond scale. Wan-Animate-2 is a separate
+    /// recipe class from <c>WanVideoRecipe</c> with its own prompt path, which is why it needed its own
+    /// wiring rather than inheriting one. Its driving stream carries its own prompt and is weighted as its own leaf.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.DrivingVideo | VideoFeatures.Lora;
 
     /// <inheritdoc/>

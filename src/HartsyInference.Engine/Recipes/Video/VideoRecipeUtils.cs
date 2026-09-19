@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text.Json;
 using HartsyInference.Audio.Io;
 using HartsyInference.Core.Backends;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Models;
 using HartsyInference.Core.Tensors;
@@ -348,6 +349,103 @@ internal static class VideoRecipeUtils
     {
         Tensor[] embeds = EncodeWanPromptBatch(backend, umt5, textDim, promptTokens, negTokens, drivingTokens);
         return (embeds[0], embeds[1], embeds[2]);
+    }
+
+    /// <summary>Tokenizes a Wan-family prompt pair and applies SwarmUI's <see cref="PromptWeightingMode.ComfyBlend"/>
+    /// to whichever of them carries an emphasis, returning the conditioning the denoise loop consumes.</summary>
+    /// <remarks><para>The blend needs the SAME encoder run on the empty prompt, identical in shape. That is free
+    /// here because umT5 pads to a fixed window, so the empty encode matches any prompt's — a family whose
+    /// conditioning length tracked the prompt could not reuse one baseline like this.</para>
+    /// <para>An unweighted prompt stays on the original single-batch encode, so its output is unchanged. It still
+    /// goes through the spans rather than the raw string, because the grammar has to come off the text whether or
+    /// not it does anything: <c>(red:1.0)</c> weighs 1, but its parens are not part of the prompt.</para></remarks>
+    internal static (Tensor Prompt, Tensor Negative) EncodeWeightedWanPrompts(
+        IBackend backend, T5TextEncoder umt5, T5Tokenizer tokenizer, int textDim, string prompt, string negative)
+    {
+        ArgumentNullException.ThrowIfNull(tokenizer);
+        (int[] promptTokens, float[]? promptWeights) = TokenizeWeightedWan(tokenizer, PromptWeighting.Parse(prompt));
+        (int[] negTokens, float[]? negativeWeights) = TokenizeWeightedWan(tokenizer, PromptWeighting.Parse(negative));
+        if (promptWeights is null && negativeWeights is null)
+        {
+            return EncodeWanPrompts(backend, umt5, textDim, promptTokens, negTokens);
+        }
+        (Tensor promptEmbeds, Tensor negEmbeds, Tensor emptyEmbeds) =
+            EncodeWanPrompts(backend, umt5, textDim, promptTokens, negTokens, tokenizer.Encode(""));
+        using (emptyEmbeds)
+        {
+            BlendWan(backend, ref promptEmbeds, emptyEmbeds, promptWeights);
+            BlendWan(backend, ref negEmbeds, emptyEmbeds, negativeWeights);
+        }
+        return (promptEmbeds, negEmbeds);
+    }
+
+    /// <summary>Three-stream form for Wan-Animate-2, whose driving clip carries its own prompt. Each stream is
+    /// its own leaf and is weighted independently, which is what SwarmUI's <c>encode_leaves</c> does.</summary>
+    internal static (Tensor Prompt, Tensor Negative, Tensor Driving) EncodeWeightedWanPrompts(
+        IBackend backend, T5TextEncoder umt5, T5Tokenizer tokenizer, int textDim,
+        string prompt, string negative, string driving)
+    {
+        ArgumentNullException.ThrowIfNull(tokenizer);
+        (int[] promptTokens, float[]? promptWeights) = TokenizeWeightedWan(tokenizer, PromptWeighting.Parse(prompt));
+        (int[] negTokens, float[]? negativeWeights) = TokenizeWeightedWan(tokenizer, PromptWeighting.Parse(negative));
+        (int[] drivingTokens, float[]? drivingWeights) = TokenizeWeightedWan(tokenizer, PromptWeighting.Parse(driving));
+        if (promptWeights is null && negativeWeights is null && drivingWeights is null)
+        {
+            return EncodeWanPrompts(backend, umt5, textDim, promptTokens, negTokens, drivingTokens);
+        }
+        // The empty baseline rides the SAME batch rather than a second pass, because it has to share the padding
+        // and the layer selection exactly.
+        Tensor[] embeds = EncodeWanPromptBatch(
+            backend, umt5, textDim, promptTokens, negTokens, drivingTokens, tokenizer.Encode(""));
+        Tensor promptEmbeds = embeds[0], negEmbeds = embeds[1], drivingEmbeds = embeds[2];
+        using (embeds[3])
+        {
+            BlendWan(backend, ref promptEmbeds, embeds[3], promptWeights);
+            BlendWan(backend, ref negEmbeds, embeds[3], negativeWeights);
+            BlendWan(backend, ref drivingEmbeds, embeds[3], drivingWeights);
+        }
+        return (promptEmbeds, negEmbeds, drivingEmbeds);
+    }
+
+    /// <summary>Tokenizes spans the way <see cref="T5Tokenizer.Encode"/> does — EOS then pad to the fixed window —
+    /// returning per-token weights only when some span actually carries one. A null weight array means "nothing to
+    /// blend", which is what keeps an ordinary prompt on the single-encode path.</summary>
+    internal static (int[] Tokens, float[]? Weights) TokenizeWeightedWan(
+        T5Tokenizer tokenizer, IReadOnlyList<WeightedSpan> spans)
+    {
+        if (!PromptWeighting.HasWeights(spans))
+        {
+            return (tokenizer.Encode(PromptWeighting.Join(spans)), null);
+        }
+        WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, tokenizer.EncodeRaw, [], []);
+        int window = tokenizer.MaxLength;
+        int[] tokens = new int[window];
+        float[] weights = new float[window];
+        Array.Fill(weights, 1f);
+        // Pad and EOS rows weigh 1: they are not part of the prompt, and blending them would pull the padding
+        // toward the empty encode along with the words.
+        int real = Math.Min(built.Tokens.Length, window - 1);
+        Array.Copy(built.Tokens, tokens, real);
+        Array.Copy(built.Weights, weights, real);
+        tokens[real] = T5Tokenizer.EosTokenId;
+        for (int i = real + 1; i < window; i++) tokens[i] = T5Tokenizer.PadTokenId;
+        return (tokens, weights);
+    }
+
+    /// <summary>Replaces <paramref name="embeds"/> with its blend toward the empty encode, when there is one.</summary>
+    internal static void BlendWan(IBackend backend, ref Tensor embeds, Tensor empty, float[]? weights)
+    {
+        if (weights is null)
+        {
+            return;
+        }
+        Tensor? blended = ComfyBlend.Apply(backend, embeds, empty, weights);
+        if (blended is null)
+        {
+            return;
+        }
+        embeds.Dispose();
+        embeds = blended;
     }
 
     /// <summary>Loads the Wan family's umT5-XXL text encoder with its fp8 scale companions folded in, plus the matching 512-token tokenizer; the loader is registered in <paramref name="loaders"/> because it owns the weights' mmap.</summary>
