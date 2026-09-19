@@ -32,7 +32,27 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
     private Tensor? _cachedCond;
     private int[]? _cachedUncondKey;
     private Tensor? _cachedUncond;
+    // Part of the cache key, not decoration. The conditioning is stored already BLENDED — the trim below makes it
+    // prompt-length, so the full-window baseline is no longer subtractable from it — and emphasis does not change
+    // the token ids, so ids alone would serve a weighted tensor to the next plain request and vice versa.
+    private float[]? _cachedCondWeights;
+    private float[]? _cachedUncondWeights;
     private bool _ditResident;
+
+    /// <summary>SwarmUI's ComfyBlend toward the empty-prompt baseline, replacing the input it consumes.</summary>
+    private Tensor BlendTowardEmpty(Tensor context, Tensor empty, float[]? weights)
+    {
+        if (weights is null || Prompting.ComfyBlend.Apply(Backend, context, empty, weights) is not Tensor blended)
+        {
+            return context;
+        }
+        context.Dispose();
+        return blended;
+    }
+
+    /// <summary>Whether two weight arrays describe the same emphasis. Part of the conditioning cache key.</summary>
+    private static bool WeightsEqual(float[]? a, float[]? b) =>
+        a is null ? b is null : b is not null && a.AsSpan().SequenceEqual(b);
 
     /// <summary>Creates a new Chroma Radiance pipeline with all components pre-loaded.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -61,9 +81,19 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         int[] promptAttentionMaskT5,
         int[] negativeAttentionMaskT5,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        float[]? promptWeights = null,
+        float[]? negativeWeights = null,
+        int[]? emptyTokenIdsT5 = null,
+        int[]? emptyAttentionMaskT5 = null)
     {
         ThrowIfDisposed();
+        if ((promptWeights is not null || negativeWeights is not null)
+            && (emptyTokenIdsT5 is null || emptyAttentionMaskT5 is null))
+        {
+            throw new ArgumentNullException(nameof(emptyTokenIdsT5),
+                "ComfyBlend needs the empty-prompt baseline, and only the caller owns the tokenizer that pads it.");
+        }
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
 
@@ -112,9 +142,11 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
         // Prompt-embedding cache: identical token ids reuse the previous gen's hidden states — the whole T5
         // phase (DiT evict + T5 preload + encode + free) vanishes for repeat prompts (seed-only changes).
         bool condHit = _cachedCond is not null
-            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsT5);
+            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsT5)
+            && WeightsEqual(_cachedCondWeights, promptWeights);
         bool uncondHit = !useCfg || (_cachedUncond is not null
-            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5));
+            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5)
+            && WeightsEqual(_cachedUncondWeights, negativeWeights));
         Tensor condContext;
         Tensor? uncondContext = null;
         if (condHit && uncondHit)
@@ -147,6 +179,18 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
                 uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
             }
 
+            // Blend BEFORE the trim: the weights describe the full padded window, and the baseline is only
+            // subtractable row for row while both still have it.
+            if (promptWeights is not null || negativeWeights is not null)
+            {
+                using Tensor empty = _t5.Encode(Backend, [emptyTokenIdsT5!], [emptyAttentionMaskT5!]);
+                condContext = BlendTowardEmpty(condContext, empty, promptWeights);
+                if (uncondContext is not null)
+                {
+                    uncondContext = BlendTowardEmpty(uncondContext, empty, negativeWeights);
+                }
+            }
+
             // Trim the padded context to Chroma's kept tokens (text_len + 1) instead of masking — EXACT (the
             // dropped rows are masked out of every attention by the transformer-side rule) and it makes all 57
             // SDPAs mask-free while shrinking every joint-sequence GEMM. See ChromaPipeline for the derivation.
@@ -161,11 +205,13 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
             _cachedCond?.Dispose();
             _cachedCond = condContext;
             _cachedCondKey = (int[])promptTokenIdsT5.Clone();
+            _cachedCondWeights = promptWeights?.ToArray();
             if (useCfg)
             {
                 _cachedUncond?.Dispose();
                 _cachedUncond = uncondContext;
                 _cachedUncondKey = (int[])negativePromptTokenIdsT5.Clone();
+                _cachedUncondWeights = negativeWeights?.ToArray();
             }
 
             Backend.Sync();

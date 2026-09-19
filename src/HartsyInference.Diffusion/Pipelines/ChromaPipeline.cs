@@ -39,12 +39,34 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     // Prompt-embedding cache (one cond + one uncond, last-used), keyed on the T5 token ids — the Krea2 pattern.
     // A hit skips the whole T5 phase (preload + encode + free). The derived transformer-side masks are cached
     // alongside (they are pure functions of the tokenizer masks).
+    /// <summary>SwarmUI's ComfyBlend toward the empty-prompt baseline, replacing the input it consumes. Returns
+    /// the input unchanged when there is nothing to apply.</summary>
+    private Tensor BlendTowardEmpty(Tensor context, Tensor empty, float[]? weights)
+    {
+        if (weights is null || Prompting.ComfyBlend.Apply(TextEncoderBackend, context, empty, weights) is not Tensor blended)
+        {
+            return context;
+        }
+        context.Dispose();
+        return blended;
+    }
+
+    /// <summary>Whether two weight arrays describe the same emphasis. Part of the conditioning cache key.</summary>
+    private static bool WeightsEqual(float[]? a, float[]? b) =>
+        a is null ? b is null : b is not null && a.AsSpan().SequenceEqual(b);
+
     private int[]? _cachedCondKey;
     private Tensor? _cachedCond;
     private Tensor? _cachedCondMask;
     private int[]? _cachedUncondKey;
     private Tensor? _cachedUncond;
     private Tensor? _cachedUncondMask;
+    // Part of the cache key, not decoration. The conditioning is stored already BLENDED — it has to be, because
+    // the trim below makes it prompt-length and the full-window baseline is no longer subtractable from it — so a
+    // key of token ids alone would serve a weighted tensor to the next plain request, and vice versa. Emphasis
+    // does not change the ids, which is exactly why the ids cannot carry it.
+    private float[]? _cachedCondWeights;
+    private float[]? _cachedUncondWeights;
 
     /// <summary>Creates a new Chroma pipeline with all components pre-loaded. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -85,9 +107,19 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         int[] promptAttentionMaskT5,
         int[] negativeAttentionMaskT5,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        float[]? promptWeights = null,
+        float[]? negativeWeights = null,
+        int[]? emptyTokenIdsT5 = null,
+        int[]? emptyAttentionMaskT5 = null)
     {
         ThrowIfDisposed();
+        if ((promptWeights is not null || negativeWeights is not null)
+            && (emptyTokenIdsT5 is null || emptyAttentionMaskT5 is null))
+        {
+            throw new ArgumentNullException(nameof(emptyTokenIdsT5),
+                "ComfyBlend needs the empty-prompt baseline, and only the caller owns the tokenizer that pads it.");
+        }
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
 
@@ -132,9 +164,11 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         // Prompt-embedding cache: identical token ids reuse the previous gen's hidden states + derived masks —
         // the whole T5 phase (preload + encode + free) vanishes for repeat prompts (seed-only changes).
         bool condHit = _cachedCond is not null
-            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsT5);
+            && _cachedCondKey is not null && _cachedCondKey.AsSpan().SequenceEqual(promptTokenIdsT5)
+            && WeightsEqual(_cachedCondWeights, promptWeights);
         bool uncondHit = !useCfg || (_cachedUncond is not null
-            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5));
+            && _cachedUncondKey is not null && _cachedUncondKey.AsSpan().SequenceEqual(negativePromptTokenIdsT5)
+            && WeightsEqual(_cachedUncondWeights, negativeWeights));
         Tensor condContext;
         Tensor? condMask;
         Tensor? uncondContext = null;
@@ -183,6 +217,19 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                 uncondContext = _t5.Encode(TextEncoderBackend, negBatchT5, negBatchMask);
             }
 
+            // Blend BEFORE the trim: the weights describe the full padded window and the baseline is only
+            // subtractable row for row while both still have it. The baseline rides the same encode so it shares
+            // the padding and the layer selection exactly.
+            if (promptWeights is not null || negativeWeights is not null)
+            {
+                using Tensor empty = _t5.Encode(TextEncoderBackend, [emptyTokenIdsT5!], [emptyAttentionMaskT5!]);
+                condContext = BlendTowardEmpty(condContext, empty, promptWeights);
+                if (uncondContext is not null)
+                {
+                    uncondContext = BlendTowardEmpty(uncondContext, empty, negativeWeights);
+                }
+            }
+
             // Trim the padded context to Chroma's kept tokens instead of masking. Chroma's transformer-side
             // rule (pipeline_chroma.py:249-252) keeps positions i <= text_len — all real tokens plus exactly
             // one unmasked padding slot — and masks the rest OUT of every attention. Masked-out tokens
@@ -220,6 +267,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             _cachedCond = condContext;
             _cachedCondMask = condMask;
             _cachedCondKey = (int[])promptTokenIdsT5.Clone();
+            _cachedCondWeights = promptWeights?.ToArray();
             if (useCfg)
             {
                 if (_cachedUncond is not null)
@@ -232,6 +280,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
                 _cachedUncond = uncondContext;
                 _cachedUncondMask = uncondMask;
                 _cachedUncondKey = (int[])negativePromptTokenIdsT5.Clone();
+                _cachedUncondWeights = negativeWeights?.ToArray();
             }
         }
 

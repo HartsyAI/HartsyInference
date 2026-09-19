@@ -33,10 +33,13 @@ public sealed class ChromaRecipePipeline(ChromaPipeline pipeline, T5Tokenizer to
 
         // TODO(E-IMG-4): img2img/inpaint (request.Img2Img/Inpaint) not yet mapped — text-to-image only.
 
-        int[] promptTokens = _tokenizer.Encode(prompt);
-        int[] negTokens = _tokenizer.Encode(negative);
+        // Declaring ComfyBlend is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar
+        // now. T5 pads to a fixed 512, so the empty baseline shares the prompt's shape.
+        (int[] promptTokens, float[]? promptWeights) = T5WeightedConditioning.Tokenize(_tokenizer, prompt);
+        (int[] negTokens, float[]? negativeWeights) = T5WeightedConditioning.Tokenize(_tokenizer, negative);
         int[] promptMask = T5Tokenizer.CreateAttentionMask(promptTokens);
         int[] negMask = T5Tokenizer.CreateAttentionMask(negTokens);
+        int[] emptyTokens = T5WeightedConditioning.EmptyTokens(_tokenizer);
 
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
@@ -62,7 +65,8 @@ public sealed class ChromaRecipePipeline(ChromaPipeline pipeline, T5Tokenizer to
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel);
 
         (byte[] rgb, int width, int height, int usedSeed) = _pipeline.GenerateFromTokens(
-            promptTokens, negTokens, promptMask, negMask, inner, bridge);
+            promptTokens, negTokens, promptMask, negMask, inner, bridge,
+            promptWeights, negativeWeights, emptyTokens, T5Tokenizer.CreateAttentionMask(emptyTokens));
 
         return new ImageResult
         {

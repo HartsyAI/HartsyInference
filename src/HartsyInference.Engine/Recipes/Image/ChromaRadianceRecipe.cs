@@ -24,6 +24,12 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>ChromaRadiance(Chroma)</c> adds no
+    /// <c>clip_target</c> of its own, so it inherits Chroma's T5 stack and its answer.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
+    /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "chroma-radiance", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Chroma Radiance's official sampling settings: 50 steps at guidance 3.5, 1024x1024 (<c>ChromaRadianceConfig.DefaultSteps</c>/<c>DefaultCfgScale</c>).</summary>
