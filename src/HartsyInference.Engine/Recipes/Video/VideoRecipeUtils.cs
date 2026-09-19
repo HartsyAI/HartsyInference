@@ -407,46 +407,14 @@ internal static class VideoRecipeUtils
         return (promptEmbeds, negEmbeds, drivingEmbeds);
     }
 
-    /// <summary>Tokenizes spans the way <see cref="T5Tokenizer.Encode"/> does — EOS then pad to the fixed window —
-    /// returning per-token weights only when some span actually carries one. A null weight array means "nothing to
-    /// blend", which is what keeps an ordinary prompt on the single-encode path.</summary>
+    /// <summary>The family's token/weight pairing, shared with every other T5-conditioned recipe.</summary>
     internal static (int[] Tokens, float[]? Weights) TokenizeWeightedWan(
-        T5Tokenizer tokenizer, IReadOnlyList<WeightedSpan> spans)
-    {
-        if (!PromptWeighting.HasWeights(spans))
-        {
-            return (tokenizer.Encode(PromptWeighting.Join(spans)), null);
-        }
-        WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, tokenizer.EncodeRaw, [], []);
-        int window = tokenizer.MaxLength;
-        int[] tokens = new int[window];
-        float[] weights = new float[window];
-        Array.Fill(weights, 1f);
-        // Pad and EOS rows weigh 1: they are not part of the prompt, and blending them would pull the padding
-        // toward the empty encode along with the words.
-        int real = Math.Min(built.Tokens.Length, window - 1);
-        Array.Copy(built.Tokens, tokens, real);
-        Array.Copy(built.Weights, weights, real);
-        tokens[real] = T5Tokenizer.EosTokenId;
-        for (int i = real + 1; i < window; i++) tokens[i] = T5Tokenizer.PadTokenId;
-        return (tokens, weights);
-    }
+        T5Tokenizer tokenizer, IReadOnlyList<WeightedSpan> spans) =>
+        Features.T5WeightedConditioning.TokenizeSpans(tokenizer, spans);
 
     /// <summary>Replaces <paramref name="embeds"/> with its blend toward the empty encode, when there is one.</summary>
-    internal static void BlendWan(IBackend backend, ref Tensor embeds, Tensor empty, float[]? weights)
-    {
-        if (weights is null)
-        {
-            return;
-        }
-        Tensor? blended = ComfyBlend.Apply(backend, embeds, empty, weights);
-        if (blended is null)
-        {
-            return;
-        }
-        embeds.Dispose();
-        embeds = blended;
-    }
+    internal static void BlendWan(IBackend backend, ref Tensor embeds, Tensor empty, float[]? weights) =>
+        Features.T5WeightedConditioning.Blend(backend, ref embeds, empty, weights);
 
     /// <summary>Loads the Wan family's umT5-XXL text encoder with its fp8 scale companions folded in, plus the matching 512-token tokenizer; the loader is registered in <paramref name="loaders"/> because it owns the weights' mmap.</summary>
     internal static (T5TextEncoder Encoder, T5Tokenizer Tokenizer) LoadUmt5(string umt5Path, List<IDisposable> loaders)
