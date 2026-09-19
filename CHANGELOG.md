@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.101
+
+- **MiniMax-H3 runs from a GGUF, verified by generation.** The `unsloth/MiniMax-H3-GGUF` Q4_K build renders the
+  same scene as the fp8 checkpoint it is a requant of, at 141 frames 512x288 seed 1 and 30 steps, and its hash is
+  now bound in `VideoProfileManifest` so it plans with H3's real task semantics instead of `UnknownBaseProfile`.
+- **The GGUF is about twice as fast per step here** — 5.20 s/step against fp8's 10.39, measured as a two-point
+  difference so load and decode cancel. That is the opposite of the expectation that a transiently-dequantized
+  build must be slower. The likely reason is residency rather than arithmetic: 19.4 GB of fp8 weights in a 24 GB
+  card leaves little room for anything else, where Q4_K needs roughly 3.7 GB. Inferred, not measured.
+- **Plain Q2_K from that repack is published but unusable**, and the loader is not at fault. It renders a
+  repeating lattice where Q4_K renders the scene at identical settings, though the two files differ only in the
+  format of the same 208 weights; our Q2_K dequant agrees with our CPU codec and matches ggml's reference walk.
+  Whether 2.6 bits is simply too coarse for an already-pruned DiT, or that repack's quantizer is at fault, is not
+  established — so the hash is deliberately left out of the manifest rather than recorded as broken.
+- `h3_bench.sh` stops claiming you need more steps when the truth is that it found no timings at all. The CLI
+  prints `denoise [n/m]` with no per-step figure, so the harness cannot report s/step; it now says so and names
+  the two-run method instead.
+
 ## alpha.100
 
 - **A GGUF MiniMax-H3 text encoder loads.** Preflight refused the published repack for a shape error —
