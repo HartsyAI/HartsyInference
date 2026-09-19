@@ -201,6 +201,13 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
+- [ ] **Chroma-Radiance does not generate — found 2026-09-19, PRE-EXISTING, unrelated to prompt weighting.**
+  `chroma-radiance-x0.safetensors` fails at both 512² and 1024² with
+  `UnpatchifyTokens input shape must be [4096, 4096, 16384]; got [4096, 256, 64]` — the middle dimension tracks
+  the resolution while the input's stays 256, so the token count reaching unpatchify is not the one the contract
+  derives. Reproduced byte-for-byte on a clean `origin/main` worktree, so it is not a regression from the
+  weighting work; it surfaced only because that work finally put a real checkpoint through the family. Its
+  ComfyBlend wiring (alpha.130) therefore remains ungated until the family can generate at all.
 - [x] **Flux.1, Anima and SD3 weight prompts — DONE 2026-09-19 (alpha.131).** Both are dual-encoder families where
   only ONE arm is blendable, and the judgement is the substance: Flux.1's CLIP-L contributes its pooled vector and
   its hidden states are disposed right after the EOS extraction, and Anima's T5 side is an `embed[t5_ids]` lookup
