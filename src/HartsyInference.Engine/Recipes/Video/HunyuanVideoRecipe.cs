@@ -1,3 +1,4 @@
+using HartsyInference.ModelAssets.Checkpoints;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -53,12 +54,16 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
     {
         // TODO(E-IMG-4/5): image-to-video conditioning and a VideoRequest.Components LLaVA/CLIP/VAE override are
         // deferred — this is the text-to-video path only.
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        // IDisposable rather than SafeTensorsLoader: the container owns the mapping whatever the format is.
+        List<IDisposable> loaders = new List<IDisposable>();
         try
         {
             Logs.Info($"[HunyuanVideoRecipe] Loading + converting DiT: {Path.GetFileName(context.CheckpointPath)}.");
-            (Dictionary<string, Tensor> ditWeights, SafeTensorsLoader ditLoader) = HunyuanVideoCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-            loaders.Add(ditLoader);
+            // One container for either format, and it folds fp8/int8 companions before the converter sees them.
+            CheckpointSource ditSource = CheckpointSource.Open(context.CheckpointPath);
+            loaders.Add(ditSource);
+            Dictionary<string, Tensor> ditWeights = HunyuanVideoCheckpointConverter.Convert(
+                new Dictionary<string, Tensor>(ditSource.Weights, StringComparer.Ordinal));
             if (ditWeights.Count == 0)
             {
                 throw new InvalidOperationException($"HunyuanVideo checkpoint '{context.CheckpointPath}' has no recognized DiT weights after conversion.");
@@ -104,7 +109,7 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
         catch (Exception ex)
         {
             Logs.Error("[HunyuanVideoRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -125,11 +130,13 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
         return withBos;
     }
 
-    private static Dictionary<string, Tensor> LoadStandalone(List<SafeTensorsLoader> loaders, string path)
+    /// <summary>Opens a side component through the container. The explicit <c>ApplyFp8ScaledDequant</c> this used to
+    /// carry is gone because the container folds companions on open — doing it twice would be harmless, but leaving
+    /// it here would suggest the container does not.</summary>
+    private static Dictionary<string, Tensor> LoadStandalone(List<IDisposable> loaders, string path)
     {
-        SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(path);
-        loaders.Add(loader);
-        return CheckpointConvertUtils.ApplyFp8ScaledDequant(loader.GetAllTensors());
+        CheckpointSource source = CheckpointSource.Open(path);
+        loaders.Add(source);
+        return new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
     }
 }

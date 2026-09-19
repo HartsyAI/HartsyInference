@@ -1,3 +1,4 @@
+using HartsyInference.ModelAssets.Checkpoints;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -70,8 +71,12 @@ public sealed class LtxVideoRecipe : IVideoRecipe
         // TODO(E-IMG-4/5): LoRA, image-to-video conditioning, and a VideoRequest.Components T5 override are deferred —
         // this is the vanilla single-file text-to-video path with the canonical T5-XXL side model.
         string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        (LtxVideoCheckpointConverter.ConvertedWeights conv, SafeTensorsLoader ckptLoader) = LtxVideoCheckpointConverter.LoadAndConvert(context.CheckpointPath);
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader> { ckptLoader };
+        // One container for either format, folding fp8/int8 companions before the converter sees them.
+        // IDisposable rather than SafeTensorsLoader because the container owns the mapping whatever the format.
+        CheckpointSource ckptSource = CheckpointSource.Open(context.CheckpointPath);
+        LtxVideoCheckpointConverter.ConvertedWeights conv = LtxVideoCheckpointConverter.Convert(
+            new Dictionary<string, Tensor>(ckptSource.Weights, StringComparer.Ordinal));
+        List<IDisposable> loaders = new List<IDisposable> { ckptSource };
         try
         {
             if (conv.Transformer.Count == 0)
@@ -89,7 +94,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
             string nameLc = Path.GetFileName(context.CheckpointPath).ToLowerInvariant();
             bool is13B = maxBlock >= 28 || nameLc.Contains("13b", StringComparison.Ordinal)
                 || nameLc.Contains("0.9.7", StringComparison.Ordinal) || nameLc.Contains("0.9.8", StringComparison.Ordinal);
-            bool timestepVae = is13B || LtxVideoCheckpointConverter.IsTimestepVae(ckptLoader.GetAllTensors().Keys) || nameLc.Contains("0.9.5", StringComparison.Ordinal);
+            bool timestepVae = is13B || LtxVideoCheckpointConverter.IsTimestepVae(ckptSource.Weights.Keys) || nameLc.Contains("0.9.5", StringComparison.Ordinal);
             LtxVideoConfig config = is13B ? LtxVideoConfig.V097 : timestepVae ? LtxVideoConfig.V095 : LtxVideoConfig.V09;
             Logs.Info($"[LtxVideoRecipe] Variant: {(is13B ? "0.9.7/13B" : timestepVae ? "0.9.5" : "0.9")} ({maxBlock + 1} DiT layers, {(timestepVae ? "timestep-conditioned" : "base")} VAE).");
 
@@ -149,7 +154,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
         catch (Exception ex)
         {
             Logs.Error("[LtxVideoRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

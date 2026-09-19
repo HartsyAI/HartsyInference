@@ -32,12 +32,12 @@ public sealed class LtxVideoRecipePipeline : IVideoRecipePipeline
     private readonly LtxVideoTransformer _transformer;
     /// <summary>Null for the 0.9.5/13B variants (Tier 3.4's encoder was built and verified against base 0.9 only — see <see cref="LtxVideoRecipe.SupportsFor"/>); plan-driven feature validation refuses an init image before this pipeline is reached.</summary>
     private readonly LtxVideoVaeEncoder? _vaeEncoder;
-    private readonly List<SafeTensorsLoader> _loaders;
+    private readonly List<IDisposable> _loaders;
     private readonly MergedLoraStack? _loraStack;
 
     /// <summary>Wraps the constructed LTX-Video pipeline plus its text encoder, taking ownership of every disposable. <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
     public LtxVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, LtxVideoPipeline pipeline, LtxVideoConfig config,
-        T5Tokenizer tokenizer, T5TextEncoder t5, LtxVideoTransformer transformer, LtxVideoVaeEncoder? vaeEncoder, List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null)
+        T5Tokenizer tokenizer, T5TextEncoder t5, LtxVideoTransformer transformer, LtxVideoVaeEncoder? vaeEncoder, List<IDisposable> loaders, MergedLoraStack? loraStack = null)
     {
         _loraStack = loraStack;
         _backend = backend;

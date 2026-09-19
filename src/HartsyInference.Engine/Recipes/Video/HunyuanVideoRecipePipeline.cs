@@ -17,7 +17,7 @@ namespace HartsyInference.Engine.Recipes.Video;
 /// <summary>A constructed HunyuanVideo pipeline driven against the native <see cref="VideoRequest"/>. <see cref="HunyuanVideoPipeline"/> takes only pre-computed embeddings, so this owns the dual text stack: LLaVA-Llama-3-8B through the diffusers prompt template (layer −3, cropped to drop the template preamble) and CLIP-L's pooled EOS embedding. Mirrors <c>HunyuanVideoGenerationTests</c>' proven construction. Wraps the constructed HunyuanVideo pipeline plus its dual text stack, taking ownership of every disposable.</summary>
 public sealed class HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPipeline pipeline,
     LlamaStyleEncoder llava, ClipTextEncoder clipL, ClipTokenizer clipTokenizer, HunyuanVideoDit dit,
-    List<SafeTensorsLoader> loaders, MergedLoraStack? loraStack = null) : IVideoRecipePipeline
+    List<IDisposable> loaders, MergedLoraStack? loraStack = null) : IVideoRecipePipeline
 {
     private readonly IBackend _backend = backend;
     private readonly HunyuanVideoPipeline _pipeline = pipeline;
@@ -25,7 +25,7 @@ public sealed class HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPip
     private readonly ClipTextEncoder _clipL = clipL;
     private readonly ClipTokenizer _clipTokenizer = clipTokenizer;
     private readonly HunyuanVideoDit _dit = dit;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly List<IDisposable> _loaders = loaders;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
     /// <inheritdoc/>
