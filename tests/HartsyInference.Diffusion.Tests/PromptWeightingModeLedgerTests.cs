@@ -153,6 +153,10 @@ public sealed class PromptWeightingModeLedgerTests
     /// vision/audio blocks with the text and emitting <c>TagRuns</c>; its cond is rank-2 <c>[seq, hidden]</c>, so the
     /// weights must be built alongside <c>Encoded.TokenIds</c> and forced to 1 on every non-text run. That is the E1
     /// seam, not something to bolt onto the recipe layer.</para>
+    /// <para><b>The Wan variants served by <c>WanVideoRecipe</c> are wired</b> (alpha.115). <c>wan-animate</c>,
+    /// <c>wan-animate-2</c>, <c>wan-s2v</c> and <c>wan-vace</c> are separate recipe classes with their own prompt
+    /// paths — S2V and Animate-2 carry a second conditioning stream — so each needs its own blend rather than
+    /// inheriting one.</para>
     /// <para><b>ltx-video-2</b> pads to a fixed conditioning length that the connector consumes positionally (it
     /// replaces learnable registers by position), so where a row scale lands relative to that connector is unverified.
     /// <b>krea2</b> is ledgered <see cref="PromptWeightingMode.CondScaleWithAttention"/> and cannot declare a mode
@@ -162,7 +166,7 @@ public sealed class PromptWeightingModeLedgerTests
         "anima", "auraflow", "boogu", "chroma", "chroma-radiance", "ernie-image", "flux1", "hidream",
         "hunyuan-image", "hunyuan-video", "ideogram4", "kandinsky5", "kandinsky5-video", "krea2", "lens",
         "ltx-2.5-distilled", "ltx-video", "ltx-video-2", "lumina2", "minimax-h3", "omnigen2",
-        "sd3", "sdxl-refiner", "wan", "wan-21-1_3b", "wan-21-14b", "wan-22-5b", "wan-animate",
+        "sd3", "sdxl-refiner", "wan-animate",
         "wan-animate-2", "wan-s2v", "wan-vace", "zeta-chroma", "zimage",
     ];
 

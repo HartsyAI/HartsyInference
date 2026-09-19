@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.116
+
+- **`(word:1.5)` works on Wan.** umT5 keeps token weights, so Wan is a ComfyBlend family: the prompt is encoded at
+  face value and the output blended toward the empty-prompt encode, `z = (z − z_empty)·w + z_empty`. The baseline
+  is encoded in the same batch as the prompt and the negative, because it has to share their padding and layer
+  selection exactly. The negative is weighted too, which is what ComfyUI does.
+- The emphasis grammar comes off the text whether or not it does anything. Declaring a weighting mode is what
+  stops the service stripping `(word:N)` upstream, so a weight of exactly 1.0 would otherwise have reached umT5
+  as literal parens and digits — and differed from the same prompt written plainly.
+
 ## alpha.115
 
 - **The engine asks a backend what it can do instead of what class it is.** Every `is CudaBackend` outside the CUDA
