@@ -1729,6 +1729,80 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         DispatchPerRowNorm(shader, 4, output, input, weight, bias, eps, normDim, totalRows);
     }
 
+    /// <summary>Fused QKV split with per-head QK-RMSNorm: <c>qkv[.,3w]</c> to q/k/v each <c>[.,w]</c>.</summary>
+    /// <remarks>The one op on the Flux/DiT path whose host default is a TRUE fallback rather than composition: it
+    /// reads <c>DataPointer</c> on six tensors, so every call was a device-to-host sync, a scalar loop over every
+    /// token and head, and a re-upload. Flux runs 19 double plus 38 single blocks per forward, each calling this
+    /// once per step.</remarks>
+    public void QkvSplitNorm(Tensor q, Tensor k, Tensor v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+    {
+        using OpScope _op = EnterOp();
+        int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
+        int w = (int)qkv.Shape[qkv.Shape.Rank - 1] / 3;
+        int heads = w / headDim;
+        long tokens = qkv.ElementCount / (3L * w);
+        bool sameDtype = qkv.DType == q.DType && q.DType == k.DType && k.DType == v.DType;
+        if (!sameDtype || (qkv.DType != DType.F32 && qkv.DType != DType.F16) || heads * headDim != w)
+        {
+            IBackend.QkvSplitNormReference(q, k, v, qkv, qWeight, kWeight, eps);
+            return;
+        }
+
+        VulkanBuffer qkvBuf = GetBuffer(qkv);
+        VulkanBuffer qwBuf = GetBuffer(qWeight);
+        VulkanBuffer kwBuf = GetBuffer(kWeight);
+        // Norm weights are FP32 in the shader signature whatever the activation dtype is, as the other norms do.
+        VulkanBuffer? qwOwned = null, kwOwned = null;
+        VulkanBuffer qwEff = qwBuf, kwEff = kwBuf;
+        if (qWeight.DType != DType.F32) (qwEff, qwOwned) = CastIfNeeded(qWeight, qwBuf, DType.F32);
+        if (kWeight.DType != DType.F32) (kwEff, kwOwned) = CastIfNeeded(kWeight, kwBuf, DType.F32);
+
+        ulong outBytes = (ulong)(q.ElementCount * q.DType.SizeInBytes);
+        VulkanBuffer qOut = _xfer.AllocateDevice(outBytes);
+        VulkanBuffer kOut = _xfer.AllocateDevice(outBytes);
+        VulkanBuffer vOut = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            const uint local = 64;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+            };
+            VulkanKernel kernel = GetKernel("qkv_split_norm" + DtypeSuffix(qkv.DType), storageBufferCount: 6, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)headDim);
+            pc.U32((uint)heads);
+            pc.U32((uint)w);
+            pc.U32((uint)tokens);
+            pc.F32(eps);
+
+            Span<ulong> bufs = stackalloc ulong[]
+            {
+                qkvBuf.Handle, qwEff.Handle, kwEff.Handle, qOut.Handle, kOut.Handle, vOut.Handle,
+            };
+            Dispatch(kernel, bufs, pc.Written, (uint)(tokens * heads), 1, 1);
+
+            CacheOutput(q, qOut);
+            CacheOutput(k, kOut);
+            CacheOutput(v, vOut);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan QkvSplitNorm dispatch failed", ex);
+            qOut.Dispose();
+            kOut.Dispose();
+            vOut.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (qwOwned is not null) _xfer.FreeDevice(qwOwned);
+            if (kwOwned is not null) _xfer.FreeDevice(kwOwned);
+        }
+    }
+
     /// <summary>Per-row LayerNorm with no learned scale or bias.</summary>
     /// <remarks>No override existed, so every call fell through to <see cref="IBackend"/>'s host default — which
     /// refuses anything but F32 outright. That is what a Flux generation on Vulkan hit: the DiT runs its block
