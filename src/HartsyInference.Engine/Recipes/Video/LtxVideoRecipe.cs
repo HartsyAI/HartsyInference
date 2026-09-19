@@ -34,6 +34,13 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     /// <summary>Family-level default. <see cref="VideoFeatures.Lora"/> (added 2026-08-20) is checkpoint-independent — it merges into the DiT, which every variant has — so unlike <see cref="VideoFeatures.InitImage"/> it is NOT narrowed by <see cref="SupportsFor"/>. InitImage stays variant-gated there: only the base 0.9 (non-timestep-VAE, non-13B) checkpoint has a VAE encoder built for its config.</summary>
     public VideoFeatures Supports => VideoFeatures.Lora;
 
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: LTX 0.9/0.9.5/13B condition on a plain
+    /// T5-XXL whose ComfyUI tokenizer does not disable weights, so they survive tokenization and the blend runs
+    /// on the encoder OUTPUT. (LTX-2 is a different stack and is CondScale — see its own recipe.)</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width per stage until the post-downsample resnet). 0.9.5/13B use a different config (timestep-conditioned VAE, different block widths) the encoder has never been constructed against — declaring <c>InitImage</c> there would be exactly the "advertises conditioning it silently drops or crashes on" class of bug 0.2 fixed for Wan's <c>EndFrame</c> over-claim. Cheap header-only peek (<see cref="VideoRecipeUtils.PeekCheckpointKeys"/>) mirrors the SAME detection <see cref="Construct"/> runs against the real converted weights, so this stays in sync without a full weight load on every capability check.</summary>
     public VideoFeatures SupportsFor(string? checkpointPath)
     {

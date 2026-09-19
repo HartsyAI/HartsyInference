@@ -73,6 +73,17 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     /// <param name="negativeAttentionMaskT5">Optional T5 attention mask for the negative prompt.</param>
     /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint.</param>
     /// <param name="onProgress">Optional progress callback.</param>
+    /// <inheritdoc/>
+    /// <remarks>The three cross-generation tensors this pipeline allocates itself. The injected encoder, DiT and
+    /// VAE are shared and stay alive, per the base class's ownership rule.</remarks>
+    protected override void DisposeCore()
+    {
+        _cachedCond?.Dispose();
+        _cachedUncond?.Dispose();
+        _cachedEmpty?.Dispose();
+        _cachedCond = _cachedUncond = _cachedEmpty = null;
+    }
+
     /// <summary>SwarmUI's ComfyBlend against the cached empty-prompt baseline, as a COPY the caller owns. Null
     /// when there is nothing to apply, meaning "keep using the original".</summary>
     private Tensor? BlendTowardEmpty(Tensor context, float[]? weights) =>
@@ -189,7 +200,6 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
             }
             _cachedCond?.Dispose();
             _cachedUncond?.Dispose();
-        _cachedEmpty?.Dispose();
             _cachedCond = condContext;
             _cachedUncond = uncondContext;
             _teKeyCond = (int[])promptTokenIdsT5.Clone();
