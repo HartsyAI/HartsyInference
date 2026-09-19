@@ -74,19 +74,15 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
         // regions are present the base drops the weight grammar entirely and the regions carry their own; a base
         // that really is weighted is refused by name below rather than quietly losing its emphasis.
         bool hasRegionParts = RegionalPromptResolver.HasRegionParts(prompt);
-        if (hasRegionParts && BaseTextCarriesWeight(prompt))
+        if (hasRegionParts && RegionalPromptWeightSplit.BaseTextCarriesWeight(prompt))
         {
             throw new NotSupportedException(
                 "Krea 2 cannot weight the base prompt and a region in the same request: the base encode covers the "
                 + "region tags too, so the two sets of weights would land on the same conditioning rows. Move the "
                 + "emphasis inside the region, or drop the region tags.");
         }
-        (WeightedTokenSequence promptTokens, int promptDrop) = EncodeWithTemplate(_tokenizer, hasRegionParts
-            // Flattening alone is not enough to take the grammar off: it rewrites SwarmUI's `<weight[N]:>` tags,
-            // but a literal `(word:N)` typed at the CLI is Comfy grammar that reaches the recipe untouched, and
-            // the builder would still split on it. Join collapses both spellings.
-            ? PromptWeighting.Join(PromptWeighting.Parse(PromptTagFlattening.Flatten(prompt, weightsAsParens: false)))
-            : PromptTagFlattening.Flatten(prompt));
+        (WeightedTokenSequence promptTokens, int promptDrop) =
+            EncodeWithTemplate(_tokenizer, RegionalPromptWeightSplit.BaseText(prompt, hasRegionParts));
         (WeightedTokenSequence negTokens, int negDrop) =
             EncodeWithTemplate(_tokenizer, PromptTagFlattening.Flatten(negative));
 
@@ -165,22 +161,6 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
                 EncodeWithTemplate(_tokenizer, PromptTagFlattening.Flatten(text));
             return _pipeline.EncodeRegionText(regionTokens.Tokens, regionDrop, regionTokens);
         });
-    }
-
-    /// <summary>Whether the text OUTSIDE every region tag carries an emphasis. The region parser hands back the
-    /// global/base/background text separately, so this asks about the part the base encode would weight rather
-    /// than about the prompt as a whole.</summary>
-    private static bool BaseTextCarriesWeight(string prompt)
-    {
-        PromptRegionParser parsed = new PromptRegionParser(prompt);
-        foreach (string text in (string[])[parsed.GlobalPrompt, parsed.BasePrompt, parsed.BackgroundPrompt])
-        {
-            if (PromptWeighting.HasWeights(PromptWeighting.Parse(PromptTagFlattening.Flatten(text))))
-            {
-                return true;
-            }
-        }
-        return false;
     }
 
     /// <summary>Builds the Krea 2 templated token sequence plus the prefix-drop index (the leading system-block + user-header positions whose hidden states the pipeline discards — Krea 2's <c>prompt_template_encode_start_idx</c>).</summary>
