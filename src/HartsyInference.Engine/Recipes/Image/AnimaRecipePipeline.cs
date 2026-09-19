@@ -206,7 +206,13 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         Tensor encodedFull = _qwen.Encode(_backend, new[] { tokenIds });
         if (weights is not null)
         {
-            using Tensor emptyFull = _qwen.Encode(_backend, new[] { _tokenizer.Encode("", appendEos: true) });
+            // All pad, no EOS. Read off ComfyUI rather than assumed: `gen_empty_tokens` emits start + end +
+            // padding, and Anima's `Qwen3_06B` declares `special_tokens={"pad": 151643}` with neither a start
+            // nor an end — so the baseline is padding alone. `Encode("", appendEos: true)` would put an EOS at
+            // row 0, and row 0 is a prompt position, so that row IS read whenever the first word is weighted.
+            int[] emptyTokens = new int[tokenIds.Length];
+            Array.Fill(emptyTokens, Qwen3Tokenizer.BosTokenId);
+            using Tensor emptyFull = _qwen.Encode(_backend, new[] { emptyTokens });
             if (ComfyBlend.Apply(_backend, encodedFull, emptyFull, weights) is Tensor blended)
             {
                 encodedFull.Dispose();

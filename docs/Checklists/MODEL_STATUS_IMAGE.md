@@ -201,6 +201,14 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
+- [ ] **AuraFlow's Pile-T5 special ids may not match the reference — found 2026-09-19, PRE-EXISTING, unverified.**
+  ComfyUI's `aura_t5.py` declares `special_tokens={"end": 2, "pad": 1}`, while our `T5Tokenizer` hardcodes
+  `EosTokenId = 1` / `PadTokenId = 0` for every T5 family it serves. If Pile-T5's vocab really puts `</s>` at 2,
+  our AuraFlow encode has been terminating with token 1 and padding with 0 — plausible output rather than an
+  error, which is why it has never surfaced. Noticed while reading `gen_empty_tokens` for the weighting
+  baselines; NOT diagnosed and NOT changed, because fixing the base tokenization is a different job from
+  weighting and would move every existing AuraFlow generation. Verify against the Pile-T5 SentencePiece vocab
+  before touching it.
 - [ ] **Chroma-Radiance does not generate — found 2026-09-19, PRE-EXISTING, unrelated to prompt weighting.**
   `chroma-radiance-x0.safetensors` fails at both 512² and 1024² with
   `UnpatchifyTokens input shape must be [4096, 4096, 16384]; got [4096, 256, 64]` — the middle dimension tracks

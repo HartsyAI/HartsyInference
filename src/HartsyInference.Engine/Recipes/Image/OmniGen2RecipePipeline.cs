@@ -163,8 +163,7 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
     /// prompt are already different keys. A token-id key would collide, since emphasis does not change the ids.
     /// </summary>
     /// <remarks>OmniGen2 does not pad, so its conditioning length tracks the prompt and the empty baseline
-    /// cannot be encoded once and reused — it is built per prompt and right-padded to that prompt's length, the
-    /// same padding <see cref="Qwen3Tokenizer.Encode"/> uses. The encoder takes no attention mask (it is causal),
+    /// cannot be encoded once and reused — it is built per prompt, at that prompt's length. The encoder takes no attention mask (it is causal),
     /// so those pad rows are attended; that is a parity nuance against ComfyUI's masked <c>gen_empty_tokens</c>,
     /// not a shape problem.</remarks>
     private Tensor EncodeWeighted(string prompt)
@@ -175,10 +174,12 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
         {
             return embeds;
         }
-        int[] emptyTemplate = EncodeWithTemplate(_tokenizer, "");
+        // All pad, NOT the template with an empty prompt. Read off ComfyUI rather than assumed: its
+        // `gen_empty_tokens` emits start + end + padding, and Omnigen2's `Qwen25_3BModel` declares
+        // `special_tokens={"pad": 151643}` with no start and no end — so the baseline is padding alone, at the
+        // prompt's length. 151643 is `<|endoftext|>`, which is also this tokenizer's pad id.
         int[] emptyPadded = new int[tokens.Length];
         Array.Fill(emptyPadded, Qwen3Tokenizer.BosTokenId);
-        Array.Copy(emptyTemplate, emptyPadded, Math.Min(emptyTemplate.Length, tokens.Length));
         using Tensor empty = _textEncoder.Encode(_backend, new[] { emptyPadded });
         if (ComfyBlend.Apply(_backend, embeds, empty, weights) is not Tensor blended)
         {
