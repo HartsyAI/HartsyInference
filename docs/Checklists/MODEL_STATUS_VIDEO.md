@@ -312,8 +312,10 @@ two different quantizations diverge chaotically over 30 steps. Coherence was jud
 **Plain `Q2_K` from that repack is published but unusable**, and the loader is not at fault: it renders a dark
 repeating lattice with no subject where Q4_K renders the scene, at identical settings. The two files are
 structurally identical (532 tensors, 212 BF16 + 102 F16 + 10 F32 either way, differing only in the format of the
-same 208 weights) and both plan as `minimax-h3-unrecognized-base`, so neither the profile nor the container path
-is the variable; our Q2_K GPU dequant agrees with our CPU codec (`GgufGpuDequantTests`) and the kernel matches
+same 208 weights) and — **as measured, before the Q4_K hash above was bound** — both planned as
+`minimax-h3-unrecognized-base`, so neither the profile nor the container path was the variable. Re-running the
+comparison today will show Q4_K resolving to `minimax-h3-fl2va-base-q4-k-gguf` and only Q2_K unknown; to reproduce
+the original conditions, compare before binding or against a Q2_K-only run; our Q2_K GPU dequant agrees with our CPU codec (`GgufGpuDequantTests`) and the kernel matches
 ggml's `dequantize_row_q2_K`. Whether the cause is 2.6 bits being too coarse for an already-pruned DiT or a fault
 in that repack's quantizer is **not established**, and `UD-Q2_K_XL` is untested.
 
