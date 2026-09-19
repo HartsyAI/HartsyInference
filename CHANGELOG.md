@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.126
+
+- **`GeluErf`, `GegluErf`, `Mish` and `Prelu` run on Vulkan.** All four were host fallbacks, so each cost a device
+  round-trip per call. Three needed no new kernel: the elementwise shader already computed exact-erf GELU for an
+  op code nothing dispatched, and Mish is one more code beside it.
+- `GegluErf` is the existing GEGLU kernel with a spec constant selecting the exact GELU over the tanh
+  approximation. The two are not interchangeable — they agree near zero and diverge by about 1e-3 at the tails,
+  which is visible in a DiT's output — so which one a family wants is a real choice rather than a detail.
+- `Prelu` gets its own kernel because its slope is indexed by channel. The elementwise path carries one scalar in
+  its push block and has no notion of the `[B, C, T]` layout; a single-element alpha is the shared-slope case and
+  falls out of the same indexing.
+- Mish's softplus is written `log1p(exp(-|x|)) + max(x, 0)`, the form that does not overflow `exp` before the log
+  for a large positive x. The tests feed +/-12 for that reason, and because the middle of the range is exactly
+  where a kernel wired to the wrong GELU still looks correct.
+- **Removed an op that does not exist.** An earlier pass added a Vulkan `Erf(output, input)`; `Erf` on `IBackend`
+  is a private scalar helper, not a tensor op, so that method implemented nothing. Its elementwise op code went
+  with it.
+
 ## alpha.125
 
 - **Quantizing a tensor that does not fill whole blocks corrupted the heap.** A block quant stores a fixed

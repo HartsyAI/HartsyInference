@@ -2722,6 +2722,74 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     #region Activations
 
+    /// <summary>Exact (erf) GELU — PyTorch's <c>nn.GELU()</c>; <see cref="Gelu"/> is the tanh approximation.</summary>
+    public void GeluErf(Tensor output, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(4u /* gelu_exact */, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
+    }
+
+    /// <summary>Mish: <c>x · tanh(softplus(x))</c>.</summary>
+    /// <remarks>The shader computes softplus as <c>log1p(exp(-|x|)) + max(x, 0)</c>, which is the form that does
+    /// not overflow <c>exp</c> before the log for a large positive x.</remarks>
+    public void Mish(Tensor output, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        DispatchElementwise(11u /* mish */, output, input, null, scalar: 0, minVal: 0, maxVal: 0);
+    }
+
+    /// <summary>Parametric ReLU with a per-channel negative slope over <c>[B, C, T]</c>.</summary>
+    public void Prelu(Tensor output, Tensor input, Tensor alpha)
+    {
+        using OpScope _op = EnterOp();
+        if (output.DType != input.DType || (input.DType != DType.F32 && input.DType != DType.F16)
+            || input.Shape.Rank != 3)
+        {
+            IBackend.PreluReference(output, input, alpha);
+            return;
+        }
+        int channels = (int)input.Shape[1];
+        int timeDim = (int)input.Shape[2];
+        long total = input.ElementCount;
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer alphaBuf = GetBuffer(alpha);
+        VulkanBuffer? alphaOwned = null;
+        VulkanBuffer alphaEff = alphaBuf;
+        if (alpha.DType != DType.F32) (alphaEff, alphaOwned) = CastIfNeeded(alpha, alphaBuf, DType.F32);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(total * output.DType.SizeInBytes));
+        try
+        {
+            const uint local = 256;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+            };
+            VulkanKernel kernel = GetKernel("prelu" + DtypeSuffix(input.DType), storageBufferCount: 3, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)channels);
+            pc.U32((uint)timeDim);
+            pc.U32((uint)total);
+            pc.U32(alpha.ElementCount > 1 ? 1u : 0u);
+
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, alphaEff.Handle, outBuf.Handle };
+            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan Prelu dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (alphaOwned is not null) _xfer.FreeDevice(alphaOwned);
+        }
+    }
+
     public void Gelu(Tensor output, Tensor input)
     {
         using OpScope _op = EnterOp();
@@ -3011,16 +3079,37 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     {
         using OpScope _op = EnterOp();
         long lastDim = input.Shape[input.Shape.Rank - 1];
-        long D = lastDim / 2;
-        long outerCount = input.ElementCount / lastDim;
+        DispatchGeglu(output, input, lastDim / 2, input.ElementCount / lastDim, useErf: false);
+    }
 
+    /// <summary>GEGLU gated by the EXACT (erf) GELU rather than the tanh approximation.</summary>
+    /// <remarks>Same kernel, one spec constant apart. The two GELUs differ by about 1e-3 at the tails, which is
+    /// visible in a DiT's output, so which one a family wants is not interchangeable.</remarks>
+    public void GegluErf(Tensor output, Tensor proj, long rows, int inner)
+    {
+        using OpScope _op = EnterOp();
+        if (output.DType != proj.DType || (proj.DType != DType.F32 && proj.DType != DType.F16))
+        {
+            IBackend.GegluErfReference(output, proj, rows, inner);
+            return;
+        }
+        DispatchGeglu(output, proj, inner, rows, useErf: true);
+    }
+
+    private void DispatchGeglu(Tensor output, Tensor input, long D, long outerCount, bool useErf)
+    {
         VulkanBuffer inBuf = GetBuffer(input);
         ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
         VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
         try
         {
             string shader = "geglu" + DtypeSuffix(input.DType);
-            VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+                SpecConstant.Bool(3, useErf),
+            };
+            VulkanKernel k = GetKernel(shader, 2, spec);
             Span<byte> pc = stackalloc byte[2 * 4];
             BinaryWriteUInt(pc, 0, (uint)outerCount);
             BinaryWriteUInt(pc, 4, (uint)D);

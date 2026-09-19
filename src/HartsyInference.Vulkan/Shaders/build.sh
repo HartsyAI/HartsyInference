@@ -70,6 +70,7 @@ DTYPE_KERNELS=(
     layernorm_modulate
     apply_rope_single
     unpatchify_tokens
+    prelu
     rmsnorm
     softmax
     im2col

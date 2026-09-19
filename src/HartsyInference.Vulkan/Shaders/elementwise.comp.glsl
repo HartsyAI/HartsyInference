@@ -61,6 +61,8 @@ float erf_approx(float x) {
 float gelu_exact(float x) { return 0.5 * x * (1.0 + erf_approx(x * 0.7071067811865475)); }
 float gelu_tanh(float x)  { return 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x))); }
 float sigmoid(float x)    { return 1.0 / (1.0 + exp(-x)); }
+// softplus via log1p on the exponent, which keeps a large positive x from overflowing exp before the log.
+float mish(float x)       { return x * tanh(log(1.0 + exp(-abs(x))) + max(x, 0.0)); }
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
@@ -78,6 +80,7 @@ void main() {
     else if (ELEMENTWISE_OP == 7u) r = clamp(av, pc.minVal, pc.maxVal);
     else if (ELEMENTWISE_OP == 8u) r = tanh(av);
     else if (ELEMENTWISE_OP == 9u) r = (av >= 0.0) ? av : (pc.scalar * (exp(av) - 1.0));
-    else /* 10 */                  r = av + pc.scalar;
+    else if (ELEMENTWISE_OP == 10u) r = av + pc.scalar;
+    else /* 11 */                   r = mish(av);
     out_[i] = FROM_F32(r);
 }
