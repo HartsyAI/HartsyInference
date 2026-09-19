@@ -98,6 +98,8 @@ public static class CheckpointQuantizer
         Logs.Info($"[Quantize] {Path.GetFileName(job.SourcePath)} ({source.Format}, {source.Weights.Count} tensors) "
             + $"→ {targetLabel}.");
 
+        RefuseIfWorkingSetWontFit(source, job.SourcePath);
+
         Dictionary<string, Tensor> dense = new(source.Weights.Count, StringComparer.Ordinal);
         List<Tensor> owned = new();
         try
@@ -133,6 +135,37 @@ public static class CheckpointQuantizer
         {
             foreach (Tensor t in owned) t.Dispose();
         }
+    }
+
+    /// <summary>Refuses a source whose F32 working set will not fit, by name and with the numbers.
+    /// <para>Every tensor is widened to F32 before the writer sees it, and the writer holds its output until
+    /// <c>Flush</c>, so the peak is roughly the whole checkpoint as F32 plus the whole output. A 13 GB Q4_K source
+    /// wants about 50 GB and gets the process OOM-killed — no message, no partial file, nothing to read. An
+    /// up-front refusal that names the requirement is worth more than a kill, and this is measured from the real
+    /// element counts rather than the file size, because a block-quantized source is several times its own size
+    /// once widened.</para>
+    /// <para>Interleaving the widen with the write would hold one tensor instead of all of them and lift this
+    /// entirely. That is the right fix and is not this one: a first attempt at it aborted in the allocator, and a
+    /// memory rewrite wants verification time rather than confidence.</para></summary>
+    private static void RefuseIfWorkingSetWontFit(CheckpointSource source, string sourcePath)
+    {
+        long f32Bytes = 0;
+        foreach (KeyValuePair<string, Tensor> kv in source.Weights)
+        {
+            f32Bytes = checked(f32Bytes + (kv.Value.ElementCount * sizeof(float)));
+        }
+        // The output roughly tracks the source on disk; the F32 intermediate is what actually varies.
+        long needed = f32Bytes + new FileInfo(sourcePath).Length;
+        long available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+        if (available <= 0 || needed <= available)
+        {
+            return;
+        }
+        throw new HartsyInferenceException(
+            $"Quantizing '{Path.GetFileName(sourcePath)}' needs about {needed / (1024L * 1024 * 1024)} GiB of RAM — "
+            + $"every tensor is widened to F32 first, and this checkpoint is {f32Bytes / (1024L * 1024 * 1024)} GiB "
+            + $"wide — but only about {available / (1024L * 1024 * 1024)} GiB is available. Quantize from a smaller "
+            + "source, or from the dense build this one was made from.");
     }
 
     /// <summary>Writes the two ComfyUI safetensors shapes. Both quantize only what they can: a weight that is not
