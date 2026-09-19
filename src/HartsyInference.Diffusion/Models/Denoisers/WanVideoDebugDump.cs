@@ -10,7 +10,13 @@ namespace HartsyInference.Diffusion.Models.Denoisers;
 public static unsafe class WanVideoDebugDump
 {
     private static readonly DebugDumpSink _sink = new DebugDumpSink(EngineKnobs.WanDebugDir);
-    private static string _tag = EngineKnobs.WanDebugTag.Value is { Length: > 0 } t ? t + "_" : "";
+    /// <summary>Explicitly set prefix, or null to let the setting decide.</summary>
+    /// <remarks>Seeded from the knob at type-initialization before, which froze it: a per-request value could
+    /// never reach it, and the first generation in the process named every later one's dumps.</remarks>
+    private static string? _tagOverride;
+
+    private static string Tag => _tagOverride
+        ?? (EngineKnobs.WanDebugTag.Value is { Length: > 0 } t ? t + "_" : "");
     private static readonly object _lock = new();
     private static readonly HashSet<string> _shapesWritten = new();
 
@@ -22,7 +28,7 @@ public static unsafe class WanVideoDebugDump
     public static void SetTag(string? tag)
     {
         if (!_sink.Enabled) return;
-        _tag = string.IsNullOrEmpty(tag) ? "" : tag + "_";
+        _tagOverride = string.IsNullOrEmpty(tag) ? "" : tag + "_";
     }
 
     public static void Dump(string name, Tensor t)
@@ -30,7 +36,7 @@ public static unsafe class WanVideoDebugDump
         string? dir = _sink.Dir;
         if (dir is null) return;
         _sink.EnsureLayersDir(dir);
-        string safeName = (_tag + name).Replace('.', '_');
+        string safeName = (Tag + name).Replace('.', '_');
         _sink.WriteRawF32(Path.Combine(dir, "layers", safeName + ".bin"), t);
         // Shape sidecar so the Python layer-diff reference knows how to reshape each raw-F32 blob.
         int[] dims = new int[t.Shape.Rank];
@@ -44,7 +50,7 @@ public static unsafe class WanVideoDebugDump
         string? dir = _sink.Dir;
         if (dir is null) return;
         _sink.EnsureLayersDir(dir);
-        string safeName = (_tag + name).Replace('.', '_');
+        string safeName = (Tag + name).Replace('.', '_');
         byte[] buffer = new byte[values.Length * sizeof(float)];
         fixed (float* src = values)
         fixed (byte* dst = buffer) Buffer.MemoryCopy(src, dst, buffer.Length, buffer.Length);
@@ -57,7 +63,7 @@ public static unsafe class WanVideoDebugDump
         string? dir = _sink.Dir;
         if (dir is null) return;
         _sink.EnsureLayersDir(dir);
-        _sink.WriteRawF32(Path.Combine(dir, _tag + "output_velocity.bin"), t);
+        _sink.WriteRawF32(Path.Combine(dir, Tag + "output_velocity.bin"), t);
     }
 
     private static void AppendShape(string dir, string safeName, int[] dims)

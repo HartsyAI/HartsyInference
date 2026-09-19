@@ -20,7 +20,7 @@ public sealed unsafe class LtxVideo2Attention
 {
     /// <summary>Kill switch for the token-major attention route (<c>HARTSY_LTX2_TOKENMAJOR=0</c>). Also the seam
     /// the layout-equivalence test flips to run the two routes against one another on one backend.</summary>
-    internal static bool TokenMajorAttention = EngineKnobs.Ltx2Tokenmajor.Value;
+    internal static bool TokenMajorAttention => EngineKnobs.Ltx2Tokenmajor.Value;
 
     private readonly int _qInDim, _kvInDim, _inner, _heads, _headDim, _outDim;
     private readonly float _qkEps;

@@ -71,9 +71,14 @@ public sealed class KnobScopeIsEnforcedTests
         {
             switch (node)
             {
-                case FieldDeclarationSyntax field
-                    when field.Modifiers.Any(SyntaxKind.StaticKeyword) && field.Modifiers.Any(SyntaxKind.ReadOnlyKeyword):
-                    return "a static readonly field initializer";
+                // `readonly` is deliberately NOT required. A mutable static initialized from a knob is bound at
+                // type-initialization exactly the same way, and is worse rather than better: it is process-wide
+                // mutable state with no per-request isolation, and the only thing that ever wrote to the three
+                // found here was a test reaching past a knob that could not reach them.
+                case FieldDeclarationSyntax field when field.Modifiers.Any(SyntaxKind.StaticKeyword):
+                    return field.Modifiers.Any(SyntaxKind.ReadOnlyKeyword)
+                        ? "a static readonly field initializer"
+                        : "a mutable static field initializer";
                 case ConstructorDeclarationSyntax ctor when ctor.Modifiers.Any(SyntaxKind.StaticKeyword):
                     return "a static constructor";
                 case ObjectCreationExpressionSyntax creation

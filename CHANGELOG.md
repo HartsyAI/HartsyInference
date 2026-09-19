@@ -6,6 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.102
+
+- **Six more Runtime knobs were frozen, in mutable statics the previous check did not look at.** The scope lint
+  required `readonly`, so `internal static bool FusedMmaGemm = EngineKnobs.Int8FusedMma.Value;` and five like it
+  slipped through — bound at type-initialization exactly as a readonly field is, and worse rather than better, since
+  a mutable process-wide static has no per-request isolation at all. The lint no longer asks for `readonly`: a
+  static field initialized from a knob is frozen, full stop.
+
+  The tell was who wrote to them. Every one of the writable ones was assigned only by tests, reaching past a knob
+  that could not reach the code — `CudaBackend.FusedMmaGemm`, `FuseHeadGateIntoQuant`, `GroupedLinear` and
+  `LtxVideo2Attention.TokenMajorAttention`. Those are live reads now and the tests set the knob instead, so what
+  they exercise is the path a real request would take.
+
+  `WanVideoDebugDump` kept its runtime setter, which is legitimate, but seeded it from the knob at
+  type-initialization — so the first generation in a process named every later one's dumps. An explicit tag now wins
+  and the setting decides when nobody set one.
+
 ## alpha.101
 
 - **MiniMax-H3 runs from a GGUF, verified by generation.** The `unsloth/MiniMax-H3-GGUF` Q4_K build renders the

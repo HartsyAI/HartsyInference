@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Tests.Common;
@@ -185,17 +186,15 @@ public sealed unsafe class GroupedLinearTests
         using Tensor b = RandomF16(rng, N);
         using Tensor fused = new Tensor(new TensorShape(Rows, N), DType.F16);
         using Tensor pair = new Tensor(new TensorShape(Rows, N), DType.F16);
-
-        bool saved = CudaBackend.FusedMmaGemm;
         try
         {
-            CudaBackend.FusedMmaGemm = true;
+            KnobStore.Set(EngineKnobs.Int8FusedMma, true);
             backend.Linear(fused, input, w, b);
-            CudaBackend.FusedMmaGemm = false;
+            KnobStore.Set(EngineKnobs.Int8FusedMma, false);
             backend.Linear(pair, input, w, b);
             backend.Sync();
         }
-        finally { CudaBackend.FusedMmaGemm = saved; }
+        finally { KnobStore.Clear(EngineKnobs.Int8FusedMma); }
 
         AssertIdentical(_output, "fused-vs-pair through Linear", fused, pair);
     }
@@ -227,16 +226,15 @@ public sealed unsafe class GroupedLinearTests
 
         using Tensor fused = new Tensor(new TensorShape(Seq, OutDim), DType.F16);
         using Tensor pair = new Tensor(new TensorShape(Seq, OutDim), DType.F16);
-        bool saved = CudaBackend.FuseHeadGateIntoQuant;
         try
         {
-            CudaBackend.FuseHeadGateIntoQuant = true;
+            KnobStore.Set(EngineKnobs.Ltx2Gatefuse, true);
             backend.LinearHeadGated(fused, fusedIn, w, b, logits, Heads, HeadDim);
-            CudaBackend.FuseHeadGateIntoQuant = false;
+            KnobStore.Set(EngineKnobs.Ltx2Gatefuse, false);
             backend.LinearHeadGated(pair, pairIn, w, b, logits, Heads, HeadDim);
             backend.Sync();
         }
-        finally { CudaBackend.FuseHeadGateIntoQuant = saved; }
+        finally { KnobStore.Clear(EngineKnobs.Ltx2Gatefuse); }
 
         AssertIdentical(_output, "fused head gate vs separate pass", fused, pair);
     }
@@ -258,17 +256,15 @@ public sealed unsafe class GroupedLinearTests
         using Tensor on1 = new Tensor(new TensorShape(Rows, N), DType.F16);
         using Tensor off0 = new Tensor(new TensorShape(Rows, N), DType.F16);
         using Tensor off1 = new Tensor(new TensorShape(Rows, N), DType.F16);
-
-        bool saved = CudaBackend.GroupedLinear;
         try
         {
-            CudaBackend.GroupedLinear = true;
+            KnobStore.Set(EngineKnobs.GroupedLinear, true);
             backend.LinearMulti(input, [new(on0, wa, null), new(on1, wb, null)]);
-            CudaBackend.GroupedLinear = false;
+            KnobStore.Set(EngineKnobs.GroupedLinear, false);
             backend.LinearMulti(input, [new(off0, wa, null), new(off1, wb, null)]);
             backend.Sync();
         }
-        finally { CudaBackend.GroupedLinear = saved; }
+        finally { KnobStore.Clear(EngineKnobs.GroupedLinear); }
 
         AssertIdentical(_output, "op0", on0, off0);
         AssertIdentical(_output, "op1", on1, off1);
