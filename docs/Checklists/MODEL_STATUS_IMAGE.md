@@ -201,7 +201,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
-- [x] **Krea 2 prompt weighting, both mechanisms — DONE 2026-09-19 (alpha.127).** Krea 2 is the only family whose
+- [x] **Krea 2 prompt weighting, both mechanisms — DONE 2026-09-19 (alpha.128).** Krea 2 is the only family whose
   SwarmUI workflow inserts `SwarmAttnTokenWeights` (`WorkflowGenerator.cs:965-972`) on top of the ordinary cond
   scaling, so `CondScaleWithAttention` is not two alternatives but two things applied together; the mode ledger
   refused the `CondScale`-only declaration that was tried first. The cond-scale half right-aligns each token's
@@ -223,7 +223,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   the **non-turbo base** build instead (`krea2-raw-1_0-krea-2-base-fp8`, 768², 12 steps, seed 1, cfg 3.5,
   negative `blurry, low quality`): `(fox:1.0)` + `(blurry:1.0)` is byte-identical to the plain pair, and
   `(fox:0.5)` + `(blurry:1.5)` sits 28.36 from it. A weighted REGION works and takes the cond-scale half
-  (`<region:…>a red (fox:1.0)` is byte-identical to the unweighted region at 0.0000, `(fox:0.5)` differs);
+  (`<region:…>a red (fox:1.0)` is byte-identical to the unweighted region at 0.0000, `(fox:0.5)` sits 6.55 from it);
   weighting the base prompt AND a region in the same request is refused by name, because the base encode covers
   the region tags and the two sets of weights would land on the same rows. img2img and masked inpaint with
   attention weights are refused for a different reason — the pixel-space route has no attention-bias surface.
