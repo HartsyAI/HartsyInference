@@ -6,6 +6,20 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.125
+
+- **Quantizing a tensor that does not fill whole blocks corrupted the heap.** A block quant stores a fixed
+  element count per block and nothing enforced it: H3's `adaln_t_table` is `[8, 1025]`, eight elements short of
+  the 33rd Q4_K block, so the buffer was sized by integer division at 32 blocks while the codec wrote 33. The
+  only guard was a `Debug.Assert`, which Release compiles out, and the overrun surfaced as an allocator abort in
+  unrelated code. Such a tensor is kept at F16 now, and `ComputeByteCount` throws rather than under-allocating.
+- **The GGUF write streams.** Each tensor is widened, quantized and its wide copy freed before the next, instead
+  of holding the whole checkpoint as F32 — which wanted 74 GiB for a 13 GB source and was OOM-killed. The
+  working-set refusal no longer applies to GGUF targets because they no longer need it.
+- **A profile sidecar for an artifact declaring no step count was written with `Steps = 0`, which the resolver
+  refuses outright** — the file cost a full hash of the output and was then thrown away. It carries the base
+  count explicitly, because the format has no way to say "use the recipe's".
+
 ## alpha.124
 
 - **`UnpatchifyTokens` runs on Vulkan**, the last of the six true host fallbacks the Flux path reaches. Every one
@@ -55,6 +69,7 @@ stable release will require. Dates are UTC.
 - **An in-place op still has to re-cache its buffer**, and the parity test is what said so. The first version
   dispatched, wrote the device buffer and returned without rebinding, so a later host read got the untouched host
   copy and the op looked like it did nothing — a 3.3 absolute error against the reference, versus 2e-7 after.
+
 
 ## alpha.121
 
