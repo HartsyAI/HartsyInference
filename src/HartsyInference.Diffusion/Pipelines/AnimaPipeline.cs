@@ -18,7 +18,7 @@ namespace HartsyInference.Diffusion.Pipelines;
 public sealed unsafe class AnimaPipeline : DiffusionPipelineBase
 {
     /// <summary>Strict opt-in (<c>ANIMA_DEBUG_STATS=1</c>) for the per-boundary min/max/mean prints. Each one reads a tensor's <c>DataPointer</c>, which D2H-syncs and evicts the GPU activation — off by default so real runs stay device-resident (same opt-in form as <c>ANIMA_BYPASS_LLM_ADAPTER</c> below).</summary>
-    private static readonly bool DiagnosticStats = EngineKnobs.AnimaDebugStats.Value;
+    private static bool DiagnosticStats => EngineKnobs.AnimaDebugStats.Value;
 
     private readonly AnimaTransformer _transformer;
     private readonly AnimaLlmAdapter _llmAdapter;

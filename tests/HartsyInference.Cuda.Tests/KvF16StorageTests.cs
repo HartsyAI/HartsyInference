@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -154,8 +155,7 @@ public sealed unsafe class KvF16StorageTests
     public void FlashAttention_F16Kv_SplitForceEnv_StillMatchesMonolithicF32Kv()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
-        string? prevForce = Environment.GetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE");
-        Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE", "1");
+        KnobStore.Set(EngineKnobs.FlashSplitForce, true);
         try
         {
             using CudaBackend backend = new(0, PtxDir());
@@ -191,7 +191,7 @@ public sealed unsafe class KvF16StorageTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_FLASH_SPLIT_FORCE", prevForce);
+            KnobStore.Clear(EngineKnobs.FlashSplitForce);
         }
     }
 }

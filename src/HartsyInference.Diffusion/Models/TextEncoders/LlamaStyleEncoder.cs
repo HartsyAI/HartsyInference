@@ -84,7 +84,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
 
     // Diagnostic (HARTSY_TE_PROBE=1): per-layer absmax of the hidden stream — forces a host sync per
     // layer, so leave off outside debugging sessions.
-    private static readonly bool TeProbe = EngineKnobs.TeProbe.Value;
+    private static bool TeProbe => EngineKnobs.TeProbe.Value;
 
     private static unsafe void ProbeAbsmax(string label, Tensor t)
     {

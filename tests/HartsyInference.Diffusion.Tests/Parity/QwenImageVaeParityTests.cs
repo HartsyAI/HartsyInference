@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
@@ -58,7 +59,7 @@ public unsafe class QwenImageVaeParityTests
         string csDumpDir = Path.Combine(repoRoot, "Output", dumpDirName);
         if (Directory.Exists(csDumpDir)) Directory.Delete(csDumpDir, recursive: true);
         Directory.CreateDirectory(Path.Combine(csDumpDir, "layers"));
-        Environment.SetEnvironmentVariable("QWEN_VAE_DEBUG_DIR", csDumpDir);
+        KnobStore.Clear(EngineKnobs.QwenVaeDebugDir);
 
         // Synthetic input from dump_qwen_image_vae.py: raw latent [1, 16, 32, 32] F32 (pre-rescale).
         // We pass this directly to the C# decoder; its UndoScaling applies the per-channel
@@ -103,7 +104,7 @@ public unsafe class QwenImageVaeParityTests
 
         decoded.Dispose();
         latentRaw.Dispose();
-        Environment.SetEnvironmentVariable("QWEN_VAE_DEBUG_DIR", null);
+        KnobStore.Clear(EngineKnobs.QwenVaeDebugDir);
 
         _output.WriteLine($"\nC# dump written to: {csDumpDir}");
         _output.WriteLine("Now run: tests/python-reference/.venv/bin/python tests/python-reference/diff_qwen_image_vae_layers.py");

@@ -44,7 +44,7 @@ public sealed class WanAnimate2DrivingCachePolicyTests
         // operator's last word; LowVramPolicy is consulted only inside auto.
         Assert.False(WanAnimate2DrivingCachePolicy.ResolveCore(
             envForced: false, LowVramMode.ForceOn, freeBytes: 0, f32DemandBytes: long.MaxValue, out string by));
-        Assert.Contains(WanAnimate2DrivingCachePolicy.EnvironmentVariable, by);
+        Assert.Contains(WanAnimate2DrivingCachePolicy.Setting, by);
         Assert.True(WanAnimate2DrivingCachePolicy.ResolveCore(
             envForced: true, LowVramMode.ForceOff, freeBytes: long.MaxValue, f32DemandBytes: 1, out _));
     }

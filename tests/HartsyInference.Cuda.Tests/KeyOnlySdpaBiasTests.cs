@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
@@ -66,11 +67,13 @@ public sealed unsafe class KeyOnlySdpaBiasTests
         return worst;
     }
 
-    /// <summary>Runs one masked SDPA under a fixed set of dispatch env switches and returns the output.</summary>
-    private static Tensor Run(Tensor q, Tensor k, Tensor v, Tensor mask, float scale, (string Key, string? Value)[] env)
+    /// <summary>Runs one masked SDPA under a fixed set of dispatch switches and returns the output.</summary>
+    /// <remarks>Knob overrides, not environment variables. These were env pairs, and nothing has read the
+    /// environment since settings moved to knobs — so every comparison in this file was running BOTH of its arms in
+    /// the default dispatch configuration, and agreeing for that reason rather than the one it claims.</remarks>
+    private static Tensor Run(Tensor q, Tensor k, Tensor v, Tensor mask, float scale, Action[] dispatch)
     {
-        (string Key, string? Value)[] saved = env.Select(e => (e.Key, Environment.GetEnvironmentVariable(e.Key))).ToArray();
-        foreach ((string key, string? value) in env) Environment.SetEnvironmentVariable(key, value);
+        foreach (Action apply in dispatch) apply();
         try
         {
             using CudaBackend backend = new(0, PtxDir());
@@ -82,7 +85,9 @@ public sealed unsafe class KeyOnlySdpaBiasTests
         }
         finally
         {
-            foreach ((string key, string? value) in saved) Environment.SetEnvironmentVariable(key, value);
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
+            KnobStore.Clear(EngineKnobs.SdpaForceTiled);
+            KnobStore.Clear(EngineKnobs.SdpaNoF16);
         }
     }
 
@@ -104,7 +109,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
         Assert.Equal(new TensorShape(1, skv), row.Shape);
         using Tensor full = Expand(row, sq);
 
-        (string, string?)[] cudnn = [("HARTSY_SDPA_CUDNN", "1"), ("HARTSY_SDPA_FORCE_TILED", null)];
+        Action[] cudnn = [() => KnobStore.Set(EngineKnobs.SdpaCudnn, true), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, false)];
         using Tensor broadcast = Run(q, k, v, row, scale, cudnn);
         using Tensor duplicate = Run(q, k, v, full, scale, cudnn);
 
@@ -130,9 +135,9 @@ public sealed unsafe class KeyOnlySdpaBiasTests
         using Tensor row = WanAnimate2Transformer.BuildLogScaleBias(hw, skv, -1.3f);
 
         using Tensor tiled = Run(q, k, v, row, scale,
-            [("HARTSY_SDPA_CUDNN", "0"), ("HARTSY_SDPA_FORCE_TILED", "1")]);
+            [() => KnobStore.Set(EngineKnobs.SdpaCudnn, false), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true)]);
         using Tensor fused = Run(q, k, v, row, scale,
-            [("HARTSY_SDPA_CUDNN", "1"), ("HARTSY_SDPA_FORCE_TILED", null)]);
+            [() => KnobStore.Set(EngineKnobs.SdpaCudnn, true), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, false)]);
 
         // The tiled path is TF32/F32 throughout; the fused path is fp16 I/O. Tolerance is the fp16 gap, not the
         // bias's — an unapplied or misplaced bias moves softmax weights by e^1.3 and lands orders of magnitude out.
@@ -157,8 +162,8 @@ public sealed unsafe class KeyOnlySdpaBiasTests
         using Tensor row = WanAnimate2Transformer.BuildLogScaleBias(hw, skv, -1.3f);
         using Tensor full = Expand(row, sq);
 
-        (string, string?)[] materialized =
-            [("HARTSY_SDPA_CUDNN", "0"), ("HARTSY_SDPA_FORCE_TILED", null), ("HARTSY_SDPA_NO_F16", "1")];
+        Action[] materialized =
+            [() => KnobStore.Set(EngineKnobs.SdpaCudnn, false), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, false), () => KnobStore.Set(EngineKnobs.SdpaNoF16, true)];
         using Tensor broadcast = Run(q, k, v, row, scale, materialized);
         using Tensor duplicate = Run(q, k, v, full, scale, materialized);
 
@@ -200,9 +205,9 @@ public sealed unsafe class KeyOnlySdpaBiasTests
                 Buffer.MemoryCopy(pRow, pDup + ((long)h * sq + qi) * skv, skv * 4, skv * 4);
         }
 
-        (string, string?)[] tiled = [("HARTSY_SDPA_CUDNN", "0"), ("HARTSY_SDPA_FORCE_TILED", "1")];
-        (string, string?)[] materialized =
-            [("HARTSY_SDPA_CUDNN", "0"), ("HARTSY_SDPA_FORCE_TILED", null), ("HARTSY_SDPA_NO_F16", "1")];
+        Action[] tiled = [() => KnobStore.Set(EngineKnobs.SdpaCudnn, false), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, true)];
+        Action[] materialized =
+            [() => KnobStore.Set(EngineKnobs.SdpaCudnn, false), () => KnobStore.Set(EngineKnobs.SdpaForceTiled, false), () => KnobStore.Set(EngineKnobs.SdpaNoF16, true)];
         using Tensor viaTiled = Run(q, k, v, rowsPerHead, scale, tiled);
         using Tensor viaMaterialized = Run(q, k, v, duplicatePerHead, scale, materialized);
 
@@ -222,8 +227,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
 
         const int heads = 4, s = 64, d = 64;
         float scale = 1f / MathF.Sqrt(d);
-        string? prev = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
-        Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "1");
+        KnobStore.Set(EngineKnobs.SdpaCudnn, true);
         try
         {
             using CudaBackend backend = new(0, PtxDir());
@@ -251,7 +255,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", prev);
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
         }
     }
 }

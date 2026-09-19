@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
@@ -159,7 +160,7 @@ public sealed class DitShardingEngineTests
     [MemberData(nameof(NonResidentCases))]
     public async Task DitSharding_NonResident_FreesShardBackend_NoAccumulationAcrossGenerations(NonResidentCase c)
     {
-        Environment.SetEnvironmentVariable("HARTSY_KEEP_MODELS", "0");
+        KnobStore.Set(EngineKnobs.KeepModels, false);
 
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         if (CudaContext.GetDeviceCount() < 2) { _output.WriteLine("SKIPPED: needs 2 physical GPUs."); return; }

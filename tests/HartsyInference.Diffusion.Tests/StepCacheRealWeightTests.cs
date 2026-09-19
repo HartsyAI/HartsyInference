@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cuda;
 using HartsyInference.Engine.Recipes;
@@ -154,8 +155,8 @@ public sealed class StepCacheRealWeightTests
 
     private static byte[] Generate(IRecipePipeline pipeline, ImageRequest request, string? threshold, string? lateWindow, out string capturedLog)
     {
-        Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE", threshold);
-        Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_LATE", lateWindow);
+        KnobStore.Clear(EngineKnobs.StepCache);
+        KnobStore.Clear(EngineKnobs.StepCacheLate);
         System.Text.StringBuilder sb = new System.Text.StringBuilder();
         Logs.SetLogger((level, message) =>
         {
@@ -170,8 +171,8 @@ public sealed class StepCacheRealWeightTests
         finally
         {
             capturedLog = sb.ToString().TrimEnd();
-            Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE", null);
-            Environment.SetEnvironmentVariable("HARTSY_STEP_CACHE_LATE", null);
+            KnobStore.Clear(EngineKnobs.StepCache);
+            KnobStore.Clear(EngineKnobs.StepCacheLate);
         }
     }
 }

@@ -287,8 +287,7 @@ public sealed unsafe class StepCacheAccelerationTests
     {
         // The knob resolves override → legacy env → default, so the ambient env value has to be parked
         // for the unset arm to mean anything on a machine that has HARTSY_CFG_INTERVAL exported.
-        string? saved = Environment.GetEnvironmentVariable("HARTSY_CFG_INTERVAL");
-        Environment.SetEnvironmentVariable("HARTSY_CFG_INTERVAL", null);
+        KnobStore.Clear(EngineKnobs.CfgInterval);
         try
         {
             Assert.True(GuidanceInterval.FromEnvironment().IsAlways);
@@ -301,7 +300,7 @@ public sealed unsafe class StepCacheAccelerationTests
         finally
         {
             KnobStore.Clear(EngineKnobs.CfgInterval);
-            Environment.SetEnvironmentVariable("HARTSY_CFG_INTERVAL", saved);
+            KnobStore.Clear(EngineKnobs.CfgInterval);
         }
     }
 

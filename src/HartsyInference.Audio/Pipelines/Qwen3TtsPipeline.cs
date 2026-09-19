@@ -24,7 +24,7 @@ namespace HartsyInference.Audio.Pipelines;
 /// text-vocab dependency — the caller supplies the already-tokenized per-frame text stream.</para></summary>
 public sealed unsafe class Qwen3TtsPipeline : IDisposable
 {
-    private static readonly bool DebugCodes = EngineKnobs.Qwen3Debug.Value;
+    private static bool DebugCodes => EngineKnobs.Qwen3Debug.Value;
 
     /// <summary>Codec-stream sentinel marking the prefill position where the ECAPA x-vector embedding is
     /// injected in place of a token lookup (voice_clone). Any value the codec vocab never uses.</summary>

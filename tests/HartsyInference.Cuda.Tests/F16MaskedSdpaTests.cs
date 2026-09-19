@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
@@ -58,10 +59,9 @@ public sealed unsafe class F16MaskedSdpaTests
             queryValues, keyValues, valueValues, maskValues,
             Batch, Heads, QueryLength, KeyLength, HeadDim, scale);
 
-        string? previousCudnn = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "0");
+            KnobStore.Set(EngineKnobs.SdpaCudnn, false);
             using CudaBackend backend = new(0, ptxDir);
             backend.ScaledDotProductAttention(actual, query, key, value, mask, scale);
             backend.Sync();
@@ -93,7 +93,7 @@ public sealed unsafe class F16MaskedSdpaTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", previousCudnn);
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
         }
     }
 
@@ -135,12 +135,11 @@ public sealed unsafe class F16MaskedSdpaTests
             ((IBackend)cpu).ScaledDotProductAttention(expected, query, key, value, mask, scale);
 
         using Tensor actual = new(query.Shape, DType.F32);
-        string? previousCudnn = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
-        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "0");
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "0");
+            KnobStore.Set(EngineKnobs.SdpaCudnn, false);
+            KnobStore.Set(EngineKnobs.SageAttnExplicit, false);
+            KnobStore.Set(EngineKnobs.SageAttn, false);
             using CudaBackend backend = new(0, ptxDir);
             backend.ScaledDotProductAttention(actual, query, key, value, mask, scale);
             backend.Sync();
@@ -148,8 +147,9 @@ public sealed unsafe class F16MaskedSdpaTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", previousCudnn);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+            KnobStore.Clear(EngineKnobs.SageAttn);
         }
 
         float* expectedValues = (float*)expected.DataPointer;

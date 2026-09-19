@@ -4,7 +4,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>Per-process activation dtype for GPU-resident DiT block/attention hot paths. Standard-profile
+/// <summary>Activation dtype for GPU-resident DiT block/attention hot paths, read per generation so a
+/// request-scoped profile decides it. Standard-profile
 /// default: F16 for every OPTED-IN model (half the HBM traffic of the bandwidth-bound
 /// norm/modulate/gate/attention kernels) while the once-per-forward text/image/timestep paths and the tiny
 /// per-channel modulation vectors stay F32. <c>HARTSY_DIT_F16=0</c> forces F32 everywhere (the pre-profile
@@ -17,7 +18,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// conversion pattern).</para></summary>
 public static class DitDtype
 {
-    public static readonly DType Act = EngineKnobs.DitF16.Value ? DType.F16 : DType.F32;
+    public static DType Act => EngineKnobs.DitF16.Value ? DType.F16 : DType.F32;
 
     /// <summary>Casts an F32 block-input stream to <see cref="Act"/> (F16 on the <c>HARTSY_DIT_F16</c> hot path, else
     /// a no-op passthrough that returns the source unchanged). Disposes the source when it casts. Device-resident.
@@ -33,7 +34,7 @@ public static class DitDtype
     }
 }
 
-/// <summary>Per-process switch for CUDA-graph capture of a DiT denoise step (<c>HARTSY_DIT_GRAPH</c>): a model
+/// <summary>Per-generation switch for CUDA-graph capture of a DiT denoise step: a model
 /// whose step issues an identical op sequence every step captures it once and replays it with a single
 /// <c>cuGraphLaunch</c> (host issue time → ~0). Models opt in IN CODE via the <c>IBackend.StepGraph*</c> API with
 /// fixed boundary buffers (see <c>Krea2Transformer.ForwardPatched</c> for the reference pattern: per-step-varying
@@ -45,7 +46,7 @@ public static class DitDtype
 /// Chroma). <c>HARTSY_DIT_GRAPH=0</c> kills both; <c>=1</c> forces both.</para></summary>
 public static class DitStepGraph
 {
-    public static readonly bool Enabled = EngineKnobs.DitGraph.Value;
+    public static bool Enabled => EngineKnobs.DitGraph.Value;
 
-    public static readonly bool EnabledDefaultOn = EngineKnobs.DitGraphDefaultOn.Value;
+    public static bool EnabledDefaultOn => EngineKnobs.DitGraphDefaultOn.Value;
 }

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using Xunit;
 using Xunit.Abstractions;
@@ -28,7 +29,7 @@ public sealed class SameGpuConcurrentRealWeightTests
     [Fact]
     public async Task TwoEnginesOneGpu_ConcurrentGenerations_BitIdenticalToSerialized()
     {
-        Environment.SetEnvironmentVariable("HARTSY_SAME_GPU_CONCURRENT", "1");
+        KnobStore.Set(EngineKnobs.SameGpuConcurrent, true);
 
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         string sdxlCheckpoint = TestPaths.Sdxl.SingleFile;

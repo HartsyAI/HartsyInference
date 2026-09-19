@@ -280,7 +280,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
     /// planning allowance the streaming scope clamps against, and it over-predicts the measured peak — charging it
     /// here would refuse geometries that demonstrably run (480x800/61f). The cache is the immovable resident
     /// object; activations are elastic under per-step frees. Dtype must resolve BEFORE this floor is sized: a
-    /// forced/low-VRAM F32 pin (<see cref="WanAnimate2DrivingCachePolicy.EnvironmentVariable"/>=off, or the global
+    /// forced/low-VRAM F32 pin (<see cref="WanAnimate2DrivingCachePolicy.Setting"/>=off, or the global
     /// low-VRAM policy forcing it off) needs the larger F32 cache checked here — checking the smaller BF16 size
     /// regardless of the pin let an F32-pinned geometry pass preflight and OOM mid-generation instead.</remarks>
     private bool PlanDrivingCache(int width, int height, int chunkLen)
@@ -305,7 +305,7 @@ public sealed class WanAnimate2RecipePipeline : IVideoRecipePipeline
                     + "animatetotalframes chunking will still need --frames at or below that)."
                 : $" Not even the shortest chunk fits at {width}x{height} — lower the resolution.";
             string cacheLabel = bf16DrivingCache ? "BF16" : "F32";
-            string pinNote = bf16DrivingCache ? "" : $" Unsetting {WanAnimate2DrivingCachePolicy.EnvironmentVariable} "
+            string pinNote = bf16DrivingCache ? "" : $" Unsetting {WanAnimate2DrivingCachePolicy.Setting} "
                 + "(or setting it to 'on') allows the smaller BF16 cache instead.";
             throw new OutOfVramException(
                 $"Wan-Animate-2 {chunkLen}f@{width}x{height} cannot run on this device: even the {cacheLabel} driving cache "

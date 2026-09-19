@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using Xunit;
 using Xunit.Abstractions;
 using HartsyInference.Core.Backends;
@@ -150,13 +151,13 @@ public unsafe class MiniMaxH3ChunkedAttentionTests
             [MiniMaxH3SegmentKind.Audio] = 1, [MiniMaxH3SegmentKind.RefAudio] = 1,
         };
 
-        Environment.SetEnvironmentVariable("HARTSY_H3_CHUNK_ROWS", null);
+        KnobStore.Clear(EngineKnobs.H3ChunkRows);
         using MiniMaxH3Transformer legacyDit = new MiniMaxH3Transformer(c);
         legacyDit.LoadWeights(CloneWeights(weights));
         (Tensor legacyVideo, Tensor legacyAudio) =
             legacyDit.Forward(backend, layout, videoRows, audioRows, text, cos, sin, uniqueT, rowOf);
 
-        Environment.SetEnvironmentVariable("HARTSY_H3_CHUNK_ROWS", "16");
+        KnobStore.Set(EngineKnobs.H3ChunkRows, 16);
         try
         {
             using MiniMaxH3Transformer chunkedDit = new MiniMaxH3Transformer(c);
@@ -179,7 +180,7 @@ public unsafe class MiniMaxH3ChunkedAttentionTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_H3_CHUNK_ROWS", null);
+            KnobStore.Clear(EngineKnobs.H3ChunkRows);
             legacyVideo.Dispose();
             legacyAudio.Dispose();
             cos.Dispose();

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -60,34 +61,29 @@ public sealed unsafe class LlamaGqaAttentionMicroBench
             return;
         }
 
-        string? previousCudnn = Environment.GetEnvironmentVariable("HARTSY_SDPA_CUDNN");
-        string? previousForceF16 = Environment.GetEnvironmentVariable("HARTSY_SDPA_F16");
-        string? previousNoF16 = Environment.GetEnvironmentVariable("HARTSY_SDPA_NO_F16");
-        string? previousSage = Environment.GetEnvironmentVariable("HARTSY_SAGE_ATTN");
-        string? previousForceFlash = Environment.GetEnvironmentVariable("HARTSY_SDPA_FORCE_FLASH");
-        string? previousForceTiled = Environment.GetEnvironmentVariable("HARTSY_SDPA_FORCE_TILED");
-        string? previousV2 = Environment.GetEnvironmentVariable("HARTSY_SDPA_V2");
         try
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", "1");
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_F16", null);
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_NO_F16", null);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", "0");
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_FORCE_FLASH", null);
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_FORCE_TILED", null);
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_V2", null);
+            KnobStore.Set(EngineKnobs.SdpaCudnn, true);
+            KnobStore.Clear(EngineKnobs.SdpaF16);
+            KnobStore.Clear(EngineKnobs.SdpaNoF16);
+            KnobStore.Set(EngineKnobs.SageAttnExplicit, false);
+            KnobStore.Set(EngineKnobs.SageAttn, false);
+            KnobStore.Clear(EngineKnobs.SdpaForceFlash);
+            KnobStore.Clear(EngineKnobs.SdpaForceTiled);
+            KnobStore.Clear(EngineKnobs.SdpaV2);
 
             RunShape(sequence);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_CUDNN", previousCudnn);
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_F16", previousForceF16);
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_NO_F16", previousNoF16);
-            Environment.SetEnvironmentVariable("HARTSY_SAGE_ATTN", previousSage);
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_FORCE_FLASH", previousForceFlash);
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_FORCE_TILED", previousForceTiled);
-            Environment.SetEnvironmentVariable("HARTSY_SDPA_V2", previousV2);
+            KnobStore.Clear(EngineKnobs.SdpaCudnn);
+            KnobStore.Clear(EngineKnobs.SdpaF16);
+            KnobStore.Clear(EngineKnobs.SdpaNoF16);
+            KnobStore.Clear(EngineKnobs.SageAttnExplicit);
+            KnobStore.Clear(EngineKnobs.SageAttn);
+            KnobStore.Clear(EngineKnobs.SdpaForceFlash);
+            KnobStore.Clear(EngineKnobs.SdpaForceTiled);
+            KnobStore.Clear(EngineKnobs.SdpaV2);
         }
     }
 

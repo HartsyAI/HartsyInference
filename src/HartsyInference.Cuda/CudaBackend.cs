@@ -596,7 +596,7 @@ public sealed class CudaBackend : IBackend
     private const int DefaultInt8ColChunk = int.MaxValue;
 
     /// <summary>HARTSY_INT8_ROW_BUDGET_MB — pins <see cref="Int8ResidentRowChunk"/>'s byte budget instead of deriving it from free VRAM. 0 keeps the derived behaviour.</summary>
-    private static readonly long RowChunkBudgetOverrideBytes = EngineKnobs.Int8RowBudgetMb.Value << 20;
+    private static long RowChunkBudgetOverrideBytes => EngineKnobs.Int8RowBudgetMb.Value << 20;
 
     private int Int8ResidentRowChunk(int m, int n, int k, int activationBytes)
     {
@@ -1206,7 +1206,7 @@ public sealed class CudaBackend : IBackend
     /// weights — 1 GB verified live for the Flux.2 VAE beside Ideogram 4's 18.6 GB resident DiTs (2 GB still OOM'd
     /// there); band size costs no GEMM efficiency (m stays ≥ tens of thousands of rows). Override via
     /// HARTSY_IM2COL_BAND_MB (also lets tests force banding on small shapes).</remarks>
-    private static readonly long Im2ColBandCapBytes = EngineKnobs.Im2colBandMb.Value << 20;
+    private static long Im2ColBandCapBytes => EngineKnobs.Im2colBandMb.Value << 20;
 
     #region Linear Algebra
 
@@ -1390,10 +1390,10 @@ public sealed class CudaBackend : IBackend
     /// must admit only the regime actually measured, under conditions that resemble a real step. Re-measure
     /// end-to-end, not per shape, before widening it — and on a different card before trusting it there.</para></remarks>
     /// <summary>Widens the N bound from <c>n &lt;= 2k</c> to <c>n &lt;= 4k</c> (<c>HARTSY_INT8_MMA_WIDE_GATE=1</c>), which admits ffn_up 4992×16384×4096 and nothing else at LTX-2.5's shapes; ffn_down stays excluded by the unchanged <c>k &lt;= 2n</c>. OFF by default and deliberately an env switch rather than an edit: ffn_up was −7.0% against cold L2 under the padded layout, so re-admitting it is a claim that the swizzle flipped that sign, and this file's rule is that such a claim is settled end-to-end, not per shape. An env arm is also the only way to A/B the gate without swapping the binary mid-campaign, which corrupts the whole run.</summary>
-    private static readonly bool WideMmaGate = EngineKnobs.Int8MmaWideGate.Value;
+    private static bool WideMmaGate => EngineKnobs.Int8MmaWideGate.Value;
 
     /// <summary>The f16-staged wide ConvRot+quant kernel, bit-identical to the rotate-then-quant pair it replaces. **OFF, and measured**: it cuts that pair's 7 bytes/element to 3, and at LTX-2.5's 1280x736x145f FFN-down (17480x16384, 96 calls/step) `Int8.Quant` still went 1557.7 -> 1607.8 ms over 3 steps, with the end-to-end A/B inside its own 19 ms spread. Staging a 16384-wide row costs 40 KB of shared, which is 2 blocks/SM against the split pair's simple high-occupancy streaming kernels — the traffic saving does not pay for the occupancy. Kept unit-pinned (<c>ConvRotFusedQuantTests</c>) as the record: recomputing the byte ratio is not evidence. <c>HARTSY_CONVROT_WIDE=1</c> re-enables.</summary>
-    private static readonly bool UseWideConvRotQuant = EngineKnobs.ConvrotWide.Value;
+    private static bool UseWideConvRotQuant => EngineKnobs.ConvrotWide.Value;
 
     private bool UseFusedMmaGemm(bool outF16, int rows, int n, int k) =>
         FusedMmaGemm && outF16 && rows >= FusedMmaMinRows
@@ -2998,7 +2998,7 @@ public sealed class CudaBackend : IBackend
             $"cached-new={System.Threading.Interlocked.Exchange(ref _castCachedNew, 0)}");
     }
 
-    private static readonly bool _quantAtProducer = EngineKnobs.QuantAtProducer.Value;
+    private static bool _quantAtProducer => EngineKnobs.QuantAtProducer.Value;
 
     /// <summary>Allocates the Q8_1 sidecar (xq/xd/xs) for a K-wide single row, returns the three pointers.</summary>
     private static (ulong xq, ulong xd, ulong xs) AllocSidecar(int k)
@@ -7624,7 +7624,7 @@ public sealed class CudaBackend : IBackend
     }
 
     /// <summary>HARTSY_LTX2_SAGE_TOKENMAJOR=1 — let a token-major SDPA call detour through the permute pair into the head-major SageAttention path. Off by default; the measurement is at the call site.</summary>
-    private static readonly bool SageTokenMajorDetour = EngineKnobs.Ltx2SageTokenmajor.Value;
+    private static bool SageTokenMajorDetour => EngineKnobs.Ltx2SageTokenmajor.Value;
 
     /// <summary>Whether the native-F16 SageAttention ingest should take this call instead of cuDNN's fp16 flash. Shared by the head-major and token-major entry points: the token-major layout has no Sage kernel, so above the crossover it is worth permuting into head-major rather than keeping the layout.</summary>
     private bool SageF16Preferred(Tensor query, Tensor key, Tensor value, Tensor output, Tensor? mask,

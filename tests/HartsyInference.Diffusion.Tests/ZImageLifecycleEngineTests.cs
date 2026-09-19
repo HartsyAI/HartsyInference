@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
@@ -30,8 +31,11 @@ public sealed class ZImageLifecycleEngineTests
             _output.WriteLine("SKIPPED: set HARTSY_RUN_ZIMAGE_LIFECYCLE_TEST=1 for the real-weight lifecycle gate.");
             return;
         }
-        if (Environment.GetEnvironmentVariable("HARTSY_KEEP_MODELS") != "0")
-            throw new InvalidOperationException("This regression must run in a fresh process with HARTSY_KEEP_MODELS=0.");
+        // The regression is about VRAM not accumulating across generations, so the model cache must not hold them.
+        // This demanded an environment variable that nothing reads, which made it a guard against nothing: the
+        // condition could only be satisfied by exporting a name with no effect. Set the knob the engine actually
+        // consults instead.
+        KnobStore.Set(EngineKnobs.KeepModels, false);
         if (!CudaContext.IsAvailable())
         {
             _output.WriteLine("SKIPPED: CUDA unavailable");

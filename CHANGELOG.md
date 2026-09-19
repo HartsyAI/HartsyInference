@@ -6,6 +6,41 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.98
+
+- **A per-request setting was silently ignored for 53 of the engine's knobs.** `KnobScope.Runtime` declares a knob
+  "read each generation; safe to override per request", and `KnobProfileScope` exists to carry a request's settings
+  into generation — it is pushed per request by the image and video services, and uses `AsyncLocal` specifically so
+  two engines generating on two devices cannot decide each other's numerics. But 56 knobs were read into
+  `static readonly` fields, which bind once at type-initialization and are never re-read. For all of those the
+  request override did nothing, and worse than nothing: a process-wide field means whichever request touched the
+  type first decided for every later request and both GPUs, which is the exact failure the scope's `AsyncLocal` was
+  chosen to prevent.
+
+  The scope was a declaration nothing enforced. It is now read at the point of use — activation dtype, step-graph
+  capture, KV-cache precision, orphan sweeping, INT8 row budgets, im2col band caps, every probe and dump — and
+  `KnobScopeIsEnforcedTests` fails the build if a `Runtime` knob is frozen again. There is deliberately no allowlist
+  file: the knob's own declared scope is the allowlist, so marking one `Construction` is how you say a value really
+  is baked in, and the three that still are (Vulkan coopmat, profiling and submit-per-op, all decided when the
+  device and its pipelines are built) are named by a test.
+
+  Measured first, because the fix depends on it. `KnobResolutionBenchmarks` is kept so the resolve cost stays
+  reproducible — roughly 57 ns with a request profile pushed, which is the production path. The other half of the
+  number was a one-off: counting the per-op orphan sweep, the hottest reader, gave 9,741 calls for a 1024x1024
+  8-step image, so about 0.56 ms across an eleven-second generation. Live reads, rather than a snapshot cache built
+  for 0.005%.
+
+- **Tests configured the engine through environment variables nothing reads.** 95 call sites across 24 files set a
+  variable that was retired when settings moved to knobs, so they were measuring defaults under a name claiming
+  otherwise. One comparison ran both of its arms in the same configuration. `TestsDoNotSetKnobEnvVarsTests` now
+  fails on any test that sets a knob's legacy name, taking the list from the registry rather than a hardcoded copy;
+  harness gates like `HARTSY_REQUIRE_REAL_WEIGHTS` are untouched, being real environment variables read by the
+  tests themselves.
+
+- **Wan-Animate-2's driving-cache policy named a dead environment variable** in its logs, its unrecognized-value
+  warning and the note on its out-of-VRAM message, telling the reader to export something inert. It now names the
+  setting id, which `--set` and the settings file accept.
+
 ## alpha.97
 
 - **MiniMax-H3 opens every component through the container**, so a GGUF build of the DiT, either VAE or the text

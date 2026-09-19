@@ -220,7 +220,7 @@ public sealed unsafe class HiFTNetVocoder : IDisposable
     // floor (same class as F0Predictor's, just far smaller since it doesn't feed an accumulator), not a
     // correctness bug; see HiftStreamParityTests for the real-generation listen-test verification this rests
     // on. Recalibrate via HARTSY_HIFT_STREAM_MARGIN whenever this network's conv/resblock shapes change.
-    private static readonly int StreamMarginSamples = EngineKnobs.HiftStreamMargin.Value ?? 96_000;
+    private static int StreamMarginSamples => EngineKnobs.HiftStreamMargin.Value ?? 96_000;
 
     /// <summary>Streaming counterpart to <see cref="Forward"/>: feed successive mel chunks of one utterance and get back only the audio newly settled by this chunk.</summary>
     /// <remarks>Consumed via <paramref name="state"/>. Set

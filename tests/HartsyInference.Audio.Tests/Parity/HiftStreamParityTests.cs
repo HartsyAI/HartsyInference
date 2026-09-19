@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -62,7 +63,7 @@ public sealed unsafe class HiftStreamParityTests
             _out.WriteLine($"SKIPPED: PTX directory not found at {ptxDir}.");
             return;
         }
-        Environment.SetEnvironmentVariable("HIFT_DETERMINISTIC", "1");
+        KnobStore.Set(EngineKnobs.HiftDeterministic, true);
 
         PytorchPickleLoader loader = new();
         loader.Load(wPath);

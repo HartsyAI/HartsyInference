@@ -76,7 +76,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     // (scheduler writes latents host-side; velocity is host-coherent per the working Flux/Lance pattern). Identical
     // velocity stats across steps ⇒ the GPU is re-reading a stale (frozen) latent input; NaN/inf or exploding
     // magnitudes ⇒ transformer/scheduler math. See memory wan22-video-first-run-state.
-    private static readonly bool WanDebug = EngineKnobs.WanDebug.Value;
+    private static bool WanDebug => EngineKnobs.WanDebug.Value;
     private static void DumpStats(string tag, Tensor t)
     {
         if (!WanDebug) return;
