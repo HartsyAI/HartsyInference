@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.124
+
+- **`UnpatchifyTokens` runs on Vulkan**, the last of the six true host fallbacks the Flux path reaches. Every one
+  of them is now a kernel: `QkvSplitNorm`, `LayerNormModulate`, `ApplyRopeSingle`, `ModulationSplit4`,
+  `AffineBroadcastRowIndexed`, `GatedResidualRowIndexed` and this. What is left on that path is `LinearMulti`,
+  whose default composes GPU ops and is correct, just extra dispatches.
+- Driven from the OUTPUT: one invocation per output element, each computing the single source it reads. Driving it
+  from the input would have each invocation write patch·patch·C scattered locations — the same work with none of
+  the coalescing.
+- It calls the same `PatchTokenContract.ValidateUnpatchify` that CUDA and the host default use, rather than
+  re-deriving the geometry. Getting that wrong produces a plausible image with the patch interior transposed,
+  which is the kind of wrong that survives a smoke test.
+- Both packings are covered by tests because both are in use and neither is a default, along with a non-square
+  packed grid (an h/w swap looks fine on square) and patch=1. A shuffle moves values without arithmetic, so the
+  assertion is exact equality rather than a tolerance.
+
 ## alpha.123
 
 - **`ModulationSplit4`, `AffineBroadcastRowIndexed` and `GatedResidualRowIndexed` run on Vulkan.** All three were

@@ -1729,6 +1729,62 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         DispatchPerRowNorm(shader, 4, output, input, weight, bias, eps, normDim, totalRows);
     }
 
+    /// <summary>DiT token sequence back to an image plane: <c>tokens [B, seq, patchVolume]</c> to
+    /// <c>[B, C, H, W]</c>.</summary>
+    /// <remarks>Driven from the OUTPUT — one invocation per output element, each computing the single source it
+    /// reads. Driving it from the input would have each invocation write patch*patch*C scattered locations: the
+    /// same work with none of the coalescing.</remarks>
+    public void UnpatchifyTokens(Tensor output, Tensor tokens, int channels, int hPacked, int wPacked, int patch,
+        bool innerChannelFastest)
+    {
+        using OpScope _op = EnterOp();
+        // The same validator CUDA and the host default use, so the geometry is agreed in one place rather than
+        // re-derived per backend — getting it wrong here produces a plausible image with the patches transposed.
+        PatchTokenGeometry geometry = PatchTokenContract.ValidateUnpatchify(
+            output, tokens, channels, hPacked, wPacked, patch);
+        if (output.DType != tokens.DType || (output.DType != DType.F32 && output.DType != DType.F16))
+        {
+            PatchTokenHostShuffle.Unpatchify(output, tokens, geometry, patch, innerChannelFastest);
+            return;
+        }
+
+        VulkanBuffer inBuf = GetBuffer(tokens);
+        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        try
+        {
+            const uint local = 256;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+                SpecConstant.Bool(3, innerChannelFastest),
+            };
+            VulkanKernel kernel = GetKernel("unpatchify_tokens" + DtypeSuffix(output.DType), storageBufferCount: 2, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)geometry.Batch);
+            pc.U32((uint)geometry.Channels);
+            pc.U32((uint)geometry.Height);
+            pc.U32((uint)geometry.Width);
+            pc.U32((uint)patch);
+            pc.U32((uint)geometry.WPacked);
+            pc.U32((uint)geometry.SequenceLength);
+            pc.U32((uint)geometry.PatchVolume);
+
+            long total = output.ElementCount;
+            Span<ulong> bufs = stackalloc ulong[] { inBuf.Handle, outBuf.Handle };
+            Dispatch(kernel, bufs, pc.Written, (uint)((total + local - 1) / local), 1, 1);
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan UnpatchifyTokens dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     /// <summary>AdaLN modulation split: <c>proj [B,4D]</c> into four <c>[B,D]</c>, <c>1+x</c> for scales and
     /// <c>tanh(x)</c> for gates.</summary>
     public void ModulationSplit4(Tensor scaleMsa, Tensor gateMsa, Tensor scaleMlp, Tensor gateMlp, Tensor proj)
