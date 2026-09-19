@@ -6,6 +6,21 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.100
+
+- **A GGUF MiniMax-H3 text encoder loads.** Preflight refused the published repack for a shape error —
+  `visual.patch_embed.proj.weight` "must be [1152,3,2,16,16], got [3456,2,16,16]" — which reads like a corrupt
+  download but is a container limit: ggml caps a tensor at `GGML_MAX_DIMS = 4`, so no GGUF can hold a rank-5 weight
+  and every repack folds the leading pair (1152 x 3 = 3456). Row-major the two layouts are the same bytes in the
+  same order, so the fold is a relabeling and nothing needs converting.
+- Behind that refusal was a silent one. The input channel count was read as `Shape[1]`, which is 3 on the rank-5
+  weight and the temporal patch size — 2 — on the folded one, so the tower would have built a `[1152, 1024]`
+  projection out of a `[1152, 1536]` weight and copied the front of it. The count is now divided out of the element
+  count, which gets the same answer from either layout, and the copy checks its source length instead of trusting
+  the caller's arithmetic.
+- The fold is accepted as that exact shape, not as "rank 4 that multiplies out": `[1152,6,16,16]` is still refused,
+  and the refusal names both forms it would have taken.
+
 ## alpha.99
 
 - **`(word:1.5)` reaches five more families the way SwarmUI means it.** Prompt weighting worked only on SD1.5 and
