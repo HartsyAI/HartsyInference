@@ -208,7 +208,8 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   error, which is why it has never surfaced. Noticed while reading `gen_empty_tokens` for the weighting
   baselines; NOT diagnosed and NOT changed, because fixing the base tokenization is a different job from
   weighting and would move every existing AuraFlow generation. Verify against the Pile-T5 SentencePiece vocab
-  before touching it.
+  before touching it. Carried as a `TODO` in `AuraFlowRecipe.Construct`, beside the tokenizer construction, so
+  it is visible from the code and not only from this checklist.
 - [ ] **Chroma-Radiance does not generate — found 2026-09-19, PRE-EXISTING, unrelated to prompt weighting.**
   `chroma-radiance-x0.safetensors` fails at both 512² and 1024² with
   `UnpatchifyTokens input shape must be [4096, 4096, 16384]; got [4096, 256, 64]` — the middle dimension tracks

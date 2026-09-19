@@ -88,6 +88,11 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
             // token-ID assignments) — the embedded Google-T5 spiece denoises into a coherent image but not the
             // prompted one, since every token id maps to the wrong piece.
             string spiecePath = ModelDownloader.EnsureSideModelAsync(SideModels.PileT5XlSpiece, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            // TODO: Pile-T5's special ids likely differ from the ones this tokenizer hardcodes. ComfyUI's
+            // `aura_t5.py:9/:14` declares `special_tokens={"end": 2, "pad": 1}` and `pad_token=1`, while
+            // `T5Tokenizer` fixes EOS=1/PAD=0 for every family it serves — so AuraFlow may be terminating and
+            // padding with the wrong pieces on the plain encode. Unverified against the spiece vocab; it fails as
+            // plausible output rather than an error, and a fix moves every existing AuraFlow generation.
             T5Tokenizer tokenizer = new T5Tokenizer(spiecePath, maxLength: 256);
 
             AuraFlowPipeline pipeline = new AuraFlowPipeline(context.Backend, t5, transformer, vae, vaeEncoder, config);
