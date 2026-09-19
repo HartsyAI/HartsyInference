@@ -6,6 +6,33 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.131
+
+- **Flux.1, Anima and SD3 honour `(word:N)`**, taking the deliberately-unwired ledger from 14 registered
+  families to 11. Both are dual-encoder families where only ONE arm can be blended, and wiring the other would have been
+  a no-op that looked like coverage.
+- **Flux.1: the T5 arm only.** CLIP-L contributes its POOLED vector and its hidden states are disposed
+  immediately after the EOS extraction — ComfyUI's blend rewrites hidden states, so there is nothing on that arm
+  for it to act on. Flux applies no trim to its T5 output, so it takes AuraFlow's shape rather than Chroma's: the
+  cache keeps the PLAIN conditioning, which still shares the baseline's shape, and the blend lands on a
+  per-request copy after the fetch.
+- **Anima: the Qwen-3 arm only.** Its T5 side is an id lookup inside the adapter (`embed[t5_ids]`), not an
+  encoder output, so there is nothing to interpolate — that text only needs the grammar taken off, or the parens
+  reach the lookup as prose. ComfyUI's own Anima text encoder drops that arm's weights the same way. The blend
+  lands on the full padded window before the real-length slice, and the Qwen-3 padding is mirrored rather than
+  assumed: EOS then BOS-as-pad, since Qwen3 has no dedicated pad token.
+- **SD3 blends all three arms, and it is the only wired family that has to.** Everywhere else CLIP contributes
+  a pooled vector and its hidden states are discarded, so only the T5/LLM arm is blendable; SD3's CLIP hidden
+  states reach the DiT. The CLIP halves reuse `ClipTextEncoder.EncodeWeightedPenultimate`, which builds its own
+  empty chunk and returns an UNWEIGHTED pooled from chunk 0 — the reference's own behaviour, not a convenience:
+  the blend rewrites hidden states only and `first_pooled` is read before its loop, so the pooled vector must not
+  carry the emphasis. Every arm is a fixed window (77/77/256) and SD3 caches no conditioning, so there is neither
+  a per-prompt baseline nor a cache key to make weight-aware. CLIP chunk 0 only, which is what the single-array
+  signature carries and what the plain encode already produced; a multi-chunk weighted prompt (`<break>`) would
+  need the chunked signature and is not wired.
+- Flux.1's regions weight per leaf and a base prompt weighted alongside one is refused — the fourth family to
+  need that split, reusing `RegionalPromptWeightSplit` rather than reimplementing it.
+
 ## alpha.130
 
 - **Nine more families honour `(word:N)`**, taking the deliberately-unwired ledger from 22 registered families

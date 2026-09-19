@@ -59,10 +59,23 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                 + "and silently ignoring the images would misrepresent the output.");
         }
 
-        int[] clipTokens = _clipTokenizer.Encode(prompt);
+        // Declaring ComfyBlend is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar
+        // now. Only the T5 arm is blendable: CLIP-L contributes its POOLED vector and its hidden states are
+        // discarded, and ComfyUI's blend rewrites hidden states only.
+        bool hasRegionParts = RegionalPromptResolver.HasRegionParts(prompt);
+        if (hasRegionParts && RegionalPromptWeightSplit.BaseTextCarriesWeight(prompt))
+        {
+            throw new NotSupportedException(
+                "Flux.1 cannot weight the base prompt and a region in the same request: the base encode covers "
+                + "the region tags too, so the two sets of weights would land on the same conditioning rows. "
+                + "Move the emphasis inside the region, or drop the region tags.");
+        }
+        string baseText = RegionalPromptWeightSplit.BaseText(prompt, hasRegionParts);
+        int[] clipTokens = _clipTokenizer.Encode(PromptWeighting.Join(PromptWeighting.Parse(baseText)));
         int eosPos = ClipTokenizer.FindEosPosition(clipTokens);
-        int[] t5Tokens = _t5Tokenizer.Encode(prompt);
+        (int[] t5Tokens, float[]? t5Weights) = T5WeightedConditioning.Tokenize(_t5Tokenizer, baseText);
         int[] t5Mask = T5Tokenizer.CreateAttentionMask(t5Tokens);
+        int[] emptyT5 = T5WeightedConditioning.EmptyTokens(_t5Tokenizer);
 
         // FLUX.1 Canny/Depth: the host already ran the edge/depth annotator (it needs host-app image types this
         // package can't reference) and handed back the finished map under this key. Absent on a genuine Tools
@@ -126,7 +139,10 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
                 regionalPlan: regionalPlan,
                 fluxControlNets: controlNets?.Conditionings,
                 reduxImageEmbeds: redux?.Embeds,
-                reduxApplyStartFraction: redux?.ApplyStart ?? 0f);
+                reduxApplyStartFraction: redux?.ApplyStart ?? 0f,
+                promptWeights: t5Weights,
+                emptyTokenIdsT5: emptyT5,
+                emptyAttentionMaskT5: T5Tokenizer.CreateAttentionMask(emptyT5));
 
             return new ImageResult
             {
@@ -161,9 +177,13 @@ public sealed class Flux1RecipePipeline(FluxPipeline pipeline, ClipTokenizer cli
         using Tensor baseCondPlaceholder = new Tensor(new TensorShape(1), DType.F32);
         return RegionalPromptResolver.Resolve(prompt, baseCondPlaceholder, width, height, steps, encodeRegion: text =>
         {
-            int[] tokens = _t5Tokenizer.Encode(text);
+            // Each region is its own leaf carrying its own emphasis, as encode_leaves does per region.
+            (int[] tokens, float[]? weights) =
+                T5WeightedConditioning.Tokenize(_t5Tokenizer, PromptTagFlattening.Flatten(text));
             int[] mask = T5Tokenizer.CreateAttentionMask(tokens);
-            return _pipeline.EncodeRegionText(tokens, mask);
+            int[] empty = T5WeightedConditioning.EmptyTokens(_t5Tokenizer);
+            return _pipeline.EncodeRegionText(
+                tokens, mask, weights, empty, T5Tokenizer.CreateAttentionMask(empty));
         });
     }
 

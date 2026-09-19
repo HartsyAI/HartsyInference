@@ -63,9 +63,21 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         int[]? promptAttentionMaskT5,
         int[]? negativeAttentionMaskT5,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        float[]? promptClipWeights = null,
+        float[]? negativeClipWeights = null,
+        float[]? promptT5Weights = null,
+        float[]? negativeT5Weights = null,
+        int[]? emptyTokenIdsT5 = null,
+        int[]? emptyAttentionMaskT5 = null)
     {
         ThrowIfDisposed();
+        if ((promptT5Weights is not null || negativeT5Weights is not null) && emptyTokenIdsT5 is null)
+        {
+            throw new ArgumentNullException(nameof(emptyTokenIdsT5),
+                "ComfyBlend needs the T5 empty-prompt baseline, and only the caller owns the tokenizer that pads "
+                + "it. The CLIP arms build their own.");
+        }
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         bool isImg2Img = request is ImageToImageRequest;
@@ -112,7 +124,8 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
         (Tensor condContext, Tensor condPooled) = EncodePrompt(
             promptTokenIdsL, promptTokenIdsG, promptTokenIdsT5,
             promptEosPositionL, promptEosPositionG,
-            promptAttentionMaskT5, clipSkip);
+            promptAttentionMaskT5, clipSkip,
+            promptClipWeights, promptT5Weights, emptyTokenIdsT5, emptyAttentionMaskT5);
 
         // Project context through transformer's context_embedder
         Tensor condProjected = _transformer.ProjectContext(Backend, condContext);
@@ -127,7 +140,8 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             (Tensor negContext, Tensor negPooled) = EncodePrompt(
                 negativePromptTokenIdsL, negativePromptTokenIdsG, negativePromptTokenIdsT5,
                 negativeEosPositionL, negativeEosPositionG,
-                negativeAttentionMaskT5, clipSkip);
+                negativeAttentionMaskT5, clipSkip,
+                negativeClipWeights, negativeT5Weights, emptyTokenIdsT5, emptyAttentionMaskT5);
 
             uncondProjected = _transformer.ProjectContext(Backend, negContext);
             negContext.Dispose();
@@ -523,22 +537,36 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Encodes a single prompt through all three text encoders and combines the results.</summary>
+    /// <param name="clipWeights">Per-token weights for the shared CLIP tokenization, or null when unweighted.
+    /// Both CLIP arms take the same array because SD3 tokenizes once for L and G.</param>
+    /// <param name="t5Weights">Per-token weights for the T5 arm.</param>
+    /// <param name="emptyTokenIdsT5">The T5 empty-prompt baseline's tokens. The CLIP arms build their own
+    /// baseline inside <see cref="ClipTextEncoder.EncodeWeightedPenultimate"/>.</param>
     private (Tensor context, Tensor pooled) EncodePrompt(
         int[] tokenIdsL, int[] tokenIdsG, int[]? tokenIdsT5,
         int eosPositionL, int eosPositionG,
-        int[]? attentionMaskT5, int clipSkip = 2)
+        int[]? attentionMaskT5, int clipSkip = 2,
+        float[]? clipWeights = null, float[]? t5Weights = null,
+        int[]? emptyTokenIdsT5 = null, int[]? emptyAttentionMaskT5 = null)
     {
         int seqLenClip = tokenIdsL.Length;
 
-        // CLIP-L: penultimate hidden [1, 77, 768] + pooled [1, 768]
+        // SD3 is the only family here whose CLIP HIDDEN states reach the DiT — elsewhere CLIP contributes a
+        // pooled vector and its hidden states are discarded — so both CLIP arms are blended, not just T5.
+        // EncodeWeightedPenultimate owns the CLIP baseline (it builds the empty chunk itself) and returns an
+        // UNWEIGHTED pooled from chunk 0, which is what the reference takes: the blend rewrites hidden states
+        // only, and first_pooled is read before its loop.
         int[][] batchTokenIdsL = [tokenIdsL];
         int[] eosPositionsL = [eosPositionL];
-        (Tensor clipLHidden, Tensor? clipLPooled) = _clipL.EncodePenultimate(Backend, batchTokenIdsL, eosPositionsL, clipSkip);
+        (Tensor clipLHidden, Tensor? clipLPooled) = clipWeights is null
+            ? _clipL.EncodePenultimate(Backend, batchTokenIdsL, eosPositionsL, clipSkip)
+            : _clipL.EncodeWeightedPenultimate(Backend, batchTokenIdsL, [clipWeights], eosPositionsL, clipSkip);
 
-        // CLIP-G: penultimate hidden [1, 77, 1280] + pooled [1, 1280]
         int[][] batchTokenIdsG = [tokenIdsG];
         int[] eosPositionsG = [eosPositionG];
-        (Tensor clipGHidden, Tensor? clipGPooled) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositionsG, clipSkip);
+        (Tensor clipGHidden, Tensor? clipGPooled) = clipWeights is null
+            ? _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositionsG, clipSkip)
+            : _clipG.EncodeWeightedPenultimate(Backend, batchTokenIdsG, [clipWeights], eosPositionsG, clipSkip);
 
         // Combine pooled: concat(clip_l_pooled, clip_g_pooled, dim=-1) → [1, 2048]
         Tensor pooled = DiTUtils.ConcatPooled(clipLPooled!, clipGPooled!);
@@ -563,6 +591,16 @@ public sealed unsafe class Sd3Pipeline : DiffusionPipelineBase
             int[][] batchT5 = [tokenIdsT5];
             int[][]? batchMask = attentionMaskT5 is not null ? [attentionMaskT5] : null;
             t5Hidden = _t5.Encode(Backend, batchT5, batchMask);
+            if (t5Weights is not null && emptyTokenIdsT5 is not null)
+            {
+                using Tensor emptyT5 = _t5.Encode(Backend, [emptyTokenIdsT5],
+                    emptyAttentionMaskT5 is null ? null : [emptyAttentionMaskT5]);
+                if (Prompting.ComfyBlend.Apply(Backend, t5Hidden, emptyT5, t5Weights) is Tensor blended)
+                {
+                    t5Hidden.Dispose();
+                    t5Hidden = blended;
+                }
+            }
         }
         else
         {

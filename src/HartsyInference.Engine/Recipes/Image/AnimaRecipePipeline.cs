@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -63,23 +64,19 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
 
         // Plain (non-chat) tokenization: Anima's reference workflow uses CLIPLoader type="stable_diffusion", which is
         // Comfy's path for raw Qwen-3 text encoding (no chat template).
-        int[] tokenIds = _tokenizer.Encode(prompt, appendEos: true);
-        int realLen = ComputeRealLength(tokenIds);
-        Tensor encodedFull = _qwen.Encode(_backend, new[] { tokenIds });
-        Tensor positiveEmbeddings = SliceFirstSeqF32(encodedFull, realLen);
-        encodedFull.Dispose();
-        int[] positiveT5Ids = EncodeT5(_t5Tokenizer, prompt);
+        // Declaring ComfyBlend is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar
+        // now. Only the Qwen-3 arm is blendable: the T5 side is an id lookup inside the adapter
+        // (`embed[t5_ids]`), not an encoder output, so there is nothing there to interpolate — its text only
+        // needs the grammar taken off, which PromptWeighting.Join does below.
+        Tensor positiveEmbeddings = EncodeWeightedQwen(prompt);
+        int[] positiveT5Ids = EncodeT5(_t5Tokenizer, StripGrammar(prompt));
 
         Tensor? negativeEmbeddings = null;
         int[]? negativeT5Ids = null;
         if (cfg > 1.0f)
         {
-            int[] negTokens = _tokenizer.Encode(negative, appendEos: true);
-            int negRealLen = ComputeRealLength(negTokens);
-            Tensor negEncodedFull = _qwen.Encode(_backend, new[] { negTokens });
-            negativeEmbeddings = SliceFirstSeqF32(negEncodedFull, negRealLen);
-            negEncodedFull.Dispose();
-            negativeT5Ids = EncodeT5(_t5Tokenizer, negative);
+            negativeEmbeddings = EncodeWeightedQwen(negative);
+            negativeT5Ids = EncodeT5(_t5Tokenizer, StripGrammar(negative));
         }
 
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
@@ -196,6 +193,57 @@ public sealed unsafe class AnimaRecipePipeline : IRecipePipeline
         }
         return result;
     }
+
+    /// <summary>Encodes one prompt through the Qwen-3 arm and applies its per-token weights. The blend lands on
+    /// the FULL padded window, before the real-length slice: the weights describe the padded rows and the
+    /// baseline is only subtractable row for row while both still have them.</summary>
+    /// <remarks>An unweighted prompt keeps <see cref="Qwen3Tokenizer.Encode"/> verbatim, so its ids and its
+    /// encoder shape are exactly what they were before weighting existed.</remarks>
+    private Tensor EncodeWeightedQwen(string prompt)
+    {
+        (int[] tokenIds, float[]? weights) = TokenizeWeightedQwen(prompt);
+        int realLen = ComputeRealLength(tokenIds);
+        Tensor encodedFull = _qwen.Encode(_backend, new[] { tokenIds });
+        if (weights is not null)
+        {
+            using Tensor emptyFull = _qwen.Encode(_backend, new[] { _tokenizer.Encode("", appendEos: true) });
+            if (ComfyBlend.Apply(_backend, encodedFull, emptyFull, weights) is Tensor blended)
+            {
+                encodedFull.Dispose();
+                encodedFull = blended;
+            }
+        }
+        Tensor sliced = SliceFirstSeqF32(encodedFull, realLen);
+        encodedFull.Dispose();
+        return sliced;
+    }
+
+    /// <summary>Mirrors <see cref="Qwen3Tokenizer.Encode"/>'s padding — EOS then BOS-as-pad to the fixed window —
+    /// while carrying one weight per row. Pad and EOS rows weigh 1: they are not part of the prompt, and blending
+    /// them would pull the padding toward the empty encode along with the words.</summary>
+    private (int[] Tokens, float[]? Weights) TokenizeWeightedQwen(string prompt)
+    {
+        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(PromptTagFlattening.Flatten(prompt));
+        if (!PromptWeighting.HasWeights(spans))
+        {
+            return (_tokenizer.Encode(PromptWeighting.Join(spans), appendEos: true), null);
+        }
+        WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, _tokenizer.EncodeRaw, [], []);
+        int window = _tokenizer.MaxLength;
+        int[] tokens = new int[window];
+        float[] weights = new float[window];
+        Array.Fill(tokens, Qwen3Tokenizer.BosTokenId);
+        Array.Fill(weights, 1f);
+        int real = Math.Min(built.Tokens.Length, window - 1);
+        Array.Copy(built.Tokens, tokens, real);
+        Array.Copy(built.Weights, weights, real);
+        tokens[real] = Qwen3Tokenizer.EosTokenId;
+        return (tokens, weights);
+    }
+
+    /// <summary>The prompt with its emphasis grammar removed, for the arm that cannot act on it.</summary>
+    private static string StripGrammar(string prompt) =>
+        PromptWeighting.Join(PromptWeighting.Parse(PromptTagFlattening.Flatten(prompt)));
 
     /// <inheritdoc/>
     public void Dispose()

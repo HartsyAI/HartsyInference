@@ -6,6 +6,7 @@ using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Tokenizers;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Recipes.Image;
@@ -27,9 +28,12 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
         string prompt = request.Prompt;
         string negative = request.NegativePrompt ?? "";
 
+        // Declaring ComfyBlend is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar
+        // now. SD3 is the only wired family whose CLIP HIDDEN states reach the DiT, so all three arms are
+        // blended rather than T5 alone.
         // Both CLIPs share the same BPE tokenizer; encode once and reuse for L and G.
-        int[] promptTokensClip = _clipTokenizer.Encode(prompt);
-        int[] negTokensClip = _clipTokenizer.Encode(negative);
+        (int[] promptTokensClip, float[]? promptClipWeights) = TokenizeClipWeighted(prompt);
+        (int[] negTokensClip, float[]? negClipWeights) = TokenizeClipWeighted(negative);
         int promptEos = ClipTokenizer.FindEosPosition(promptTokensClip);
         int negEos = ClipTokenizer.FindEosPosition(negTokensClip);
 
@@ -37,12 +41,18 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
         int[]? negTokensT5 = null;
         int[]? promptMaskT5 = null;
         int[]? negMaskT5 = null;
+        float[]? promptT5Weights = null;
+        float[]? negT5Weights = null;
+        int[]? emptyT5 = null;
+        int[]? emptyMaskT5 = null;
         if (_t5Tokenizer is not null)
         {
-            promptTokensT5 = _t5Tokenizer.Encode(prompt);
-            negTokensT5 = _t5Tokenizer.Encode(negative);
+            (promptTokensT5, promptT5Weights) = T5WeightedConditioning.Tokenize(_t5Tokenizer, prompt);
+            (negTokensT5, negT5Weights) = T5WeightedConditioning.Tokenize(_t5Tokenizer, negative);
             promptMaskT5 = T5Tokenizer.CreateAttentionMask(promptTokensT5);
             negMaskT5 = T5Tokenizer.CreateAttentionMask(negTokensT5);
+            emptyT5 = T5WeightedConditioning.EmptyTokens(_t5Tokenizer);
+            emptyMaskT5 = T5Tokenizer.CreateAttentionMask(emptyT5);
         }
 
         // Sd3Pipeline validates the source against the unsnapped request size, so resolve at exactly that.
@@ -64,7 +74,8 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
             promptEos, negEos,
             promptTokensT5, negTokensT5,
             promptMaskT5, negMaskT5,
-            inner, bridge);
+            inner, bridge,
+            promptClipWeights, negClipWeights, promptT5Weights, negT5Weights, emptyT5, emptyMaskT5);
 
         return new ImageResult
         {
@@ -80,6 +91,25 @@ public sealed class Sd3RecipePipeline(Sd3Pipeline pipeline, ClipTokenizer clipTo
                 ["steps"] = (request.Steps ?? Sd3Recipe.FamilyDefaults.Steps).ToString(CultureInfo.InvariantCulture),
             },
         };
+    }
+
+    /// <summary>The CLIP tokenization plus its per-token weights. An unweighted prompt keeps
+    /// <see cref="ClipTokenizer.Encode"/> verbatim, so its ids are exactly what they were before weighting
+    /// existed.</summary>
+    /// <remarks>Chunk 0 only, which is what the single-array pipeline signature can carry and what the plain
+    /// encode already produced: a prompt past the 77-token window is truncated the same way either way. A
+    /// multi-chunk weighted prompt (<c>&lt;break&gt;</c>) would need the chunked signature and is not wired.</remarks>
+    private (int[] Tokens, float[]? Weights) TokenizeClipWeighted(string prompt)
+    {
+        string text = PromptTagFlattening.Flatten(prompt);
+        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(text);
+        if (!PromptWeighting.HasWeights(spans))
+        {
+            return (_clipTokenizer.Encode(PromptWeighting.Join(spans)), null);
+        }
+        (IReadOnlyList<int[]> ids, IReadOnlyList<float[]> weights) =
+            WeightedPromptTokenizer.Tokenize(_clipTokenizer, text);
+        return (ids[0], weights[0]);
     }
 
     /// <inheritdoc/>
