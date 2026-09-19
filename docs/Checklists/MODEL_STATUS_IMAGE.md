@@ -201,14 +201,24 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
-- [x] **Flux.1 and Anima weight prompts — DONE 2026-09-19 (alpha.131).** Both are dual-encoder families where
+- [x] **Flux.1, Anima and SD3 weight prompts — DONE 2026-09-19 (alpha.131).** Both are dual-encoder families where
   only ONE arm is blendable, and the judgement is the substance: Flux.1's CLIP-L contributes its pooled vector and
   its hidden states are disposed right after the EOS extraction, and Anima's T5 side is an `embed[t5_ids]` lookup
   inside the adapter rather than an encoder output. Wiring either would have been a no-op that looked like
   coverage; both arms instead get the grammar stripped so the parens never reach them as prose. Real-weight
   verified on `flux1-dev-fp8` (512², seed 1): `(fox:1.0)` byte-identical to plain, `(fox:0.5)` and `(fox:1.5)`
   each differing from plain and from each other. Flux.1's regions weight per leaf and the base-plus-region
-  combination is refused.
+  combination is refused. **SD3 is the only wired family that blends all three arms** — elsewhere CLIP is
+  pooled-only — and its CLIP halves reuse `EncodeWeightedPenultimate`, whose chunk-0 pooled is unweighted by
+  construction, matching the reference's `first_pooled` read before the blend loop. Verified on
+  `sd3.5_medium_incl_clips_t5xxlfp8scaled` (512², seed 1): `(fox:1.0)` byte-identical, `(fox:0.5)` and
+  `(fox:1.5)` each differing from plain and from each other.
+
+  **A gate-config note worth keeping:** the first Anima gate reported `(fox:1.0)` as byte-different and
+  reproducible, while a same-code control showed the model was perfectly deterministic — which reads exactly like
+  a logic bug. It was a stale `bin/Release` CLI, built before the recipe change; a `dotnet build` of the Engine
+  project alone does not refresh it. A control run proves determinism, not freshness. The gate scripts now echo
+  the engine DLL's mtime beside the recipe source's.
 - [x] **AuraFlow, Chroma and Chroma-Radiance weight prompts — DONE 2026-09-19 (alpha.130).** The first image
   families on the ComfyBlend mechanism rather than CondScale: their ComfyUI tokenizers keep weights, so the blend
   runs on the encoder OUTPUT against the same encoder's empty-prompt baseline. `T5WeightedConditioning` is the
