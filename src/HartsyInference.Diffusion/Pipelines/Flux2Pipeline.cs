@@ -118,8 +118,14 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
             foreach (Tensor partial in encoded) partial.Dispose();
             throw;
         }
-        Backend.FreeWeights(_textEncoder.EnumerateWeights());
-        Backend.FreeActivations();
+        finally
+        {
+            // Same reason as the single-prompt path: the encoder cannot be resident alongside the DiT and nothing
+            // else reclaims it, so it is freed whether the forwards returned or threw. A schedule runs N forwards
+            // rather than one, so it gets N chances to throw here.
+            Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            Backend.FreeActivations();
+        }
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms "
             + $"({encoded.Count} variants, seqLen={encoded[0].Shape[1]})");
         return encoded;
@@ -213,14 +219,21 @@ _transformer.InvalidateStepGraph(Backend);
             }
 
             int[][] batchedTokenIds = [promptTokenIds];
-            textEmbeddings = _textEncoder.EncodeMultiLayer(Backend, batchedTokenIds, _hiddenLayers);
-            Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (seqLen={textEmbeddings.Shape[1]}, hidden={textEmbeddings.Shape[2]})");
-            LogTensorStats("text embeddings", textEmbeddings);
-
-            // Free the TE weights (auto-promoted into the weight cache during the forward), host-materialize
-            // the embeddings so they survive activation sweeps across generations, and reclaim the encoder's
-            // device intermediates before the DiT phase.
-            Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            try
+            {
+                textEmbeddings = _textEncoder.EncodeMultiLayer(Backend, batchedTokenIds, _hiddenLayers);
+                Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms (seqLen={textEmbeddings.Shape[1]}, hidden={textEmbeddings.Shape[2]})");
+                LogTensorStats("text embeddings", textEmbeddings);
+            }
+            finally
+            {
+                // Free the TE weights (auto-promoted into the weight cache during the forward) whether the
+                // forward returned or threw: the encoder cannot be resident alongside the DiT, and nothing else
+                // reclaims it, so a backend error used to leave it pinned until the next successful encode.
+                Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            }
+            // Host-materialize the embeddings so they survive activation sweeps across generations, then reclaim
+            // the encoder's device intermediates before the DiT phase.
             _ = textEmbeddings.DataPointer;
             Backend.FreeActivations();
 
