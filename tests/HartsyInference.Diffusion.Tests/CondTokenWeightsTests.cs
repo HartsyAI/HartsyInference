@@ -184,4 +184,41 @@ public sealed class CondTokenWeightsTests
         Assert.NotNull(scaled);
         Assert.Equal(before, cond.AsReadOnlySpan<float>().ToArray());
     }
+
+    /// <summary>The elementwise scale reads and writes <c>float*</c> for <c>ElementCount</c> elements whatever the
+    /// dtype, so a half-precision tensor would have twice its own size written into it. That is a buffer overrun,
+    /// not a wrong number, so it is refused by name rather than scaled.</summary>
+    [Theory]
+    [InlineData("cond")]
+    [InlineData("pooled")]
+    public void AHalfPrecisionTensorIsRefusedRatherThanOverrun(string which)
+    {
+        IBackend backend = new CpuBackend();
+        bool condHalf = which == "cond";
+        using Tensor cond = condHalf ? new Tensor(new TensorShape(2, 2), DType.F16) : Ramp(2, 2);
+        using Tensor pooled = condHalf ? Ramp(1, 3) : new Tensor(new TensorShape(1, 3), DType.F16);
+        ArgumentException ex = Assert.Throws<ArgumentException>(
+            () => CondTokenWeights.ScaleUniform(backend, cond, pooled, 0.5f));
+        Assert.Equal(which, ex.ParamName);
+    }
+
+    /// <summary>Why the guard above matters only to a direct caller. It is tempting to assume a uniform weight
+    /// reaches <see cref="CondTokenWeights.ScaleUniform"/> through <c>Apply</c> and carries an unchecked pooled
+    /// vector with it — it does not. <c>ScaleRightAligned</c> returns null only when no weight other than 1 lands
+    /// inside the cond, and a uniform non-1 weight lands on every row, so the per-token path takes it and the
+    /// pooled vector is never touched. This pins that routing, so a future change that makes the uniform fallback
+    /// genuinely reachable fails here rather than silently widening what reaches the scale.</summary>
+    [Fact]
+    public void AUniformWeightTakesThePerTokenPathAndNeverSeesThePooledVector()
+    {
+        IBackend backend = new CpuBackend();
+        using Tensor cond = Ramp(2, 2);
+        using Tensor pooled = new Tensor(new TensorShape(1, 3), DType.F16);
+        WeightedTokenSequence sequence = new WeightedTokenSequence([1, 2], [1.5f, 1.5f]) { UniformWeight = 1.5f };
+        CondScaleResult result = CondTokenWeights.Apply(backend, cond, pooled, sequence);
+        using Tensor? scaledCond = result.Cond;
+        Assert.NotNull(scaledCond);
+        Assert.Null(result.Pooled);
+        Assert.Equal(DType.F16, pooled.DType);
+    }
 }

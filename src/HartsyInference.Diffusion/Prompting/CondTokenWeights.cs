@@ -92,6 +92,14 @@ public static class CondTokenWeights
         return result;
     }
 
+    /// <summary>Refuses a tensor the scaling path would corrupt rather than merely mis-scale.</summary>
+    private static void RequireF32(Tensor? tensor, string name)
+    {
+        if (tensor is not null && tensor.DType != DType.F32)
+            throw new ArgumentException(
+                $"CondScale weighting needs an F32 tensor, got {tensor.DType}.", name);
+    }
+
     /// <summary>Scales the whole conditioning — and the pooled vector when there is one — by a single weight, the
     /// fallback SwarmUI takes when every leaf carries the same weight and no per-token position survived
     /// (<c>SwarmText.py:578-583</c>). Unconditional: the <c>w == 1</c> short-circuit belongs to <see cref="Apply"/>.</summary>
@@ -99,6 +107,15 @@ public static class CondTokenWeights
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(cond);
+        // Not a style check. The elementwise scale reads and writes float* for ElementCount elements without
+        // consulting the dtype, so a half-precision tensor gets twice its own size written into it — a silent
+        // out-of-bounds write, not a wrong number. This is for direct callers of this public method: `Apply` cannot
+        // arrive here with a weighted sequence, because a uniform non-1 weight lands on every row and so
+        // ScaleRightAligned takes it instead (pinned by AUniformWeightTakesThePerTokenPathAndNeverSeesThePooled-
+        // Vector). The guard is what keeps that an implementation detail rather than the only thing holding the
+        // overrun back.
+        RequireF32(cond, nameof(cond));
+        RequireF32(pooled, nameof(pooled));
         Tensor scaledCond = new Tensor(cond.Shape, cond.DType);
         Tensor? scaledPooled = null;
         try
