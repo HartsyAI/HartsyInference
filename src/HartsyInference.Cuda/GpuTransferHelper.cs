@@ -5,6 +5,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Gpu;
 
 namespace HartsyInference.Cuda;
 
@@ -89,6 +90,71 @@ internal static unsafe class GpuTransferHelper
         }
 
         public void WaitForCallbacksToDrain() => _callbacksDrained.Wait();
+
+        // ── Residency queries ───────────────────────────────────────────────────────────────────────────────
+        // What callers and tests actually want to know about this cache, stated as questions about a tensor rather
+        // than as reads of whichever dictionary happens to hold it. The collections above are an implementation of
+        // residency, not the definition of it, and asserting against them couples every test to that choice.
+
+        /// <summary>Which cache holds this tensor's device copy, if either.</summary>
+        /// <exception cref="InvalidOperationException">Both do. <see cref="CopyToDevice"/> checks weights first, so
+        /// the activation — the newer bytes, written by an op — would be shadowed by the stale weight on every later
+        /// read. That is the "auto-promote discards device writes" bug, and the demotion in
+        /// <see cref="CacheActivation"/> exists to prevent it; this asks rather than assumes.</exception>
+        public GpuResidencyTier TierOf(Tensor tensor)
+        {
+            bool weight = WeightCache.ContainsKey(tensor);
+            bool activation = ActivationCache.ContainsKey(tensor);
+            if (weight && activation)
+            {
+                throw new InvalidOperationException(
+                    $"Tensor {tensor.Shape} {tensor.DType} is cached as BOTH a weight and an activation on state "
+                    + $"{Key}. A weight lookup wins, so every later read would serve the pre-op bytes and silently "
+                    + "discard what the op wrote.");
+            }
+            return weight ? GpuResidencyTier.Weight
+                : activation ? GpuResidencyTier.Activation
+                : GpuResidencyTier.None;
+        }
+
+        /// <summary>Whether this tensor's activation is marked to survive <see cref="FreeActivations"/>.</summary>
+        public bool IsPinnedActivation(Tensor tensor) => PinnedActivations.Contains(tensor);
+
+        /// <summary>Whether this cache owns the allocation behind a device pointer, and so will free it itself.</summary>
+        public bool OwnsBuffer(ulong devicePtr) => CachedPointers.Contains(devicePtr);
+
+        /// <summary>Resident weights.</summary>
+        public int WeightCount => WeightCache.Count;
+
+        /// <summary>Resident activations.</summary>
+        public int ActivationCount => ActivationCache.Count;
+
+        /// <summary>Cached dtype conversions of resident weights.</summary>
+        public int WeightCastCount => WeightCastCache.Count;
+
+        /// <summary>Activations marked to survive a bulk free.</summary>
+        public int PinnedActivationCount => PinnedActivations.Count;
+
+        /// <summary>Device allocations this cache owns, across every tier. Zero after a full teardown, whatever
+        /// route the buffers took to get there.</summary>
+        public int CachedBufferCount => CachedPointers.Count;
+
+        /// <summary>Device bytes held by resident activations.</summary>
+        /// <remarks>A total rather than a per-tensor lookup because the callers that need it — teardown probes that
+        /// deliberately drop every tensor reference to prove the cache still holds the memory — have no tensor left
+        /// to ask about. <see cref="CachedBytes"/> deliberately measures permanent weight/cast residency instead.</remarks>
+        public long ActivationBytes
+        {
+            get
+            {
+                long total = 0;
+                foreach ((ulong _, nuint bytes) in ActivationCache.Values)
+                {
+                    total += (long)bytes;
+                }
+                return total;
+            }
+        }
 
         public long CachedBytes;
         public long Hits;
@@ -782,7 +848,7 @@ internal static unsafe class GpuTransferHelper
     }
 
     /// <summary>True when this backend's activation cache currently holds a device copy of <paramref name="tensor"/>.</summary>
-    internal static bool HasCachedActivation(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
+    internal static bool HasCachedActivation(Tensor tensor) => IsActivationCached(tensor);
 
     /// <summary>The device pointer already backing <paramref name="tensor"/>, without uploading anything. For an op that OVERWRITES its destination in full: <see cref="CopyToDevice"/> would stage the host bytes over PCIe first, and the very next line discards them.</summary>
     internal static bool TryGetCachedDevice(Tensor tensor, out ulong gpuPtr)
@@ -1017,9 +1083,13 @@ internal static unsafe class GpuTransferHelper
     // to reach into private fields.
 
     /// <summary>True if the weight is currently cached on the device. Streaming uploads check this to skip already-resident tensors.</summary>
-    internal static bool IsWeightCached(Tensor weight) => Resolve().WeightCache.ContainsKey(weight);
+    /// <summary>True when this backend holds <paramref name="weight"/> as a resident weight.</summary>
+    /// <remarks>Routed through <see cref="State.TierOf"/> rather than reading the dictionary directly, so the
+    /// at-most-one-tier invariant is checked on this path too. It is the one that matters most: a table computed as
+    /// an activation and then preloaded is exactly how a tensor could end up in both.</remarks>
+    internal static bool IsWeightCached(Tensor weight) => Resolve().TierOf(weight) == GpuResidencyTier.Weight;
 
-    internal static bool IsActivationCached(Tensor tensor) => Resolve().ActivationCache.ContainsKey(tensor);
+    internal static bool IsActivationCached(Tensor tensor) => Resolve().TierOf(tensor) == GpuResidencyTier.Activation;
 
     /// <summary>Registers an already-uploaded weight in the cache. The caller is responsible for the alloc + H2D copy (sync or async); this just records the tensor → dptr mapping and bumps the byte counter.</summary>
     internal static void RegisterCachedWeight(Tensor weight, ulong dptr, nuint byteSize)

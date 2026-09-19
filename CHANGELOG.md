@@ -6,6 +6,30 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.103
+
+- **The residency cache answers questions about a tensor now, instead of handing out its dictionaries.**
+  `TierOf(tensor)`, `IsPinnedActivation`, `OwnsBuffer` and the four counts land on `GpuTransferHelper.State`, and the
+  ~35 test assertions that reached into `WeightCache`/`ActivationCache`/`WeightCastCache`/`PinnedActivations`/
+  `CachedPointers` now ask those instead. The collections are an implementation of residency, not the definition of
+  it, and every assertion written against them was coupled to that choice — which matters immediately, because the
+  shared `GpuResidencyCache<TBuffer>` keeps them `protected` and those are the teardown and isolation tests that have
+  to keep working across the migration.
+- **`GpuResidencyTier` makes "resident as both" unrepresentable, and `TierOf` throws when it happens anyway.** A
+  lookup checks weights first, so a tensor in both tiers has its activation — the bytes an op just wrote — shadowed
+  by a stale weight on every later read. That is the auto-promote-discards-device-writes bug, and until now nothing
+  asserted it could not occur: `PreloadWeight` tests only the weight cache before inserting, so a tensor computed as
+  an activation and then preloaded was the plausible route in. The whole CUDA suite passes with the check live,
+  including the RoPE-table lifecycle tests that take exactly that route, so the invariant is now a tested fact
+  rather than an assumption the shared cache was about to be built on.
+- **This changes a production failure mode on purpose.** `IsWeightCached`/`IsActivationCached` route through
+  `TierOf`, so a violation raises where it happens rather than returning an answer that is quietly wrong for the
+  rest of the generation. The cost is one extra reference-equality dictionary probe on those paths; the alternative
+  is a check that only protects the tests, which is not what this invariant is for.
+- `HartsyInference.Cuda` references `HartsyInference.Gpu` for the first time. Nothing depends on it yet beyond the
+  enum — it is landed here, on its own, so the package-graph change is proven separately from the cache migration
+  that needs it.
+
 ## alpha.102
 
 - **Six more Runtime knobs were frozen, in mutable statics the previous check did not look at.** The scope lint

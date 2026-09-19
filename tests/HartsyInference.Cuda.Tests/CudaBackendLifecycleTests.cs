@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Gpu;
 using HartsyInference.Cuda;
 using Xunit;
 using Xunit.Abstractions;
@@ -47,9 +48,11 @@ public sealed unsafe class CudaBackendLifecycleTests
             Assert.NotEqual(keyA, stateB.Key);
             Assert.Equal(registryBaseline + 2, GpuTransferHelper.RegisteredStateCount);
             Assert.Contains(stateB.Key, GpuTransferHelper.RegisteredStateKeysForTests);
-            Assert.Single(stateB.WeightCache);
-            KeyValuePair<Tensor, (ulong gpuPtr, nuint bytes)> activationEntry = Assert.Single(stateB.ActivationCache);
-            Assert.Equal((nuint)(4L << 20), activationEntry.Value.bytes);
+            Assert.Equal(1, stateB.WeightCount);
+            // The probe deliberately drops every tensor reference, so there is nothing left to name — the claim
+            // is "one 4 MiB activation is still resident", which is what these two say.
+            Assert.Equal(1, stateB.ActivationCount);
+            Assert.Equal(4L << 20, stateB.ActivationBytes);
             // CachedBytes deliberately measures permanent weight/cast residency; activation bytes are asserted
             // from their own cache entry above.
             Assert.True(stateB.CachedBytes >= 16L << 20,
@@ -80,12 +83,12 @@ public sealed unsafe class CudaBackendLifecycleTests
             Assert.False(GpuTransferHelper.IsStateRegistered(stateB.Key));
             Assert.DoesNotContain(stateB.Key, GpuTransferHelper.RegisteredStateKeysForTests);
             Assert.Equal(registryBaseline + 1, GpuTransferHelper.RegisteredStateCount);
-            Assert.Empty(stateB.WeightCache);
-            Assert.Empty(stateB.ActivationCache);
-            Assert.Empty(stateB.WeightCastCache);
-            Assert.Empty(stateB.CachedPointers);
+            Assert.Equal(0, stateB.WeightCount);
+            Assert.Equal(0, stateB.ActivationCount);
+            Assert.Equal(0, stateB.WeightCastCount);
+            Assert.Equal(0, stateB.CachedBufferCount);
             Assert.Empty(stateB.PendingOrphans);
-            Assert.Empty(stateB.PinnedActivations);
+            Assert.Equal(0, stateB.PinnedActivationCount);
             Assert.Empty(stateB.SidecarCache);
             Assert.Equal(0, stateB.CachedBytes);
             Assert.Equal(0, stateB.StreamHandle);
@@ -95,7 +98,7 @@ public sealed unsafe class CudaBackendLifecycleTests
 
             // A is on the same primary context. B's retirement must neither evict A's resident weight nor leave
             // the shared device/context unusable.
-            Assert.Contains(weightA, backendA.TransferState.WeightCache.Keys);
+            Assert.Equal(GpuResidencyTier.Weight, backendA.TransferState.TierOf(weightA));
             long hitsBefore = backendA.TransferState.Hits;
             using Tensor second = new(inputA.Shape, DType.F32);
             Assert.Equal(expectedA, RunLinear(backendA, inputA, weightA, second), 3);
@@ -138,7 +141,7 @@ public sealed unsafe class CudaBackendLifecycleTests
         Assert.Equal(1, scaleBeforeDispose.Count);
         Assert.Equal(LifecycleActive, backend.LifecycleStateForTests);
         Assert.Equal(0, backend.CleanupExecutionCount);
-        Assert.Contains(liveActivation, state.ActivationCache.Keys);
+        Assert.Equal(GpuResidencyTier.Activation, state.TierOf(liveActivation));
 
         const int callers = 16;
         using ManualResetEventSlim start = new(initialState: false);
