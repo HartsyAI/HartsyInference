@@ -304,7 +304,10 @@ public sealed class TextService : ITextService, IDisposable
             deviceKey = fallbackDevice;
         }
         IBackend backend = slot.Backend ??= CreateBackendFor(deviceKey);
-        bool isCpu = backend is not CudaBackend;
+        // A backend that cannot read quantized weights needs them dequantized on the way in. Asking the backend
+        // what it supports rather than what class it is means Vulkan gets the right answer the moment it publishes
+        // SupportsQuantized, instead of silently paying an F32 expansion forever because it is not CUDA.
+        bool dequantize = !backend.Capabilities.SupportsQuantized;
         string architecture = architecture0;
         if (SsmLanguageModel.IsSsmArchitecture(architecture))
         {
@@ -319,9 +322,11 @@ public sealed class TextService : ITextService, IDisposable
         // The engine's on-disk quant is honored as-is; LowVramQuant here is the "keep quant compressed on-device"
         // toggle (any non-empty value enables it) — the loader takes a bool, not a target quant string.
         bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
-        slot.Model = GgufLanguageModel.Load(path, lowVram, dequantizeToF32: isCpu);
-        if (backend is CudaBackend)
-            backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights());
+        slot.Model = GgufLanguageModel.Load(path, lowVram, dequantizeToF32: dequantize);
+        // Unconditional: PreloadWeights is a no-op on a backend with no device memory, and a backend that HAS
+        // device memory wants its weights resident — gating on the class meant Vulkan re-uploaded every weight
+        // over PCIe on every op.
+        backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights());
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
         slot.LoadedPath = path;
         LoadVisionInto(slot, path);
@@ -473,10 +478,7 @@ public sealed class TextService : ITextService, IDisposable
         tp.LoadWeights(checkpoint.Weights, "model");
         for (int rank = 0; rank < backends.Count; rank++)
         {
-            if (backends[rank] is CudaBackend)
-            {
-                backends[rank].PreloadWeights(tp.EnumerateRankWeights(rank));
-            }
+            backends[rank].PreloadWeights(tp.EnumerateRankWeights(rank));
         }
         slot.TpCheckpoint = checkpoint;
         slot.TpTransformer = tp;
@@ -591,17 +593,16 @@ public sealed class TextService : ITextService, IDisposable
         slot.VisionPath = null;
         if (slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null)
         {
-            if (slot.Backend is CudaBackend cuda)
+            if (slot.Backend is not null)
             {
-                try { cuda.FreeAllDeviceMemory(); }
+                try { slot.Backend.FreeAllDeviceMemory(); }
                 catch (Exception ex) { Logs.Debug($"[TextService] FreeAllDeviceMemory failed: {ex.Message}"); }
             }
             if (slot.ExtraStageBackends is not null)
             {
                 foreach (IBackend stage in slot.ExtraStageBackends)
                 {
-                    if (stage is not CudaBackend stageCuda) continue;
-                    try { stageCuda.FreeAllDeviceMemory(); }
+                    try { stage.FreeAllDeviceMemory(); }
                     catch (Exception ex) { Logs.Debug($"[TextService] Stage FreeAllDeviceMemory failed: {ex.Message}"); }
                 }
             }

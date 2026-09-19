@@ -41,9 +41,11 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
     /// <inheritdoc/>
     public IRecipePipeline Construct(RecipeContext context)
     {
-        if (context.Backend is CudaBackend cuda)
+        // Asked of the backend, not of its class: any GPU backend that reports memory can answer this, and the
+        // preflight is about how much VRAM there is rather than about which vendor supplies it.
+        (long freeBytes, long totalBytes) = context.Backend.GetVramInfo();
+        if (totalBytes > 0)
         {
-            (nuint freeBytes, nuint totalBytes) = cuda.Context.GetMemoryInfo();
             double freeGb = freeBytes / (1024.0 * 1024.0 * 1024.0);
             if (freeGb < MinRequiredVramGb)
             {

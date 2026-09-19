@@ -6,6 +6,27 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.115
+
+- **The engine asks a backend what it can do instead of what class it is.** Every `is CudaBackend` outside the CUDA
+  package is gone. They were not stylistic: each one silently denied a capability to any backend that was not CUDA,
+  so a second backend inherited the restriction whether or not it applied.
+- `dequantizeToF32` is `!Capabilities.SupportsQuantized` in both `TextService` and `ModelManager`. Equivalent today
+  — CUDA publishes true, Vulkan and CPU false — but it means Vulkan stops paying an F32 expansion the moment it
+  publishes the capability, rather than forever because it is not CUDA.
+- `PreloadWeights` is called unconditionally. It is a no-op on a backend with no device memory, and a backend that
+  HAS device memory wants its weights resident; gating on the class meant Vulkan re-uploaded every weight over PCIe
+  on every op. Same for `FreeAllDeviceMemory` on unload, which simply never ran on Vulkan and left VRAM held.
+- The Ideogram 4 and Boogu VRAM preflights use `GetVramInfo()` and `StreamingCache`, so they now apply on any
+  backend that reports memory rather than being skipped entirely off CUDA — which is what made them silent there.
+- **Two of these change behaviour rather than just spelling, and deliberately.** SeedVR2's BF16 VAE activations
+  were keyed on "is CUDA" and are now keyed on `SupportsBF16`, which on CUDA is compute capability 8.0 or newer —
+  so a pre-Ampere card gets F32 activations where it previously got BF16 it has no hardware for. MiniMax-Music3's
+  half-precision KV moves from "is CUDA" to `SupportsF16` on the same reasoning.
+- Left alone on purpose: `ValidateShardDevices` still requires a CUDA device for LLM layer-split. The real
+  requirement is a backend that computes on quantized tensors, and Vulkan does not yet — relaxing the check to any
+  GPU kind would admit it to a path that would fail further in. It changes when Vulkan publishes the capability.
+
 ## alpha.113
 
 - **The op scope every GPU backend needs is written once.** `GpuBackendBase` owns it: the point at which a backend
