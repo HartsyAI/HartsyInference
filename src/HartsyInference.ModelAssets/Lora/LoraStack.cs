@@ -487,6 +487,17 @@ public sealed class LoraStack : IDisposable
         Tensor finalTensor;
         if (IsInt8Tensorwise(baseW))
         {
+            if (baseW.Shape.Rank != 2)
+            {
+                // Reachable only since convolution targets were allowed through. ConvRot's rotation is defined
+                // over a 2-D weight's rows and its codec refuses anything else — correctly, but with a message
+                // about its own contract rather than the user's situation.
+                accumF32.Dispose();
+                throw new NotSupportedException(
+                    $"'{canonicalKey}' is an int8 convolution weight. The ConvRot rotation a LoRA merge has to "
+                    + "reverse and reapply is defined over a 2-D weight, so it cannot be repacked at rank "
+                    + $"{baseW.Shape.Rank}. Use a BF16/fp8 build of this model with convolution LoRAs.");
+            }
             finalTensor = RequantizeF32ToInt8ConvRot(accumF32, baseW.QuantInfo!);
         }
         else if (baseW.DType.IsFp8)

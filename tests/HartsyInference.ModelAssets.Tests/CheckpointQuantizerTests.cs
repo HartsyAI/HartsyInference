@@ -201,4 +201,38 @@ public sealed class CheckpointQuantizerTests : IDisposable
         Assert.Equal("int8_tensorwise", loaded.QuantInfo!.Format);
         Assert.Equal(256, loaded.QuantInfo.ConvRotGroupSize);
     }
+
+    /// <summary>Several eligible weights, not one. The single-tensor cases above cannot see an ownership bug that
+    /// only appears once a second tensor exists — a bookkeeping pass that rescans the whole output on every
+    /// iteration re-registers earlier companions each time, and what it hands back is disposed more than once.
+    /// </summary>
+    [Fact]
+    public unsafe void TheFp8TargetHandlesSeveralWeightsWithoutDoubleFreeingCompanions()
+    {
+        Dictionary<string, Tensor> src = new(StringComparer.Ordinal);
+        for (int i = 0; i < 4; i++) src[$"blocks.{i}.attn.weight"] = Ramp(1024, 1024, scale: 1f + i);
+        string path = WriteSafetensors("fp8multi.safetensors", src);
+        foreach (Tensor t in src.Values) t.Dispose();
+        string outPath = Path.Combine(_dir, "fp8multi-out.safetensors");
+
+        QuantizationReport report = CheckpointQuantizer.Quantize(new QuantizationJob
+        {
+            SourcePath = path,
+            OutputPath = outPath,
+            Target = new QuantizationTarget(QuantizationTargetKind.Fp8Scaled),
+        });
+        Assert.Equal(4, report.QuantizedCount);
+
+        using Checkpoints.CheckpointSource read = Checkpoints.CheckpointSource.Open(outPath);
+        for (int i = 0; i < 4; i++)
+        {
+            Tensor stored = read.Weights[$"blocks.{i}.attn.weight"];
+            Assert.Equal(DType.F8E4M3, stored.DType);
+            using Tensor back = stored.CastTo(DType.F32);
+            // The scale is folded on open, so a companion that was freed early or attached to the wrong weight
+            // shows up as values that are not the ones written.
+            float first = ((float*)back.DataPointer)[0];
+            Assert.InRange(first, -0.001f, 0.001f);
+        }
+    }
 }
