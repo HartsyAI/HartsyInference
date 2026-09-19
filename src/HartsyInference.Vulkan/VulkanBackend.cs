@@ -4,13 +4,14 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Gpu;
 
 namespace HartsyInference.Vulkan;
 
 /// <summary>Vulkan compute backend implementing <see cref="IBackend"/> via SPIR-V compute shaders.</summary>
 // Mirrors the CUDA backend's GPU weight cache + lazy-sync activation cache so model code that works
 // on CUDA works unchanged here.
-public sealed class VulkanBackend : IBackend
+public sealed class VulkanBackend : GpuBackendBase, IBackend
 {
     private readonly VulkanInstance _instance;
     private readonly VulkanDevice _vkDevice;
@@ -70,11 +71,9 @@ public sealed class VulkanBackend : IBackend
         && (dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0
             || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K);
 
-    /// <summary>Count of lazy D2H syncs since <see cref="ResetD2hSyncCount"/>; mirrors <c>CudaBackend</c>'s counter of the same name — ~0 means the traced region stayed GPU-resident.</summary>
-    public long GetD2hSyncCount() => _xfer.GetSyncCount();
 
-    /// <summary>Resets the D2H sync counter.</summary>
-    public void ResetD2hSyncCount() => _xfer.ResetSyncCount();
+
+
 
     /// <summary>Weight/activation transfer-cache hit and miss counts since backend construction (a miss is a fresh H2D upload — the other half of a residency break that <see cref="GetD2hSyncCount"/> alone doesn't show, since a CPU-loop-default <c>IBackend</c> member that reads a GPU-resident tensor pays a D2H sync going in AND forces an H2D re-upload the next time a GPU op needs that tensor back). Cumulative since construction, not reset by <see cref="ResetD2hSyncCount"/> — diff two calls around the region you're measuring.</summary>
     public (long hits, long misses) GetTransferCacheStats()
@@ -186,8 +185,7 @@ public sealed class VulkanBackend : IBackend
         };
     }
 
-    /// <summary>Preloads weights to GPU memory. Cached by Tensor reference.</summary>
-    public void PreloadWeights(IEnumerable<Tensor> weights) => _xfer.PreloadWeights(LowRankAdjunct.ExpandWeights(weights));
+
 
     /// <summary>Master kill-switch for weight dtype-cast caching — mirrors <c>CudaBackend.CacheWeightCasts</c> exactly (same name, same purpose): turn off for a large FP8/quantized model whose full cast set (e.g. FP8→F32, 4x expansion) doesn't fit VRAM alongside its own raw weights, trading recompute for memory via transient (dispatched-and-freed-per-call) dequant instead of a cast cached forever. Defaults from <c>HARTSYINFERENCE_VK_NO_WEIGHT_CAST_CACHE=1</c>.</summary>
     public bool CacheWeightCasts
@@ -211,7 +209,7 @@ public sealed class VulkanBackend : IBackend
         _dispatchesSinceSubmit = 0;
     }
 
-    public void FreeWeights(IEnumerable<Tensor> weights) => _xfer.FreeWeights(LowRankAdjunct.ExpandWeights(weights));
+
 
     /// <summary>Materializes a cached activation to host and releases its device buffer, by firing the lazy sync callback <c>VulkanGpuTransferHelper.CacheActivation</c> plants. Overridden rather than left as the interface no-op because Vulkan has its own lazy activation cache: the callers of this are cross-model caches that used to spell it <c>_ = t.DataPointer</c>, and a no-op here would silently leave them device-only.</summary>
     public unsafe void OffloadActivation(Tensor tensor)
@@ -319,69 +317,66 @@ public sealed class VulkanBackend : IBackend
         // and the buffers get vkDestroy'd while later heads' descriptor sets still reference
         // them — silent garbage output for heads beyond the first ~2.
         // Transient drain is now done explicitly at op boundaries via DrainAndFlush.
-        if (_dispatchesSinceSubmit >= FlushThreshold && _opNestingDepth == 0)
+        if (_dispatchesSinceSubmit >= FlushThreshold && !InOp)
         {
             DrainAndFlush();
         }
     }
 
-    /// <summary>Tracks whether we're currently inside a backend op; while >0, auto-flush is suppressed.</summary>
-    // Draining transients mid-op would free buffers still referenced by later dispatches in the same
-    // op (e.g. SDPA's per-head loop sharing Q/K/V uploads).
-    private int _opNestingDepth;
-
-    private OpScope EnterOp([CallerMemberName] string opName = "")
-        => new(this, opName);
-    private readonly struct OpScope : IDisposable
+    /// <inheritdoc/>
+    /// <remarks>Total comes from the device's DEVICE_LOCAL heaps, which is exact. Free is total minus what THIS
+    /// backend's allocator is holding, which is an underestimate of what the card has left — another process, or
+    /// another backend on the same device, is invisible here. It is reported anyway because the planner's
+    /// alternative was no number at all: every VRAM decision on Vulkan logged "no VRAM report" and fell back to
+    /// fixed budgets. A live figure from <c>VK_EXT_memory_budget</c> is the Phase 10 replacement; the capability is
+    /// already detected (<see cref="VulkanCapabilities.HasMemoryBudget"/>) and nothing queries it yet.</remarks>
+    public override (long FreeBytes, long TotalBytes) GetVramInfo()
     {
-        private readonly VulkanBackend _b;
-        private readonly string _opName;
-        private readonly long _startTicks;
-
-        public OpScope(VulkanBackend b, string opName)
+        long total = (long)Vk.TotalVramBytes;
+        long held = 0;
+        foreach ((bool _, int _, ulong size) in _allocator.SnapshotBlocks())
         {
-            _b = b;
-            _opName = opName;
-            _startTicks = b._profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-            if (b._opNestingDepth == 0)
-            {
-                b._dispatchesThisOp = 0;
-                // A tensor finalized rather than disposed cannot free its device buffer from the finalizer thread,
-                // which has no business touching this device, so the work is queued instead. The outermost op scope
-                // is the safe point that runs it. Nothing ran it on this backend before, so every such tensor's
-                // buffer stayed allocated until the backend itself was torn down.
-                b._xfer.DrainFinalizerCleanup();
-                // Every previous op's finally has run by now, so a buffer still parked from a rebind has no owner.
-                b._xfer.SweepOrphans();
-            }
-            b._opNestingDepth++;
+            held += (long)size;
         }
+        return (Math.Max(0, total - held), total);
+    }
 
-        public void Dispose()
+    /// <inheritdoc/>
+    protected override bool ProfilingEnabled => _profiler.IsEnabled;
+
+    /// <inheritdoc/>
+    protected override void OnOpRecorded(string opName, long elapsedTicks, int dispatches) =>
+        _profiler.Record(opName, elapsedTicks, dispatches);
+
+    /// <inheritdoc/>
+    protected override IGpuResidency Residency => _xfer;
+
+    /// <inheritdoc/>
+    /// <remarks>Nothing to do on entry: Vulkan has no current-context notion, and the drain and sweep the base
+    /// performs are the whole of what this backend needed here.</remarks>
+    protected override void OnOpBegin(string opName) { }
+
+    /// <inheritdoc/>
+    protected override void OnOpEnd(string opName, int dispatches)
+    {
+        // Step-graph capture: every dispatch this op issued was recorded onto the capture buffer, not _stream
+        // (see Dispatch) — _stream has nothing pending, so a submit here would be at best a wasted no-op and at
+        // worst an assumption this comment exists to keep from ever becoming false. DrainTransients() is
+        // capture-safe on its own (it redirects to the retain list), but skip the whole block explicitly rather
+        // than relying on that alone.
+        if (_capturingStepGraph)
         {
-            _b._opNestingDepth--;
-            if (_b._opNestingDepth == 0)
-            {
-                int dispatches = _b._dispatchesThisOp;
-                // Step-graph capture: every dispatch this op issued was recorded onto the capture buffer, not
-                // _stream (see VulkanBackend.Dispatch) — _stream has nothing pending, so a submit here would
-                // be at best a wasted no-op and at worst an assumption this comment exists to keep from ever
-                // becoming false. DrainTransients() is capture-safe on its own (redirects to the retain list),
-                // but skip the whole block explicitly rather than relying on that alone.
-                if (_b._capturingStepGraph) return;
-                // Tag this op's transient uploads for deferred-free at the op boundary (safe — every
-                // dispatch that referenced them is already recorded). Submitting, however, is batched:
-                // only flush the command buffer once enough dispatches accumulate, so a stream of tiny
-                // ops costs one vkQueueSubmit2 instead of one each. Sync()/lazy-sync still force a flush.
-                _b._xfer.DrainTransients();
-                if (_submitPerOp || _b._dispatchesSinceSubmit >= FlushThreshold)
-                {
-                    _b._stream.SubmitAndAdvance();
-                    _b._dispatchesSinceSubmit = 0;
-                }
-                if (_b._profiler.IsEnabled)
-                    _b._profiler.Record(_opName, System.Diagnostics.Stopwatch.GetTimestamp() - _startTicks, dispatches);
-            }
+            return;
+        }
+        // Tag this op's transient uploads for deferred free at the op boundary — safe, because every dispatch
+        // that referenced them is already recorded. Submitting is batched instead: flush only once enough
+        // dispatches accumulate, so a stream of tiny ops costs one vkQueueSubmit2 rather than one each.
+        // Sync() and the lazy sync still force a flush.
+        _xfer.DrainTransients();
+        if (_submitPerOp || _dispatchesSinceSubmit >= FlushThreshold)
+        {
+            _stream.SubmitAndAdvance();
+            _dispatchesSinceSubmit = 0;
         }
     }
 
@@ -2596,7 +2591,7 @@ public sealed class VulkanBackend : IBackend
         _stream.RecordGlobalComputeBarrier();
         _dispatchesSinceSubmit++;
         _dispatchesThisOp++;
-        if (_dispatchesSinceSubmit >= FlushThreshold && _opNestingDepth == 0) DrainAndFlush();
+        if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
         CacheOutput(output, outBuf);
     }
 
@@ -2970,7 +2965,7 @@ public sealed class VulkanBackend : IBackend
                     postAccess: VkAccessFlags2.ShaderStorageRead);
                 _dispatchesSinceSubmit++;
                 _dispatchesThisOp++;
-                if (_dispatchesSinceSubmit >= FlushThreshold && _opNestingDepth == 0) DrainAndFlush();
+                if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
                 CacheOutput(destination, dstBuf);
             }
             catch (Exception ex)
@@ -3040,7 +3035,7 @@ public sealed class VulkanBackend : IBackend
             postAccess: VkAccessFlags2.ShaderStorageRead);
         _dispatchesSinceSubmit++;
         _dispatchesThisOp++;
-        if (_dispatchesSinceSubmit >= FlushThreshold && _opNestingDepth == 0) DrainAndFlush();
+        if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
         // In-place re-assert (the CfgEulerStep pattern): dst keeps this buffer across the copy. Clear stale
         // callbacks BEFORE re-caching — skipping this reproduces a stale-callback bug on the next dispose/sync.
         dst._gpuSyncCallback = null;
@@ -3520,7 +3515,8 @@ public sealed class VulkanBackend : IBackend
 
     #region Disposal
 
-    public void Dispose()
+    /// <inheritdoc/>
+    protected override void DisposeCore()
     {
         if (_disposed) return;
         _disposed = true;

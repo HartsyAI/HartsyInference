@@ -6,6 +6,32 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.113
+
+- **The op scope every GPU backend needs is written once.** `GpuBackendBase` owns it: the point at which a backend
+  runs the device cleanup a finalizer could not, and reclaims what the previous op displaced. Both backends had
+  written it separately, and it is easy to get subtly wrong because it is defined by what has ALREADY happened
+  rather than by what the op is about to do. Nesting is handled there too — an op built out of other ops must not
+  sweep in the middle of itself, since the buffers it would reclaim are the ones its own later dispatches read.
+- The `IBackend` members that are simply the residency cache live there too: the D2H counters, preload, free,
+  pin/unpin and bulk offload. Expanding low-rank adjuncts before a preload or free is part of that — both backends
+  did it, because a weight carrying an adjunct is read as its factors, so preloading the weight alone leaves the
+  factors to miss one at a time on the hot path.
+- **Vulkan reports VRAM.** Every memory decision on that backend logged "no VRAM report" and fell back to fixed
+  budgets, because `GetVramInfo` did not exist there. Total now comes from the device's DEVICE_LOCAL heaps, which
+  is exact; free is total minus what this backend's allocator holds, which underestimates what the card has left
+  because another process is invisible to it. Reported anyway: the alternative was no number at all. A live figure
+  from `VK_EXT_memory_budget` is the replacement, and the capability is already detected with nothing querying it.
+- Profiling stays a hook rather than a shared object. CUDA's is NVTX ranges and Vulkan's is `VulkanProfiler`;
+  unifying those is its own change, and all the scope needs is whether to time an op and somewhere to hand the
+  answer.
+- **CUDA does not derive from the base yet, and that is deliberate rather than unfinished-by-accident.** Converting
+  its 181 op entries to the shared scope makes three `CudaGraphTests` fail at teardown with
+  `CUDA_ERROR_INVALID_VALUE`, freeing an activation whose address the driver already reclaimed with a directly
+  constructed `CudaGraph`. Bisected: the base plus the Vulkan adoption is clean, disposal routing is not the cause,
+  and forcing the old always-enter behaviour on nested scopes does not fix it. Landing the half that is proven
+  beats landing a regression next to it.
+
 ## alpha.111
 
 ## alpha.112
