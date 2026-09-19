@@ -24,6 +24,13 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
     /// <remarks>AuraFlow reuses the SDXL VAE; the encoder half is built alongside the decoder.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.AuraFlowTransformer"/> names its blocks <c>joint_transformer_blocks.{i}</c> / <c>single_transformer_blocks.{i}</c>; the first of those is a root the bare-root LoRA detector only started recognizing in the same change.</para></remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:661</c> →
+    /// <c>aura_t5.AuraT5Tokenizer</c> → <c>PT5XlTokenizer</c>, which does NOT disable weights — so they survive
+    /// tokenization and ComfyUI interpolates the encoder OUTPUT away from the empty-prompt baseline.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "auraflow", StringComparison.OrdinalIgnoreCase);
 

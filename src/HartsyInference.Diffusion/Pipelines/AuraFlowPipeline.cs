@@ -35,6 +35,10 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     private int[]? _teKeyCond, _teKeyUncond, _teKeyCondMask, _teKeyUncondMask;
     private Tensor? _cachedCond;
     private Tensor? _cachedUncond;
+    // The ComfyBlend baseline: the SAME encoder on the empty prompt. Pile-T5 pads to a fixed 256, so this does
+    // not depend on the prompt and is encoded once for the pipeline's lifetime. It is only ever built when a
+    // request actually carries a weight, so an unweighted workload never pays for it.
+    private Tensor? _cachedEmpty;
 
     /// <summary>Creates a new AuraFlow pipeline with all components pre-loaded. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
     /// <param name="backend">Compute backend.</param>
@@ -69,15 +73,40 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     /// <param name="negativeAttentionMaskT5">Optional T5 attention mask for the negative prompt.</param>
     /// <param name="request">Generation parameters. Pass an <see cref="ImageToImageRequest"/> for img2img / inpaint.</param>
     /// <param name="onProgress">Optional progress callback.</param>
+    /// <summary>SwarmUI's ComfyBlend against the cached empty-prompt baseline, as a COPY the caller owns. Null
+    /// when there is nothing to apply, meaning "keep using the original".</summary>
+    private Tensor? BlendTowardEmpty(Tensor context, float[]? weights) =>
+        weights is null || _cachedEmpty is null
+            ? null : Prompting.ComfyBlend.Apply(Backend, context, _cachedEmpty, weights);
+
+    /// <summary>Weights are matched to conditioning rows by position, so an array that does not describe the
+    /// tokens it arrived with shifts every emphasis onto a neighbouring word rather than failing.</summary>
+    private static void RequireRowCount(float[]? weights, int[] tokenIds, string name)
+    {
+        if (weights is not null && weights.Length != tokenIds.Length)
+            throw new ArgumentException(
+                $"Weights describe {weights.Length} tokens but {tokenIds.Length} were passed.", name);
+    }
+
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsT5,
         int[] negativePromptTokenIdsT5,
         int[]? promptAttentionMaskT5,
         int[]? negativeAttentionMaskT5,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        float[]? promptWeights = null,
+        float[]? negativeWeights = null,
+        int[]? emptyTokenIdsT5 = null)
     {
         ThrowIfDisposed();
+        RequireRowCount(promptWeights, promptTokenIdsT5, nameof(promptWeights));
+        RequireRowCount(negativeWeights, negativePromptTokenIdsT5, nameof(negativeWeights));
+        if ((promptWeights is not null || negativeWeights is not null) && emptyTokenIdsT5 is null)
+        {
+            throw new ArgumentNullException(nameof(emptyTokenIdsT5),
+                "ComfyBlend needs the empty-prompt baseline, and only the caller owns the tokenizer that pads it.");
+        }
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
         using IDisposable seamlessScope = BeginSeamlessTiling(request.SeamlessTiling);
         bool isImg2Img = request is ImageToImageRequest;
@@ -107,7 +136,10 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         // ── 1. Encode text with Pile-T5-XL (with a cross-generation prompt-embedding cache) ──
         bool useCfg = cfgScale > 1.0f;
-        bool teCacheHit = _cachedCond is not null
+        // A weighted request needs the empty baseline, and the encoder weights are freed after each encode — so
+        // the first weighted request must take the encode branch even on an otherwise perfect cache hit.
+        bool needEmpty = (promptWeights is not null || negativeWeights is not null) && _cachedEmpty is null;
+        bool teCacheHit = !needEmpty && _cachedCond is not null
             && TokensEqual(_teKeyCond, promptTokenIdsT5) && TokensEqual(_teKeyCondMask, promptAttentionMaskT5)
             && (!useCfg || (_cachedUncond is not null
             && TokensEqual(_teKeyUncond, negativePromptTokenIdsT5) && TokensEqual(_teKeyUncondMask, negativeAttentionMaskT5)));
@@ -139,6 +171,13 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
                 int[][]? negBatchMask = negativeAttentionMaskT5 is not null ? [negativeAttentionMaskT5] : null;
                 uncondContext = _t5.Encode(Backend, negBatchT5, negBatchMask);
             }
+            if (needEmpty)
+            {
+                // The recipe owns the tokenizer, so it supplies the empty batch; it must carry the SAME padding
+                // the prompt got, which is the whole reason the baseline is subtractable row by row.
+                _cachedEmpty = _t5.Encode(Backend, [emptyTokenIdsT5!], null);
+                unsafe { _ = (nint)_cachedEmpty.DataPointer; }
+            }
             Backend.FreeWeights(_t5.EnumerateWeights());
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
 
@@ -150,6 +189,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
             }
             _cachedCond?.Dispose();
             _cachedUncond?.Dispose();
+        _cachedEmpty?.Dispose();
             _cachedCond = condContext;
             _cachedUncond = uncondContext;
             _teKeyCond = (int[])promptTokenIdsT5.Clone();
@@ -157,6 +197,14 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
             _teKeyUncond = useCfg ? (int[])negativePromptTokenIdsT5.Clone() : null;
             _teKeyUncondMask = (int[]?)negativeAttentionMaskT5?.Clone();
         }
+
+        // The blend lands on a per-request COPY. The cache above is keyed on token ids, and a weighted prompt
+        // tokenizes to the same ids once the grammar is off, so blending in place would hand the next plain
+        // request this one's emphasis.
+        Tensor? blendedCond = BlendTowardEmpty(condContext, promptWeights);
+        if (blendedCond is not null) condContext = blendedCond;
+        Tensor? blendedUncond = uncondContext is null ? null : BlendTowardEmpty(uncondContext, negativeWeights);
+        if (blendedUncond is not null) uncondContext = blendedUncond;
 
         // ── 2. Set up flow-match scheduler (static shift) ────────────────
         FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(_schedulerShift);
@@ -388,6 +436,10 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         byte[] rgbData = ImagePostProcessor.TensorToRgbBytes(image);
         image.Dispose();
+
+        // Per-request copies, not the cached originals.
+        blendedCond?.Dispose();
+        blendedUncond?.Dispose();
 
         sw.Stop();
         Logs.Info($"AuraFlow {opMode} complete in {sw.ElapsedMilliseconds}ms (seed={seed})");

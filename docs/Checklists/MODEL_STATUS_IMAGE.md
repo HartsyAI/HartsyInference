@@ -216,6 +216,10 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   everywhere (same md5), `(fox:0.5)` moving 5.18-17.78 mean-abs-pixel; Z-Image also on its true-CFG path with a
   weighted negative. Lens' `ChatTemplateIds` assertion caught a second wrong
   assumption on its first run — `DefaultTxtOffset` counts the stripped PREFIX alone, not the whole wrapper.
+  The region-weighting paths are gated too: for both Z-Image and Ideogram 4 a weighted region at `(fox:1.0)` is
+  byte-identical to the unweighted region and `(fox:0.5)` differs, and weighting the base prompt alongside a
+  region is refused by name. (Ideogram 4's region runs were still outstanding when alpha.129 merged — they were
+  waiting on a long-running SwarmUI service holding 16 GB of the 24 GB card — and passed once it freed.)
 - [x] **Krea 2 prompt weighting, both mechanisms — DONE 2026-09-19 (alpha.128).** Krea 2 is the only family whose
   SwarmUI workflow inserts `SwarmAttnTokenWeights` (`WorkflowGenerator.cs:965-972`) on top of the ordinary cond
   scaling, so `CondScaleWithAttention` is not two alternatives but two things applied together; the mode ledger
