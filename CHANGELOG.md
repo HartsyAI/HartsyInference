@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.104
+
+- **Flux.2 schedules its conditioning per step.** `<alternate:a, b>` and `<fromto[N]:a, b>` reached it as prose or
+  not at all; now each distinct step-text is tokenized through the recipe's own chat template — so a branch
+  carrying its own `(word:1.5)` emphasis is weighted per branch — encoded once, and selected by step. `<alternate:>`
+  over 30 steps costs two encodes, not thirty, because variants are deduped globally rather than per contiguous run.
+- Two things a schedule cannot coexist with, both narrowed rather than ignored. **Step-graph capture** replays one
+  op sequence with the conditioning pinned as step-invariant, so it is skipped for a scheduled prompt and logs why
+  — the output is unaffected, the step is slower. **A regional prompt** builds its text stream and attention bias
+  once from the base conditioning, and switching underneath it would leave both stale while the shapes still line
+  up, so that pairing is refused by name.
+- **`<fromto[0]:a, b>` was a silent no-op for every family that cannot schedule.** A fromto switches at
+  `step < when`, so at `when = 0` it has already switched before step 0 runs and `b` is its step-0 text — but the
+  flattener returned the first branch unconditionally, resolving the tag to exactly the phrase it was written to
+  replace. Pre-existing; it took wiring a family far enough to compare against a plain prompt to see it.
+
 ## alpha.103
 
 - **The residency cache answers questions about a tensor now, instead of handing out its dictionaries.**
