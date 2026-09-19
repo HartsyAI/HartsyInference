@@ -76,4 +76,16 @@ public sealed class PromptFeatureFlatteningTests
                 $"'{family}' sets VideoFeatures.PromptWeighting directly; declare PromptWeighting instead.");
         }
     }
+
+    /// <summary>A <c>fromto</c> flattens to its step-0 TEXT, which is not always its first branch. It switches at
+    /// <c>step &lt; when</c>, so <c>&lt;fromto[0]:a, b&gt;</c> has already switched before step 0 runs — and a family
+    /// that cannot schedule, which is most of them, sees only this flattened value. Reading "first branch" as the
+    /// step-0 value made <c>&lt;fromto[0]:&gt;</c> a silent no-op everywhere.</summary>
+    [Theory]
+    [InlineData("<fromto[0]:fox, whale>", "whale")]
+    [InlineData("<fromto[0.5]:fox, whale>", "fox")]
+    [InlineData("<fromto[99]:fox, whale>", "fox")]
+    [InlineData("<alternate:fox, whale>", "fox")]
+    public void SchedulingFlattensToItsStepZeroText(string prompt, string expected) =>
+        Assert.Equal(expected, PromptFeatureFlattening.Prepare(prompt, PromptWeightingMode.CondScale));
 }

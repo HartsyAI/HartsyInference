@@ -11,7 +11,9 @@ namespace HartsyInference.Diffusion.Prompting;
 /// these same constructs. <c>&lt;weight[N]:inner&gt;</c> converts to the legacy <c>(inner:N)</c> parens grammar
 /// <see cref="PromptWeighting"/> already implements — this mirrors what SwarmUI's own reference implementation
 /// does internally for CLIP models (<c>join_text</c> in its <c>SwarmText.py</c>). <c>&lt;alt&gt;</c>/<c>&lt;alternate&gt;</c>/
-/// <c>&lt;fromto[N]&gt;</c> flatten to their first ("step 0") value, matching what a step-unaware consumer would see
+/// <c>&lt;fromto[N]&gt;</c> flatten to their step-0 value — the FIRST branch for <c>&lt;alternate&gt;</c> and for a
+/// <c>fromto</c> that switches later, the SECOND for <c>&lt;fromto[0]&gt;</c>, which has switched before step 0 runs —
+/// matching what a step-unaware consumer would see
 /// for the very first denoise step — see <see cref="PromptTagScheduling"/> for real per-step resolution.
 /// Every other tag (<c>&lt;region:&gt;</c>, <c>&lt;break&gt;</c>, <c>&lt;embed:&gt;</c>, <c>&lt;lora:&gt;</c>, <c>&lt;refcrop:&gt;</c>, etc.)
 /// passes through byte-for-byte untouched — this is a narrow, targeted fix for exactly the three tag kinds
@@ -88,9 +90,15 @@ public static class PromptTagFlattening
                 i = close + 1;
                 continue;
             }
-            if (flattenScheduling && prefix == "fromto" && TryParseWhen(predata, out _))
+            if (flattenScheduling && prefix == "fromto" && TryParseWhen(predata, out float when))
             {
-                result.Append(FirstFlattened(data, flattenScheduling, weightsAsParens));
+                // The step-0 TEXT, which is not always the first branch: a fromto switches at
+                // `step < when` (fraction of the step count when when < 1), so `<fromto[0]:a, b>` has already
+                // switched before step 0 runs and its step-0 text is b. The step count is not needed to decide
+                // that — 0 < when*steps holds exactly when when > 0 — so this stays a pure text transform.
+                result.Append(when > 0f
+                    ? FirstFlattened(data, flattenScheduling, weightsAsParens)
+                    : BranchFlattened(data, 1, flattenScheduling, weightsAsParens));
                 i = close + 1;
                 continue;
             }
@@ -121,10 +129,19 @@ public static class PromptTagFlattening
     /// — correct for step 0 of both <c>alternate</c> (cycles by <c>step % count</c>, so step 0 is entry 0) and
     /// <c>fromto</c> (switches at <c>when</c>, which is virtually always &gt; 0, so step 0 is always the "from"
     /// value, entry 0).</summary>
-    private static string FirstFlattened(string data, bool flattenScheduling, bool weightsAsParens)
+    private static string FirstFlattened(string data, bool flattenScheduling, bool weightsAsParens) =>
+        BranchFlattened(data, 0, flattenScheduling, weightsAsParens);
+
+    /// <summary>One branch of a comma-split tag, flattened. Falls back to the last branch present rather than the
+    /// empty string, so a malformed one-branch <c>&lt;fromto&gt;</c> still contributes its text.</summary>
+    private static string BranchFlattened(string data, int index, bool flattenScheduling, bool weightsAsParens)
     {
         string[] parts = SplitSmart(data);
-        return parts.Length > 0 ? FlattenInner(parts[0], flattenScheduling, weightsAsParens) : "";
+        if (parts.Length == 0)
+        {
+            return "";
+        }
+        return FlattenInner(parts[Math.Min(index, parts.Length - 1)], flattenScheduling, weightsAsParens);
     }
 
     /// <summary>Parses a <c>&lt;fromto[when]:...&gt;</c> threshold. A non-numeric <paramref name="predata"/> means the
