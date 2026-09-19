@@ -444,8 +444,15 @@ _transformer.InvalidateStepGraph(Backend);
         // textEmbeddings is a cross-generation cache entry — not disposed here. extendedText (region-extended)
         // is rebuilt fresh every generation — always disposed.
         extendedText?.Dispose();
-        // Per-request copy shadowing the cached embeddings; the unweighted original stays in the cache.
-        weightedText?.Dispose();
+        // Per-request copy shadowing the cached embeddings; the unweighted original stays in the cache. The graph
+        // route pins step-invariant conditioning with PreloadWeights, and that is this tensor when the prompt is
+        // weighted — so the device entry has to be released by identity before the host storage goes, or every
+        // weighted generation strands a conditioning buffer and hands the next one a new signature to flip on.
+        if (weightedText is not null)
+        {
+            Backend.FreeWeights([weightedText]);
+            weightedText.Dispose();
+        }
         packedSourceLatent?.Dispose();
         packedMask?.Dispose();
 
