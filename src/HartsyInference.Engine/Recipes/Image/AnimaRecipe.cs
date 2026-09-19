@@ -28,6 +28,14 @@ public sealed class AnimaRecipe : IArchitectureRecipe
 
     /// <inheritdoc/>
     /// <remarks>Anima shares the Qwen-Image VAE; its encoder half is built alongside the decoder and <see cref="AnimaPipeline"/> implements the latent-mask blend.</remarks>
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:1157</c> →
+    /// <c>anima.AnimaTokenizer</c> = qwen3_06b + t5xxl, neither of which disables weights. Only the Qwen-3 arm
+    /// is blendable: the T5 side is an id lookup inside the adapter (<c>embed[t5_ids]</c>), not an encoder
+    /// output, so there is nothing there to interpolate and its text is only stripped.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
 
     /// <inheritdoc/>
