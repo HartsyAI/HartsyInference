@@ -23,6 +23,13 @@ stable release will require. Dates are UTC.
   type-initialization — so the first generation in a process named every later one's dumps. An explicit tag now wins
   and the setting decides when nobody set one.
 
+- **The dump directory next to that tag was frozen too, one hop further out.** `DebugDumpSink` resolved its knob in
+  its constructor, and all nineteen dump sinks are held in `static readonly` fields, so eighteen of them bound the
+  directory at type-initialization. The lint cannot see this shape — the read is inside an instance constructor —
+  but the tell was there again: the one sink that opted out of caching was the one whose parity tests needed the
+  knob to reach the code. The opt-out is gone and every sink resolves per access, which also removes a
+  created-once flag that would have sent later dumps to a directory it never made.
+
 ## alpha.101
 
 - **MiniMax-H3 runs from a GGUF, verified by generation.** The `unsloth/MiniMax-H3-GGUF` Q4_K build renders the
