@@ -14,6 +14,10 @@ stable release will require. Dates are UTC.
   before the copy that reads them — and on the other side, a copy's `TransferWrite` sits outside the source scope
   of the next dispatch's barrier. `Concat` (every DiT forward joins the text and image sequences through it),
   `CopyInto` and `CopyTo` all recorded copies into that gap. Both directions are closed now.
+- **The staging copies had the same gap.** `VulkanGpuTransferHelper`'s upload and download each record a copy with
+  a post-barrier only, so a destination a dispatch just wrote — or one an earlier staging copy wrote — was not
+  ordered against it. Consecutive uploads are the bulk of what synchronization validation reports on a real
+  generation.
 - **`Concat`'s trailing barrier was the wrong one.** It recorded the compute→compute barrier after a transfer, so
   its source scope named `ShaderStorageWrite` for writes that were `TransferWrite` — it ordered nothing. It is now
   a real transfer→compute barrier. `CopyInto` and `CopyTo` already had a correct post-copy barrier through
