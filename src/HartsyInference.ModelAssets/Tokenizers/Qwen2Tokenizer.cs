@@ -68,8 +68,11 @@ public sealed class Qwen2Tokenizer : ILlmTokenizer, IDisposable
         ThrowIfDisposed();
         // TODO(byte-level): same bug Qwen3Tokenizer.EncodeRaw was fixed for — BpeTokenizer.Create(vocab,
         // merges) drops leading spaces (" there" -> "there" not "Ġthere"), so space-prefixed words mis-
-        // tokenize. Route through ByteLevelCodec.Encode(text) before EncodeToIds, then re-validate the
-        // consumers (Lance T2I/T2V, HunyuanImage 2.1) since their conditioning tokens WILL change.
+        // tokenize. It also drops a bare newline ENTIRELY: EncodeRaw("\n") returns zero ids where HF emits 198.
+        // That reaches EncodeChat through AppendBpe, so every chat template built here is short by one id per
+        // newline — measured on HunyuanImage 2.1, whose 34-token diffusers template tokenizes to 33 for us.
+        // Route through ByteLevelCodec.Encode(text) before EncodeToIds, then re-validate the consumers
+        // (Lance T2I/T2V, HunyuanImage 2.1) since their conditioning tokens WILL change.
         return _tokenizer.EncodeToIds(text);
     }
 

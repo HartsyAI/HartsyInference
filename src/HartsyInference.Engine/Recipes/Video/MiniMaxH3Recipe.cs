@@ -38,6 +38,15 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.EndFrame | VideoFeatures.Lora
         | VideoFeatures.ReferenceImages | VideoFeatures.ReferenceVideos | VideoFeatures.ReferenceAudios
         | VideoFeatures.LongFormChain | VideoFeatures.DrivingAudio;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:988</c> →
+    /// <c>minimax.MiniMaxH3Tokenizer</c> → <c>disable_weights</c> at <c>minimax.py:158</c>. The weights are built
+    /// inside <c>MiniMaxH3TextEncoding.Build</c>, which tokenizes the prompt itself, and carry only the prompt's
+    /// own tokens — the prompt is appended after every condition label and vision block, so it is contiguous at
+    /// the tail and right-alignment lands on exactly those rows.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
     /// <inheritdoc/>
     public bool Matches(string familyId)
     {

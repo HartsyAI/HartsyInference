@@ -136,13 +136,17 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
     /// constant — a drift between the split and the whole-string encode is what would silently misplace every
     /// weight.</summary>
     /// <remarks>
-    /// <para>TODO — PRE-EXISTING, out of scope for weighting, unverified against HF. This prefix is <b>33</b>
-    /// ids, but <see cref="HunyuanImageQwenTextEncoder.TemplatePrefixTokens"/> is 34 and the encoder slices from
-    /// there, so the prompt's FIRST token's hidden state is dropped from the conditioning on every generation.
-    /// The cause is one step down: <c>EncodeRaw("\n")</c> returns ZERO ids on this tokenizer, so the newline
-    /// between <c>&lt;|im_end|&gt;</c> and the next <c>&lt;|im_start|&gt;</c> vanishes, where HF emits id 198.
-    /// diffusers' <c>prompt_template_encode_start_idx</c> of 34 is right for HF's tokenization and one too many
-    /// for ours. Fixing it means fixing the tokenizer, which moves every existing HunyuanImage generation.</para>
+    /// <para>TODO — PRE-EXISTING, out of scope for weighting, unverified against HF. The root cause is one step
+    /// down: <c>EncodeRaw("\n")</c> returns ZERO ids on this tokenizer where HF emits 198, so every newline in
+    /// the chat template vanishes. Measured: <c>"user\n"</c> gives 1 id, not 2; the newline between
+    /// <c>&lt;|im_end|&gt;</c> and the next <c>&lt;|im_start|&gt;</c> gives 0. So this is not one missing id —
+    /// HunyuanImage's BASE conditioning is built on a tokenization missing several ids that ComfyUI feeds in,
+    /// and the <c>"system\n"</c> join is very likely affected the same way.</para>
+    /// <para>On top of that the counts disagree: this prefix is <b>33</b> ids while
+    /// <see cref="HunyuanImageQwenTextEncoder.TemplatePrefixTokens"/> is 34 and the encoder slices from there, so
+    /// the prompt's FIRST token's hidden state is dropped from the conditioning on every generation. diffusers'
+    /// <c>prompt_template_encode_start_idx</c> of 34 is right for HF's tokenization and one too many for ours.
+    /// Fixing either means fixing the tokenizer, which moves every existing HunyuanImage generation.</para>
     /// <para>Weighting is unaffected by that discrepancy: the weights are indexed by sequence POSITION and
     /// right-aligned against a cond of <c>realLen − 34</c> rows, so weight <c>i</c> lands on sequence position
     /// <c>i</c> whatever the template's true length is. The dropped token simply loses its weight with it.</para>

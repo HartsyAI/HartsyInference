@@ -153,10 +153,12 @@ public sealed class PromptWeightingModeLedgerTests
     /// right-alignment offset −34 exactly. Gating it also surfaced a PRE-EXISTING defect, recorded as a TODO and
     /// not fixed: the chat template is 33 ids on our tokenizer, not 34, because <c>EncodeRaw("\n")</c> returns
     /// nothing where HF emits id 198 — so the encoder's slice drops the prompt's first token.</para>
-    /// <para><b>minimax-h3</b> tokenizes INSIDE its encoder (<c>MiniMaxH3TextEncoding.Build</c>), interleaving
-    /// vision/audio blocks with the text and emitting <c>TagRuns</c>; its cond is rank-2 <c>[seq, hidden]</c>, so the
-    /// weights must be built alongside <c>Encoded.TokenIds</c> and forced to 1 on every non-text run. That is the E1
-    /// seam, not something to bolt onto the recipe layer.</para>
+    /// <para><b>minimax-h3 came off this list, and needed less than this entry predicted.</b> It tokenizes INSIDE
+    /// its encoder (<c>MiniMaxH3TextEncoding.Build</c>), so the weights are built there — but they do NOT need to
+    /// be a full-length array with non-text runs forced to 1. <c>Build</c> appends the user prompt LAST, after
+    /// every condition label and vision block, so the prompt is contiguous at the tail and a prompt-length weight
+    /// array right-aligns onto exactly those rows. Its cond is rank-2 <c>[seq, hidden]</c> and F32
+    /// (<c>MiniMaxH3TextEncoder.cs:215</c>), which is what <c>ScaleRightAligned</c> requires.</para>
     /// <para><b>The whole Wan family is wired.</b> The four variant recipe classes came off this list once the
     /// blend was hoisted into <c>VideoRecipeUtils</c>; Animate-2's driving stream is weighted as its own leaf.</para>
     /// <para><b>ltx-video-2 and ltx-2.5-distilled: the seam is now located, and it is inside the connector.</b>
@@ -178,7 +180,7 @@ public sealed class PromptWeightingModeLedgerTests
     /// both halves, so the partial declaration it carried first was refused here rather than accepted.</para></summary>
     private static readonly string[] NotYetWired =
     [
-        "ltx-2.5-distilled", "ltx-video-2", "minimax-h3",
+        "ltx-2.5-distilled", "ltx-video-2",
     ];
 
     private readonly ITestOutputHelper _output;
