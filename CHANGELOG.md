@@ -28,6 +28,31 @@ stable release will require. Dates are UTC.
   `ShaderModuleCreateInfo` was 15 (image view) instead of 16.
 - **Found by running a real generation under `VK_LAYER_KHRONOS_validation`**, which names each one by VUID. Worth
   keeping as a habit: the backend had been developed for months against a driver that tolerates all of it.
+## alpha.147
+
+- **Buffer copies on Vulkan are synchronized against the dispatches around them.** Every compute dispatch ends with
+  a barrier whose destination scope is `ComputeShader`/`ShaderStorageRead`. A `vkCmdCopyBuffer` reading the same
+  memory is a `Copy`/`TransferRead` access and sits outside that scope, so nothing ordered a dispatch's writes
+  before the copy that reads them — and on the other side, a copy's `TransferWrite` sits outside the source scope
+  of the next dispatch's barrier. `Concat` (every DiT forward joins the text and image sequences through it),
+  `CopyInto` and `CopyTo` all recorded copies into that gap. Both directions are closed now.
+- **The staging copies had the same gap.** `VulkanGpuTransferHelper`'s upload and download each record a copy with
+  a post-barrier only, so a destination a dispatch just wrote — or one an earlier staging copy wrote — was not
+  ordered against it. Consecutive uploads are the bulk of what synchronization validation reports on a real
+  generation.
+- **So did the barrier every dispatch records.** Its destination scope was `ShaderStorageRead`, so two dispatches
+  writing the same buffer — an in-place op following the op that produced its input — were a write-after-write
+  nothing ordered. With every copy ordered, that pair is what synchronization validation reports, and it is the
+  single hottest barrier in the backend.
+- **A copy's destination scope named only reads.** Every post-copy barrier made the copy visible to
+  `ShaderStorageRead`, so a dispatch that *writes* the buffer it just received — which is what an in-place op does
+  straight after an upload — was a write-after-write nothing ordered. That pair is what synchronization validation
+  still reported once the other gaps were closed.
+- **`Concat`'s trailing barrier was the wrong one.** It recorded the compute→compute barrier after a transfer, so
+  its source scope named `ShaderStorageWrite` for writes that were `TransferWrite` — it ordered nothing. It is now
+  a real transfer→compute barrier. `CopyInto` and `CopyTo` already had a correct post-copy barrier through
+  `RecordCopyAndBarrier` and needed only the pre-copy half; the remark shipped in alpha.146 said otherwise and is
+  corrected.
 
 ## alpha.146
 
