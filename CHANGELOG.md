@@ -17,6 +17,12 @@ stable release will require. Dates are UTC.
   half of all inputs, and has since CUDA first overrode it. The new parity row therefore pins the rule the GPUs
   implement rather than comparing against the host cast: changing either side would alter shipped numerics to make
   a test pass. Which rounding should be canonical is a real question and belongs in its own change.
+- **F16 input chains through F32**, as CUDA's override already did — without it an F16 caller would have fallen to
+  the host round-trip this override exists to remove. Both real callers pass F32 today.
+- **A second divergence, in the NaN the two backends produce.** Vulkan emits the canonical positive quiet NaN and
+  CUDA keeps the input's sign. IEEE 754 fixes neither the sign nor the payload of a produced NaN, so neither is
+  wrong, and the parity row checks that element for NaN-ness rather than for bytes — every other element,
+  infinities and both zeros included, is compared exactly.
 
 ## alpha.143
 
