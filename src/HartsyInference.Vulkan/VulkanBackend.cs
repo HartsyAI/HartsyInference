@@ -130,6 +130,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
         _xfer = new VulkanGpuTransferHelper(_vkDevice.Handle, _allocator, in memProps, Vk, _stream);
+        // A bulk release drains the stream on its own, which submits whatever was recorded; the batching count
+        // has to learn about a submit it did not make, or the next op flushes early against a stale number.
+        _xfer.StreamDrained = () => _dispatchesSinceSubmit = 0;
 
         // Opt-in INT8 dot-product GEMM path for Linear (see TryDispatchInt8Linear). Strict "1" opt-in,
         // matching this constructor's push-descriptor switch above — an experimental switch, not a proven
@@ -205,6 +208,16 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     public void Sync()
     {
         _xfer.DrainTransients();
+        DrainStream();
+    }
+
+    /// <summary>Submits whatever is recorded, waits for it, and tells the batching count that it happened.</summary>
+    /// <remarks>Every drain outside teardown goes through here. <c>WaitIdleHost</c> always submits first, so a
+    /// drain that did not reset the count left it holding dispatches that had already gone to the queue, and the
+    /// next op crossed the flush threshold early against a number that was simply wrong. Harmless in effect — a
+    /// submit with nothing recorded is a no-op — which is exactly why it survived at four separate call sites.</remarks>
+    private void DrainStream()
+    {
         _stream.WaitIdleHost();
         _dispatchesSinceSubmit = 0;
     }
@@ -361,47 +374,72 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     /// and fell back to a fixed budget.</para></remarks>
     public override (long FreeBytes, long TotalBytes) GetVramInfo()
     {
-        long total = (long)Vk.TotalVramBytes;
-        // After teardown the physical device belongs to a destroyed instance, and the query is a native call, so a
-        // stale caller would take the process down rather than throw. Callers reach this at odd lifecycle points
-        // on purpose (AudioRuntime wraps it in a catch for exactly that reason), so it has to answer safely.
+        // The device guard is inside TryQueryDriverVram, which is the only path here that touches the device.
+        if (TryQueryDriverVram(out long driverFree, out long driverTotal))
+        {
+            return (driverFree, driverTotal);
+        }
+        // The SAME heap the driver path would have described, for the same reason: reporting a free figure for one
+        // heap against a total summed over all of them leaves the caller comparing two bases, which is the defect
+        // this pair was rewritten to remove. Vk.TotalVramBytes is that sum and is deliberately not used here.
+        (uint heapIndex, long total) = LargestDeviceLocalHeap();
         if (_disposed)
         {
+            // Nothing is allocatable through a torn-down backend, and the allocator's block list is empty by now,
+            // so the arithmetic below would answer "entirely free" — the least useful thing to tell a planner.
             return (0, total);
         }
-        if (TryQueryDriverVram(out long budgetFree))
-        {
-            return (budgetFree, total);
-        }
-        // Device-local only, the same basis as the total: the allocator's blocks include host-visible staging,
-        // and subtracting those from a device-local total under-reports free VRAM by the size of the staging ring.
-        (_, long reservedDeviceBytes, _, _) = MemoryStats;
-        return (Math.Max(0, total - reservedDeviceBytes), total);
+        return (Math.Max(0, total - (long)_allocator.ReservedBytes(heapIndex)), total);
     }
 
-    /// <summary>Whether the driver answered, and what it said. Exposed so a test can assert which path was taken:
-    /// the two produce different numbers, and a query that quietly stopped working would otherwise look like a
-    /// card that happens to be busy.</summary>
-    internal bool TryQueryDriverVram(out long freeBytes)
+    /// <summary>The device-local heap with the most memory, and its size.</summary>
+    /// <remarks>Which heap the fallback describes has to match what the driver path picks — one heap, because no
+    /// allocation spans two. The driver path picks by what is LEFT, which needs a live query; without one, largest
+    /// is the same heap on every device that has only one, and the best available guess where there are more.</remarks>
+    private (uint HeapIndex, long SizeBytes) LargestDeviceLocalHeap()
     {
-        if (!Vk.HasMemoryBudget || _disposed)
+        uint best = 0;
+        ulong bestSize = 0;
+        for (uint heap = 0; heap < _vkDevice.MemoryProperties.memoryHeapCount; heap++)
         {
-            freeBytes = 0;
-            return false;
+            VkMemoryHeap info = _vkDevice.MemoryProperties.GetMemoryHeap((int)heap);
+            if ((info.flags & VkMemoryHeapFlags.DeviceLocal) != 0 && info.size > bestSize)
+            {
+                best = heap;
+                bestSize = info.size;
+            }
         }
-        return TryQueryHeapBudget(out freeBytes);
+        return (best, (long)bestSize);
     }
 
-    /// <summary>What this process may still allocate on the device, as the driver accounts for it.</summary>
-    /// <remarks>Budget minus usage, and never negative: the spec allows usage to exceed budget, which is the driver
-    /// saying this process is already over its share rather than that it has negative memory left.
+    /// <summary>What the driver says this process may still allocate, and out of how much.</summary>
+    /// <remarks>Both figures describe ONE heap — the device-local heap with the most left — because that is the
+    /// question a caller is asking: no allocation spans two heaps, so a free figure summed across them is a number
+    /// nothing can use, and some drivers expose a second device-local heap carved from the same physical memory,
+    /// where summing reports twice what exists. Reporting the free half from one heap and the total from all of
+    /// them would leave a caller comparing two different bases.
     ///
-    /// <para>Returns false only when the device exposes no device-local heap at all. Zero free is an ANSWER — the
-    /// most important one a driver can give — so it must not read as "no answer" and send the caller back to
-    /// arithmetic that cannot see the process filling the card.</para></remarks>
-    private unsafe bool TryQueryHeapBudget(out long freeBytes)
+    /// <para>Budget minus usage, never negative: the spec allows usage to exceed budget, which is the driver saying
+    /// this process is already over its share rather than that it has negative memory left. Zero free is an ANSWER,
+    /// and the most important one a driver can give — it must not read as "no answer" and send a caller back to
+    /// arithmetic that cannot see the process filling the card. False therefore means only that the extension is
+    /// absent, this backend is torn down, or the device exposes no device-local heap at all.</para>
+    ///
+    /// <para>Internal so a test can assert which path <see cref="GetVramInfo"/> took: the two produce different
+    /// numbers, and a query that quietly stopped answering would otherwise look like a card that happens to be
+    /// busy.</para></remarks>
+    internal unsafe bool TryQueryDriverVram(out long freeBytes, out long totalBytes)
     {
         freeBytes = 0;
+        totalBytes = 0;
+        // After teardown the physical device belongs to a destroyed instance, and this is a native call, so a stale
+        // caller would take the process down rather than throw — and callers reach it at odd lifecycle points on
+        // purpose (AudioRuntime wraps it in a catch for exactly that reason). This covers the ordinary sequential
+        // case; a Dispose racing a query on another thread is outside this backend's single-threaded contract.
+        if (!Vk.HasMemoryBudget || _disposed)
+        {
+            return false;
+        }
         VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = new()
         {
             sType = VkStructureType.PhysicalDeviceMemoryBudgetProperties,
@@ -422,19 +460,16 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             {
                 continue;
             }
-            sawDeviceLocal = true;
             ulong heapBudget = budget.heapBudget[heap];
             ulong heapUsage = budget.heapUsage[heap];
-            // Usage above budget is the driver saying this process is already over its share, not that it has
-            // negative memory left.
             long remaining = heapBudget > heapUsage ? (long)(heapBudget - heapUsage) : 0;
-            // The LARGEST single heap, not the sum. A caller asks this to decide whether one allocation fits, and
-            // no allocation spans two heaps — while some drivers expose a second device-local heap carved out of
-            // the same physical memory, where summing reports twice what exists.
-            freeBytes = Math.Max(freeBytes, remaining);
+            if (!sawDeviceLocal || remaining > freeBytes)
+            {
+                freeBytes = remaining;
+                totalBytes = (long)info.size;
+            }
+            sawDeviceLocal = true;
         }
-        // Zero free is the single most important answer a driver can give, so it must not read as "no answer" and
-        // fall through to arithmetic that cannot see the process filling the card.
         return sawDeviceLocal;
     }
 
@@ -459,7 +494,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     /// success having returned almost nothing.</remarks>
     protected override void TrimMemoryPoolCore()
     {
-        _stream.WaitIdleHost();
+        DrainStream();
         _allocator.ReleaseEmptySlabs();
     }
 
@@ -886,7 +921,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         for (int i = 0; i < iterations; i++) dispatchOne();
         nint cbEnd = _stream.AcquireRecording();   // same buffer unless an internal auto-flush happened
         timer.RecordEnd(cbEnd);
-        _stream.WaitIdleHost();   // submits + host-waits, guaranteeing RecordEnd's write has completed
+        DrainStream();   // submits + host-waits, guaranteeing RecordEnd's write has completed
         return timer.ReadElapsedMs();
     }
 
@@ -2534,7 +2569,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         // per-step temb/tembMod refresh) immediately before this call; without flushing+waiting here, that
         // write can still be sitting unsubmitted (or submitted-but-not-completed) when the capture buffer's
         // dispatches read it, reading stale/zero data instead — silently wrong, not a crash.
-        _stream.WaitIdleHost();
+        DrainStream();
         _stepGraph ??= new VulkanStepGraph(_vkDevice.Handle, _vkDevice.ComputeQueue, Vk.ComputeQueueFamilyIndex);
         _stepGraph.BeginCapture();
         _capturingStepGraph = true;
@@ -2555,7 +2590,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             throw new InvalidOperationException("VulkanBackend.StepGraphLaunch called with no captured graph.");
         // Same cross-submission visibility requirement as StepGraphBegin — the caller's pre-launch CopyInto
         // refresh (normal stream) must be complete before the captured buffer's dispatches read it.
-        _stream.WaitIdleHost();
+        DrainStream();
         _stepGraph.Launch();
     }
 
@@ -4057,7 +4092,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     {
         if (handle == 0 || !_scalarBuffers.TryGetValue(handle, out VulkanBuffer? buf))
             throw new NotSupportedException("ReadScalarBufferInt called with an unallocated buffer.");
-        _stream.WaitIdleHost();
+        DrainStream();
         int v;
         _xfer.DownloadToHost((nint)(&v), buf, sizeof(int));
         return v;

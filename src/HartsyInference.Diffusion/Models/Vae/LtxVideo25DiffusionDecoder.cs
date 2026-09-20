@@ -299,8 +299,11 @@ public sealed unsafe class LtxVideo25DiffusionDecoder : IDisposable
         // and a decode starting under enough pressure hit the 768 MB floor, i.e. 1 frame per chunk with a 5-frame
         // halo each side, ~11x redundant attention. The trim costs one driver reservation the chunk loop pays back.
         backend.TrimMemoryPool();
-        long free = backend.FreeMemoryBytes();
-        if (free <= 0) return DefaultChunkBytes;
+        (long free, long total) = backend.GetVramInfo();
+        // Gated on the total: zero free from a backend that reports honestly means the card is full, which should
+        // take the 768 MB floor below rather than the optimistic default this line exists to give a backend that
+        // reports nothing at all.
+        if (total <= 0) return DefaultChunkBytes;
         long bytes = Math.Clamp(free / 3, 768L << 20, 8L << 30);
         HartsyInference.Core.Logging.Logs.Info(
             $"[ltx25-vae] chunk budget {bytes >> 20} MB from {free >> 20} MB free (pool-trimmed).");

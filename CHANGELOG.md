@@ -6,6 +6,41 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.137
+
+- **The free-VRAM report means one thing now.** The driver path described a single heap while the total described
+  all of them — not theoretical on an RTX 4090, which is 24564 MiB while the summed total reported 24810 MB,
+  because NVIDIA exposes a small second device-local heap for ReBAR. Callers comparing free against total were
+  comparing two bases, and the recipes that refuse to construct below a VRAM floor compare exactly those. Both
+  halves now come from the same heap, the device-local one with the most left.
+- **"Zero free is an answer" is now true downstream as well.** `AudioRuntime` gated eviction on `free > 0`, so a
+  driver honestly reporting a full card disabled the eviction written for that case; the LTX-2.5 decoder returned
+  its optimistic default instead of its floor. Both gate on the TOTAL, which is what separates "no report" from
+  "nothing left".
+- **Tests that could not fail what they described.** The release test compared two probes of what used to be
+  allocator arithmetic with no slack, and alpha.135 made it a live figure that moves with every process on the
+  card. The test that claimed to assert which path answered never checked that `GetVramInfo` returned the driver's
+  number — delete the branch and its upper bound holds at equality. Its sibling bounded only the difference between
+  the two spellings, so a 2 GB window swallowed a return to the old constant zero. All three are fixed, and zero is
+  admitted as the legal answer the production code says it is.
+- **CUDA's two spellings are covered for the first time.** On Vulkan `FreeMemoryBytes` IS `GetVramInfo().FreeBytes`
+  through the interface default and cannot disagree; `CudaBackend` keeps genuinely independent implementations
+  reading different routes to the driver, which is the shape that drifts. A cross-backend contract test now asks
+  both.
+- **Every stream drain tells the backend it happened.** A drain always submits first, and the dispatch count that
+  drives submit batching did not learn about it, so the next op crossed the flush threshold early against a number
+  that was simply wrong. Harmless in effect — a submit with nothing recorded is a no-op — which is exactly why it
+  survived at seven separate call sites, including the scalar read-back that runs on every decode step and the
+  device-to-host sync behind every lazy activation read. Each class now has one drain helper and every site uses it.
+- **The fallback describes the same heap the driver path does.** Fixing the free/total basis in the driver query
+  left `Vk.TotalVramBytes` — a sum over every device-local heap — under the fallback's free figure for one heap, so
+  the defect was relocated rather than removed, reachable whenever the budget extension is absent. And a disposed
+  backend, which now reaches that path, would have computed "entirely free" from an empty allocator; it answers
+  zero, as it did before.
+- The fallback walks the device-local heaps itself rather than destructuring `MemoryStats`, which also computed a
+  per-block free-list scan and a full weight-cache sum for a number nobody read — several times per denoise step on
+  any device without the budget extension.
+
 ## alpha.136
 
 - **LTX-2 honours `(word:N)`, and the deliberately-unwired ledger is now EMPTY** — every registered image and
