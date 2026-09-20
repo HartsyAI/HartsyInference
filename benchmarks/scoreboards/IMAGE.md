@@ -56,6 +56,7 @@ per-model as footnotes, not used to replace the baseline row.
 | Flux-Dev (20 st) | 4090 | **9.5 s** | 12.5 s | **0.76×** | 2026-07-26 | 2026-07-26 sweep |
 | SDXL (20 st)³ | 4090 | 10.9 s | **7.5 s** | 1.45× | 2026-07-26 | 2026-07-26 sweep |
 | HunyuanImage 2.1 17B (Q4_K_M GGUF, 2048², 20 st) | 4090 | 48.3 s | **47.1 s** | 1.03× (matched) | 2026-07-26 | 2026-07-26 sweep |
+| Qwen-Image 2.1 (25 st, 1024²) | 4090 | 691 ms/step | **493 ms/step** | 1.40× | 2026-09-20 | qwen-image-2.1 bring-up (PR #116) |
 | Qwen-Image-Edit 2511 (20 st + ref, edit) | 4090 | 93 s | **87.8 s** | 1.06× | 2026-07-11 | PERFORMANCE.md §5 (retired) |
 | Lumina-Image 2.0 (25 st, cfg 4)⁴ | 4090 | 17.7 s | **10.05 s** | 1.76× | 2026-07-18 | python baselines |
 | F-Lite 10B (30 st, cfg 6)⁵ | 4090 | **61.5 s** | 122.98 s (Python/diffusers) | **0.50×** | 2026-07-18 | python baselines |
@@ -136,3 +137,13 @@ Release number beside it — no ratio is reported. Retires the `OOM²` cell from
   illustration) — rejected. A late-only band (`0.15,1`) is quality-safe but only saves 3–5% because this
   scheduler has few late-normalized-t steps. See
   `2026-07-22_accel_cfginterval_qwen_4090.md`.
+
+**Qwen-Image 2.1** is reported **per step**, not as a whole-generation time, and that is deliberate: the
+per-step figure is the slope between a 25-step and a 50-step run, which cancels model load, text encode and
+VAE decode on both sides. The fixed costs are not comparable here — the Hartsy number is a fresh CLI process
+loading 31 GB (from page cache) while ComfyUI is a resident server whose warm fixed cost is 0.82 s — so putting
+them in one column would flatter us for a reason that has nothing to do with the model. Both sides: same 4090,
+`Comfy-Org/Qwen-Image-2.1` bf16, euler/simple, cfg 1.0, prefix caching on, ComfyUI `3dd559d8` at default flags.
+Hartsy runs **F32 activations** against ComfyUI's bf16 (this engine has no BF16 kernel for `LayerNormNoAffine`,
+`RmsNorm` or `WanRopeInterleaved`); the GEMMs are BF16 on both sides, so the gap is the per-call activation cast
+and double elementwise bandwidth, not matmul precision. Output quality is equivalent at equal settings.

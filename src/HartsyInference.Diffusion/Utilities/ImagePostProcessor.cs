@@ -63,6 +63,28 @@ public static unsafe class ImagePostProcessor
         return rgb;
     }
 
+    /// <summary>Extracts a single extra channel from a decoded image tensor as an 8-bit plane, row-major
+    /// <c>[H, W]</c>, using the same <c>[-1, 1] → [0, 255]</c> mapping <see cref="TensorToRgbBytes"/> applies to
+    /// colour. Qwen-Image 2.1's VAE emits four channels — its alpha is a real output of the model, not a matte
+    /// computed afterwards — and <see cref="TensorToRgbBytes"/> reads only the first three.</summary>
+    /// <returns>The plane, or null when <paramref name="image"/> has no such channel.</returns>
+    public static byte[]? TensorToChannelBytes(Tensor image, int channel)
+    {
+        int channels = (int)image.Shape[1];
+        if (channel < 0 || channel >= channels) return null;
+        int height = (int)image.Shape[2];
+        int width = (int)image.Shape[3];
+
+        byte[] plane = new byte[height * width];
+        float* imgPtr = (float*)image.DataPointer + (long)channel * height * width;
+        for (int i = 0; i < plane.Length; i++)
+        {
+            float val = Math.Clamp((imgPtr[i] + 1.0f) * 0.5f, 0.0f, 1.0f);
+            plane[i] = (byte)(val * 255.0f + 0.5f);
+        }
+        return plane;
+    }
+
     /// <summary>Writes a raw RGB byte array as a BMP file (simple, no external dependencies).</summary>
     public static void SaveBmp(string path, byte[] rgbData, int width, int height)
     {

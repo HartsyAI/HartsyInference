@@ -43,6 +43,7 @@ public static class RecipeRegistry
         new Image.Flux2Recipe(),
         new Image.Lumina2Recipe(),
         new Image.QwenImageRecipe(),
+        new Image.QwenImage21Recipe(),
         new Image.HunyuanImageRecipe(),
         new Image.OmniGen2Recipe(),
         new Image.Krea2Recipe(),

@@ -55,6 +55,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | **Flux.2 Klein 4B** | ✅ | Clean astronaut. |
 | **AuraFlow v0.3** | ✅ | Clean on-prompt horse+rider @1024 (`calcuis/aura` fp8). ([details](#auraflow-v03)) |
 | **Qwen-Image** (20B MMDiT) | ✅ | Clean photoreal astronaut-on-horse @1024 (Q4_K GGUF + Qwen2.5-VL fp8 TE). ([details](#qwen-image)) |
+| **Qwen-Image 2.1** (7B single-stream DiT) | ✅ | Clean on-prompt apple @512 text-to-image (bf16 DiT + Qwen3-VL-8B bf16 TE + RGBA VAE). Reference-image editing and LoRA not wired. ([details](#qwen-image-21)) |
 | **Qwen-Image-Edit 2511** (20B, Q5 GGUF) | ✅ | Full edit conditioning e2e (`44.39-local`, 2026-07-10): suit-recolor + background-swap edits verified with subject identity preserved. ([details](#qwen-image-edit-2511)) |
 | **Anima** (Cosmos-Predict2 2B) | ✅ | Clean on-prompt anime @512 on the 3060 (Qwen3-0.6B embeds). ([details](#anima)) |
 | **Lumina-Image 2.0** (2B NextDiT) | ✅ | Clean on-prompt mountain-lake @512 (53s). ([details](#lumina-image-20)) |
@@ -422,6 +423,61 @@ Clean on-prompt horse+rider @1024 (`calcuis/aura` fp8). Two fixes: Pile-T5-XL at
 ### Qwen-Image
 
 Clean photoreal astronaut-on-horse @1024 (Q4_K GGUF + Qwen2.5-VL fp8 TE). 4 bugs fixed (final-layer scale/shift, conditioning template+drop, GGUF shape relabel, weight-cast OOM) + GPU-residency perf rewrite. See PARITY §Bugs. Perf grind 2026-07-08 (`alpha.44.8-local`): warm 1024²/20 steps **40.9s vs ComfyUI 54.8s (1.34× FASTER)** — device joint RoPE (was per-block host loop), cuDNN flash SDPA, fused device CFG+Euler drain-free loop, TE prompt cache, KEEP_MODELS. Next lever (documented in the benchmark doc): Q4_K→fp8 requant at load (est. →~30s). **CLI catalog-path verified 2026-07-21**: `hartsy image -m qwen-image` (`QuantStack/Qwen-Image-GGUF` Q4_K_M), sharp on-prompt astronaut-on-horse @1024/20st. **Low-VRAM 2026-07-27**: `QwenImageBlock` now implements `IStreamingBlock` and `QwenImageTransformer` exposes `BlockCount`/`GetBlock`/`BeforeBlockForward` + a shared-vs-block split, so the denoise loop streams its 60 blocks when the resident layout will not fit. Previously this pipeline used the streaming cache **only** as a VAE-decode eviction gate — the loop itself was all-or-nothing, which is why a 12 GB card OOM'd after uploading 1,675 weights. **Verified running on a 12 GB RTX 3060**: 1024²/20 steps in 231 s, peak 9,959 MiB, quality-gate clean and visually sharp (14.3 GB needed vs 9.7 GB available, so it does not fit resident). Note the shared weights *bracket* the blocks in `EnumerateWeights` (input projections before, output head after) — `EnumerateSharedWeights` is a genuine partition, not a prefix. Host-side load/convert of the 20B checkpoint was slow enough on this box (16GB text_encoders + 13GB GGUF, shared 62GB RAM) that a 500s timeout wasn't enough on the first clean attempt — needed ~900s; not investigated further (matches the general pattern of large-checkpoint host conversion being RAM/CPU-bound here, same class as the ChromaRadiance and Anima-@1024 findings). `CliDrivable=true`. **Multi-GPU (2026-08-05)**: DiT block-range sharding verified on real weights — `QwenImageDitSharding{,Vram,Engine}Tests`: 19.6 GB pooled 13.4+6.2 across 4090+3060 at the live 41/60 split, e2e SSIM 0.9734 vs unsharded, cross-generation VRAM drift 0.00 GB; TE/VAE placement wired (2026-08-04 wave, incl. the edit-reference encode) but awaiting a checkpoint re-download for engine verification.
+
+### Qwen-Image 2.1
+
+**Text-to-image verified end to end 2026-09-20** (`Comfy-Org/Qwen-Image-2.1` bf16 DiT + `qwen3vl_8b_bf16` TE +
+`qwen_image_2.1_vae_bf16`, 4090): clean, on-prompt red apple on a wooden table. Despite the version number this
+shares no block structure with Qwen-Image v1 — it is a **single-stream** DiT over the concatenated
+`[text, image]` sequence (32 blocks, hidden 4096, 32 heads of 128), with **one modulation shared by every block**,
+a fused-`gate_up` SwiGLU MLP, **scale-only adaLN with no shift term**, zero biases anywhere, and a 64-channel
+patch-1 latent. The text encoder is **Qwen3-VL-8B tapped at the last decoder layer with no final norm**
+(ComfyUI `layer_norm_hidden_state=False`), and the VAE is the **Wan 2.2 architecture** at 64 channels / 16×
+spatial / patch 1 / temporal kernel 1 — the only VAE here that emits **four** channels, because 2.1 generates
+transparency natively (prompt it with "This is an RGBA format image with transparency...").
+
+**The text prefix is evaluated once per prompt, not once per step.** Text rows modulate from `t = 0` and attend
+only to earlier text rows, so their per-block K/V are constant across the denoise loop; the prefix runs once into
+a `QwenImage21PrefixCache` and the image rows run alone against it each step. ComfyUI reaches the same arithmetic
+from the other side (evaluate the whole sequence, cache the prefix afterwards), but factoring it up front means
+every block call sees a *uniform* modulation and needs none of the per-row-range scale/gate splitting the
+reference performs.
+
+Three bugs found during bring-up, each of which fails as plausible output rather than an error: (1) the VAE's
+**temporal kernel threads through every conv**, not just the resample — `conv3x3(in, out, k)` is
+`(k,3,3)` with padding `(k//2,1,1)`, so leaving Wan's `padT=1` against a depth-1 kernel grew `T` by 2 per conv and
+the residual add read past its operand; (2) `Cast` returns its source when no conversion is needed, and the
+timestep embedder disposed it unconditionally — invisible on bf16, immediate on F32; (3) the VAE reconstructs an
+opaque image's alpha at 253–255, so testing for exactly 255 made every ordinary generation RGBA.
+
+**Activations are F32, not the reference's bf16.** This engine's CUDA DiT recipe is F32-or-F16:
+`LayerNormNoAffine`, `RmsNorm` and `WanRopeInterleaved` have no BF16 kernel, so bf16 activations fail at the
+first norm. Weights stay bf16 either way; the modulation stays F32 whatever the activations are, because the
+16-bit recipe is *16-bit activations with an F32 scale/gate*.
+
+**F16 was tried and is blocked on weight residency, not on precision.** With the reference's `clip(±65504)`
+wired in (`Clamp`, kept in the block and still reachable via `QwenImage21Transformer`'s `act` parameter), F16
+renders correctly at 512²/4 steps and lands 0.59/255 mean from the F32 image, max 17 — no SwiGLU overflow. It
+then **OOMs at 1024²**, and the reason is not activation size: F16 activations against a BF16 weight make
+`ResolveGemmDtype` pick F16, which forces a BF16→F16 materialization of **every** weight and so wants a second
+14 GB copy of the DiT resident. F32 activations against BF16 weights pick a BF16 GEMM and cast **no** weight at
+all, only the activation. So the real F16 lever is converting the checkpoint to F16 **at load** (same 14 GB, no
+duplicate) rather than flipping the activation dtype — a load-path change with its own verification, not a
+one-line switch.
+
+**Prompt weighting is declared CondScale and wired, and is provably inert** — the Kandinsky5 situation by a
+different route. The DiT's first act on the conditioning is `txt_in.text_norm`, a per-row RMSNorm, and RMSNorm is
+scale-invariant per row, so multiplying a cond row by `w` cancels exactly. SwarmUI scales that same tensor, so
+its CondScale does nothing here either and reproducing the no-op *is* parity. The gate is therefore inverted, as
+Kandinsky5's is — measured at 512²/4 steps/seed 42: `a red apple`, `(a red apple:1.0)` and `(a red apple:1.5)`
+all pixel-identical, the plain prompt run twice identical (determinism), and a *different* prompt 34/255 away
+(the control proving conditioning reaches the model at all). Pinned by
+`QwenImage21WeightSeamTests.APerRowScaleIsCancelledByTheTextProjectionsRmsNorm`.
+
+**Not wired:** reference-image editing (needs the Wan 2.2 VAE *encoder* parameterized the same way the decoder now
+is, plus the interleaved text/reference sequence and per-reference RoPE), LoRA (adapters address
+`img_mlp.gate_layer`/`proj`, the two halves of the fused `gate_up` this loads whole), and the `int8_convrot`
+build. `CliDrivable=true`.
 
 ### Qwen-Image-Edit 2511
 
