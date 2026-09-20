@@ -4049,6 +4049,25 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         throw new NotSupportedException($"VulkanBackend.CastToF16: {input.DType.Name} -> F16 not implemented.");
     }
 
+    /// <summary>F32 to bfloat16 on the device, the same way <see cref="CastToF16"/> reaches F16.</summary>
+    /// <remarks>The interface default builds a whole host-side cast tensor and memcpys it, which on a resident
+    /// input is a device sync, a host conversion of every element and a re-upload. The shader this routes to
+    /// already existed and was reachable only as an internal dtype conversion, never as the op.</remarks>
+    public unsafe void CastToBf16(Tensor output, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        if (input.DType != DType.F32 || output.DType != DType.BF16)
+        {
+            IBackend.CastToBf16Reference(output, input);
+            return;
+        }
+        VulkanBuffer src = GetBuffer(input);
+        // Always a real conversion here — the dtypes differ by the guard above — so the returned buffer is owned
+        // by this call and handing it to the cache transfers that ownership.
+        (VulkanBuffer cast, _) = CastIfNeeded(input, src, DType.BF16);
+        CacheOutput(output, cast);
+    }
+
     public unsafe void CastToF32(Tensor output, Tensor input)
     {
         using OpScope _op = EnterOp();

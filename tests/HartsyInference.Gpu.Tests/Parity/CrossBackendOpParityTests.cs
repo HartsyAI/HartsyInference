@@ -117,6 +117,43 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
         TensorAssert.Close(actual, expected, because: $"on {kind}");
     }
 
+    /// <summary>F32 to bfloat16, against the rounding rule the GPU kernels actually implement.</summary>
+    /// <remarks>Deliberately NOT compared against <c>CpuBackend</c>. <c>Tensor.CastTo(BF16)</c> truncates — its own
+    /// doc says so — while both GPU kernels round to nearest, ties to even, which is what hardware and every other
+    /// framework do. That divergence is pre-existing and shipped: CUDA has overridden this op for a long time and
+    /// differs from the host cast by one unit in the last place on roughly half of all inputs. Picking a side here
+    /// would change one backend's numerics to make a test pass, so this pins what the GPUs do and the difference
+    /// is reported rather than papered over.
+    ///
+    /// <para>Exact, and the count is not a multiple of the workgroup size.</para></remarks>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void CastToBf16_RoundsToNearestEven(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+
+        using Tensor input = Random(new TensorShape(1025), seed: 61);
+        using Tensor actual = new(input.Shape, DType.BF16);
+        using Tensor expected = new(input.Shape, DType.BF16);
+
+        ReadOnlySpan<float> source = input.AsReadOnlySpan<float>();
+        Span<ushort> reference = expected.AsSpan<ushort>();
+        for (int i = 0; i < source.Length; i++)
+        {
+            uint bits = BitConverter.SingleToUInt32Bits(source[i]);
+            // Add half an output ULP, biased by the low bit of the result, then drop the low 16 mantissa bits.
+            reference[i] = (ushort)((bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16);
+        }
+
+        backend.CastToBf16(actual, input);
+
+        TensorAssert.Identical(actual, expected, because: $"on {kind}");
+    }
+
     /// <summary>Per-head RoPE tables, where the whole difference from the shared-table form is one index.</summary>
     /// <remarks>Non-identity tables and more than one head on purpose: with a single head, or with cos/sin equal
     /// across heads, the per-head and shared layouts address the same bytes and a wrong index passes. The rotation
