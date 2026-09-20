@@ -9,7 +9,7 @@
 #   tests/migration-baseline.sh                              # compare against it
 #   tests/migration-baseline.sh --backend vulkan --record    # the same gate for the Vulkan half
 #   tests/migration-baseline.sh --filter sd15                # one case, for iterating on a change
-#   tests/migration-baseline.sh --no-build                   # trust the CLI already on disk
+#   tests/migration-baseline.sh --no-build                   # trust the CLI already on disk (+no-build in the stamp)
 #
 # It BUILDS the CLI before it measures anything, and that is not a convenience. The digest is evidence about a
 # tree, and the only thing tying the two together is that the binary came from it — a gate run after building
@@ -45,16 +45,6 @@ while [ $# -gt 0 ]; do
     esac
 done
 REF="$BASE/$BACKEND"
-if [ "$BUILD" = 1 ]; then
-    echo "building the CLI from $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo 'a non-git tree')..." >&2
-    if ! dotnet build "$REPO/src/HartsyInference.Cli" -c Release -f net10.0 --nologo -v q >"$WORK/build.log" 2>&1; then
-        echo "the CLI did not build; the gate has nothing to measure:" >&2
-        tail -30 "$WORK/build.log" >&2
-        exit 2
-    fi
-fi
-[ -f "$CLI" ] || { echo "build the CLI first: dotnet build src/HartsyInference.Cli -c Release -f net10.0" >&2; exit 2; }
-mkdir -p "$REF"
 
 # What the run measured, so a digest can be traced back to a tree. A reference carries its own copy (written
 # beside it at --record); a stale one is then visible as a commit nobody recognises instead of an unexplained
@@ -63,6 +53,23 @@ PROVENANCE="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)
 if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
     PROVENANCE="$PROVENANCE+dirty"
 fi
+if [ "$BUILD" = 0 ]; then
+    # The commit is only evidence about the binary if this run built it. Under --no-build the CLI on disk may
+    # have come from anywhere, so the stamp says it is a guess rather than quietly asserting a tree — which is
+    # the misattribution this script exists to make impossible, one level up.
+    PROVENANCE="$PROVENANCE+no-build"
+fi
+
+if [ "$BUILD" = 1 ]; then
+    echo "building the CLI from $PROVENANCE..." >&2
+    if ! dotnet build "$REPO/src/HartsyInference.Cli" -c Release -f net10.0 --nologo -v q >"$WORK/build.log" 2>&1; then
+        echo "the CLI did not build; the gate has nothing to measure:" >&2
+        tail -30 "$WORK/build.log" >&2
+        exit 2
+    fi
+fi
+[ -f "$CLI" ] || { echo "build the CLI first: dotnet build src/HartsyInference.Cli -c Release -f net10.0" >&2; exit 2; }
+mkdir -p "$REF"
 
 # case id | checkpoint (relative to MODELS) | command|positional|arguments
 CASES=$(cat <<'MATRIX'
@@ -87,7 +94,7 @@ digest_of() {
 status=0
 confirmed=0
 selected=0
-printf 'case\tbackend\tresult\tdigest\n'
+printf 'case\tbackend\tresult\tdigest\tsource\n'
 
 while IFS=$'\t' read -r id ckpt spec; do
     [ -z "$id" ] && continue
