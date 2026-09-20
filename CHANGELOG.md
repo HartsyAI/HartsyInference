@@ -30,6 +30,15 @@ stable release will require. Dates are UTC.
   stripped before tokenization, so `(fox:1.5)` and `fox` produce identical ids — the second generation of a
   weighted prompt would have been served the previous weighting's conditioning. Same defect class already fixed
   for Chroma and HiDream.
+- **Gate: NOT run.** `LtxVideo2WeightedPromptTests` pins the sequence assembly, but no generation happened — the
+  21 GB int8-convrot DiT plus the ~12 GB Gemma encoder would not load alongside a concurrent 19 GB job from
+  another agent on this 62 GB box, and four attempts were killed. The TODO on the recipe names the runs, and
+  specifies FRAME PNGs rather than the mp4 plus a same-code control, because this family's audio decode is
+  nondeterministic run to run while its video is not.
+- **A correction to alpha.134's MiniMax-H3 note.** It said H3's OOM was "the family's own load footprint, not
+  contention", citing 42 GB free at the time. That is withdrawn: this box runs concurrent agents, one later
+  measured holding 19 GB, and a `free` reading taken between their jobs looks like headroom that is not there.
+  H3 "did not load here" — the number should not be read as a property of the family.
 - `PromptWeightingModeLedgerTests.NotYetWired` is empty and stays in place: a NEW recipe that cannot weight yet
   needs somewhere honest to declare that rather than silently claiming a mode. The per-family notes are kept as
   the record of what each turned out to need — several contradict what the entry predicted before the work.

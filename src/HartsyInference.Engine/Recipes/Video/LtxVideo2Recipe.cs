@@ -87,7 +87,13 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <c>ltx-2.5-distilled</c> alike.
     /// <para>The scale is applied inside <c>LtxVideo2TextConnectors</c>, after the per-modality projection and
     /// before the learnable registers — the only placement that reproduces ComfyUI's default path. See that
-    /// method's remarks for why the connector's output and its input are both wrong.</para></remarks>
+    /// method's remarks for why the connector's output and its input are both wrong.</para>
+    /// <para>TODO — NOT real-weight gated. <c>LtxVideo2WeightedPromptTests</c> pins the sequence assembly, but no
+    /// generation has run: the 21 GB int8-convrot DiT plus the ~12 GB Gemma encoder would not load alongside a
+    /// concurrent 19 GB job on this 62 GB box, and four attempts were killed. Run <c>plain</c> / <c>(fox:1.0)</c>
+    /// / <c>(fox:0.5)</c> on a quiet box, comparing FRAME PNGs rather than the mp4 — this family's audio decode
+    /// is nondeterministic run to run while its video is not, so a container hash cannot tell a logic bug from
+    /// noise, and a same-code control run is required to establish that floor.</para></remarks>
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.CondScale;
 
