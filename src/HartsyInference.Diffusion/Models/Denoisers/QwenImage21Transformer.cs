@@ -34,13 +34,15 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
     private Tensor? _projOut;
     private readonly List<Tensor> _owned = new();
 
-    /// <param name="act">Activation dtype. BF16 is the reference's own compute dtype
-    /// (<c>supported_inference_dtypes = [bfloat16, float32]</c>) and, unlike F16, has F32's exponent range — the
-    /// block's <c>clip(±65504)</c> guard exists precisely because F16 does not.</param>
+    /// <param name="act">Activation dtype, F32 by default. The reference computes in bf16, but this engine's CUDA
+    /// DiT recipe is F32-or-F16: <c>LayerNormNoAffine</c>, <c>RmsNorm</c> and <c>WanRopeInterleaved</c> have no BF16
+    /// kernel, so bf16 activations fail at the first norm rather than running slowly. Weights stay bf16 either way —
+    /// only the activations widen. F16 is the other served recipe and is why the reference block carries a
+    /// <c>clip(±65504)</c>; it is selectable here but unverified on this model.</param>
     public QwenImage21Transformer(QwenImage21Config config, DType? act = null)
     {
         _config = config;
-        _act = act ?? DType.BF16;
+        _act = act ?? DType.F32;
         _mlpDim = config.HiddenSize * config.MlpRatio;
         if (config.NumHeads * config.HeadDim != config.HiddenSize)
             throw new ArgumentException($"numHeads * headDim ({config.NumHeads} * {config.HeadDim}) must equal hiddenSize ({config.HiddenSize}).", nameof(config));

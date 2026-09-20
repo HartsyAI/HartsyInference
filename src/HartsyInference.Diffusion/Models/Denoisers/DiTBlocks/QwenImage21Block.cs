@@ -160,33 +160,30 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
         return (qn, kn, v);
     }
 
-    /// <summary>Attention plus the output projection, returning <c>[1, S, hidden]</c>. Uses the token-major kernel
-    /// when the backend serves it — Q/K/V already sit in the layout the Linears emitted and <c>to_out</c> wants, so
-    /// that path pays no permute on either side.</summary>
+    /// <summary>Attention plus the output projection, returning <c>[1, S, hidden]</c>.</summary>
+    /// <remarks>Head-major, not the token-major kernel. Token-major wants strict rank-2 <c>[S, heads·headDim]</c>,
+    /// but the per-head QK RMSNorm needs the head dim last, so Q/K/V must be rank-4 — and reshaping them into
+    /// rank-2 would hand the backend a NEW tensor object whose device-cache entry is keyed separately from its
+    /// parent's, so the kernel would read whatever stale bytes the view's host buffer holds. The explicit permute
+    /// is a real copy and is what every other DiT in this repo does.</remarks>
     private Tensor Attend(IBackend backend, Tensor q, Tensor k, Tensor v, int qSeq, int kvSeq, Tensor? mask)
     {
         DType act = q.DType;
         float scale = 1.0f / MathF.Sqrt(_headDim);
         // Q and K are RMS-normed per head, so pre-softmax scores are bounded and F16 accumulation is safe.
+        Tensor qh = new Tensor(new TensorShape(1, _numHeads, qSeq, _headDim), act);
+        backend.Permute0213(qh, q, qSeq, _numHeads, _headDim);
+        Tensor kh = new Tensor(new TensorShape(1, _numHeads, kvSeq, _headDim), act);
+        backend.Permute0213(kh, k, kvSeq, _numHeads, _headDim);
+        Tensor vh = new Tensor(new TensorShape(1, _numHeads, kvSeq, _headDim), act);
+        backend.Permute0213(vh, v, kvSeq, _numHeads, _headDim);
+        Tensor attn = new Tensor(new TensorShape(1, _numHeads, qSeq, _headDim), act);
+        backend.ScaledDotProductAttention(attn, qh, kh, vh, mask, scale, allowF16: true);
+        qh.Dispose(); kh.Dispose(); vh.Dispose();
+
         Tensor flat = new Tensor(new TensorShape(1, qSeq, _hiddenSize), act);
-        if (backend.SupportsTokenMajorAttention)
-        {
-            backend.ScaledDotProductAttentionTokenMajor(flat, q, k, v, mask, _numHeads, _headDim, scale, allowF16: true);
-        }
-        else
-        {
-            Tensor qh = new Tensor(new TensorShape(1, _numHeads, qSeq, _headDim), act);
-            backend.Permute0213(qh, q, qSeq, _numHeads, _headDim);
-            Tensor kh = new Tensor(new TensorShape(1, _numHeads, kvSeq, _headDim), act);
-            backend.Permute0213(kh, k, kvSeq, _numHeads, _headDim);
-            Tensor vh = new Tensor(new TensorShape(1, _numHeads, kvSeq, _headDim), act);
-            backend.Permute0213(vh, v, kvSeq, _numHeads, _headDim);
-            Tensor attn = new Tensor(new TensorShape(1, _numHeads, qSeq, _headDim), act);
-            backend.ScaledDotProductAttention(attn, qh, kh, vh, mask, scale, allowF16: true);
-            qh.Dispose(); kh.Dispose(); vh.Dispose();
-            backend.Permute0213(flat, attn, _numHeads, qSeq, _headDim);
-            attn.Dispose();
-        }
+        backend.Permute0213(flat, attn, _numHeads, qSeq, _headDim);
+        attn.Dispose();
 
         Tensor projected = new Tensor(new TensorShape(1, qSeq, _hiddenSize), act);
         backend.Linear(projected, flat, _toOut!, null);

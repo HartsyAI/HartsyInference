@@ -70,7 +70,7 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
         // ("This is an RGBA format image with transparency...") is how the user asks for it. Left null when the
         // image came out fully opaque, which is what ImageResult.Alpha's contract means by "no alpha".
         byte[]? alpha = ImagePostProcessor.TensorToChannelBytes(image, channel: 3);
-        if (alpha is not null && IsFullyOpaque(alpha))
+        if (alpha is not null && IsEffectivelyOpaque(alpha))
         {
             alpha = null;
         }
@@ -112,11 +112,18 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
         return (sequence.Tokens, sequence.IsUniformlyUnweighted ? null : sequence.Weights);
     }
 
-    private static bool IsFullyOpaque(byte[] alpha)
+    /// <summary>Alpha below which a pixel counts as genuinely transparent. The VAE reconstructs an opaque image's
+    /// alpha at 253–255 rather than exactly 255 (measured on a plain "red apple" prompt: min 253, 32% of pixels
+    /// under 255), so an exact test would attach a near-opaque plane to every ordinary generation and turn every
+    /// PNG RGBA for nothing. A prompt that actually asks for transparency drives the background to ~0, far under
+    /// this.</summary>
+    private const byte OpaqueFloor = 250;
+
+    private static bool IsEffectivelyOpaque(byte[] alpha)
     {
         foreach (byte a in alpha)
         {
-            if (a != 255) return false;
+            if (a < OpaqueFloor) return false;
         }
         return true;
     }

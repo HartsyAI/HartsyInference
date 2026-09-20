@@ -339,6 +339,7 @@ public static class SideModels
         TargetSubdir = "text_encoders",
         TargetName = "qwen3vl_8b_bf16.safetensors",
         Role = "text encoder",
+        Sha256 = "68bdc82bc1b66851162ae656225e7e2068166b603db19bd5d5a3b90eb12669a9"
     };
 
     /// <summary>Qwen-Image 2.1 VAE — the Wan 2.2 architecture at 64 channels / 16x spatial / patch 1, and the only

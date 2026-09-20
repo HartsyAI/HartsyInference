@@ -70,17 +70,22 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
         }
 
         int h = height / VaeScale, w = width / VaeScale;
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
 
-        // 1. Text conditioning, then straight into the DiT's prefix: the projected text rows and their per-block
-        // K/V are step-independent, so this is the only time the text touches the transformer.
+        // 1. Text conditioning. The encoder and the DiT are ~17 GB and ~14 GB at bf16 and do not overlap in time,
+        // so the encoder is evicted before the DiT is staged — both resident at once does not fit a 24 GB card.
         Tensor condHidden = ApplyTokenWeights(EncodeDropped(condTokens, condDrop), condWeights);
+        Tensor? uncondHidden = useCfg
+            ? ApplyTokenWeights(EncodeDropped(uncondTokens!, uncondDrop), uncondWeights) : null;
+        Backend.FreeWeights(_textEncoder.EnumerateWeights());
+
+        // The projected text rows and their per-block K/V are step-independent, so this is the only time the text
+        // touches the transformer.
+        Backend.PreloadWeights(_transformer.EnumerateWeights());
         QwenImage21PrefixCache condPrefix = _transformer.BuildPrefix(Backend, condHidden);
         condHidden.Dispose();
         QwenImage21PrefixCache? uncondPrefix = null;
-        if (useCfg)
+        if (uncondHidden is not null)
         {
-            Tensor uncondHidden = ApplyTokenWeights(EncodeDropped(uncondTokens!, uncondDrop), uncondWeights);
             uncondPrefix = _transformer.BuildPrefix(Backend, uncondHidden);
             uncondHidden.Dispose();
         }
