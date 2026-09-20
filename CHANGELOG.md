@@ -6,6 +6,39 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.149
+
+- **Qwen-Image 2.1 (`Comfy-Org/Qwen-Image-2.1`) generates end to end.** Despite the version number it shares no
+  block structure with Qwen-Image v1: a **single-stream** DiT over the concatenated `[text, image]` sequence (32
+  blocks, hidden 4096), **one modulation shared by every block**, scale-only adaLN with no shift, a fused-`gate_up`
+  SwiGLU, no biases anywhere, a 64-channel patch-1 latent, **Qwen3-VL-8B** tapped at the last decoder layer with
+  **no final norm**, and the **Wan 2.2 VAE** at temporal kernel 1 emitting **four** channels — alpha is a model
+  output here, not a matte, so `ImageResult.Alpha` carries it when the image is actually transparent. New family
+  id `qwen-image-2.1`, its own detector rule, and both Qwen families now refuse the other's checkpoint by name.
+  Verified at 1024²/25 steps on a 4090, plus `--cfg 2.5`, the `int8_convrot` build, and bare-path detection.
+- **The text prefix is evaluated once per prompt instead of once per step.** Text rows modulate from `t = 0` and
+  attend only to earlier text rows, so their per-block K/V are constant across the denoise loop; they run once
+  into a `QwenImage21PrefixCache` and the image rows run alone against it. Every block call then sees a uniform
+  modulation and needs none of the per-row-range scale/gate splitting the reference performs.
+- **The Wan 2.2 VAE's `temporal_kernel` now threads through every conv, not just the resample's `time_conv`.**
+  The reference applies it in `conv3x3` too, so `decoder.conv1`, both convs of every residual block and the head
+  are all `(k,3,3)` with padding `(k//2,1,1)`. Keeping Wan's `padT=1` against a depth-1 kernel grew `T` by 2 per
+  conv and the residual add read past its operand — an access violation on CPU, and on CUDA an async illegal
+  address that surfaced at an unrelated `Free` during teardown. **Wan 2.2 itself is unchanged**: the default
+  kernel is still 3. `Wan22VaeLatentNorm` also gained span overloads, because a consumer's latent statistics are
+  its own and Wan's embedded 48-channel table is both wrong-shaped and wrong-valued for a 64-channel model.
+- **Prompt weighting on Qwen-Image 2.1 is declared, wired, and provably inert** — the Kandinsky5 situation by a
+  different route. The DiT's first act on the conditioning is `txt_in.text_norm`, a per-row RMSNorm, which is
+  scale-invariant per row, so a per-row multiply cancels exactly. SwarmUI scales the same tensor, so its
+  CondScale does nothing here either and reproducing the no-op is the parity behaviour. Recorded with the
+  inverted gate and the control that makes it meaningful (a different prompt moves the image by 34/255).
+- **Performance vs ComfyUI at master, same 4090, same checkpoint, 1024²:** **691 ms/step against their 493 ms**,
+  per-step taken as the slope between 25 and 50 steps so load, encode and decode cancel on both sides. Output
+  quality is equivalent. The gap is the activation dtype and its consequences, not the GEMM: F32 activations
+  against BF16 weights already resolve to a BF16 matmul, but pay a per-call activation cast and double the
+  elementwise bandwidth. F16 is the named lever and the modulation chain is already F32-internal so the dtype is
+  free to change; not attempted here.
+
 ## alpha.148
 
 - **Eight `VkStructureType` values were wrong, and the consequence was that Vulkan enabled no optional feature at
