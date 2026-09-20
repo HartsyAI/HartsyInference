@@ -163,7 +163,8 @@ public unsafe class MusicGenCheckpointConverterTests
 
     /// <summary>HF transformers EncodecModel state dict for <see cref="TinyEnCodecConfig"/>: encoder seq indices
     /// 0=stem, 1/4=resnet blocks, 3/6=downsample convs, 7=LSTM, 9=final; decoder 0=initial, 1=LSTM, 3/6=transpose
-    /// convs, 4/7=resnet blocks, 9=final. Transpose convs carry the dim=1 weight-norm shape [1, C_out, 1].</summary>
+    /// convs, 4/7=resnet blocks, 9=final. Every conv carries weight_norm's dim=0 gain, which is one scalar per the
+    /// weight's LEADING axis — output channels for a conv, input channels for a transposed one.</summary>
     private static Dictionary<string, Tensor> BuildHfEnCodecCheckpoint()
     {
         Dictionary<string, Tensor> w = new();
