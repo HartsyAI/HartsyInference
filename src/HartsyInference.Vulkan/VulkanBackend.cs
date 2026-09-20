@@ -2086,12 +2086,42 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             IBackend.ApplyRopeSingleReference(x, cos, sin, rotaryDim);
             return;
         }
+        DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: false);
+    }
+
+    /// <summary>The GPT-J pairing of the same rotation: pairs <c>(2i, 2i+1)</c>, one frequency serving both.</summary>
+    /// <remarks>A real dispatch rather than the interface default, which reads <c>x.DataPointer</c> on a tensor the
+    /// caller just produced on the device — a sync, a host loop over every head and position, and a re-upload for
+    /// the next op. Twelve call sites across the audio and LLM stacks reach it.
+    ///
+    /// <para>Non-F32 and non-rank-4 go to the shared reference, matching what the split-half form does: this
+    /// kernel's F16 variant exists, but the reference is the contract both are checked against.</para></remarks>
+    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+    {
+        using OpScope _op = EnterOp();
+        if (x.Shape.Rank != 4 || (x.DType != DType.F32 && x.DType != DType.F16)
+            || cos.DType != DType.F32 || sin.DType != DType.F32)
+        {
+            IBackend.ApplyRopeInterleavedReference(x, cos, sin, rotaryDim);
+            return;
+        }
+        DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: true);
+    }
+
+    /// <summary>Spec-constant id selecting GPT-J interleaved pairing in <c>apply_rope_single</c>.</summary>
+    private const uint InterleavedRopePairsSpecId = 10;
+
+    private void DispatchApplyRope(Tensor x, Tensor cos, Tensor sin, int rotaryDim, bool interleaved)
+    {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         int numHeads = (int)x.Shape[2];
         int headDim = (int)x.Shape[3];
         int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
-        int half = rdim / 2;
+        // Split-half rotates rdim/2 pairs and dispatches exactly those. Interleaved dispatches every pair in the
+        // head and drops the ones past the window inside the shader, which is what both the CPU reference and the
+        // CUDA kernel do — and for an odd rotaryDim the two rules genuinely differ, so this is not a free choice.
+        int half = interleaved ? headDim / 2 : rdim / 2;
         if (half == 0)
         {
             return;
@@ -2111,6 +2141,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
             {
                 SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+                SpecConstant.Bool(InterleavedRopePairsSpecId, interleaved),
             };
             VulkanKernel kernel = GetKernel("apply_rope_single" + DtypeSuffix(x.DType), storageBufferCount: 3, spec);
 
@@ -2121,6 +2152,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             pc.U32((uint)numHeads);
             pc.U32((uint)headDim);
             pc.U32((uint)half);
+            pc.U32((uint)rdim);
 
             long total = (long)batch * seqLen * numHeads * half;
             Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosEff.Handle, sinEff.Handle };
@@ -2132,7 +2164,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
         catch (Exception ex)
         {
-            Logs.Error("Vulkan ApplyRopeSingle dispatch failed", ex);
+            Logs.Error($"Vulkan {(interleaved ? "ApplyRopeInterleaved" : "ApplyRopeSingle")} dispatch failed", ex);
             throw;
         }
         finally
