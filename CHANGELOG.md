@@ -6,6 +6,21 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.143
+
+- **`ChwF32ToHwcU8` runs on the GPU on Vulkan.** The last step of every image generation — the VAE's `[B,3,H,W]`
+  F32 output in `[-1,1]` to the `[H,W,3]` u8 an encoder wants — was an interface default here: a device sync of the
+  whole F32 image, then a host loop over every pixel. The pixels have to reach the host either way to be encoded,
+  but as bytes that is a quarter of the transfer, and the loop goes away.
+- **One invocation per output WORD, not per pixel.** A pixel is three bytes, so pixels straddle word boundaries,
+  and GLSL cannot address bytes without an extension. Composing whole words needs neither atomics nor a
+  pre-zeroed buffer; the allocation rounds up to a whole word so the tail lanes write zero rather than reading
+  past the image.
+- The parity row uses 5×7 on purpose: only every fourth pixel starts on a word boundary, so the final word holds
+  one real byte and three past the image. Its values are offset so a good share land outside `[-1,1]`, because the
+  clamp is part of the contract and an unclamped kernel wraps rather than saturating. The comparison is exact —
+  the rounding is round-half-up, and a pixel off by one is a byte off in the PNG.
+
 ## alpha.141
 
 - **`WanRopeInterleavedPerHead` runs on the GPU on Vulkan.** It was an interface default that reads

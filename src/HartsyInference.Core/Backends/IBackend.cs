@@ -1736,7 +1736,13 @@ public interface IBackend : IDisposable
     void DisposeGraph(object graphHandle) { }
 
     /// <summary>Image-output conversion: CHW F32 in [-1,1] → interleaved HWC u8 in [0,255] (round-half-up, clamped).</summary>
-    unsafe void ChwF32ToHwcU8(Tensor output, Tensor input)
+    unsafe void ChwF32ToHwcU8(Tensor output, Tensor input) => ChwF32ToHwcU8Reference(output, input);
+
+    /// <summary>The host implementation of <see cref="ChwF32ToHwcU8"/>, for a backend that overrides it and needs
+    /// to bail on a dtype or rank its kernel does not cover.</summary>
+    /// <remarks>Static because an override cannot reach its own interface default — the call binds back to the
+    /// class and recurses until the stack ends.</remarks>
+    static unsafe void ChwF32ToHwcU8Reference(Tensor output, Tensor input)
     {
         int height = (int)input.Shape[2], width = (int)input.Shape[3];
         long hw = (long)height * width;

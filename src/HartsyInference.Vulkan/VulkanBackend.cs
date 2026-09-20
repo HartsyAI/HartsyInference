@@ -2943,6 +2943,52 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Depth-to-space over a 5-D volume: <c>[N, cOut·r², D, H, W]</c> to <c>[N, cOut, D, H·r, W·r]</c>.</summary>
+    /// <summary>The VAE's <c>[B,3,H,W]</c> F32 output in <c>[-1,1]</c> to <c>[H,W,3]</c> u8, on the device.</summary>
+    /// <remarks>The last step of every image generation, and an interface default here until now — a host loop over
+    /// every pixel, preceded by a device sync of the whole F32 image. The pixels have to reach the host either way
+    /// to be encoded, but as bytes that is a quarter of the transfer, and the loop goes away.
+    ///
+    /// <para>One invocation per output WORD rather than per pixel: a pixel is three bytes, so pixels straddle word
+    /// boundaries, and GLSL cannot address bytes without an extension. Composing whole words needs no atomics and
+    /// no pre-zeroed buffer. The allocation is rounded up to a whole word for the same reason.</para></remarks>
+    public void ChwF32ToHwcU8(Tensor output, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        if (input.DType != DType.F32 || output.DType != DType.U8 || input.Shape.Rank != 4)
+        {
+            IBackend.ChwF32ToHwcU8Reference(output, input);
+            return;
+        }
+        long pixels = input.Shape[2] * input.Shape[3];
+        if (input.Shape[1] != 3 || output.ElementCount != pixels * 3)
+        {
+            throw new ArgumentException(
+                $"ChwF32ToHwcU8: input {input.Shape} must be [B,3,H,W] and output must hold {pixels * 3} bytes, "
+                + $"got {output.ElementCount}.");
+        }
+        long words = (pixels * 3 + 3) / 4;
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(words * sizeof(uint)));
+        try
+        {
+            VulkanKernel kernel = GetKernel("chw_f32_to_hwc_u8", storageBufferCount: 2, _default1DSpec);
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)pixels);
+            pc.U32((uint)words);
+            Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, inBuf.Handle };
+            Dispatch(kernel, bufs, pc.Written, GroupCount(words, LocalX1D));
+            CacheOutput(output, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ChwF32ToHwcU8 dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     public void PixelShuffle2d(Tensor output, Tensor input, int ratio)
     {
         using OpScope _op = EnterOp();
