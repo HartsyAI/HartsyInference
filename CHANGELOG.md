@@ -6,6 +6,45 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.134
+
+- **HunyuanImage 2.1 and MiniMax-H3 honour `(word:N)`**, taking the deliberately-unwired ledger from 4
+  registered families to 2. Both are `CondScale`; what each needed was different, and in both cases the ledger's
+  own prediction turned out to be wrong in an instructive direction.
+- **HunyuanImage returns the weights at the sequence's REAL length, not padded to 1034.** Its encoder trims to
+  the attention mask's real length, encodes that, then slices `[34, realLen)`. Right-aligning `realLen` weights
+  against `realLen − 34` conditioning rows gives offset −34, so the template weights fall off the front exactly
+  as SwarmUI's `pos = condLen − len(batch) + i` intends. Handing the padded array through would give offset
+  `keep − 1034` and push every prompt weight off the front — a silent no-op that would have looked like coverage.
+- **MiniMax-H3 needed less than the ledger predicted.** That entry said the weights would have to be a
+  full-length array with every non-text `TagRun` forced to 1. Reading `MiniMaxH3TextEncoding.Build` showed the
+  user prompt is appended LAST, after every condition label and vision block, so it is contiguous at the tail and
+  a prompt-length array right-aligns onto exactly those rows. Its cond is already rank-2 F32.
+- **A PRE-EXISTING tokenizer defect, found because the CPU test was written in the same commit rather than
+  after it.** The first HunyuanImage prefix check asserted the encoder's hard-coded 34 template tokens and every
+  test failed at 33. `Qwen2Tokenizer.EncodeRaw("\n")` returns ZERO ids where HF emits 198, so every newline in a
+  chat template vanishes — `"user\n"` gives 1 id, not 2. HunyuanImage's BASE conditioning is therefore missing
+  several ids ComfyUI feeds in, and the 34-token slice drops the prompt's first token's hidden state on top of
+  that. Recorded as TODOs on the recipe and the tokenizer; unfixed, because the fix moves every existing
+  HunyuanImage generation. The check now compares the split against what `EncodeChat` actually emits, which is
+  the invariant that matters, instead of against a constant describing a different tokenizer.
+- **The LTX-2 seam is located rather than guessed at, and the family stays unwired.**
+  `LTXAVTEModel.encode_token_weights` (`lt.py:163-189`) runs the embeddings connectors ONLY under `compat_mode`;
+  its default path returns token-length embeddings, which is why SwarmUI's unconditional right-alignment lands
+  correctly there. Our pipeline mirrors `compat_mode`, so right-aligning would put every weight on REGISTER
+  rows. Scaling `feats` before the connector is also wrong: `lt.py:174-176` normalizes by a global min/max over
+  the whole sequence, so scaling one token moves the divisor every other token shares. The scale belongs inside
+  `LtxVideo2TextConnectors`, after the projection and before the register concat.
+- **Two pre-existing HunyuanImage checkpoint problems, recorded with evidence.** Its catalog asset
+  `QuantStack/HunyuanImage-2.1-GGUF` no longer resolves on HuggingFace, and the safetensors build cannot be
+  loaded at all: Comfy-Org's repack uses a `model.model.` prefix with DOTTED sub-modules
+  (`img_attn.norm.query_norm.scale`) while the converter detects the fused underscore form and strips only
+  `model.diffusion_model.`. The family loads from GGUF alone today.
+- **Gates.** HunyuanImage and MiniMax-H3 are wired and covered by CPU tests but have NO real-weight gate, each
+  for a stated reason rather than an omission: HunyuanImage has no loadable checkpoint on this machine per the
+  above, and H3's load was OOM-killed twice (exit 137) wanting a 20 GB DiT, a 15 GB text encoder and a 4.9 GB
+  VAE. Both carry TODOs naming the runs a capable box should do.
+
 ## alpha.133
 
 - **Every GPU backend gives device memory back when the engine asks.** `FreeActivations`, `TrimMemoryPool` and
