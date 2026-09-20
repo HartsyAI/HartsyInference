@@ -6,6 +6,36 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.135
+
+- **Vulkan asks the driver how much VRAM is left.** `VK_EXT_memory_budget` reports, per heap, how much this process
+  may still allocate and how much it already holds, both of which move as OTHER processes take and release memory.
+  The extension was already detected and already enabled on the device; nothing queried it. Measured on this box:
+  the driver reports **16711 MB free of 24810 MB**, where the old total-minus-our-own-blocks arithmetic would have
+  claimed all 24810 MB — roughly eight gigabytes belong to other processes. Over-reporting free VRAM is how a
+  planner OOMs a decode it was told would fit. The arithmetic stays as the fallback where the extension is absent.
+- **`FreeMemoryBytes` is the free half of `GetVramInfo`, on the interface itself.** It was an independent `long
+  FreeMemoryBytes() => 0`, and 0 is not "unknown" to its callers — it is "nothing fits", which kept every backend
+  but CUDA on its smallest path forever. Fixing it on `IBackend` rather than on the shared GPU base means a backend
+  that answers one answers both, including implementors and test doubles that never inherit that base. `CudaBackend`
+  keeps its own override for now, reading the same driver call by a different route; it collapses onto the shared
+  base with the rest of CUDA.
+- **Zero free is an answer, not a missing one.** The first cut of the driver query returned "no answer" when every
+  heap reported nothing left, which fell through to arithmetic that cannot see the process filling the card — an
+  optimistic number at exactly the moment the honest one matters. It now reports the **largest single device-local
+  heap's** remainder rather than the sum: no allocation spans two heaps, and some drivers expose a second
+  device-local heap carved from the same physical memory, where summing reports twice what exists.
+- **A live figure has consequences the constant did not.** A recipe that refuses to construct below a VRAM floor
+  (`BooguImageRecipe`, `HunyuanVideoPipeline`, `DitShardPlanner`) now sees a number that moves with every other
+  process on the card, so a co-tenant's spike can fail a request that would have succeeded a second later. That is
+  the honest reading rather than a regression, but it is a behaviour change and single-sample preflights are now
+  worth revisiting.
+- **What that did NOT change, measured rather than assumed.** The engine's own text path preloads unconditionally
+  (`TextService`), so Llama-3.2-1B on Vulkan was already resident: peak device memory 8491 MB before and 8483 MB
+  after, 64 tokens in 8.84 s before and 8.90 s after. What the zero did suppress is the budget-aware preload inside
+  `TextGenerationPipeline`, which only callers driving that pipeline directly reach, and the VAE decoder's full-res
+  attempt — which stayed tiled here, so all three Vulkan byte-identity digests are unchanged.
+
 ## alpha.134
 
 - **HunyuanImage 2.1 and MiniMax-H3 honour `(word:N)`**, taking the deliberately-unwired ledger from 4

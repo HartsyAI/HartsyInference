@@ -3422,7 +3422,10 @@ public interface IBackend : IDisposable
     void FreeAllDeviceMemory() { }
 
     /// <summary>Free device memory in bytes (0 if not a device backend). For diagnostics / adaptive tiling.</summary>
-    long FreeMemoryBytes() => 0;
+    /// <remarks>The free half of <see cref="GetVramInfo"/>, so a backend that answers one answers both. It used to
+    /// be an independent <c>0</c>, which is not "unknown" to the code that reads it — it is "nothing fits", and it
+    /// kept every non-CUDA backend's callers on their smallest path forever.</remarks>
+    long FreeMemoryBytes() => GetVramInfo().FreeBytes;
 
     /// <summary>Pre-uploads weights into the weight cache so ops avoid re-uploading; pair with <see cref="FreeWeights"/>.</summary>
     void PreloadWeights(IEnumerable<Tensor> weights) { }

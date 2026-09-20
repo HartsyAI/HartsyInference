@@ -439,6 +439,29 @@ public unsafe struct VkPhysicalDeviceMemoryProperties
     };
 }
 
+/// <summary>Chain head for <c>vkGetPhysicalDeviceMemoryProperties2</c>, so a budget struct can hang off pNext.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct VkPhysicalDeviceMemoryProperties2
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public VkPhysicalDeviceMemoryProperties memoryProperties;
+}
+
+/// <summary>Per-heap budget and usage from <c>VK_EXT_memory_budget</c>: what this process may still allocate, and
+/// what it already has. Both move as OTHER processes take and release memory, which is the whole reason to ask.</summary>
+/// <remarks>Fixed 16-element arrays by ABI, matching <see cref="VkPhysicalDeviceMemoryProperties"/>'s heap count
+/// ceiling. Declared as inline buffers rather than the field-per-index spelling beside them because these are read
+/// by index in a loop over live heaps, not by name.</remarks>
+[StructLayout(LayoutKind.Sequential)]
+public unsafe struct VkPhysicalDeviceMemoryBudgetPropertiesEXT
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public fixed ulong heapBudget[16];
+    public fixed ulong heapUsage[16];
+}
+
 [StructLayout(LayoutKind.Sequential)]
 public struct VkQueueFamilyProperties
 {

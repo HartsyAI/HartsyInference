@@ -54,6 +54,9 @@ internal static partial class VulkanApi
     internal static partial void vkGetPhysicalDeviceMemoryProperties(nint physicalDevice, out VkPhysicalDeviceMemoryProperties memProps);
 
     [LibraryImport(Lib)]
+    internal static partial void vkGetPhysicalDeviceMemoryProperties2(nint physicalDevice, ref VkPhysicalDeviceMemoryProperties2 memProps);
+
+    [LibraryImport(Lib)]
     internal static partial void vkGetPhysicalDeviceQueueFamilyProperties(nint physicalDevice, ref uint pCount, nint pProperties);
 
     // ── Logical Device & Queue ──────────────────────────────────────────
