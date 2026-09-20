@@ -3712,6 +3712,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             ? (_xfer.TryGetCached(output, out VulkanBuffer? existingOut) && existingOut is not null ? existingOut : _xfer.AllocateDevice((ulong)(output.ElementCount * elemSize)))
             : _xfer.AllocateDevice((ulong)(output.ElementCount * elemSize));
         nint cb = _capturingStepGraph ? _stepGraph!.RecordingBuffer : _stream.AcquireRecording();
+        // The inputs were written by dispatches, and a dispatch's trailing barrier ends at ComputeShader /
+        // ShaderStorageRead — a transfer reading the same memory is outside that scope.
+        VulkanCommandStream.RecordComputeToCopyBarrierOn(cb);
 
         long curDim = 0;
         Span<VkBufferCopy> regions = stackalloc VkBufferCopy[(int)outerStride];
@@ -3733,12 +3736,12 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
         if (_capturingStepGraph)
         {
-            VulkanCommandStream.RecordGlobalComputeBarrierOn(cb);
+            VulkanCommandStream.RecordCopyToComputeBarrierOn(cb);
             CacheOutput(output, outBuf);
             return;
         }
 
-        _stream.RecordGlobalComputeBarrier();
+        VulkanCommandStream.RecordCopyToComputeBarrierOn(cb);
         _dispatchesSinceSubmit++;
         _dispatchesThisOp++;
         if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
@@ -3768,8 +3771,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     ///
     /// <para>The barriers are not the ones a dispatch leaves behind. Every compute dispatch ends with a
     /// compute→compute barrier whose destination scope is <c>ShaderStorageRead</c>; a transfer reading or writing
-    /// the same memory is outside it in both directions, so this closes both explicitly. <see cref="Concat"/> and
-    /// <see cref="CopyInto"/> record the compute→compute barrier around their copies and have the same gap.</para></remarks>
+    /// the same memory is outside it in both directions, so this closes both explicitly.</para></remarks>
     public unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
     {
         using OpScope _op = EnterOp();
@@ -4224,6 +4226,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             VulkanBuffer dstBuf = _xfer.AllocateDevice(byteCount);
             try
             {
+                _stream.RecordComputeToCopyBarrier();
                 _stream.RecordCopyAndBarrier(srcBuf.Handle, dstBuf.Handle, byteCount,
                     postStage: VkPipelineStageFlags2.ComputeShader,
                     postAccess: VkAccessFlags2.ShaderStorageRead);
@@ -4280,6 +4283,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             VulkanBuffer capDstBuf = _xfer.TryGetCached(dst, out VulkanBuffer? capExisting) && capExisting is not null
                 ? capExisting : _xfer.AllocateDevice(capByteCount);
             VulkanBuffer capSrcBuf = GetBuffer(src);
+            VulkanCommandStream.RecordComputeToCopyBarrierOn(_stepGraph!.RecordingBuffer);
             VulkanCommandStream.RecordCopyAndBarrierOn(_stepGraph!.RecordingBuffer, capSrcBuf.Handle, capDstBuf.Handle, capByteCount,
                 postStage: VkPipelineStageFlags2.ComputeShader,
                 postAccess: VkAccessFlags2.ShaderStorageRead);
@@ -4294,6 +4298,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         VulkanBuffer dstBuf = _xfer.TryGetCached(dst, out VulkanBuffer? existingDst) && existingDst is not null
             ? existingDst : _xfer.AllocateDevice(byteCount);
         VulkanBuffer srcBuf = GetBuffer(src);
+        _stream.RecordComputeToCopyBarrier();
         _stream.RecordCopyAndBarrier(srcBuf.Handle, dstBuf.Handle, byteCount,
             postStage: VkPipelineStageFlags2.ComputeShader,
             postAccess: VkAccessFlags2.ShaderStorageRead);

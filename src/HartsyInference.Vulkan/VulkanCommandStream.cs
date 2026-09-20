@@ -134,6 +134,9 @@ public sealed class VulkanCommandStream : IDisposable
     /// it, and a transfer that writes one is outside the source scope of the next dispatch's barrier in the same
     /// way. Both directions are hazards the spec makes the caller close explicitly, and neither fails loudly — the
     /// copy reads or is read at whatever point the driver happens to schedule it.</remarks>
+    public void RecordComputeToCopyBarrier() => RecordComputeToCopyBarrierOn(AcquireRecording());
+
+    /// <inheritdoc cref="RecordComputeToCopyBarrier"/>
     public static unsafe void RecordComputeToCopyBarrierOn(nint cb)
         => RecordGlobalBarrierOn(cb,
             VkPipelineStageFlags2.ComputeShader, VkAccessFlags2.ShaderStorageWrite,
@@ -141,6 +144,9 @@ public sealed class VulkanCommandStream : IDisposable
 
     /// <summary>The second half of <see cref="RecordComputeToCopyBarrierOn"/> — a copy's writes made visible to
     /// the dispatches that follow it.</summary>
+    public void RecordCopyToComputeBarrier() => RecordCopyToComputeBarrierOn(AcquireRecording());
+
+    /// <inheritdoc cref="RecordCopyToComputeBarrier"/>
     public static unsafe void RecordCopyToComputeBarrierOn(nint cb)
         => RecordGlobalBarrierOn(cb,
             VkPipelineStageFlags2.Copy, VkAccessFlags2.TransferWrite,

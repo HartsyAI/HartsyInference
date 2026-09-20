@@ -6,6 +6,20 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.147
+
+- **Buffer copies on Vulkan are synchronized against the dispatches around them.** Every compute dispatch ends with
+  a barrier whose destination scope is `ComputeShader`/`ShaderStorageRead`. A `vkCmdCopyBuffer` reading the same
+  memory is a `Copy`/`TransferRead` access and sits outside that scope, so nothing ordered a dispatch's writes
+  before the copy that reads them — and on the other side, a copy's `TransferWrite` sits outside the source scope
+  of the next dispatch's barrier. `Concat` (every DiT forward joins the text and image sequences through it),
+  `CopyInto` and `CopyTo` all recorded copies into that gap. Both directions are closed now.
+- **`Concat`'s trailing barrier was the wrong one.** It recorded the compute→compute barrier after a transfer, so
+  its source scope named `ShaderStorageWrite` for writes that were `TransferWrite` — it ordered nothing. It is now
+  a real transfer→compute barrier. `CopyInto` and `CopyTo` already had a correct post-copy barrier through
+  `RecordCopyAndBarrier` and needed only the pre-copy half; the remark shipped in alpha.146 said otherwise and is
+  corrected.
+
 ## alpha.146
 
 - **The head-major chunked-attention trio runs on the GPU on Vulkan.** `QkvSplitNormHeadMajor`,
