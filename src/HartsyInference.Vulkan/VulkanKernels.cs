@@ -110,10 +110,15 @@ public sealed class VulkanKernelRegistry : IDisposable
                 };
 
                 // Ask for a full subgroup of a fixed size only when the workgroup can actually hold whole ones.
-                // Every kernel here declares its workgroup size through LocalSizeId, i.e. spec constant 0, so the
-                // value is right here; a kernel dispatched 8 wide cannot be made of 32-wide subgroups, and asking
-                // is invalid usage. It was invisible until the features were really enabled (see VulkanEnums), and
-                // a driver that enforces it would refuse the pipeline rather than quietly ignore the request.
+                // A kernel dispatched 8 wide cannot be made of 32-wide subgroups, and asking for a required
+                // subgroup size it cannot satisfy is invalid usage — invisible until the features were really
+                // enabled (see VulkanEnums), and a driver that enforces it refuses the pipeline rather than
+                // ignoring the request.
+                //
+                // The width comes from spec constant 0, which is how nearly every kernel here declares it
+                // (LocalSizeId). The exception is sdpa_flash, whose size is a compile-time literal and which is
+                // built with no spec constants at all: that leaves localX at 0 and the request unmade, which is
+                // the safe answer for a width this cannot see.
                 uint localX = 0;
                 for (int i = 0; i < specCount; i++)
                 {
