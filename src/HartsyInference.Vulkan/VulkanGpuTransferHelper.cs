@@ -329,7 +329,9 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
             _stream.RecordComputeToCopyBarrier();
             _stream.RecordCopyAndBarrier(staging.Handle, dst.Handle, size,
                 postStage: VkPipelineStageFlags2.ComputeShader,
-                postAccess: VkAccessFlags2.ShaderStorageRead);
+                // Write as well as read: an in-place op dispatches straight onto a buffer it just uploaded, and
+                // a destination scope naming only reads leaves that write-after-write unordered.
+                postAccess: VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
             // Submit so the staging buffer can be released once the copy has run.
             ulong tick = _stream.SubmitAndAdvance();
             _stream.DeferredFreeAt(tick, staging);

@@ -18,6 +18,10 @@ stable release will require. Dates are UTC.
   a post-barrier only, so a destination a dispatch just wrote — or one an earlier staging copy wrote — was not
   ordered against it. Consecutive uploads are the bulk of what synchronization validation reports on a real
   generation.
+- **A copy's destination scope named only reads.** Every post-copy barrier made the copy visible to
+  `ShaderStorageRead`, so a dispatch that *writes* the buffer it just received — which is what an in-place op does
+  straight after an upload — was a write-after-write nothing ordered. That pair is what synchronization validation
+  still reported once the other gaps were closed.
 - **`Concat`'s trailing barrier was the wrong one.** It recorded the compute→compute barrier after a transfer, so
   its source scope named `ShaderStorageWrite` for writes that were `TransferWrite` — it ordered nothing. It is now
   a real transfer→compute barrier. `CopyInto` and `CopyTo` already had a correct post-copy barrier through

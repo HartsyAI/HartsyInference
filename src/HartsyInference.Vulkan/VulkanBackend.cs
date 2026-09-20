@@ -4229,7 +4229,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
                 _stream.RecordComputeToCopyBarrier();
                 _stream.RecordCopyAndBarrier(srcBuf.Handle, dstBuf.Handle, byteCount,
                     postStage: VkPipelineStageFlags2.ComputeShader,
-                    postAccess: VkAccessFlags2.ShaderStorageRead);
+                    postAccess: VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
                 _dispatchesSinceSubmit++;
                 _dispatchesThisOp++;
                 if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
@@ -4286,7 +4286,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             VulkanCommandStream.RecordComputeToCopyBarrierOn(_stepGraph!.RecordingBuffer);
             VulkanCommandStream.RecordCopyAndBarrierOn(_stepGraph!.RecordingBuffer, capSrcBuf.Handle, capDstBuf.Handle, capByteCount,
                 postStage: VkPipelineStageFlags2.ComputeShader,
-                postAccess: VkAccessFlags2.ShaderStorageRead);
+                postAccess: VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
             dst._gpuSyncCallback = null;
             dst._gpuDisposeCallback = null;
             CacheOutput(dst, capDstBuf);
@@ -4301,7 +4301,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         _stream.RecordComputeToCopyBarrier();
         _stream.RecordCopyAndBarrier(srcBuf.Handle, dstBuf.Handle, byteCount,
             postStage: VkPipelineStageFlags2.ComputeShader,
-            postAccess: VkAccessFlags2.ShaderStorageRead);
+            postAccess: VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
         _dispatchesSinceSubmit++;
         _dispatchesThisOp++;
         if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
