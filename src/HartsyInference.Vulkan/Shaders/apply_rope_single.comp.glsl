@@ -31,6 +31,13 @@
 
 layout(local_size_x_id = 0) in;
 
+// Which two elements form a rotated pair, and where their frequencies live.
+//   false (GPT-NeoX split-half): pair (i, i+half), frequencies at i and i+half.
+//   true  (GPT-J interleaved):   pair (2i, 2i+1),  one frequency at i for both.
+// Same dispatch shape either way — one invocation per pair — so one kernel serves both conventions
+// rather than a second binary differing only in two offsets.
+layout(constant_id = 10) const bool INTERLEAVED = false;
+
 layout(set = 0, binding = 0)          buffer X_   { DTYPE x[];   };
 layout(set = 0, binding = 1) readonly buffer Cos_ { float cosv[]; };
 layout(set = 0, binding = 2) readonly buffer Sin_ { float sinv[]; };
@@ -56,13 +63,16 @@ void main() {
     uint vecOff  = (bs * pc.numHeads + h) * pc.headDim;
     uint freqOff = bs * pc.headDim;
 
-    float lower = TO_F32(x[vecOff + i]);
-    float upper = TO_F32(x[vecOff + i + pc.half_]);
+    uint lowIdx  = INTERLEAVED ? (vecOff + 2u * i)      : (vecOff + i);
+    uint highIdx = INTERLEAVED ? (vecOff + 2u * i + 1u)  : (vecOff + i + pc.half_);
+
+    float lower = TO_F32(x[lowIdx]);
+    float upper = TO_F32(x[highIdx]);
     float c0 = cosv[freqOff + i];
     float s0 = sinv[freqOff + i];
-    float c1 = cosv[freqOff + i + pc.half_];
-    float s1 = sinv[freqOff + i + pc.half_];
+    float c1 = INTERLEAVED ? c0 : cosv[freqOff + i + pc.half_];
+    float s1 = INTERLEAVED ? s0 : sinv[freqOff + i + pc.half_];
 
-    x[vecOff + i]            = FROM_F32(lower * c0 - upper * s0);
-    x[vecOff + i + pc.half_] = FROM_F32(upper * c1 + lower * s1);
+    x[lowIdx]  = FROM_F32(lower * c0 - upper * s0);
+    x[highIdx] = FROM_F32(upper * c1 + lower * s1);
 }

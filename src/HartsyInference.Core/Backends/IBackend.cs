@@ -956,6 +956,14 @@ public interface IBackend : IDisposable
     /// <summary>In-place <b>interleaved (GPT-J)</b> rotary on <c>x [B,L,numHeads,headDim]</c>; NOT same as <see cref="ApplyRopeSingle"/>.</summary>
     /// <param name="rotaryDim">0 (or &gt;=headDim) rotates every pair; otherwise only <c>[0, rotaryDim)</c> pairs rotate (HF partial-rotary).</param>
     unsafe void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+        => ApplyRopeInterleavedReference(x, cos, sin, rotaryDim);
+
+    /// <summary>The host implementation of <see cref="ApplyRopeInterleaved"/>, callable by a backend that
+    /// overrides it and needs to bail on a dtype or rank its kernel does not cover.</summary>
+    /// <remarks>Static because an override cannot reach its own interface default: <c>((IBackend)this).X(...)</c>
+    /// binds back to the class and recurses until the stack ends. A lint fails the build on that spelling, and
+    /// this is what it points callers at.</remarks>
+    static unsafe void ApplyRopeInterleavedReference(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("ApplyRopeInterleaved default fallback only supports F32.");

@@ -55,6 +55,62 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
         TensorAssert.Close(actual, expected, because: $"on {kind}");
     }
 
+    /// <summary>The GPT-J pairing, against the GPT-NeoX one it now shares a kernel with.</summary>
+    /// <remarks>Both conventions are exercised, and a partial rotary too: the two differ only in which elements
+    /// pair up and where their frequencies live, so a kernel that confused them still produces plausible numbers
+    /// of the right magnitude in the right places. Only a reference comparison separates them.</remarks>
+    [Theory]
+    [InlineData("cuda", 0)]
+    [InlineData("cuda", 4)]
+    [InlineData("vulkan", 0)]
+    [InlineData("vulkan", 4)]
+    public void ApplyRopeInterleaved_Matches_The_Cpu(string kind, int rotaryDim)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int batch = 2, seqLen = 5, heads = 3, headDim = 8;
+        using Tensor actual = Random(new TensorShape(batch, seqLen, heads, headDim), seed: 31);
+        using Tensor expected = new(actual.Shape, DType.F32);
+        actual.AsReadOnlySpan<float>().CopyTo(expected.AsSpan<float>());
+        using Tensor cos = Random(new TensorShape(batch, seqLen, headDim), seed: 32);
+        using Tensor sin = Random(new TensorShape(batch, seqLen, headDim), seed: 33);
+
+        backend.ApplyRopeInterleaved(actual, cos, sin, rotaryDim);
+        ((IBackend)cpu).ApplyRopeInterleaved(expected, cos, sin, rotaryDim);
+
+        TensorAssert.Close(actual, expected, because: $"on {kind}, rotaryDim {rotaryDim}");
+    }
+
+    /// <summary>The split-half pairing, re-checked because it now comes off the same kernel.</summary>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void ApplyRopeSingle_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int batch = 2, seqLen = 5, heads = 3, headDim = 8;
+        using Tensor actual = Random(new TensorShape(batch, seqLen, heads, headDim), seed: 41);
+        using Tensor expected = new(actual.Shape, DType.F32);
+        actual.AsReadOnlySpan<float>().CopyTo(expected.AsSpan<float>());
+        using Tensor cos = Random(new TensorShape(batch, seqLen, headDim), seed: 42);
+        using Tensor sin = Random(new TensorShape(batch, seqLen, headDim), seed: 43);
+
+        backend.ApplyRopeSingle(actual, cos, sin);
+        ((IBackend)cpu).ApplyRopeSingle(expected, cos, sin);
+
+        TensorAssert.Close(actual, expected, because: $"on {kind}");
+    }
+
     /// <summary>Per-head RoPE tables, where the whole difference from the shared-table form is one index.</summary>
     /// <remarks>Non-identity tables and more than one head on purpose: with a single head, or with cos/sin equal
     /// across heads, the per-head and shared layouts address the same bytes and a wrong index passes. The rotation

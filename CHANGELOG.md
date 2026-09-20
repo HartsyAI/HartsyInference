@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.142
+
+- **`ApplyRopeInterleaved` runs on the GPU on Vulkan.** Twelve call sites across the audio and LLM stacks reached
+  an interface default that reads `x.DataPointer` — a device sync, a host loop over every head and position, and a
+  re-upload for the next op, on a tensor the caller had just produced on the device.
+- **One kernel now serves both rotary conventions.** GPT-NeoX split-half pairs `(i, i+half)` with frequencies at
+  `i` and `i+half`; GPT-J interleaved pairs `(2i, 2i+1)` with one frequency serving both. Same dispatch shape, one
+  invocation per pair, so a spec constant picks the offsets rather than a second committed binary.
+- **`IBackend.ApplyRopeInterleavedReference`** joins the other reference statics. An override cannot reach its own
+  interface default — `((IBackend)this).X(...)` binds back to the class and recurses until the stack ends, which a
+  lint already fails the build on — so a backend bailing on a dtype or rank needs somewhere to bail TO.
+- Parity rows for both conventions, including a partial rotary. They differ only in which elements pair and where
+  the frequencies live, so a kernel that confuses them still writes plausible numbers of the right magnitude in the
+  right places; only a reference comparison separates them. Flipping the spec constant fails both interleaved rows
+  and leaves the split-half ones green — checked by doing it.
+
 ## alpha.141
 
 - **`WanRopeInterleavedPerHead` runs on the GPU on Vulkan.** It was an interface default that reads

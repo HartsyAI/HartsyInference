@@ -2086,6 +2086,33 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             IBackend.ApplyRopeSingleReference(x, cos, sin, rotaryDim);
             return;
         }
+        DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: false);
+    }
+
+    /// <summary>The GPT-J pairing of the same rotation: pairs <c>(2i, 2i+1)</c>, one frequency serving both.</summary>
+    /// <remarks>A real dispatch rather than the interface default, which reads <c>x.DataPointer</c> on a tensor the
+    /// caller just produced on the device — a sync, a host loop over every head and position, and a re-upload for
+    /// the next op. Twelve call sites across the audio and LLM stacks reach it.
+    ///
+    /// <para>Non-F32 and non-rank-4 go to the shared reference, matching what the split-half form does: this
+    /// kernel's F16 variant exists, but the reference is the contract both are checked against.</para></remarks>
+    public void ApplyRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+    {
+        using OpScope _op = EnterOp();
+        if (x.Shape.Rank != 4 || (x.DType != DType.F32 && x.DType != DType.F16)
+            || cos.DType != DType.F32 || sin.DType != DType.F32)
+        {
+            IBackend.ApplyRopeInterleavedReference(x, cos, sin, rotaryDim);
+            return;
+        }
+        DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: true);
+    }
+
+    /// <summary>Spec-constant id selecting GPT-J interleaved pairing in <c>apply_rope_single</c>.</summary>
+    private const uint InterleavedRopePairsSpecId = 10;
+
+    private void DispatchApplyRope(Tensor x, Tensor cos, Tensor sin, int rotaryDim, bool interleaved)
+    {
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         int numHeads = (int)x.Shape[2];
@@ -2111,6 +2138,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
             {
                 SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+                SpecConstant.Bool(InterleavedRopePairsSpecId, interleaved),
             };
             VulkanKernel kernel = GetKernel("apply_rope_single" + DtypeSuffix(x.DType), storageBufferCount: 3, spec);
 
