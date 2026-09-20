@@ -6,6 +6,17 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.141
+
+- **`WanRopeInterleavedPerHead` runs on the GPU on Vulkan.** It was an interface default that reads
+  `x.DataPointer`, so MG3's sigma_theta rotation cost a device sync, a host loop over every head and position, and
+  a re-upload on the next op — on a tensor that was already resident. The rotation is identical to the shared-table
+  form already implemented here; only the cos/sin offset differs, so a spec constant selects it and both come off
+  one binary rather than a second committed one.
+- Parity rows for **both** forms, on both backends. Per-head tables need more than one head and tables that differ
+  between heads to test anything: with one head, or with equal tables, the two layouts address the same bytes and a
+  wrong index passes. Flipping the spec constant fails the per-head row and nothing else — checked by doing it.
+
 ## alpha.140
 
 - **The safetensors quantizer streams, so a large source no longer needs the whole checkpoint as F32.** The GGUF

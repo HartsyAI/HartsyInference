@@ -3752,13 +3752,38 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     public void WanRopeInterleaved(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
     {
         using OpScope _op = EnterOp();
+        DispatchWanRopeInterleaved(x, cos, sin, seqLen, heads, headDim, perHead: false);
+    }
+
+    /// <summary>The same rotation with a cos/sin table per head, <c>[heads, S, headDim]</c>.</summary>
+    /// <remarks>Real dispatch rather than the interface default for the same reason the shared-table version is:
+    /// the default reads <c>x.DataPointer</c>, which on a GPU-resident tensor is a device sync, a host loop and a
+    /// re-upload on the next op. MG3's sigma_theta is the caller — its RoPE tables vary per head, and nothing else
+    /// about the rotation does, so the two share a shader and differ by one spec constant.</remarks>
+    public void WanRopeInterleavedPerHead(Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim)
+    {
+        using OpScope _op = EnterOp();
+        DispatchWanRopeInterleaved(x, cos, sin, seqLen, heads, headDim, perHead: true);
+    }
+
+    /// <summary>Spec-constant id selecting per-head RoPE tables in <c>wan_rope_interleaved</c>.</summary>
+    /// <remarks>Ten and up, because 0-2 are the workgroup dimensions every kernel here declares.</remarks>
+    private const uint PerHeadRopeTablesSpecId = 10;
+
+    private void DispatchWanRopeInterleaved(
+        Tensor x, Tensor cos, Tensor sin, int seqLen, int heads, int headDim, bool perHead)
+    {
         VulkanBuffer xBuf = GetBuffer(x);
         VulkanBuffer cosBuf = GetBuffer(cos);
         VulkanBuffer sinBuf = GetBuffer(sin);
         try
         {
             string shader = "wan_rope_interleaved" + DtypeSuffix(x.DType);
-            VulkanKernel kernel = GetKernel(shader, 3, _default1DSpec);
+            VulkanKernel kernel = GetKernel(shader, 3,
+            [
+                SpecConstant.UInt(0, LocalX1D), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+                SpecConstant.Bool(PerHeadRopeTablesSpecId, perHead),
+            ]);
             Span<byte> pc = stackalloc byte[3 * 4];
             BinaryWriteUInt(pc, 0, (uint)seqLen);
             BinaryWriteUInt(pc, 4, (uint)heads);
