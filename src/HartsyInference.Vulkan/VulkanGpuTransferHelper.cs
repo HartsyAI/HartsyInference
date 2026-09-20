@@ -144,10 +144,18 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
         _stream.DeferredFree(buffer);
     }
 
+    /// <summary>Called after a bulk release has drained the stream, so the backend's own submit accounting can
+    /// account for a submit it did not make.</summary>
+    /// <remarks>The backend batches submits by counting dispatches since the last one. A drain here submits
+    /// whatever was recorded, and without this the count keeps those dispatches, so the next op crosses the flush
+    /// threshold early. Harmless — a submit with nothing recorded is a no-op — but it makes the number a lie.</remarks>
+    internal Action? StreamDrained { get; set; }
+
     /// <summary>Runs a bulk release with the stream drained first and the frees taken immediately.</summary>
     private void ReleaseInBulk(Action release)
     {
         _stream.WaitIdleHost();
+        StreamDrained?.Invoke();
         _releasingInBulk = true;
         try
         {

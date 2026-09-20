@@ -130,6 +130,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
         _xfer = new VulkanGpuTransferHelper(_vkDevice.Handle, _allocator, in memProps, Vk, _stream);
+        // A bulk release drains the stream on its own, which submits whatever was recorded; the batching count
+        // has to learn about a submit it did not make, or the next op flushes early against a stale number.
+        _xfer.StreamDrained = () => _dispatchesSinceSubmit = 0;
 
         // Opt-in INT8 dot-product GEMM path for Linear (see TryDispatchInt8Linear). Strict "1" opt-in,
         // matching this constructor's push-descriptor switch above — an experimental switch, not a proven
@@ -476,6 +479,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     protected override void TrimMemoryPoolCore()
     {
         _stream.WaitIdleHost();
+        _dispatchesSinceSubmit = 0;
         _allocator.ReleaseEmptySlabs();
     }
 

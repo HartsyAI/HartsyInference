@@ -27,6 +27,10 @@ stable release will require. Dates are UTC.
   through the interface default and cannot disagree; `CudaBackend` keeps genuinely independent implementations
   reading different routes to the driver, which is the shape that drifts. A cross-backend contract test now asks
   both.
+- **A bulk release tells the backend it drained the stream.** `ReleaseInBulk` and the Vulkan trim both submit and
+  wait on their own, and the dispatch count that drives submit batching did not learn about it — so the next op
+  crossed the flush threshold early against a stale number. Harmless (a submit with nothing recorded is a no-op)
+  but the count was a lie. From the post-merge review of alpha.133.
 - The fallback walks the device-local heaps itself rather than destructuring `MemoryStats`, which also computed a
   per-block free-list scan and a full weight-cache sum for a number nobody read — several times per denoise step on
   any device without the budget extension.
