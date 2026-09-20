@@ -28,6 +28,84 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Upload counts for host tensors that miss both caches. A tensor re-uploaded with unchanged host data is behaving like a weight, whoever created it — on its second upload it is promoted into the weight cache (see <see cref="TryAutoPromote"/>), making pipelines that never call <c>PreloadWeights</c> (the audio stack) GPU-resident instead of PCIe-bound. Weak-keyed so tracked tensors stay collectible; the state dies with its tensor. Per-State so promotion bookkeeping stays with the backend that owns the device copy.</summary>
         public readonly ConditionalWeakTable<Tensor, UploadState> UploadTracker = new();
 
+        /// <summary>Releases every unpinned activation, and every Q8_1 sidecar riding on one.</summary>
+        /// <remarks>An override rather than the base's version because two things here are CUDA's: the sidecars,
+        /// which are swept wholesale — pinned survivors included, since a consumer that misses one simply
+        /// re-quantizes — and the graph arenas, whose pointers are owned as a block and must never be handed back
+        /// individually. Everything else matches the base: sweep first, skip the pinned, clear the binding as the
+        /// entry goes so a much-later finalizer cannot resurrect a retired cleanup bucket.</remarks>
+        public override void FreeActivations()
+        {
+            Context?.EnsureCurrent();
+            // Called between pipeline stages, never mid-op, so any parked orphan is already ownerless.
+            SweepOrphans();
+            foreach (Tensor tensor in SidecarCache.Keys.ToList())
+            {
+                RemoveSidecar(this, tensor);
+            }
+            List<KeyValuePair<Tensor, (ulong Buffer, long Bytes)>>? survivors = null;
+            foreach (KeyValuePair<Tensor, (ulong Buffer, long Bytes)> entry in ActivationCache)
+            {
+                if (PinnedActivations.Contains(entry.Key))
+                {
+                    (survivors ??= new List<KeyValuePair<Tensor, (ulong Buffer, long Bytes)>>()).Add(entry);
+                    continue;
+                }
+                entry.Key.ClearGpuBinding(Key);
+                CachedPointers.Remove(entry.Value.Buffer);
+                if (!IsArenaPtr(this, entry.Value.Buffer))
+                {
+                    CudaMemory.FreeAsync(entry.Value.Buffer, StreamHandle);
+                }
+            }
+            ActivationCache.Clear();
+            if (survivors is not null)
+            {
+                foreach (KeyValuePair<Tensor, (ulong Buffer, long Bytes)> entry in survivors)
+                {
+                    ActivationCache[entry.Key] = entry.Value;
+                }
+            }
+        }
+
+        /// <summary>The shared cache's sweep, with the three guards CUDA's free paths need.</summary>
+        /// <remarks>Reached from the shared op scope, which is the only reason this is an override rather than a
+        /// wrapper: the base calls <c>Residency.SweepOrphans()</c>, so a guard that lives anywhere else is a guard
+        /// the op scope does not have.
+        ///
+        /// <para>Never during a stream capture. <c>cuMemFreeAsync</c> on a buffer allocated BEFORE the capture
+        /// began is rejected outright with <c>CUDA_ERROR_INVALID_VALUE</c> — measured, and it is what aborted all
+        /// three graph tests the first time this migration was attempted. They stay parked, and the first op after
+        /// the capture ends sweeps them. The capture probe sits behind the empty-set check on purpose: a driver
+        /// call on every op entry would cost more than the deferral does.</para>
+        ///
+        /// <para>Demoted auto-promoted weights go back through <c>cuMemFree</c>, not the async pool they were never
+        /// allocated from, so they are swept separately.</para></remarks>
+        public override void SweepOrphans()
+        {
+            if (!OrphanSweepEnabled)
+            {
+                return;
+            }
+            if (PendingPersistentFrees.Count != 0)
+            {
+                SweepPersistentFrees(this);
+            }
+            if (PendingOrphanCount == 0)
+            {
+                return;
+            }
+            if (StreamHandle != 0)
+            {
+                CudaDriverApi.cuStreamIsCapturing(StreamHandle, out int captureStatus).ThrowOnError();
+                if (captureStatus != 0)
+                {
+                    return;
+                }
+            }
+            base.SweepOrphans();
+        }
+
         /// <summary>Auto-promoted weight buffers demoted mid-op because a device write rebound their tensor to a different buffer. They come from <c>cuMemAlloc</c> (<see cref="CudaMemory.AllocatePersistent"/>), so they must be released with <c>cuMemFree</c> and NOT parked in <see cref="PendingOrphans"/>, which frees against the async pool. Freed by the next op's sweep, after the current op's finally blocks have run — freeing inline would double-free, since the demoted buffer is usually that same op's input.</summary>
         public readonly HashSet<ulong> PendingPersistentFrees = new();
 
@@ -779,19 +857,7 @@ internal static unsafe class GpuTransferHelper
     /// is rejected outright (CUDA_ERROR_INVALID_VALUE, which aborted all three CudaGraphTests), so they stay parked
     /// and the first op after the capture ends sweeps them. The probe sits behind the empty-set check on purpose: a
     /// driver call on every EnterOp would cost more than the deferral does.</remarks>
-    internal static void SweepOrphans()
-    {
-        if (!OrphanSweepEnabled) return;
-        State s = Resolve();
-        if (s.PendingPersistentFrees.Count != 0) SweepPersistentFrees(s);
-        if (s.PendingOrphanCount == 0) return;
-        if (s.StreamHandle != 0)
-        {
-            CudaDriverApi.cuStreamIsCapturing(s.StreamHandle, out int captureStatus).ThrowOnError();
-            if (captureStatus != 0) return;
-        }
-        s.SweepOrphans();
-    }
+    internal static void SweepOrphans() => Resolve().SweepOrphans();
 
 
 
@@ -1147,32 +1213,7 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Frees only cached ACTIVATION device buffers; preloaded weights and weight-casts are kept. Call between denoise steps to deterministically reclaim device memory held by activations that were neither read back to host (which frees via the sync callback) nor explicitly disposed — those otherwise linger in the cache until non-deterministic GC finalization and accumulate to OOM over multi-step diffusion. Safe because the only cross-step state (the latent) lives on the host; anything still cached here is dead. Bindings are detached as entries are reclaimed so late tensor finalizers cannot enqueue obsolete backend callbacks.</summary>
     public static void FreeActivations(bool trimPool = true)
     {
-        State s = Resolve();
-        s.Context?.EnsureCurrent();
-        // Called between pipeline stages, never mid-op, so any parked orphan is already ownerless.
-        SweepOrphans();
-        // Q8_1 sidecars are per-step transients riding on activations — sweep them all here (pinned
-        // survivors included: a consumer that misses the sidecar simply re-quantizes).
-        foreach (Tensor t in s.SidecarCache.Keys.ToList())
-            RemoveSidecar(s, t);
-        List<KeyValuePair<Tensor, (ulong Buffer, long Bytes)>>? survivors = null;
-        foreach (KeyValuePair<Tensor, (ulong Buffer, long Bytes)> kv in s.ActivationCache)
-        {
-            if (s.PinnedActivations.Contains(kv.Key))
-            {
-                (survivors ??= new List<KeyValuePair<Tensor, (ulong Buffer, long Bytes)>>()).Add(kv);
-                continue;
-            }
-            // The allocation is being reclaimed without D2H. Detach its tensor callback now so a much-later
-            // finalizer cannot recreate this backend's already-retired cleanup bucket.
-            kv.Key.ClearGpuBinding(s.Key);
-            s.CachedPointers.Remove(kv.Value.Buffer);
-            if (!IsArenaPtr(s, kv.Value.Buffer)) CudaMemory.FreeAsync(kv.Value.Buffer, s.StreamHandle);
-        }
-        s.ActivationCache.Clear();
-        if (survivors is not null)
-            foreach (KeyValuePair<Tensor, (ulong Buffer, long Bytes)> kv in survivors)
-                s.ActivationCache[kv.Key] = kv.Value;
+        Resolve().FreeActivations();
 
         // Return pooled memory to the driver. cuMemFreeAsync (used by every activation/dispose free) hands memory
         // back to the stream-ordered mempool, which RESERVES it (cuMemGetInfo counts it as used) until trimmed —
