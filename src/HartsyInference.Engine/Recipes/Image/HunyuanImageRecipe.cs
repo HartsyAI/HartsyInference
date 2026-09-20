@@ -32,6 +32,14 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
     /// does not exist yet, so Inpaint is deliberately not declared.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.HunyuanImageTransformer"/> names its blocks <c>transformer_blocks.{i}</c> / <c>single_transformer_blocks.{i}</c>, both already-recognized canonical diffusers roots. NOTE: this family's production config is a Q4_K_M GGUF, and a K-quant weight cannot take a LoRA merge (requantizing a merged result back into block form is not implemented) — such a request refuses by name, telling the user to pick a safetensors/fp8 build. That refusal is the intended behaviour, not a regression.</para></remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Inpaint | ImageFeatures.Refiner | ImageFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:2109</c> →
+    /// <c>hunyuan_image.HunyuanImageTokenizer</c>, a <c>QwenImageTokenizer</c> subclass, so the Qwen arm disables
+    /// weights (<c>qwen_image.py:39</c>). Its byt5 arm keeps them but is populated only for QUOTED text, and
+    /// SwarmUI's discriminator probes the unquoted literal <c>(x:2)</c>, so byt5 never enters the probe.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "hunyuan-image", StringComparison.OrdinalIgnoreCase);
 

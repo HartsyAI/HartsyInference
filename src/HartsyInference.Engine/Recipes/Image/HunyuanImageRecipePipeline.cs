@@ -9,6 +9,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Diffusion.Prompting;
 
 using HartsyInference.Engine.Features;
 
@@ -45,7 +46,7 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
 
         // TODO(E-IMG-4/5): img2img/inpaint, LoRA, ControlNet, regional prompting and the ByT5 glyph branch are
         // deferred — text-to-image only.
-        (int[] ids, int[] mask) = TokenizePadded(_tokenizer, prompt);
+        (int[] ids, int[] mask, float[]? weights) = TokenizePadded(_tokenizer, prompt);
         bool useCfg = cfg > 1.0f;
         // An empty negative encodes to exactly the 34-token template, which the encoder's prefix-drop rejects —
         // give it one real token.
@@ -55,9 +56,10 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
         }
         int[]? negIds = null;
         int[]? negMask = null;
+        float[]? negWeights = null;
         if (useCfg)
         {
-            (negIds, negMask) = TokenizePadded(_tokenizer, negative);
+            (negIds, negMask, negWeights) = TokenizePadded(_tokenizer, negative);
         }
 
         // Resolved at the same width/height the inner request carries — HunyuanImage rejects sizes that are not a
@@ -84,7 +86,8 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
         Action<GenerationProgress> bridge = RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
 
         (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.GenerateFromTokens(
-            ids, mask, negIds, negMask, inner, onProgress: bridge);
+            ids, mask, negIds, negMask, inner, onProgress: bridge,
+            promptTokenWeights: weights, negativeTokenWeights: negWeights);
 
         return new ImageResult
         {
@@ -103,10 +106,21 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
         };
     }
 
-    /// <summary>Chat-template encode padded to the fixed 1034-token window with a matching attention mask (diffusers <c>_get_qwen_prompt_embeds</c>).</summary>
-    private static (int[] ids, int[] mask) TokenizePadded(Qwen2Tokenizer tokenizer, string prompt)
+    /// <summary>Chat-template encode padded to the fixed 1034-token window with a matching attention mask (diffusers <c>_get_qwen_prompt_embeds</c>), plus the per-token weights parsed from the emphasis grammar.</summary>
+    /// <remarks>The weights are returned at the sequence's REAL length, not padded to 1034. The encoder trims to
+    /// the mask's real length, encodes that, then slices <c>[34, realLen)</c> — so right-aligning <c>realLen</c>
+    /// weights against <c>realLen − 34</c> conditioning rows gives offset −34 and the template weights fall off
+    /// the front exactly as SwarmUI intends. Handing the padded 1034 array through instead would give offset
+    /// <c>keep − 1034</c> and push every prompt weight off the front: a silent no-op, not an error.</remarks>
+    internal static (int[] ids, int[] mask, float[]? weights) TokenizePadded(Qwen2Tokenizer tokenizer, string prompt)
     {
-        int[] raw = tokenizer.EncodeChat(prompt, systemPrompt: HunyuanImageQwenTextEncoder.SystemPrompt, addGenerationPrompt: false);
+        WeightedTokenSequence sequence = TemplatedPromptTokens.Build(
+            PromptTagFlattening.Flatten(prompt),
+            t => tokenizer.EncodeChat(t, systemPrompt: HunyuanImageQwenTextEncoder.SystemPrompt, addGenerationPrompt: false),
+            // Legacy EncodeRaw, deliberately, because that is what EncodeChat's own AppendBpe uses: byte-identity
+            // is measured against OUR base path, not against the HF fast tokenizer. See the TODO below.
+            tokenizer.EncodeRaw, TemplatePrefix(tokenizer), [Qwen2Tokenizer.ImEndId]);
+        int[] raw = sequence.Tokens;
         int realLen = Math.Min(raw.Length, HunyuanImageQwenTextEncoder.PaddedLength);
         int[] ids = Qwen2Tokenizer.PadToLength(raw, HunyuanImageQwenTextEncoder.PaddedLength);
         int[] mask = new int[HunyuanImageQwenTextEncoder.PaddedLength];
@@ -114,7 +128,49 @@ public sealed class HunyuanImageRecipePipeline(HunyuanImagePipeline pipeline, Qw
         {
             mask[i] = 1;
         }
-        return (ids, mask);
+        return (ids, mask, sequence.IsUniformlyUnweighted ? null : sequence.Weights[..realLen]);
+    }
+
+    /// <summary>The ids <see cref="Qwen2Tokenizer.EncodeChat"/> puts before the prompt, assembled the same way it
+    /// does, and checked against what that method actually emits for an empty prompt rather than against a
+    /// constant — a drift between the split and the whole-string encode is what would silently misplace every
+    /// weight.</summary>
+    /// <remarks>
+    /// <para>TODO — PRE-EXISTING, out of scope for weighting, unverified against HF. The root cause is one step
+    /// down: <c>EncodeRaw("\n")</c> returns ZERO ids on this tokenizer where HF emits 198, so every newline in
+    /// the chat template vanishes. Measured: <c>"user\n"</c> gives 1 id, not 2; the newline between
+    /// <c>&lt;|im_end|&gt;</c> and the next <c>&lt;|im_start|&gt;</c> gives 0. So this is not one missing id —
+    /// HunyuanImage's BASE conditioning is built on a tokenization missing several ids that ComfyUI feeds in,
+    /// and the <c>"system\n"</c> join is very likely affected the same way.</para>
+    /// <para>On top of that the counts disagree: this prefix is <b>33</b> ids while
+    /// <see cref="HunyuanImageQwenTextEncoder.TemplatePrefixTokens"/> is 34 and the encoder slices from there, so
+    /// the prompt's FIRST token's hidden state is dropped from the conditioning on every generation. diffusers'
+    /// <c>prompt_template_encode_start_idx</c> of 34 is right for HF's tokenization and one too many for ours.
+    /// Fixing either means fixing the tokenizer, which moves every existing HunyuanImage generation.</para>
+    /// <para>Weighting is unaffected by that discrepancy: the weights are indexed by sequence POSITION and
+    /// right-aligned against a cond of <c>realLen − 34</c> rows, so weight <c>i</c> lands on sequence position
+    /// <c>i</c> whatever the template's true length is. The dropped token simply loses its weight with it.</para>
+    /// <para>Weighted spans also inherit the leading-space drop documented on
+    /// <see cref="Qwen2Tokenizer.EncodeRaw"/>. The base encode has the same bug, so the two agree and the
+    /// unweighted path is byte-identical; <see cref="Qwen2Tokenizer.EncodeRawByteLevel"/> is the fix for both.</para>
+    /// </remarks>
+    private static int[] TemplatePrefix(Qwen2Tokenizer tokenizer)
+    {
+        List<int> prefix = new List<int>(48) { Qwen2Tokenizer.ImStartId };
+        prefix.AddRange(tokenizer.EncodeRaw("system\n" + HunyuanImageQwenTextEncoder.SystemPrompt));
+        prefix.Add(Qwen2Tokenizer.ImEndId);
+        prefix.AddRange(tokenizer.EncodeRaw("\n"));
+        prefix.Add(Qwen2Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw("user\n"));
+        int wholeTemplate = tokenizer.EncodeChat(
+            "", systemPrompt: HunyuanImageQwenTextEncoder.SystemPrompt, addGenerationPrompt: false).Length;
+        if (prefix.Count + 1 != wholeTemplate)
+        {
+            throw new InvalidOperationException(
+                $"HunyuanImage's split chat template is {prefix.Count} prefix + 1 suffix ids but EncodeChat "
+                + $"emits {wholeTemplate} for an empty prompt — the two must agree or every weight is misplaced.");
+        }
+        return [.. prefix];
     }
 
     /// <inheritdoc/>
