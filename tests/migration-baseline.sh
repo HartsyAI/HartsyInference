@@ -9,6 +9,12 @@
 #   tests/migration-baseline.sh                              # compare against it
 #   tests/migration-baseline.sh --backend vulkan --record    # the same gate for the Vulkan half
 #   tests/migration-baseline.sh --filter sd15                # one case, for iterating on a change
+#   tests/migration-baseline.sh --no-build                   # trust the CLI already on disk
+#
+# It BUILDS the CLI before it measures anything, and that is not a convenience. The digest is evidence about a
+# tree, and the only thing tying the two together is that the binary came from it — a gate run after building
+# only the test projects measures whatever DLL was there before, reports `identical`, and the change under test
+# never ran at all. That failure is silent and it looks exactly like success.
 #
 # One script for both backends on purpose: a digest is only evidence against a digest taken the same way, and the
 # first Vulkan byte-identity checks were hashed by a different method than this, so they cannot be compared to
@@ -26,6 +32,7 @@ WORK="$(mktemp -d)"
 MODE="compare"
 BACKEND="cuda"
 FILTER=""
+BUILD=1
 trap 'rm -rf "$WORK"' EXIT
 
 while [ $# -gt 0 ]; do
@@ -33,12 +40,29 @@ while [ $# -gt 0 ]; do
         --record)  MODE="record";  shift ;;
         --backend) BACKEND="$2";   shift 2 ;;
         --filter)  FILTER="$2";    shift 2 ;;
+        --no-build) BUILD=0;       shift ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
     esac
 done
 REF="$BASE/$BACKEND"
+if [ "$BUILD" = 1 ]; then
+    echo "building the CLI from $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo 'a non-git tree')..." >&2
+    if ! dotnet build "$REPO/src/HartsyInference.Cli" -c Release -f net10.0 --nologo -v q >"$WORK/build.log" 2>&1; then
+        echo "the CLI did not build; the gate has nothing to measure:" >&2
+        tail -30 "$WORK/build.log" >&2
+        exit 2
+    fi
+fi
 [ -f "$CLI" ] || { echo "build the CLI first: dotnet build src/HartsyInference.Cli -c Release -f net10.0" >&2; exit 2; }
 mkdir -p "$REF"
+
+# What the run measured, so a digest can be traced back to a tree. A reference carries its own copy (written
+# beside it at --record); a stale one is then visible as a commit nobody recognises instead of an unexplained
+# CHANGED months later.
+PROVENANCE="$(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [ -n "$(git -C "$REPO" status --porcelain 2>/dev/null)" ]; then
+    PROVENANCE="$PROVENANCE+dirty"
+fi
 
 # case id | checkpoint (relative to MODELS) | command|positional|arguments
 CASES=$(cat <<'MATRIX'
@@ -135,8 +159,9 @@ while IFS=$'\t' read -r id ckpt spec; do
 
     if [ "$MODE" = record ]; then
         echo "$digest" > "$REF/$id.digest"
+        printf '%s\t%s\n' "$PROVENANCE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$REF/$id.source"
         cp "$artifact" "$REF/$id.${artifact##*.}"
-        printf '%s\t%s\trecorded\t%s\n' "$id" "$BACKEND" "$digest"
+        printf '%s\t%s\trecorded\t%s\t%s\n' "$id" "$BACKEND" "$digest" "$PROVENANCE"
         continue
     fi
     if [ ! -f "$REF/$id.digest" ]; then
@@ -148,7 +173,13 @@ while IFS=$'\t' read -r id ckpt spec; do
         printf '%s\t%s\tidentical\t%s\n' "$id" "$BACKEND" "$digest"
         confirmed=$((confirmed + 1))
     else
-        printf '%s\t%s\tCHANGED\t%s (reference %s)\n' "$id" "$BACKEND" "$digest" "$(cat "$REF/$id.digest")"
+        # Name both trees. "CHANGED" on its own sends the reader looking for a bug in the branch, when the
+        # reference may simply predate a change nobody attributed — which is exactly what happened to krea2
+        # on Vulkan between 2026-09-18 and 2026-09-20.
+        recorded_at="unknown commit"
+        [ -f "$REF/$id.source" ] && recorded_at="$(cut -f1 "$REF/$id.source") of $(cut -f2 "$REF/$id.source")"
+        printf '%s\t%s\tCHANGED\t%s at %s (reference %s, recorded at %s)\n' \
+            "$id" "$BACKEND" "$digest" "$PROVENANCE" "$(cat "$REF/$id.digest")" "$recorded_at"
         cp "$artifact" "$REF/$id.actual.${artifact##*.}"
         status=1
     fi
