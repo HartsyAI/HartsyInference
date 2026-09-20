@@ -4,7 +4,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads + buckets a Hunyuan Image 2.1 single-file safetensors checkpoint into transformer / VAE / CLIP / T5 dictionaries. The diffusers naming convention is preserved verbatim — Hunyuan ships in canonical diffusers layout, so no key remapping is required. FP8 <c>.scale_weight</c> companion tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via the shared <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> helper.</summary>
+/// <summary>Loads + buckets a Hunyuan Image 2.1 single-file safetensors checkpoint into transformer / VAE / CLIP / T5 dictionaries. A checkpoint already in diffusers layout is preserved verbatim; the two published non-diffusers layouts — original-Tencent (what GGUF repacks ship) and the Comfy-Org repack — are remapped first via <see cref="ConvertTencentToDiffusers"/>. FP8 <c>.scale_weight</c> companion tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via the shared <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> helper.</summary>
 public sealed class HunyuanImageCheckpointConverter
 {
     /// <summary>Result of partitioning a Hunyuan Image 2.1 safetensors file.</summary>
@@ -37,7 +37,10 @@ public sealed class HunyuanImageCheckpointConverter
         Dictionary<string, Tensor> allWeights = source as Dictionary<string, Tensor>
             ?? new Dictionary<string, Tensor>(source, StringComparer.Ordinal);
         if (allWeights.ContainsKey("double_blocks.0.img_attn_qkv.weight") ||
-            allWeights.ContainsKey("model.diffusion_model.double_blocks.0.img_attn_qkv.weight"))
+            allWeights.ContainsKey("model.diffusion_model.double_blocks.0.img_attn_qkv.weight") ||
+            allWeights.ContainsKey("double_blocks.0.img_attn.qkv.weight") ||
+            allWeights.ContainsKey("model.diffusion_model.double_blocks.0.img_attn.qkv.weight") ||
+            allWeights.ContainsKey("model.model.double_blocks.0.img_attn.qkv.weight"))
         {
             allWeights = ConvertTencentToDiffusers(allWeights);
         }
@@ -80,6 +83,8 @@ public sealed class HunyuanImageCheckpointConverter
             string transformerKey = key;
             if (transformerKey.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
                 transformerKey = transformerKey["model.diffusion_model.".Length..];
+            else if (transformerKey.StartsWith("model.model.", StringComparison.Ordinal))
+                transformerKey = transformerKey["model.model.".Length..];
             else if (transformerKey.StartsWith("transformer.", StringComparison.Ordinal))
                 transformerKey = transformerKey["transformer.".Length..];
 
@@ -107,6 +112,9 @@ public sealed class HunyuanImageCheckpointConverter
             string key = kvp.Key;
             if (key.StartsWith("model.diffusion_model.", StringComparison.Ordinal))
                 key = key["model.diffusion_model.".Length..];
+            else if (key.StartsWith("model.model.", StringComparison.Ordinal))
+                key = key["model.model.".Length..];
+            key = NormalizeComfyOrgNames(key);
             Tensor t = kvp.Value;
 
             if (key.StartsWith("byt5_in.", StringComparison.Ordinal))
@@ -222,6 +230,50 @@ public sealed class HunyuanImageCheckpointConverter
             else output[key] = t;
         }
         return output;
+    }
+
+    /// <summary>Rewrites the Comfy-Org repack's sub-module names to the original-Tencent names the rest of this converter reads: Comfy-Org nests what Tencent flattens (<c>img_attn.qkv</c> vs <c>img_attn_qkv</c>, <c>img_mlp.0</c> vs <c>img_mlp.fc1</c>, <c>img_mod.lin</c> vs <c>img_mod.linear</c>) and calls an RMSNorm weight <c>.scale</c>. Same architecture and same tensors, so only names change and the fused-qkv splitting applies unchanged; a key already in Tencent form is returned untouched.</summary>
+    internal static string NormalizeComfyOrgNames(string key)
+    {
+        // Scoped per section rather than one global replace list: ".norm.query_norm.scale" is a single-block key
+        // but also the tail of the double blocks' stream-prefixed ".img_attn.norm.query_norm.scale".
+        if (key.StartsWith("double_blocks.", StringComparison.Ordinal))
+        {
+            return key
+                .Replace(".img_attn.qkv.", ".img_attn_qkv.").Replace(".txt_attn.qkv.", ".txt_attn_qkv.")
+                .Replace(".img_attn.proj.", ".img_attn_proj.").Replace(".txt_attn.proj.", ".txt_attn_proj.")
+                .Replace(".img_attn.norm.query_norm.scale", ".img_attn_q_norm.weight")
+                .Replace(".img_attn.norm.key_norm.scale", ".img_attn_k_norm.weight")
+                .Replace(".txt_attn.norm.query_norm.scale", ".txt_attn_q_norm.weight")
+                .Replace(".txt_attn.norm.key_norm.scale", ".txt_attn_k_norm.weight")
+                .Replace(".img_mod.lin.", ".img_mod.linear.").Replace(".txt_mod.lin.", ".txt_mod.linear.")
+                .Replace(".img_mlp.0.", ".img_mlp.fc1.").Replace(".img_mlp.2.", ".img_mlp.fc2.")
+                .Replace(".txt_mlp.0.", ".txt_mlp.fc1.").Replace(".txt_mlp.2.", ".txt_mlp.fc2.");
+        }
+        if (key.StartsWith("single_blocks.", StringComparison.Ordinal))
+        {
+            return key
+                .Replace(".modulation.lin.", ".modulation.linear.")
+                .Replace(".norm.query_norm.scale", ".q_norm.weight")
+                .Replace(".norm.key_norm.scale", ".k_norm.weight");
+        }
+        if (key.StartsWith("txt_in.individual_token_refiner.", StringComparison.Ordinal))
+        {
+            return key
+                .Replace(".self_attn.qkv.", ".self_attn_qkv.").Replace(".self_attn.proj.", ".self_attn_proj.")
+                .Replace(".mlp.0.", ".mlp.fc1.").Replace(".mlp.2.", ".mlp.fc2.");
+        }
+        // The two-layer MLP heads: Tencent indexes them (mlp.0/mlp.2), Comfy-Org names them, except c_embedder
+        // which feeds a diffusers text_embedder that wants linear_1/linear_2 directly.
+        if (key.StartsWith("txt_in.c_embedder.", StringComparison.Ordinal))
+            return key.Replace(".in_layer.", ".linear_1.").Replace(".out_layer.", ".linear_2.");
+        if (key.StartsWith("txt_in.t_embedder.", StringComparison.Ordinal)
+            || key.StartsWith("time_in.", StringComparison.Ordinal)
+            || key.StartsWith("guidance_in.", StringComparison.Ordinal))
+        {
+            return key.Replace(".in_layer.", ".mlp.0.").Replace(".out_layer.", ".mlp.2.");
+        }
+        return key;
     }
 
     private static unsafe void SplitRows(Tensor fused, int parts, Dictionary<string, Tensor> output,
