@@ -40,10 +40,12 @@ stable release will require. Dates are UTC.
   loaded at all: Comfy-Org's repack uses a `model.model.` prefix with DOTTED sub-modules
   (`img_attn.norm.query_norm.scale`) while the converter detects the fused underscore form and strips only
   `model.diffusion_model.`. The family loads from GGUF alone today.
-- **Gates.** HunyuanImage and MiniMax-H3 are wired and covered by CPU tests but have NO real-weight gate, each
-  for a stated reason rather than an omission: HunyuanImage has no loadable checkpoint on this machine per the
-  above, and H3's load was OOM-killed twice (exit 137) wanting a 20 GB DiT, a 15 GB text encoder and a 4.9 GB
-  VAE. Both carry TODOs naming the runs a capable box should do.
+- **Gate.** HunyuanImage is real-weight gated at 512², seed 1, on `svjack/HunyuanImage_gguf` Q4_0:
+  `(fox:1.0)` byte-identical to plain, `(fox:0.5)` and `(fox:1.5)` both differing and differing from each other.
+  **MiniMax-H3 is NOT gated** — its load was OOM-killed three times (exit 137), the last with 42 GB of host RAM
+  free and nothing else large running, so the footprint is the family's own rather than contention. It carries a
+  TODO naming the runs a capable box should do, including the same-code determinism control, which is not
+  optional for this model because its output is only reproducible with the GPU otherwise idle.
 
 ## alpha.133
 

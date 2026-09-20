@@ -201,6 +201,18 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
+- [x] **HunyuanImage 2.1 and MiniMax-H3 weight prompts — DONE 2026-09-19 (alpha.133).** The unwired ledger goes
+  from 4 registered families to 2, both LTX-2. Both are CondScale, and in both the ledger's own prediction was
+  wrong in a useful direction. HunyuanImage returns the weights at the sequence's REAL length rather than padded
+  to 1034, so right-alignment gives offset −34 and the template weights fall off the front exactly as intended;
+  the padded array would have given `keep − 1034` and silently scaled nothing. H3 needed no full-length array
+  with non-text runs forced to 1: `MiniMaxH3TextEncoding.Build` appends the user prompt LAST, so it is
+  contiguous at the tail and a prompt-length array right-aligns onto those rows alone. **Real-weight gate:
+  HunyuanImage at 512², seed 1, on `svjack/HunyuanImage_gguf` Q4_0 — `(fox:1.0)` byte-identical to plain
+  (`4fa0f250`), `(fox:0.5)` and `(fox:1.5)` both differing and differing from each other. MiniMax-H3 is NOT
+  gated**: its load was OOM-killed three times (exit 137), the last with 42 GB of host RAM free, so the
+  footprint is the family's own. Writing the CPU test in the same commit is what found the tokenizer defect
+  below — the first prefix check asserted 34 and every test failed at 33.
 - [ ] **HunyuanImage 2.1 loads only from GGUF, and its catalog asset is dead — found 2026-09-19, PRE-EXISTING.**
   Two separate problems, both surfaced while gating prompt weighting. (1) The declared asset
   `QuantStack/HunyuanImage-2.1-GGUF` **no longer resolves on HuggingFace** — the API returns

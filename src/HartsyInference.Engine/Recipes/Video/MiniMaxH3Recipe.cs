@@ -47,8 +47,9 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// the tail and right-alignment lands on exactly those rows.
     /// <para>TODO — NOT real-weight gated. <c>MiniMaxH3WeightedPromptTests</c> pins the ordering property and the
     /// weight array's length, but no generation has run: loading this family wants the 20 GB fp8 DiT, the 15 GB
-    /// Qwen3-VL text encoder and the 4.9 GB video VAE, and the CLI was OOM-killed at load (exit 137, twice) with
-    /// ~41 GB of host RAM free. The gate is an environment limit, not a code one — run
+    /// Qwen3-VL text encoder and the 4.9 GB video VAE, and the CLI was OOM-killed at load (exit 137) on three
+    /// attempts, the last with 42 GB of host RAM free and nothing else large running — so this is the family's
+    /// own load footprint on this path, not contention. The gate is an environment limit, not a code one — run
     /// <c>plain</c> / <c>(fox:1.0)</c> / <c>(fox:0.5)</c> plus a same-code determinism control on a box that can
     /// hold it. The control is NOT optional here: this model's output is only reproducible with the GPU
     /// otherwise idle.</para></remarks>
