@@ -93,12 +93,11 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// the number to plan against: it fits a 62 GB box only with nothing else large resident, which is why a
     /// gate run concurrently with anything else gets OOM-killed during load rather than failing in a way that
     /// names itself.</para>
-    /// <para>Gate evidence, 320x192 / 25 frames / seed 1, comparing FRAME PNGs rather than the mp4 — this
-    /// family's audio decode is nondeterministic run to run while its video is not, so a container hash cannot
-    /// separate a logic bug from noise. Two same-code plain runs hash identically, which establishes that floor,
-    /// and <c>(fox:1.0)</c> matches them byte for byte. The <c>(fox:0.5)</c> half was still queued behind another
-    /// job when this landed; run it to confirm the weighting moves the output, which is the half these three
-    /// rows cannot show.</para></remarks>
+    /// <para>Gated at 320x192 / 25 frames / seed 1 on FRAME PNGs rather than the mp4 — this family's audio
+    /// decode is nondeterministic run to run while its video is not, so a container hash cannot separate a logic
+    /// bug from noise. Two same-code plain runs hash identically, which establishes that floor;
+    /// <c>(fox:1.0)</c> matches plain byte for byte, and <c>(fox:0.5)</c> and <c>(fox:1.5)</c> both differ and
+    /// differ from each other.</para></remarks>
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.CondScale;
 

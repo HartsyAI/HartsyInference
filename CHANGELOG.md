@@ -30,15 +30,28 @@ stable release will require. Dates are UTC.
   stripped before tokenization, so `(fox:1.5)` and `fox` produce identical ids — the second generation of a
   weighted prompt would have been served the previous weighting's conditioning. Same defect class already fixed
   for Chroma and HiDream.
-- **Gate: three of four rows, and the missing one is named rather than glossed.** 320x192 / 25 frames / seed 1,
-  comparing FRAME PNGs rather than the mp4 because this family's audio decode is nondeterministic run to run
-  while its video is not. Two same-code plain runs hash identically (`78ead7cd`), which establishes that floor;
-  `(fox:1.0)` matches them byte for byte, so the unweighted path is unmoved. **`(fox:0.5)` was still queued
-  behind another job and has not completed** — that is the half showing the weighting DOES something, and it is
-  outstanding.
-- **Loading LTX-2 peaks at ~42 GB of host RSS**, measured across those three runs (42.1 / 42.3 / 42.5 GB) against
-  a 21 GB on-disk int8-convrot checkpoint — roughly 2x the file. It fits a 62 GB box only with nothing else
-  large resident, which is why earlier attempts died during load without naming a cause.
+- **The gate found a real bug, and it was in this change.** `ApplyTokenWeights` first scaled the rows HOST-side
+  through `AsSpan<float>()`, on a tensor `backend.Linear` had just produced on the device — the
+  discarded-device-write pattern. The symptom was not wrong pixels but `OutOfVramException`: a weighted prompt
+  exhausting the 4090 at a geometry the same prompt completed at unweighted, twice, including once on an idle
+  card. `(fox:1.0)` passed throughout because the scale returns early when every weight is 1, so only a prompt
+  with a weight that actually differs took the bad path. It now goes through `backend.MaskRows` and stays on
+  device.
+- **Gate (real weights), 320x192 / 25 frames / seed 1, comparing FRAME PNGs** rather than the mp4, because this
+  family's audio decode is nondeterministic run to run while its video is not:
+
+  | run | frame hash |
+  |---|---|
+  | plain | `78ead7cd` |
+  | `(fox:1.0)` | `78ead7cd` — byte-identical |
+  | `(fox:0.5)` | `0802180b` — differs |
+  | `(fox:1.5)` | `64847778` — differs from both |
+
+  Two same-code plain runs hashed identically before the fix, establishing that this family's video really is
+  deterministic run to run, so the differences above are signal. `plain` still hashes `78ead7cd` after the fix,
+  the same value the pre-fix runs produced, so the unweighted path did not move.
+- **Loading LTX-2 peaks at ~42 GB of host RSS**, measured across three runs (42.1 / 42.3 / 42.5 GB) against a
+  21 GB on-disk int8-convrot checkpoint — roughly 2x the file, and worth knowing before scheduling a run.
 - **A correction to alpha.134's MiniMax-H3 note.** It said H3's OOM was "the family's own load footprint, not
   contention", citing 42 GB free at the time. That is withdrawn: this box runs concurrent agents, one later
   measured holding 19 GB, and a `free` reading taken between their jobs looks like headroom that is not there.
