@@ -362,16 +362,21 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     public override (long FreeBytes, long TotalBytes) GetVramInfo()
     {
         long total = (long)Vk.TotalVramBytes;
-        if (Vk.HasMemoryBudget && TryQueryHeapBudget(out long budgetFree))
+        // After teardown the physical device belongs to a destroyed instance, and the query is a native call, so a
+        // stale caller would take the process down rather than throw. Callers reach this at odd lifecycle points
+        // on purpose (AudioRuntime wraps it in a catch for exactly that reason), so it has to answer safely.
+        if (_disposed)
+        {
+            return (0, total);
+        }
+        if (TryQueryDriverVram(out long budgetFree))
         {
             return (budgetFree, total);
         }
-        long held = 0;
-        foreach ((bool _, int _, ulong size) in _allocator.SnapshotBlocks())
-        {
-            held += (long)size;
-        }
-        return (Math.Max(0, total - held), total);
+        // Device-local only, the same basis as the total: the allocator's blocks include host-visible staging,
+        // and subtracting those from a device-local total under-reports free VRAM by the size of the staging ring.
+        (_, long reservedDeviceBytes, _, _) = MemoryStats;
+        return (Math.Max(0, total - reservedDeviceBytes), total);
     }
 
     /// <summary>Sums what this process may still allocate across the device-local heaps.</summary>
@@ -380,6 +385,19 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     ///
     /// <para>Returns false rather than zero when the driver reports nothing usable, so the caller falls back to the
     /// allocator's own figure instead of telling a planner the card is full.</para></remarks>
+    /// <summary>Whether the driver answered, and what it said. Exposed so a test can assert which path was taken:
+    /// the two produce different numbers, and a query that quietly stopped working would otherwise look like a
+    /// card that happens to be busy.</summary>
+    internal bool TryQueryDriverVram(out long freeBytes)
+    {
+        if (!Vk.HasMemoryBudget || _disposed)
+        {
+            freeBytes = 0;
+            return false;
+        }
+        return TryQueryHeapBudget(out freeBytes);
+    }
+
     private unsafe bool TryQueryHeapBudget(out long freeBytes)
     {
         freeBytes = 0;
@@ -392,16 +410,10 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             sType = VkStructureType.PhysicalDeviceMemoryProperties2,
             pNext = (nint)(&budget),
         };
-        try
-        {
-            VulkanApi.vkGetPhysicalDeviceMemoryProperties2(_vkDevice.PhysicalDevice, ref props);
-        }
-        catch (Exception ex)
-        {
-            Logs.Debug($"[Vulkan] memory-budget query failed, using allocator accounting: {ex.Message}");
-            return false;
-        }
-        uint heapCount = Math.Min(props.memoryProperties.memoryHeapCount, 16u);
+        VulkanApi.vkGetPhysicalDeviceMemoryProperties2(_vkDevice.PhysicalDevice, ref props);
+
+        bool sawDeviceLocal = false;
+        uint heapCount = Math.Min(props.memoryProperties.memoryHeapCount, VkConstants.MaxMemoryHeaps);
         for (uint heap = 0; heap < heapCount; heap++)
         {
             VkMemoryHeap info = props.memoryProperties.GetMemoryHeap((int)heap);
@@ -409,14 +421,20 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             {
                 continue;
             }
+            sawDeviceLocal = true;
             ulong heapBudget = budget.heapBudget[heap];
             ulong heapUsage = budget.heapUsage[heap];
-            if (heapBudget > heapUsage)
-            {
-                freeBytes += (long)(heapBudget - heapUsage);
-            }
+            // Usage above budget is the driver saying this process is already over its share, not that it has
+            // negative memory left.
+            long remaining = heapBudget > heapUsage ? (long)(heapBudget - heapUsage) : 0;
+            // The LARGEST single heap, not the sum. A caller asks this to decide whether one allocation fits, and
+            // no allocation spans two heaps — while some drivers expose a second device-local heap carved out of
+            // the same physical memory, where summing reports twice what exists.
+            freeBytes = Math.Max(freeBytes, remaining);
         }
-        return freeBytes > 0;
+        // Zero free is the single most important answer a driver can give, so it must not read as "no answer" and
+        // fall through to arithmetic that cannot see the process filling the card.
+        return sawDeviceLocal;
     }
 
     /// <inheritdoc/>

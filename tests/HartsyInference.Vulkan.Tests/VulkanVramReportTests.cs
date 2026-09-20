@@ -14,12 +14,18 @@ namespace HartsyInference.Vulkan.Tests;
 [Trait("Category", "GpuIntegration")]
 public sealed class VulkanVramReportTests
 {
+    /// <summary>~1 GB of F32, big enough that a report which ignores it is obvious.</summary>
+    private const int Rows = 8192, Cols = 32768;
+
+    /// <summary>How much of a residency has to show up in the reported figure.</summary>
+    /// <remarks>A quarter, not all of it. This backend shares the card with whatever else is running, and the
+    /// driver's figure moves with those processes too — the assertion has to survive a co-tenant taking or
+    /// releasing a few hundred megabytes between two probes, while still failing a figure that does not move.</remarks>
+    private const int ObservedFraction = 4;
+
     private readonly ITestOutputHelper _output;
 
     public VulkanVramReportTests(ITestOutputHelper output) => _output = output;
-
-    /// <summary>~1 GB of F32, big enough that a report which ignores it is obvious.</summary>
-    private const int Rows = 8192, Cols = 32768;
 
     [Fact]
     public void FreeMemoryBytes_IsTheSameNumberAsGetVramInfo()
@@ -31,14 +37,17 @@ public sealed class VulkanVramReportTests
         using VulkanBackend backend = (VulkanBackend)opened!;
 
         (long free, long total) = backend.GetVramInfo();
-        long viaOldName = backend.FreeMemoryBytes();
+        // Through the interface deliberately: the fix is the interface's own default, so every backend that
+        // answers GetVramInfo answers this too, including ones that never inherit the shared GPU base.
+        long viaOldName = ((IBackend)backend).FreeMemoryBytes();
 
         _output.WriteLine($"free={free >> 20} MB of total={total >> 20} MB, budget extension={backend.Vk.HasMemoryBudget}");
         Assert.True(total > 0, "the device reported no device-local memory at all");
         Assert.InRange(free, 1, total);
-        // Two probes of a live figure can differ if something else on the card moved between them, but not by
-        // anything like a gigabyte on an otherwise idle test host.
-        Assert.True(Math.Abs(free - viaOldName) < (1L << 30),
+        // Two probes of a live figure differ when something else on the card moves between them, so this is a
+        // sanity bound rather than an equality — what it catches is the two spellings reading different sources,
+        // which is what they did before (one of them returned a constant zero).
+        Assert.True(Math.Abs(free - viaOldName) < (2L << 30),
             $"the two spellings disagree: {free >> 20} MB vs {viaOldName >> 20} MB");
     }
 
@@ -73,11 +82,11 @@ public sealed class VulkanVramReportTests
 
         _output.WriteLine($"free {before >> 20} MB -> {duringFree >> 20} MB with {bytes >> 20} MB resident "
             + $"-> {after >> 20} MB after release");
-        // Allow slack for the allocator rounding up to a slab and for anything else on the card; the point is that
-        // most of a gigabyte showed up in the number, not that it accounted for every byte.
-        Assert.True(before - duringFree >= bytes / 2,
+        // Slack for the allocator rounding up to a slab, and for anything else on the card moving between the two
+        // probes: the driver's figure is live, so it answers for every process, not just this one.
+        Assert.True(before - duringFree >= bytes / ObservedFraction,
             $"a {bytes >> 20} MB residency moved the free figure by only {(before - duringFree) >> 20} MB");
-        Assert.True(after >= duringFree + (bytes / 2),
+        Assert.True(after >= duringFree + (bytes / ObservedFraction),
             $"releasing {bytes >> 20} MB recovered only {(after - duringFree) >> 20} MB");
     }
 
@@ -103,17 +112,27 @@ public sealed class VulkanVramReportTests
         using Tensor weight = new(new TensorShape(Rows, Cols), DType.F32);
         backend.PreloadWeights([weight]);
         backend.Sync();
+        try
+        {
+            // Which path answered, asserted rather than assumed: the two produce different numbers, and a query
+            // that quietly stopped answering would otherwise read as a card that happens to be busy.
+            Assert.True(backend.TryQueryDriverVram(out long driverFree),
+                "the extension is present but the driver query did not answer");
+            (long free, long total) = backend.GetVramInfo();
+            (_, long reserved, _, _) = backend.MemoryStats;
+            long arithmetic = total - reserved;
 
-        (long free, long total) = backend.GetVramInfo();
-        (_, long reserved, _, _) = backend.MemoryStats;
-        long arithmetic = total - reserved;
-
-        _output.WriteLine($"driver says {free >> 20} MB free; total {total >> 20} MB minus {reserved >> 20} MB "
-            + $"reserved = {arithmetic >> 20} MB");
-        Assert.True(free <= arithmetic,
-            $"the driver reported MORE free ({free >> 20} MB) than this backend's own arithmetic allows "
-            + $"({arithmetic >> 20} MB) — budget and usage are likely swapped");
-
-        backend.FreeWeights([weight]);
+            _output.WriteLine($"driver says {free >> 20} MB free (direct query {driverFree >> 20} MB); "
+                + $"total {total >> 20} MB minus {reserved >> 20} MB reserved = {arithmetic >> 20} MB");
+            Assert.True(free <= arithmetic,
+                $"the driver reported MORE free ({free >> 20} MB) than this backend's own arithmetic allows "
+                + $"({arithmetic >> 20} MB) — budget and usage are likely swapped");
+        }
+        finally
+        {
+            // Before the assertions could throw: a leaked gigabyte of device memory would fail the NEXT test in
+            // this class rather than this one, turning one real failure into a cascade.
+            backend.FreeWeights([weight]);
+        }
     }
 }
