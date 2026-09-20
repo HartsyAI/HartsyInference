@@ -47,6 +47,14 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
     public VideoFeatures Supports => VideoFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:1038</c> →
+    /// <c>hunyuan_video.HunyuanVideoTokenizer</c> = CLIP-L + <c>LLAMA3Tokenizer</c>, neither of which disables
+    /// weights. Only the Llama arm is blended — CLIP-L contributes a pooled vector here — and the blend runs on the
+    /// full sequence BEFORE the template crop, which is the order <c>encode_token_weights</c> uses.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
+    /// <inheritdoc/>
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming;
 
@@ -118,16 +126,61 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
     }
 
     /// <summary>Builds the templated + BOS-prefixed Llama-3 token sequence the diffusers pipeline feeds LLaVA (add_special_tokens=True → BOS prepended), from the embedded Llama-3 byte-level BPE tokenizer.</summary>
-    internal static int[] BuildTemplatedTokens(string prompt)
+    internal static int[] BuildTemplatedTokens(string prompt) => BuildWeightedTokens(prompt).Tokens;
+
+    /// <summary>The templated Llama-3 ids plus one weight per row, template positions pinned to 1.</summary>
+    /// <remarks>ComfyUI blends the FULL sequence and crops afterwards — <c>encode_token_weights</c>
+    /// (<c>hunyuan_video.py:104-110</c>) calls <c>self.llama.encode_token_weights</c> first and only then computes
+    /// <c>template_end</c> — so the weights returned here are indexed against the uncropped sequence and the caller
+    /// must blend before <c>CropSequence</c>.</remarks>
+    internal static Diffusion.Prompting.WeightedTokenSequence BuildWeightedTokens(string prompt)
     {
         using Stream json = EmbeddedTokenizerResources.OpenLlama3TokenizerJson();
         HartsyInference.ModelAssets.Tokenizers.GgufTokenizer tok = HfTokenizerJson.LoadByteLevelBpe(json);
+        int placeholder = PromptTemplate.IndexOf("{0}", StringComparison.Ordinal);
+        int[] prefix = [StartId(tok), .. tok.Encode(PromptTemplate[..placeholder], addSpecial: true)];
+        int[] suffix = tok.Encode(PromptTemplate[(placeholder + 3)..], addSpecial: true);
+        // The crop is a hard-coded count, so a tokenizer revision that moved the template's length would silently
+        // crop into the prompt (or leave template rows in the conditioning) instead of failing. Checked rather than
+        // trusted, because both outcomes render plausibly.
+        if (prefix.Length != CropStart)
+        {
+            throw new InvalidOperationException(
+                $"HunyuanVideo's prompt template tokenizes to {prefix.Length} ids but CropStart is {CropStart}.");
+        }
+        return Diffusion.Prompting.TemplatedPromptTokens.Build(
+            Diffusion.Prompting.PromptTagFlattening.Flatten(prompt),
+            t => Templated(tok, t), t => tok.Encode(t, addSpecial: true), prefix, suffix);
+    }
+
+    /// <summary>The whole-template encode, kept verbatim for the unweighted path so wiring weighting moves nothing.</summary>
+    private static int[] Templated(HartsyInference.ModelAssets.Tokenizers.GgufTokenizer tok, string prompt)
+    {
         string templated = string.Format(System.Globalization.CultureInfo.InvariantCulture, PromptTemplate, prompt);
         int[] ids = tok.Encode(templated, addSpecial: true);
         int[] withBos = new int[ids.Length + 1];
-        withBos[0] = tok.BosId ?? 128000;
+        withBos[0] = StartId(tok);
         Array.Copy(ids, 0, withBos, 1, ids.Length);
         return withBos;
+    }
+
+    /// <summary>ComfyUI's <c>LLAMAModel special_tokens={"start": 128000, "pad": 128258}</c> (<c>hunyuan_video.py:32</c>).
+    /// <c>LLAMA3Tokenizer</c> sets <c>pad_with_end=False</c> with an explicit <c>pad_token=128258</c>, so the pad is
+    /// NOT the Llama end-of-text id.</summary>
+    private const int StartTokenId = 128000;
+    private const int PadTokenId = 128258;
+
+    private static int StartId(HartsyInference.ModelAssets.Tokenizers.GgufTokenizer tok) => tok.BosId ?? StartTokenId;
+
+    /// <summary>The ComfyBlend baseline for a conditioning of <paramref name="length"/> rows: <c>gen_empty_tokens</c>
+    /// emits start + end + padding and this model declares no end, so it is one start token then pad. Built per
+    /// prompt because the tokenizer does not pad to a fixed window.</summary>
+    internal static int[] EmptyBaseline(int length)
+    {
+        int[] empty = new int[length];
+        empty[0] = StartTokenId;
+        Array.Fill(empty, PadTokenId, 1, length - 1);
+        return empty;
     }
 
     /// <summary>Opens a side component through the container. The explicit <c>ApplyFp8ScaledDequant</c> this used to

@@ -25,6 +25,16 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
     /// <remarks>Kandinsky 5 image-lite reuses the Flux.1 VAE; the encoder half is built alongside the decoder.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.Kandinsky5Transformer"/> names its two block stacks <c>text_transformer_blocks.{i}</c> and <c>visual_transformer_blocks.{i}</c> — neither was a root the bare-root LoRA detector recognized before the same change.</para></remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: the CLIP-L arm keeps weights, so
+    /// SwarmUI's probe selects ComfyBlend. The blend is nevertheless a verified END-TO-END NO-OP —
+    /// <c>Kandinsky5TEModel.encode_token_weights</c> (<c>kandinsky5.py:39-43</c>) returns the Qwen cond plus
+    /// CLIP-L's POOLED vector and discards the blended hidden states. Parity is therefore to strip the emphasis
+    /// and apply nothing, which <c>Kandinsky5TextEncoding.StripEmphasis</c> does; declaring the mode is what
+    /// keeps the grammar out of the encoder's input text. Blending the Qwen arm would BREAK parity.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5", StringComparison.OrdinalIgnoreCase);
 

@@ -10,6 +10,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -42,15 +43,32 @@ public sealed class HunyuanVideoRecipePipeline(IBackend backend, HunyuanVideoPip
         Tensor? pooled = null;
         try
         {
-            int[] llamaTokens = HunyuanVideoRecipe.BuildTemplatedTokens(prompt);
+            // Only the Llama arm can be blended: CLIP-L contributes its POOLED vector here and its hidden states are
+            // disposed on the next line but one, and ComfyBlend rewrites hidden states. CLIP-L still needs the
+            // grammar taken off, or the parens reach it as prose.
+            WeightedTokenSequence llamaSeq = HunyuanVideoRecipe.BuildWeightedTokens(prompt);
             backend.PreloadWeights(_llava.EnumerateWeights());
-            Tensor full = _llava.EncodeMultiLayer(backend, [llamaTokens], [HunyuanVideoRecipe.LlamaLayer]);
+            Tensor full = _llava.EncodeMultiLayer(backend, [llamaSeq.Tokens], [HunyuanVideoRecipe.LlamaLayer]);
+            if (!llamaSeq.IsUniformlyUnweighted)
+            {
+                // start + pad at the prompt's own length: LLAMA3Tokenizer pads to nothing here (min_length=1,
+                // pad_to_max_length=False), so the baseline cannot be encoded once and reused.
+                int[] empty = HunyuanVideoRecipe.EmptyBaseline(llamaSeq.Tokens.Length);
+                using Tensor emptyFull = _llava.EncodeMultiLayer(backend, [empty], [HunyuanVideoRecipe.LlamaLayer]);
+                if (ComfyBlend.Apply(backend, full, emptyFull, llamaSeq.Weights) is Tensor blended)
+                {
+                    full.Dispose();
+                    full = blended;
+                }
+            }
+            // The crop runs AFTER the blend, matching hunyuan_video.py:104-110 where template_end is computed from
+            // the already-encoded output.
             promptEmbeds = CropSequence(full, HunyuanVideoRecipe.CropStart);
             full.Dispose();
             backend.Sync();
             backend.FreeWeights(_llava.EnumerateWeights());
 
-            int[] clipTokens = _clipTokenizer.Encode(prompt);
+            int[] clipTokens = _clipTokenizer.Encode(PromptWeighting.Join(PromptWeighting.Parse(prompt)));
             int eos = ClipTokenizer.FindEosPosition(clipTokens);
             backend.PreloadWeights(_clipL.EnumerateWeights());
             (Tensor hidden, Tensor? p) = _clipL.EncodePenultimate(backend, [clipTokens], [eos], layersFromEnd: 1);

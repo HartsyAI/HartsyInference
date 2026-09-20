@@ -73,7 +73,9 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         int promptEosPositionG,
         int negativeEosPositionG,
         SdxlRefinerRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        float[]? promptWeightsG = null,
+        float[]? negativeWeightsG = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose. The refiner
@@ -112,7 +114,10 @@ public sealed class SdxlRefinerPipeline : DiffusionPipelineBase
         Logs.Info("Encoding text with CLIP-G...");
         int[][] batchTokenIdsG = [negativePromptTokenIdsG, promptTokenIdsG];
         int[] eosPositions = [negativeEosPositionG, promptEosPositionG];
-        (Tensor textEmbeddings, Tensor? pooledOutput) = _clipG.EncodePenultimate(Backend, batchTokenIdsG, eosPositions, request.ClipSkip ?? 2);
+        // The batch row order is (negative, positive), so the weight rows have to be handed over the same way
+        // round — swapping them would emphasise the negative prompt and leave the positive flat.
+        (Tensor textEmbeddings, Tensor? pooledOutput) = _clipG.EncodeBatchWeightedPenultimate(
+            Backend, batchTokenIdsG, [negativeWeightsG, promptWeightsG], eosPositions, request.ClipSkip ?? 2);
         if (pooledOutput is null)
             throw new InvalidOperationException("CLIP-G must produce a pooled output for SDXL refiner.");
         Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");

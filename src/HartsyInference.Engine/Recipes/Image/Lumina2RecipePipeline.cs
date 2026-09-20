@@ -13,6 +13,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Diffusion.Prompting;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -128,19 +129,59 @@ public sealed class Lumina2RecipePipeline(Lumina2Pipeline pipeline, IBackend bac
         return embeds;
     }
 
-    /// <summary>Tokenizes the system-prompt-prefixed caption and taps <c>hidden_states[-2]</c> (encoder layer index NumLayers-1, WITHOUT the final RMSNorm), host-materializing the result so it survives activation reclaims.</summary>
+    /// <summary>Tokenizes the system-prompt-prefixed caption and taps <c>hidden_states[-2]</c> (encoder layer index NumLayers-1, WITHOUT the final RMSNorm), host-materializing the result so it survives activation reclaims. Applies the prompt's per-token weights via ComfyBlend.</summary>
+    /// <remarks>Lumina-2 does NOT pad — <c>Gemma2BTokenizer</c> sets <c>pad_to_max_length=False</c> with
+    /// <c>min_length=1</c> — so the conditioning length tracks the prompt and the empty baseline has to be rebuilt
+    /// at that length for every prompt instead of encoded once and reused.
+    /// <para>Caching the BLENDED result is safe because both caches are keyed on the raw prompt STRING, emphasis
+    /// grammar included: <c>(fox:1.5)</c> and <c>fox</c> are already different keys. A token-id key would collide,
+    /// since the emphasis is stripped before tokenization and does not change the ids.</para></remarks>
     private unsafe Tensor EncodeTemplated(string prompt)
     {
-        int[] tokens = _tokenizer.Encode(_systemPrompt + " <Prompt Start> " + prompt);
+        WeightedTokenSequence sequence = TemplatedPromptTokens.Build(
+            PromptTagFlattening.Flatten(prompt),
+            t => _tokenizer.Encode(_systemPrompt + " <Prompt Start> " + t),
+            EncodeSpan, TemplatePrefix, []).Truncate(_tokenizer.MaxLength);
+        int[] tokens = sequence.Tokens;
         // Round-trip decode is the cheapest way to catch a wrong-vocab tokenizer: mismatched ids stay in range
         // and produce coherent-but-unrelated conditioning instead of throwing.
         Logs.Debug($"[Lumina2] caption tokens={tokens.Length} ids[0..8]=[{string.Join(",", tokens[..Math.Min(8, tokens.Length)])}] " +
             $"roundtrip=\"{_tokenizer.Decode(tokens)}\"");
         int tapIndex = _textEncoder.NumLayers - 1;
         Tensor embeds = _textEncoder.EncodeMultiLayer(_backend, new[] { tokens }, new[] { tapIndex });
+        if (!sequence.IsUniformlyUnweighted)
+        {
+            // start + pad, read off ComfyUI rather than assumed: `gen_empty_tokens` emits start + end + padding and
+            // `Gemma2_2BModel` declares `special_tokens={"start": 2, "pad": 0}` with no end, so the baseline is BOS
+            // followed by pad. Row 0 is a real prompt position here, so getting that first id wrong would shift the
+            // blend for any prompt whose first word is weighted.
+            int[] empty = new int[tokens.Length];
+            empty[0] = GemmaTokenizer.BosTokenId;
+            using Tensor emptyEmbeds = _textEncoder.EncodeMultiLayer(_backend, new[] { empty }, new[] { tapIndex });
+            if (ComfyBlend.Apply(_backend, embeds, emptyEmbeds, sequence.Weights) is Tensor blended)
+            {
+                embeds.Dispose();
+                embeds = blended;
+            }
+        }
         _ = embeds.DataPointer;
         return embeds;
     }
+
+    /// <summary>One weighted span's ids, BOS stripped. ComfyUI tokenizes each word alone and slices from
+    /// <c>tokens_start=1</c> (<c>sd1_clip.py:501</c>, <c>has_start_token</c> defaulting true for
+    /// <c>Gemma2BTokenizer</c>), then prepends the start token once for the whole batch — so a per-span BOS would
+    /// put a stray sentence start in the middle of the caption.</summary>
+    private IReadOnlyList<int> EncodeSpan(string text)
+    {
+        IReadOnlyList<int> ids = _tokenizer.EncodeRaw(text);
+        return ids.Count > 0 && ids[0] == GemmaTokenizer.BosTokenId ? [.. ids.Skip(1)] : ids;
+    }
+
+    /// <summary>The ids the templated encode puts before the caption: the single batch-level BOS plus the system
+    /// prompt and its <c>&lt;Prompt Start&gt;</c> marker, all pinned to weight 1.</summary>
+    private int[] TemplatePrefix =>
+        field ??= [GemmaTokenizer.BosTokenId, .. EncodeSpan(_systemPrompt + " <Prompt Start> ")];
 
     /// <inheritdoc/>
     public void Dispose()

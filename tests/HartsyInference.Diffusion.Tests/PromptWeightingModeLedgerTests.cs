@@ -139,12 +139,13 @@ public sealed class PromptWeightingModeLedgerTests
     /// encoder as prose — a regression on a family that works today. The rollout is sequenced by the plan's E2 (Wan /
     /// LTX / HunyuanVideo) and E3 (remaining image recipes) phases; this list can only shrink, and shrinking it means
     /// editing this test, which is the point.
-    /// <para><b>Kandinsky5 and kandinsky5-video are not an oversight.</b> They are ledgered ComfyBlend because CLIP-L
-    /// keeps weights, but <c>Kandinsky5TEModel.encode_token_weights</c> (<c>kandinsky5.py:39-43</c>) returns the Qwen
-    /// cond plus CLIP-L's POOLED vector and discards the blended hidden states, so SwarmUI's weighting is a no-op end
-    /// to end and parity is to leave the conditioning alone. Their correct end state is to declare ComfyBlend, strip
-    /// the emphasis from the prompt and apply no blend — declaring it before that is wired would keep the parens in
-    /// the prompt for the Qwen arm to read as prose, which is the OPPOSITE of parity.</para>
+    /// <para><b>Kandinsky5 and kandinsky5-video came off this list by declaring a no-op.</b> They are ComfyBlend
+    /// because CLIP-L keeps weights, but <c>Kandinsky5TEModel.encode_token_weights</c> (<c>kandinsky5.py:39-43</c>)
+    /// returns the Qwen cond plus CLIP-L's POOLED vector and discards the blended hidden states, so SwarmUI's
+    /// weighting does nothing end to end and parity is to leave the conditioning alone. What they still owe is the
+    /// STRIP: <c>Kandinsky5TextEncoding.StripEmphasis</c> takes the grammar off before either arm tokenizes, because
+    /// declaring the mode is what stops <c>ImagesService</c> collapsing the tag and would otherwise hand Qwen the
+    /// parens as prose. Blending the Qwen arm to "fix" the no-op would BREAK parity, not achieve it.</para>
     /// <para><b>hunyuan-image</b> needs the UNPADDED weights: it pads to 1034 and the encoder then slices
     /// <c>[34, 34 + keep)</c> (<c>HunyuanImageQwenTextEncoder.cs:17,60-63</c>), so handing the padded array through
     /// gives <c>offset = keep − 1034</c> and every prompt weight falls off the front — a silent no-op rather than an
@@ -161,9 +162,8 @@ public sealed class PromptWeightingModeLedgerTests
     /// both halves, so the partial declaration it carried first was refused here rather than accepted.</para></summary>
     private static readonly string[] NotYetWired =
     [
-        "hunyuan-image", "hunyuan-video", "kandinsky5", "kandinsky5-video",
-        "ltx-2.5-distilled", "ltx-video-2", "lumina2", "minimax-h3",
-        "sdxl-refiner",
+        "hunyuan-image",
+        "ltx-2.5-distilled", "ltx-video-2", "minimax-h3",
     ];
 
     private readonly ITestOutputHelper _output;
