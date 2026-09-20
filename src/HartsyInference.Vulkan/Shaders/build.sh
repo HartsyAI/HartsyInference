@@ -96,6 +96,7 @@ DTYPE_KERNELS=(
 )
 
 SINGLE_KERNELS=(
+    chw_f32_to_hwc_u8
     affine_mix
     fill_bias
     pixel_shuffle2d

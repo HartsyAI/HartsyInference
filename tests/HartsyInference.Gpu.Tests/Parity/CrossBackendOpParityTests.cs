@@ -209,6 +209,35 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
         TensorAssert.Close(actual, expected, because: $"on {kind}");
     }
 
+    /// <summary>The last step of an image generation: F32 CHW in [-1,1] to u8 HWC.</summary>
+    /// <remarks>Odd dimensions on purpose. The output is three bytes per pixel, so only every fourth pixel starts
+    /// on a word boundary, and a kernel that composes whole words has a tail to get wrong — 5x7 leaves the final
+    /// word holding one real byte and three past the image. The rounding is round-half-up rather than
+    /// round-to-even, and a pixel off by one is a byte off in the PNG, so the comparison is exact.</remarks>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void ChwF32ToHwcU8_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int height = 5, width = 7;
+        // Offset so a good share of the values land outside [-1,1]: the clamp is part of the contract, and an
+        // unclamped kernel wraps rather than saturating.
+        using Tensor input = Random(new TensorShape(1, 3, height, width), seed: 51, offset: 0.6f);
+        using Tensor actual = new(new TensorShape(height, width, 3), DType.U8);
+        using Tensor expected = new(actual.Shape, DType.U8);
+
+        backend.ChwF32ToHwcU8(actual, input);
+        ((IBackend)cpu).ChwF32ToHwcU8(expected, input);
+
+        TensorAssert.Identical(actual, expected, because: $"on {kind}");
+    }
+
     [Theory]
     [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
     public void RmsNorm_Matches_The_Cpu(string kind)
