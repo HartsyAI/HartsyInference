@@ -109,13 +109,28 @@ public sealed class VulkanKernelRegistry : IDisposable
                     pData = specDataPtr,
                 };
 
-                // Pin a required-subgroup-size struct only if the device supports it
+                // Ask for a full subgroup of a fixed size only when the workgroup can actually hold whole ones.
+                // A kernel dispatched 8 wide cannot be made of 32-wide subgroups, and asking for a required
+                // subgroup size it cannot satisfy is invalid usage — invisible until the features were really
+                // enabled (see VulkanEnums), and a driver that enforces it refuses the pipeline rather than
+                // ignoring the request.
+                //
+                // The width comes from spec constant 0, which is how nearly every kernel here declares it
+                // (LocalSizeId). The exception is sdpa_flash, whose size is a compile-time literal and which is
+                // built with no spec constants at all: that leaves localX at 0 and the request unmade, which is
+                // the safe answer for a width this cannot see.
+                uint localX = 0;
+                for (int i = 0; i < specCount; i++)
+                {
+                    if (specConstants[i].ConstantId == 0) { localX = specConstants[i].AsUInt32; break; }
+                }
+                bool wholeSubgroups = _caps.SubgroupSize > 0 && localX > 0 && localX % _caps.SubgroupSize == 0;
                 VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroupSizeCi = new()
                 {
                     sType = VkStructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
                     requiredSubgroupSize = _caps.SubgroupSize,
                 };
-                if (_caps.SubgroupSizeControl)
+                if (_caps.SubgroupSizeControl && wholeSubgroups)
                 {
                     subgroupCi = Marshal.AllocHGlobal(Marshal.SizeOf<VkPipelineShaderStageRequiredSubgroupSizeCreateInfo>());
                     Marshal.StructureToPtr(subgroupSizeCi, subgroupCi, false);
@@ -125,7 +140,9 @@ public sealed class VulkanKernelRegistry : IDisposable
                 {
                     sType = VkStructureType.PipelineShaderStageCreateInfo,
                     pNext = subgroupCi,
-                    flags = _caps.ComputeFullSubgroups ? VkPipelineShaderStageCreateFlags.RequireFullSubgroups : VkPipelineShaderStageCreateFlags.None,
+                    flags = _caps.ComputeFullSubgroups && wholeSubgroups
+                        ? VkPipelineShaderStageCreateFlags.RequireFullSubgroups
+                        : VkPipelineShaderStageCreateFlags.None,
                     stage = VkShaderStageFlags.Compute,
                     module = module,
                     pName = _mainEntry,
