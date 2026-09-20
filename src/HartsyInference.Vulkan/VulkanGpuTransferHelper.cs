@@ -324,6 +324,9 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
         try
         {
             Buffer.MemoryCopy(src.DataPointer, (void*)staging.MappedPointer, (long)staging.Size, (long)size);
+            // The destination may be a buffer a dispatch just wrote, or one an earlier staging copy wrote, and
+            // neither is ordered against this one by the compute→compute barrier a dispatch leaves behind.
+            _stream.RecordComputeToCopyBarrier();
             _stream.RecordCopyAndBarrier(staging.Handle, dst.Handle, size,
                 postStage: VkPipelineStageFlags2.ComputeShader,
                 postAccess: VkAccessFlags2.ShaderStorageRead);
@@ -356,6 +359,7 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
             VkMemoryPropertyFlags.HostCached);
         try
         {
+            _stream.RecordComputeToCopyBarrier();
             _stream.RecordCopyAndBarrier(src.Handle, staging.Handle, size,
                 postStage: VkPipelineStageFlags2.Host,
                 postAccess: VkAccessFlags2.HostRead);
