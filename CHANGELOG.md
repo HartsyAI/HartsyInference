@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.148
+
+- **Eight `VkStructureType` values were wrong, and the consequence was that Vulkan enabled no optional feature at
+  all.** A wrong sType does not fail loudly — a driver that meets an unrecognized struct in a `pNext` chain skips
+  it — so the `VkPhysicalDeviceVulkan12Features`/`Vulkan13Features` structs were invisible both when querying and
+  when creating the device. The query came back all zeros, which this code has carried vendor-ID fallbacks for
+  since bring-up under the belief that the NVIDIA driver misreports promoted features; it does not, and the
+  fallbacks were papering over this. More seriously, `vkCreateDevice` enabled **nothing**: `synchronization2`
+  (every barrier and submit here is the 2 form), `timelineSemaphore` (the whole stream is built on one),
+  `subgroupSizeControl` and `computeFullSubgroups` (the reduction kernels ask for full subgroups),
+  `storageBuffer16BitAccess` (every F16 kernel), and `maintenance4` — which is what permits `LocalSizeId`, the
+  spec-constant workgroup size every kernel in this backend declares. NVIDIA permits all of it unrequested. A
+  driver is not required to, which is the likeliest reason cross-vendor was expected to be painful.
+- `MemoryBarrier2` and `BufferMemoryBarrier2` were swapped, so every barrier this backend recorded was tagged as
+  the other kind; the KHR cooperative-matrix features/properties pair was swapped the same way; and
+  `ShaderModuleCreateInfo` was 15 (image view) instead of 16.
+- **Found by running a real generation under `VK_LAYER_KHRONOS_validation`**, which names each one by VUID. Worth
+  keeping as a habit: the backend had been developed for months against a driver that tolerates all of it.
+
 ## alpha.146
 
 - **The head-major chunked-attention trio runs on the GPU on Vulkan.** `QkvSplitNormHeadMajor`,
