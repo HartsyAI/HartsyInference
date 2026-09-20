@@ -21,9 +21,18 @@ stable release will require. Dates are UTC.
 - **The refusal is narrowed to what is actually held.** It claimed the whole checkpoint as F32 plus the output;
   the real peak is the largest single tensor as F32 plus the finished file, because the output still has to be
   complete before a safetensors header can be written.
-- **Verified on real weights, not just unit tests.** SDXL base (6.5 GB) to fp8-scaled: `exit=0`, **10.7 GB peak
-  RSS**, 4.1 GB output. The same job on the old path needed the source widened whole, which for SDXL is ~26 GB
-  before counting the output. 80 quantizer tests pass unchanged.
+- **Verified as a pure refactor, byte for byte.** The pre-change code from a clean `origin/main` worktree and
+  this one were run over the same SDXL source to the same target: **identical sha256**
+  (`0f6d12f2517a9e60…`), identical size (4111075535). So the interleave changes when memory is held, not what
+  gets written.
+- **And verified against what it replaces.** Old path on this box: refused, `about 0 GiB is free`. New path, same
+  job: `exit=0`, **10.7 GB peak RSS**, 4.1 GB output, and the result loads and renders. Widening SDXL whole is
+  ~26 GB before counting the output, which is why the old one only runs on an idle machine. 80 quantizer tests
+  pass unchanged.
+- One thing the gate does NOT show, stated so it is not misread: the fp8 output renders a visibly different image
+  from the dense original at the same seed (SSIM 0.379). That is fp8 being lossy on a chaotic 8-step trajectory,
+  not a defect — the byte-identical comparison above is what rules out a regression, and SSIM cannot tell the two
+  apart.
 
 ## alpha.139
 
