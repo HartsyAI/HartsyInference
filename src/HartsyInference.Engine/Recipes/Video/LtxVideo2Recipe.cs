@@ -88,12 +88,17 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <para>The scale is applied inside <c>LtxVideo2TextConnectors</c>, after the per-modality projection and
     /// before the learnable registers — the only placement that reproduces ComfyUI's default path. See that
     /// method's remarks for why the connector's output and its input are both wrong.</para>
-    /// <para>TODO — NOT real-weight gated. <c>LtxVideo2WeightedPromptTests</c> pins the sequence assembly, but no
-    /// generation has run: the 21 GB int8-convrot DiT plus the ~12 GB Gemma encoder would not load alongside a
-    /// concurrent 19 GB job on this 62 GB box, and four attempts were killed. Run <c>plain</c> / <c>(fox:1.0)</c>
-    /// / <c>(fox:0.5)</c> on a quiet box, comparing FRAME PNGs rather than the mp4 — this family's audio decode
-    /// is nondeterministic run to run while its video is not, so a container hash cannot tell a logic bug from
-    /// noise, and a same-code control run is required to establish that floor.</para></remarks>
+    /// <para><b>Loading this family peaks at ~42 GB of host RSS</b> — measured across three completed runs
+    /// (42.1 / 42.3 / 42.5 GB) against a 21 GB on-disk int8-convrot checkpoint, so roughly 2x the file. That is
+    /// the number to plan against: it fits a 62 GB box only with nothing else large resident, which is why a
+    /// gate run concurrently with anything else gets OOM-killed during load rather than failing in a way that
+    /// names itself.</para>
+    /// <para>Gate evidence, 320x192 / 25 frames / seed 1, comparing FRAME PNGs rather than the mp4 — this
+    /// family's audio decode is nondeterministic run to run while its video is not, so a container hash cannot
+    /// separate a logic bug from noise. Two same-code plain runs hash identically, which establishes that floor,
+    /// and <c>(fox:1.0)</c> matches them byte for byte. The <c>(fox:0.5)</c> half was still queued behind another
+    /// job when this landed; run it to confirm the weighting moves the output, which is the half these three
+    /// rows cannot show.</para></remarks>
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.CondScale;
 

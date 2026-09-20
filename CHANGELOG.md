@@ -30,11 +30,15 @@ stable release will require. Dates are UTC.
   stripped before tokenization, so `(fox:1.5)` and `fox` produce identical ids — the second generation of a
   weighted prompt would have been served the previous weighting's conditioning. Same defect class already fixed
   for Chroma and HiDream.
-- **Gate: NOT run.** `LtxVideo2WeightedPromptTests` pins the sequence assembly, but no generation happened — the
-  21 GB int8-convrot DiT plus the ~12 GB Gemma encoder would not load alongside a concurrent 19 GB job from
-  another agent on this 62 GB box, and four attempts were killed. The TODO on the recipe names the runs, and
-  specifies FRAME PNGs rather than the mp4 plus a same-code control, because this family's audio decode is
-  nondeterministic run to run while its video is not.
+- **Gate: three of four rows, and the missing one is named rather than glossed.** 320x192 / 25 frames / seed 1,
+  comparing FRAME PNGs rather than the mp4 because this family's audio decode is nondeterministic run to run
+  while its video is not. Two same-code plain runs hash identically (`78ead7cd`), which establishes that floor;
+  `(fox:1.0)` matches them byte for byte, so the unweighted path is unmoved. **`(fox:0.5)` was still queued
+  behind another job and has not completed** — that is the half showing the weighting DOES something, and it is
+  outstanding.
+- **Loading LTX-2 peaks at ~42 GB of host RSS**, measured across those three runs (42.1 / 42.3 / 42.5 GB) against
+  a 21 GB on-disk int8-convrot checkpoint — roughly 2x the file. It fits a 62 GB box only with nothing else
+  large resident, which is why earlier attempts died during load without naming a cause.
 - **A correction to alpha.134's MiniMax-H3 note.** It said H3's OOM was "the family's own load footprint, not
   contention", citing 42 GB free at the time. That is withdrawn: this box runs concurrent agents, one later
   measured holding 19 GB, and a `free` reading taken between their jobs looks like headroom that is not there.

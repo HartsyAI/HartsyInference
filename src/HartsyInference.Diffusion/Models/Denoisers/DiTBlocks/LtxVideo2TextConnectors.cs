@@ -85,8 +85,26 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
         int seq = (int)gemmaFeatures.Shape[0];
         if (seq % _numRegisters != 0)
             throw new ArgumentException($"text seq {seq} must be a multiple of {_numRegisters} registers.");
-        if (tokenWeights.Length > seq)
-            throw new ArgumentException($"{tokenWeights.Length} token weights exceed the {seq}-token sequence.", nameof(tokenWeights));
+        // Against the REAL token count, not the padded length. A weights array longer than the real tokens but
+        // shorter than `seq` would otherwise pass and scale padding rows that the registers are about to replace
+        // — a silent mis-scale rather than a failure.
+        if (tokenWeights.Length > 0)
+        {
+            int realTokens = 0;
+            for (int i = 0; i < validMask.Length; i++)
+            {
+                if (validMask[i] != 0f)
+                {
+                    realTokens++;
+                }
+            }
+            if (tokenWeights.Length > realTokens)
+            {
+                throw new ArgumentException(
+                    $"{tokenWeights.Length} token weights exceed the {realTokens} real tokens in a {seq}-token sequence.",
+                    nameof(tokenWeights));
+            }
+        }
 
         // 1. Per-token (per-layer) RMS-norm over the 3840 channels, then zero out padded tokens.
         Tensor normed = PerTokenRmsNormMasked(gemmaFeatures, validMask, seq);
