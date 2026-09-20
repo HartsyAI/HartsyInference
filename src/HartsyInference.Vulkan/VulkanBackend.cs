@@ -4364,7 +4364,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     ///
     /// <para>Ties go to the lower index, matching the reference: the per-thread scan keeps the earliest with a
     /// strict compare, and the tree reduction breaks ties explicitly, since which thread holds which candidate is
-    /// an artifact of the stride order.</para></remarks>
+    /// an artifact of the stride order.</para>
+    /// <para>F32 logits into I32 indices; anything else takes the host reference, which is also where the shape
+    /// and dtype errors are raised.</para></remarks>
     public void ArgMaxLastDim(Tensor indices, Tensor input)
     {
         using OpScope _op = EnterOp();
