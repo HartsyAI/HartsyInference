@@ -607,6 +607,21 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                Id = "qwen-image-2.1", Modality = img, DisplayName = "Qwen-Image 2.1", Architecture = "Single-stream DiT (Qwen3-VL-8B)", Status = ok,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    // bf16, ~14 GB. The int8_convrot build in the same repo halves that and is the one ComfyUI's
+                    // own template selects, but is not gated here yet.
+                    new() { Repo = "Comfy-Org/Qwen-Image-2.1", RepoPath = "diffusion_models/qwen_image_2.1_bf16.safetensors",
+                        TargetSubdir = "diffusion_models", Role = "transformer",
+                        Sha256 = "89f4158d066cc33906a199fca85634f766892dd78f49b6698dabf187ac86c4bc" },
+                    SideModels.Qwen3VL_8B_QwenImage21,
+                    SideModels.QwenImage21Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "qwen-image", Modality = img, DisplayName = "Qwen-Image", Architecture = "MMDiT (Qwen2.5-VL)", Status = ok,
                 CliDrivable = true, // `hartsy image -m qwen-image` verified end-to-end 2026-07-21 (QuantStack
                 // Q4_K_M GGUF; host-side load/convert of a 20B checkpoint is slow on this box — budget 15 min)

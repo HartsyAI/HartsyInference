@@ -31,36 +31,49 @@ public static unsafe class Wan22VaeLatentNorm
     ];
 
     /// <summary>In-place decode normalization: <c>z = z · std + mean</c> per channel, on a <c>[B, 48, T, H, W]</c> latent.</summary>
-    public static void Denormalize(Tensor z)
+    public static void Denormalize(Tensor z) => Denormalize(z, Mean, Std);
+
+    /// <summary>In-place encode normalization: <c>z = (z − mean) / std</c> per channel.</summary>
+    public static void Normalize(Tensor z) => Normalize(z, Mean, Std);
+
+    /// <summary>Decode normalization against caller-supplied constants, for the other models built on this VAE
+    /// whose latent statistics differ — Qwen-Image 2.1 is 64-channel with its own table
+    /// (<see cref="QwenImage21LatentNorm"/>), so the embedded Wan 48-channel one would be silently wrong.</summary>
+    public static void Denormalize(Tensor z, ReadOnlySpan<float> mean, ReadOnlySpan<float> std)
     {
-        int b = (int)z.Shape[0], c = (int)z.Shape[1];
-        if (c != Channels) throw new ArgumentException($"latent channels {c} != {Channels}.", nameof(z));
-        long spatial = z.Shape.ElementCount / ((long)b * c);
+        (int b, int c, long spatial) = Layout(z, mean, std);
         float* p = (float*)z.DataPointer;
         for (int bi = 0; bi < b; bi++)
             for (int ci = 0; ci < c; ci++)
             {
-                float std = Std[ci], mean = Mean[ci];
+                float s = std[ci], m = mean[ci];
                 long baseOff = ((long)bi * c + ci) * spatial;
                 for (long i = 0; i < spatial; i++)
-                    p[baseOff + i] = p[baseOff + i] * std + mean;
+                    p[baseOff + i] = p[baseOff + i] * s + m;
             }
     }
 
-    /// <summary>In-place encode normalization: <c>z = (z − mean) / std</c> per channel.</summary>
-    public static void Normalize(Tensor z)
+    /// <summary>Encode normalization against caller-supplied constants; the inverse of the matching
+    /// <see cref="Denormalize(Tensor, ReadOnlySpan{float}, ReadOnlySpan{float})"/>.</summary>
+    public static void Normalize(Tensor z, ReadOnlySpan<float> mean, ReadOnlySpan<float> std)
     {
-        int b = (int)z.Shape[0], c = (int)z.Shape[1];
-        if (c != Channels) throw new ArgumentException($"latent channels {c} != {Channels}.", nameof(z));
-        long spatial = z.Shape.ElementCount / ((long)b * c);
+        (int b, int c, long spatial) = Layout(z, mean, std);
         float* p = (float*)z.DataPointer;
         for (int bi = 0; bi < b; bi++)
             for (int ci = 0; ci < c; ci++)
             {
-                float std = Std[ci], mean = Mean[ci];
+                float s = std[ci], m = mean[ci];
                 long baseOff = ((long)bi * c + ci) * spatial;
                 for (long i = 0; i < spatial; i++)
-                    p[baseOff + i] = (p[baseOff + i] - mean) / std;
+                    p[baseOff + i] = (p[baseOff + i] - m) / s;
             }
+    }
+
+    private static (int Batch, int Channels, long Spatial) Layout(Tensor z, ReadOnlySpan<float> mean, ReadOnlySpan<float> std)
+    {
+        int b = (int)z.Shape[0], c = (int)z.Shape[1];
+        if (mean.Length != c || std.Length != c)
+            throw new ArgumentException($"latent has {c} channels but the norm table has {mean.Length} mean / {std.Length} std entries.", nameof(z));
+        return (b, c, z.Shape.ElementCount / ((long)b * c));
     }
 }

@@ -41,4 +41,8 @@ public enum LatentArchitecture
     /// <summary>Mage-Flow — 128-channel image latent. Uses an approximate deterministic projection until
     /// calibrated latent-to-RGB factors are published.</summary>
     MageFlow = 18,
+    /// <summary>Qwen-Image 2.1 — 64-channel image latent at 16× spatial reduction, whitened by
+    /// <see cref="Models.Vae.QwenImage21LatentNorm"/>. Unrelated to <see cref="HunyuanImage"/> despite the matching
+    /// channel count.</summary>
+    QwenImage21 = 19,
 }

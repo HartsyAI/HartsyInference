@@ -68,6 +68,15 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             // handles the format difference, including ggml's [in, out] shape order, so the converter sees one dict.
             CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
             checkpoint = source;
+            // Qwen-Image 2.1 is a different architecture that shares this family's transformer_blocks naming, so it
+            // passes the emptiness check below and would load into the v1 denoiser as a shape mismatch at best and
+            // noise at worst. Refuse it by name and point at its own family id.
+            if (QwenImage21CheckpointConverter.MatchesByKeys([.. source.Weights.Keys]))
+            {
+                throw new InvalidOperationException(
+                    $"'{Path.GetFileName(context.CheckpointPath)}' is a Qwen-Image 2.1 checkpoint, not Qwen-Image v1 — "
+                    + "they share key names but not architecture. Use -m qwen-image-2.1.");
+            }
             QwenImageCheckpointConverter.ConvertedWeights converted = QwenImageCheckpointConverter.Convert(source.Weights);
             if (converted.Transformer.Count == 0)
             {

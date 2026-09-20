@@ -61,6 +61,13 @@ public static class ModelArchitectureDetector
             k.HasPrefixAfterOptional("model.diffusion_model.", "nerf_") ||
             k.HasPrefixAfterOptional("model.diffusion_model.", "img_in_patch.")),
 
+        // ── Qwen-Image 2.1 ───────────────────────────────────────────────
+        // ComfyUI's own signature (model_detection.py). Qwen-Image v1 has no rule here, but if one is ever added
+        // it must come AFTER this: v1 satisfies "has transformer_blocks" too, and only 2.1 has a shared
+        // `modulation.1` alongside a zero-centered `txt_in.text_norm`.
+        (ModelArchitecture.QwenImage21, k =>
+            CheckpointConverters.QwenImage21CheckpointConverter.MatchesByKeys(k.Keys)),
+
         // ── AuraFlow ─────────────────────────────────────────────────────
         (ModelArchitecture.AuraFlow, k =>
             k.HasPrefixAfterOptional("model.", "double_layers.") &&
@@ -120,5 +127,8 @@ public static class ModelArchitectureDetector
             HasPrefix(inner) || HasPrefix(optionalOuter + inner);
 
         public bool HasPair(string first, string second) => HasPrefix(first) && HasPrefix(second);
+
+        /// <summary>The raw keys, for a rule that needs exact membership rather than a prefix probe.</summary>
+        public IReadOnlyCollection<string> Keys => _sorted;
     }
 }

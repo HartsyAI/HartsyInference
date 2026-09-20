@@ -57,6 +57,16 @@ public sealed class PromptWeightingModeLedgerTests
         // supported_models.py:2052 -> qwen_image.QwenImageTokenizer (:14) -> disable_weights at qwen_image.py:39.
         // Qwen-Image Edit rides the same tokenizer (the llama_template_images branch, :18/:20-38), so same mode.
         ["qwen-image"] = PromptWeightingMode.CondScale,
+        // supported_models.py:2081 -> qwen_image21.QwenImage21Tokenizer (:23), a Qwen3VLTokenizer subclass whose
+        // tokenize_with_weights (qwen3vl.py:186) passes disable_weights=True. One arm, and it disables, so the
+        // probe selects CondScale.
+        // NOTE it is INERT on this family, the Kandinsky5 situation by a different route: the first thing the DiT
+        // does to the conditioning is txt_in.text_norm, a per-row RMSNorm (qwen_image21/model.py:31), and RMSNorm
+        // is scale-invariant per row — so multiplying a cond row by w is cancelled exactly. SwarmUI scales that
+        // same tensor, so its CondScale is equally inert here, and reproducing the no-op IS parity. Measured:
+        // (x:1.5) is pixel-identical to the plain prompt, while a different prompt moves the image by 34/255.
+        // Pinned by QwenImage21WeightSeamTests.APerRowScaleIsCancelledByTheTextProjectionsRmsNorm.
+        ["qwen-image-2.1"] = PromptWeightingMode.CondScale,
         // supported_models.py:2109 -> hunyuan_image.HunyuanImageTokenizer (:13), a QwenImageTokenizer subclass, so the
         // Qwen arm disables (qwen_image.py:39). Its byt5 arm (:8-11) keeps weights but is only populated for QUOTED text
         // (:24-38), and SwarmUI's discriminator probes the unquoted literal "(x:2)" — byt5 never enters the probe.
