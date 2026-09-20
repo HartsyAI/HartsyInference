@@ -8,36 +8,52 @@ stable release will require. Dates are UTC.
 
 ## alpha.132
 
-- **HiDream, OmniGen2 and Lumina-2 honour `(word:N)`**, taking the deliberately-unwired ledger from 11
-  registered families to 8.
+- **Seven more families honour `(word:N)`** — HiDream, OmniGen2, Lumina-2, Kandinsky5, Kandinsky5-Video,
+  HunyuanVideo and the SDXL refiner — taking the deliberately-unwired ledger from 11 registered families to 4.
 - **HiDream blends its T5 and Llama arms.** The Llama side is blended ONCE, before `SliceLastDimIntoChunks`:
-  ComfyBlend broadcasts across the last dimension, so a single call covers all 48 layer slices and 48 separate
-  blends would be the same arithmetic done 48 times. Its conditioning cache key carries the weights through
-  `ConditioningCacheKey`, because the emphasis is stripped before tokenization — `(cat:1.5)` and `cat` produce
-  identical ids, so an id-only key serves the wrong tensor on the second generation.
-- **OmniGen2 and Lumina-2 are the first two variable-length baselines.** Every ComfyBlend family wired so far
-  padded to a fixed window, which makes one empty encode valid for any prompt. Neither of these pads, so the
-  baseline is rebuilt at each prompt's own length. That is a real cost — one extra encoder forward per uncached
-  prompt — and it is not avoidable by caching a longer baseline and slicing, because the encoders are causal.
-- **Two ComfyBlend baselines were wrong and are corrected.** They were written from the plausible assumption
-  that an empty baseline means "the family's own template with an empty prompt". ComfyUI's `gen_empty_tokens`
-  (`comfy/sd1_clip.py:15-25`) emits `start + end + padding` from each model's declared `special_tokens`, and
-  both of these declare only a pad: OmniGen2's `Qwen25_3BModel` is `{pad: 151643}` and Anima's `Qwen3_06B` the
-  same shape, so each baseline is padding alone. Anima's `Encode("", appendEos: true)` was additionally putting
-  an EOS at row 0 — and row 0 is a prompt position, so that row IS read whenever the first word is weighted.
-  **Anima shipped in alpha.131, so this changes its weighted output; `w=1.0` is unaffected**, because a
-  baseline is never read when nothing is weighted.
+  ComfyBlend broadcasts across the last dimension, so a single call covers all 48 layer slices. Its conditioning
+  cache key carries the weights through `ConditioningCacheKey`, because the emphasis is stripped before
+  tokenization — `(cat:1.5)` and `cat` produce identical ids, so an id-only key serves the wrong tensor on the
+  second generation of a weighted prompt.
+- **OmniGen2, Lumina-2 and HunyuanVideo are the first variable-length baselines.** Every ComfyBlend family wired
+  before them padded to a fixed window, which makes one empty encode valid for any prompt. None of these three
+  pads, so the baseline is rebuilt at each prompt's own length — one extra encoder forward per uncached prompt,
+  not avoidable by caching a longer baseline and slicing, because the encoders are causal.
+- **Two ComfyBlend baselines were wrong and are corrected.** They were written from the plausible assumption that
+  an empty baseline means "the family's own template with an empty prompt". ComfyUI's `gen_empty_tokens`
+  (`comfy/sd1_clip.py:15-25`) emits `start + end + padding` from each model's declared `special_tokens`, and both
+  of these declare only a pad: OmniGen2's `Qwen25_3BModel` is `{pad: 151643}` and Anima's `Qwen3_06B` the same
+  shape, so each baseline is padding alone. Anima's `Encode("", appendEos: true)` was additionally putting an EOS
+  at row 0 — and row 0 is a prompt position, so that row IS read whenever the first word is weighted.
+  **Anima shipped in alpha.131, so this changes its weighted output; `w=1.0` is unaffected**, because a baseline
+  is never read when nothing is weighted.
 - The rule that makes these tractable, now stated where the code can be checked against it: ComfyBlend only
-  rewrites rows whose weight is not 1, and pad rows always weigh 1, so a baseline's padding region is never
-  read. Pad-id conventions between us and ComfyUI are therefore immaterial. Row 0 is not.
-- **Lumina-2's per-span ids drop the SentencePiece BOS.** ComfyUI tokenizes each word alone from
-  `tokens_start=1` and prepends the start token once per batch; keeping it per span would put a stray sentence
-  start in the middle of the caption.
+  rewrites rows whose weight is not 1, and pad rows always weigh 1, so a baseline's padding region is never read.
+  Pad-id conventions between us and ComfyUI are therefore immaterial. Row 0 is not.
+- **HunyuanVideo blends the full sequence and crops afterwards**, which is the order `encode_token_weights` uses
+  (`hunyuan_video.py:104-110`) — the crop count is computed from the already-encoded output there. Only the Llama
+  arm blends; CLIP-L contributes a pooled vector and just needs the grammar taken off. Its hard-coded 95-token
+  `CropStart` is now checked against the tokenized template instead of trusted: a tokenizer revision that moved
+  the template's length would crop into the prompt and still render something plausible.
+- **Kandinsky5 and Kandinsky5-Video declare the mode in order to apply NOTHING, and that is parity rather than a
+  gap.** SwarmUI's probe puts them on ComfyBlend because CLIP-L keeps weights, but
+  `Kandinsky5TEModel.encode_token_weights` (`kandinsky5.py:39-43`) returns the Qwen cond plus CLIP-L's POOLED
+  vector and discards the blended hidden states. What they owe is the STRIP — declaring the mode is what stops
+  the service collapsing the tag, so without it the parens would reach Qwen as prose. Blending the Qwen arm to
+  "fix" the no-op would BREAK parity, not achieve it.
+- **The SDXL refiner needed a batched weighted CLIP encode.** `EncodeWeightedPenultimate` concatenates its inputs
+  along the SEQUENCE axis as 77-token chunks of ONE prompt, so handing it a (negative, positive) batch would
+  splice the negative onto the end of the positive. `EncodeBatchWeightedPenultimate` keeps each prompt in its own
+  batch row, skips the baseline encode entirely when nothing is weighted, and leaves the pooled vector unweighted
+  the way the reference does. Chunk 0 only; a multi-chunk weighted prompt (`<break>`) is not wired.
+- **Lumina-2's per-span ids drop the SentencePiece BOS.** ComfyUI tokenizes each word alone from `tokens_start=1`
+  and prepends the start token once per batch; keeping it per span would put a stray sentence start in the middle
+  of the caption.
 - An `AuraFlow` `TODO` records a suspected PRE-EXISTING defect found while reading `gen_empty_tokens`, and
   deliberately not fixed here: ComfyUI's `aura_t5.py` declares `special_tokens={"end": 2, "pad": 1}` and
   `pad_token=1`, while `T5Tokenizer` fixes EOS=1/PAD=0 for every T5 family it serves. Unverified against the
-  Pile-T5 vocab; it would fail as plausible output rather than an error, and a fix moves every existing
-  AuraFlow generation.
+  Pile-T5 vocab; it would fail as plausible output rather than an error, and a fix moves every existing AuraFlow
+  generation.
 
 ## alpha.131
 
