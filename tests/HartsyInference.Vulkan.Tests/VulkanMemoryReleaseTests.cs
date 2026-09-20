@@ -22,6 +22,11 @@ public sealed class VulkanMemoryReleaseTests
 
     private const int M = 512, K = 512, N = 512;
 
+    /// <summary>How far the driver's free figure may drift between two probes without meaning anything.</summary>
+    /// <remarks>Since the report became a live driver number it answers for every process on the card, not just
+    /// this one, so a comparison across time needs room for a co-tenant. Far below the ~1 GB this test moves.</remarks>
+    private const long CoTenantSlackBytes = 256L << 20;
+
     /// <summary>A weight big enough that keeping it resident is visible next to the activations.</summary>
     private static Tensor NewWeight() => Filled(new TensorShape(N, K), 0.01f);
 
@@ -201,7 +206,11 @@ public sealed class VulkanMemoryReleaseTests
             + $"free {openingFree >> 20} MB -> {afterFree >> 20} MB, cached {afterCached} B");
         Assert.Equal(0, afterCached);
         Assert.Equal(openingUsed, afterUsed);
-        Assert.True(afterFree >= openingFree,
+        // The driver's free figure moves with every process on the card, so this carries slack that the exact
+        // allocator figures above do not need. It was written when the number was pure allocator arithmetic and
+        // two probes of it were exactly comparable; a co-tenant taking a megabyte between them would otherwise
+        // report a leak that did not happen. The allocator assertions are the ones with teeth here.
+        Assert.True(afterFree >= openingFree - CoTenantSlackBytes,
             $"free VRAM did not come back: {openingFree >> 20} MB at open, {afterFree >> 20} MB after the sweep");
 
         // The tensors outlive the sweep, and reading one must still produce its value from the host copy rather

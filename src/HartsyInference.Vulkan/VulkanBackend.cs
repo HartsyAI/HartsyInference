@@ -361,47 +361,46 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     /// and fell back to a fixed budget.</para></remarks>
     public override (long FreeBytes, long TotalBytes) GetVramInfo()
     {
+        // The guard is in TryQueryDriverVram, which is the only path here that touches the device.
+        if (TryQueryDriverVram(out long driverFree, out long driverTotal))
+        {
+            return (driverFree, driverTotal);
+        }
+        // Device-local only, the same basis as the total the driver path reports: the allocator's blocks include
+        // host-visible staging, and subtracting those from a device-local total under-reports free VRAM by the
+        // size of the staging ring.
         long total = (long)Vk.TotalVramBytes;
-        // After teardown the physical device belongs to a destroyed instance, and the query is a native call, so a
-        // stale caller would take the process down rather than throw. Callers reach this at odd lifecycle points
-        // on purpose (AudioRuntime wraps it in a catch for exactly that reason), so it has to answer safely.
-        if (_disposed)
-        {
-            return (0, total);
-        }
-        if (TryQueryDriverVram(out long budgetFree))
-        {
-            return (budgetFree, total);
-        }
-        // Device-local only, the same basis as the total: the allocator's blocks include host-visible staging,
-        // and subtracting those from a device-local total under-reports free VRAM by the size of the staging ring.
-        (_, long reservedDeviceBytes, _, _) = MemoryStats;
-        return (Math.Max(0, total - reservedDeviceBytes), total);
+        return (Math.Max(0, total - ReservedDeviceBytes), total);
     }
 
-    /// <summary>Whether the driver answered, and what it said. Exposed so a test can assert which path was taken:
-    /// the two produce different numbers, and a query that quietly stopped working would otherwise look like a
-    /// card that happens to be busy.</summary>
-    internal bool TryQueryDriverVram(out long freeBytes)
-    {
-        if (!Vk.HasMemoryBudget || _disposed)
-        {
-            freeBytes = 0;
-            return false;
-        }
-        return TryQueryHeapBudget(out freeBytes);
-    }
-
-    /// <summary>What this process may still allocate on the device, as the driver accounts for it.</summary>
-    /// <remarks>Budget minus usage, and never negative: the spec allows usage to exceed budget, which is the driver
-    /// saying this process is already over its share rather than that it has negative memory left.
+    /// <summary>What the driver says this process may still allocate, and out of how much.</summary>
+    /// <remarks>Both figures describe ONE heap — the device-local heap with the most left — because that is the
+    /// question a caller is asking: no allocation spans two heaps, so a free figure summed across them is a number
+    /// nothing can use, and some drivers expose a second device-local heap carved from the same physical memory,
+    /// where summing reports twice what exists. Reporting the free half from one heap and the total from all of
+    /// them would leave a caller comparing two different bases.
     ///
-    /// <para>Returns false only when the device exposes no device-local heap at all. Zero free is an ANSWER — the
-    /// most important one a driver can give — so it must not read as "no answer" and send the caller back to
-    /// arithmetic that cannot see the process filling the card.</para></remarks>
-    private unsafe bool TryQueryHeapBudget(out long freeBytes)
+    /// <para>Budget minus usage, never negative: the spec allows usage to exceed budget, which is the driver saying
+    /// this process is already over its share rather than that it has negative memory left. Zero free is an ANSWER,
+    /// and the most important one a driver can give — it must not read as "no answer" and send a caller back to
+    /// arithmetic that cannot see the process filling the card. False therefore means only that the extension is
+    /// absent, this backend is torn down, or the device exposes no device-local heap at all.</para>
+    ///
+    /// <para>Internal so a test can assert which path <see cref="GetVramInfo"/> took: the two produce different
+    /// numbers, and a query that quietly stopped answering would otherwise look like a card that happens to be
+    /// busy.</para></remarks>
+    internal unsafe bool TryQueryDriverVram(out long freeBytes, out long totalBytes)
     {
         freeBytes = 0;
+        totalBytes = 0;
+        // After teardown the physical device belongs to a destroyed instance, and this is a native call, so a stale
+        // caller would take the process down rather than throw — and callers reach it at odd lifecycle points on
+        // purpose (AudioRuntime wraps it in a catch for exactly that reason). This covers the ordinary sequential
+        // case; a Dispose racing a query on another thread is outside this backend's single-threaded contract.
+        if (!Vk.HasMemoryBudget || _disposed)
+        {
+            return false;
+        }
         VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = new()
         {
             sType = VkStructureType.PhysicalDeviceMemoryBudgetProperties,
@@ -422,20 +421,37 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             {
                 continue;
             }
-            sawDeviceLocal = true;
             ulong heapBudget = budget.heapBudget[heap];
             ulong heapUsage = budget.heapUsage[heap];
-            // Usage above budget is the driver saying this process is already over its share, not that it has
-            // negative memory left.
             long remaining = heapBudget > heapUsage ? (long)(heapBudget - heapUsage) : 0;
-            // The LARGEST single heap, not the sum. A caller asks this to decide whether one allocation fits, and
-            // no allocation spans two heaps — while some drivers expose a second device-local heap carved out of
-            // the same physical memory, where summing reports twice what exists.
-            freeBytes = Math.Max(freeBytes, remaining);
+            if (!sawDeviceLocal || remaining > freeBytes)
+            {
+                freeBytes = remaining;
+                totalBytes = (long)info.size;
+            }
+            sawDeviceLocal = true;
         }
-        // Zero free is the single most important answer a driver can give, so it must not read as "no answer" and
-        // fall through to arithmetic that cannot see the process filling the card.
         return sawDeviceLocal;
+    }
+
+    /// <summary>Bytes this backend's allocator has reserved on the device-local heaps.</summary>
+    /// <remarks>Its own walk rather than a <see cref="MemoryStats"/> destructure: that property also computes
+    /// per-block free lists and a full weight-cache sum, and the fallback path here runs several times per denoise
+    /// step on any device without the budget extension.</remarks>
+    private long ReservedDeviceBytes
+    {
+        get
+        {
+            ulong reserved = 0;
+            for (uint heap = 0; heap < _vkDevice.MemoryProperties.memoryHeapCount; heap++)
+            {
+                if ((_vkDevice.MemoryProperties.GetMemoryHeap((int)heap).flags & VkMemoryHeapFlags.DeviceLocal) != 0)
+                {
+                    reserved += _allocator.ReservedBytes(heap);
+                }
+            }
+            return (long)reserved;
+        }
     }
 
     /// <inheritdoc/>

@@ -43,10 +43,17 @@ public sealed class VulkanVramReportTests
 
         _output.WriteLine($"free={free >> 20} MB of total={total >> 20} MB, budget extension={backend.Vk.HasMemoryBudget}");
         Assert.True(total > 0, "the device reported no device-local memory at all");
-        Assert.InRange(free, 1, total);
-        // Two probes of a live figure differ when something else on the card moves between them, so this is a
-        // sanity bound rather than an equality — what it catches is the two spellings reading different sources,
-        // which is what they did before (one of them returned a constant zero).
+        // Zero is a legal answer — a card another process has filled — so the range starts there. It is the total
+        // that says whether the number is real.
+        Assert.InRange(free, 0, total);
+        // The regression this exists for is one spelling reading a different source from the other; the old name
+        // used to be a constant zero. So both sides are bounded, not just their difference: a 2 GB window around
+        // a card with 1.5 GB free would otherwise swallow a return to that constant.
+        Assert.InRange(viaOldName, 0, total);
+        Assert.True(free == 0 || viaOldName > 0,
+            $"GetVramInfo reports {free >> 20} MB free while the older spelling reports {viaOldName} bytes");
+        // Two probes of a live figure differ when something else on the card moves between them, so the window is
+        // a sanity bound rather than an equality.
         Assert.True(Math.Abs(free - viaOldName) < (2L << 30),
             $"the two spellings disagree: {free >> 20} MB vs {viaOldName >> 20} MB");
     }
@@ -110,28 +117,36 @@ public sealed class VulkanVramReportTests
         }
 
         using Tensor weight = new(new TensorShape(Rows, Cols), DType.F32);
-        backend.PreloadWeights([weight]);
-        backend.Sync();
         try
         {
-            // Which path answered, asserted rather than assumed: the two produce different numbers, and a query
-            // that quietly stopped answering would otherwise read as a card that happens to be busy.
-            Assert.True(backend.TryQueryDriverVram(out long driverFree),
+            // Inside the try: a gigabyte upload is the likeliest thing here to throw, and the release below has to
+            // cover it.
+            backend.PreloadWeights([weight]);
+            backend.Sync();
+
+            // Which path answered, asserted rather than assumed — and that GetVramInfo actually RETURNED it. With
+            // only the first of these, deleting the driver branch from GetVramInfo leaves the test green: the
+            // fallback equals the arithmetic, and an upper bound holds at equality.
+            Assert.True(backend.TryQueryDriverVram(out long driverFree, out long driverTotal),
                 "the extension is present but the driver query did not answer");
             (long free, long total) = backend.GetVramInfo();
             (_, long reserved, _, _) = backend.MemoryStats;
             long arithmetic = total - reserved;
 
-            _output.WriteLine($"driver says {free >> 20} MB free (direct query {driverFree >> 20} MB); "
-                + $"total {total >> 20} MB minus {reserved >> 20} MB reserved = {arithmetic >> 20} MB");
+            _output.WriteLine($"driver says {free >> 20} MB free of {driverTotal >> 20} MB; GetVramInfo reports "
+                + $"{free >> 20} MB of {total >> 20} MB; arithmetic would say {arithmetic >> 20} MB");
+            Assert.Equal(driverTotal, total);
+            Assert.True(Math.Abs(free - driverFree) < (1L << 30),
+                $"GetVramInfo reported {free >> 20} MB where the driver query says {driverFree >> 20} MB — "
+                + "the driver branch is not the one that answered");
             Assert.True(free <= arithmetic,
                 $"the driver reported MORE free ({free >> 20} MB) than this backend's own arithmetic allows "
                 + $"({arithmetic >> 20} MB) — budget and usage are likely swapped");
         }
         finally
         {
-            // Before the assertions could throw: a leaked gigabyte of device memory would fail the NEXT test in
-            // this class rather than this one, turning one real failure into a cascade.
+            // Not for the next test's sake — each opens its own backend and disposes it — but so a failure here is
+            // reported against a card in the state the next assertion expects.
             backend.FreeWeights([weight]);
         }
     }

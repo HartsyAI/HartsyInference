@@ -172,9 +172,11 @@ internal sealed class AudioRuntime
             return;
         }
         long availableKb = ReadAvailableMemoryKb();
-        long freeVramBytes = SafeFreeMemoryBytes(backend);
+        (long freeVramBytes, long totalVramBytes) = SafeVramInfo(backend);
         bool hostLow = availableKb > 0 && availableKb < EvictBelowAvailableKb;
-        bool vramLow = freeVramBytes > 0 && freeVramBytes < EvictBelowFreeVramBytes;
+        // Gated on the TOTAL, not on free being non-zero: a backend that reports honestly can say zero free, and
+        // testing free itself skipped eviction in precisely the case it was written for.
+        bool vramLow = totalVramBytes > 0 && freeVramBytes < EvictBelowFreeVramBytes;
         if (hostLow || vramLow)
         {
             Logs.Info($"[Audio] Memory pressure (host {availableKb / 1024 / 1024.0:0.0} GB free, VRAM "
@@ -222,16 +224,20 @@ internal sealed class AudioRuntime
         return 0;
     }
 
-    private static long SafeFreeMemoryBytes(IBackend backend)
+    /// <summary>Free and total device memory, or <c>(0, 0)</c> when this backend does not report it.</summary>
+    /// <remarks>Both halves, because free alone cannot say whether zero means "nothing left" or "no report" — and
+    /// on a backend that reports honestly, nothing left is exactly the state eviction exists for. A total above
+    /// zero is what marks the number as real.</remarks>
+    private static (long FreeBytes, long TotalBytes) SafeVramInfo(IBackend backend)
     {
         try
         {
-            return backend.FreeMemoryBytes();
+            return backend.GetVramInfo();
         }
         catch (Exception ex)
         {
-            Logs.Debug($"[Audio] Backend free-memory query failed ({ex.Message}) — VRAM eviction disabled.");
-            return 0;
+            Logs.Debug($"[Audio] Backend VRAM query failed ({ex.Message}) — VRAM eviction disabled.");
+            return (0, 0);
         }
     }
 }
