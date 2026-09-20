@@ -6,6 +6,31 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.136
+
+- **The free-VRAM report means one thing now.** The driver path described a single heap while the total described
+  all of them — not theoretical on an RTX 4090, which is 24564 MiB while the summed total reported 24810 MB,
+  because NVIDIA exposes a small second device-local heap for ReBAR. Callers comparing free against total were
+  comparing two bases, and the recipes that refuse to construct below a VRAM floor compare exactly those. Both
+  halves now come from the same heap, the device-local one with the most left.
+- **"Zero free is an answer" is now true downstream as well.** `AudioRuntime` gated eviction on `free > 0`, so a
+  driver honestly reporting a full card disabled the eviction written for that case; the LTX-2.5 decoder returned
+  its optimistic default instead of its floor. Both gate on the TOTAL, which is what separates "no report" from
+  "nothing left".
+- **Tests that could not fail what they described.** The release test compared two probes of what used to be
+  allocator arithmetic with no slack, and alpha.135 made it a live figure that moves with every process on the
+  card. The test that claimed to assert which path answered never checked that `GetVramInfo` returned the driver's
+  number — delete the branch and its upper bound holds at equality. Its sibling bounded only the difference between
+  the two spellings, so a 2 GB window swallowed a return to the old constant zero. All three are fixed, and zero is
+  admitted as the legal answer the production code says it is.
+- **CUDA's two spellings are covered for the first time.** On Vulkan `FreeMemoryBytes` IS `GetVramInfo().FreeBytes`
+  through the interface default and cannot disagree; `CudaBackend` keeps genuinely independent implementations
+  reading different routes to the driver, which is the shape that drifts. A cross-backend contract test now asks
+  both.
+- The fallback walks the device-local heaps itself rather than destructuring `MemoryStats`, which also computed a
+  per-block free-list scan and a full weight-cache sum for a number nobody read — several times per denoise step on
+  any device without the budget extension.
+
 ## alpha.135
 
 - **Vulkan asks the driver how much VRAM is left.** `VK_EXT_memory_budget` reports, per heap, how much this process
