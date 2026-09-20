@@ -3373,7 +3373,13 @@ public interface IBackend : IDisposable
     }
 
     /// <summary>Cast tensor from FP32 to BF16. Default: CPU fallback via Tensor.CastTo.</summary>
-    void CastToBf16(Tensor output, Tensor input)
+    void CastToBf16(Tensor output, Tensor input) => CastToBf16Reference(output, input);
+
+    /// <summary>The host implementation of <see cref="CastToBf16"/>, for a backend that overrides it and needs to
+    /// bail on a dtype its kernel does not cover.</summary>
+    /// <remarks>Static because an override cannot reach its own interface default — the call binds back to the
+    /// class and recurses until the stack ends.</remarks>
+    static void CastToBf16Reference(Tensor output, Tensor input)
     {
         Tensor casted = input.CastTo(DType.BF16);
         try

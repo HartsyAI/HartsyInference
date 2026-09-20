@@ -1003,6 +1003,20 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
 
         string shader;
+        if (src.DType == DType.F16 && want == DType.BF16)
+        {
+            // F16 -> BF16 = F16 -> F32 -> BF16. Same two-stage shape as BF16 -> F16 below and for the same
+            // reason: the two formats share neither exponent range nor mantissa width, so there is no shortcut a
+            // dedicated shader would exploit. CUDA chains it the same way.
+            (VulkanBuffer mid, _) = CastIfNeeded(src, srcBuf, DType.F32);
+            VulkanKernel kk = GetKernel("cast_f32_bf16", storageBufferCount: 2, _default1DSpec);
+            Span<byte> pc2 = stackalloc byte[4];
+            BinaryWriteUInt(pc2, 0, (uint)elements);
+            Span<ulong> bufs2 = stackalloc ulong[] { mid.Handle, dst.Handle };
+            Dispatch(kk, bufs2, pc2, GroupCount(elements, LocalX1D));
+            _xfer.FreeDevice(mid);
+            return FinishCast(src, want, dst, cacheThis);
+        }
         if (src.DType == DType.F32 && want == DType.F16) shader = "cast_f32_f16";
         else if (src.DType == DType.F16 && want == DType.F32) shader = "cast_f16_f32";
         else if (src.DType == DType.BF16 && want == DType.F32) shader = "cast_bf16_f32";
@@ -4093,6 +4107,27 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             return;
         }
         throw new NotSupportedException($"VulkanBackend.CastToF16: {input.DType.Name} -> F16 not implemented.");
+    }
+
+    /// <summary>F32 to bfloat16 on the device, the same way <see cref="CastToF16"/> reaches F16.</summary>
+    /// <remarks>The interface default builds a whole host-side cast tensor and memcpys it, which on a resident
+    /// input is a device sync, a host conversion of every element and a re-upload. The shader this routes to
+    /// already existed and was reachable only as an internal dtype conversion, never as the op.</remarks>
+    public unsafe void CastToBf16(Tensor output, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        if ((input.DType != DType.F32 && input.DType != DType.F16) || output.DType != DType.BF16)
+        {
+            IBackend.CastToBf16Reference(output, input);
+            return;
+        }
+        VulkanBuffer src = GetBuffer(input);
+        // F16 input chains through F32, which is what CUDA does — both real callers pass F32 today, but a caller
+        // that did not would otherwise fall to the host round-trip this override exists to remove.
+        // Always a real conversion here — the dtypes differ by the guard above — so the returned buffer is owned
+        // by this call and handing it to the cache transfers that ownership.
+        (VulkanBuffer cast, _) = CastIfNeeded(input, src, DType.BF16);
+        CacheOutput(output, cast);
     }
 
     public unsafe void CastToF32(Tensor output, Tensor input)

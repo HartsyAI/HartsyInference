@@ -117,6 +117,98 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
         TensorAssert.Close(actual, expected, because: $"on {kind}");
     }
 
+    /// <summary>F32 to bfloat16, against the rounding rule the GPU kernels actually implement.</summary>
+    /// <remarks>Deliberately NOT compared against <c>CpuBackend</c>. <c>Tensor.CastTo(BF16)</c> truncates — its own
+    /// doc says so — while both GPU kernels round to nearest, ties to even, which is what hardware and every other
+    /// framework do. That divergence is pre-existing and shipped: CUDA has overridden this op for a long time and
+    /// differs from the host cast by one unit in the last place on roughly half of all inputs. Picking a side here
+    /// would change one backend's numerics to make a test pass, so this pins what the GPUs do and the difference
+    /// is reported rather than papered over.
+    ///
+    /// <para>Exact, and the count is not a multiple of the workgroup size. NaN, both infinities and both zeros
+    /// are planted in the input: infinities and zeros round like anything else, but a NaN does not — rounding can
+    /// carry its mantissa into the exponent — so the kernel has a branch for it that random values never reach.
+    /// The NaN element is checked for NaN-ness rather than bytes: the two backends disagree on its sign, and IEEE
+    /// fixes neither the sign nor the payload of a produced NaN.</para></remarks>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void CastToBf16_RoundsToNearestEven(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+
+        using Tensor input = Random(new TensorShape(1025), seed: 61);
+        using Tensor actual = new(input.Shape, DType.BF16);
+        using Tensor expected = new(input.Shape, DType.BF16);
+
+        Span<float> writable = input.AsSpan<float>();
+        // The kernel has a branch for non-finite input — rounding a NaN can carry its mantissa into the exponent,
+        // so it emits a canonical quiet NaN instead. Random values never reach it, which would leave that branch
+        // free to rot.
+        writable[0] = float.NaN;
+        writable[1] = float.PositiveInfinity;
+        writable[2] = float.NegativeInfinity;
+        writable[3] = 0f;
+        writable[4] = -0f;
+
+        ReadOnlySpan<float> source = input.AsReadOnlySpan<float>();
+        Span<ushort> reference = expected.AsSpan<ushort>();
+        for (int i = 0; i < source.Length; i++)
+        {
+            uint bits = BitConverter.SingleToUInt32Bits(source[i]);
+            // Add half an output ULP, biased by the low bit of the result, then drop the low 16 mantissa bits.
+            reference[i] = (ushort)((bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16);
+        }
+
+        backend.CastToBf16(actual, input);
+
+        // The NaN is checked for NaN-ness, not for bytes. Vulkan emits the canonical positive quiet NaN and CUDA
+        // keeps the input's sign, so they differ at that element — and IEEE 754 fixes neither the sign nor the
+        // payload of a produced NaN, so neither is wrong. Aligning them would mean editing a shipped kernel's
+        // output to satisfy a test. Every other element, infinities and both zeros included, is compared exactly.
+        ushort produced = actual.AsReadOnlySpan<ushort>()[0];
+        Assert.True((produced & 0x7F80) == 0x7F80 && (produced & 0x007F) != 0,
+            $"a NaN input produced 0x{produced:X4} on {kind}, which is not a NaN");
+        reference[0] = produced;
+
+        TensorAssert.Identical(actual, expected, because: $"on {kind}");
+    }
+
+    /// <summary>F16 input to the same op, which both backends reach by chaining through F32.</summary>
+    /// <remarks>The values are chosen to be exactly representable in F16 so the comparison is about the BF16 step
+    /// and not about what the F16 leg rounded away. Exact on both backends.</remarks>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void CastToBf16_AcceptsF16Input(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+
+        float[] values = [0f, 1f, -1f, 0.5f, -0.25f, 2f, -8f, 1.5f, 0.125f, -3.25f, 16f, -0.0625f, 4f];
+        using Tensor wide = new(new TensorShape(values.Length), DType.F32);
+        values.CopyTo(wide.AsSpan<float>());
+        using Tensor half = new(wide.Shape, DType.F16);
+        backend.CastToF16(half, wide);
+
+        using Tensor actual = new(wide.Shape, DType.BF16);
+        using Tensor expected = new(wide.Shape, DType.BF16);
+        backend.CastToBf16(actual, half);
+        Span<ushort> reference = expected.AsSpan<ushort>();
+        for (int i = 0; i < values.Length; i++)
+        {
+            uint bits = BitConverter.SingleToUInt32Bits(values[i]);
+            reference[i] = (ushort)((bits + 0x7FFFu + ((bits >> 16) & 1u)) >> 16);
+        }
+
+        TensorAssert.Identical(actual, expected, because: $"on {kind}");
+    }
+
     /// <summary>Per-head RoPE tables, where the whole difference from the shared-table form is one index.</summary>
     /// <remarks>Non-identity tables and more than one head on purpose: with a single head, or with cos/sin equal
     /// across heads, the per-head and shared layouts address the same bytes and a wrong index passes. The rotation
