@@ -546,6 +546,11 @@ public static class TestPaths
 
         /// <summary>A stock CivitAI SDXL LoRA (Harrlogos v2.0) — sd-scripts LDM block naming, the majority spelling.</summary>
         public static string HarrlogosSdxl => Resolve("HARRLOGOS_SDXL_LORA_PATH", Path.Combine(ModelsDir, "Lora", "SDXL", "harrlogos_v2_0.safetensors"));
+
+        /// <summary>A LoCon (LyCORIS) SDXL adapter — kohya naming with <c>conv_dim</c>/<c>conv_alpha</c> set, so it
+        /// carries rank-4 convolution modules as well as the usual rank-2 linears. The only adapter on hand that
+        /// exercises the conv merge path at all.</summary>
+        public static string LoconSdxl => Resolve("LOCON_SDXL_LORA_PATH", Path.Combine(ModelsDir, "Lora", "SDXL", "shea_haulia_sdxl_locon_v1.safetensors"));
     }
 
     /// <summary>Tokenizer asset paths.</summary>

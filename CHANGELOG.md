@@ -6,6 +6,28 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.138
+
+- **The conv half of the LoRA merge is verified against a real adapter.** Rank-4 convolution support has existed
+  since the conv-LoRA work landed, but every test until now built its deltas by hand — so what was pinned was the
+  arithmetic, not that a shipped adapter's conv modules resolve to weights this engine holds. Those are different
+  claims, and only the second fails when a key rule is wrong. `LoraLoconConvRealTests` loads a LoCon
+  (`conv_dim`/`conv_alpha` set, 98 rank-4 tensors = 49 modules) and asserts every one names a key the converted
+  SDXL checkpoint has, with the delta's folded `[out, in·kh·kw]` matching the base conv's own shape:
+  **49 conv modules checked, 0 unmatched, 0 mis-shaped.**
+- **`hartsy image` gains `--lora` / `--lora-weight`, which it never had.** The video and inspect commands both
+  carried them; `ImageCommand` had 32 options and no LoRA among them, and `ImageRequest.Loras` was never populated
+  from the CLI — the stack builder, the request field and the merge all existed with no way to reach them.
+  `git log -S"Loras"` on that file is empty, so it was an omission rather than a removal. This is also why the
+  conv merge had never been exercised end to end: there was no way to ask for it.
+- **Gate (real weights).** SDXL base at 512², seed 1. Two same-code runs hash identically (`e90f80c4`), so the
+  family is deterministic here; adding the LoCon moves the image to `8582c5b4`. That alone would not prove the
+  CONV layers merged — ~1000 linear modules would move it regardless — so the merge log is part of the gate:
+  `Merged 788 of 788` into the UNet, `72 of 72` into CLIP-L, `192 of 192` into CLIP-G. 1052 of 1052 modules, none
+  skipped, and the 49 convs are inside that UNet count.
+- The adapter is Pony-trained, which is irrelevant to what is being shown: it shares SDXL's UNet and kohya's key
+  grammar, and the claim is that the conv path resolves and fits, not that the output looks like anything.
+
 ## alpha.137
 
 - **The free-VRAM report means one thing now.** The driver path described a single heap while the total described

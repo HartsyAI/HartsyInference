@@ -64,6 +64,7 @@ public static class GenerationDispatch
             Steps = parameters.GetIntOrNull("steps"),
             CfgScale = parameters.GetFloatOrNull("cfg"),
             Sampler = parameters.GetStringOrNull("sampler"),
+            Loras = BuildLoraStack(parameters),
             Scheduler = parameters.GetStringOrNull("scheduler"),
             SigmaShift = parameters.GetDoubleOrNull("sigma-shift"),
             Vram = ParseVramOverrides(parameters),
