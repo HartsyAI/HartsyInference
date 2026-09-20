@@ -234,7 +234,7 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
     /// <c>silu(gate) * up</c> over the two halves, then the down projection. Gate is the FIRST half — ComfyUI's
     /// <c>_swiglu_eager</c> chunks <c>(gate, up)</c> in that order, and its LoRA key map confirms it by addressing
     /// <c>gate_layer</c> at row 0 and <c>proj</c> at row <c>mlpDim</c> of the same fused matrix.</summary>
-    private Tensor ForwardMlp(IBackend backend, Tensor input, int seq, DType act)
+    internal Tensor ForwardMlp(IBackend backend, Tensor input, int seq, DType act)
     {
         Tensor fused = new Tensor(new TensorShape(1, seq, 2 * _mlpDim), act);
         backend.Linear(fused, input, _gateUp!, null);

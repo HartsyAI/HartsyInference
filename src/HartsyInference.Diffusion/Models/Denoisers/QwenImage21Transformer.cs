@@ -218,7 +218,9 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
         Tensor sinusoid = new Tensor(new TensorShape(1, 256), DType.F32);
         DiTUtils.SinusoidalTimestepEmbedding(sinusoid, timestep * 1000.0f, batch: 1, embDim: 256);
         Tensor sinusoidAct = Cast(backend, sinusoid, _act);
-        sinusoid.Dispose();
+        // Cast returns the SOURCE when no conversion is needed, so disposing unconditionally would free the tensor
+        // still in use — invisible on the bf16 path and immediate on the F32 one.
+        if (!ReferenceEquals(sinusoidAct, sinusoid)) sinusoid.Dispose();
 
         TensorShape shape = new TensorShape(1, _config.HiddenSize);
         Tensor first = new Tensor(shape, _act);
@@ -303,7 +305,7 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
         return value;
     }
 
-    private static float Bf16RoundTrip(float value)
+    internal static float Bf16RoundTrip(float value)
     {
         uint bits = BitConverter.SingleToUInt32Bits(value);
         if ((bits & 0x7F80_0000u) == 0x7F80_0000u) return value;   // NaN/Inf survive unchanged
