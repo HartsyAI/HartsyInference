@@ -47,6 +47,11 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     private int[]? _cachedUncondKeyT5, _cachedUncondKeyLlama;
     private Tensor? _cachedUncondPooled, _cachedUncondT5;
     private IReadOnlyList<Tensor>? _cachedUncondLlama;
+    // Part of the cache key. HiDream stores conditioning that is already BLENDED — the Llama arm has to be
+    // blended before its last-dim split, so the stored per-block tensors carry the emphasis — and emphasis does
+    // not change the token ids, so ids alone would serve a weighted tensor to the next plain request.
+    private float[]? _cachedCondWeightsT5, _cachedCondWeightsLlama;
+    private float[]? _cachedUncondWeightsT5, _cachedUncondWeightsLlama;
 
     /// <summary>Creates a new HiDream pipeline with all components pre-loaded. Caller owns each component and is responsible for their lifetime — the pipeline does not dispose them on its own <see cref="DiffusionPipelineBase.Dispose"/>.</summary>
     public HiDreamPipeline(IBackend backend,
@@ -117,7 +122,14 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         int[]? promptAttentionMaskT5, int[]? negativeAttentionMaskT5,
         int[] promptTokenIdsLlama, int[] negativePromptTokenIdsLlama,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        float[]? promptT5Weights = null,
+        float[]? negativeT5Weights = null,
+        float[]? promptLlamaWeights = null,
+        float[]? negativeLlamaWeights = null,
+        int[]? emptyTokenIdsT5 = null,
+        int[]? emptyAttentionMaskT5 = null,
+        int[]? emptyTokenIdsLlama = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
@@ -150,11 +162,15 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
         // ── 1. Encode all four text encoders (positive + optional negative), with a prompt cache ──
         bool condHit = _cachedCondPooled is not null
-            && _cachedCondKeyT5 is not null && _cachedCondKeyT5.AsSpan().SequenceEqual(promptTokenIdsT5)
-            && _cachedCondKeyLlama is not null && _cachedCondKeyLlama.AsSpan().SequenceEqual(promptTokenIdsLlama);
+            && Prompting.ConditioningCacheKey.Matches(
+                _cachedCondKeyT5, _cachedCondWeightsT5, promptTokenIdsT5, promptT5Weights)
+            && Prompting.ConditioningCacheKey.Matches(
+                _cachedCondKeyLlama, _cachedCondWeightsLlama, promptTokenIdsLlama, promptLlamaWeights);
         bool uncondHit = !useCfg || (_cachedUncondPooled is not null
-            && _cachedUncondKeyT5 is not null && _cachedUncondKeyT5.AsSpan().SequenceEqual(negativePromptTokenIdsT5)
-            && _cachedUncondKeyLlama is not null && _cachedUncondKeyLlama.AsSpan().SequenceEqual(negativePromptTokenIdsLlama));
+            && Prompting.ConditioningCacheKey.Matches(
+                _cachedUncondKeyT5, _cachedUncondWeightsT5, negativePromptTokenIdsT5, negativeT5Weights)
+            && Prompting.ConditioningCacheKey.Matches(
+                _cachedUncondKeyLlama, _cachedUncondWeightsLlama, negativePromptTokenIdsLlama, negativeLlamaWeights));
 
         Tensor condPooled, condT5;
         IReadOnlyList<Tensor> condLlama;
@@ -195,13 +211,15 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
             (condPooled, condT5, condLlama) = EncodePrompt(
                 promptTokenIdsL, promptTokenIdsG, promptTokenIdsT5, promptTokenIdsLlama,
-                promptEosPositionL, promptEosPositionG, promptAttentionMaskT5);
+                promptEosPositionL, promptEosPositionG, promptAttentionMaskT5,
+                promptT5Weights, promptLlamaWeights, emptyTokenIdsT5, emptyAttentionMaskT5, emptyTokenIdsLlama);
 
             if (useCfg)
             {
                 (uncondPooled, uncondT5, uncondLlama) = EncodePrompt(
                     negativePromptTokenIdsL, negativePromptTokenIdsG, negativePromptTokenIdsT5, negativePromptTokenIdsLlama,
-                    negativeEosPositionL, negativeEosPositionG, negativeAttentionMaskT5);
+                    negativeEosPositionL, negativeEosPositionG, negativeAttentionMaskT5,
+                    negativeT5Weights, negativeLlamaWeights, emptyTokenIdsT5, emptyAttentionMaskT5, emptyTokenIdsLlama);
             }
 
             Logs.Info($"Text encoding done in {sw.ElapsedMilliseconds}ms");
@@ -230,6 +248,8 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             _cachedCondLlama = condLlama;
             _cachedCondKeyT5 = (int[])promptTokenIdsT5.Clone();
             _cachedCondKeyLlama = (int[])promptTokenIdsLlama.Clone();
+            _cachedCondWeightsT5 = promptT5Weights;
+            _cachedCondWeightsLlama = promptLlamaWeights;
             if (useCfg)
             {
                 _ = uncondPooled!.DataPointer;
@@ -241,6 +261,8 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
                 _cachedUncondLlama = uncondLlama;
                 _cachedUncondKeyT5 = (int[])negativePromptTokenIdsT5.Clone();
                 _cachedUncondKeyLlama = (int[])negativePromptTokenIdsLlama.Clone();
+                _cachedUncondWeightsT5 = negativeT5Weights;
+                _cachedUncondWeightsLlama = negativeLlamaWeights;
             }
         }
 
@@ -505,9 +527,27 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     }
 
     /// <summary>Encodes a single prompt through all four text encoders, returning (pooled, t5_hidden, llama_per_block_hidden).</summary>
+    /// <summary>SwarmUI's ComfyBlend toward the empty-prompt baseline, replacing the input it consumes.</summary>
+    private Tensor BlendTowardEmpty(Tensor context, Tensor empty, float[]? weights)
+    {
+        if (weights is null || Prompting.ComfyBlend.Apply(Backend, context, empty, weights) is not Tensor blended)
+        {
+            return context;
+        }
+        context.Dispose();
+        return blended;
+    }
+
+    /// <param name="t5Weights">Per-token weights for the T5 arm, or null when unweighted.</param>
+    /// <param name="llamaWeights">Per-token weights for the Llama arm.</param>
+    /// <remarks>The CLIP arms take no weights: HiDream discards their hidden states into <c>Tensor _</c> and
+    /// keeps only the pooled vectors, and ComfyUI's blend rewrites hidden states — so wiring them would be a
+    /// no-op.</remarks>
     private (Tensor pooled, Tensor t5Hidden, IReadOnlyList<Tensor> llamaPerBlock) EncodePrompt(
         int[] tokenIdsL, int[] tokenIdsG, int[] tokenIdsT5, int[] tokenIdsLlama,
-        int eosPositionL, int eosPositionG, int[]? attentionMaskT5)
+        int eosPositionL, int eosPositionG, int[]? attentionMaskT5,
+        float[]? t5Weights = null, float[]? llamaWeights = null,
+        int[]? emptyTokenIdsT5 = null, int[]? emptyAttentionMaskT5 = null, int[]? emptyTokenIdsLlama = null)
     {
         // CLIP-L pooled
         int[][] batchL = [tokenIdsL];
@@ -528,6 +568,12 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         int[][] batchT5 = [tokenIdsT5];
         int[][]? batchMask = attentionMaskT5 is not null ? [attentionMaskT5] : null;
         Tensor t5Hidden = _t5.Encode(Backend, batchT5, batchMask);
+        if (t5Weights is not null && emptyTokenIdsT5 is not null)
+        {
+            using Tensor emptyT5 = _t5.Encode(Backend, [emptyTokenIdsT5],
+                emptyAttentionMaskT5 is null ? null : [emptyAttentionMaskT5]);
+            t5Hidden = BlendTowardEmpty(t5Hidden, emptyT5, t5Weights);
+        }
 
         // Llama multi-layer: extract each requested layer separately. The diffusers reference indexes
         // hidden_states[1:] (one per encoder layer, dropping the embeddings) and feeds those into
@@ -543,6 +589,15 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         int[] uniqueArray = uniqueLayers.ToArray();
 
         Tensor stacked = _llama.EncodeMultiLayer(Backend, batchLlama, uniqueArray);
+        if (llamaWeights is not null && emptyTokenIdsLlama is not null)
+        {
+            // ONE blend, before the last-dim split: ComfyBlend takes its rows from Shape[rank-2] — the 256
+            // sequence positions — and broadcasts across the whole last dim, so a single call covers every
+            // captured layer. Blending the 48 per-block tensors afterwards would be the same arithmetic 48
+            // times, and would have to happen before the duplicate-layer cloning to stay consistent.
+            using Tensor emptyStacked = _llama.EncodeMultiLayer(Backend, [emptyTokenIdsLlama], uniqueArray);
+            stacked = BlendTowardEmpty(stacked, emptyStacked, llamaWeights);
+        }
         // stacked is [B, S, K * H_llama]. Split into K per-layer tensors of [B, S, H_llama], then expand
         // to one tensor per LlamaLayers entry by mapping each entry to its slot in uniqueArray.
         int H = (int)stacked.Shape[2] / uniqueArray.Length;

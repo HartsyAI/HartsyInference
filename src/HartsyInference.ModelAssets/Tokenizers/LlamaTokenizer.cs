@@ -80,6 +80,9 @@ public sealed class LlamaTokenizer : IDisposable
     }
 
     /// <summary>Encodes text and returns the raw token ids with no padding / truncation / BOS.</summary>
+    /// <summary>The fixed window <see cref="Encode"/> pads to.</summary>
+    public int MaxLength => _maxLength;
+
     public IReadOnlyList<int> EncodeRaw(string text)
     {
         ThrowIfDisposed();

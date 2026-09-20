@@ -26,6 +26,16 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
     /// only frames 1.. denoising. No end-frame conditioning in this family.</remarks>
     /// <remarks><see cref="VideoFeatures.Lora"/> added 2026-08-20. Shares <see cref="HartsyInference.Diffusion.Models.Denoisers.Kandinsky5Transformer"/> with the T2I family, so its <c>text_transformer_blocks.{i}</c> / <c>visual_transformer_blocks.{i}</c> roots need the same widened bare-root LoRA detection.</remarks>
     public VideoFeatures Supports => VideoFeatures.InitImage | VideoFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: the CLIP-L arm keeps weights, so
+    /// SwarmUI's probe selects ComfyBlend. The blend is nevertheless a verified END-TO-END NO-OP —
+    /// <c>Kandinsky5TEModel.encode_token_weights</c> (<c>kandinsky5.py:39-43</c>) returns the Qwen cond plus
+    /// CLIP-L's POOLED vector and discards the blended hidden states. Parity is therefore to strip the emphasis
+    /// and apply nothing, which <c>Kandinsky5TextEncoding.StripEmphasis</c> does; declaring the mode is what
+    /// keeps the grammar out of the encoder's input text. Blending the Qwen arm would BREAK parity.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "kandinsky5-video", StringComparison.OrdinalIgnoreCase);
 

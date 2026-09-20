@@ -201,6 +201,15 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
+- [ ] **AuraFlow's Pile-T5 special ids may not match the reference — found 2026-09-19, PRE-EXISTING, unverified.**
+  ComfyUI's `aura_t5.py` declares `special_tokens={"end": 2, "pad": 1}`, while our `T5Tokenizer` hardcodes
+  `EosTokenId = 1` / `PadTokenId = 0` for every T5 family it serves. If Pile-T5's vocab really puts `</s>` at 2,
+  our AuraFlow encode has been terminating with token 1 and padding with 0 — plausible output rather than an
+  error, which is why it has never surfaced. Noticed while reading `gen_empty_tokens` for the weighting
+  baselines; NOT diagnosed and NOT changed, because fixing the base tokenization is a different job from
+  weighting and would move every existing AuraFlow generation. Verify against the Pile-T5 SentencePiece vocab
+  before touching it. Carried as a `TODO` in `AuraFlowRecipe.Construct`, beside the tokenizer construction, so
+  it is visible from the code and not only from this checklist.
 - [ ] **Chroma-Radiance does not generate — found 2026-09-19, PRE-EXISTING, unrelated to prompt weighting.**
   `chroma-radiance-x0.safetensors` fails at both 512² and 1024² with
   `UnpatchifyTokens input shape must be [4096, 4096, 16384]; got [4096, 256, 64]` — the middle dimension tracks
@@ -226,6 +235,29 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   a logic bug. It was a stale `bin/Release` CLI, built before the recipe change; a `dotnet build` of the Engine
   project alone does not refresh it. A control run proves determinism, not freshness. The gate scripts now echo
   the engine DLL's mtime beside the recipe source's.
+- [x] **Seven more families weight prompts — DONE 2026-09-19 (alpha.132): HiDream, OmniGen2, Lumina-2,
+  Kandinsky5, Kandinsky5-Video, HunyuanVideo and the SDXL refiner.** The unwired ledger goes from 11 registered
+  families to 4. **OmniGen2, Lumina-2 and HunyuanVideo are the first variable-length ComfyBlend baselines** —
+  every family wired before them padded to a fixed window, which makes one empty encode valid for any prompt;
+  these three rebuild it per prompt, at that prompt's length, for one extra encoder forward. HiDream blends its
+  Llama arm ONCE before the 48-way layer slice, because ComfyBlend broadcasts across the last dimension.
+  **Two baselines were wrong and are corrected here:** `gen_empty_tokens` emits `start + end + padding` from each
+  model's declared `special_tokens`, and OmniGen2's and Anima's declare only a pad — so each is padding alone,
+  not the family's template with an empty prompt. Anima shipped in alpha.131 with the wrong one, so **its
+  weighted output changes**; `w=1.0` does not, because a baseline is never read when nothing is weighted.
+  The general rule, now written down: ComfyBlend only rewrites rows whose weight is not 1 and pad rows always
+  weigh 1, so a baseline's padding is never read — but row 0 is. **Kandinsky5 and Kandinsky5-Video declare the
+  mode to apply NOTHING**, which is parity rather than a gap: `Kandinsky5TEModel.encode_token_weights` discards
+  the blended hidden states, so all three gate runs must be byte-IDENTICAL; what they owe is the strip, without
+  which the parens would reach Qwen as prose. The SDXL refiner needed `EncodeBatchWeightedPenultimate` — the
+  existing weighted CLIP entry concatenates along the SEQUENCE axis as chunks of one prompt, so a
+  (negative, positive) batch would have spliced the negative onto the end of the positive. Real-weight verified
+  at 512², seed 1: `(fox:1.0)` byte-identical to plain for HiDream, OmniGen2, Lumina-2 and the refiner, with
+  `(fox:0.5)` differing; Kandinsky5 identical across all three as its no-op contract requires. **Two checkpoints
+  were downloaded for this and sha256-verified against the catalog: the SDXL refiner and the Kandinsky5 T2V
+  transformer.** HunyuanVideo's unweighted path is pinned by a CPU test rather than only sampled by the gate —
+  its hard-coded 95-token crop is now checked against the tokenized template, and that check runs on every
+  generation.
 - [x] **AuraFlow, Chroma and Chroma-Radiance weight prompts — DONE 2026-09-19 (alpha.130).** The first image
   families on the ComfyBlend mechanism rather than CondScale: their ComfyUI tokenizers keep weights, so the blend
   runs on the encoder OUTPUT against the same encoder's empty-prompt baseline. `T5WeightedConditioning` is the

@@ -56,6 +56,11 @@ public static class T5WeightedConditioning
 
     /// <summary>The token batch for the empty-prompt baseline — the same padding the prompt got, which is the
     /// whole point of it.</summary>
+    /// <remarks>This is ComfyUI's <c>gen_empty_tokens</c>: start (none for T5) + end + padding. Its pad id is a
+    /// per-family convention and ours need not match, because <see cref="ComfyBlend"/> only rewrites rows whose
+    /// weight differs from 1 and pad rows always weigh 1 — so the baseline's padding region is never read. What
+    /// must match is the prefix: a baseline whose row 0 holds a different token from the reference's shifts the
+    /// blend wherever the first word is weighted.</remarks>
     public static int[] EmptyTokens(T5Tokenizer tokenizer)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);

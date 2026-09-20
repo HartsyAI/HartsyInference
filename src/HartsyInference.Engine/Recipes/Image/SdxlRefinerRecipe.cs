@@ -35,6 +35,13 @@ public sealed class SdxlRefinerRecipe : IArchitectureRecipe
     /// thing the community trains. Declare it only alongside a real refiner LoRA to test against.</remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.SeamlessTiling;
 
+    /// <inheritdoc/>
+    /// <remarks>The refiner carries ONE text encoder — CLIP-G at <c>conditioner.embedders.0</c> — whose hidden
+    /// states reach the UNet, so the blend has something to act on and the family is ComfyBlend like base SDXL.
+    /// The pooled vector stays unweighted, which is the reference's own behaviour rather than a shortcut.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
+
     /// <summary>The refiner's recommended settings mirror base SDXL's (diffusers img2img defaults).</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 40, CfgScale = 5.0f, Width = 1024, Height = 1024 };
 
@@ -86,6 +93,25 @@ internal sealed class SdxlRefinerRecipePipeline : IRecipePipeline
     private readonly SafeTensorsLoader _auxLoader;
     private readonly ClipTokenizer _tokenizer = new ClipTokenizer();
 
+    /// <summary>The refiner's single CLIP-G arm, tokenized with its per-token weights.</summary>
+    /// <remarks>Chunk 0 only, which is what the pipeline signature carries and what the plain encode already
+    /// produced — a prompt past 77 tokens truncates the same way either way. A multi-chunk weighted prompt
+    /// (<c>&lt;break&gt;</c>) would need the chunked signature and is not wired.
+    /// <para>An unweighted prompt keeps <see cref="ClipTokenizer.Encode"/> rather than taking chunk 0 of the
+    /// weighted builder. The two agree today, but they are different code paths, and the byte-identity of
+    /// <c>(fox:1.0)</c> against a plain prompt is the gate this family is held to.</para></remarks>
+    private (int[] Ids, float[]? Weights) EncodeWeighted(string text)
+    {
+        IReadOnlyList<Diffusion.Prompting.WeightedSpan> spans = Diffusion.Prompting.PromptWeighting.Parse(text);
+        if (!Diffusion.Prompting.PromptWeighting.HasWeights(spans))
+        {
+            return (_tokenizer.Encode(Diffusion.Prompting.PromptWeighting.Join(spans)), null);
+        }
+        (IReadOnlyList<int[]> ids, IReadOnlyList<float[]> weights) =
+            Diffusion.Prompting.WeightedPromptTokenizer.Tokenize(_tokenizer, text);
+        return (ids[0], weights[0]);
+    }
+
     public SdxlRefinerRecipePipeline(SdxlRefinerPipeline pipeline, ClipTextEncoder clipG, SdxlRefinerEntry entry, SafeTensorsLoader auxLoader)
     {
         _pipeline = pipeline;
@@ -104,8 +130,8 @@ internal sealed class SdxlRefinerRecipePipeline : IRecipePipeline
         float cfg = request.CfgScale ?? SdxlRefinerRecipe.FamilyDefaults.CfgScale;
         (int width, int height) = RecipeRequestMapper.Size(request);
 
-        int[] tokensG = _tokenizer.Encode(prompt);
-        int[] negG = _tokenizer.Encode(negative);
+        (int[] tokensG, float[]? weightsG) = EncodeWeighted(prompt);
+        (int[] negG, float[]? negWeightsG) = EncodeWeighted(negative);
         int eosG = ClipTokenizer.FindEosPosition(tokensG);
         int negEosG = ClipTokenizer.FindEosPosition(negG);
 
@@ -145,7 +171,8 @@ internal sealed class SdxlRefinerRecipePipeline : IRecipePipeline
             Action<GenerationProgress>? bridge = progress is null
                 ? null
                 : RecipeProgressAdapter.Create(progress, cancel, totalSteps: steps);
-            (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.RefineFromTokens(tokensG, negG, eosG, negEosG, inner, bridge);
+            (byte[] rgb, int outW, int outH, int usedSeed) = _pipeline.RefineFromTokens(
+                tokensG, negG, eosG, negEosG, inner, bridge, weightsG, negWeightsG);
             return new ImageResult
             {
                 Rgb = rgb,

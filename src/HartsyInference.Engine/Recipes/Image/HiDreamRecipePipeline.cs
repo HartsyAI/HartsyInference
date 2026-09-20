@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Pipelines;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -38,22 +39,29 @@ public sealed class HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenize
         int steps = request.Steps ?? HiDreamRecipe.FamilyDefaults.Steps;
         float cfg = request.CfgScale ?? HiDreamRecipe.FamilyDefaults.CfgScale;
 
-        // TODO(E-IMG-4/5): LoRA, ControlNet, IP-Adapter, refiner, regional prompting, weighted
-        // conditioning and ImageRequest.Components overrides are deferred — text-to-image only.
-        int[] clipTokens = _clipTokenizer.Encode(prompt);
-        int[] negClipTokens = _clipTokenizer.Encode(negative);
+        // TODO(E-IMG-4/5): LoRA, ControlNet, IP-Adapter, refiner, regional prompting and
+        // ImageRequest.Components overrides are deferred — text-to-image only.
+        // Declaring ComfyBlend is what stops ImagesService collapsing `(word:N)`, so the recipe owns the grammar
+        // now. The CLIP arms take no weights: HiDream keeps only their pooled vectors and discards the hidden
+        // states, and ComfyUI's blend rewrites hidden states — wiring them would be a no-op.
+        string baseText = PromptWeighting.Join(PromptWeighting.Parse(PromptTagFlattening.Flatten(prompt)));
+        string negBaseText = PromptWeighting.Join(PromptWeighting.Parse(PromptTagFlattening.Flatten(negative)));
+        int[] clipTokens = _clipTokenizer.Encode(baseText);
+        int[] negClipTokens = _clipTokenizer.Encode(negBaseText);
         int eosPos = ClipTokenizer.FindEosPosition(clipTokens);
         int negEosPos = ClipTokenizer.FindEosPosition(negClipTokens);
 
         // Always tokenize the negative: the pipeline's parameters are non-optional and it decides internally
         // whether to run the negative pass (cfg > 1).
-        int[] t5Tokens = _t5Tokenizer.Encode(prompt);
-        int[] negT5Tokens = _t5Tokenizer.Encode(negative);
+        (int[] t5Tokens, float[]? t5Weights) = T5WeightedConditioning.Tokenize(_t5Tokenizer, prompt);
+        (int[] negT5Tokens, float[]? negT5Weights) = T5WeightedConditioning.Tokenize(_t5Tokenizer, negative);
         int[] t5Mask = T5Tokenizer.CreateAttentionMask(t5Tokens);
         int[] negT5Mask = T5Tokenizer.CreateAttentionMask(negT5Tokens);
+        int[] emptyT5 = T5WeightedConditioning.EmptyTokens(_t5Tokenizer);
 
-        int[] llamaTokens = _llamaTokenizer.Encode(prompt);
-        int[] negLlamaTokens = _llamaTokenizer.Encode(negative);
+        (int[] llamaTokens, float[]? llamaWeights) = TokenizeLlamaWeighted(prompt);
+        (int[] negLlamaTokens, float[]? negLlamaWeights) = TokenizeLlamaWeighted(negative);
+        int[] emptyLlama = _llamaTokenizer.Encode("");
 
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
         using Img2ImgResolver.Img2ImgSpec? img2img = RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
@@ -86,7 +94,9 @@ public sealed class HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenize
             t5Tokens, negT5Tokens,
             t5Mask, negT5Mask,
             llamaTokens, negLlamaTokens,
-            inner, bridge);
+            inner, bridge,
+            t5Weights, negT5Weights, llamaWeights, negLlamaWeights,
+            emptyT5, T5Tokenizer.CreateAttentionMask(emptyT5), emptyLlama);
 
         return new ImageResult
         {
@@ -103,6 +113,29 @@ public sealed class HiDreamRecipePipeline(HiDreamPipeline pipeline, ClipTokenize
                 ["cfg"] = cfg.ToString(CultureInfo.InvariantCulture),
             },
         };
+    }
+
+    /// <summary>Mirrors <see cref="LlamaTokenizer.Encode"/>'s layout — BOS, then the prompt, then right-pad to
+    /// the fixed window — while carrying one weight per row. BOS and pad rows weigh 1: they are not part of the
+    /// prompt, and blending them would pull the padding toward the empty encode along with the words.</summary>
+    private (int[] Tokens, float[]? Weights) TokenizeLlamaWeighted(string prompt)
+    {
+        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(PromptTagFlattening.Flatten(prompt));
+        if (!PromptWeighting.HasWeights(spans))
+        {
+            return (_llamaTokenizer.Encode(PromptWeighting.Join(spans)), null);
+        }
+        WeightedTokenSequence built = WeightedTokenBuilder.Build(spans, _llamaTokenizer.EncodeRaw, [], []);
+        int window = _llamaTokenizer.MaxLength;
+        int[] tokens = new int[window];
+        float[] weights = new float[window];
+        Array.Fill(tokens, LlamaTokenizer.PadTokenId);
+        Array.Fill(weights, 1f);
+        tokens[0] = LlamaTokenizer.BosTokenId;
+        int real = Math.Min(built.Tokens.Length, window - 1);
+        Array.Copy(built.Tokens, 0, tokens, 1, real);
+        Array.Copy(built.Weights, 0, weights, 1, real);
+        return (tokens, weights);
     }
 
     /// <inheritdoc/>

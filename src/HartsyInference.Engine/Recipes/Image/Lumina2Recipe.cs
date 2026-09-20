@@ -36,6 +36,15 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     /// <remarks>Lumina 2 reuses the Flux.1 VAE; the encoder half is built alongside the decoder.</remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
+
+    /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: <c>supported_models.py:1202</c> →
+    /// <c>lumina2.LuminaTokenizer</c> → <c>Gemma2BTokenizer</c> (<c>lumina2.py:7-11</c>), which does NOT disable
+    /// weights. <c>lumina2.py:20</c>'s <c>disable_weights</c> is on <c>Gemma3_4BTokenizer</c>, a different model's
+    /// encoder reached only through <c>NTokenizer</c> — this recipe pins <c>SideModels.Gemma2_2B</c> and rejects
+    /// the Gemma-3 tokenizer by hash, so only the weight-keeping arm applies.</remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "lumina2", StringComparison.OrdinalIgnoreCase);
 

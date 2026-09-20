@@ -5,6 +5,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Pipelines;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Diffusion.Requests;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
@@ -127,14 +128,14 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
         _backend.PreloadWeights(_textEncoder.EnumerateWeights());
         if (!promptHit)
         {
-            Tensor embeds = _textEncoder.Encode(_backend, new[] { EncodeWithTemplate(_tokenizer, prompt) });
+            Tensor embeds = EncodeWeighted(prompt);
             _cachedEmbeds?.Dispose();
             _cachedEmbeds = embeds;
             _cachedPrompt = prompt;
         }
         if (negative is not null && !negativeHit)
         {
-            Tensor negEmbeds = _textEncoder.Encode(_backend, new[] { EncodeWithTemplate(_tokenizer, negative) });
+            Tensor negEmbeds = EncodeWeighted(negative);
             _cachedNegEmbeds?.Dispose();
             _cachedNegEmbeds = negEmbeds;
             _cachedNegPrompt = negative;
@@ -157,6 +158,61 @@ public sealed class OmniGen2RecipePipeline(OmniGen2Pipeline pipeline, Qwen3Token
     }
 
     /// <summary>Tokenizes with ComfyUI's OmniGen2 chat template. The FULL sequence (system block included) is the conditioning — no prefix drop, unlike Qwen-Image. Special tokens are inserted by id; text segments are BPE'd separately, which matches HF tokenization because special tokens split the text at exactly these boundaries.</summary>
+    /// <summary>Encodes one prompt and applies its per-token weights. Caching the BLENDED result is safe here
+    /// only because the cache key is the raw prompt STRING, parens included — a weighted and an unweighted
+    /// prompt are already different keys. A token-id key would collide, since emphasis does not change the ids.
+    /// </summary>
+    /// <remarks>OmniGen2 does not pad, so its conditioning length tracks the prompt and the empty baseline
+    /// cannot be encoded once and reused — it is built per prompt, at that prompt's length. The encoder takes no attention mask (it is causal),
+    /// so those pad rows are attended; that is a parity nuance against ComfyUI's masked <c>gen_empty_tokens</c>,
+    /// not a shape problem.</remarks>
+    private Tensor EncodeWeighted(string prompt)
+    {
+        (int[] tokens, float[]? weights) = TokenizeWeighted(prompt);
+        Tensor embeds = _textEncoder.Encode(_backend, new[] { tokens });
+        if (weights is null)
+        {
+            return embeds;
+        }
+        // All pad, NOT the template with an empty prompt. Read off ComfyUI rather than assumed: its
+        // `gen_empty_tokens` emits start + end + padding, and Omnigen2's `Qwen25_3BModel` declares
+        // `special_tokens={"pad": 151643}` with no start and no end — so the baseline is padding alone, at the
+        // prompt's length. 151643 is `<|endoftext|>`, which is also this tokenizer's pad id.
+        int[] emptyPadded = new int[tokens.Length];
+        Array.Fill(emptyPadded, Qwen3Tokenizer.BosTokenId);
+        using Tensor empty = _textEncoder.Encode(_backend, new[] { emptyPadded });
+        if (ComfyBlend.Apply(_backend, embeds, empty, weights) is not Tensor blended)
+        {
+            return embeds;
+        }
+        embeds.Dispose();
+        return blended;
+    }
+
+    /// <summary>The templated ids plus one weight per row, template positions pinned to 1.</summary>
+    private (int[] Tokens, float[]? Weights) TokenizeWeighted(string prompt)
+    {
+        (int[] prefix, int[] suffix) = TemplateIds(_tokenizer);
+        WeightedTokenSequence sequence = TemplatedPromptTokens.Build(
+            PromptTagFlattening.Flatten(prompt), t => EncodeWithTemplate(_tokenizer, t),
+            _tokenizer.EncodeRaw, prefix, suffix).Truncate(MaxTokens);
+        return (sequence.Tokens, sequence.IsUniformlyUnweighted ? null : sequence.Weights);
+    }
+
+    /// <summary>The ids <see cref="EncodeWithTemplate"/> puts either side of the prompt.</summary>
+    private static (int[] Prefix, int[] Suffix) TemplateIds(Qwen3Tokenizer tokenizer)
+    {
+        List<int> prefix = new List<int>(96) { Qwen3Tokenizer.ImStartId };
+        prefix.AddRange(tokenizer.EncodeRaw("system\n" + SystemPrompt));
+        prefix.Add(Qwen3Tokenizer.ImEndId);
+        prefix.AddRange(tokenizer.EncodeRaw("\n"));
+        prefix.Add(Qwen3Tokenizer.ImStartId);
+        prefix.AddRange(tokenizer.EncodeRaw("user\n"));
+        List<int> suffix = new List<int>(4) { Qwen3Tokenizer.ImEndId };
+        suffix.AddRange(tokenizer.EncodeRaw("\n"));
+        return (prefix.ToArray(), suffix.ToArray());
+    }
+
     private static int[] EncodeWithTemplate(Qwen3Tokenizer tokenizer, string prompt)
     {
         List<int> ids = new List<int>(96);

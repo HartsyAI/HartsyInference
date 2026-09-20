@@ -235,6 +235,57 @@ public sealed unsafe class ClipTextEncoder
         return (result, pooled);
     }
 
+    /// <summary>ComfyBlend for a pipeline that encodes cond AND uncond in ONE batched forward, where
+    /// <see cref="EncodeWeightedPenultimate"/> does not fit: that overload concatenates its inputs along the
+    /// SEQUENCE axis as 77-token chunks of a single prompt, so feeding it a two-prompt batch would splice the
+    /// negative onto the end of the positive. Here each entry of <paramref name="batchTokenIds"/> is its own
+    /// prompt and keeps its own row of the batch.</summary>
+    /// <param name="batchWeights">One entry per batch row, aligned with <paramref name="batchTokenIds"/>; a null
+    /// entry leaves that row untouched, and an all-null list skips the baseline encode entirely so an unweighted
+    /// request costs exactly what it did before.</param>
+    /// <remarks>The pooled output is deliberately NOT weighted, matching the reference: the blend rewrites hidden
+    /// states only, and <c>first_pooled</c> is read before the emphasis loop runs.</remarks>
+    public (Tensor hiddenStates, Tensor? pooledOutput) EncodeBatchWeightedPenultimate(IBackend backend,
+        IReadOnlyList<int[]> batchTokenIds, IReadOnlyList<float[]?> batchWeights,
+        ReadOnlySpan<int> eosTokenPositions, int layersFromEnd = 2)
+    {
+        ArgumentNullException.ThrowIfNull(batchTokenIds);
+        ArgumentNullException.ThrowIfNull(batchWeights);
+        if (batchTokenIds.Count != batchWeights.Count)
+        {
+            throw new ArgumentException(
+                $"batch row count {batchTokenIds.Count} must equal weight row count {batchWeights.Count}.");
+        }
+        int[][] batch = batchTokenIds as int[][] ?? [.. batchTokenIds];
+        (Tensor hidden, Tensor? pooled) = EncodePenultimate(backend, batch, eosTokenPositions, layersFromEnd);
+        bool anyWeighted = false;
+        for (int r = 0; r < batchWeights.Count; r++)
+        {
+            anyWeighted |= batchWeights[r] is not null;
+        }
+        if (!anyWeighted)
+        {
+            return (hidden, pooled);
+        }
+        int hiddenSize = _config.HiddenSize;
+        int seqLen = batchTokenIds[0].Length;
+        int[] emptyChunk = BuildEmptyChunk(seqLen);
+        (Tensor zEmpty, Tensor? emptyPooled) = EncodePenultimate(backend, new int[][] { emptyChunk }, stackalloc int[] { 1 }, layersFromEnd);
+        emptyPooled?.Dispose();
+        ReadOnlySpan<float> emptySpan = zEmpty.AsReadOnlySpan<float>();
+        Span<float> hiddenSpan = hidden.AsSpan<float>();
+        for (int r = 0; r < batchWeights.Count; r++)
+        {
+            if (batchWeights[r] is float[] weights)
+            {
+                EmphasisMath.ApplyComfy(hiddenSpan.Slice(r * seqLen * hiddenSize, seqLen * hiddenSize),
+                    emptySpan, weights, seqLen, hiddenSize);
+            }
+        }
+        zEmpty.Dispose();
+        return (hidden, pooled);
+    }
+
     private static void ValidateWeightedChunks(IReadOnlyList<int[]> idChunks, IReadOnlyList<float[]> weightChunks)
     {
         if (idChunks.Count == 0)

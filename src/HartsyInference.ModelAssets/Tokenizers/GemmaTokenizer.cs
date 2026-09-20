@@ -28,6 +28,10 @@ public sealed class GemmaTokenizer : IDisposable, ILtx2PromptTokenizer
     private readonly int _maxLength;
     private int _disposed;
 
+    /// <summary>The cap <see cref="Encode"/> truncates to. Exposed because a caller assembling its own weighted id
+    /// array has to truncate it identically — a weight array longer than the ids it describes shifts every emphasis.</summary>
+    public int MaxLength => _maxLength;
+
     /// <summary>Creates a Gemma tokenizer from a SentencePiece <c>.model</c> file (e.g. LTX-2's <c>tokenizer/tokenizer.model</c>).</summary>
     public GemmaTokenizer(string modelPath, int maxLength = DefaultMaxLength)
     {
