@@ -209,6 +209,37 @@ Two real, would-have-shipped-silently bugs surfaced and fixed here (see `TROUBLE
   authoritative) instead of reading the real value from `devicePos` — would have silently corrupted the KV
   cache the instant `GraphDecodeSupported` flipped on. Caught in review before any test ran, not after.
 
+## Results — Krea2 e2e and per-op profile, RTX 4090, 2026-09-20 (alpha.148)
+
+Same command both backends, cold single-shot CLI, 1024², 8 steps, seed 42:
+`hartsy image "a red apple on a wooden table" -m krea2 --steps 8 --width 1024 --height 1024 --seed 42`.
+
+| backend | wall | ratio |
+|---|--:|--:|
+| CUDA | **11 s** | 1× |
+| Vulkan | **297 s** | **27×** |
+
+Down from the 29–41× recorded below, and the reason is now measured rather than guessed. Per-op host wall from
+`--set diagnostics.vkProfile=1` over the same run (9,733 ops, 261.6 s accounted):
+
+| op | calls | total | avg | share |
+|---|--:|--:|--:|--:|
+| `ScaledDotProductAttention` | 264 | 167.6 s | 635 ms | **64.1%** |
+| `RepeatKvHeads` | 518 | 35.8 s | 69 ms | 13.7% |
+| `Permute0213` | 1,052 | 30.9 s | 29 ms | 11.8% |
+| `Linear` | 2,112 | 14.7 s | 7 ms | 5.6% |
+| `RmsNorm` | 1,061 | 5.7 s | 5 ms | 2.2% |
+| everything else (15 ops) | 4,726 | 6.9 s | — | 2.6% |
+
+**Attention is the bottleneck and nothing else is close.** 264 calls averaging 635 ms each is not a measurement
+artifact; the three ops beneath it each show a `Max` near 5.1 s, which is one stall being charged to whichever op
+held the host timer, so read their shares as an upper bound rather than a figure. Even so, `RepeatKvHeads` and
+`Permute0213` together issue 1,570 dispatches whose entire job is to reshape and duplicate K/V for an attention
+kernel — work a query-tiled flash kernel consuming head-major q/k/v would not do at all.
+
+This is the measurement ROADMAP §3's Phase 5 was waiting on: the flash-attention rewrite is worth more than every
+other Vulkan op port combined, and the two layout ops are part of its scope rather than separate work.
+
 ## Results — Krea2 real-weight e2e (Phase 7), RTX 4090 — CORRECTNESS FIXED, speed not at parity
 
 **Update 2026-07-30 — the earlier "OUTPUT INVALID" state below was root-caused and fixed.** `DispatchMatmul`
