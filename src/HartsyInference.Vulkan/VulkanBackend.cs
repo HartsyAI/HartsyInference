@@ -2942,7 +2942,6 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Depth-to-space over a 5-D volume: <c>[N, cOut·r², D, H, W]</c> to <c>[N, cOut, D, H·r, W·r]</c>.</summary>
     /// <summary>The VAE's <c>[B,3,H,W]</c> F32 output in <c>[-1,1]</c> to <c>[H,W,3]</c> u8, on the device.</summary>
     /// <remarks>The last step of every image generation, and an interface default here until now — a host loop over
     /// every pixel, preceded by a device sync of the whole F32 image. The pixels have to reach the host either way
@@ -2989,6 +2988,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>Depth-to-space over a 5-D volume: <c>[N, cOut·r², D, H, W]</c> to <c>[N, cOut, D, H·r, W·r]</c>.</summary>
     public void PixelShuffle2d(Tensor output, Tensor input, int ratio)
     {
         using OpScope _op = EnterOp();
