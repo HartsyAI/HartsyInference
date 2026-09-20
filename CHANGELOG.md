@@ -35,6 +35,18 @@ stable release will require. Dates are UTC.
   arm blends; CLIP-L contributes a pooled vector and just needs the grammar taken off. Its hard-coded 95-token
   `CropStart` is now checked against the tokenized template instead of trusted: a tokenizer revision that moved
   the template's length would crop into the prompt and still render something plausible.
+- **HunyuanVideo's text encoder was configured 64 vocabulary rows short of its checkpoint, and the gate is what
+  found it.** It reused `LlamaStyleEncoderConfig.Llama31_8B` (vocab 128256), but
+  `Comfy-Org/HunyuanVideo_repackaged`'s `llava_llama3_*.safetensors` ships `model.embed_tokens.weight` with
+  **128320** rows — the LLaVA fine-tune adds its own specials. Harmless for prompts, since every id a caption
+  produces is below 128256, but it made ComfyUI's declared pad token 128258 unreachable and the weighted run
+  died with "Token id 128258 is outside vocabulary size 128256". A new `LlavaLlama3_8B` config carries the real
+  size; `Llama31_8B` is left alone because HiDream's `llama_3.1_8b_instruct_fp8_scaled` really is 128256.
+- **A correction to how the ComfyBlend baseline rule was stated in alpha.130-131.** "Pad rows always weigh 1, so
+  the baseline's padding is never read" holds only for a FIXED-WINDOW family, where the conditioning's pad rows
+  line up with the baseline's. On a variable-length family the baseline is start-plus-pad at the prompt's own
+  length, so its pad rows sit directly under WEIGHTED prompt rows and are read every time. The pad id is
+  load-bearing there, which is why the short vocabulary above was a hard failure rather than a nuance.
 - **Kandinsky5 and Kandinsky5-Video declare the mode in order to apply NOTHING, and that is parity rather than a
   gap.** SwarmUI's probe puts them on ComfyBlend because CLIP-L keeps weights, but
   `Kandinsky5TEModel.encode_token_weights` (`kandinsky5.py:39-43`) returns the Qwen cond plus CLIP-L's POOLED

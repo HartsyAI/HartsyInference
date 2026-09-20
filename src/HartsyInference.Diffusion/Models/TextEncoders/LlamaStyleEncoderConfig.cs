@@ -286,6 +286,16 @@ public sealed record LlamaStyleEncoderConfig
         BosTokenId = 128_000,
     };
 
+    /// <summary>The LLaVA-Llama-3-8B tower HunyuanVideo conditions on. Identical to <see cref="Llama31_8B"/> except
+    /// for the vocabulary: <c>Comfy-Org/HunyuanVideo_repackaged</c>'s <c>llava_llama3_*.safetensors</c> ships
+    /// <c>model.embed_tokens.weight</c> with <b>128320</b> rows, 64 past plain Llama-3's 128256, because the LLaVA
+    /// fine-tune adds its own specials.</summary>
+    /// <remarks>Reusing <see cref="Llama31_8B"/> here was harmless for prompts — every id a caption produces is
+    /// below 128256 — but it made the top 64 ids unreachable, and ComfyUI's own HunyuanVideo pad token is 128258
+    /// (<c>hunyuan_video.py:32</c>). That is read, not skipped, wherever a weighted prompt row sits above a pad row
+    /// in the ComfyBlend baseline, so the short vocabulary refused the reference baseline outright.</remarks>
+    public static LlamaStyleEncoderConfig LlavaLlama3_8B => Llama31_8B with { VocabSize = 128_320 };
+
     /// <summary>Mistral-Small-3 (BFL Flux.2 Dev distill): 30 layers, hidden=5120, GQA 32:8, head_dim=128, IntermediateSize=32768 (~6.4× ratio — wider FFN than standard Mistral), vocab=131072 (Tekken). No per-head Q/K norm, no final norm — ships as a feature extractor. Verified against <c>Comfy-Org/Flux2/text_encoders/mistral_3_small_flux2_fp8.safetensors</c>.</summary>
     public static LlamaStyleEncoderConfig MistralSmall3 => new()
     {

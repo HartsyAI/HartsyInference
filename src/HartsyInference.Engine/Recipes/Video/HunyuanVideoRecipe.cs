@@ -103,7 +103,7 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
             RecipeBackendFlags.DisableCacheWeightCasts(context, "HunyuanVideoRecipe");
 
             string llavaPath = ModelDownloader.EnsureSideModelAsync(SideModels.LlavaLlama3, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            LlamaStyleEncoder llava = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Llama31_8B);
+            LlamaStyleEncoder llava = new LlamaStyleEncoder(LlamaStyleEncoderConfig.LlavaLlama3_8B);
             llava.LoadWeights(TextEncoderQuantNormalizer.Normalize(LoadStandalone(loaders, llavaPath)));
 
             string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
