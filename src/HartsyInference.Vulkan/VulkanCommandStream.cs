@@ -133,13 +133,19 @@ public sealed class VulkanCommandStream : IDisposable
     /// scope is <c>ComputeShader</c>/<c>ShaderStorageRead</c>, so a transfer that reads the same buffer is outside
     /// it, and a transfer that writes one is outside the source scope of the next dispatch's barrier in the same
     /// way. Both directions are hazards the spec makes the caller close explicitly, and neither fails loudly — the
-    /// copy reads or is read at whatever point the driver happens to schedule it.</remarks>
+    /// copy reads or is read at whatever point the driver happens to schedule it.
+    ///
+    /// <para>The scopes name transfer on BOTH sides as well as compute. Two copies from different ops land back to
+    /// back with only a dispatch's compute→compute barrier between them, which orders neither, and synchronization
+    /// validation reports exactly that pair as its most common hazard by an order of magnitude.</para></remarks>
     public void RecordComputeToCopyBarrier() => RecordComputeToCopyBarrierOn(AcquireRecording());
 
     /// <inheritdoc cref="RecordComputeToCopyBarrier"/>
     public static unsafe void RecordComputeToCopyBarrierOn(nint cb)
         => RecordGlobalBarrierOn(cb,
-            VkPipelineStageFlags2.ComputeShader, VkAccessFlags2.ShaderStorageWrite,
+            VkPipelineStageFlags2.ComputeShader | VkPipelineStageFlags2.Copy,
+            VkAccessFlags2.ShaderStorageWrite | VkAccessFlags2.ShaderStorageRead
+                | VkAccessFlags2.TransferWrite | VkAccessFlags2.TransferRead,
             VkPipelineStageFlags2.Copy, VkAccessFlags2.TransferRead | VkAccessFlags2.TransferWrite);
 
     /// <summary>The second half of <see cref="RecordComputeToCopyBarrierOn"/> — a copy's writes made visible to
@@ -149,8 +155,10 @@ public sealed class VulkanCommandStream : IDisposable
     /// <inheritdoc cref="RecordCopyToComputeBarrier"/>
     public static unsafe void RecordCopyToComputeBarrierOn(nint cb)
         => RecordGlobalBarrierOn(cb,
-            VkPipelineStageFlags2.Copy, VkAccessFlags2.TransferWrite,
-            VkPipelineStageFlags2.ComputeShader, VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
+            VkPipelineStageFlags2.Copy, VkAccessFlags2.TransferWrite | VkAccessFlags2.TransferRead,
+            VkPipelineStageFlags2.ComputeShader | VkPipelineStageFlags2.Copy,
+            VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite
+                | VkAccessFlags2.TransferRead | VkAccessFlags2.TransferWrite);
 
     private static unsafe void RecordGlobalBarrierOn(nint cb, ulong srcStage, ulong srcAccess, ulong dstStage, ulong dstAccess)
     {
