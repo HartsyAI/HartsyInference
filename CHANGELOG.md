@@ -32,8 +32,12 @@ stable release will require. Dates are UTC.
   discard — attention is this backend's own shaders — but a caller reaching a phase boundary does need the
   previous phase's attention to have stopped reading the memory it is about to reuse.
 - **The model-swap soak is no longer CUDA-only.** Its new cross-backend theory runs the shape a server actually
-  runs — one backend, many models through it — and asserts the device memory comes back each time. It fails on the
-  first swap with `FreeAllDeviceMemory` a no-op, which is the regression it exists to hold.
+  runs — one backend, many models through it — and asserts the device memory comes back each time. Measured on both:
+  cuda 61 MB and vulkan 8 MB unreturned across four swaps. What it does NOT do is hold this change: neutering the
+  release calls and re-running leaves it green, because disposing a model disposes its tensors and each tensor's
+  binding releases its own buffer. The regression is held by the Vulkan device tests, where 3 of 4 fail the moment
+  the release path goes inert. That is the honest shape of the defect — bounded by tensor lifetime rather than an
+  unbounded leak, with the loss being release at the named boundary the engine actually asks for it at.
 
 ## alpha.132
 
