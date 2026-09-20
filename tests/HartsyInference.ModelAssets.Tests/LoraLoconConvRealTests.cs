@@ -92,6 +92,11 @@ public sealed class LoraLoconConvRealTests
     }
 
     /// <summary>Rank-4 modules are the ones whose down weight keeps its kernel axes.</summary>
+    /// <remarks>Local to this test and to this file. The variant check is what makes reading <c>LoraDown</c> safe,
+    /// but it also means this counts conv modules only where they arrive as a standard LoRA delta — which is every
+    /// module in the kohya LoCon under test, and not the general rule. Production asks the question the other way
+    /// round, from the checkpoint's own base-weight rank (<c>LoraStack.DeltaShapeMatches</c>), so it also sees the
+    /// conv modules of a DoRA, LoHa or LoKr. Lifting this helper anywhere else would silently undercount those.</remarks>
     private static bool IsConv(LoraLayer layer) =>
         layer.Variant == LoraVariant.StandardLora && layer.LoraDown.Shape.Rank == 4;
 

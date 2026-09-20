@@ -37,6 +37,29 @@ public sealed class VideoCommandContractTests
         Assert.Equal(typeof(double[]), weights.PropertyType);
     }
 
+    /// <summary>Every command that composes LoRAs offers the same two options, spelled the same way.</summary>
+    /// <remarks>`hartsy image` shipped without them: `ImageRequest.Loras` existed and the dispatch built a stack,
+    /// but no option ever set it, so a documented feature had no way to be reached from the one command most likely
+    /// to want it. A reflection test is what catches that class — the code compiles and runs perfectly with the
+    /// option absent.</remarks>
+    [Theory]
+    [InlineData(typeof(ImageCommand.Settings))]
+    [InlineData(typeof(VideoCommand.Settings))]
+    [InlineData(typeof(InspectCommand.Settings))]
+    public void EveryLoraComposingCommandTakesTheSameTwoOptions(Type settings)
+    {
+        PropertyInfo? loras = settings.GetProperty("Loras");
+        PropertyInfo? weights = settings.GetProperty("LoraWeights");
+
+        Assert.NotNull(loras);
+        Assert.NotNull(weights);
+        Assert.Contains("lora", loras!.GetCustomAttribute<CommandOptionAttribute>()!.LongNames);
+        Assert.Contains("lora-weight", weights!.GetCustomAttribute<CommandOptionAttribute>()!.LongNames);
+        // Arrays, because both options repeat: one --lora per adapter, one --lora-weight per adapter.
+        Assert.Equal(typeof(string[]), loras.PropertyType);
+        Assert.Equal(typeof(double[]), weights.PropertyType);
+    }
+
     [Fact]
     public void InspectDowngradesMissingRuntimeMediaButPreservesReleaseAndStructuralFailures()
     {
