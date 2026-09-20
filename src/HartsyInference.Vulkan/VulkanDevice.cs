@@ -472,9 +472,6 @@ public sealed class VulkanDevice : IDisposable
         return device;
     }
 
-    /// <summary>Blocks until all GPU work submitted to any queue on this device has completed.</summary>
-    public void WaitIdle() => VulkanApi.vkDeviceWaitIdle(Handle).ThrowOnError("vkDeviceWaitIdle");
-
     public void Dispose()
     {
         if (_device != 0)

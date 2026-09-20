@@ -48,17 +48,12 @@ public enum VkStructureType
     InstanceCreateInfo = 1,
     DeviceQueueCreateInfo = 2,
     DeviceCreateInfo = 3,
-    SubmitInfo = 4,
     MemoryAllocateInfo = 5,
     MappedMemoryRange = 6,
-    BindSparseInfo = 7,
     FenceCreateInfo = 8,
     SemaphoreCreateInfo = 9,
-    EventCreateInfo = 10,
     QueryPoolCreateInfo = 11,
     BufferCreateInfo = 12,
-    BufferViewCreateInfo = 13,
-    ImageCreateInfo = 14,
     ShaderModuleCreateInfo = 16,
     PipelineCacheCreateInfo = 17,
     PipelineShaderStageCreateInfo = 18,
@@ -68,12 +63,9 @@ public enum VkStructureType
     DescriptorPoolCreateInfo = 33,
     DescriptorSetAllocateInfo = 34,
     WriteDescriptorSet = 35,
-    CopyDescriptorSet = 36,
     CommandPoolCreateInfo = 39,
     CommandBufferAllocateInfo = 40,
     CommandBufferBeginInfo = 42,
-    BufferMemoryBarrier = 44,
-    MemoryBarrier = 46,
 
     PhysicalDeviceFeatures2 = 1000059000,
     PhysicalDeviceProperties2 = 1000059001,
@@ -81,17 +73,13 @@ public enum VkStructureType
     PhysicalDeviceSubgroupProperties = 1000094000,
 
     PhysicalDeviceVulkan11Features = 49,
-    PhysicalDeviceVulkan11Properties = 50,
     PhysicalDeviceVulkan12Features = 51,
-    PhysicalDeviceVulkan12Properties = 52,
     PhysicalDeviceVulkan13Features = 53,
-    PhysicalDeviceVulkan13Properties = 54,
 
     PipelineShaderStageRequiredSubgroupSizeCreateInfo = 1000225001,
     PhysicalDeviceSubgroupSizeControlProperties = 1000225000,
 
     SemaphoreTypeCreateInfo = 1000207002,
-    SemaphoreSignalInfo = 1000207005,
     SemaphoreWaitInfo = 1000207004,
 
     PhysicalDeviceMemoryBudgetProperties = 1000237000,
@@ -105,11 +93,9 @@ public enum VkStructureType
 
     PhysicalDeviceCooperativeMatrixFeaturesKHR = 1000506000,
     CooperativeMatrixPropertiesKHR = 1000506001,
-    PhysicalDeviceCooperativeMatrixPropertiesKHR = 1000506002,
 
     PhysicalDeviceCooperativeMatrix2FeaturesNV = 1000593000,
     CooperativeMatrixFlexibleDimensionsPropertiesNV = 1000593001,
-    PhysicalDeviceCooperativeMatrix2PropertiesNV = 1000593002,
 }
 
 /// <summary>VkBufferUsageFlags — bits we actually use.</summary>

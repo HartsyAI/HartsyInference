@@ -1,34 +1,10 @@
-// matmul_coopmat_partial_m: coopmat GEMM variant for when M is NOT a multiple of 16 (N and K still
-// must be — this is Krea2's real, measured case: the joint text+image sequence length is prompt-
-// token-count-dependent and essentially never lands on a multiple of 16, while hidden/head/FFN dims
-// always are, fixed architecture hyperparameters). matmul_coopmat.comp.glsl's fixed-size 16x16x16
-// coopMatLoad/coopMatStore have no partial-tile handling and would read/write past the real A/C
-// buffers' actual extent for the boundary row-tile — this is a SEPARATE FILE, not a branch inside
-// matmul_coopmat.comp.glsl, specifically so the existing, already-proven aligned fast path compiles
-// to a BYTE-IDENTICAL artifact with zero new shared-memory footprint and zero risk from this variant.
+// matmul_coopmat_partial_m: coopmat GEMM for M NOT a multiple of 16 (N and K still must be). The fixed-size
+// 16x16x16 coopMatLoad/coopMatStore in matmul_coopmat.comp.glsl have no partial-tile handling and would read
+// and write past A's and C's real extent on the boundary row-tile.
 //
-// Design: mirrors matmul_tiled.comp.glsl's own bounds-checked cooperative shared-memory staging
-// idiom (load with a scalar `if (row < pc.M)` check, zero-fill out-of-range, barrier(), then read
-// from the guaranteed-in-bounds shared copy) instead of the earlier (reverted — see
-// docs/Checklists/TROUBLESHOOTING.md) host-side scratch-buffer + device-to-device-copy approach,
-// which caused a real ErrorDeviceLost. Everything here happens inside ONE dispatch's own shared
-// memory — no separate command buffer, no cross-submission barrier, avoiding that entire risk class.
-// coopMatLoad/coopMatStore against `shared` memory is used only against the EXACTLY-sized (BM x
-// FRAG_K / BM x BN) scratch arrays below, which can never be out of bounds regardless of the real
-// M — only the ORDINARY scalar staging/drain loops (indexed by real (row, col), not by coopmat's
-// implementation-defined per-lane index) ever touch the real, possibly-short A/C buffers, and only
-// under an explicit bounds check. Per-element coopmat fragment access (`frag[i]`) is used ONLY for
-// the Accumulator type's epilogue (alpha/beta/bias — matching the base kernel exactly, and matching
-// the ONE thing the KHR_cooperative_matrix extension actually guarantees a stable, cross-fragment-
-// consistent (if not portably-absolute) per-lane mapping for); A/B "MatrixUse" fragments are never
-// hand-constructed element-by-element, since that mapping is not portable across vendors.
-//
-// Spec consts: same numbering as matmul_coopmat.comp.glsl (BM, BN, SUBGROUP_SIZE, TRANSPOSE_A,
-// TRANSPOSE_B, OUTPUT_F32, HAS_BIAS) so the host's existing SpecConstant array can be reused as-is.
-// N and K are NOT handled here — the host must guarantee they're already exact multiples of 16
-// before selecting this variant (matmul_coopmat.comp.glsl's original N/K gate, unchanged).
-//
-// Bindings: identical to matmul_coopmat.comp.glsl (0=A, 1=B, 2=C, 3=bias, 4=Cf32).
+// A separate file rather than a branch inside that kernel: the bounds handling changes its codegen, and the
+// aligned kernel is on a shipped path.
+
 #version 460
 
 #extension GL_KHR_cooperative_matrix : require

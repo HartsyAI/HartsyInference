@@ -1,41 +1,11 @@
-// matmul_coopmat2: GEMM via VK_NV_cooperative_matrix2 — a genuinely different instruction/memory path from
-// matmul_coopmat.comp.glsl / matmul_coopmat_blocked.comp.glsl, not just a different tiling strategy over the
-// same coopmat1 instructions. Built after the 2026-07-31 GPU-profiling breakthrough (see
-// docs/Checklists/TROUBLESHOOTING.md) showed VK_KHR_cooperative_matrix (coopmat1, subgroup-scope,
-// 16x16x16 fragments) has IDENTICAL real GPU throughput to the plain scalar fallback kernel on this RTX
-// 4090 — i.e. coopMatMulAdd isn't buying any real tensor-core advantage via that API on this driver.
-// coopmat2 (VK_NV_cooperative_matrix2) is architecturally distinct: WORKGROUP scope (the entire workgroup
-// cooperates on ONE big matrix multiply instead of each subgroup doing its own independent 16x16 tile),
-// addressed via tensorLayoutNV descriptors + coopMatLoadTensorNV/coopMatStoreTensorNV directly against
-// global memory (no manual shared-memory staging — the driver handles cooperative loading internally), with
-// built-in bounds CLAMPING (gl_CooperativeMatrixClampModeConstantNV: out-of-bounds reads return 0,
-// out-of-bounds writes are dropped) so M/N/K need not be multiples of the tile size at all — unlike every
-// coopmat1 kernel in this codebase, no manual partial-tile bounds-checking is needed here.
+// matmul_coopmat2: GEMM via VK_NV_cooperative_matrix2 (workgroup scope), a different instruction and memory
+// path from the coopmat1 kernels rather than a different tiling of them.
 //
-// Modeled on ggml/llama.cpp's mul_mm_cm2.comp (fetched directly from the ggml-org/llama.cpp repo — see
-// docs/Checklists/TROUBLESHOOTING.md for the URL) but drastically simplified: no quantization, no MoE
-// (MUL_MAT_ID) row remapping, no K-splitting, no register-blocked sub-tiling, no alpha/beta epilogue — this
-// started as a diagnostic asking ONE question (does the coopmat2 instruction path alone go faster than
-// coopmat1 on real GEMM shapes?) and is now wired into DispatchMatmul behind VulkanBackend.EnableCoopMat2
-// (opt-in, off by default — see that property's doc comment).
-//
-// Specialized for TRANSPOSE_A=false, TRANSPOSE_B=true (A:[M,K] row-major, B:[N,K] row-major) — the only
-// combination the production Linear path and existing coopmat diagnostics actually exercise; a genuinely
-// different combination would need its own tensorLayoutNV dimension/stride setup, not a spec-constant flag.
-//
-// Bias epilogue (HAS_BIAS, 2026-07-31): a real Krea2 e2e run found the original follow-up-BroadcastAdd-
-// dispatch design measured FASTER in isolated GPU-only-time benchmarks but SLOWER in real wall-clock — the
-// extra dispatch's host-side submission + the unconditional per-dispatch VkMemoryBarrier2 (see ROADMAP.md's
-// "per-dispatch barrier scoping" entry) isn't visible to a VkQueryPool-timestamp-only measurement, but it's
-// very real. Fused directly here instead via a broadcast tensorLayoutNV (stride 0 on the M dimension, so
-// every row's coopMatLoadTensorNV reads the same underlying bias[n] regardless of row) loaded straight into
-// an Accumulator-typed coopmat and added to the matmul result — no shared memory, no extra dispatch.
-//
-// Tile shape (BM, BN) is spec-constant, HOST-SUPPLIED from VulkanCapabilities.CoopMat2{M,N}Granularity —
-// the actual "flexible dimensions" configuration the driver reported via
-// vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV (see VulkanDevice.CoopMat2Supported).
-// local_size_x is likewise host-supplied from CoopMat2WorkgroupInvocations — mismatching it against what
-// the driver expects for this BM/BN config is undefined behavior per the NV_cooperative_matrix2 spec.
+// Unlike every coopmat1 kernel here, this one needs no partial-tile handling: tensorLayoutNV addressing with
+// gl_CooperativeMatrixClampModeConstantNV clamps out-of-bounds reads to 0 and drops out-of-bounds writes, so
+// M/N/K need not be multiples of the tile size. Modeled on ggml/llama.cpp's mul_mm_cm2.comp, without
+// quantization or MoE. See docs/Checklists/TROUBLESHOOTING.md for why coopmat1 did not pay off here.
+
 #version 460
 
 #extension GL_KHR_cooperative_matrix : require

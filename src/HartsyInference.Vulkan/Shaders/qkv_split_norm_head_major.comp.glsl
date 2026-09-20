@@ -1,26 +1,16 @@
-// qkv_split_norm_head_major: the head-major twin of qkv_split_norm, and the subset-emitting one.
+// qkv_split_norm_head_major: head-major, subset-emitting twin of qkv_split_norm.
 //   qkv[token, packStride*w] -> q/k/v each [B, heads, seq, headDim]
 //   q and k are RMS-normed over headDim and scaled by their per-dim weight; v is copied.
 //
-// Two things separate it from qkv_split_norm, and both come from MiniMaxH3Transformer's chunked attention:
+// packStride is how many w-wide segments the packed source holds; qSlot/kSlot/vSlot say which segment each
+// output reads, negative meaning not produced. An output that is not produced still has a descriptor bound
+// (Vulkan has no optional binding) and the caller binds a produced output's buffer there; every store is
+// slot-guarded so nothing writes through it.
 //
-//   1. Head-major output. The token-major kernel writes token*w + h*headDim; here a head walks the whole
-//      sequence before the next one starts, so the row is ((b*heads + h)*seq + s)*headDim. Emitting this
-//      layout is what lets the caller feed SDPA without a Permute0213 in between.
-//
-//   2. A subset of q/k/v, from a source that may itself be narrower than [q|k|v]. packStride is how many
-//      w-wide segments the packed source holds and qSlot/kSlot/vSlot say which segment each output reads,
-//      negative meaning "not produced". That is what lets the chunked attention project k+v in one pass and
-//      q in the next, so a full-sequence q never stays resident across the pass boundary.
-//
-// A separate kernel rather than spec constants on qkv_split_norm: that one is on Krea2's shipped path and
-// CUDA split its own for the same reason — folding the slot guards in changed the fused kernel's codegen
-// enough to move real generation output.
-//
-// An output that is not produced still has a descriptor bound (Vulkan has no optional binding), and the
-// caller binds a produced output's buffer there. Nothing writes through it — every store is slot-guarded.
+// A separate kernel rather than spec constants on qkv_split_norm, which is on a shipped generation path.
 //
 // Bindings: 0=qkv (in), 1=qWeight (in, per-dim), 2=kWeight (in, per-dim), 3=q (out), 4=k (out), 5=v (out)
+
 #version 460
 #extension GL_KHR_shader_subgroup_basic      : require
 #extension GL_KHR_shader_subgroup_arithmetic : require

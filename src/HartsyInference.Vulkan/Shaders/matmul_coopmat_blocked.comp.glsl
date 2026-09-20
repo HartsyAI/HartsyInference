@@ -1,31 +1,10 @@
-// matmul_coopmat_blocked: register-blocked coopmat GEMM — the real fix for the ~30-160x Vulkan-vs-CUDA
-// GEMM gap measured in benchmarks/scoreboards/VULKAN.md, NOT a shape-alignment issue (that was already
-// closed by matmul_coopmat_partial_m.comp.glsl and measured to buy ~0 wall-clock — see
-// docs/Checklists/TROUBLESHOOTING.md's 2026-07-31 entries).
+// matmul_coopmat_blocked: register-blocked coopmat GEMM. Each subgroup accumulates a grid of coopmat
+// fragments in registers rather than one, so the A and B tiles staged into shared memory are reused across
+// several output tiles instead of being re-read per fragment.
 //
-// Root cause found by reading ggml/llama.cpp's actual Vulkan GEMM source (mul_mm.comp/mul_mm_funcs.glsl,
-// not just its PR descriptions): matmul_coopmat.comp.glsl has each SUBGROUP compute exactly ONE 16x16
-// output tile via coopMatLoad DIRECTLY from global memory, once per K-step — one global load pays for
-// exactly one coopMatMulAdd. ggml's kernel instead cooperatively stages a whole BMxBK / BKxBN tile into
-// WORKGROUP SHARED MEMORY once per K-block, then has EACH SUBGROUP compute a GRID of output tiles
-// (register blocking: WM/16 x WN/16 accumulators) by re-reading that ONE staged tile multiple times —
-// dramatically raising arithmetic intensity (FLOPs per byte of global-memory traffic) without any change
-// to raw ALU throughput. This is classic tiled-GEMM optimization theory, not a Vulkan-specific technique;
-// our naive 1-accumulator-per-subgroup design was leaving the tensor cores starved on memory bandwidth.
-//
-// This file is a STANDALONE, NOT-YET-WIRED-IN kernel (no VulkanBackend call site references it) —
-// deliberately isolated so its throughput can be benchmarked in isolation via
-// benchmarks/HartsyInference.GpuBenchmarks (the same methodology as the existing GEMM scoreboard) before
-// any integration risk is taken on. See ROADMAP.md/TROUBLESHOOTING.md for the benchmark results and the
-// integration decision.
-//
-// Design (fixed for this first pass, not yet parameterized like ggml's full generality):
-//   BM=BN=64 (workgroup output tile), WM=WN=32 (per-subgroup output tile -> 2x2=4 subgroups/workgroup),
-//   TM=TN=FRAG=16 (coopmat fragment, hardware-fixed), so each subgroup owns cms_per_row*cms_per_col =
-//   (WM/16)*(WN/16) = 2*2 = 4 accumulators. BK=32 (two FRAG_K=16 coopmat steps staged per barrier round,
-//   halving barrier count vs staging every 16 elements).
-//
-// Spec consts: same numbering convention as matmul_coopmat.comp.glsl where they overlap.
+// Modeled on ggml/llama.cpp's mul_mm.comp. See benchmarks/scoreboards/VULKAN.md for where the GEMM gap
+// stands and docs/Checklists/TROUBLESHOOTING.md for the paths already ruled out.
+
 #version 460
 
 #extension GL_KHR_cooperative_matrix : require

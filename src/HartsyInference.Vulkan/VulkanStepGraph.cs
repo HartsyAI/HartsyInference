@@ -1,29 +1,11 @@
 namespace HartsyInference.Vulkan;
 
-/// <summary>Vulkan-native analog of <c>HartsyInference.Cuda.CudaGraph</c>: records a fixed op sequence into a single, persistent <c>VkCommandBuffer</c> once, then replays it with a plain resubmit — collapsing the per-op host dispatch/descriptor/submit overhead of a hand-written-kernel backend into one host call per step. See <c>docs/Checklists/ROADMAP.md</c>'s Phase 6e/7 entries for why this needed real design work (a pool-allocated descriptor set can be invalidated by a later pool reset while a replayed command buffer still references it — undefined behavior) rather than a direct port of CUDA Graph capture (which has no descriptor-binding concept at all, and whose allocation-node semantics have no Vulkan equivalent).</summary>
-/// <remarks>
-/// <para><b>Descriptor safety</b>: every dispatch recorded during capture uses <c>vkCmdPushDescriptorSet</c>
-/// (via <see cref="VulkanDescriptorManager.PushSet"/>, always, regardless of the process's default eager-mode
-/// descriptor strategy) against a push-descriptor-flavored pipeline (<c>VulkanKernelRegistry.Get(..., forCapture:
-/// true)</c>). Push descriptors write the buffer bindings directly into the command stream — there is no
-/// external <c>VkDescriptorSet</c> object a later pool flip could invalidate.</para>
-/// <para><b>Buffer lifetime</b>: a captured command buffer bakes device buffer addresses at record time. Every
-/// transient buffer the model's normal per-op allocate/dispose cycle touches during capture is redirected by
-/// <see cref="VulkanGpuTransferHelper.CapturingStepGraph"/> to a retain list instead of being freed, and stays
-/// alive for the graph's entire lifetime (freed in bulk by <see cref="VulkanGpuTransferHelper.ReleaseStepGraphRetained"/>
-/// when the graph is reset). There is no bump-pointer arena or address-remapping — buffers simply aren't freed
-/// until the graph itself is torn down, which is both simpler and correct: the exact same allocation sequence
-/// happens on every real forward pass, so "don't free between replays" is sufficient.</para>
-/// <para><b>Command buffer flags</b>: recorded with plain (no <c>ONE_TIME_SUBMIT</c>, no <c>SIMULTANEOUS_USE</c>)
-/// begin flags, replayed via a fence-waited <c>vkQueueSubmit2</c> per launch. This is correct for a strictly
-/// serial step loop (one launch fully completes before the next begins) but is a deliberate v1 floor, not an
-/// oversight: it gives the host-overhead win without submission/execution overlap across steps. Pipelining
-/// replays (double-buffered command buffers + a semaphore instead of a blocking fence wait) is a follow-up if
-/// profiling shows fence-wait latency is itself a meaningful fraction of the per-step cost.</para>
-/// <para><b>No cross-graph reuse of the fixed pool/pipeline layouts</b>: the push-descriptor pipeline variant a
-/// capture uses is cached by <see cref="VulkanKernelRegistry"/> exactly like the normal-mode one, keyed by
-/// <c>KernelKey.ForCapture</c> — no extra bookkeeping needed here.</para>
-/// </remarks>
+/// <summary>Vulkan analog of <c>CudaGraph</c>: records a fixed op sequence into one persistent
+/// <c>VkCommandBuffer</c> and replays it with a resubmit, collapsing per-op host overhead into one call per step.</summary>
+/// <remarks>Capture uses push descriptors against a push-descriptor pipeline variant, because a pool-allocated
+/// set can be invalidated by a later pool reset while a replayed buffer still references it. A captured buffer
+/// also bakes device addresses, so transients allocated during capture are retained, not freed, until the graph
+/// is reset. Replay is a fence-waited submit per launch, correct only for a strictly serial step loop.</remarks>
 public sealed unsafe class VulkanStepGraph(nint device, nint queue, uint queueFamilyIndex) : IDisposable
 {
     private readonly nint _device = device;
