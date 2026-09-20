@@ -138,13 +138,13 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
         // OOM retry path: when an allocation fails, force the stream to submit and wait for the
         // GPU, drain the deferred-free list, then release any fully-empty slab blocks back to the
-        // device. Mirrors CudaMemory.Allocate's retry path.
+        // device. Mirrors CudaMemory.Allocate's retry path — and is the same work TrimMemoryPool asks
+        // for at a phase boundary, so it is spelled once.
         _allocator.OnOutOfMemory = () =>
         {
             try
             {
-                _stream.WaitIdleHost();
-                _allocator.ReleaseEmptySlabs();
+                TrimMemoryPoolCore();
             }
             catch (Exception ex)
             {
@@ -381,6 +381,41 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     /// <remarks>Nothing to do on entry: Vulkan has no current-context notion, and the drain and sweep the base
     /// performs are the whole of what this backend needed here.</remarks>
     protected override void OnOpBegin(string opName) { }
+
+    /// <inheritdoc/>
+    /// <remarks>Waits first. A slab is only empty once the deferred frees standing against the timeline have been
+    /// serviced, so trimming without draining releases whatever happens to be free at that instant and reports
+    /// success having returned almost nothing.</remarks>
+    protected override void TrimMemoryPoolCore()
+    {
+        _stream.WaitIdleHost();
+        _allocator.ReleaseEmptySlabs();
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>A captured step graph records device addresses into its command buffer, so the activations about
+    /// to be freed are baked into it — replaying it afterwards reads memory the allocator has taken back. Owners
+    /// detect the reset through <see cref="StepGraphReady"/> and re-capture.</remarks>
+    protected override void OnActivationsFreeing()
+    {
+        if (_stepGraph is null)
+        {
+            return;
+        }
+        StepGraphReset();
+        StepGraphOwner = null;
+    }
+
+    /// <summary>Drains attention work in flight. There is no plan cache to discard: this backend's attention is
+    /// its own shaders, whose pipelines are the kernel registry's and outlive any one phase.</summary>
+    /// <remarks>Implemented rather than left as the interface no-op because the drain is the half of the contract
+    /// that does apply — a caller reaches this at a phase boundary precisely to be sure the previous phase's
+    /// attention is no longer reading the memory it is about to reuse.</remarks>
+    public void ReleaseAttentionExecutionCache()
+    {
+        using OpScope _op = EnterOp();
+        Sync();
+    }
 
     /// <inheritdoc/>
     protected override void OnOpEnd(string opName, int dispatches)

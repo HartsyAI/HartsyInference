@@ -18,10 +18,16 @@ namespace HartsyInference.Cuda.Tests;
 /// place.</para>
 ///
 /// <para>Prerequisite for migrating the CUDA residency cache onto the shared base: the bugs that migration is most
-/// likely to introduce are teardown bugs, and a test that never tears down twice cannot find them.</para></summary>
+/// likely to introduce are teardown bugs, and a test that never tears down twice cannot find them.</para>
+///
+/// <para>Two tests, because the question has two halves. The CUDA one below asks whether a torn-down backend's
+/// state is retired and its registry entry gone, which is CUDA's own mechanism. The cross-backend one asks the
+/// portable question — whether a backend an engine keeps for its lifetime gives its device memory back when a
+/// model is swapped through it — and that one is where a backend whose <c>FreeAllDeviceMemory</c> does nothing
+/// shows up, rather than in any single generation.</para></summary>
 [Collection("CudaSerial")]
 [Trait("Category", "GpuIntegration")]
-public sealed class CudaModelSwapSoakTests
+public sealed class ModelSwapSoakTests
 {
     private const string Prompt = "Write one sentence about a lighthouse.";
     private const int MaxTokens = 24;
@@ -33,7 +39,7 @@ public sealed class CudaModelSwapSoakTests
 
     private readonly ITestOutputHelper _output;
 
-    public CudaModelSwapSoakTests(ITestOutputHelper output) => _output = output;
+    public ModelSwapSoakTests(ITestOutputHelper output) => _output = output;
 
     /// <summary>Set to 1 to turn "the models are not on this box" from a skip into a failure.</summary>
     /// <remarks>The suite's convention is to print SKIPPED and return, which xunit records as a PASS — fine for a
@@ -175,6 +181,87 @@ public sealed class CudaModelSwapSoakTests
         foreach (nint key in keys)
         {
             Assert.DoesNotContain(key, GpuTransferHelper.RegisteredStateKeysForTests);
+        }
+    }
+
+    /// <summary>The shape a server actually runs: ONE backend, many models through it. Load, generate, release,
+    /// load a different family, generate, release — and the device memory the backend is holding comes back each
+    /// time, rather than at whatever later moment the GC reaches the tensors.</summary>
+    /// <remarks>The release call is the subject, so it is deliberately the only thing between rounds: with
+    /// <c>FreeAllDeviceMemory</c> a no-op — which it was on every backend but CUDA — this fails on the first
+    /// swap. Model choice is the smallest pair that still crosses families and quantizations, because a backend
+    /// that cannot hold a packed weight dequantizes on load, and the 4B the CUDA test uses costs sixteen
+    /// gigabytes and several minutes there.
+    ///
+    /// <para>Free VRAM is read from the SAME backend throughout. A fresh probe instance would report a Vulkan
+    /// device as entirely free whatever the previous one was holding, since that figure is the total minus what
+    /// the asking allocator has taken.</para></remarks>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void SwappingModelsThroughOneBackend_ReturnsItsDeviceMemory(string kind)
+    {
+        string[] models = [TestPaths.Llm.Llama32_1BQ8, TestPaths.Llm.Qwen25_05BQ4KM];
+        if (models.FirstOrDefault(path => !File.Exists(path)) is string missing)
+        {
+            Assert.False(Environment.GetEnvironmentVariable(RequireVar) == "1",
+                $"{RequireVar}=1 but the soak cannot run: model not found: {missing}");
+            _output.WriteLine($"SKIPPED: model not found: {missing}");
+            return;
+        }
+        if (!BackendGate.TryOpen(kind, _output.WriteLine, out IBackend? opened))
+        {
+            return;
+        }
+        using IBackend backend = opened!;
+
+        // One full cycle before the baseline. First touch brings up pipelines, descriptor pools and the first
+        // slabs, none of which come back, and measuring from before that reads start-up cost as a leak.
+        SwapOneModelThrough(backend, models[0]);
+        ForceFullGc();
+        long freeBefore = backend.GetVramInfo().FreeBytes;
+
+        for (int round = 0; round < Rounds; round++)
+        {
+            foreach (string path in models)
+            {
+                SwapOneModelThrough(backend, path);
+                ForceFullGc();
+            }
+        }
+
+        long freeAfter = backend.GetVramInfo().FreeBytes;
+        long unreturned = freeBefore - freeAfter;
+        _output.WriteLine($"[{kind}] free VRAM {freeBefore >> 20} MB -> {freeAfter >> 20} MB after "
+            + $"{Rounds * models.Length} swaps ({unreturned >> 20} MB unreturned)");
+        Assert.True(unreturned < LeakToleranceBytes,
+            $"[{kind}] {unreturned >> 20} MB of device memory was not returned across "
+            + $"{Rounds * models.Length} model swaps through one backend");
+    }
+
+    /// <summary>Loads a model onto this backend, generates, and releases every device allocation it made.</summary>
+    /// <remarks>Not inlined, for the same reason as <see cref="RunOneModel"/>: the model and its tensors have to
+    /// be unreachable before the caller collects, and a local in the enclosing scope stays rooted.</remarks>
+    private void SwapOneModelThrough(IBackend backend, string path)
+    {
+        // A backend that cannot read a packed weight needs it widened on load — the same question the engine's
+        // own loaders ask, asked the same way, so this test degrades exactly as production does.
+        GgufLanguageModel model = GgufLanguageModel.Load(path, dequantizeToF32: !backend.Capabilities.SupportsQuantized);
+        try
+        {
+            TextGenerationPipeline pipeline = new(model.Transformer, model.Tokenizer, backend, model.Template);
+            GenerationResult result = pipeline.Generate(new GenerationRequest
+            {
+                Prompt = Prompt,
+                MaxTokens = MaxTokens,
+                Sampling = SamplingOptions.Default with { Greedy = true },
+            });
+            Assert.NotEmpty(result.TokenIds);
+            _output.WriteLine($"  {Path.GetFileName(path)}: {result.TokenIds.Count} tokens");
+        }
+        finally
+        {
+            model.Dispose();
+            backend.FreeAllDeviceMemory();
         }
     }
 }

@@ -118,25 +118,45 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     /// <inheritdoc/>
     protected override VulkanBuffer AllocateDevice(long bytes) => AllocateDevice((ulong)bytes);
 
-    /// <summary>True while tearing everything down, when a deferred free would never be serviced.</summary>
-    private bool _tearingDown;
+    /// <summary>True inside a bulk release, which has already drained the stream and is not followed by a flush.</summary>
+    private bool _releasingInBulk;
 
     /// <inheritdoc/>
     /// <remarks>Deferred, not immediate: the stream may still hold recorded work referencing this buffer, so it is
     /// released against the timeline rather than destroyed now.
     ///
-    /// <para>Except during teardown. A deferred free is serviced by a later flush, and at teardown there is no later
-    /// flush — the device is about to be destroyed, and the buffer's own finalizer would then call
-    /// <c>vkDestroyBuffer</c> against a destroyed device. That is not theoretical: it crashed the test host with
-    /// <c>vkDestroyBuffer: Invalid device</c> the first time this cache deferred its teardown frees.</para></remarks>
+    /// <para>Except inside a bulk release, where deferring would strand every byte it was asked to reclaim. A
+    /// deferred free is tagged with the tick the NEXT submit will take, and a bulk release ends there — nothing
+    /// records afterwards, so the timeline never reaches that tick and the buffers sit allocated until whatever
+    /// work happens to come next. Each of these paths drains the stream before releasing anything, so by here no
+    /// command buffer can still reference what is being destroyed.</para>
+    ///
+    /// <para>For teardown specifically it is not merely wasteful but fatal: the device is about to be destroyed and
+    /// the buffer's own finalizer would then call <c>vkDestroyBuffer</c> against it, which crashed the test host
+    /// with <c>vkDestroyBuffer: Invalid device</c> the first time this cache deferred its teardown frees.</para></remarks>
     protected override void FreeDevice(VulkanBuffer buffer, long bytes)
     {
-        if (_tearingDown)
+        if (_releasingInBulk)
         {
             buffer.Dispose();
             return;
         }
         _stream.DeferredFree(buffer);
+    }
+
+    /// <summary>Runs a bulk release with the stream drained first and the frees taken immediately.</summary>
+    private void ReleaseInBulk(Action release)
+    {
+        _stream.WaitIdleHost();
+        _releasingInBulk = true;
+        try
+        {
+            release();
+        }
+        finally
+        {
+            _releasingInBulk = false;
+        }
     }
 
     /// <inheritdoc/>
@@ -218,32 +238,26 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     /// <summary>Releases these weights and their conversions, after waiting for work that might still read them.</summary>
     public override void FreeWeights(IEnumerable<Tensor> weights)
     {
-        _stream.WaitIdleHost();
-        base.FreeWeights(weights);
+        Tensor[] materialized = [.. weights];
+        ReleaseInBulk(() => base.FreeWeights(materialized));
     }
+
+    /// <summary>Releases every unpinned activation. The phase-boundary counterpart to <see cref="FreeWeights"/>.</summary>
+    public override void FreeActivations() => ReleaseInBulk(base.FreeActivations);
 
     /// <summary>Drops every cached buffer and any pending transients.</summary>
     /// <remarks>Waits for the device first, then lets the base clear the caches — which also neutralizes the tensor
     /// bindings. That ordering matters: a tensor finalized after the backend is disposed would otherwise run a
     /// callback closing over destroyed device state.</remarks>
-    public override void FreeAllCached()
+    public override void FreeAllCached() => ReleaseInBulk(() =>
     {
-        _stream.WaitIdleHost();
-        _tearingDown = true;
-        try
+        base.FreeAllCached();
+        foreach (VulkanBuffer transient in _transientBuffers)
         {
-            base.FreeAllCached();
-            foreach (VulkanBuffer transient in _transientBuffers)
-            {
-                transient.Dispose();
-            }
-            _transientBuffers.Clear();
+            transient.Dispose();
         }
-        finally
-        {
-            _tearingDown = false;
-        }
-    }
+        _transientBuffers.Clear();
+    });
 
     /// <summary>The shared occupancy summary plus the Vulkan-only rows.</summary>
     public override string DiagnosticsSummary()

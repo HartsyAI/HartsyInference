@@ -666,6 +666,116 @@ public sealed class GpuResidencyCacheTests
         Assert.False(promoted.Freed, "the promoted weight was freed by the caller's own cleanup");
     }
 
+    /// <summary>The phase-boundary free: every unpinned activation goes back, and nothing is read on the way out.
+    /// A pinned one stays, which is the whole reason a pin exists — its only copy is on the device.</summary>
+    [Fact]
+    public void FreeActivations_ReleasesTheUnpinnedAndKeepsThePinned()
+    {
+        using FakeCache cache = new();
+        using Tensor scratch = NewTensor();
+        using Tensor kept = NewTensor();
+
+        FakeCache.Buffer scratchBuffer = cache.AllocateForTest(Size(scratch));
+        cache.CacheActivation(scratch, scratchBuffer, Size(scratch));
+        FakeCache.Buffer keptBuffer = cache.AllocateForTest(Size(kept));
+        cache.CacheActivation(kept, keptBuffer, Size(kept));
+        cache.PinActivation(kept);
+
+        cache.FreeActivations();
+
+        Assert.True(scratchBuffer.Freed);
+        Assert.False(keptBuffer.Freed);
+        Assert.Equal(0, cache.Downloads);                  // reclaimed, not read back
+        Assert.True(cache.TryGetCached(kept, out FakeCache.Buffer? resident));
+        Assert.Same(keptBuffer, resident);
+        Assert.Single(cache.Evicted, entry => ReferenceEquals(entry.Buffer, scratchBuffer));
+    }
+
+    /// <summary>Resident weights and their conversions are exactly what this must not touch: a caller frees
+    /// activations between phases precisely so the next phase does not pay to upload the weights again.</summary>
+    [Fact]
+    public void FreeActivations_LeavesResidentWeightsAlone()
+    {
+        using FakeCache cache = new();
+        using Tensor weight = NewTensor();
+        using Tensor activation = NewTensor();
+
+        cache.PreloadWeight(weight);
+        FakeCache.Buffer resident = cache.CopyToDevice(weight);
+        FakeCache.Buffer cast = cache.AllocateForTest(16);
+        cache.StoreWeightCast(weight, DType.F16, cast, 16);
+        FakeCache.Buffer scratch = cache.AllocateForTest(Size(activation));
+        cache.CacheActivation(activation, scratch, Size(activation));
+
+        cache.FreeActivations();
+
+        Assert.True(scratch.Freed);
+        Assert.False(resident.Freed);
+        Assert.False(cast.Freed);
+        Assert.Same(resident, cache.CopyToDevice(weight));
+        Assert.True(cache.TryGetWeightCast(weight, DType.F16, out FakeCache.Buffer? survivor));
+        Assert.Same(cast, survivor);
+    }
+
+    /// <summary>The binding has to go with the buffer. Nothing reads a freed activation back, so a binding left
+    /// planted would fire its sync callback much later against memory the driver already has — and would hand the
+    /// tensor bytes from a buffer somebody else has been given since.</summary>
+    [Fact]
+    public void FreeActivations_ClearsTheBindingSoNoLaterReadSyncs()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer buffer = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, buffer, Size(tensor));
+
+        cache.FreeActivations();
+        unsafe
+        {
+            _ = tensor.DataPointer;
+        }
+
+        Assert.Equal(0, cache.Downloads);
+        Assert.Single(cache.FreedBuffers, freed => ReferenceEquals(freed, buffer));
+    }
+
+    /// <summary>A phase boundary is a safe point by definition — every op's cleanup has run — so a buffer still
+    /// parked from a rebind provably has no owner and must not be left to sit until teardown.</summary>
+    [Fact]
+    public void FreeActivations_SweepsAnOrphanFirst()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+
+        FakeCache.Buffer displaced = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, displaced, Size(tensor));
+        FakeCache.Buffer current = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, current, Size(tensor));
+
+        cache.FreeActivations();
+
+        Assert.True(displaced.Freed, "the parked buffer outlived the phase that displaced it");
+        Assert.True(current.Freed);
+    }
+
+    /// <summary>A buffer two tensors share is handed back once. Aliased activations are rare and the double free
+    /// they would cause is not recoverable, so the dedupe is not optional.</summary>
+    [Fact]
+    public void FreeActivations_ReleasesASharedBufferOnce()
+    {
+        using FakeCache cache = new();
+        using Tensor first = NewTensor();
+        using Tensor second = NewTensor();
+
+        FakeCache.Buffer shared = cache.AllocateForTest(Size(first));
+        cache.CacheActivation(first, shared, Size(first));
+        cache.CacheActivation(second, shared, Size(second));
+
+        cache.FreeActivations();
+
+        Assert.Single(cache.FreedBuffers, freed => ReferenceEquals(freed, shared));
+    }
+
     /// <summary>Promotion must not leave the tensor resident in both tiers. A lookup checks weights first, so an
     /// activation left behind would be shadowed by the weight on every later read — the device write silently
     /// discarded.</summary>
