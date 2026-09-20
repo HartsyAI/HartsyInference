@@ -55,6 +55,18 @@ public sealed class GemmaTokenizer : IDisposable, ILtx2PromptTokenizer
     /// <summary>0 — LTX-2.3 conditions at whatever register multiple the prompt lands on, and that path is verified.</summary>
     public int MinimumConditioningLength => 0;
 
+    /// <inheritdoc/>
+    /// <remarks>This SentencePiece is built with <c>addBeginningOfSentence: true</c>, so the BOS it prepends per
+    /// call has to come off a span — the sequence gets exactly one, at the front.</remarks>
+    public IReadOnlyList<int> EncodeSpan(string text)
+    {
+        IReadOnlyList<int> ids = EncodeRaw(text);
+        return ids.Count > 0 && ids[0] == BosTokenId ? [.. ids.Skip(1)] : ids;
+    }
+
+    /// <inheritdoc/>
+    public int ConditioningStartId => BosTokenId;
+
     public int[] Encode(string text)
     {
         ThrowIfDisposed();

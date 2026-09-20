@@ -65,6 +65,10 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     // host-materialized so they survive activation sweeps between generations.
     private int[]? _cachedPosKey;
     private int[]? _cachedNegKey;
+    // The emphasis is stripped before tokenization, so `(fox:1.5)` and `fox` produce IDENTICAL ids. An id-only
+    // key would serve the previous weighting's conditioning on the second generation of a weighted prompt.
+    private float[]? _cachedPosWeights;
+    private float[]? _cachedNegWeights;
     private Tensor? _cachedVideoPos, _cachedAudioPos, _cachedVideoNeg, _cachedAudioNeg;
 
     // Persistent resident prefix (the Flux KEEP_MODELS idiom, adapted to the streamed 22B DiT): the shared
@@ -109,7 +113,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// <paramref name="negativeTokens"/> are single-prompt token id arrays; they are padded internally to a multiple
     /// of the connector register count. Set <paramref name="numFrames"/> so <c>(numFrames-1) % 8 == 0</c>.</summary>
     public Ltx2Result GenerateFromTokens(int[] promptTokens, int[] negativeTokens, TextToImageRequest request,
-        int numFrames, double frameRate = 24.0, Action<GenerationProgress>? onProgress = null)
+        int numFrames, double frameRate = 24.0, Action<GenerationProgress>? onProgress = null,
+        float[]? promptTokenWeights = null, float[]? negativeTokenWeights = null)
     {
         // Sampler selection is NOT wired on this family (2026-08-20 audit): its denoise step is a host-side
         // Euler in a different algebraic form than IBackend.CfgEulerStep, its schedule is a raw float[] rather
@@ -204,8 +209,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         // Gemma phase including its ~12 GB weight upload.
         Stopwatch phase = Stopwatch.StartNew();
         bool cacheHit = _cachedPosKey is not null && _cachedNegKey is not null
-            && promptTokens.AsSpan().SequenceEqual(_cachedPosKey)
-            && negativeTokens.AsSpan().SequenceEqual(_cachedNegKey);
+            && Diffusion.Prompting.ConditioningCacheKey.Matches(_cachedPosKey, _cachedPosWeights, promptTokens, promptTokenWeights)
+            && Diffusion.Prompting.ConditioningCacheKey.Matches(_cachedNegKey, _cachedNegWeights, negativeTokens, negativeTokenWeights);
         Tensor encVideoPos, encAudioPos, encVideoNeg, encAudioNeg;
         if (cacheHit)
         {
@@ -246,8 +251,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
                         $"(free {freeNow >> 20} MB ≥ TE {_gemmaWeightBytes >> 20} MB + 2048 MB margin).");
                 }
             }
-            (encVideoPos, encAudioPos) = EncodeText(promptTokens);
-            (encVideoNeg, encAudioNeg) = EncodeText(negativeTokens);
+            (encVideoPos, encAudioPos) = EncodeText(promptTokens, promptTokenWeights);
+            (encVideoNeg, encAudioNeg) = EncodeText(negativeTokens, negativeTokenWeights);
 
             // Reclaim the ~12 GB Gemma encoder AND the ~4 GB text connectors before the DiT — none are needed
             // during denoise (the connectors already produced the four cached embeddings). Freeing the connectors
@@ -272,6 +277,8 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
             _cachedVideoNeg = encVideoNeg; _cachedAudioNeg = encAudioNeg;
             _cachedPosKey = (int[])promptTokens.Clone();
             _cachedNegKey = (int[])negativeTokens.Clone();
+            _cachedPosWeights = (float[]?)promptTokenWeights?.Clone();
+            _cachedNegWeights = (float[]?)negativeTokenWeights?.Clone();
             Logs.Info($"[ltx2-phase] TE(Gemma)+connectors+free: {phase.ElapsedMilliseconds} ms");
         }
         phase.Restart();
@@ -676,7 +683,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     /// <summary>Runs Gemma over the (register-padded) tokens, relayouts the 49 hidden states into the connector's
     /// <c>channel·49+layer</c> feature layout, and returns the per-modality text embeddings (video <c>[seq,4096]</c>,
     /// audio <c>[seq,2048]</c>). Caller owns both tensors.</summary>
-    private (Tensor Video, Tensor Audio) EncodeText(int[] tokens)
+    private (Tensor Video, Tensor Audio) EncodeText(int[] tokens, float[]? tokenWeights = null)
     {
         int real = tokens.Length;
         int seq = ((real + ConnectorRegisters - 1) / ConnectorRegisters) * ConnectorRegisters;
@@ -723,7 +730,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Logs.Info($"[ltx2-phase]   gemma relayout (host): {sub.ElapsedMilliseconds} ms");
         sub.Restart();
 
-        (Tensor video, Tensor audio) = _connectors.Forward(TextEncoderBackend, feats, validMask);
+        (Tensor video, Tensor audio) = _connectors.Forward(TextEncoderBackend, feats, validMask, tokenWeights ?? []);
         feats.Dispose();
         Logs.Info($"[ltx2-phase]   connectors: {sub.ElapsedMilliseconds} ms");
         return (video, audio);
@@ -1006,6 +1013,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         _cachedVideoNeg?.Dispose(); _cachedAudioNeg?.Dispose();
         _cachedVideoPos = _cachedAudioPos = _cachedVideoNeg = _cachedAudioNeg = null;
         _cachedPosKey = null; _cachedNegKey = null;
+        _cachedPosWeights = null; _cachedNegWeights = null;
     }
 
     /// <summary>Packs a video latent <c>[1, C, T, H, W] → [T·H·W, C]</c> in (f,h,w) order — the exact inverse of

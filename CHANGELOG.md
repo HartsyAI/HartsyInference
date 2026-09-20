@@ -6,6 +6,60 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.136
+
+- **LTX-2 honours `(word:N)`, and the deliberately-unwired ledger is now EMPTY** — every registered image and
+  video family consumes its prompt weights. One recipe class serves `ltx-video-2` and `ltx-2.5-distilled`, so
+  both come off together.
+- **The scale goes inside `LtxVideo2TextConnectors`, after the per-modality projection and before the learnable
+  registers**, and both neighbouring placements are wrong. Scaling the connector's OUTPUT hits register rows:
+  our pipeline mirrors ComfyUI's `compat_mode`, where the real tokens sit at the FRONT and the tail is padding
+  replaced by learnable registers. Scaling its INPUT is worse than it looks — the reference normalizes by a
+  global min/max over the whole sequence before projecting (`lt.py:174-176`), so one token's emphasis would move
+  the divisor every other token shares.
+- **One deliberate divergence from SwarmUI, stated rather than buried.** SwarmUI scales whatever the CLIP node
+  returns, which under `compat_mode` is post-connector — register rows. Reproducing that literally would be
+  scaling learnable padding, so this implements ComfyUI's DEFAULT path semantics instead
+  (`LTXAVTEModel.encode_token_weights` returns token-length embeddings there and lets the DiT connect them),
+  which is what the weighting is for.
+- **`ILtx2PromptTokenizer` gains `EncodeSpan` and `ConditioningStartId`**, because its two implementations
+  disagree about specials: the Gemma-3 SentencePiece is constructed with `addBeginningOfSentence: true`, so
+  every call prepends a BOS that has to come off a span, while `Gemma4Tokenizer.Encode` adds none. The start id
+  is read from the tokenizer rather than assumed, even though both are 2.
+- **LTX-2's conditioning cache is now weight-aware.** Its key was the token ids alone, and the emphasis is
+  stripped before tokenization, so `(fox:1.5)` and `fox` produce identical ids — the second generation of a
+  weighted prompt would have been served the previous weighting's conditioning. Same defect class already fixed
+  for Chroma and HiDream.
+- **The gate found a real bug, and it was in this change.** `ApplyTokenWeights` first scaled the rows HOST-side
+  through `AsSpan<float>()`, on a tensor `backend.Linear` had just produced on the device — the
+  discarded-device-write pattern. The symptom was not wrong pixels but `OutOfVramException`: a weighted prompt
+  exhausting the 4090 at a geometry the same prompt completed at unweighted, twice, including once on an idle
+  card. `(fox:1.0)` passed throughout because the scale returns early when every weight is 1, so only a prompt
+  with a weight that actually differs took the bad path. It now goes through `backend.MaskRows` and stays on
+  device.
+- **Gate (real weights), 320x192 / 25 frames / seed 1, comparing FRAME PNGs** rather than the mp4, because this
+  family's audio decode is nondeterministic run to run while its video is not:
+
+  | run | frame hash |
+  |---|---|
+  | plain | `78ead7cd` |
+  | `(fox:1.0)` | `78ead7cd` — byte-identical |
+  | `(fox:0.5)` | `0802180b` — differs |
+  | `(fox:1.5)` | `64847778` — differs from both |
+
+  Two same-code plain runs hashed identically before the fix, establishing that this family's video really is
+  deterministic run to run, so the differences above are signal. `plain` still hashes `78ead7cd` after the fix,
+  the same value the pre-fix runs produced, so the unweighted path did not move.
+- **Loading LTX-2 peaks at ~42 GB of host RSS**, measured across three runs (42.1 / 42.3 / 42.5 GB) against a
+  21 GB on-disk int8-convrot checkpoint — roughly 2x the file, and worth knowing before scheduling a run.
+- **A correction to alpha.134's MiniMax-H3 note.** It said H3's OOM was "the family's own load footprint, not
+  contention", citing 42 GB free at the time. That is withdrawn: this box runs concurrent agents, one later
+  measured holding 19 GB, and a `free` reading taken between their jobs looks like headroom that is not there.
+  H3 "did not load here" — the number should not be read as a property of the family.
+- `PromptWeightingModeLedgerTests.NotYetWired` is empty and stays in place: a NEW recipe that cannot weight yet
+  needs somewhere honest to declare that rather than silently claiming a mode. The per-family notes are kept as
+  the record of what each turned out to need — several contradict what the entry predicted before the work.
+
 ## alpha.135
 
 - **Vulkan asks the driver how much VRAM is left.** `VK_EXT_memory_budget` reports, per heap, how much this process

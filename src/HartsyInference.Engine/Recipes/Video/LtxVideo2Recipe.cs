@@ -80,6 +80,28 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public VideoFeatures Supports => VideoFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: LTX-2 loads its TE through
+    /// <c>sd.py</c>'s <c>CLIPType.LTXV</c> branch → <c>lt.LTXAVGemmaTokenizer</c> → <c>Gemma3_12BTokenizer</c>,
+    /// <c>disable_weights</c> at <c>lt.py:76</c>; a Gemma-4 TE takes the sibling branch and is also disabled.
+    /// Both arms agree, so the family is CondScale, and one recipe class serves <c>ltx-video-2</c> and
+    /// <c>ltx-2.5-distilled</c> alike.
+    /// <para>The scale is applied inside <c>LtxVideo2TextConnectors</c>, after the per-modality projection and
+    /// before the learnable registers — the only placement that reproduces ComfyUI's default path. See that
+    /// method's remarks for why the connector's output and its input are both wrong.</para>
+    /// <para><b>Loading this family peaks at ~42 GB of host RSS</b> — measured across three completed runs
+    /// (42.1 / 42.3 / 42.5 GB) against a 21 GB on-disk int8-convrot checkpoint, so roughly 2x the file. That is
+    /// the number to plan against: it fits a 62 GB box only with nothing else large resident, which is why a
+    /// gate run concurrently with anything else gets OOM-killed during load rather than failing in a way that
+    /// names itself.</para>
+    /// <para>Gated at 320x192 / 25 frames / seed 1 on FRAME PNGs rather than the mp4 — this family's audio
+    /// decode is nondeterministic run to run while its video is not, so a container hash cannot separate a logic
+    /// bug from noise. Two same-code plain runs hash identically, which establishes that floor;
+    /// <c>(fox:1.0)</c> matches plain byte for byte, and <c>(fox:0.5)</c> and <c>(fox:1.5)</c> both differ and
+    /// differ from each other.</para></remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
+
+    /// <inheritdoc/>
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.ComponentPlacement;
 
