@@ -210,10 +210,12 @@ public sealed class Qwen3Tokenizer : IDisposable
     /// with <c>user\n</c> as its own BPE call, whereas <see cref="EncodeChat"/> merges it with the prompt — the two
     /// agree except when the prompt begins with whitespace, so an UNWEIGHTED prompt must keep using
     /// <see cref="EncodeChat"/>.</summary>
-    public (int[] Prefix, int[] Suffix) ChatTemplateIds(bool includeThinkBlock = true)
+    public (int[] Prefix, int[] Suffix) ChatTemplateIds(bool includeThinkBlock = true, string? systemPrompt = null)
     {
         ThrowIfDisposed();
-        List<int> prefix = new(8) { _imStartId };
+        List<int> prefix = new(48);
+        AppendSystemTurn(prefix, systemPrompt);
+        prefix.Add(_imStartId);
         AppendBpe(prefix, "user\n");
         List<int> suffix = new(16) { _imEndId };
         AppendBpe(suffix, "\n");
@@ -227,6 +229,60 @@ public sealed class Qwen3Tokenizer : IDisposable
             AppendBpe(suffix, "\n\n");
         }
         return (prefix.ToArray(), suffix.ToArray());
+    }
+
+    /// <summary>Encodes the chat template with an optional system turn and <b>no padding or truncation</b>, for
+    /// encoders driven at the prompt's real length rather than a fixed window (Qwen-Image 2.1 masks rather than
+    /// pads). Renders
+    /// <c>[&lt;|im_start|&gt;system\n{system}&lt;|im_end|&gt;\n]&lt;|im_start|&gt;user\n{prompt}&lt;|im_end|&gt;\n&lt;|im_start|&gt;assistant\n[think]</c>.</summary>
+    /// <param name="systemPrompt">System message, or null for no system turn (the Flux.2 Klein / Z-Image / Ideogram 4
+    /// rendering). A dropped system turn still changes the kept rows: this encoder is causal, so the user tokens'
+    /// hidden states are computed with it in context.</param>
+    public int[] EncodeChatUnpadded(string prompt, string? systemPrompt = null, bool includeThinkBlock = true)
+    {
+        ThrowIfDisposed();
+        List<int> ids = new(prompt.Length / 3 + 48);
+        AppendSystemTurn(ids, systemPrompt);
+        ids.Add(_imStartId);
+        // Merged with the prompt for the same reason EncodeChatWithLength merges it: splitting here would create
+        // an artificial pre-tokenization boundary when the prompt starts with whitespace.
+        AppendBpe(ids, string.Concat("user\n", prompt));
+        ids.Add(_imEndId);
+        AppendBpe(ids, "\n");
+        ids.Add(_imStartId);
+        AppendBpe(ids, "assistant\n");
+        if (includeThinkBlock)
+        {
+            ids.Add(_thinkStartId);
+            AppendBpe(ids, "\n\n");
+            ids.Add(_thinkEndId);
+            AppendBpe(ids, "\n\n");
+        }
+        return [.. ids];
+    }
+
+    /// <summary>Number of ids the system turn occupies, i.e. everything before the <b>second</b>
+    /// <c>&lt;|im_start|&gt;</c>. Qwen-Image 2.1 conditions on the rows after exactly this many.</summary>
+    public int SystemTurnLength(string? systemPrompt)
+    {
+        ThrowIfDisposed();
+        List<int> ids = new(48);
+        AppendSystemTurn(ids, systemPrompt);
+        return ids.Count;
+    }
+
+    /// <summary>Renders <c>&lt;|im_start|&gt;system\n{system}&lt;|im_end|&gt;\n</c>, or nothing when there is no
+    /// system message.</summary>
+    private void AppendSystemTurn(List<int> dst, string? systemPrompt)
+    {
+        if (string.IsNullOrEmpty(systemPrompt))
+        {
+            return;
+        }
+        dst.Add(_imStartId);
+        AppendBpe(dst, string.Concat("system\n", systemPrompt));
+        dst.Add(_imEndId);
+        AppendBpe(dst, "\n");
     }
 
     /// <summary>The fixed window <see cref="EncodeChat"/> truncates and right-pads to.</summary>

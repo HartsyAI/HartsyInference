@@ -329,6 +329,31 @@ public static class SideModels
         Sha256 = "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
     };
 
+    /// <summary>Qwen3-VL-8B (bf16) as repackaged for Qwen-Image 2.1. Distinct from <see cref="Qwen3VL_8B"/>, which
+    /// is Ideogram 4's fp8_scaled copy: 2.1 conditions on the last decoder layer with <b>no final norm</b>, a tap
+    /// where fp8 weight error is not re-normalized away, so the bf16 file is the one pinned here.</summary>
+    public static readonly ModelAsset Qwen3VL_8B_QwenImage21 = new ModelAsset
+    {
+        Repo = "Comfy-Org/Qwen-Image-2.1",
+        RepoPath = "text_encoders/qwen3vl_8b_bf16.safetensors",
+        TargetSubdir = "text_encoders",
+        TargetName = "qwen3vl_8b_bf16.safetensors",
+        Role = "text encoder",
+    };
+
+    /// <summary>Qwen-Image 2.1 VAE — the Wan 2.2 architecture at 64 channels / 16x spatial / patch 1, and the only
+    /// VAE in the catalogue that emits FOUR channels: its alpha is a model output, not a matte. Not interchangeable
+    /// with <see cref="QwenImageVae"/> (v1, 16-channel).</summary>
+    public static readonly ModelAsset QwenImage21Vae = new ModelAsset
+    {
+        Repo = "Comfy-Org/Qwen-Image-2.1",
+        RepoPath = "vae/qwen_image_2.1_vae_bf16.safetensors",
+        TargetSubdir = "VAE",
+        TargetName = "qwen_image_2.1_vae_bf16.safetensors",
+        Role = "vae",
+        Sha256 = "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
+    };
+
     /// <summary>Mage-Flow VAE — bespoke 128-channel /16 one-step-diffusion codec (MageVAE). Decoder only is used at
     /// inference; the <c>student.*</c> / <c>y_embedder.encoder|bottleneck</c> encoder side is skipped at load. Official
     /// microsoft/Mage-Flow repo ships bf16; no sha pinned yet.</summary>
