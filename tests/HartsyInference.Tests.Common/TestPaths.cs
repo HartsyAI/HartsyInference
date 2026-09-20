@@ -430,6 +430,12 @@ public static class TestPaths
         /// alongside a second model on one card.</remarks>
         public static string Qwen3_4BQ4KM => Resolve("QWEN3_4B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen3", "Qwen3-4B-Q4_K_M.gguf"));
 
+        /// <summary>Qwen2.5-0.5B-Instruct, Q4_K_M GGUF (~469 MB). The smallest real model that is still a different
+        /// family and quantization from the Llama above, for a swap test that has to run on a backend which
+        /// dequantizes to F32 on load — where the 4B costs sixteen gigabytes and several minutes.</summary>
+        public static string Qwen25_05BQ4KM => Resolve("QWEN25_05B_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "qwen25", "qwen2.5-0.5b-instruct-q4_k_m.gguf"));
+
         /// <summary>Qwen3-32B, Q4_K_M GGUF (~19.8 GB). Too large for a single 24 GB consumer card once driver
         /// overhead and KV/activations are counted — the layer-split tok/s oracle.</summary>
         public static string Qwen3_32BQ4KM => Resolve("QWEN3_32B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen3", "Qwen3-32B-Q4_K_M.gguf"));

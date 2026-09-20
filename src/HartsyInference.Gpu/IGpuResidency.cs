@@ -35,6 +35,13 @@ public interface IGpuResidency : IDisposable
     /// <summary>Releases every cached device allocation this cache owns.</summary>
     void FreeAllCached();
 
+    /// <summary>Releases the device copy of every activation except the pinned ones, keeping resident weights.
+    ///
+    /// <para>Deliberately NOT a read-back: an activation nobody has read is scratch, and the point of a phase
+    /// boundary is to reclaim it at the cost of recomputing it, not to spend a device-to-host transfer per buffer
+    /// preserving it. <see cref="OffloadActivations"/> is the paying version, for state that must survive.</para></summary>
+    void FreeActivations();
+
     /// <summary>Marks a tensor's activation as surviving <see cref="OffloadActivations"/>, for state that must stay
     /// on the device across steps.</summary>
     void PinActivation(Tensor tensor);

@@ -685,6 +685,37 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
     }
 
     /// <inheritdoc/>
+    /// <remarks>Sweeps first, for the same reason the op scope does: this runs between phases, never mid-op, so a
+    /// buffer still parked from a rebind provably has no owner and would otherwise sit there until teardown.
+    ///
+    /// <para>The binding has to be cleared as the entry goes, not left to the callback: nothing reads this tensor
+    /// back, so its sync callback would fire much later against a buffer that has already been handed to the
+    /// driver.</para></remarks>
+    public virtual void FreeActivations()
+    {
+        MakeCurrent();
+        SweepOrphans();
+        HashSet<TBuffer> released = [];
+        foreach ((Tensor tensor, (TBuffer buffer, long bytes)) in Activations.ToArray())
+        {
+            // Cross-step state whose only copy is on the device — the whole purpose of the pin.
+            if (Pinned.Contains(tensor))
+            {
+                continue;
+            }
+            Activations.Remove(tensor);
+            tensor.ClearGpuBinding(BindingKey);
+            // What hangs off an activation describes its contents, so it dies with the activation.
+            OnActivationEvicted(tensor, buffer);
+            CachedBuffers.Remove(buffer);
+            if (released.Add(buffer))
+            {
+                ReleaseBuffer(buffer, bytes);
+            }
+        }
+    }
+
+    /// <inheritdoc/>
     public void PinActivation(Tensor tensor) => Pinned.Add(tensor);
 
     /// <inheritdoc/>

@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Gpu;
@@ -164,7 +165,91 @@ public abstract class GpuBackendBase
     /// <summary>Free and total device memory, as the driver reports it.</summary>
     public abstract (long FreeBytes, long TotalBytes) GetVramInfo();
 
+    // ── Reclaiming device memory ─────────────────────────────────────────────────────────────────────────
+    //
+    // These four are what an engine calls at a phase, generation or model-swap boundary, and they are the
+    // difference between VRAM coming back when asked and coming back whenever the GC happens to reach each
+    // tensor. They were no-ops on IBackend and implemented only by CUDA, so every one of those call sites did
+    // nothing at all on any other GPU backend.
 
+    /// <summary>Drops cached activations and returns what the pool was holding, keeping resident weights.</summary>
+    public void FreeActivations() => FreeActivations(trimPool: true);
+
+    /// <summary>As <see cref="FreeActivations()"/>, with control over the pool trim.</summary>
+    /// <remarks>Hot per-step callers pass false: the next iteration re-uses the reservation directly, and a trim
+    /// there costs a multi-gigabyte driver release and re-map every iteration for memory that is about to be
+    /// asked for again.</remarks>
+    public void FreeActivations(bool trimPool)
+    {
+        using OpScope _ = EnterOp();
+        OnActivationsFreeing();
+        Residency.FreeActivations();
+        if (trimPool)
+        {
+            TrimMemoryPoolCore();
+        }
+    }
+
+    /// <summary>Returns pool-reserved-but-free device memory to the driver, keeping every cache intact.</summary>
+    public void TrimMemoryPool()
+    {
+        using OpScope _ = EnterOp();
+        TrimMemoryPoolCore();
+    }
+
+    /// <summary>Hands back whatever this backend's allocator is holding but not using.</summary>
+    /// <remarks>Abstract rather than a virtual no-op: a backend that genuinely has nothing to trim should say so
+    /// with an empty body, because inheriting silence here is exactly how this whole set came to do nothing.</remarks>
+    protected abstract void TrimMemoryPoolCore();
+
+    /// <summary>Releases every cached device allocation — weights, conversions and activations — for a clean slate.</summary>
+    /// <remarks>Each step runs even if an earlier one failed, and the first failure is rethrown at the end: these
+    /// are independent native resources, and letting one failure strand the rest would leave the card full for a
+    /// reason the caller cannot see.</remarks>
+    public void FreeAllDeviceMemory()
+    {
+        using OpScope _ = EnterOp();
+        Exception? failure = null;
+        long freeBefore = Probe();
+        Attempt(OnActivationsFreeing);
+        Attempt(Residency.FreeAllCached);
+        Attempt(OnAllDeviceMemoryFreed);
+        Attempt(TrimMemoryPoolCore);
+        long freeAfter = Probe();
+        if (freeBefore >= 0 && freeAfter >= 0)
+        {
+            Logs.Info($"[{GetType().Name}] FreeAllDeviceMemory: free {freeBefore >> 20} MB → {freeAfter >> 20} MB");
+        }
+        if (failure is not null)
+        {
+            throw new InvalidOperationException(
+                $"One or more device resources failed to release during {GetType().Name}'s full memory sweep.",
+                failure);
+        }
+
+        long Probe()
+        {
+            try { return GetVramInfo().FreeBytes; }
+            catch (Exception ex) { Logs.Debug($"[{GetType().Name}] VRAM probe failed: {ex.Message}"); return -1; }
+        }
+
+        void Attempt(Action step)
+        {
+            try { step(); }
+            catch (Exception ex) { failure ??= ex; }
+        }
+    }
+
+    /// <summary>Called before activations are released, at the phase boundary that releases them.</summary>
+    /// <remarks>Where a backend invalidates anything that baked an activation's device address. A captured step
+    /// graph is the case that exists: it holds the addresses of the buffers about to be freed, so replaying it
+    /// afterwards reads memory the driver has taken back.</remarks>
+    protected virtual void OnActivationsFreeing() { }
+
+    /// <summary>Called during <see cref="FreeAllDeviceMemory"/>, after the caches are dropped.</summary>
+    /// <remarks>Where a backend releases device memory its residency cache never owned — a vendor library's plan
+    /// cache and workspaces, a side table keyed by weight.</remarks>
+    protected virtual void OnAllDeviceMemoryFreed() { }
 
     /// <summary>Idempotent teardown.</summary>
     /// <remarks>Idempotent because a backend is disposed from more than one place in practice — a pipeline's
