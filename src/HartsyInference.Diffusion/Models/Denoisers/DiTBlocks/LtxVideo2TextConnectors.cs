@@ -126,34 +126,55 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
         Tensor proj = new(new TensorShape(seq, dim), DType.F32);
         backend.Linear(proj, scaled, projW, projB);
         scaled.Dispose();
-        ApplyTokenWeights(proj, tokenWeights, dim);
+        proj = ApplyTokenWeights(backend, proj, tokenWeights, seq);
         Tensor outT = connector.Forward(backend, proj, validMask);
         proj.Dispose();
         return outT;
     }
 
-    /// <summary>Scales each weighted token's projected row in place. Host-side rather than through
-    /// <c>MaskRows</c> because the tensor is already host-resident here and the row count is a prompt's worth.</summary>
-    private static void ApplyTokenWeights(Tensor proj, ReadOnlySpan<float> tokenWeights, int dim)
+    /// <summary>Scales each weighted token's projected row, through the backend's own per-row multiply.</summary>
+    /// <remarks>This ran host-side first, writing into <paramref name="proj"/> with <c>AsSpan&lt;float&gt;()</c>,
+    /// and that was wrong on a device backend: <c>proj</c> is whatever <c>backend.Linear</c> just produced, so a
+    /// host write to it is the discarded-device-write pattern, and the read-back it forces materializes the
+    /// projection on the host and re-uploads it. The visible symptom was a weighted prompt exhausting VRAM at a
+    /// geometry the same unweighted prompt completed at. <c>MaskRows</c> keeps the whole thing on device and
+    /// takes the same shape <c>CondTokenWeights.ScaleRightAligned</c> uses, left-aligned here because the real
+    /// tokens are at the FRONT and the registers replace the tail.</remarks>
+    private static Tensor ApplyTokenWeights(IBackend backend, Tensor proj, ReadOnlySpan<float> tokenWeights, int seq)
     {
         if (tokenWeights.Length == 0)
         {
-            return;
+            return proj;
         }
-        Span<float> rows = proj.AsSpan<float>();
+        float[] rowScales = new float[seq];
+        Array.Fill(rowScales, 1f);
+        bool any = false;
         for (int t = 0; t < tokenWeights.Length; t++)
         {
-            float w = tokenWeights[t];
-            if (w == 1f)
+            if (tokenWeights[t] != 1f)
             {
-                continue;
-            }
-            Span<float> row = rows.Slice(t * dim, dim);
-            for (int c = 0; c < row.Length; c++)
-            {
-                row[c] *= w;
+                rowScales[t] = tokenWeights[t];
+                any = true;
             }
         }
+        if (!any)
+        {
+            return proj;
+        }
+        using Tensor mask = new Tensor(new TensorShape(seq), DType.F32);
+        rowScales.CopyTo(mask.AsSpan<float>());
+        Tensor scaled = new Tensor(proj.Shape, DType.F32);
+        try
+        {
+            backend.MaskRows(scaled, proj, mask);
+        }
+        catch
+        {
+            scaled.Dispose();
+            throw;
+        }
+        proj.Dispose();
+        return scaled;
     }
 
     /// <summary>RMS-normalizes each token's per-layer 3840-vector (variance over the channel axis, eps 1e-6), then
