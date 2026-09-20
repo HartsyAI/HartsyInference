@@ -6,6 +6,35 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.133
+
+- **Every GPU backend gives device memory back when the engine asks.** `FreeActivations`, `TrimMemoryPool` and
+  `FreeAllDeviceMemory` are empty-bodied defaults on `IBackend` that only CUDA implemented, so the ~25 engine call
+  sites at generation, phase and model-swap boundaries did nothing on Vulkan and VRAM came back only when the GC
+  reached each tensor's binding. They are implemented once on `GpuBackendBase` rather than a second time per
+  backend, so ROCm and Metal inherit them.
+- **The shared residency cache gains the one primitive it lacked**: release every unpinned activation without
+  reading any back. That is deliberately neither `FreeAllCached` (drops resident weights too) nor
+  `OffloadActivations` (pays a device-to-host transfer per buffer to preserve values) — an activation nobody has
+  read is scratch, and a phase boundary reclaims it at the cost of recomputing it, exactly as
+  `docs/Research/MEMORY_SCHEDULING_SERVING.md` describes.
+- **A Vulkan bulk release now actually lands.** A deferred free is tagged with the tick the NEXT submit will take,
+  and a bulk release is followed by no submit — so the timeline never reached that tick and the buffers stayed
+  allocated until whatever work happened to come next. Releasing weights had the same shape. All three paths now
+  drain the stream and take their frees immediately, which teardown already did for a different reason.
+- **Two hooks carry what differs between backends.** `OnActivationsFreeing` runs before the release, where a
+  backend invalidates anything that baked an activation's device address — a captured step graph holds the
+  addresses of the buffers about to go, so replaying it afterwards reads memory the allocator has taken back.
+  `OnAllDeviceMemoryFreed` is where a backend drops device memory its residency cache never owned.
+- `TrimMemoryPoolCore` is abstract rather than a virtual no-op: a backend with nothing to trim should say so with
+  an empty body, because inheriting silence here is how this whole set came to do nothing.
+- **Vulkan's `ReleaseAttentionExecutionCache` is the drain half of its contract.** There is no plan cache to
+  discard — attention is this backend's own shaders — but a caller reaching a phase boundary does need the
+  previous phase's attention to have stopped reading the memory it is about to reuse.
+- **The model-swap soak is no longer CUDA-only.** Its new cross-backend theory runs the shape a server actually
+  runs — one backend, many models through it — and asserts the device memory comes back each time. It fails on the
+  first swap with `FreeAllDeviceMemory` a no-op, which is the regression it exists to hold.
+
 ## alpha.132
 
 - **Seven more families honour `(word:N)`** — HiDream, OmniGen2, Lumina-2, Kandinsky5, Kandinsky5-Video,
