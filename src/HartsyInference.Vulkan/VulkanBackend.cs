@@ -350,21 +350,73 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <inheritdoc/>
-    /// <remarks>Total comes from the device's DEVICE_LOCAL heaps, which is exact. Free is total minus what THIS
-    /// backend's allocator is holding, which is an underestimate of what the card has left — another process, or
-    /// another backend on the same device, is invisible here. It is reported anyway because the planner's
-    /// alternative was no number at all: every VRAM decision on Vulkan logged "no VRAM report" and fell back to
-    /// fixed budgets. A live figure from <c>VK_EXT_memory_budget</c> is the Phase 10 replacement; the capability is
-    /// already detected (<see cref="VulkanCapabilities.HasMemoryBudget"/>) and nothing queries it yet.</remarks>
+    /// <remarks>Asks the driver where it can. <c>VK_EXT_memory_budget</c> reports, per heap, how much this process
+    /// may still allocate and how much it already holds — both of which move as OTHER processes take and release
+    /// memory, which is exactly what a planner deciding whether a model fits needs to know and what an allocator's
+    /// own bookkeeping can never see.
+    ///
+    /// <para>Without the extension it falls back to total minus what this backend's allocator holds. That is an
+    /// overestimate of what is free, because everything outside this process is invisible to it, and it is reported
+    /// anyway because the alternative was no number at all: every VRAM decision on Vulkan logged "no VRAM report"
+    /// and fell back to a fixed budget.</para></remarks>
     public override (long FreeBytes, long TotalBytes) GetVramInfo()
     {
         long total = (long)Vk.TotalVramBytes;
+        if (Vk.HasMemoryBudget && TryQueryHeapBudget(out long budgetFree))
+        {
+            return (budgetFree, total);
+        }
         long held = 0;
         foreach ((bool _, int _, ulong size) in _allocator.SnapshotBlocks())
         {
             held += (long)size;
         }
         return (Math.Max(0, total - held), total);
+    }
+
+    /// <summary>Sums what this process may still allocate across the device-local heaps.</summary>
+    /// <remarks>Budget minus usage, per heap, and never negative: the spec allows usage to exceed budget, which is
+    /// the driver saying this process is already over its share rather than that it has negative memory.
+    ///
+    /// <para>Returns false rather than zero when the driver reports nothing usable, so the caller falls back to the
+    /// allocator's own figure instead of telling a planner the card is full.</para></remarks>
+    private unsafe bool TryQueryHeapBudget(out long freeBytes)
+    {
+        freeBytes = 0;
+        VkPhysicalDeviceMemoryBudgetPropertiesEXT budget = new()
+        {
+            sType = VkStructureType.PhysicalDeviceMemoryBudgetProperties,
+        };
+        VkPhysicalDeviceMemoryProperties2 props = new()
+        {
+            sType = VkStructureType.PhysicalDeviceMemoryProperties2,
+            pNext = (nint)(&budget),
+        };
+        try
+        {
+            VulkanApi.vkGetPhysicalDeviceMemoryProperties2(_vkDevice.PhysicalDevice, ref props);
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"[Vulkan] memory-budget query failed, using allocator accounting: {ex.Message}");
+            return false;
+        }
+        uint heapCount = Math.Min(props.memoryProperties.memoryHeapCount, 16u);
+        for (uint heap = 0; heap < heapCount; heap++)
+        {
+            VkMemoryHeap info = props.memoryProperties.GetMemoryHeap((int)heap);
+            if ((info.flags & VkMemoryHeapFlags.DeviceLocal) == 0)
+            {
+                continue;
+            }
+            ulong heapBudget = budget.heapBudget[heap];
+            ulong heapUsage = budget.heapUsage[heap];
+            if (heapBudget > heapUsage)
+            {
+                freeBytes += (long)(heapBudget - heapUsage);
+            }
+        }
+        return freeBytes > 0;
     }
 
     /// <inheritdoc/>

@@ -165,6 +165,16 @@ public abstract class GpuBackendBase
     /// <summary>Free and total device memory, as the driver reports it.</summary>
     public abstract (long FreeBytes, long TotalBytes) GetVramInfo();
 
+    /// <summary>Free device memory, the spelling the planners and preflights already call.</summary>
+    /// <remarks>The same number <see cref="GetVramInfo"/> reports, under the older name that predates it. It
+    /// returned zero on any backend but CUDA, and zero is not "unknown" to its callers — it is "nothing fits", so
+    /// the LLM preload kept no weights at all and the VAE always tiled.</remarks>
+    public long FreeMemoryBytes()
+    {
+        using OpScope _ = EnterOp();
+        return GetVramInfo().FreeBytes;
+    }
+
     // ── Reclaiming device memory ─────────────────────────────────────────────────────────────────────────
     //
     // These four are what an engine calls at a phase, generation or model-swap boundary, and they are the
