@@ -18,6 +18,10 @@ stable release will require. Dates are UTC.
   a post-barrier only, so a destination a dispatch just wrote — or one an earlier staging copy wrote — was not
   ordered against it. Consecutive uploads are the bulk of what synchronization validation reports on a real
   generation.
+- **So did the barrier every dispatch records.** Its destination scope was `ShaderStorageRead`, so two dispatches
+  writing the same buffer — an in-place op following the op that produced its input — were a write-after-write
+  nothing ordered. With every copy ordered, that pair is what synchronization validation reports, and it is the
+  single hottest barrier in the backend.
 - **A copy's destination scope named only reads.** Every post-copy barrier made the copy visible to
   `ShaderStorageRead`, so a dispatch that *writes* the buffer it just received — which is what an in-place op does
   straight after an upload — was a write-after-write nothing ordered. That pair is what synchronization validation

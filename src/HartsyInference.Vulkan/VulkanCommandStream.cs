@@ -116,7 +116,10 @@ public sealed class VulkanCommandStream : IDisposable
             srcStageMask = VkPipelineStageFlags2.ComputeShader,
             srcAccessMask = VkAccessFlags2.ShaderStorageWrite,
             dstStageMask = VkPipelineStageFlags2.ComputeShader,
-            dstAccessMask = VkAccessFlags2.ShaderStorageRead,
+            // Write as well as read. Two dispatches writing the same buffer — an in-place op following the op
+            // that produced its input — are a write-after-write, and a destination scope naming only reads does
+            // not order them. That pair is what synchronization validation reports once every copy is ordered.
+            dstAccessMask = VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite,
         };
         VkDependencyInfo dep = new()
         {
