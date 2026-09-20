@@ -411,7 +411,11 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     /// <remarks>Implemented rather than left as the interface no-op because the drain is the half of the contract
     /// that does apply — a caller reaches this at a phase boundary precisely to be sure the previous phase's
     /// attention is no longer reading the memory it is about to reuse.</remarks>
-    public void ReleaseAttentionExecutionCache() => Sync();
+    public void ReleaseAttentionExecutionCache()
+    {
+        using OpScope _op = EnterOp();
+        Sync();
+    }
 
     /// <inheritdoc/>
     protected override void OnOpEnd(string opName, int dispatches)
