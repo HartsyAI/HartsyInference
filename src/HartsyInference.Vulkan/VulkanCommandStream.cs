@@ -127,6 +127,44 @@ public sealed class VulkanCommandStream : IDisposable
         VulkanApi.vkCmdPipelineBarrier2(cb, in dep);
     }
 
+    /// <summary>Barriers for a <c>vkCmdCopyBuffer</c> recorded between compute dispatches: the first makes a
+    /// dispatch's writes visible to the copy, the second makes the copy's writes visible to the next dispatch.</summary>
+    /// <remarks>The compute→compute barrier every dispatch already ends with does NOT cover this. Its destination
+    /// scope is <c>ComputeShader</c>/<c>ShaderStorageRead</c>, so a transfer that reads the same buffer is outside
+    /// it, and a transfer that writes one is outside the source scope of the next dispatch's barrier in the same
+    /// way. Both directions are hazards the spec makes the caller close explicitly, and neither fails loudly — the
+    /// copy reads or is read at whatever point the driver happens to schedule it.</remarks>
+    public static unsafe void RecordComputeToCopyBarrierOn(nint cb)
+        => RecordGlobalBarrierOn(cb,
+            VkPipelineStageFlags2.ComputeShader, VkAccessFlags2.ShaderStorageWrite,
+            VkPipelineStageFlags2.Copy, VkAccessFlags2.TransferRead | VkAccessFlags2.TransferWrite);
+
+    /// <summary>The second half of <see cref="RecordComputeToCopyBarrierOn"/> — a copy's writes made visible to
+    /// the dispatches that follow it.</summary>
+    public static unsafe void RecordCopyToComputeBarrierOn(nint cb)
+        => RecordGlobalBarrierOn(cb,
+            VkPipelineStageFlags2.Copy, VkAccessFlags2.TransferWrite,
+            VkPipelineStageFlags2.ComputeShader, VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
+
+    private static unsafe void RecordGlobalBarrierOn(nint cb, ulong srcStage, ulong srcAccess, ulong dstStage, ulong dstAccess)
+    {
+        VkMemoryBarrier2 mb = new()
+        {
+            sType = VkStructureType.MemoryBarrier2,
+            srcStageMask = srcStage,
+            srcAccessMask = srcAccess,
+            dstStageMask = dstStage,
+            dstAccessMask = dstAccess,
+        };
+        VkDependencyInfo dep = new()
+        {
+            sType = VkStructureType.DependencyInfo,
+            memoryBarrierCount = 1,
+            pMemoryBarriers = (nint)(&mb),
+        };
+        VulkanApi.vkCmdPipelineBarrier2(cb, in dep);
+    }
+
     /// <summary>Records a buffer→buffer copy followed by a barrier transitioning to the requested consumer stage/access.</summary>
     public void RecordCopyAndBarrier(ulong src, ulong dst, ulong size, ulong postStage, ulong postAccess)
         => RecordCopyAndBarrierOn(AcquireRecording(), src, dst, size, postStage, postAccess);

@@ -79,6 +79,7 @@ DTYPE_KERNELS=(
     layernorm
     layernorm_noaffine
     qkv_split_norm
+    qkv_split_norm_head_major
     layernorm_modulate
     apply_rope_single
     unpatchify_tokens

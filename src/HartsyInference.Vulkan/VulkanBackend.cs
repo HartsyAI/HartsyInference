@@ -2122,14 +2122,50 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: true);
     }
 
+    /// <summary>The same split-half rotation on a head-major <c>x [B, heads, seq, headDim]</c>, cos/sin still
+    /// <c>[B, seq, headDim]</c>.</summary>
+    /// <remarks>Its own entry point rather than a flag on <see cref="ApplyRopeSingle"/> because the layouts are
+    /// indistinguishable from the tensor alone — the element count is identical with heads and seq swapped, and
+    /// only the cos/sin row count catches a caller that picked the wrong one, which is why the reference checks
+    /// it. MiniMaxH3's DiT and Gemma-4's text encoder rope head-major q/k straight out of
+    /// <see cref="QkvSplitNormHeadMajor"/>, so the interface default's D2H sync sat between the projection and
+    /// attention on every block of every step.
+    ///
+    /// <para>Non-F32/F16 and non-rank-4 take the shared reference, as the token-major form does.</para></remarks>
+    public void ApplyRopeSingleHeadMajor(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+    {
+        using OpScope _op = EnterOp();
+        if (x.Shape.Rank != 4 || (x.DType != DType.F32 && x.DType != DType.F16)
+            || cos.DType != DType.F32 || sin.DType != DType.F32)
+        {
+            IBackend.ApplyRopeSingleHeadMajorReference(x, cos, sin, rotaryDim);
+            return;
+        }
+        long tableElements = x.Shape[0] * x.Shape[2] * x.Shape[3];
+        if (cos.ElementCount != tableElements || sin.ElementCount != tableElements)
+        {
+            // The one check that separates the two layouts. Let the reference raise it so the message, and which
+            // argument it names, are the same wherever the op runs.
+            IBackend.ApplyRopeSingleHeadMajorReference(x, cos, sin, rotaryDim);
+            return;
+        }
+        DispatchApplyRope(x, cos, sin, rotaryDim, interleaved: false, headMajor: true);
+    }
+
     /// <summary>Spec-constant id selecting GPT-J interleaved pairing in <c>apply_rope_single</c>.</summary>
     private const uint InterleavedRopePairsSpecId = 10;
 
-    private void DispatchApplyRope(Tensor x, Tensor cos, Tensor sin, int rotaryDim, bool interleaved)
+    /// <summary>Spec-constant id selecting the head-major cos/sin row in <c>apply_rope_single</c>.</summary>
+    private const uint HeadMajorRopeSpecId = 11;
+
+    private void DispatchApplyRope(Tensor x, Tensor cos, Tensor sin, int rotaryDim, bool interleaved,
+        bool headMajor = false)
     {
         int batch = (int)x.Shape[0];
-        int seqLen = (int)x.Shape[1];
-        int numHeads = (int)x.Shape[2];
+        // Head-major swaps the middle two axes; headDim stays innermost, which is why the vector's own offset is
+        // its index times headDim in either layout and only the cos/sin row has to be recovered differently.
+        int seqLen = (int)x.Shape[headMajor ? 2 : 1];
+        int numHeads = (int)x.Shape[headMajor ? 1 : 2];
         int headDim = (int)x.Shape[3];
         int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
         // Split-half rotates rdim/2 pairs and dispatches exactly those. Interleaved dispatches every pair in the
@@ -2156,6 +2192,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             {
                 SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
                 SpecConstant.Bool(InterleavedRopePairsSpecId, interleaved),
+                SpecConstant.Bool(HeadMajorRopeSpecId, headMajor),
             };
             VulkanKernel kernel = GetKernel("apply_rope_single" + DtypeSuffix(x.DType), storageBufferCount: 3, spec);
 
@@ -2178,7 +2215,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
         catch (Exception ex)
         {
-            Logs.Error($"Vulkan {(interleaved ? "ApplyRopeInterleaved" : "ApplyRopeSingle")} dispatch failed", ex);
+            Logs.Error($"Vulkan {(interleaved ? "ApplyRopeInterleaved" : headMajor ? "ApplyRopeSingleHeadMajor" : "ApplyRopeSingle")} dispatch failed", ex);
             throw;
         }
         finally
@@ -2316,6 +2353,137 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             qOut.Dispose();
             kOut.Dispose();
             vOut.Dispose();
+            throw;
+        }
+        finally
+        {
+            if (qwOwned is not null) _xfer.FreeDevice(qwOwned);
+            if (kwOwned is not null) _xfer.FreeDevice(kwOwned);
+        }
+    }
+
+    /// <summary>The head-major, subset-emitting form: same split and per-head QK-RMSNorm, but q/k/v come out
+    /// <c>[B, heads, seq, headDim]</c> and any of them may be omitted.</summary>
+    /// <remarks>Its own kernel rather than a flag on <see cref="QkvSplitNorm"/>, for the reason CUDA split its
+    /// own: that one is on a shipped generation path and folding the slot guards in changes its codegen.
+    ///
+    /// <para>The interface default is a host loop over <c>DataPointer</c>, so on Vulkan every MiniMaxH3 attention
+    /// block synced the whole packed projection down, normalized it on the CPU and re-uploaded three tensors —
+    /// twice per block on the chunked path, which projects k+v in one pass and q in the next precisely to keep a
+    /// full-sequence q from staying resident.</para>
+    ///
+    /// <para>Falls to the shared reference for anything but F32/F16 with matching output dtypes, and for the
+    /// layout errors, so the message a caller gets does not depend on which backend it ran on.</para></remarks>
+    public void QkvSplitNormHeadMajor(Tensor? q, Tensor? k, Tensor? v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+    {
+        using OpScope _op = EnterOp();
+        Tensor? shapeRef = q ?? k ?? v;
+        if (shapeRef is null || shapeRef.Shape.Rank != 4
+            || (qkv.DType != DType.F32 && qkv.DType != DType.F16)
+            || (q is not null && q.DType != qkv.DType)
+            || (k is not null && k.DType != qkv.DType)
+            || (v is not null && v.DType != qkv.DType)
+            || (q is not null && !q.Shape.Equals(shapeRef.Shape))
+            || (k is not null && !k.Shape.Equals(shapeRef.Shape))
+            || (v is not null && !v.Shape.Equals(shapeRef.Shape)))
+        {
+            IBackend.QkvSplitNormHeadMajorReference(q, k, v, qkv, qWeight, kWeight, eps);
+            return;
+        }
+        int headDim = (int)qWeight.Shape[qWeight.Shape.Rank - 1];
+        int heads = (int)shapeRef.Shape[1];
+        int seq = (int)shapeRef.Shape[2];
+        long w = (long)heads * headDim;
+        long packedWidth = qkv.Shape[qkv.Shape.Rank - 1];
+        if (headDim <= 0 || w <= 0 || packedWidth % w != 0)
+        {
+            IBackend.QkvSplitNormHeadMajorReference(q, k, v, qkv, qWeight, kWeight, eps);
+            return;
+        }
+        // packStride comes from the SOURCE width, not from how many outputs were asked for: a full [q|k|v] buffer
+        // can be read for only k and v, while a narrowed [k|v] or [q] carries only what it names, in q,k,v order.
+        int packStride = (int)(packedWidth / w);
+        int qSlot, kSlot, vSlot;
+        if (packStride == 3)
+        {
+            qSlot = q is null ? -1 : 0;
+            kSlot = k is null ? -1 : 1;
+            vSlot = v is null ? -1 : 2;
+        }
+        else
+        {
+            int next = 0;
+            qSlot = q is null ? -1 : next++;
+            kSlot = k is null ? -1 : next++;
+            vSlot = v is null ? -1 : next++;
+            if (next != packStride)
+            {
+                IBackend.QkvSplitNormHeadMajorReference(q, k, v, qkv, qWeight, kWeight, eps);
+                return;
+            }
+        }
+        long tokens = qkv.ElementCount / (packStride * w);
+        if ((int)shapeRef.Shape[3] != headDim || shapeRef.Shape[0] * seq != tokens)
+        {
+            IBackend.QkvSplitNormHeadMajorReference(q, k, v, qkv, qWeight, kWeight, eps);
+            return;
+        }
+
+        VulkanBuffer qkvBuf = GetBuffer(qkv);
+        VulkanBuffer qwBuf = GetBuffer(qWeight);
+        VulkanBuffer kwBuf = GetBuffer(kWeight);
+        // Norm weights are FP32 in the shader signature whatever the activation dtype is, as the other norms do.
+        VulkanBuffer? qwOwned = null, kwOwned = null;
+        VulkanBuffer qwEff = qwBuf, kwEff = kwBuf;
+        if (qWeight.DType != DType.F32) (qwEff, qwOwned) = CastIfNeeded(qWeight, qwBuf, DType.F32);
+        if (kWeight.DType != DType.F32) (kwEff, kwOwned) = CastIfNeeded(kWeight, kwBuf, DType.F32);
+
+        ulong outBytes = (ulong)(shapeRef.ElementCount * shapeRef.DType.SizeInBytes);
+        VulkanBuffer? qOut = q is null ? null : _xfer.AllocateDevice(outBytes);
+        VulkanBuffer? kOut = k is null ? null : _xfer.AllocateDevice(outBytes);
+        VulkanBuffer? vOut = v is null ? null : _xfer.AllocateDevice(outBytes);
+        try
+        {
+            const uint local = 64;
+            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+            {
+                SpecConstant.UInt(0, local), SpecConstant.UInt(1, 1), SpecConstant.UInt(2, 1),
+            };
+            VulkanKernel kernel = GetKernel("qkv_split_norm_head_major" + DtypeSuffix(qkv.DType), storageBufferCount: 6, spec);
+
+            Span<byte> pcBytes = stackalloc byte[(int)VulkanDescriptorManager.PushConstantRangeBytes];
+            Authoring.PushConstants pc = new(pcBytes);
+            pc.U32((uint)headDim);
+            pc.U32((uint)heads);
+            pc.U32((uint)w);
+            pc.U32((uint)tokens);
+            pc.U32((uint)seq);
+            pc.U32((uint)packStride);
+            pc.I32(qSlot);
+            pc.I32(kSlot);
+            pc.I32(vSlot);
+            pc.F32(eps);
+
+            // Vulkan has no optional descriptor, so an output this call does not produce still needs a handle and
+            // gets a produced one's. Nothing writes through it — every store in the shader is slot-guarded.
+            ulong filler = (qOut ?? kOut ?? vOut)!.Handle;
+            Span<ulong> bufs = stackalloc ulong[]
+            {
+                qkvBuf.Handle, qwEff.Handle, kwEff.Handle,
+                qOut?.Handle ?? filler, kOut?.Handle ?? filler, vOut?.Handle ?? filler,
+            };
+            Dispatch(kernel, bufs, pc.Written, (uint)(tokens * heads), 1, 1);
+
+            if (q is not null) CacheOutput(q, qOut!);
+            if (k is not null) CacheOutput(k, kOut!);
+            if (v is not null) CacheOutput(v, vOut!);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan QkvSplitNormHeadMajor dispatch failed", ex);
+            qOut?.Dispose();
+            kOut?.Dispose();
+            vOut?.Dispose();
             throw;
         }
         finally
@@ -3574,6 +3742,88 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         _dispatchesSinceSubmit++;
         _dispatchesThisOp++;
         if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
+        CacheOutput(output, outBuf);
+    }
+
+    /// <summary>Writes a <c>[1, heads, c, hd]</c> chunk into sequence rows <c>[seqOffset, seqOffset + c)</c> of a
+    /// head-major <c>[1, heads, seq, hd]</c> tensor, in place and accumulating across calls.</summary>
+    /// <remarks>Data movement, so one multi-region <c>vkCmdCopyBuffer</c> rather than a compute shader — a head's
+    /// chunk rows are contiguous, heads are not (the destination stride is the full sequence, the source stride
+    /// the chunk), which is exactly the per-slice shape <see cref="Concat"/>'s <c>dim &gt; 0</c> path already
+    /// issues. CUDA spends one device-to-device copy per head; this spends one command for all of them.
+    ///
+    /// <para>The destination persists ACROSS calls — that is the whole point, and what separates this from a
+    /// concat: MiniMaxH3's chunked attention and Wan's per-frame attention both fill one buffer chunk by chunk
+    /// without ever holding the chunk list alive alongside the result. So a destination that already has a device
+    /// buffer keeps it, and the copy lands next to what the earlier chunks wrote.</para>
+    ///
+    /// <para>A destination that does NOT have one yet is allocated, deliberately WITHOUT uploading its host
+    /// contents, which is what CUDA does and is a real divergence from the interface reference: the reference
+    /// writes only the chunk rows, so on the host everything outside every chunk survives, while on both GPUs it
+    /// is whatever the allocation came with. Uploading is not a option a caller would want — the destination is
+    /// the whole attention key/value buffer (Wan-Animate-2 builds a <c>[1, heads, s + hw, headDim]</c> one per
+    /// forward, hundreds of megabytes) and this would move all of it to write one chunk. Every caller fills the
+    /// whole buffer across its chunks, so the region is unreachable; a future one that does not must zero it
+    /// itself.</para>
+    ///
+    /// <para>The barriers are not the ones a dispatch leaves behind. Every compute dispatch ends with a
+    /// compute→compute barrier whose destination scope is <c>ShaderStorageRead</c>; a transfer reading or writing
+    /// the same memory is outside it in both directions, so this closes both explicitly. <see cref="Concat"/> and
+    /// <see cref="CopyInto"/> record the compute→compute barrier around their copies and have the same gap.</para></remarks>
+    public unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
+    {
+        using OpScope _op = EnterOp();
+        if (output.DType != DType.F32 || input.DType != DType.F32
+            || output.Shape.Rank != 4 || input.Shape.Rank != 4)
+        {
+            IBackend.ScatterSeqHeadMajorReference(output, input, seqOffset);
+            return;
+        }
+        int heads = (int)output.Shape[1], seq = (int)output.Shape[2], hd = (int)output.Shape[3];
+        int chunk = (int)input.Shape[2];
+        long elemSize = DType.F32.SizeInBytes;
+        if (heads <= 0 || chunk <= 0 || (int)input.Shape[1] != heads || (int)input.Shape[3] != hd
+            || seqOffset < 0 || (long)seqOffset + chunk > seq)
+        {
+            IBackend.ScatterSeqHeadMajorReference(output, input, seqOffset);
+            return;
+        }
+
+        // Both buffers resolved BEFORE the recording buffer is acquired: GetBuffer's cache-miss path submits
+        // internally, which would end the command buffer this then records into (see Concat).
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer outBuf = _xfer.TryGetCached(output, out VulkanBuffer? resident) && resident is not null
+            ? resident
+            : _xfer.AllocateDevice((ulong)(output.ElementCount * elemSize));
+        nint cb = _capturingStepGraph ? _stepGraph!.RecordingBuffer : _stream.AcquireRecording();
+        VulkanCommandStream.RecordComputeToCopyBarrierOn(cb);
+
+        Span<VkBufferCopy> regions = heads <= 128 ? stackalloc VkBufferCopy[heads] : new VkBufferCopy[heads];
+        long sliceBytes = (long)chunk * hd * elemSize;
+        for (int h = 0; h < heads; h++)
+        {
+            regions[h] = new VkBufferCopy
+            {
+                srcOffset = (ulong)((long)h * chunk * hd * elemSize),
+                dstOffset = (ulong)((((long)h * seq + seqOffset) * hd) * elemSize),
+                size = (ulong)sliceBytes,
+            };
+        }
+        fixed (VkBufferCopy* pRegions = regions)
+            VulkanApi.vkCmdCopyBuffer(cb, inBuf.Handle, outBuf.Handle, (uint)heads, (nint)pRegions);
+        VulkanCommandStream.RecordCopyToComputeBarrierOn(cb);
+
+        if (!_capturingStepGraph)
+        {
+            _dispatchesSinceSubmit++;
+            _dispatchesThisOp++;
+            // Same bookkeeping block the other copy-recording ops carry. The flush itself cannot fire from here —
+            // an op holding a scope has InOp true — but the increment is what OnOpEnd reads, so a run of chunk
+            // calls still submits every FlushThreshold of them at the op boundary.
+            if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
+        }
+        // Re-cached even though the buffer is unchanged: the rebind is what tells the tensor its device copy is
+        // authoritative, so a later host read syncs it back instead of returning the stale host buffer.
         CacheOutput(output, outBuf);
     }
 
