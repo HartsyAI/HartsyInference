@@ -44,7 +44,14 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
     /// <c>minimax.MiniMaxH3Tokenizer</c> → <c>disable_weights</c> at <c>minimax.py:158</c>. The weights are built
     /// inside <c>MiniMaxH3TextEncoding.Build</c>, which tokenizes the prompt itself, and carry only the prompt's
     /// own tokens — the prompt is appended after every condition label and vision block, so it is contiguous at
-    /// the tail and right-alignment lands on exactly those rows.</remarks>
+    /// the tail and right-alignment lands on exactly those rows.
+    /// <para>TODO — NOT real-weight gated. <c>MiniMaxH3WeightedPromptTests</c> pins the ordering property and the
+    /// weight array's length, but no generation has run: loading this family wants the 20 GB fp8 DiT, the 15 GB
+    /// Qwen3-VL text encoder and the 4.9 GB video VAE, and the CLI was OOM-killed at load (exit 137, twice) with
+    /// ~41 GB of host RAM free. The gate is an environment limit, not a code one — run
+    /// <c>plain</c> / <c>(fox:1.0)</c> / <c>(fox:0.5)</c> plus a same-code determinism control on a box that can
+    /// hold it. The control is NOT optional here: this model's output is only reproducible with the GPU
+    /// otherwise idle.</para></remarks>
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.CondScale;
     /// <inheritdoc/>
