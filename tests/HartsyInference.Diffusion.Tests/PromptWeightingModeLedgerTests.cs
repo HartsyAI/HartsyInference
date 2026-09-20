@@ -133,12 +133,15 @@ public sealed class PromptWeightingModeLedgerTests
     /// there is no ComfyUI tokenizer to read it off, so it stays out.</para></summary>
     private static readonly string[] Unresolved = ["f-lite", "lance-image", "lance-video"];
 
-    /// <summary>Ledgered families whose recipe still declares <see cref="PromptWeightingMode.None"/> because their
-    /// pipeline does not consume weights yet. A recipe may NOT declare a mode it cannot act on: the declaration is what
-    /// keeps the <c>(text:N)</c> grammar in the prompt, so an unwired pipeline would hand the parens and digits to its
-    /// encoder as prose — a regression on a family that works today. The rollout is sequenced by the plan's E2 (Wan /
-    /// LTX / HunyuanVideo) and E3 (remaining image recipes) phases; this list can only shrink, and shrinking it means
-    /// editing this test, which is the point.
+    /// <summary><b>EMPTY as of alpha.135 — every registered family consumes its weights.</b> This listed the
+    /// families whose recipe still declared <see cref="PromptWeightingMode.None"/> because their pipeline could not
+    /// act on weights yet. A recipe may NOT declare a mode it cannot act on: the declaration is what keeps the
+    /// <c>(text:N)</c> grammar in the prompt, so an unwired pipeline would hand the parens and digits to its
+    /// encoder as prose — a regression on a family that works today. The list could only shrink, and shrinking it
+    /// meant editing this test, which was the point; it stays here, with the notes below, so a NEW recipe that
+    /// cannot weight yet has somewhere honest to go rather than silently declaring a mode.
+    /// <para>The notes that follow are kept as the record of what each family turned out to need. Several of them
+    /// contradict what this entry predicted before the work was done, which is the reason to keep them.</para>
     /// <para><b>Kandinsky5 and kandinsky5-video came off this list by declaring a no-op.</b> They are ComfyBlend
     /// because CLIP-L keeps weights, but <c>Kandinsky5TEModel.encode_token_weights</c> (<c>kandinsky5.py:39-43</c>)
     /// returns the Qwen cond plus CLIP-L's POOLED vector and discards the blended hidden states, so SwarmUI's
@@ -178,10 +181,7 @@ public sealed class PromptWeightingModeLedgerTests
     /// it stays unwired rather than half-done.</para>
     /// <b>krea2</b> came off this list once the joint-attention patch landed; it is the only family that needs
     /// both halves, so the partial declaration it carried first was refused here rather than accepted.</para></summary>
-    private static readonly string[] NotYetWired =
-    [
-        "ltx-2.5-distilled", "ltx-video-2",
-    ];
+    private static readonly string[] NotYetWired = [];
 
     private readonly ITestOutputHelper _output;
 

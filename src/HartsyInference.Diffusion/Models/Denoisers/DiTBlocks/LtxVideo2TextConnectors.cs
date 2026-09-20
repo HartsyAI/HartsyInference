@@ -67,24 +67,58 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
     /// (layout channel-major: feature index = <c>channel·49 + layer</c>). <paramref name="validMask"/> is
     /// <c>[seq]</c> with 1 for real tokens and 0 for padding (seq must be a multiple of the register count).
     /// Returns the video <c>[seq, 4096]</c> and audio <c>[seq, 2048]</c> text embeddings.</summary>
-    public (Tensor Video, Tensor Audio) Forward(IBackend backend, Tensor gemmaFeatures, ReadOnlySpan<float> validMask)
+    /// <param name="tokenWeights">SwarmUI's per-token emphasis, one entry per REAL token and aligned to the
+    /// front of the sequence, or empty for none. Applied after the projection and before the connector — see the
+    /// remarks for why neither neighbouring position works.</param>
+    /// <remarks>Where the emphasis lands is the whole difficulty of this family, so it is stated here rather than
+    /// left to the caller. ComfyUI's <c>LTXAVTEModel.encode_token_weights</c> (<c>lt.py:163-189</c>) runs these
+    /// connectors ONLY under <c>compat_mode</c>; its default path hands back token-length embeddings and lets the
+    /// DiT connect them, which is why SwarmUI's unconditional right-alignment lands on token rows there. This
+    /// pipeline mirrors <c>compat_mode</c>, so scaling the connector's OUTPUT would hit learnable register rows
+    /// instead of tokens. Scaling <paramref name="gemmaFeatures"/> is equally wrong: the reference normalizes by a
+    /// global min/max over the whole sequence before projecting (<c>lt.py:174-176</c>), so touching one token
+    /// there moves the divisor every other token shares. Post-projection, pre-register is the only placement that
+    /// reproduces the default path's meaning.</remarks>
+    public (Tensor Video, Tensor Audio) Forward(IBackend backend, Tensor gemmaFeatures, ReadOnlySpan<float> validMask,
+        ReadOnlySpan<float> tokenWeights = default)
     {
         int seq = (int)gemmaFeatures.Shape[0];
         if (seq % _numRegisters != 0)
             throw new ArgumentException($"text seq {seq} must be a multiple of {_numRegisters} registers.");
+        // Against the REAL token count, not the padded length. A weights array longer than the real tokens but
+        // shorter than `seq` would otherwise pass and scale padding rows that the registers are about to replace
+        // — a silent mis-scale rather than a failure.
+        if (tokenWeights.Length > 0)
+        {
+            int realTokens = 0;
+            for (int i = 0; i < validMask.Length; i++)
+            {
+                if (validMask[i] != 0f)
+                {
+                    realTokens++;
+                }
+            }
+            if (tokenWeights.Length > realTokens)
+            {
+                throw new ArgumentException(
+                    $"{tokenWeights.Length} token weights exceed the {realTokens} real tokens in a {seq}-token sequence.",
+                    nameof(tokenWeights));
+            }
+        }
 
         // 1. Per-token (per-layer) RMS-norm over the 3840 channels, then zero out padded tokens.
         Tensor normed = PerTokenRmsNormMasked(gemmaFeatures, validMask, seq);
 
-        // 2. Per-modality scale + projection + connector.
-        Tensor video = ProjectAndConnect(backend, normed, validMask, seq, _videoProjW!, _videoProjB, _videoDim, _video);
-        Tensor audio = ProjectAndConnect(backend, normed, validMask, seq, _audioProjW!, _audioProjB, _audioDim, _audio);
+        // 2. Per-modality scale + projection + connector. Both modalities carry the same emphasis: the reference
+        //    projects once and fans out to two connectors, while this splits the projection per modality.
+        Tensor video = ProjectAndConnect(backend, normed, validMask, seq, _videoProjW!, _videoProjB, _videoDim, _video, tokenWeights);
+        Tensor audio = ProjectAndConnect(backend, normed, validMask, seq, _audioProjW!, _audioProjB, _audioDim, _audio, tokenWeights);
         normed.Dispose();
         return (video, audio);
     }
 
     private Tensor ProjectAndConnect(IBackend backend, Tensor normed, ReadOnlySpan<float> validMask, int seq,
-        Tensor projW, Tensor? projB, int dim, Connector connector)
+        Tensor projW, Tensor? projB, int dim, Connector connector, ReadOnlySpan<float> tokenWeights)
     {
         float scale = MathF.Sqrt((float)dim / CaptionChannels);
         Tensor scaled = new(new TensorShape(seq, FeatureDim), DType.F32);
@@ -92,9 +126,55 @@ public sealed unsafe class LtxVideo2TextConnectors : IDisposable
         Tensor proj = new(new TensorShape(seq, dim), DType.F32);
         backend.Linear(proj, scaled, projW, projB);
         scaled.Dispose();
+        proj = ApplyTokenWeights(backend, proj, tokenWeights, seq);
         Tensor outT = connector.Forward(backend, proj, validMask);
         proj.Dispose();
         return outT;
+    }
+
+    /// <summary>Scales each weighted token's projected row, through the backend's own per-row multiply.</summary>
+    /// <remarks>This ran host-side first, writing into <paramref name="proj"/> with <c>AsSpan&lt;float&gt;()</c>,
+    /// and that was wrong on a device backend: <c>proj</c> is whatever <c>backend.Linear</c> just produced, so a
+    /// host write to it is the discarded-device-write pattern, and the read-back it forces materializes the
+    /// projection on the host and re-uploads it. The visible symptom was a weighted prompt exhausting VRAM at a
+    /// geometry the same unweighted prompt completed at. <c>MaskRows</c> keeps the whole thing on device and
+    /// takes the same shape <c>CondTokenWeights.ScaleRightAligned</c> uses, left-aligned here because the real
+    /// tokens are at the FRONT and the registers replace the tail.</remarks>
+    private static Tensor ApplyTokenWeights(IBackend backend, Tensor proj, ReadOnlySpan<float> tokenWeights, int seq)
+    {
+        if (tokenWeights.Length == 0)
+        {
+            return proj;
+        }
+        float[] rowScales = new float[seq];
+        Array.Fill(rowScales, 1f);
+        bool any = false;
+        for (int t = 0; t < tokenWeights.Length; t++)
+        {
+            if (tokenWeights[t] != 1f)
+            {
+                rowScales[t] = tokenWeights[t];
+                any = true;
+            }
+        }
+        if (!any)
+        {
+            return proj;
+        }
+        using Tensor mask = new Tensor(new TensorShape(seq), DType.F32);
+        rowScales.CopyTo(mask.AsSpan<float>());
+        Tensor scaled = new Tensor(proj.Shape, DType.F32);
+        try
+        {
+            backend.MaskRows(scaled, proj, mask);
+        }
+        catch
+        {
+            scaled.Dispose();
+            throw;
+        }
+        proj.Dispose();
+        return scaled;
     }
 
     /// <summary>RMS-normalizes each token's per-layer 3840-vector (variance over the channel axis, eps 1e-6), then

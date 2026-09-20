@@ -9,4 +9,13 @@ public interface ILtx2PromptTokenizer
 
     /// <summary>Shortest conditioning sequence this family conditions at, or 0 to use only the register multiple. Gemma 4 is 1024; Gemma 3 keeps 0 so the shipping LTX-2.3 behaviour is unchanged.</summary>
     int MinimumConditioningLength { get; }
+
+    /// <summary>One emphasis span's ids: CONTENT only, no sequence-start token and no padding. Needed because
+    /// SwarmUI tokenizes each weighted leaf alone and splices it, and a per-span start token would put a stray
+    /// sentence beginning in the middle of the caption.</summary>
+    IReadOnlyList<int> EncodeSpan(string text);
+
+    /// <summary>The single sequence-start id <see cref="EncodeForConditioning"/> puts before the content. Exposed
+    /// so a caller assembling its own weighted sequence reproduces the same prefix instead of assuming one.</summary>
+    int ConditioningStartId { get; }
 }

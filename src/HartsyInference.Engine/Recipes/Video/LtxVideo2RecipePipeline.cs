@@ -10,6 +10,7 @@ using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Diffusion.Prompting;
 using HartsyInference.Video.Pipelines;
 
 namespace HartsyInference.Engine.Recipes.Video;
@@ -56,8 +57,8 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
 
         // Conditioning length is family-specific (Gemma 3 pads to 256, Gemma 4 to 1024) and is part of the
         // conditioning, not padding — the connector replaces learnable registers positionally.
-        int[] promptTokens = _tokenizer.EncodeForConditioning(prompt);
-        int[] negTokens = _tokenizer.EncodeForConditioning(negative);
+        (int[] promptTokens, float[]? promptWeights) = EncodeWeighted(_tokenizer, prompt);
+        (int[] negTokens, float[]? negWeights) = EncodeWeighted(_tokenizer, negative);
 
         TextToImageRequest inner = new TextToImageRequest
         {
@@ -77,7 +78,8 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
 
         try
         {
-            LtxVideo2Pipeline.Ltx2Result result = _pipeline.GenerateFromTokens(promptTokens, negTokens, inner, numFrames, frameRate, bridge);
+            LtxVideo2Pipeline.Ltx2Result result = _pipeline.GenerateFromTokens(promptTokens, negTokens, inner,
+                numFrames, frameRate, bridge, promptWeights, negWeights);
             AudioBuffer audio = AudioBuffer.FromChannels(result.Audio, result.AudioSampleRate);
             Logs.Info($"[LtxVideo2RecipePipeline] Pipeline returned {result.Frames.Length} frames {result.Width}x{result.Height}"
                 + (audio.IsEmpty ? "." : $" plus a {audio.SampleRate} Hz {audio.ChannelCount}ch soundtrack."));
@@ -88,6 +90,35 @@ public sealed class LtxVideo2RecipePipeline : IVideoRecipePipeline
             Logs.Error("[LtxVideo2RecipePipeline] Generation failed.", ex);
             throw;
         }
+    }
+
+    /// <summary>The conditioning ids plus one weight per id, or a null weight array when nothing is weighted.</summary>
+    /// <remarks>An unweighted prompt keeps <see cref="ILtx2PromptTokenizer.EncodeForConditioning"/> verbatim, so
+    /// wiring weighting moves no existing generation; only a prompt that actually carries emphasis is reassembled
+    /// per span. The single sequence-start id is taken from the tokenizer rather than assumed, because the two
+    /// implementations differ in whether their own encode already supplies one.</remarks>
+    internal static (int[] Tokens, float[]? Weights) EncodeWeighted(ILtx2PromptTokenizer tokenizer, string text)
+    {
+        IReadOnlyList<WeightedSpan> spans = PromptWeighting.Parse(PromptTagFlattening.Flatten(text));
+        if (!PromptWeighting.HasWeights(spans))
+        {
+            return (tokenizer.EncodeForConditioning(PromptWeighting.Join(spans)), null);
+        }
+        List<int> ids = new List<int>(64) { tokenizer.ConditioningStartId };
+        List<float> weights = new List<float>(64) { 1f };
+        foreach (WeightedSpan span in spans)
+        {
+            if (span.Text.Length == 0)
+            {
+                continue;
+            }
+            foreach (int id in tokenizer.EncodeSpan(span.Text))
+            {
+                ids.Add(id);
+                weights.Add(span.Weight);
+            }
+        }
+        return ([.. ids], [.. weights]);
     }
 
     /// <inheritdoc/>
