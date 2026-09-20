@@ -548,6 +548,9 @@ public sealed class InferenceEngine : IInferenceEngine
             ModelArchitecture.AuraFlow => "auraflow",
             ModelArchitecture.Chroma => "chroma",
             ModelArchitecture.MiniMaxH3 => "minimax-h3",
+            // Needs an explicit case: the fallback lowercases the enum name to "qwenimage21", which no recipe
+            // matches, so a bare --model-path would report the family as unsupported instead of routing.
+            ModelArchitecture.QwenImage21 => "qwen-image-2.1",
             _ => arch.ToString().ToLowerInvariant(),
         };
     }

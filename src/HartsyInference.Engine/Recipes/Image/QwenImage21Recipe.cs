@@ -58,7 +58,11 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
-    public MemoryCapabilities MemorySupports => MemoryCapabilities.ComponentPlacement;
+    /// <remarks>None declared. Component placement would need the encoder and VAE to actually run on
+    /// <c>TextEncoderBackend</c>/<c>VaeBackend</c>; the pipeline currently runs both on the single request backend,
+    /// and declaring a capability the pipeline does not consume is how a user gets a setting that silently does
+    /// nothing. The encoder/DiT residency swap that makes a 24 GB card work is unconditional and needs no flag.</remarks>
+    public MemoryCapabilities MemorySupports => MemoryCapabilities.None;
 
     public IRecipePipeline Construct(RecipeContext context)
     {
@@ -111,11 +115,7 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
             Wan22VaeDecoder vae = BuildVae(vaeWeights);
             vae.LoadWeights(vaeWeights);
 
-            QwenImage21Pipeline pipeline = new QwenImage21Pipeline(context.Backend, textEncoder, transformer, vae, config)
-            {
-                TextEncoderBackend = context.TextEncoderBackendOrDefault,
-                VaeBackend = context.VaeBackendOrDefault,
-            };
+            QwenImage21Pipeline pipeline = new QwenImage21Pipeline(context.Backend, textEncoder, transformer, vae, config);
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 1024);
             Logs.Info($"[QwenImage21Recipe] Ready ({config.Depth} blocks, hidden {config.HiddenSize}; "
                 + "Qwen3-VL-8B encoder, no final norm; flow-match Euler at shift 0.69).");
