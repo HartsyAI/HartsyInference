@@ -208,6 +208,16 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     public void Sync()
     {
         _xfer.DrainTransients();
+        DrainStream();
+    }
+
+    /// <summary>Submits whatever is recorded, waits for it, and tells the batching count that it happened.</summary>
+    /// <remarks>Every drain outside teardown goes through here. <c>WaitIdleHost</c> always submits first, so a
+    /// drain that did not reset the count left it holding dispatches that had already gone to the queue, and the
+    /// next op crossed the flush threshold early against a number that was simply wrong. Harmless in effect — a
+    /// submit with nothing recorded is a no-op — which is exactly why it survived at four separate call sites.</remarks>
+    private void DrainStream()
+    {
         _stream.WaitIdleHost();
         _dispatchesSinceSubmit = 0;
     }
@@ -364,16 +374,42 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     /// and fell back to a fixed budget.</para></remarks>
     public override (long FreeBytes, long TotalBytes) GetVramInfo()
     {
-        // The guard is in TryQueryDriverVram, which is the only path here that touches the device.
+        // The device guard is inside TryQueryDriverVram, which is the only path here that touches the device.
         if (TryQueryDriverVram(out long driverFree, out long driverTotal))
         {
             return (driverFree, driverTotal);
         }
-        // Device-local only, the same basis as the total the driver path reports: the allocator's blocks include
-        // host-visible staging, and subtracting those from a device-local total under-reports free VRAM by the
-        // size of the staging ring.
-        long total = (long)Vk.TotalVramBytes;
-        return (Math.Max(0, total - ReservedDeviceBytes), total);
+        // The SAME heap the driver path would have described, for the same reason: reporting a free figure for one
+        // heap against a total summed over all of them leaves the caller comparing two bases, which is the defect
+        // this pair was rewritten to remove. Vk.TotalVramBytes is that sum and is deliberately not used here.
+        (uint heapIndex, long total) = LargestDeviceLocalHeap();
+        if (_disposed)
+        {
+            // Nothing is allocatable through a torn-down backend, and the allocator's block list is empty by now,
+            // so the arithmetic below would answer "entirely free" — the least useful thing to tell a planner.
+            return (0, total);
+        }
+        return (Math.Max(0, total - (long)_allocator.ReservedBytes(heapIndex)), total);
+    }
+
+    /// <summary>The device-local heap with the most memory, and its size.</summary>
+    /// <remarks>Which heap the fallback describes has to match what the driver path picks — one heap, because no
+    /// allocation spans two. The driver path picks by what is LEFT, which needs a live query; without one, largest
+    /// is the same heap on every device that has only one, and the best available guess where there are more.</remarks>
+    private (uint HeapIndex, long SizeBytes) LargestDeviceLocalHeap()
+    {
+        uint best = 0;
+        ulong bestSize = 0;
+        for (uint heap = 0; heap < _vkDevice.MemoryProperties.memoryHeapCount; heap++)
+        {
+            VkMemoryHeap info = _vkDevice.MemoryProperties.GetMemoryHeap((int)heap);
+            if ((info.flags & VkMemoryHeapFlags.DeviceLocal) != 0 && info.size > bestSize)
+            {
+                best = heap;
+                bestSize = info.size;
+            }
+        }
+        return (best, (long)bestSize);
     }
 
     /// <summary>What the driver says this process may still allocate, and out of how much.</summary>
@@ -437,26 +473,6 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         return sawDeviceLocal;
     }
 
-    /// <summary>Bytes this backend's allocator has reserved on the device-local heaps.</summary>
-    /// <remarks>Its own walk rather than a <see cref="MemoryStats"/> destructure: that property also computes
-    /// per-block free lists and a full weight-cache sum, and the fallback path here runs several times per denoise
-    /// step on any device without the budget extension.</remarks>
-    private long ReservedDeviceBytes
-    {
-        get
-        {
-            ulong reserved = 0;
-            for (uint heap = 0; heap < _vkDevice.MemoryProperties.memoryHeapCount; heap++)
-            {
-                if ((_vkDevice.MemoryProperties.GetMemoryHeap((int)heap).flags & VkMemoryHeapFlags.DeviceLocal) != 0)
-                {
-                    reserved += _allocator.ReservedBytes(heap);
-                }
-            }
-            return (long)reserved;
-        }
-    }
-
     /// <inheritdoc/>
     protected override bool ProfilingEnabled => _profiler.IsEnabled;
 
@@ -478,8 +494,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     /// success having returned almost nothing.</remarks>
     protected override void TrimMemoryPoolCore()
     {
-        _stream.WaitIdleHost();
-        _dispatchesSinceSubmit = 0;
+        DrainStream();
         _allocator.ReleaseEmptySlabs();
     }
 
@@ -906,7 +921,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         for (int i = 0; i < iterations; i++) dispatchOne();
         nint cbEnd = _stream.AcquireRecording();   // same buffer unless an internal auto-flush happened
         timer.RecordEnd(cbEnd);
-        _stream.WaitIdleHost();   // submits + host-waits, guaranteeing RecordEnd's write has completed
+        DrainStream();   // submits + host-waits, guaranteeing RecordEnd's write has completed
         return timer.ReadElapsedMs();
     }
 
@@ -2554,7 +2569,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         // per-step temb/tembMod refresh) immediately before this call; without flushing+waiting here, that
         // write can still be sitting unsubmitted (or submitted-but-not-completed) when the capture buffer's
         // dispatches read it, reading stale/zero data instead — silently wrong, not a crash.
-        _stream.WaitIdleHost();
+        DrainStream();
         _stepGraph ??= new VulkanStepGraph(_vkDevice.Handle, _vkDevice.ComputeQueue, Vk.ComputeQueueFamilyIndex);
         _stepGraph.BeginCapture();
         _capturingStepGraph = true;
@@ -2575,7 +2590,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             throw new InvalidOperationException("VulkanBackend.StepGraphLaunch called with no captured graph.");
         // Same cross-submission visibility requirement as StepGraphBegin — the caller's pre-launch CopyInto
         // refresh (normal stream) must be complete before the captured buffer's dispatches read it.
-        _stream.WaitIdleHost();
+        DrainStream();
         _stepGraph.Launch();
     }
 
@@ -4077,7 +4092,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     {
         if (handle == 0 || !_scalarBuffers.TryGetValue(handle, out VulkanBuffer? buf))
             throw new NotSupportedException("ReadScalarBufferInt called with an unallocated buffer.");
-        _stream.WaitIdleHost();
+        DrainStream();
         int v;
         _xfer.DownloadToHost((nint)(&v), buf, sizeof(int));
         return v;

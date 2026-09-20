@@ -27,10 +27,16 @@ stable release will require. Dates are UTC.
   through the interface default and cannot disagree; `CudaBackend` keeps genuinely independent implementations
   reading different routes to the driver, which is the shape that drifts. A cross-backend contract test now asks
   both.
-- **A bulk release tells the backend it drained the stream.** `ReleaseInBulk` and the Vulkan trim both submit and
-  wait on their own, and the dispatch count that drives submit batching did not learn about it — so the next op
-  crossed the flush threshold early against a stale number. Harmless (a submit with nothing recorded is a no-op)
-  but the count was a lie. From the post-merge review of alpha.133.
+- **Every stream drain tells the backend it happened.** A drain always submits first, and the dispatch count that
+  drives submit batching did not learn about it, so the next op crossed the flush threshold early against a number
+  that was simply wrong. Harmless in effect — a submit with nothing recorded is a no-op — which is exactly why it
+  survived at five separate call sites, including the scalar read-back that runs on every decode step. They now go
+  through one drain helper.
+- **The fallback describes the same heap the driver path does.** Fixing the free/total basis in the driver query
+  left `Vk.TotalVramBytes` — a sum over every device-local heap — under the fallback's free figure for one heap, so
+  the defect was relocated rather than removed, reachable whenever the budget extension is absent. And a disposed
+  backend, which now reaches that path, would have computed "entirely free" from an empty allocator; it answers
+  zero, as it did before.
 - The fallback walks the device-local heaps itself rather than destructuring `MemoryStats`, which also computed a
   per-block free-list scan and a full weight-cache sum for a number nobody read — several times per denoise step on
   any device without the budget extension.
