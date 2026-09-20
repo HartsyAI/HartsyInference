@@ -218,29 +218,19 @@ public sealed class VulkanDevice : IDisposable
         bool hasCoopMatrix2 = hasCoopMatrix && hasCoopMatrix2Raw
             && CoopMat2Supported(instance, pd, out coopMat2MGran, out coopMat2NGran, out coopMat2KGran, out coopMat2WgInvocations);
 
-        // Some drivers (notably older NVIDIA Linux blobs) advertise apiVersion 1.3+ but
-        // return zeros for shaderFloat16 / timelineSemaphore / synchronization2 / etc.
-        // when queried through the v1.2/v1.3 *promoted* feature structs. The features
-        // are still real and accepted on device-create. Trust apiVersion as the source of
-        // truth for guaranteed-promoted core features.
-        uint api = props2.properties.apiVersion;
-        uint apiMajor = (api >> 22) & 0x7F;
-        uint apiMinor = (api >> 12) & 0x3FF;
-        bool atLeast12 = apiMajor > 1 || (apiMajor == 1 && apiMinor >= 2);
-        bool atLeast13 = apiMajor > 1 || (apiMajor == 1 && apiMinor >= 3);
-
-        bool fp16  = f12.shaderFloat16 != 0 || (atLeast12 && props2.properties.vendorID is 0x10DE or 0x1002 or 0x8086);
-        bool ts    = f12.timelineSemaphore != 0 || atLeast12;
-        bool bda   = f12.bufferDeviceAddress != 0 || (atLeast12 && props2.properties.vendorID is 0x10DE or 0x1002 or 0x8086);
-        bool sgs   = f13.subgroupSizeControl != 0 || atLeast13;
-        bool cfs   = f13.computeFullSubgroups != 0 || atLeast13;
-        bool sync2 = f13.synchronization2 != 0 || atLeast13;
-        // shaderIntegerDotProduct: like fp16/timeline/sync2, the NVIDIA Linux blob reports 0 through
-        // the promoted Vulkan13Features struct but accepts the feature on device-create (deviation
-        // #3). All NVIDIA/AMD/Intel GPUs exposing Vulkan 1.3 support integer dot product (DP4a HW),
-        // so fall back to the vendor + apiVersion check, mirroring the fp16 detection above.
-        bool int8dot = f13.shaderIntegerDotProduct != 0
-            || (atLeast13 && props2.properties.vendorID is 0x10DE or 0x1002 or 0x8086);
+        // The query is the answer. It used to come back all zeros, and this block used to work around that with
+        // apiVersion and a vendor-ID allowlist, on the belief that "older NVIDIA Linux blobs" misreport promoted
+        // features. They do not: the feature structs carried sTypes no driver recognises, so they were skipped on
+        // the way in and left untouched on the way out. With the right sTypes this device answers 1 for every one
+        // of them. A vendor allowlist would now only claim features a device may genuinely lack, which is the
+        // direction that breaks rather than the direction that is slow.
+        bool fp16  = f12.shaderFloat16 != 0;
+        bool ts    = f12.timelineSemaphore != 0;
+        bool bda   = f12.bufferDeviceAddress != 0;
+        bool sgs   = f13.subgroupSizeControl != 0;
+        bool cfs   = f13.computeFullSubgroups != 0;
+        bool sync2 = f13.synchronization2 != 0;
+        bool int8dot = f13.shaderIntegerDotProduct != 0;
 
         VulkanCapabilities caps = new()
         {

@@ -19,6 +19,10 @@ stable release will require. Dates are UTC.
   `storageBuffer16BitAccess` (every F16 kernel), and `maintenance4` — which is what permits `LocalSizeId`, the
   spec-constant workgroup size every kernel in this backend declares. NVIDIA permits all of it unrequested. A
   driver is not required to, which is the likeliest reason cross-vendor was expected to be painful.
+- **The vendor-ID allowlist that compensated for it is gone.** With the right sTypes this device answers 1 for
+  every feature the query asks about, so the apiVersion-plus-vendor fallback only ever claimed features a device
+  might genuinely lack — the direction that breaks rather than the direction that is slow. The query is the answer
+  now.
 - `MemoryBarrier2` and `BufferMemoryBarrier2` were swapped, so every barrier this backend recorded was tagged as
   the other kind; the KHR cooperative-matrix features/properties pair was swapped the same way; and
   `ShaderModuleCreateInfo` was 15 (image view) instead of 16.
