@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.139
+## alpha.140
 
 - **`WanRopeInterleavedPerHead` runs on the GPU on Vulkan.** It was an interface default that reads
   `x.DataPointer`, so MG3's sigma_theta rotation cost a device sync, a host loop over every head and position, and
@@ -16,6 +16,30 @@ stable release will require. Dates are UTC.
 - Parity rows for **both** forms, on both backends. Per-head tables need more than one head and tables that differ
   between heads to test anything: with one head, or with equal tables, the two layouts address the same bytes and a
   wrong index passes. Flipping the spec constant fails the per-head row and nothing else — checked by doing it.
+
+## alpha.139
+
+- **CUDA is on the shared op scope.** `CudaBackend` was still a standalone `IBackend` carrying its own copy of
+  everything `GpuBackendBase` exists to hold, so a layer written to be inherited had one inheritor. Two hundred op
+  entries, the weight preload and free, activation release, the pool trim and the full device sweep now go through
+  the base; the D2H counters and pin/unpin are gone entirely.
+- **Why the first attempt at this failed, and what fixes it.** It broke three `CudaGraphTests` with
+  `CUDA_ERROR_INVALID_VALUE`. The base's op scope calls the residency cache's own `SweepOrphans`, while CUDA's ops
+  called a static wrapper — and the guards were on the wrapper, chief among them a `cuStreamIsCapturing` check,
+  because freeing a buffer allocated before a capture began is rejected outright on a capturing stream. The
+  conversion therefore dropped that guard at every op entry, and the first capture to park an orphan died. The
+  guards now live on the cache, where the scope reaches them.
+- **Op entry is two jobs, and only one of them is per-op.** CUDA resolves its transfer state through a
+  thread-static ambient, so entry must bind this backend AND reclaim what the last op left. The reclaim stays at
+  depth 0 — an op built of other ops must not free what its own later dispatches read — but binding runs at every
+  depth through a new `OnOpEnter` hook, because `CopyFromPeer` enters another backend mid-op and returns to find
+  that one bound. Its four calls were never scopes; they are rebinds and now say so.
+- **Disposing twice still waits.** The base owns the once-only flag, so a second caller reaches `OnDisposeRepeated`
+  and waits for the teardown it would otherwise return in the middle of, rethrowing what the first caller hit. The
+  base suppresses finalization in a `finally`, since CUDA's teardown reports failure by throwing.
+- A lint fails the build on a discarded op scope. `EnterOp();` as a bare statement still compiles — the result is a
+  struct and C# will throw it away — and it raises the op depth permanently, so every later op is treated as
+  nested: no finalizer drain, no orphan sweep, no flush.
 
 ## alpha.138
 
@@ -38,6 +62,7 @@ stable release will require. Dates are UTC.
   skipped, and the 49 convs are inside that UNet count.
 - The adapter is Pony-trained, which is irrelevant to what is being shown: it shares SDXL's UNet and kohya's key
   grammar, and the claim is that the conv path resolves and fits, not that the output looks like anything.
+
 
 ## alpha.137
 

@@ -163,7 +163,8 @@ public unsafe class MusicGenCheckpointConverterTests
 
     /// <summary>HF transformers EncodecModel state dict for <see cref="TinyEnCodecConfig"/>: encoder seq indices
     /// 0=stem, 1/4=resnet blocks, 3/6=downsample convs, 7=LSTM, 9=final; decoder 0=initial, 1=LSTM, 3/6=transpose
-    /// convs, 4/7=resnet blocks, 9=final. Transpose convs carry the dim=1 weight-norm shape [1, C_out, 1].</summary>
+    /// convs, 4/7=resnet blocks, 9=final. Every conv carries weight_norm's dim=0 gain, which is one scalar per the
+    /// weight's LEADING axis — output channels for a conv, input channels for a transposed one.</summary>
     private static Dictionary<string, Tensor> BuildHfEnCodecCheckpoint()
     {
         Dictionary<string, Tensor> w = new();
@@ -200,9 +201,14 @@ public unsafe class MusicGenCheckpointConverterTests
         w[$"{prefix}.conv.bias"] = T(cOut);
     }
 
+    /// <summary>A transposed conv under <c>weight_norm</c>, as PyTorch writes one.</summary>
+    /// <remarks><c>ConvTranspose1d</c>'s weight is <c>[C_in, C_out, K]</c> — the input channels lead, unlike
+    /// <c>Conv1d</c> — and <c>weight_norm</c> defaults to <c>dim=0</c>, so the gain is one scalar per INPUT channel
+    /// and its shape is <c>[C_in, 1, 1]</c>. Writing it per output channel is the transposed layout's standing
+    /// trap: it is what the plain-conv case two methods up correctly does, and it is wrong here.</remarks>
     private static void AddHfTransposeConv(Dictionary<string, Tensor> w, string prefix, int cIn, int cOut, int k)
     {
-        w[$"{prefix}.conv.weight_g"] = T(1, cOut, 1);
+        w[$"{prefix}.conv.weight_g"] = T(cIn, 1, 1);
         w[$"{prefix}.conv.weight_v"] = T(cIn, cOut, k);
         w[$"{prefix}.conv.bias"] = T(cOut);
     }
