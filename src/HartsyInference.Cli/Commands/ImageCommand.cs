@@ -32,6 +32,16 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Disable the per-family extras SwarmUI gates on its ModelSpecificEnhancements toggle (Krea 2's joint-attention prompt-weight patch). Default: enabled, matching SwarmUI.")]
         public bool NoModelEnhancements { get; init; }
 
+        /// <summary>LoRAs to merge into the denoiser; families that don't declare LoRA support refuse them.</summary>
+        [CommandOption("--lora")]
+        [Description("LoRA to merge, by name or path; repeat for more. Merges into fp8 checkpoints too — the target weight is dequantized, merged, and requantized.")]
+        public string[]? Loras { get; init; }
+
+        /// <summary>Per-LoRA strengths, positionally matched to --lora; missing entries default to 1.0.</summary>
+        [CommandOption("--lora-weight")]
+        [Description("Strength for the same-position --lora (default 1.0).")]
+        public double[]? LoraWeights { get; init; }
+
         /// <summary>Compute backend selector.</summary>
         [CommandOption("-b|--backend")]
         [Description("Backend: auto, cpu, cuda, or vulkan.")]
@@ -227,6 +237,13 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         if (settings.NoModelEnhancements)
         {
             parameters.Put("no-model-enhancements", "true");
+        }
+        if (settings.Loras is { Length: > 0 })
+        {
+            parameters.Put("loras", string.Join('\n', settings.Loras));
+            parameters.Put("lora-weights", string.Join('\n',
+                settings.Loras.Select((_, i) => (settings.LoraWeights is not null && i < settings.LoraWeights.Length
+                    ? settings.LoraWeights[i] : 1.0).ToString(CultureInfo.InvariantCulture))));
         }
         parameters.Put("seed", settings.Seed.ToString(CultureInfo.InvariantCulture));
 
