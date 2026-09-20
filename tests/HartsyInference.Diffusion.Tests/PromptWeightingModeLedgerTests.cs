@@ -146,10 +146,13 @@ public sealed class PromptWeightingModeLedgerTests
     /// STRIP: <c>Kandinsky5TextEncoding.StripEmphasis</c> takes the grammar off before either arm tokenizes, because
     /// declaring the mode is what stops <c>ImagesService</c> collapsing the tag and would otherwise hand Qwen the
     /// parens as prose. Blending the Qwen arm to "fix" the no-op would BREAK parity, not achieve it.</para>
-    /// <para><b>hunyuan-image</b> needs the UNPADDED weights: it pads to 1034 and the encoder then slices
-    /// <c>[34, 34 + keep)</c> (<c>HunyuanImageQwenTextEncoder.cs:17,60-63</c>), so handing the padded array through
-    /// gives <c>offset = keep − 1034</c> and every prompt weight falls off the front — a silent no-op rather than an
-    /// error.</para>
+    /// <para><b>hunyuan-image came off this list by returning the UNPADDED weights.</b> It pads to 1034 and the
+    /// encoder then slices <c>[34, 34 + keep)</c> (<c>HunyuanImageQwenTextEncoder.cs:17,60-63</c>), so handing the
+    /// padded array through would give <c>offset = keep − 1034</c> and drop every prompt weight off the front — a
+    /// silent no-op rather than an error. The weights are cut to the mask's real length instead, which makes the
+    /// right-alignment offset −34 exactly. Gating it also surfaced a PRE-EXISTING defect, recorded as a TODO and
+    /// not fixed: the chat template is 33 ids on our tokenizer, not 34, because <c>EncodeRaw("\n")</c> returns
+    /// nothing where HF emits id 198 — so the encoder's slice drops the prompt's first token.</para>
     /// <para><b>minimax-h3</b> tokenizes INSIDE its encoder (<c>MiniMaxH3TextEncoding.Build</c>), interleaving
     /// vision/audio blocks with the text and emitting <c>TagRuns</c>; its cond is rank-2 <c>[seq, hidden]</c>, so the
     /// weights must be built alongside <c>Encoded.TokenIds</c> and forced to 1 on every non-text run. That is the E1
@@ -162,7 +165,6 @@ public sealed class PromptWeightingModeLedgerTests
     /// both halves, so the partial declaration it carried first was refused here rather than accepted.</para></summary>
     private static readonly string[] NotYetWired =
     [
-        "hunyuan-image",
         "ltx-2.5-distilled", "ltx-video-2", "minimax-h3",
     ];
 
