@@ -236,6 +236,13 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
         backend.GatedResidualLastDim(result, afterAttn, mlpOut, mod.Gate2);
         afterAttn.Dispose();
         mlpOut.Dispose();
+        if (act == DType.F16)
+        {
+            // The reference clips the block output to F16's range for exactly this dtype
+            // (qwen_image21/model.py, end of QwenImage21TransformerBlock.forward): the SwiGLU intermediate can
+            // momentarily exceed 65504, and an Inf in the residual stream poisons every later block.
+            backend.Clamp(result, result, -65504f, 65504f);
+        }
         return result;
     }
 
@@ -285,7 +292,8 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
 
 /// <summary>The one modulation every Qwen-Image 2.1 block reads, evaluated once per forward and shared by all of
 /// them. Scales arrive as <c>1 + scale</c> and gates already through <c>tanh</c>, so a block does no modulation
-/// arithmetic of its own. A pair of these exists per step: one built from <c>t = 0</c> for the text prefix, one from
+/// arithmetic of its own. Always <b>F32</b>, independent of the activation dtype, because the backend's 16-bit
+/// DiT recipe is 16-bit activations with an F32 scale/gate. A pair of these exists per step: one built from <c>t = 0</c> for the text prefix, one from
 /// the sampled timestep for the image rows.</summary>
 public readonly struct QwenImage21Modulation(Tensor scale1Plus1, Tensor gate1, Tensor scale2Plus1, Tensor gate2) : IDisposable
 {

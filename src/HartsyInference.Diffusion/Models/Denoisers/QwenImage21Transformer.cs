@@ -263,25 +263,24 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
         return new QwenImage21Modulation(scale1Plus1, gate1Tanh, scale2Plus1, gate2Tanh);
     }
 
-    /// <summary><c>1 + x</c> in F32, then down to the activation dtype for the blocks to broadcast.</summary>
-    private Tensor Widened(IBackend backend, Tensor value, float bias)
+    /// <summary><c>1 + x</c>, kept F32. The modulation stays F32 whatever the activation dtype is: this engine's
+    /// 16-bit DiT recipe is <b>16-bit activations with an F32 scale/gate</b> — both
+    /// <see cref="IBackend.AffineBroadcastLastDim"/> and <see cref="IBackend.GatedResidualLastDim"/> refuse a
+    /// 16-bit scale — and these are <c>[1, hidden]</c> tensors, so the width is free.</summary>
+    private static Tensor Widened(IBackend backend, Tensor value, float bias)
     {
         Tensor sum = new Tensor(value.Shape, DType.F32);
         backend.AddScalar(sum, value, bias);
         value.Dispose();
-        Tensor result = Cast(backend, sum, _act);
-        if (!ReferenceEquals(result, sum)) sum.Dispose();
-        return result;
+        return sum;
     }
 
-    private Tensor Tanhed(IBackend backend, Tensor value)
+    private static Tensor Tanhed(IBackend backend, Tensor value)
     {
         Tensor activated = new Tensor(value.Shape, DType.F32);
         backend.Tanh(activated, value);
         value.Dispose();
-        Tensor result = Cast(backend, activated, _act);
-        if (!ReferenceEquals(result, activated)) activated.Dispose();
-        return result;
+        return activated;
     }
 
     /// <summary><c>LastLayer</c>: scale-only adaLN — <c>LayerNorm(x) · (1 + Linear(SiLU(temb)))</c> with no shift

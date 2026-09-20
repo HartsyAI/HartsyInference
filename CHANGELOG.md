@@ -37,7 +37,10 @@ stable release will require. Dates are UTC.
   quality is equivalent. The gap is the activation dtype and its consequences, not the GEMM: F32 activations
   against BF16 weights already resolve to a BF16 matmul, but pay a per-call activation cast and double the
   elementwise bandwidth. F16 is the named lever and the modulation chain is already F32-internal so the dtype is
-  free to change; not attempted here.
+  free to change. F16 itself was tried and is blocked on weight residency rather than precision: it renders
+  correctly at 512² (0.59/255 from the F32 image) but OOMs at 1024², because F16 activations against a BF16
+  weight force a BF16→F16 materialization of the whole DiT, where F32 activations pick a BF16 GEMM and cast no
+  weight at all. The lever is converting the checkpoint to F16 at load, not flipping the activation dtype.
 
 ## alpha.148
 

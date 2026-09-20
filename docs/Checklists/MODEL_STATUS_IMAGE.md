@@ -452,9 +452,18 @@ opaque image's alpha at 253–255, so testing for exactly 255 made every ordinar
 
 **Activations are F32, not the reference's bf16.** This engine's CUDA DiT recipe is F32-or-F16:
 `LayerNormNoAffine`, `RmsNorm` and `WanRopeInterleaved` have no BF16 kernel, so bf16 activations fail at the
-first norm. Weights stay bf16 either way. F16 is the other served recipe and is why the reference block carries a
-`clip(±65504)`; it is selectable on `QwenImage21Transformer` but unverified on this model, and is the obvious
-next lever if the step time needs to come down.
+first norm. Weights stay bf16 either way; the modulation stays F32 whatever the activations are, because the
+16-bit recipe is *16-bit activations with an F32 scale/gate*.
+
+**F16 was tried and is blocked on weight residency, not on precision.** With the reference's `clip(±65504)`
+wired in (`Clamp`, kept in the block and still reachable via `QwenImage21Transformer`'s `act` parameter), F16
+renders correctly at 512²/4 steps and lands 0.59/255 mean from the F32 image, max 17 — no SwiGLU overflow. It
+then **OOMs at 1024²**, and the reason is not activation size: F16 activations against a BF16 weight make
+`ResolveGemmDtype` pick F16, which forces a BF16→F16 materialization of **every** weight and so wants a second
+14 GB copy of the DiT resident. F32 activations against BF16 weights pick a BF16 GEMM and cast **no** weight at
+all, only the activation. So the real F16 lever is converting the checkpoint to F16 **at load** (same 14 GB, no
+duplicate) rather than flipping the activation dtype — a load-path change with its own verification, not a
+one-line switch.
 
 **Prompt weighting is declared CondScale and wired, and is provably inert** — the Kandinsky5 situation by a
 different route. The DiT's first act on the conditioning is `txt_in.text_norm`, a per-row RMSNorm, and RMSNorm is

@@ -37,16 +37,34 @@ public sealed class QwenImage21ArchitectureTests
         Assert.Equal((4, 1, 2), image[23]);
     }
 
-    /// <summary>An odd grid still centers by integer division, and every image row shares one sequence-axis value —
-    /// the property that makes the text prefix and the image block separable.</summary>
+    /// <summary>An ODD grid is where the centering convention actually shows, and the reference's is not the
+    /// common one. ComfyUI writes (<c>qwen_image21/model.py</c>, <c>build_sequence</c>):
+    /// <code>hh = torch.arange(h) - (h - h // 2) + 0.5 * (h % 2 - x.shape[-2] % 2)</code>
+    /// For the target image the parity term is zero, leaving <c>r − (h − h/2)</c>. At <c>h = 3</c> that is
+    /// <c>r − 2</c> → <c>−2, −1, 0</c>, which is deliberately NOT the <c>r − h//2</c> convention that would give
+    /// <c>−1, 0, 1</c>. Both render; only one matches the model's training. The expected values below are read
+    /// off the reference expression, not off this implementation, and the second assertion fails under the
+    /// <c>h//2</c> convention specifically.</summary>
     [Fact]
-    public void AnOddGridCentersByIntegerDivisionAndSharesOneSequenceAxis()
+    public void AnOddGridUsesTheReferencesCenteringNotTheCommonOne()
     {
         (double Seq, double Height, double Width)[] image = QwenImage21Rope.ImagePositions(textLen: 7, imgH: 3, imgW: 3);
-        // 3 - 3/2 = 2, so rows run -2, -1, 0.
         Assert.Equal((7, -2, -2), image[0]);
+        Assert.Equal((7, -1, -1), image[4]);
         Assert.Equal((7, 0, 0), image[8]);
+        // The h//2 convention would put the grid's centre row at 0 and its last row at +1; the reference ends at 0.
+        Assert.DoesNotContain(image, p => p.Height > 0 || p.Width > 0);
         Assert.All(image, p => Assert.Equal(7, p.Seq));
+    }
+
+    /// <summary>The same expression for an EVEN grid, where <c>h − h/2</c> and <c>h//2</c> happen to agree — so
+    /// this case cannot distinguish the two conventions and is pinned only to catch an off-by-one.</summary>
+    [Fact]
+    public void AnEvenGridCentersOnTheHalfwayRow()
+    {
+        (double Seq, double Height, double Width)[] image = QwenImage21Rope.ImagePositions(textLen: 2, imgH: 4, imgW: 4);
+        Assert.Equal((2, -2, -2), image[0]);
+        Assert.Equal((2, 1, 1), image[15]);
     }
 
     /// <summary>The rope table is axis-major with each pair's angle duplicated across both slots, which is what the

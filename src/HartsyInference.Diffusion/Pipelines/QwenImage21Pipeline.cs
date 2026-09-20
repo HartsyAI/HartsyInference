@@ -107,34 +107,39 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
             uncondHidden?.Dispose();
         }
 
-        Tensor latent = GaussianLatent(1, _config.InChannels, h, w, seed);
-        if (variationSeedStrength > 0)
-        {
-            VariationNoise.BlendInPlace(latent, latent.Shape, variationSeed, variationSeedStrength);
-        }
-
-        FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(MathF.Exp(SchedulerMu));
-        scheduler.SetTimesteps(steps);
-        ISampler sampler = FlowMatchSampling.Resolve(samplerSelection, scheduler, unchecked((int)seed), "Qwen-Image 2.1");
-
-        Logs.Info($"[QwenImage21] Denoise {steps} steps, CFG {cfgScale}, {width}x{height} (latent {w}x{h}, "
-            + $"{h * w} image tokens, {condPrefix.Length} text tokens).");
-
-        DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
-            PredictionType.FlowVelocity,
-            (x, s, stepIndex) =>
-            {
-                Tensor cond = _transformer.Forward(Backend, x, condPrefix, s);
-                if (!useCfg)
-                {
-                    return new DenoisePrediction(cond, cond);
-                }
-                Tensor uncond = _transformer.Forward(Backend, x, uncondPrefix!, s);
-                return new DenoisePrediction(cond, uncond, cfgScale);
-            });
-
+        // From here to the decode, everything runs under one finally that releases the prefix caches. They are
+        // depth x 2 x T x hidden of resident GPU memory each, and the setup below can throw on caller-supplied
+        // input — FlowMatchSampling.Resolve refuses an unrecognized sampler name — so a guard that started only
+        // at the denoise loop would leak both caches on every misspelled sampler.
+        Tensor? latent = null;
         try
         {
+            latent = GaussianLatent(1, _config.InChannels, h, w, seed);
+            if (variationSeedStrength > 0)
+            {
+                VariationNoise.BlendInPlace(latent, latent.Shape, variationSeed, variationSeedStrength);
+            }
+
+            FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(MathF.Exp(SchedulerMu));
+            scheduler.SetTimesteps(steps);
+            ISampler sampler = FlowMatchSampling.Resolve(samplerSelection, scheduler, unchecked((int)seed), "Qwen-Image 2.1");
+
+            Logs.Info($"[QwenImage21] Denoise {steps} steps, CFG {cfgScale}, {width}x{height} (latent {w}x{h}, "
+                + $"{h * w} image tokens, {condPrefix.Length} text tokens).");
+
+            DelegateDenoisePredictor predictor = new DelegateDenoisePredictor(
+                PredictionType.FlowVelocity,
+                (x, s, stepIndex) =>
+                {
+                    Tensor cond = _transformer.Forward(Backend, x, condPrefix, s);
+                    if (!useCfg)
+                    {
+                        return new DenoisePrediction(cond, cond);
+                    }
+                    Tensor uncond = _transformer.Forward(Backend, x, uncondPrefix!, s);
+                    return new DenoisePrediction(cond, uncond, cfgScale);
+                });
+
             sampler.Reset(latent.Shape);
             for (int i = 0; i < steps; i++)
             {
@@ -164,7 +169,7 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
         {
             condPrefix.Dispose();
             uncondPrefix?.Dispose();
-            latent.Dispose();
+            latent?.Dispose();
         }
     }
 
