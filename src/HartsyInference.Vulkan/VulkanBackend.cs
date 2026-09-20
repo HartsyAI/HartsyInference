@@ -3817,6 +3817,10 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         {
             _dispatchesSinceSubmit++;
             _dispatchesThisOp++;
+            // Same bookkeeping block the other copy-recording ops carry. The flush itself cannot fire from here —
+            // an op holding a scope has InOp true — but the increment is what OnOpEnd reads, so a run of chunk
+            // calls still submits every FlushThreshold of them at the op boundary.
+            if (_dispatchesSinceSubmit >= FlushThreshold && !InOp) DrainAndFlush();
         }
         // Re-cached even though the buffer is unchanged: the rebind is what tells the tensor its device copy is
         // authoritative, so a later host read syncs it back instead of returning the stale host buffer.
