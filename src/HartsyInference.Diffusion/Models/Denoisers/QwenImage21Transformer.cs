@@ -215,23 +215,22 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
 
     /// <summary>Sinusoidal timestep embedding (cos-then-sin halves, <c>time_factor</c> 1000 folded into the scaled
     /// argument) through the bias-free <c>linear_1 → SiLU → linear_2</c> projector.</summary>
+    /// <remarks>Kept in F32 whatever the activation dtype. These are <c>[1, 256]</c> and <c>[1, hidden]</c>
+    /// tensors evaluated twice per step, so the width costs nothing, and the modulation they feed goes through
+    /// <c>AddScalar</c> and <c>Tanh</c>, which this engine's CUDA backend serves for F32 only.</remarks>
     private Tensor ComputeTimestepEmbedding(IBackend backend, float timestep)
     {
         Tensor sinusoid = new Tensor(new TensorShape(1, 256), DType.F32);
         DiTUtils.SinusoidalTimestepEmbedding(sinusoid, timestep * 1000.0f, batch: 1, embDim: 256);
-        Tensor sinusoidAct = Cast(backend, sinusoid, _act);
-        // Cast returns the SOURCE when no conversion is needed, so disposing unconditionally would free the tensor
-        // still in use — invisible on the bf16 path and immediate on the F32 one.
-        if (!ReferenceEquals(sinusoidAct, sinusoid)) sinusoid.Dispose();
 
         TensorShape shape = new TensorShape(1, _config.HiddenSize);
-        Tensor first = new Tensor(shape, _act);
-        backend.Linear(first, sinusoidAct, _timeLinear1!, null);
-        sinusoidAct.Dispose();
-        Tensor activated = new Tensor(shape, _act);
+        Tensor first = new Tensor(shape, DType.F32);
+        backend.Linear(first, sinusoid, _timeLinear1!, null);
+        sinusoid.Dispose();
+        Tensor activated = new Tensor(shape, DType.F32);
         backend.Silu(activated, first);
         first.Dispose();
-        Tensor temb = new Tensor(shape, _act);
+        Tensor temb = new Tensor(shape, DType.F32);
         backend.Linear(temb, activated, _timeLinear2!, null);
         activated.Dispose();
         return temb;
@@ -243,33 +242,46 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
     private QwenImage21Modulation ComputeModulation(IBackend backend, Tensor temb)
     {
         int hidden = _config.HiddenSize;
-        Tensor activated = new Tensor(new TensorShape(1, hidden), _act);
+        Tensor activated = new Tensor(new TensorShape(1, hidden), DType.F32);
         backend.Silu(activated, temb);
-        Tensor all = new Tensor(new TensorShape(1, 4 * hidden), _act);
+        Tensor all = new Tensor(new TensorShape(1, 4 * hidden), DType.F32);
         backend.Linear(all, activated, _modulation!, null);
         activated.Dispose();
 
         TensorShape one = new TensorShape(1, hidden);
-        Tensor scale1 = new Tensor(one, _act);
-        Tensor gate1 = new Tensor(one, _act);
-        Tensor scale2 = new Tensor(one, _act);
-        Tensor gate2 = new Tensor(one, _act);
+        Tensor scale1 = new Tensor(one, DType.F32);
+        Tensor gate1 = new Tensor(one, DType.F32);
+        Tensor scale2 = new Tensor(one, DType.F32);
+        Tensor gate2 = new Tensor(one, DType.F32);
         backend.Split([scale1, gate1, scale2, gate2], all, 1);
         all.Dispose();
 
-        Tensor scale1Plus1 = new Tensor(one, _act);
-        backend.AddScalar(scale1Plus1, scale1, 1.0f);
-        scale1.Dispose();
-        Tensor scale2Plus1 = new Tensor(one, _act);
-        backend.AddScalar(scale2Plus1, scale2, 1.0f);
-        scale2.Dispose();
-        Tensor gate1Tanh = new Tensor(one, _act);
-        backend.Tanh(gate1Tanh, gate1);
-        gate1.Dispose();
-        Tensor gate2Tanh = new Tensor(one, _act);
-        backend.Tanh(gate2Tanh, gate2);
-        gate2.Dispose();
+        Tensor scale1Plus1 = Widened(backend, scale1, 1.0f);
+        Tensor scale2Plus1 = Widened(backend, scale2, 1.0f);
+        Tensor gate1Tanh = Tanhed(backend, gate1);
+        Tensor gate2Tanh = Tanhed(backend, gate2);
         return new QwenImage21Modulation(scale1Plus1, gate1Tanh, scale2Plus1, gate2Tanh);
+    }
+
+    /// <summary><c>1 + x</c> in F32, then down to the activation dtype for the blocks to broadcast.</summary>
+    private Tensor Widened(IBackend backend, Tensor value, float bias)
+    {
+        Tensor sum = new Tensor(value.Shape, DType.F32);
+        backend.AddScalar(sum, value, bias);
+        value.Dispose();
+        Tensor result = Cast(backend, sum, _act);
+        if (!ReferenceEquals(result, sum)) sum.Dispose();
+        return result;
+    }
+
+    private Tensor Tanhed(IBackend backend, Tensor value)
+    {
+        Tensor activated = new Tensor(value.Shape, DType.F32);
+        backend.Tanh(activated, value);
+        value.Dispose();
+        Tensor result = Cast(backend, activated, _act);
+        if (!ReferenceEquals(result, activated)) activated.Dispose();
+        return result;
     }
 
     /// <summary><c>LastLayer</c>: scale-only adaLN — <c>LayerNorm(x) · (1 + Linear(SiLU(temb)))</c> with no shift
@@ -277,14 +289,12 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
     private Tensor ApplyFinalLayer(IBackend backend, Tensor hidden, Tensor temb, int seq)
     {
         int dim = _config.HiddenSize;
-        Tensor activated = new Tensor(new TensorShape(1, dim), _act);
+        Tensor activated = new Tensor(new TensorShape(1, dim), DType.F32);
         backend.Silu(activated, temb);
-        Tensor scale = new Tensor(new TensorShape(1, dim), _act);
+        Tensor scale = new Tensor(new TensorShape(1, dim), DType.F32);
         backend.Linear(scale, activated, _normOutLinear!, null);
         activated.Dispose();
-        Tensor scalePlus1 = new Tensor(new TensorShape(1, dim), _act);
-        backend.AddScalar(scalePlus1, scale, 1.0f);
-        scale.Dispose();
+        Tensor scalePlus1 = Widened(backend, scale, 1.0f);
 
         TensorShape shape = new TensorShape(1, seq, dim);
         Tensor normed = new Tensor(shape, _act);

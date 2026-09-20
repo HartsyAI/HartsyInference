@@ -456,6 +456,15 @@ first norm. Weights stay bf16 either way. F16 is the other served recipe and is 
 `clip(±65504)`; it is selectable on `QwenImage21Transformer` but unverified on this model, and is the obvious
 next lever if the step time needs to come down.
 
+**Prompt weighting is declared CondScale and wired, and is provably inert** — the Kandinsky5 situation by a
+different route. The DiT's first act on the conditioning is `txt_in.text_norm`, a per-row RMSNorm, and RMSNorm is
+scale-invariant per row, so multiplying a cond row by `w` cancels exactly. SwarmUI scales that same tensor, so
+its CondScale does nothing here either and reproducing the no-op *is* parity. The gate is therefore inverted, as
+Kandinsky5's is — measured at 512²/4 steps/seed 42: `a red apple`, `(a red apple:1.0)` and `(a red apple:1.5)`
+all pixel-identical, the plain prompt run twice identical (determinism), and a *different* prompt 34/255 away
+(the control proving conditioning reaches the model at all). Pinned by
+`QwenImage21WeightSeamTests.APerRowScaleIsCancelledByTheTextProjectionsRmsNorm`.
+
 **Not wired:** reference-image editing (needs the Wan 2.2 VAE *encoder* parameterized the same way the decoder now
 is, plus the interleaved text/reference sequence and per-reference RoPE), LoRA (adapters address
 `img_mlp.gate_layer`/`proj`, the two halves of the fused `gate_up` this loads whole), and the `int8_convrot`

@@ -73,21 +73,38 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
 
         // 1. Text conditioning. The encoder and the DiT are ~17 GB and ~14 GB at bf16 and do not overlap in time,
         // so the encoder is evicted before the DiT is staged — both resident at once does not fit a 24 GB card.
-        Tensor condHidden = ApplyTokenWeights(EncodeDropped(condTokens, condDrop), condWeights);
-        Tensor? uncondHidden = useCfg
-            ? ApplyTokenWeights(EncodeDropped(uncondTokens!, uncondDrop), uncondWeights) : null;
-        Backend.FreeWeights(_textEncoder.EnumerateWeights());
-
         // The projected text rows and their per-block K/V are step-independent, so this is the only time the text
         // touches the transformer.
-        Backend.PreloadWeights(_transformer.EnumerateWeights());
-        QwenImage21PrefixCache condPrefix = _transformer.BuildPrefix(Backend, condHidden);
-        condHidden.Dispose();
+        QwenImage21PrefixCache condPrefix;
         QwenImage21PrefixCache? uncondPrefix = null;
-        if (uncondHidden is not null)
+        Tensor? condHidden = null, uncondHidden = null;
+        try
         {
-            uncondPrefix = _transformer.BuildPrefix(Backend, uncondHidden);
-            uncondHidden.Dispose();
+            condHidden = ApplyTokenWeights(EncodeDropped(condTokens, condDrop), condWeights);
+            if (useCfg)
+            {
+                uncondHidden = ApplyTokenWeights(EncodeDropped(uncondTokens!, uncondDrop), uncondWeights);
+            }
+            Backend.FreeWeights(_textEncoder.EnumerateWeights());
+            Backend.PreloadWeights(_transformer.EnumerateWeights());
+            condPrefix = _transformer.BuildPrefix(Backend, condHidden);
+            if (uncondHidden is not null)
+            {
+                try
+                {
+                    uncondPrefix = _transformer.BuildPrefix(Backend, uncondHidden);
+                }
+                catch
+                {
+                    condPrefix.Dispose();
+                    throw;
+                }
+            }
+        }
+        finally
+        {
+            condHidden?.Dispose();
+            uncondHidden?.Dispose();
         }
 
         Tensor latent = GaussianLatent(1, _config.InChannels, h, w, seed);
@@ -128,29 +145,27 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
                     LatentArch = LatentArchitecture.QwenImage21,
                 });
             }
+
+            Backend.FreeWeights(_transformer.EnumerateWeights());
+
+            // 2. Decode. The Wan 2.2 decoder is a video decoder, so the latent carries a length-1 time axis; T=1 is
+            // its stateless first-chunk path. The latent denorm (this model's own 64-channel table) is inside.
+            using Tensor latent5d = latent.Reshape(new TensorShape([1L, _config.InChannels, 1L, h, w]));
+            using Tensor decoded = _vaeDecoder.Decode(Backend, latent5d);
+
+            // Drop the length-1 time axis by copying rather than viewing: a reshaped view aliases the parent's
+            // buffer, and the caller would have no handle on the parent to release. One frame is cheap.
+            int outChannels = (int)decoded.Shape[1];
+            Tensor image = new Tensor(new TensorShape(1, outChannels, height, width), decoded.DType);
+            Backend.SliceRowsGeneric(image, decoded, rowOffset: 0);
+            return image;
         }
         finally
         {
             condPrefix.Dispose();
             uncondPrefix?.Dispose();
+            latent.Dispose();
         }
-
-        Backend.FreeWeights(_transformer.EnumerateWeights());
-
-        // 2. Decode. The Wan 2.2 decoder is a video decoder, so the latent carries a length-1 time axis; T=1 is its
-        // stateless first-chunk path. The latent denorm (this model's own 64-channel table) is applied inside.
-        Tensor latent5d = latent.Reshape(new TensorShape([1L, _config.InChannels, 1L, h, w]));
-        Tensor decoded = _vaeDecoder.Decode(Backend, latent5d);
-        latent5d.Dispose();
-        latent.Dispose();
-
-        // Drop the length-1 time axis by copying rather than viewing: a reshaped view aliases the parent's buffer,
-        // and the caller would have no handle on the parent to release. One 4-channel frame is cheap.
-        int outChannels = (int)decoded.Shape[1];
-        Tensor image = new Tensor(new TensorShape(1, outChannels, height, width), decoded.DType);
-        Backend.SliceRowsGeneric(image, decoded, rowOffset: 0);
-        decoded.Dispose();
-        return image;
     }
 
     /// <summary>Encodes the prompt and drops the leading template rows. The tap is the last decoder layer

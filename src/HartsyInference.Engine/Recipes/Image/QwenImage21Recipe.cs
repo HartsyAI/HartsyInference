@@ -41,7 +41,15 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>. <c>QwenImage21Tokenizer</c> subclasses
     /// <c>Qwen3VLTokenizer</c>, whose <c>tokenize_with_weights</c> passes <c>disable_weights=True</c>, so SwarmUI's
     /// probe puts the family on CondScale: encode at weight 1, then scale each token's cond row — here after the
-    /// system-turn drop, which is what makes the right-alignment offset negative.</remarks>
+    /// system-turn drop, which is what makes the right-alignment offset negative.
+    /// <para><b>It is inert on this family, and that is the parity behaviour.</b> The DiT's first act on the
+    /// conditioning is <c>txt_in.text_norm</c>, a per-row RMSNorm, which is scale-invariant per row — so a
+    /// per-row multiply is cancelled exactly. SwarmUI scales the same tensor, so its CondScale does nothing here
+    /// either; "fixing" it by scaling somewhere the norm cannot reach would break parity, not restore it. This is
+    /// Kandinsky5's situation reached by a different route. Measured at 512²/4 steps/seed 42:
+    /// <c>(x:1.5)</c> pixel-identical to the plain prompt, a different prompt 34/255 away. The seam is wired and
+    /// exercised regardless, so if a future variant drops that norm the weights already arrive in the right
+    /// place.</para></remarks>
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
 
     /// <inheritdoc/>
