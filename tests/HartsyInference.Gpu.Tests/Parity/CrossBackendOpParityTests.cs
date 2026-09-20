@@ -55,6 +55,61 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
         TensorAssert.Close(actual, expected, because: $"on {kind}");
     }
 
+    /// <summary>Per-head RoPE tables, where the whole difference from the shared-table form is one index.</summary>
+    /// <remarks>Non-identity tables and more than one head on purpose: with a single head, or with cos/sin equal
+    /// across heads, the per-head and shared layouts address the same bytes and a wrong index passes. The rotation
+    /// is checked in place, as its callers use it.</remarks>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void WanRopeInterleavedPerHead_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int seqLen = 6, heads = 3, headDim = 8;
+        using Tensor actual = Random(new TensorShape(seqLen, heads, headDim), seed: 11);
+        using Tensor expected = new(actual.Shape, DType.F32);
+        actual.AsReadOnlySpan<float>().CopyTo(expected.AsSpan<float>());
+        using Tensor cos = Random(new TensorShape(heads, seqLen, headDim), seed: 12);
+        using Tensor sin = Random(new TensorShape(heads, seqLen, headDim), seed: 13);
+
+        backend.WanRopeInterleavedPerHead(actual, cos, sin, seqLen, heads, headDim);
+        // Through the interface: the reference for both forms is IBackend's own default, which
+        // CpuBackend does not redeclare.
+        ((IBackend)cpu).WanRopeInterleavedPerHead(expected, cos, sin, seqLen, heads, headDim);
+
+        TensorAssert.Close(actual, expected, because: $"on {kind}");
+    }
+
+    /// <summary>The shared-table form, which now comes off the same shader — so it has to be re-checked.</summary>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void WanRopeInterleaved_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int seqLen = 6, heads = 3, headDim = 8;
+        using Tensor actual = Random(new TensorShape(seqLen, heads, headDim), seed: 21);
+        using Tensor expected = new(actual.Shape, DType.F32);
+        actual.AsReadOnlySpan<float>().CopyTo(expected.AsSpan<float>());
+        using Tensor cos = Random(new TensorShape(seqLen, headDim), seed: 22);
+        using Tensor sin = Random(new TensorShape(seqLen, headDim), seed: 23);
+
+        backend.WanRopeInterleaved(actual, cos, sin, seqLen, heads, headDim);
+        ((IBackend)cpu).WanRopeInterleaved(expected, cos, sin, seqLen, heads, headDim);
+
+        TensorAssert.Close(actual, expected, because: $"on {kind}");
+    }
+
     [Theory]
     [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
     public void RmsNorm_Matches_The_Cpu(string kind)

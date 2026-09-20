@@ -32,6 +32,11 @@
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 
+// Whether cos/sin carry a table PER HEAD ([heads, S, headDim]) rather than one shared across heads
+// ([S, headDim]). Only the table offset differs, so a spec constant selects it and both variants come
+// from one binary — MG3's sigma_theta is the per-head caller.
+layout(constant_id = 10) const bool PER_HEAD = false;
+
 layout(set = 0, binding = 0) buffer X_   { DTYPE x_data[];   };
 layout(set = 0, binding = 1) readonly buffer Cos_ { float cos_data[]; };
 layout(set = 0, binding = 2) readonly buffer Sin_ { float sin_data[]; };
@@ -54,7 +59,7 @@ void main() {
     uint s = t / pc.heads;
 
     uint xoff = (s * pc.heads + h) * pc.headDim;
-    uint coff = s * pc.headDim;
+    uint coff = (PER_HEAD ? (h * pc.seqLen + s) : s) * pc.headDim;
     uint i0 = 2u * i;
 
     float re = TO_F32(x_data[xoff + i0]);
