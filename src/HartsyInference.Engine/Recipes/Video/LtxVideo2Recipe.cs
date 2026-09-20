@@ -80,6 +80,18 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     public VideoFeatures Supports => VideoFeatures.Lora;
 
     /// <inheritdoc/>
+    /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: LTX-2 loads its TE through
+    /// <c>sd.py</c>'s <c>CLIPType.LTXV</c> branch → <c>lt.LTXAVGemmaTokenizer</c> → <c>Gemma3_12BTokenizer</c>,
+    /// <c>disable_weights</c> at <c>lt.py:76</c>; a Gemma-4 TE takes the sibling branch and is also disabled.
+    /// Both arms agree, so the family is CondScale, and one recipe class serves <c>ltx-video-2</c> and
+    /// <c>ltx-2.5-distilled</c> alike.
+    /// <para>The scale is applied inside <c>LtxVideo2TextConnectors</c>, after the per-modality projection and
+    /// before the learnable registers — the only placement that reproduces ComfyUI's default path. See that
+    /// method's remarks for why the connector's output and its input are both wrong.</para></remarks>
+    public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
+        Diffusion.Prompting.PromptWeightingMode.CondScale;
+
+    /// <inheritdoc/>
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.ComponentPlacement;
 

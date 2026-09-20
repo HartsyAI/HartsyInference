@@ -150,6 +150,14 @@ public sealed class Gemma4Tokenizer : ILtx2PromptTokenizer
     /// <summary>ComfyUI conditions Gemma 4 at 1024 tokens, and length is part of the conditioning.</summary>
     int ILtx2PromptTokenizer.MinimumConditioningLength => LtxMinLength;
 
+    /// <inheritdoc/>
+    /// <remarks><see cref="Encode"/> adds no special tokens, so a span needs no BOS stripped — unlike the
+    /// SentencePiece-backed Gemma 3 tokenizer, whose every call prepends one.</remarks>
+    IReadOnlyList<int> ILtx2PromptTokenizer.EncodeSpan(string text) => Encode(text);
+
+    /// <inheritdoc/>
+    int ILtx2PromptTokenizer.ConditioningStartId => BosTokenId;
+
     /// <summary>Prepends BOS unless <paramref name="ids"/> already starts with it (upstream both dropped and duplicated it at different times), never appends EOS, and right-pads to <paramref name="minLength"/>. Sequences already longer than <paramref name="minLength"/> are returned unpadded — the reference caps length at <c>min_length</c>, not a maximum.</summary>
     public static int[] BuildConditioningSequence(ReadOnlySpan<int> ids, int minLength = LtxMinLength,
         int bosId = BosTokenId, int padId = PadTokenId)
