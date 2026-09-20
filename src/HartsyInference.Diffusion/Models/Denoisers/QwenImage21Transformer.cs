@@ -350,6 +350,7 @@ public sealed unsafe class QwenImage21Transformer : IDisposable
     public void Dispose()
     {
         _rope.Dispose();
+        foreach (QwenImage21Block block in _blocks) block.DisposeOwned();
         foreach (Tensor t in _owned) t.Dispose();
         _owned.Clear();
     }

@@ -33,6 +33,7 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
     private Tensor? _toQ, _toK, _toV, _toOut;
     private Tensor? _normQ, _normK;
     private Tensor? _gateUp, _mlpOut;
+    private readonly List<Tensor> _owned = new();
 
     /// <summary>Creates a 2.1 block. Every projection is bias-free, so only weights are held.</summary>
     /// <param name="mlpDim">SwiGLU inner width (12288 for the released checkpoint); the stored <c>gate_up</c> is
@@ -70,8 +71,10 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
         _toK = weights[$"{prefix}.attn.to_k.weight"];
         _toV = weights[$"{prefix}.attn.to_v.weight"];
         _toOut = weights[$"{prefix}.attn.to_out.0.weight"];
-        _normQ = weights[$"{prefix}.attn.norm_q.weight"];
-        _normK = weights[$"{prefix}.attn.norm_k.weight"];
+        // F32 once at load: RmsNorm's fast kernels all require an F32 weight, and the checkpoint ships these
+        // BF16, which drops every QK norm onto the cast-operands-on-device fallback. 128 floats per norm.
+        _normQ = OwnAsF32(weights[$"{prefix}.attn.norm_q.weight"]);
+        _normK = OwnAsF32(weights[$"{prefix}.attn.norm_k.weight"]);
         _gateUp = weights[$"{prefix}.img_mlp.gate_up.weight"];
         _mlpOut = weights[$"{prefix}.img_mlp.out.weight"];
 
@@ -84,6 +87,29 @@ public sealed unsafe class QwenImage21Block : IStreamingBlock
     {
         foreach (Tensor? w in new[] { _toQ, _toK, _toV, _toOut, _normQ, _normK, _gateUp, _mlpOut })
             if (w is not null) yield return w;
+    }
+
+    /// <summary>Returns <paramref name="source"/> when it is already F32, else an owned F32 copy.</summary>
+    private Tensor OwnAsF32(Tensor source)
+    {
+        if (source.DType == DType.F32)
+        {
+            return source;
+        }
+        Tensor converted = TensorCasts.EnsureF32(source);
+        if (ReferenceEquals(converted, source))
+        {
+            return source;
+        }
+        _owned.Add(converted);
+        return converted;
+    }
+
+    /// <summary>Releases the F32 norm copies this block created. The checkpoint owns every other weight.</summary>
+    internal void DisposeOwned()
+    {
+        foreach (Tensor t in _owned) t.Dispose();
+        _owned.Clear();
     }
 
     /// <summary>Runs the text prefix. Attention is causal within the prefix (ComfyUI gives each text segment a
