@@ -6,6 +6,42 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.146
+
+- **The head-major chunked-attention trio runs on the GPU on Vulkan.** `QkvSplitNormHeadMajor`,
+  `ApplyRopeSingleHeadMajor` and `ScatterSeqHeadMajor` are the three ops MiniMaxH3's DiT calls back to back, and
+  all three were interface defaults on Vulkan — host loops over `DataPointer`. Every attention block synced the
+  packed projection down, normalized it on the CPU, uploaded three tensors, synced two of them back to rope them,
+  uploaded them again, and did it twice per block on the chunked path, which projects k+v in one pass and q in the
+  next precisely to keep a full-sequence q from staying resident. Wan-Animate-2's per-frame attention reaches the
+  scatter on the same terms and Gemma-4's text encoder reaches the rope.
+- **The head-major rope shares the token-major kernel.** The two layouts hold the same elements with heads and seq
+  swapped, and `headDim` is innermost either way, so a vector's own offset is unchanged and only the cos/sin row
+  has to be recovered differently — one spec constant (`HEAD_MAJOR`), not a second binary. The parity rows use
+  more than one batch AND more than one head, because at either equal to one the two layouts coincide element for
+  element and a kernel reading the wrong one passes.
+- **The head-major QKV split is its own kernel, and serves a subset.** A caller can ask for any of q/k/v, from a
+  source that may itself be narrower than `[q|k|v]`: a 3-wide source keeps the canonical q=0, k=1, v=2 segments
+  even when only some outputs are wanted, while a narrowed `[k|v]` or `[q]` carries only what it names. Reading k
+  from segment 0 and from segment 1 are both correct, for different sources, and picking the wrong rule returns a
+  well-formed tensor of wrong values — so there is a parity row per source width. Deliberately NOT spec constants
+  on `qkv_split_norm`: that one is on a shipped generation path, and CUDA split its own kernel for the same reason.
+- **`ScatterSeqHeadMajor` is one multi-region `vkCmdCopyBuffer`, not a shader.** A head's chunk rows are contiguous
+  and heads are not, which is the per-slice shape `Concat` already issues; CUDA spends one device-to-device copy
+  per head and this spends one command for all of them. It also does not upload the destination's host contents
+  when allocating it — matching CUDA, because the destination is the whole attention key/value buffer
+  (Wan-Animate-2 builds a `[1, heads, s + hw, headDim]` one per forward) and uploading it to write one chunk would
+  move hundreds of megabytes. **This is a real divergence from the interface reference**, which writes only the
+  chunk rows and so leaves everything outside them intact; on both GPUs that region holds whatever the allocation
+  came with. Every shipped caller fills the whole buffer across its chunks, so nothing reaches it today.
+- **Buffer copies recorded between dispatches now carry their own barriers.** The compute→compute barrier every
+  dispatch ends with has `ShaderStorageRead` as its destination scope, so a transfer reading the same memory sits
+  outside it — and a transfer that writes sits outside the source scope of the next dispatch's barrier in the same
+  way. `RecordComputeToCopyBarrierOn`/`RecordCopyToComputeBarrierOn` close both directions; the new scatter uses
+  them. `Concat` and `CopyInto` still record only the compute→compute barrier around their copies and have the
+  same gap — noted here rather than changed, since both are on a shipped generation path and that is its own
+  change with its own gate.
+
 ## alpha.145
 
 - **`build.sh` stopped hiding what it did not build.** `set -e` aborted the whole run on the first kernel a given

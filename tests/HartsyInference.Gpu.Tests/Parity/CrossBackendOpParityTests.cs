@@ -394,4 +394,132 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
             _out.WriteLine(reason is null ? $"{kind}: available" : $"{kind}: unavailable — {reason}");
         }
     }
+
+    /// <summary>The split-half rotation on a head-major tensor, where the frequency row is not the vector index.</summary>
+    /// <remarks>Batch and head counts are both greater than one on purpose. The two layouts hold the same element
+    /// count with heads and seq swapped, so at heads == 1 or batch == 1 they coincide element for element and a
+    /// kernel using the wrong one passes. Only [B &gt; 1, heads &gt; 1] separates them.
+    ///
+    /// <para>A partial rotary is included because it decides where the untouched tail of each head begins, and
+    /// that tail is what a wrong row mapping would leave correct while corrupting everything before it.</para></remarks>
+    [Theory]
+    [InlineData("cuda", 0)]
+    [InlineData("cuda", 4)]
+    [InlineData("vulkan", 0)]
+    [InlineData("vulkan", 4)]
+    public void ApplyRopeSingleHeadMajor_Matches_The_Cpu(string kind, int rotaryDim)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int batch = 2, heads = 3, seqLen = 5, headDim = 8;
+        using Tensor actual = Random(new TensorShape(batch, heads, seqLen, headDim), seed: 51);
+        using Tensor expected = new(actual.Shape, DType.F32);
+        actual.AsReadOnlySpan<float>().CopyTo(expected.AsSpan<float>());
+        using Tensor cos = Random(new TensorShape(batch, seqLen, headDim), seed: 52);
+        using Tensor sin = Random(new TensorShape(batch, seqLen, headDim), seed: 53);
+
+        backend.ApplyRopeSingleHeadMajor(actual, cos, sin, rotaryDim);
+        ((IBackend)cpu).ApplyRopeSingleHeadMajor(expected, cos, sin, rotaryDim);
+
+        TensorAssert.Close(actual, expected, because: $"on {kind}, rotaryDim {rotaryDim}");
+    }
+
+    /// <summary>The head-major QKV split, over every subset of outputs a caller can ask for.</summary>
+    /// <remarks>Four cases, because slot resolution has two branches and the interesting one is not the full call:
+    /// a 3-wide source keeps the canonical q=0, k=1, v=2 segments even when only some outputs are wanted, while a
+    /// narrowed source carries only what it names, numbered in q,k,v order. Reading k from segment 0 of a
+    /// <c>[k|v]</c> buffer and reading it from segment 1 of a <c>[q|k|v]</c> one are both correct, for different
+    /// sources, and a kernel that picks the wrong rule returns a well-formed tensor of the wrong values.
+    ///
+    /// <para>headDim is 96 — larger than the workgroup, so every thread accumulates several elements before the
+    /// reduction, and not a power of two, so the cross-subgroup fold is not a no-op.</para></remarks>
+    [Theory]
+    [InlineData("cuda", 3, true, true, true)]
+    [InlineData("cuda", 3, false, true, true)]
+    [InlineData("cuda", 2, false, true, true)]
+    [InlineData("cuda", 1, true, false, false)]
+    [InlineData("vulkan", 3, true, true, true)]
+    [InlineData("vulkan", 3, false, true, true)]
+    [InlineData("vulkan", 2, false, true, true)]
+    [InlineData("vulkan", 1, true, false, false)]
+    public void QkvSplitNormHeadMajor_Matches_The_Cpu(string kind, int packStride, bool wantQ, bool wantK, bool wantV)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int batch = 2, heads = 2, seq = 3, headDim = 96;
+        const int tokens = batch * seq, w = heads * headDim;
+        const float eps = 1e-6f;
+        TensorShape headed = new(batch, heads, seq, headDim);
+
+        using Tensor qkv = Random(new TensorShape(tokens, packStride * w), seed: 61);
+        using Tensor qWeight = Random(new TensorShape(headDim), seed: 62, offset: 1f);
+        using Tensor kWeight = Random(new TensorShape(headDim), seed: 63, offset: 1f);
+
+        using Tensor? qA = wantQ ? new Tensor(headed, DType.F32) : null;
+        using Tensor? kA = wantK ? new Tensor(headed, DType.F32) : null;
+        using Tensor? vA = wantV ? new Tensor(headed, DType.F32) : null;
+        using Tensor? qE = wantQ ? new Tensor(headed, DType.F32) : null;
+        using Tensor? kE = wantK ? new Tensor(headed, DType.F32) : null;
+        using Tensor? vE = wantV ? new Tensor(headed, DType.F32) : null;
+
+        backend.QkvSplitNormHeadMajor(qA, kA, vA, qkv, qWeight, kWeight, eps);
+        ((IBackend)cpu).QkvSplitNormHeadMajor(qE, kE, vE, qkv, qWeight, kWeight, eps);
+
+        string because = $"on {kind}, packStride {packStride}, q={wantQ} k={wantK} v={wantV}";
+        if (wantQ) TensorAssert.Close(qA!, qE!, because: $"q {because}");
+        if (wantK) TensorAssert.Close(kA!, kE!, because: $"k {because}");
+        // v is copied, not normalized, so it is the one output that must match bit for bit.
+        if (wantV) TensorAssert.Identical(vA!, vE!, because: $"v {because}");
+    }
+
+    /// <summary>Two chunks into one head-major buffer, which is the op — a single call is indistinguishable from
+    /// a concat.</summary>
+    /// <remarks>The second call has to find the buffer the first one left behind: allocating a fresh destination
+    /// per call would pass a single-chunk test and silently lose chunk 1. The chunks are different lengths and
+    /// neither they nor the head dim is a multiple of a workgroup, so a per-head destination stride that is off by
+    /// one lands inside the assertion rather than past the end.
+    ///
+    /// <para>The chunks COVER the destination, and that is a deliberate limit on what this asserts. Both GPU
+    /// backends allocate the destination without uploading its host contents — the destination is an attention
+    /// key/value buffer and uploading it to write a chunk would move hundreds of megabytes — so rows outside every
+    /// chunk hold whatever the allocation came with, while the interface reference leaves them untouched. Every
+    /// shipped caller fills the whole buffer, so the divergence is unreachable; asserting on it here would pin the
+    /// host's behaviour on hardware that deliberately does not implement it.</para></remarks>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void ScatterSeqHeadMajor_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int first = 4, second = 3;
+        const int heads = 3, seq = first + second, hd = 5;
+        using Tensor actual = Random(new TensorShape(1, heads, seq, hd), seed: 71);
+        using Tensor expected = new(actual.Shape, DType.F32);
+        actual.AsReadOnlySpan<float>().CopyTo(expected.AsSpan<float>());
+
+        using Tensor chunkA = Random(new TensorShape(1, heads, first, hd), seed: 72);
+        using Tensor chunkB = Random(new TensorShape(1, heads, second, hd), seed: 73);
+
+        backend.ScatterSeqHeadMajor(actual, chunkA, 0);
+        backend.ScatterSeqHeadMajor(actual, chunkB, first);
+        ((IBackend)cpu).ScatterSeqHeadMajor(expected, chunkA, 0);
+        ((IBackend)cpu).ScatterSeqHeadMajor(expected, chunkB, first);
+
+        TensorAssert.Identical(actual, expected, because: $"on {kind}");
+    }
 }

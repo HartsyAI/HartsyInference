@@ -1,5 +1,5 @@
 // apply_rope_single: in-place rotary position embedding on ONE tensor.
-//   x [B, L, H, D], cos/sin [B, L, D]
+//   x [B, L, H, D] (or [B, H, L, D] head-major), cos/sin [B, L, D] either way
 //   pairs (i, i + half) with half = rotaryDim / 2:
 //     x[i]        = lower * cos[i]        - upper * sin[i]
 //     x[i + half] = upper * cos[i + half] + lower * sin[i + half]
@@ -38,6 +38,14 @@ layout(local_size_x_id = 0) in;
 // rather than a second binary differing only in two offsets.
 layout(constant_id = 10) const bool INTERLEAVED = false;
 
+// Where the head axis sits relative to the sequence axis.
+//   false (token-major): x is [B, L, H, D] — the frequency row is the invocation's vector index over H.
+//   true  (head-major):  x is [B, H, L, D] — the frequency row has to be recovered from B and L, because
+//                        every head walks the whole sequence before the next one starts.
+// Only the cos/sin row differs: a vector's own offset is its index times headDim in both layouts, since
+// D is innermost either way. That is one line of index arithmetic, not a second kernel.
+layout(constant_id = 11) const bool HEAD_MAJOR = false;
+
 layout(set = 0, binding = 0)          buffer X_   { DTYPE x[];   };
 layout(set = 0, binding = 1) readonly buffer Cos_ { float cosv[]; };
 layout(set = 0, binding = 2) readonly buffer Sin_ { float sinv[]; };
@@ -61,12 +69,21 @@ void main() {
     // dispatching rdim/2 of them. That is what the CPU reference and the CUDA kernel both do, and for an ODD
     // rotaryDim the two rules differ: at rdim 5 this rotates the pair (4,5) and the other would not.
     if (INTERLEAVED && 2u * i >= pc.rdim) return;
-    uint rest = gid / pc.half_;
-    uint h   = rest % pc.numHeads;
-    uint bs  = rest / pc.numHeads;          // batch * seqLen + position
+    uint rest = gid / pc.half_;             // which [headDim] vector, in x's own order
 
-    uint vecOff  = (bs * pc.numHeads + h) * pc.headDim;
-    uint freqOff = bs * pc.headDim;
+    // freqRow indexes cos/sin's [B, L, D] rows, which are head-independent.
+    uint freqRow;
+    if (HEAD_MAJOR) {
+        uint s = rest % pc.seqLen;
+        uint b = rest / (pc.numHeads * pc.seqLen);
+        freqRow = b * pc.seqLen + s;
+    }
+    else {
+        freqRow = rest / pc.numHeads;       // batch * seqLen + position
+    }
+
+    uint vecOff  = rest * pc.headDim;
+    uint freqOff = freqRow * pc.headDim;
 
     uint lowIdx  = INTERLEAVED ? (vecOff + 2u * i)      : (vecOff + i);
     uint highIdx = INTERLEAVED ? (vecOff + 2u * i + 1u)  : (vecOff + i + pc.half_);
