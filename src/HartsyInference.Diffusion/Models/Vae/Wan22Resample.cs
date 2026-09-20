@@ -33,15 +33,22 @@ public sealed unsafe class Wan22Resample
     private CausalConv3d? _timeConv;            // upsample3d temporal branch (dim → 2·dim, kernel (3,1,1))
     private CausalConv3d? _downTimeConv;        // downsample3d temporal branch (dim → dim, kernel (3,1,1), strideT 2, causal)
 
-    public Wan22Resample(int dim, bool temporal = false)
-        : this(dim, temporal ? Wan22ResampleMode.Upsample3d : Wan22ResampleMode.Upsample2d)
+    private readonly int _temporalKernel;
+
+    public Wan22Resample(int dim, bool temporal = false, int temporalKernel = 3)
+        : this(dim, temporal ? Wan22ResampleMode.Upsample3d : Wan22ResampleMode.Upsample2d, temporalKernel)
     {
     }
 
-    public Wan22Resample(int dim, Wan22ResampleMode mode)
+    /// <param name="temporalKernel">Depth of the <c>time_conv</c> kernel. Wan 2.2 uses 3; Qwen-Image 2.1 reuses this
+    /// VAE with 1, which makes the temporal branch a pointwise conv over a single frame.</param>
+    public Wan22Resample(int dim, Wan22ResampleMode mode, int temporalKernel = 3)
     {
         _dim = dim;
         _mode = mode;
+        if (temporalKernel < 1 || temporalKernel % 2 == 0)
+            throw new ArgumentOutOfRangeException(nameof(temporalKernel), temporalKernel, "The temporal kernel must be odd and positive.");
+        _temporalKernel = temporalKernel;
     }
 
     /// <summary>Loads the spatial conv (Sequential index 1: <c>resample.1</c>) and, for the temporal variants, the <c>time_conv</c>.</summary>
@@ -52,12 +59,17 @@ public sealed unsafe class Wan22Resample
         if (_mode == Wan22ResampleMode.Upsample3d)
         {
             weights.TryGetValue($"{prefix}.time_conv.bias", out Tensor? tb);
-            _timeConv = new CausalConv3d(weights[$"{prefix}.time_conv.weight"], tb, padT: 1, padH: 0, padW: 0);
+            // padding=(k//2, 0, 0), matching the reference's parameterized Resample.
+            _timeConv = new CausalConv3d(weights[$"{prefix}.time_conv.weight"], tb, padT: _temporalKernel / 2, padH: 0, padW: 0);
         }
         else if (_mode == Wan22ResampleMode.Downsample3d)
         {
             weights.TryGetValue($"{prefix}.time_conv.bias", out Tensor? tb);
-            // CausalConv3d(dim→dim, kernel (3,1,1), strideT 2, causal padT 1): halves T per stage.
+            // CausalConv3d(dim→dim, kernel (3,1,1), strideT 2, causal padT 1): halves T per stage. The padT here is
+            // the causal-left pad for kernel 3 specifically and has never been exercised at another depth, so a
+            // non-default kernel is refused rather than silently padded wrong.
+            if (_temporalKernel != 3)
+                throw new NotSupportedException($"Downsample3d is only implemented for temporal kernel 3; got {_temporalKernel}.");
             _downTimeConv = new CausalConv3d(weights[$"{prefix}.time_conv.weight"], tb, strideT: 2, padT: 1, padH: 0, padW: 0);
         }
     }

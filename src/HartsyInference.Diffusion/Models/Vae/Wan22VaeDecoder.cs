@@ -13,6 +13,10 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
     private readonly int _zDim;
     private readonly int _dim;
     private readonly int[] _dimMult;
+    private readonly int _patchSize;
+    private readonly int _temporalKernel;
+    private readonly float[] _latentMean;
+    private readonly float[] _latentStd;
     private readonly int _numResBlocks;
     private readonly bool[] _temperalUpsample;
 
@@ -35,7 +39,14 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
     }
 
     /// <summary>Creates the Lance Wan2.2 decoder (defaults match <c>WanVAE_(dec_dim=256, z_dim=48, dim_mult=[1,2,4,4], num_res_blocks=2, temperal_upsample=[F,T,T])</c>).</summary>
-    public Wan22VaeDecoder(int dim = 256, int zDim = 48, int[]? dimMult = null, int numResBlocks = 2, bool[]? temperalUpsample = null)
+    /// <param name="patchSize">Spatial patch folded into the head's output channels. Wan 2.2 uses 2 (head emits
+    /// <c>3·p²</c> = 12); Qwen-Image 2.1 uses 1, so the head's channels are already the final image channels.</param>
+    /// <param name="temporalKernel">Depth of each <c>time_conv</c>. Wan 2.2 uses 3, Qwen-Image 2.1 uses 1.</param>
+    /// <param name="latentMean">Per-channel decode denormalization mean; defaults to Wan 2.2's 48-channel table.
+    /// Qwen-Image 2.1 must pass <see cref="QwenImage21LatentNorm"/>, whose statistics are entirely different.</param>
+    public Wan22VaeDecoder(int dim = 256, int zDim = 48, int[]? dimMult = null, int numResBlocks = 2,
+        bool[]? temperalUpsample = null, int patchSize = 2, int temporalKernel = 3,
+        float[]? latentMean = null, float[]? latentStd = null)
     {
         _dim = dim;
         _zDim = zDim;
@@ -43,6 +54,12 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         _numResBlocks = numResBlocks;
         // Real wan2.2_vae: time_conv on decoder up-stages 0 and 1 (verified from the checkpoint header).
         _temperalUpsample = temperalUpsample ?? [true, true, false];
+        _patchSize = patchSize;
+        _temporalKernel = temporalKernel;
+        _latentMean = latentMean ?? Wan22VaeLatentNorm.Mean;
+        _latentStd = latentStd ?? Wan22VaeLatentNorm.Std;
+        if (_latentMean.Length != zDim || _latentStd.Length != zDim)
+            throw new ArgumentException($"latent norm table has {_latentMean.Length}/{_latentStd.Length} entries but z_dim is {zDim}.", nameof(latentMean));
     }
 
     private int[] BuildDims()
@@ -92,7 +109,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
             Wan22Resample? resample = null;
             if (upFlag)
             {
-                resample = new Wan22Resample(outDim, temporal: tUp);
+                resample = new Wan22Resample(outDim, temporal: tUp, temporalKernel: _temporalKernel);
                 resample.LoadWeights(w, $"decoder.upsamples.{i}.upsamples.{mult}");
             }
             _stages[i] = new UpStage
@@ -138,7 +155,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
 
         // z = z·std + mean (decode-side latent norm). conv2 is 1×1×1 (no temporal cache needed).
         Tensor z = VaeOps.Clone(latent);
-        Wan22VaeLatentNorm.Denormalize(z);
+        Wan22VaeLatentNorm.Denormalize(z, _latentMean, _latentStd);
         Tensor x = _conv2!.Forward(backend, z);
         z.Dispose();
 
@@ -156,7 +173,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         if ((int)latent.Shape[1] != _zDim)
             throw new ArgumentException($"latent channels {latent.Shape[1]} != z_dim {_zDim}.", nameof(latent));
         Tensor z = VaeOps.Clone(latent);
-        Wan22VaeLatentNorm.Denormalize(z);
+        Wan22VaeLatentNorm.Denormalize(z, _latentMean, _latentStd);
         Tensor x = _conv2!.Forward(backend, z);
         z.Dispose();
         try
@@ -176,7 +193,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         if (t == 1)
         {
             Tensor twelve = DecodeFrame(backend, x, cache: null, firstChunk: true);
-            Tensor rgb = Wan22VaePatch.Unpatchify(backend, twelve, 2);
+            Tensor rgb = Wan22VaePatch.Unpatchify(backend, twelve, _patchSize);
             twelve.Dispose();
             yield return rgb;
             yield break;
@@ -188,7 +205,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
             Tensor frame = Vae3dLayout.SliceFrames(backend, x, i, 1);
             Tensor twelve = DecodeFrame(backend, frame, cache, firstChunk: i == 0);
             frame.Dispose();
-            Tensor rgb = Wan22VaePatch.Unpatchify(backend, twelve, 2);
+            Tensor rgb = Wan22VaePatch.Unpatchify(backend, twelve, _patchSize);
             twelve.Dispose();
             yield return rgb;
         }
