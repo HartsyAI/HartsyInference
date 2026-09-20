@@ -6,6 +6,34 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.136
+
+- **LTX-2 honours `(word:N)`, and the deliberately-unwired ledger is now EMPTY** — every registered image and
+  video family consumes its prompt weights. One recipe class serves `ltx-video-2` and `ltx-2.5-distilled`, so
+  both come off together.
+- **The scale goes inside `LtxVideo2TextConnectors`, after the per-modality projection and before the learnable
+  registers**, and both neighbouring placements are wrong. Scaling the connector's OUTPUT hits register rows:
+  our pipeline mirrors ComfyUI's `compat_mode`, where the real tokens sit at the FRONT and the tail is padding
+  replaced by learnable registers. Scaling its INPUT is worse than it looks — the reference normalizes by a
+  global min/max over the whole sequence before projecting (`lt.py:174-176`), so one token's emphasis would move
+  the divisor every other token shares.
+- **One deliberate divergence from SwarmUI, stated rather than buried.** SwarmUI scales whatever the CLIP node
+  returns, which under `compat_mode` is post-connector — register rows. Reproducing that literally would be
+  scaling learnable padding, so this implements ComfyUI's DEFAULT path semantics instead
+  (`LTXAVTEModel.encode_token_weights` returns token-length embeddings there and lets the DiT connect them),
+  which is what the weighting is for.
+- **`ILtx2PromptTokenizer` gains `EncodeSpan` and `ConditioningStartId`**, because its two implementations
+  disagree about specials: the Gemma-3 SentencePiece is constructed with `addBeginningOfSentence: true`, so
+  every call prepends a BOS that has to come off a span, while `Gemma4Tokenizer.Encode` adds none. The start id
+  is read from the tokenizer rather than assumed, even though both are 2.
+- **LTX-2's conditioning cache is now weight-aware.** Its key was the token ids alone, and the emphasis is
+  stripped before tokenization, so `(fox:1.5)` and `fox` produce identical ids — the second generation of a
+  weighted prompt would have been served the previous weighting's conditioning. Same defect class already fixed
+  for Chroma and HiDream.
+- `PromptWeightingModeLedgerTests.NotYetWired` is empty and stays in place: a NEW recipe that cannot weight yet
+  needs somewhere honest to declare that rather than silently claiming a mode. The per-family notes are kept as
+  the record of what each turned out to need — several contradict what the entry predicted before the work.
+
 ## alpha.135
 
 - **Vulkan asks the driver how much VRAM is left.** `VK_EXT_memory_budget` reports, per heap, how much this process
