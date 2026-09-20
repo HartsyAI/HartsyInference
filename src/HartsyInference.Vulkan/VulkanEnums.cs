@@ -37,6 +37,11 @@ public enum VkResult
 #pragma warning restore CA1707
 
 /// <summary>VkStructureType — only the values used by the compute backend are listed.</summary>
+/// <remarks>These are the values the Vulkan headers define, and several here were not. A wrong one does not fail
+/// loudly: a driver that skips an unrecognized <c>pNext</c> struct simply ignores it, so a feature chain with the
+/// wrong sType queries as all-zero and enables nothing, while the device keeps working because the driver allows
+/// what was never requested. That is what made the 1.2/1.3 feature structs look like a driver that "reports 0" —
+/// it was this. Synchronization validation names every one of them by VUID, which is how these were found.</remarks>
 public enum VkStructureType
 {
     ApplicationInfo = 0,
@@ -54,7 +59,7 @@ public enum VkStructureType
     BufferCreateInfo = 12,
     BufferViewCreateInfo = 13,
     ImageCreateInfo = 14,
-    ShaderModuleCreateInfo = 15,
+    ShaderModuleCreateInfo = 16,
     PipelineCacheCreateInfo = 17,
     PipelineShaderStageCreateInfo = 18,
     ComputePipelineCreateInfo = 29,
@@ -75,12 +80,12 @@ public enum VkStructureType
     PhysicalDeviceMemoryProperties2 = 1000059006,
     PhysicalDeviceSubgroupProperties = 1000094000,
 
-    PhysicalDeviceVulkan11Features = 1000175000,
-    PhysicalDeviceVulkan11Properties = 1000175001,
-    PhysicalDeviceVulkan12Features = 1000196000,
-    PhysicalDeviceVulkan12Properties = 1000196001,
-    PhysicalDeviceVulkan13Features = 1000241000,
-    PhysicalDeviceVulkan13Properties = 1000241001,
+    PhysicalDeviceVulkan11Features = 49,
+    PhysicalDeviceVulkan11Properties = 50,
+    PhysicalDeviceVulkan12Features = 51,
+    PhysicalDeviceVulkan12Properties = 52,
+    PhysicalDeviceVulkan13Features = 53,
+    PhysicalDeviceVulkan13Properties = 54,
 
     PipelineShaderStageRequiredSubgroupSizeCreateInfo = 1000225001,
     PhysicalDeviceSubgroupSizeControlProperties = 1000225000,
@@ -91,15 +96,15 @@ public enum VkStructureType
 
     PhysicalDeviceMemoryBudgetProperties = 1000237000,
 
-    BufferMemoryBarrier2 = 1000314000,
-    MemoryBarrier2 = 1000314001,
+    MemoryBarrier2 = 1000314000,
+    BufferMemoryBarrier2 = 1000314001,
     DependencyInfo = 1000314003,
     SubmitInfo2 = 1000314004,
     SemaphoreSubmitInfo = 1000314005,
     CommandBufferSubmitInfo = 1000314006,
 
-    CooperativeMatrixPropertiesKHR = 1000506000,
-    PhysicalDeviceCooperativeMatrixFeaturesKHR = 1000506001,
+    PhysicalDeviceCooperativeMatrixFeaturesKHR = 1000506000,
+    CooperativeMatrixPropertiesKHR = 1000506001,
     PhysicalDeviceCooperativeMatrixPropertiesKHR = 1000506002,
 
     PhysicalDeviceCooperativeMatrix2FeaturesNV = 1000593000,

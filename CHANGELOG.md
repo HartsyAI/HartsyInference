@@ -6,6 +6,90 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.148
+
+- **Eight `VkStructureType` values were wrong, and the consequence was that Vulkan enabled no optional feature at
+  all.** A wrong sType does not fail loudly — a driver that meets an unrecognized struct in a `pNext` chain skips
+  it — so the `VkPhysicalDeviceVulkan12Features`/`Vulkan13Features` structs were invisible both when querying and
+  when creating the device. The query came back all zeros, which this code has carried vendor-ID fallbacks for
+  since bring-up under the belief that the NVIDIA driver misreports promoted features; it does not, and the
+  fallbacks were papering over this. More seriously, `vkCreateDevice` enabled **nothing**: `synchronization2`
+  (every barrier and submit here is the 2 form), `timelineSemaphore` (the whole stream is built on one),
+  `subgroupSizeControl` and `computeFullSubgroups` (the reduction kernels ask for full subgroups),
+  `storageBuffer16BitAccess` (every F16 kernel), and `maintenance4` — which is what permits `LocalSizeId`, the
+  spec-constant workgroup size every kernel in this backend declares. NVIDIA permits all of it unrequested. A
+  driver is not required to, which is the likeliest reason cross-vendor was expected to be painful.
+- **The vendor-ID allowlist that compensated for it is gone.** With the right sTypes this device answers 1 for
+  every feature the query asks about, so the apiVersion-plus-vendor fallback only ever claimed features a device
+  might genuinely lack — the direction that breaks rather than the direction that is slow. The query is the answer
+  now.
+- `MemoryBarrier2` and `BufferMemoryBarrier2` were swapped, so every barrier this backend recorded was tagged as
+  the other kind; the KHR cooperative-matrix features/properties pair was swapped the same way; and
+  `ShaderModuleCreateInfo` was 15 (image view) instead of 16.
+- **Found by running a real generation under `VK_LAYER_KHRONOS_validation`**, which names each one by VUID. Worth
+  keeping as a habit: the backend had been developed for months against a driver that tolerates all of it.
+## alpha.147
+
+- **Buffer copies on Vulkan are synchronized against the dispatches around them.** Every compute dispatch ends with
+  a barrier whose destination scope is `ComputeShader`/`ShaderStorageRead`. A `vkCmdCopyBuffer` reading the same
+  memory is a `Copy`/`TransferRead` access and sits outside that scope, so nothing ordered a dispatch's writes
+  before the copy that reads them — and on the other side, a copy's `TransferWrite` sits outside the source scope
+  of the next dispatch's barrier. `Concat` (every DiT forward joins the text and image sequences through it),
+  `CopyInto` and `CopyTo` all recorded copies into that gap. Both directions are closed now.
+- **The staging copies had the same gap.** `VulkanGpuTransferHelper`'s upload and download each record a copy with
+  a post-barrier only, so a destination a dispatch just wrote — or one an earlier staging copy wrote — was not
+  ordered against it. Consecutive uploads are the bulk of what synchronization validation reports on a real
+  generation.
+- **So did the barrier every dispatch records.** Its destination scope was `ShaderStorageRead`, so two dispatches
+  writing the same buffer — an in-place op following the op that produced its input — were a write-after-write
+  nothing ordered. With every copy ordered, that pair is what synchronization validation reports, and it is the
+  single hottest barrier in the backend.
+- **A copy's destination scope named only reads.** Every post-copy barrier made the copy visible to
+  `ShaderStorageRead`, so a dispatch that *writes* the buffer it just received — which is what an in-place op does
+  straight after an upload — was a write-after-write nothing ordered. That pair is what synchronization validation
+  still reported once the other gaps were closed.
+- **`Concat`'s trailing barrier was the wrong one.** It recorded the compute→compute barrier after a transfer, so
+  its source scope named `ShaderStorageWrite` for writes that were `TransferWrite` — it ordered nothing. It is now
+  a real transfer→compute barrier. `CopyInto` and `CopyTo` already had a correct post-copy barrier through
+  `RecordCopyAndBarrier` and needed only the pre-copy half; the remark shipped in alpha.146 said otherwise and is
+  corrected.
+
+## alpha.146
+
+- **The head-major chunked-attention trio runs on the GPU on Vulkan.** `QkvSplitNormHeadMajor`,
+  `ApplyRopeSingleHeadMajor` and `ScatterSeqHeadMajor` are the three ops MiniMaxH3's DiT calls back to back, and
+  all three were interface defaults on Vulkan — host loops over `DataPointer`. Every attention block synced the
+  packed projection down, normalized it on the CPU, uploaded three tensors, synced two of them back to rope them,
+  uploaded them again, and did it twice per block on the chunked path, which projects k+v in one pass and q in the
+  next precisely to keep a full-sequence q from staying resident. Wan-Animate-2's per-frame attention reaches the
+  scatter on the same terms and Gemma-4's text encoder reaches the rope.
+- **The head-major rope shares the token-major kernel.** The two layouts hold the same elements with heads and seq
+  swapped, and `headDim` is innermost either way, so a vector's own offset is unchanged and only the cos/sin row
+  has to be recovered differently — one spec constant (`HEAD_MAJOR`), not a second binary. The parity rows use
+  more than one batch AND more than one head, because at either equal to one the two layouts coincide element for
+  element and a kernel reading the wrong one passes.
+- **The head-major QKV split is its own kernel, and serves a subset.** A caller can ask for any of q/k/v, from a
+  source that may itself be narrower than `[q|k|v]`: a 3-wide source keeps the canonical q=0, k=1, v=2 segments
+  even when only some outputs are wanted, while a narrowed `[k|v]` or `[q]` carries only what it names. Reading k
+  from segment 0 and from segment 1 are both correct, for different sources, and picking the wrong rule returns a
+  well-formed tensor of wrong values — so there is a parity row per source width. Deliberately NOT spec constants
+  on `qkv_split_norm`: that one is on a shipped generation path, and CUDA split its own kernel for the same reason.
+- **`ScatterSeqHeadMajor` is one multi-region `vkCmdCopyBuffer`, not a shader.** A head's chunk rows are contiguous
+  and heads are not, which is the per-slice shape `Concat` already issues; CUDA spends one device-to-device copy
+  per head and this spends one command for all of them. It also does not upload the destination's host contents
+  when allocating it — matching CUDA, because the destination is the whole attention key/value buffer
+  (Wan-Animate-2 builds a `[1, heads, s + hw, headDim]` one per forward) and uploading it to write one chunk would
+  move hundreds of megabytes. **This is a real divergence from the interface reference**, which writes only the
+  chunk rows and so leaves everything outside them intact; on both GPUs that region holds whatever the allocation
+  came with. Every shipped caller fills the whole buffer across its chunks, so nothing reaches it today.
+- **Buffer copies recorded between dispatches now carry their own barriers.** The compute→compute barrier every
+  dispatch ends with has `ShaderStorageRead` as its destination scope, so a transfer reading the same memory sits
+  outside it — and a transfer that writes sits outside the source scope of the next dispatch's barrier in the same
+  way. `RecordComputeToCopyBarrierOn`/`RecordCopyToComputeBarrierOn` close both directions; the new scatter uses
+  them. `Concat` and `CopyInto` still record only the compute→compute barrier around their copies and have the
+  same gap — noted here rather than changed, since both are on a shipped generation path and that is its own
+  change with its own gate.
+
 ## alpha.145
 
 - **`build.sh` stopped hiding what it did not build.** `set -e` aborted the whole run on the first kernel a given

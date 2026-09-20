@@ -309,6 +309,12 @@ public interface IBackend : IDisposable
     /// <c>MiniMaxH3Transformer</c>'s chunked attention project k+v in one pass and q in the next, so a full-sequence
     /// q never stays resident across the pass boundary.</remarks>
     unsafe void QkvSplitNormHeadMajor(Tensor? q, Tensor? k, Tensor? v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
+        => QkvSplitNormHeadMajorReference(q, k, v, qkv, qWeight, kWeight, eps);
+
+    /// <summary>The managed <see cref="QkvSplitNormHeadMajor"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).QkvSplitNormHeadMajor(...)</c> re-enters the override through
+    /// interface dispatch and recurses until the stack overflows.</summary>
+    static unsafe void QkvSplitNormHeadMajorReference(Tensor? q, Tensor? k, Tensor? v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
     {
         Tensor shapeRef = q ?? k ?? v ?? throw new ArgumentException("QkvSplitNormHeadMajor needs at least one of q/k/v.", nameof(q));
         if (shapeRef.DType != DType.F32 || qkv.DType != DType.F32) throw new NotSupportedException("QkvSplitNormHeadMajor default fallback only supports F32.");
@@ -1881,6 +1887,12 @@ public interface IBackend : IDisposable
     /// <summary>Head-major <see cref="ApplyRopeSingle"/>: in-place rotary on <c>x [B,heads,L,headDim]</c>, cos/sin still <c>[B,L,headDim]</c>.</summary>
     /// <remarks>Lets q/k from <see cref="QkvSplitNormHeadMajor"/> be roped in place and fed straight to attention.</remarks>
     unsafe void ApplyRopeSingleHeadMajor(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
+        => ApplyRopeSingleHeadMajorReference(x, cos, sin, rotaryDim);
+
+    /// <summary>The managed <see cref="ApplyRopeSingleHeadMajor"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).ApplyRopeSingleHeadMajor(...)</c> re-enters the override through
+    /// interface dispatch and recurses until the stack overflows.</summary>
+    static unsafe void ApplyRopeSingleHeadMajorReference(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         if (x.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("ApplyRopeSingleHeadMajor default fallback only supports F32.");
@@ -2274,6 +2286,12 @@ public interface IBackend : IDisposable
     /// offsets as concatenating every chunk along dim 2, but without holding the whole chunk list alive alongside the
     /// result — which is what makes long-sequence chunked attention fit (see <c>MiniMaxH3Transformer</c>).</summary>
     unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
+        => ScatterSeqHeadMajorReference(output, input, seqOffset);
+
+    /// <summary>The managed <see cref="ScatterSeqHeadMajor"/> body, callable directly. A backend override must
+    /// call THIS to fall back — <c>((IBackend)this).ScatterSeqHeadMajor(...)</c> re-enters the override through
+    /// interface dispatch and recurses until the stack overflows.</summary>
+    static unsafe void ScatterSeqHeadMajorReference(Tensor output, Tensor input, int seqOffset)
     {
         if (output.DType != DType.F32 || input.DType != DType.F32)
             throw new NotSupportedException("ScatterSeqHeadMajor default fallback only supports F32.");
