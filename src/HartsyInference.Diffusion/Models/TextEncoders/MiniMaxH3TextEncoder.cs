@@ -215,6 +215,16 @@ public sealed unsafe class MiniMaxH3TextEncoder : IDisposable
             Tensor states = new Tensor(new TensorShape(seqLen, _hiddenSize), DType.F32);
             long bytes = (long)seqLen * _hiddenSize * sizeof(float);
             Buffer.MemoryCopy((void*)hidden.DataPointer, (void*)states.DataPointer, bytes, bytes);
+            // SwarmUI's CondScale: encode at weight 1, then scale each token's row, right-aligned
+            // (SwarmText.py:256-271). Right-alignment is exactly right here because MiniMaxH3TextEncoding appends
+            // the user prompt LAST — every condition label and vision block precedes it — so the weights land on
+            // the prompt's own rows and the conditioning ahead of them is left at 1.
+            if (presentation.PromptWeights is float[] promptWeights
+                && Prompting.CondTokenWeights.ScaleRightAligned(backend, states, promptWeights) is Tensor scaled)
+            {
+                states.Dispose();
+                states = scaled;
+            }
             return new Result { HiddenStates = states, TagRuns = ToTupleRuns(presentation.TagRuns) };
         }
         finally

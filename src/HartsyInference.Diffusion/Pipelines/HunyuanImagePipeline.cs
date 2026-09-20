@@ -86,13 +86,36 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     }
 
     /// <summary>Generates an image via the primary Qwen2.5-VL path. Token ids come from <c>Qwen2Tokenizer.EncodeChat(prompt, systemPrompt: HunyuanImageQwenTextEncoder.SystemPrompt, addGenerationPrompt: false)</c> padded to <see cref="HunyuanImageQwenTextEncoder.PaddedLength"/> with matching attention masks. Negative inputs may be null when CFG is off (cfg ≤ 1).</summary>
+    /// <summary>SwarmUI's CondScale step: the prompt is encoded at weight 1 and each token's conditioning row is
+    /// then scaled, right-aligned against the cond (<c>SwarmText.py:256-271</c>). Takes ownership of
+    /// <paramref name="cond"/> and returns either it or its replacement.</summary>
+    /// <remarks>The weights describe the TRIMMED sequence, which is 34 rows longer than the conditioning the
+    /// encoder returns — it drops the chat template before handing it back. Right-alignment turns that into a
+    /// negative offset and the template weights fall off the front, which is the case SwarmUI's own
+    /// <c>pos = condLen − len(batch) + i</c> is written for.</remarks>
+    private Tensor ApplyTokenWeights(Tensor cond, float[]? weights)
+    {
+        if (weights is null)
+        {
+            return cond;
+        }
+        if (Prompting.CondTokenWeights.ScaleRightAligned(TextEncoderBackend, cond, weights) is not Tensor scaled)
+        {
+            return cond;
+        }
+        cond.Dispose();
+        return scaled;
+    }
+
     public (byte[] rgbData, int width, int height, int seed) GenerateFromTokens(
         int[] promptTokenIdsQwen,
         int[] promptAttentionMaskQwen,
         int[]? negativePromptTokenIdsQwen,
         int[]? negativeAttentionMaskQwen,
         TextToImageRequest request,
-        Action<GenerationProgress>? onProgress = null)
+        Action<GenerationProgress>? onProgress = null,
+        float[]? promptTokenWeights = null,
+        float[]? negativeTokenWeights = null)
     {
         ThrowIfDisposed();
         // Wrap-pad every conv backend for this call so the output tiles seamlessly; restores on dispose.
@@ -136,9 +159,12 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
 
             Logs.Info("Encoding text with Qwen2.5-VL-7B (primary 3584-dim per-token)...");
             TextEncoderBackend.PreloadWeights(_qwenEncoder.EnumerateWeights());
-            cond = _qwenEncoder.Encode(TextEncoderBackend, promptTokenIdsQwen, promptAttentionMaskQwen);
+            cond = ApplyTokenWeights(_qwenEncoder.Encode(TextEncoderBackend, promptTokenIdsQwen, promptAttentionMaskQwen),
+                promptTokenWeights);
             uncond = useCfg
-                ? _qwenEncoder.Encode(TextEncoderBackend, negativePromptTokenIdsQwen!, negativeAttentionMaskQwen!)
+                ? ApplyTokenWeights(
+                    _qwenEncoder.Encode(TextEncoderBackend, negativePromptTokenIdsQwen!, negativeAttentionMaskQwen!),
+                    negativeTokenWeights)
                 : null;
             TextEncoderBackend.Sync();
             TextEncoderBackend.FreeWeights(_qwenEncoder.EnumerateWeights());

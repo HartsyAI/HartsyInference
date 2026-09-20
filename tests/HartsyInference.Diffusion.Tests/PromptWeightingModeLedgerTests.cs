@@ -146,24 +146,41 @@ public sealed class PromptWeightingModeLedgerTests
     /// STRIP: <c>Kandinsky5TextEncoding.StripEmphasis</c> takes the grammar off before either arm tokenizes, because
     /// declaring the mode is what stops <c>ImagesService</c> collapsing the tag and would otherwise hand Qwen the
     /// parens as prose. Blending the Qwen arm to "fix" the no-op would BREAK parity, not achieve it.</para>
-    /// <para><b>hunyuan-image</b> needs the UNPADDED weights: it pads to 1034 and the encoder then slices
-    /// <c>[34, 34 + keep)</c> (<c>HunyuanImageQwenTextEncoder.cs:17,60-63</c>), so handing the padded array through
-    /// gives <c>offset = keep − 1034</c> and every prompt weight falls off the front — a silent no-op rather than an
-    /// error.</para>
-    /// <para><b>minimax-h3</b> tokenizes INSIDE its encoder (<c>MiniMaxH3TextEncoding.Build</c>), interleaving
-    /// vision/audio blocks with the text and emitting <c>TagRuns</c>; its cond is rank-2 <c>[seq, hidden]</c>, so the
-    /// weights must be built alongside <c>Encoded.TokenIds</c> and forced to 1 on every non-text run. That is the E1
-    /// seam, not something to bolt onto the recipe layer.</para>
+    /// <para><b>hunyuan-image came off this list by returning the UNPADDED weights.</b> It pads to 1034 and the
+    /// encoder then slices <c>[34, 34 + keep)</c> (<c>HunyuanImageQwenTextEncoder.cs:17,60-63</c>), so handing the
+    /// padded array through would give <c>offset = keep − 1034</c> and drop every prompt weight off the front — a
+    /// silent no-op rather than an error. The weights are cut to the mask's real length instead, which makes the
+    /// right-alignment offset −34 exactly. Gating it also surfaced a PRE-EXISTING defect, recorded as a TODO and
+    /// not fixed: the chat template is 33 ids on our tokenizer, not 34, because <c>EncodeRaw("\n")</c> returns
+    /// nothing where HF emits id 198 — so the encoder's slice drops the prompt's first token.</para>
+    /// <para><b>minimax-h3 came off this list, and needed less than this entry predicted.</b> It tokenizes INSIDE
+    /// its encoder (<c>MiniMaxH3TextEncoding.Build</c>), so the weights are built there — but they do NOT need to
+    /// be a full-length array with non-text runs forced to 1. <c>Build</c> appends the user prompt LAST, after
+    /// every condition label and vision block, so the prompt is contiguous at the tail and a prompt-length weight
+    /// array right-aligns onto exactly those rows. Its cond is rank-2 <c>[seq, hidden]</c> and F32
+    /// (<c>MiniMaxH3TextEncoder.cs:215</c>), which is what <c>ScaleRightAligned</c> requires.</para>
     /// <para><b>The whole Wan family is wired.</b> The four variant recipe classes came off this list once the
     /// blend was hoisted into <c>VideoRecipeUtils</c>; Animate-2's driving stream is weighted as its own leaf.</para>
-    /// <para><b>ltx-video-2</b> pads to a fixed conditioning length that the connector consumes positionally (it
-    /// replaces learnable registers by position), so where a row scale lands relative to that connector is unverified.
+    /// <para><b>ltx-video-2 and ltx-2.5-distilled: the seam is now located, and it is inside the connector.</b>
+    /// Read off the reference rather than inferred. <c>LTXAVTEModel.encode_token_weights</c> (<c>lt.py:163-189</c>)
+    /// runs the embeddings connectors ONLY under <c>compat_mode</c>; its default path returns un-connected,
+    /// token-length embeddings tagged <c>unprocessed_ltxav_embeds</c> and the DiT runs the connectors. SwarmUI
+    /// right-aligns unconditionally — <c>offset = cond_len − len(batch)</c>, <c>SwarmText.py:269-271</c> — so on
+    /// that default path the scale is token-aligned and correct.
+    /// <para>Our pipeline mirrors <c>compat_mode</c> instead: <c>LtxVideo2Pipeline.EncodeText</c> pads to a
+    /// 128-register multiple and calls the connectors itself (<c>:682-689,726</c>). Right-aligning a
+    /// <c>real</c>-length weight array against that <c>seq</c>-length conditioning would put every weight on
+    /// REGISTER rows, since the real tokens sit at the FRONT — a scale applied to learnable padding.</para>
+    /// <para>The fix is not to scale <c>feats</c> before the connector either. <c>lt.py:174-176</c> normalizes by a
+    /// global min/max over the whole sequence before <c>text_embedding_projection</c>, so scaling one token ahead of
+    /// that moves the statistics every other token is divided by. The scale belongs after the projection and before
+    /// the register concat, which is inside <c>LtxVideo2TextConnectors</c> — real work, not a recipe-layer call, so
+    /// it stays unwired rather than half-done.</para>
     /// <b>krea2</b> came off this list once the joint-attention patch landed; it is the only family that needs
     /// both halves, so the partial declaration it carried first was refused here rather than accepted.</para></summary>
     private static readonly string[] NotYetWired =
     [
-        "hunyuan-image",
-        "ltx-2.5-distilled", "ltx-video-2", "minimax-h3",
+        "ltx-2.5-distilled", "ltx-video-2",
     ];
 
     private readonly ITestOutputHelper _output;

@@ -74,6 +74,12 @@ public static class MiniMaxH3TextEncoding
         /// <summary>The presented text segments in order, before tokenization.</summary>
         public required IReadOnlyList<string> TextSegments { get; init; }
 
+        /// <summary>One weight per token of the USER PROMPT, or null when nothing is weighted. Deliberately not
+        /// the full sequence: the prompt is appended last (every condition's label and vision block precedes it),
+        /// so it is contiguous at the tail and SwarmUI's right-alignment lands on exactly these rows with the
+        /// conditioning ahead of them left alone.</summary>
+        public float[]? PromptWeights { get; init; }
+
         public int Length => TokenIds.Length;
     }
 
@@ -200,7 +206,33 @@ public static class MiniMaxH3TextEncoding
                     throw new ArgumentException($"Unknown MiniMax-H3 condition kind '{condition.Kind}'.", nameof(conditions));
             }
         }
-        AddText(prompt);
+        // The prompt goes last, which is what makes the weights right-alignable against the whole sequence.
+        float[]? promptWeights = null;
+        IReadOnlyList<Prompting.WeightedSpan> spans = Prompting.PromptWeighting.Parse(prompt);
+        if (Prompting.PromptWeighting.HasWeights(spans))
+        {
+            List<float> weights = new List<float>(64);
+            foreach (Prompting.WeightedSpan span in spans)
+            {
+                if (span.Text.Length == 0)
+                {
+                    continue;
+                }
+                int before = ids.Count;
+                AddText(span.Text);
+                for (int i = before; i < ids.Count; i++)
+                {
+                    weights.Add(span.Weight);
+                }
+            }
+            promptWeights = weights.ToArray();
+        }
+        else
+        {
+            // Join, not `prompt`: a weight of exactly 1 does nothing, but the grammar that expressed it is still
+            // in the string and would reach the encoder as prose. One call, so the ids stay byte-identical.
+            AddText(Prompting.PromptWeighting.Join(spans));
+        }
 
         if (ids.Count == 0)
         {
@@ -212,6 +244,7 @@ public static class MiniMaxH3TextEncoding
         return new Encoded
         {
             TokenIds = ids.ToArray(),
+            PromptWeights = promptWeights,
             ModalityTags = tagArray,
             TagRuns = BuildRuns(tagArray),
             VisionBlockTokenCounts = blockCounts,
