@@ -1,10 +1,16 @@
-// argmax_lastdim: single-workgroup parallel-reduction argmax over a [C]-length logits row, writing the
-// winning index into a persistent 1-int device buffer (AllocDeviceTokenId) — the on-device greedy-sampling
-// step that lets a decode graph chain "this step's output token" into "next step's embed input" with zero
-// D2H sync between them. Scoped to ONE row (greedy single-sequence decode; IBackend's ArgMaxInto only
-// exposes one output handle, so batched argmax has no destination to write multiple winners into).
-// Tie-breaking is NOT guaranteed to match a naive first-index-wins CPU argmax on an EXACT float tie
-// (cross-thread reduction order) — a measure-zero case for real (non-adversarial) logit distributions.
+// argmax_lastdim: parallel-reduction argmax over the last dimension, ONE WORKGROUP PER ROW, writing each
+// row's winning index to out_data[row].
+//
+// Two callers. ArgMaxInto dispatches a single workgroup and writes out_data[0] — the on-device greedy
+// sampling step that lets a decode graph chain "this step's output token" into "next step's embed input"
+// with no D2H sync between them. ArgMaxLastDim dispatches one workgroup per row for the batched form.
+//
+// Ties go to the LOWER index, matching IBackend.ArgMaxLastDim's reference exactly. Both halves of that
+// matter: the per-thread scan keeps the earliest with a strict >, and the tree reduction has to break ties
+// explicitly, because which thread holds which candidate is an artifact of the stride order. Without it an
+// exact tie resolves differently run to run — measure-zero for real logits, and not for a test, a uniform
+// distribution, or a model whose head emits saturated values.
+//
 // WGSIZE must equal the dispatch's local_size_x (VulkanBackend always dispatches this with LocalX1D=256).
 //
 // Compile:
@@ -28,10 +34,12 @@ shared uint sIdx[WGSIZE];
 
 void main() {
     uint tid = gl_LocalInvocationID.x;
+    uint row = gl_WorkGroupID.x;
+    uint rowBase = row * pc.c;
     float best = -3.402823e38;
     uint bestIdx = 0u;
     for (uint i = tid; i < pc.c; i += WGSIZE) {
-        float v = logits_data[i];
+        float v = logits_data[rowBase + i];
         if (v > best) { best = v; bestIdx = i; }
     }
     sMax[tid] = best;
@@ -39,12 +47,16 @@ void main() {
     barrier();
 
     for (uint stride = WGSIZE / 2u; stride > 0u; stride >>= 1u) {
-        if (tid < stride && sMax[tid + stride] > sMax[tid]) {
-            sMax[tid] = sMax[tid + stride];
-            sIdx[tid] = sIdx[tid + stride];
+        if (tid < stride) {
+            bool takeOther = sMax[tid + stride] > sMax[tid]
+                || (sMax[tid + stride] == sMax[tid] && sIdx[tid + stride] < sIdx[tid]);
+            if (takeOther) {
+                sMax[tid] = sMax[tid + stride];
+                sIdx[tid] = sIdx[tid + stride];
+            }
         }
         barrier();
     }
 
-    if (tid == 0u) out_data[0] = sIdx[0];
+    if (tid == 0u) out_data[row] = sIdx[0];
 }

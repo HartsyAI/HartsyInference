@@ -4357,6 +4357,49 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>Per-row argmax over the last dimension, one workgroup per row.</summary>
+    /// <remarks>The batched form of what <see cref="ArgMaxInto"/> does for a single decode step, off the same
+    /// kernel. The interface default reads <c>input.DataPointer</c>, so on a resident logits tensor it syncs the
+    /// whole vocabulary-wide row set to host to pick one index per row.
+    ///
+    /// <para>Ties go to the lower index, matching the reference: the per-thread scan keeps the earliest with a
+    /// strict compare, and the tree reduction breaks ties explicitly, since which thread holds which candidate is
+    /// an artifact of the stride order.</para></remarks>
+    public void ArgMaxLastDim(Tensor indices, Tensor input)
+    {
+        using OpScope _op = EnterOp();
+        if (input.DType != DType.F32 || indices.DType != DType.I32)
+        {
+            IBackend.ArgMaxLastDimReference(indices, input);
+            return;
+        }
+        int c = (int)input.Shape[input.Shape.Rank - 1];
+        long rows = input.ElementCount / c;
+        if (indices.ElementCount < rows)
+        {
+            throw new ArgumentException($"ArgMaxLastDim indices length {indices.ElementCount} < rows {rows}.");
+        }
+
+        VulkanBuffer inBuf = GetBuffer(input);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(rows * sizeof(int)));
+        try
+        {
+            VulkanKernel k = GetKernel("argmax_lastdim", storageBufferCount: 2, _default1DSpec);
+            Span<byte> pc = stackalloc byte[4];
+            BinaryWriteUInt(pc, 0, (uint)c);
+            Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, inBuf.Handle };
+            // One workgroup per row; the reduction inside each spans that row on its own.
+            Dispatch(k, bufs, pc, (uint)rows);
+            CacheOutput(indices, outBuf);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan ArgMaxLastDim dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
+        }
+    }
+
     public void ArgMaxInto(ulong outputTokenId, Tensor input)
     {
         using OpScope _op = EnterOp();

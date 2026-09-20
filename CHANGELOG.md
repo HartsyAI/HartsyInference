@@ -6,6 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.145
+
+- **`build.sh` stopped hiding what it did not build.** `set -e` aborted the whole run on the first kernel a given
+  glslang could not compile, and every kernel listed after it was silently left stale — no error naming them, and
+  an exit that read as success. Ubuntu's packaged glslang cannot build `matmul_int8` (no
+  `GL_EXT_integer_dot_product`) and that entry sits partway down the list, so on an ordinary dev box the last five
+  kernels had not been rebuilt by this script in a long time. **Found by editing one of them and watching the
+  committed binary not change.** Failures are collected and reported by name at the end now, and the run still
+  exits non-zero.
+- **`ArgMaxLastDim` runs on the GPU on Vulkan.** The per-row form of what `ArgMaxInto` already did for a single
+  decode step, off the same kernel — one workgroup per row instead of one in total. The interface default reads
+  `input.DataPointer`, so it synced a whole vocabulary-wide row set to host to pick one index per row.
+- **The reduction breaks ties explicitly now, to the lower index.** Which thread holds which candidate in a tree
+  reduction is an artifact of the stride order, so an exact tie resolved differently depending on the workgroup
+  size; the shader's own comment called that "measure-zero for real logit distributions", which is true right up
+  until a head saturates. It matches the reference for ties as well as for maxima, and the parity row plants two.
+
 ## alpha.144
 
 - **`CastToBf16` runs on the GPU on Vulkan.** The interface default builds a whole host-side cast tensor and

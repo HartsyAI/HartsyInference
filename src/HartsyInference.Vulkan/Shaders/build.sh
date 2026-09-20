@@ -27,6 +27,9 @@ fi
 
 mkdir -p "$OUT"
 
+# Kernels this run could not build. Collected rather than fatal; see compile_one.
+FAILED=()
+
 compile_one() {
     # Args: <basename> <define-flags...> -- <output-suffix>
     local base="$1"; shift
@@ -43,11 +46,20 @@ compile_one() {
         return
     fi
 
-    "$GLSLANG" --target-env "$TARGET" -S comp -V --quiet \
-        "${defs[@]}" -o "$dst" "$src"
+    # Not fatal on its own. `set -e` used to abort the whole run on the first kernel a given glslang could
+    # not build, and every kernel listed after it was then silently left stale -- the script printed no error
+    # naming them and exited as if it had done its job. Ubuntu's packaged glslang cannot build matmul_int8
+    # (no GL_EXT_integer_dot_product), which sits partway down the list, so on an ordinary dev box the last
+    # five kernels had not been rebuilt by this script in a long time. Failures are collected and reported at
+    # the end instead, and the exit status still says the run was incomplete.
+    if ! "$GLSLANG" --target-env "$TARGET" -S comp -V --quiet "${defs[@]}" -o "$dst" "$src"; then
+        FAILED+=("${base}${suffix}")
+        return
+    fi
 
-    if command -v "$SPIRVVAL" >/dev/null; then
-        "$SPIRVVAL" "$dst"
+    if command -v "$SPIRVVAL" >/dev/null && ! "$SPIRVVAL" "$dst"; then
+        FAILED+=("${base}${suffix} (spirv-val)")
+        return
     fi
 
     local sz
@@ -161,5 +173,15 @@ compile_one "rope_decode_step" -DINTERLEAVED=1 -- "_interleaved_f32"
 # buffer instead of push constants. Mutually exclusive with HAS_MASK (FlashAttentionDev has no mask param).
 # F32-only (decode-graph state is F32).
 compile_one "sdpa_flash" -DUSE_FP16=0 -DHAS_DEVICE_POS=1 -- "_dev_f32"
+
+if [[ "${#FAILED[@]}" -gt 0 ]]; then
+    echo >&2
+    echo "error: ${#FAILED[@]} kernel(s) did not build with $GLSLANG:" >&2
+    for f in "${FAILED[@]}"; do echo "         $f" >&2; done
+    echo "       Every OTHER kernel above was rebuilt; these keep whatever is committed." >&2
+    echo "       A glslang that lacks an extension a shader requires is the usual cause — the LunarG SDK" >&2
+    echo "       builds all of them where a distribution package may not." >&2
+    exit 1
+fi
 
 echo "Done. SPIR-V files in $(realpath "$OUT")"

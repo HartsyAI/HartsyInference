@@ -55,6 +55,43 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
         TensorAssert.Close(actual, expected, because: $"on {kind}");
     }
 
+    /// <summary>Per-row argmax, including the exact ties a reduction resolves by accident.</summary>
+    /// <remarks>Two rows carry a deliberate tie for the maximum. Which thread holds which candidate in a tree
+    /// reduction is an artifact of the stride order, so without an explicit tie-break the winner depends on the
+    /// workgroup size — and a tie is not exotic for a head that saturates. The row width is deliberately larger
+    /// than one workgroup so each thread makes several candidates before the reduction starts.</remarks>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void ArgMaxLastDim_Matches_The_Cpu(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int rows = 6, cols = 777;
+        using Tensor input = Random(new TensorShape(rows, cols), seed: 71);
+        Span<float> values = input.AsSpan<float>();
+        // Row 2: the maximum appears twice, first at 40. Row 4: three times, first at 5.
+        values[2 * cols + 40] = 9f;
+        values[2 * cols + 600] = 9f;
+        values[4 * cols + 5] = 12f;
+        values[4 * cols + 300] = 12f;
+        values[4 * cols + 776] = 12f;
+
+        using Tensor actual = new(new TensorShape(rows), DType.I32);
+        using Tensor expected = new(actual.Shape, DType.I32);
+
+        backend.ArgMaxLastDim(actual, input);
+        ((IBackend)cpu).ArgMaxLastDim(expected, input);
+
+        Assert.Equal(40, actual.AsReadOnlySpan<int>()[2]);
+        Assert.Equal(5, actual.AsReadOnlySpan<int>()[4]);
+        TensorAssert.Identical(actual, expected, because: $"on {kind}");
+    }
+
     /// <summary>The GPT-J pairing, against the GPT-NeoX one it now shares a kernel with.</summary>
     /// <remarks>Both conventions are exercised, and two partial rotaries: the two differ only in which elements
     /// pair up and where their frequencies live, so a kernel that confused them still produces plausible numbers

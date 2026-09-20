@@ -2228,7 +2228,13 @@ public interface IBackend : IDisposable
     }
 
     /// <summary>Per-row argmax over the last dim: <c>indices[r] = argmax_c input[r,c]</c> (first max wins) — keeps sampling GPU-resident.</summary>
-    unsafe void ArgMaxLastDim(Tensor indices, Tensor input)
+    unsafe void ArgMaxLastDim(Tensor indices, Tensor input) => ArgMaxLastDimReference(indices, input);
+
+    /// <summary>The host implementation of <see cref="ArgMaxLastDim"/>, for a backend that overrides it and needs
+    /// to bail on a dtype its kernel does not cover.</summary>
+    /// <remarks>Static because an override cannot reach its own interface default — the call binds back to the
+    /// class and recurses until the stack ends.</remarks>
+    static unsafe void ArgMaxLastDimReference(Tensor indices, Tensor input)
     {
         if (input.DType != DType.F32)
             throw new NotSupportedException("ArgMaxLastDim default fallback only supports F32.");
