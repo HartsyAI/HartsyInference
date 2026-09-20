@@ -1186,7 +1186,6 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <summary>This backend's transfer state, for the multi-backend isolation tests.</summary>
     internal GpuTransferHelper.State TransferState => _transferState;
 
-    /// <summary>Op-entry guard: binds this backend as the calling thread's ambient transfer state, binds the CUDA context, and drains THIS backend's finalizer-queued GPU cleanups. Replaces the bare <c>_context.EnsureCurrent()</c> at every op entry — context identity alone cannot name the owning backend when two backends share a device's primary context, and the cleanup buckets are keyed per backend.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     /// <summary>Binds this backend as the calling thread's ambient op target. For collective transports (<see cref="NcclComm"/>), which stage uploads through the ambient-based transfer helper without going through a public tensor op.</summary>
     /// <remarks>Deliberately NOT an op scope. Its callers bind so that the transfer helper's statics resolve here

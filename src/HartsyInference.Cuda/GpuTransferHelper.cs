@@ -851,13 +851,6 @@ internal static unsafe class GpuTransferHelper
     /// <summary><c>HARTSY_ORPHAN_SWEEP=0</c> restores the pre-fix behaviour (displaced buffers leak) — a bisect handle for a change that sits on every op's allocation path.</summary>
     private static bool OrphanSweepEnabled => EngineKnobs.OrphanSweep.Value;
 
-    /// <summary>Frees the buffers displaced by a rebind that no caller claimed, and the persistent buffers a
-    /// demotion parked. Called at the start of an op, when every previous op's cleanup has provably run.</summary>
-    /// <remarks>Never during a stream capture. <c>cuMemFreeAsync</c> on a buffer allocated BEFORE the capture began
-    /// is rejected outright (CUDA_ERROR_INVALID_VALUE, which aborted all three CudaGraphTests), so they stay parked
-    /// and the first op after the capture ends sweeps them. The probe sits behind the empty-set check on purpose: a
-    /// driver call on every EnterOp would cost more than the deferral does.</remarks>
-    internal static void SweepOrphans() => Resolve().SweepOrphans();
 
 
 
@@ -1210,27 +1203,6 @@ internal static unsafe class GpuTransferHelper
             "entries that would otherwise dangle (CUDA_ERROR_INVALID_VALUE on the next free).");
     }
 
-    /// <summary>Frees only cached ACTIVATION device buffers; preloaded weights and weight-casts are kept. Call between denoise steps to deterministically reclaim device memory held by activations that were neither read back to host (which frees via the sync callback) nor explicitly disposed — those otherwise linger in the cache until non-deterministic GC finalization and accumulate to OOM over multi-step diffusion. Safe because the only cross-step state (the latent) lives on the host; anything still cached here is dead. Bindings are detached as entries are reclaimed so late tensor finalizers cannot enqueue obsolete backend callbacks.</summary>
-    public static void FreeActivations(bool trimPool = true)
-    {
-        Resolve().FreeActivations();
-
-        // Return pooled memory to the driver. cuMemFreeAsync (used by every activation/dispose free) hands memory
-        // back to the stream-ordered mempool, which RESERVES it (cuMemGetInfo counts it as used) until trimmed —
-        // otherwise the pool's high-water mark grows every op and multi-step diffusion OOMs even though the memory
-        // is logically free. Sync first so the queued async frees complete. Hot per-step/per-tile callers pass
-        // trimPool=false: the next iteration re-uses the reservation directly, and a trim there costs a multi-GB
-        // driver release + re-map every iteration (persistent cuMemAlloc callers reclaim the pool via their
-        // OOM-retry if they ever need it).
-        if (trimPool) TrimPool();
-    }
-
-    /// <summary>Marks a tensor's activation as surviving <see cref="FreeActivations"/>.</summary>
-    public static void PinActivation(Tensor tensor) => Resolve().PinActivation(tensor);
-
-
-    /// <summary>Removes a <see cref="PinActivation"/> mark.</summary>
-    public static void UnpinActivation(Tensor tensor) => Resolve().UnpinActivation(tensor);
 
 
     /// <summary>Returns pool-reserved-but-free device memory to the driver WITHOUT clearing the activation cache. <c>cuMemFreeAsync</c> (every activation/dispose free) hands blocks back to the stream-ordered mempool, which RESERVES them (counts as used in cuMemGetInfo) until trimmed. Unlike <see cref="FreeActivations"/> this leaves live cached activations intact — only already-freed blocks are reclaimed — so it is safe to call mid-computation (e.g. between VAE decode tiles) to cap peak at one unit's working set without corrupting tensors still in use. Syncs the stream first so queued async frees complete before the trim.</summary>
@@ -1260,9 +1232,4 @@ internal static unsafe class GpuTransferHelper
         return (s.CachedBytes, s.Hits, s.Misses);
     }
 
-    /// <summary>Number of lazy D2H sync callbacks fired since the last reset. Each one is a full GPU stall plus a device-to-host copy; a GPU-resident hot loop should fire none.</summary>
-    public static long GetSyncCount() => Resolve().D2hSyncCount;
-
-    /// <summary>Resets the D2H sync counter (call at the start of a region you want to measure for residency).</summary>
-    public static void ResetSyncCount() => Resolve().ResetD2hSyncCount();
 }

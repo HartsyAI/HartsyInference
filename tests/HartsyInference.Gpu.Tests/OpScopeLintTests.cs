@@ -13,7 +13,7 @@ public sealed class OpScopeLintTests
         Path.Combine("src", "HartsyInference.Vulkan", "VulkanBackend.cs"),
     ];
 
-    /// <summary>The scope has to be held, not discarded.</summary>
+    /// <summary>The scope has to be held for the op AND disposed at the end of it.</summary>
     /// <remarks>Before the shared base, CUDA's op entry was a void call and every op invoked it as a bare
     /// statement. Under the base that spelling still compiles — <c>EnterOp()</c> returns a struct and C# is happy
     /// to throw it away — but the scope's dispose is what decrements the depth, so a discarded one raises the
@@ -29,8 +29,10 @@ public sealed class OpScopeLintTests
         List<string> offenders = [];
         for (int index = 0; index < lines.Length; index++)
         {
-            // A call whose result goes nowhere: `EnterOp();` as a whole statement, rather than `using ... =`.
-            if (Regex.IsMatch(lines[index], @"^\s*(?:\w+\.)?EnterOp\(\s*\)\s*;\s*$"))
+            // Two spellings, one bug. `EnterOp();` discards the struct outright; `OpScope x = EnterOp();`
+            // keeps it and never disposes it. Both leave the depth raised, and only the second looks careful.
+            if (Regex.IsMatch(lines[index], @"^\s*(?:\w+\.)?EnterOp\(\s*\)\s*;\s*$")
+                || Regex.IsMatch(lines[index], @"^\s*(?!using\b)(?:var|OpScope|GpuBackendBase\.OpScope)\s+\w+\s*=\s*(?:\w+\.)?EnterOp\("))
             {
                 offenders.Add($"{Path.GetFileName(path)}:{index + 1}: {lines[index].Trim()}");
             }
