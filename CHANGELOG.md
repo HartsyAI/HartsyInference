@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.134
+
+- **Vulkan asks the driver how much VRAM is left.** `VK_EXT_memory_budget` reports, per heap, how much this process
+  may still allocate and how much it already holds, both of which move as OTHER processes take and release memory.
+  The extension was already detected and already enabled on the device; nothing queried it. Measured on this box:
+  the driver reports **16711 MB free of 24810 MB**, where the old total-minus-our-own-blocks arithmetic would have
+  claimed all 24810 MB — roughly eight gigabytes belong to other processes. Over-reporting free VRAM is how a
+  planner OOMs a decode it was told would fit. The arithmetic stays as the fallback where the extension is absent.
+- **`FreeMemoryBytes` is a real number on every GPU backend**, spelled once on the shared base as the free half of
+  `GetVramInfo`. It returned 0 on Vulkan, and 0 is not "unknown" to its six callers — it is "nothing fits".
+- **What that did NOT change, measured rather than assumed.** The engine's own text path preloads unconditionally
+  (`TextService`), so Llama-3.2-1B on Vulkan was already resident: peak device memory 8491 MB before and 8483 MB
+  after, 64 tokens in 8.84 s before and 8.90 s after. What the zero did suppress is the budget-aware preload inside
+  `TextGenerationPipeline`, which only callers driving that pipeline directly reach, and the VAE decoder's full-res
+  attempt — which stayed tiled here, so all three Vulkan byte-identity digests are unchanged.
+
 ## alpha.133
 
 - **Every GPU backend gives device memory back when the engine asks.** `FreeActivations`, `TrimMemoryPool` and
