@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.140
+
+- **The safetensors quantizer streams, so a large source no longer needs the whole checkpoint as F32.** The GGUF
+  writer has always interleaved — widen one tensor, quantize it, free the wide copy — but the fp8/int8 path built
+  a complete F32 dictionary before the writer saw anything. That is what made a 13 GB Q4_K source ask for ~50 GB
+  and get the process OOM-killed. `WriteSafetensors` now takes the `CheckpointSource` and does the same
+  one-at-a-time loop the GGUF path does.
+- **Two ownership traps this exposed, both of which would have quietly undone the change.** An ineligible weight
+  is stored AS its wide copy, so that copy has to outlive the loop while every other one is freed — handled by
+  reference identity against what the iteration added to the output, not by key. And the fp8 branch was parking
+  its narrowed BF16 copy of every quantized weight in `owned` until the end; on a streaming loop that is half the
+  checkpoint held for no reason, so it is disposed the moment the fp8 weight and its scale exist.
+- **The refusal is narrowed to what is actually held.** It claimed the whole checkpoint as F32 plus the output;
+  the real peak is the largest single tensor as F32 plus the finished file, because the output still has to be
+  complete before a safetensors header can be written.
+- **Verified on real weights, not just unit tests.** SDXL base (6.5 GB) to fp8-scaled: `exit=0`, **10.7 GB peak
+  RSS**, 4.1 GB output. The same job on the old path needed the source widened whole, which for SDXL is ~26 GB
+  before counting the output. 80 quantizer tests pass unchanged.
+
 ## alpha.139
 
 - **CUDA is on the shared op scope.** `CudaBackend` was still a standalone `IBackend` carrying its own copy of
@@ -29,6 +48,7 @@ stable release will require. Dates are UTC.
 - A lint fails the build on a discarded op scope. `EnterOp();` as a bare statement still compiles — the result is a
   struct and C# will throw it away — and it raises the op depth permanently, so every later op is treated as
   nested: no finalizer drain, no orphan sweep, no flush.
+
 
 ## alpha.138
 

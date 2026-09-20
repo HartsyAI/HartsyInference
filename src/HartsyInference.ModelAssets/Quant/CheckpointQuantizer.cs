@@ -98,13 +98,10 @@ public static class CheckpointQuantizer
         Logs.Info($"[Quantize] {Path.GetFileName(job.SourcePath)} ({source.Format}, {source.Weights.Count} tensors) "
             + $"→ {targetLabel}.");
 
-        // Only the safetensors targets still widen the whole checkpoint at once; GGUF streams, so it is exempt.
-        if (job.Target.Kind != QuantizationTargetKind.Gguf)
-        {
-            RefuseIfWorkingSetWontFit(source, job.SourcePath);
-        }
+        // Both targets stream now: each tensor is widened, quantized and its wide copy freed before the next one
+        // is touched, so the peak is one tensor plus the output rather than the whole checkpoint as F32.
+        RefuseIfWorkingSetWontFit(source, job.SourcePath);
 
-        Dictionary<string, Tensor> dense = new(source.Weights.Count, StringComparer.Ordinal);
         List<Tensor> owned = new();
         try
         {
@@ -116,12 +113,7 @@ public static class CheckpointQuantizer
             }
             else
             {
-                foreach (KeyValuePair<string, Tensor> kv in source.Weights)
-                {
-                    cancel.ThrowIfCancellationRequested();
-                    dense[kv.Key] = MaterializeF32(kv.Value, kv.Key, owned);
-                }
-                (written, quantized) = WriteSafetensors(job, dense, owned);
+                (written, quantized) = WriteSafetensors(job, source, owned, cancel);
             }
             return new QuantizationReport
             {
@@ -185,26 +177,30 @@ public static class CheckpointQuantizer
         return (written, quantized);
     }
 
-    /// <summary>Refuses a source whose F32 working set will not fit, by name and with the numbers.
-    /// <para>Every tensor is widened to F32 before the writer sees it, and the writer holds its output until
-    /// <c>Flush</c>, so the peak is roughly the whole checkpoint as F32 plus the whole output. A 13 GB Q4_K source
-    /// wants about 50 GB and gets the process OOM-killed — no message, no partial file, nothing to read. An
-    /// up-front refusal that names the requirement is worth more than a kill, and this is measured from the real
-    /// element counts rather than the file size, because a block-quantized source is several times its own size
-    /// once widened. Passing it is a necessary condition, not a guarantee: another process can take the memory
-    /// between this check and the allocation.</para>
-    /// <para>Interleaving the widen with the write would hold one tensor instead of all of them and lift this
-    /// entirely. That is the right fix and is not this one: a first attempt at it aborted in the allocator, and a
-    /// memory rewrite wants verification time rather than confidence.</para></summary>
+    /// <summary>Refuses a source whose working set will not fit, by name and with the numbers.
+    /// <para>Both writers stream: one tensor is widened to F32 at a time and its wide copy is freed as soon as the
+    /// quantized form exists. What still has to be held whole is the OUTPUT, because a safetensors header is
+    /// written up front and <c>GgufWriter</c> keeps its tensors until <c>Flush</c>. So the peak is the largest
+    /// single tensor as F32 plus the finished file, not the whole checkpoint as F32 — which is what this used to
+    /// be, and what made a 13 GB Q4_K source ask for ~50 GB and get OOM-killed with no message and no partial
+    /// file.</para>
+    /// <para>Measured from real element counts rather than the file size, because a block-quantized tensor is
+    /// several times its own stored size once widened. Passing is a necessary condition, not a guarantee: another
+    /// process can take the memory between this check and the allocation.</para></summary>
     private static void RefuseIfWorkingSetWontFit(CheckpointSource source, string sourcePath)
     {
-        long f32Bytes = 0;
+        long widestTensorBytes = 0;
         foreach (KeyValuePair<string, Tensor> kv in source.Weights)
         {
-            f32Bytes = checked(f32Bytes + (kv.Value.ElementCount * sizeof(float)));
+            long bytes = kv.Value.ElementCount * sizeof(float);
+            if (bytes > widestTensorBytes)
+            {
+                widestTensorBytes = bytes;
+            }
         }
-        // The output roughly tracks the source on disk; the F32 intermediate is what actually varies.
-        long needed = f32Bytes + new FileInfo(sourcePath).Length;
+        // The output roughly tracks the source on disk — a quantized target is smaller, a dense one comparable —
+        // and it is the term that dominates now that the F32 intermediate is one tensor rather than all of them.
+        long needed = widestTensorBytes + new FileInfo(sourcePath).Length;
         long available = AvailableMemoryBytes();
         if (available <= 0 || needed <= available)
         {
@@ -212,9 +208,9 @@ public static class CheckpointQuantizer
         }
         throw new HartsyInferenceException(
             $"Quantizing '{Path.GetFileName(sourcePath)}' needs about {needed / (1024L * 1024 * 1024)} GiB of RAM — "
-            + $"every tensor is widened to F32 first, and this checkpoint is {f32Bytes / (1024L * 1024 * 1024)} GiB "
-            + $"wide — but only about {available / (1024L * 1024 * 1024)} GiB is free. Quantize from a smaller "
-            + "source, or from the dense build this one was made from.");
+            + $"the finished file plus its widest tensor as F32 ({widestTensorBytes / (1024L * 1024)} MiB) — but "
+            + $"only about {available / (1024L * 1024 * 1024)} GiB is free. Close what else is running, or "
+            + "quantize from a smaller source.");
     }
 
     /// <summary>Memory this process could actually get, not what the machine has.
@@ -244,20 +240,29 @@ public static class CheckpointQuantizer
     /// <summary>Writes the two ComfyUI safetensors shapes. Both quantize only what they can: a weight that is not
     /// an eligible rank-2 <c>.weight</c>, or is too small to be worth it, is written wide rather than forced — the
     /// same rule the GGUF policy applies, and the reason a quantized file still carries F32 norms and biases.</summary>
+    /// <remarks>Streams like <see cref="WriteGguf"/>: each tensor is widened, quantized, and its wide copy freed
+    /// before the next is touched. Only what the file will actually contain survives the loop, so the peak is one
+    /// tensor plus the output rather than the whole checkpoint as F32.</remarks>
     private static (int Written, int Quantized) WriteSafetensors(
-        QuantizationJob job, Dictionary<string, Tensor> dense, List<Tensor> owned)
+        QuantizationJob job, CheckpointSource source, List<Tensor> owned, CancellationToken cancel)
     {
-        Dictionary<string, Tensor> output = new(dense.Count, StringComparer.Ordinal);
+        Dictionary<string, Tensor> output = new(source.Weights.Count, StringComparer.Ordinal);
         int quantized = 0;
-        foreach (KeyValuePair<string, Tensor> kv in dense)
+        foreach (KeyValuePair<string, Tensor> sourceEntry in source.Weights)
         {
+            cancel.ThrowIfCancellationRequested();
+            // `scratch` holds only what MaterializeF32 CREATED — empty when the tensor was already F32, in which
+            // case `wide` is the container's mmap view and freeing it would pull the mapping out from under us.
+            List<Tensor> scratch = new(1);
+            Tensor wide = MaterializeF32(sourceEntry.Value, sourceEntry.Key, scratch);
+            KeyValuePair<string, Tensor> kv = new(sourceEntry.Key, wide);
+            int outputCountBefore = output.Count;
             if (job.Target.Kind == QuantizationTargetKind.Fp8Scaled)
             {
                 // The helper takes BF16/F16 because that is what a published fp8_scaled build is made from; our
                 // dense copy is F32, so it is narrowed first and the narrowed copy is what gets stored if the
                 // weight turns out ineligible.
                 Tensor half = kv.Value.DType == DType.BF16 ? kv.Value : kv.Value.CastTo(DType.BF16);
-                if (!ReferenceEquals(half, kv.Value)) owned.Add(half);
                 // Claim ownership of exactly what THIS call added, by diffing against the keys already present.
                 // Rescanning the whole output instead both re-registered every earlier companion on each pass and
                 // missed the fp8 weight itself — it reuses the source's key, so a "not already in dense" test
@@ -274,17 +279,25 @@ public static class CheckpointQuantizer
                         }
                     }
                     quantized++;
+                    // The fp8 weight and its scale are what the file carries now; the BF16 copy is dead the moment
+                    // they exist. Parking it in `owned` until the end would hold a narrowed copy of every quantized
+                    // weight — half the checkpoint, which is the cost this streaming exists to avoid.
+                    if (!ReferenceEquals(half, kv.Value)) half.Dispose();
+                    FreeWideCopy(scratch, output, outputCountBefore, owned);
                     continue;
                 }
+                // Ineligible: the narrowed copy IS the stored value, so it has to outlive the loop.
+                if (!ReferenceEquals(half, kv.Value)) owned.Add(half);
                 output[kv.Key] = half;
+                FreeWideCopy(scratch, output, outputCountBefore, owned);
                 continue;
             }
             if (IsInt8Eligible(kv.Key, kv.Value))
             {
                 // QuantizeFromF32 rotates in place, so it gets a copy rather than the container's mapped tensor.
-                Tensor scratch = kv.Value.CastTo(DType.F32);
-                (Tensor weight, Tensor rowScale) = Core.Tensors.Int8ConvRotCodec.QuantizeFromF32(scratch, ConvRotGroup);
-                scratch.Dispose();
+                Tensor rotable = kv.Value.CastTo(DType.F32);
+                (Tensor weight, Tensor rowScale) = Core.Tensors.Int8ConvRotCodec.QuantizeFromF32(rotable, ConvRotGroup);
+                rotable.Dispose();
                 owned.Add(weight);
                 owned.Add(rowScale);
                 // [rows,1] rather than the codec's flat [rows]: that is the shape published ComfyUI int8 repacks
@@ -304,12 +317,49 @@ public static class CheckpointQuantizer
                 owned.Add(descriptor);
                 output[kv.Key[..^".weight".Length] + ComfyQuantDescriptor.Suffix] = descriptor;
                 quantized++;
+                FreeWideCopy(scratch, output, outputCountBefore, owned);
                 continue;
             }
             output[kv.Key] = kv.Value;
+            FreeWideCopy(scratch, output, outputCountBefore, owned);
         }
         SafeTensorsWriter.Save(job.OutputPath, output);
         return (output.Count, quantized);
+    }
+
+    /// <summary>Frees this tensor's wide copy unless the output kept it. Anything the iteration added to
+    /// <paramref name="output"/> has to survive until <c>Save</c>; everything else was scratch and is dead the
+    /// moment the quantized form exists — which is the whole point of streaming rather than widening up front.</summary>
+    /// <param name="outputCountBefore">Output size before this tensor was handled, so the values it added can be
+    /// identified without rescanning the whole dictionary each pass.</param>
+    private static void FreeWideCopy(List<Tensor> scratch, Dictionary<string, Tensor> output,
+        int outputCountBefore, List<Tensor> owned)
+    {
+        if (scratch.Count == 0)
+        {
+            return;
+        }
+        // Reference identity, not keys: an ineligible weight is stored AS its wide copy, and a copy that is also
+        // in the output must not be freed underneath the writer.
+        HashSet<Tensor> kept = [];
+        if (output.Count != outputCountBefore)
+        {
+            foreach (Tensor value in output.Values)
+            {
+                kept.Add(value);
+            }
+        }
+        foreach (Tensor created in scratch)
+        {
+            if (kept.Contains(created))
+            {
+                owned.Add(created);
+            }
+            else
+            {
+                created.Dispose();
+            }
+        }
     }
 
     /// <summary>ConvRot's group size. 256 is what the published ComfyUI int8 repacks use, and a reader takes it
