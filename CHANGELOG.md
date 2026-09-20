@@ -6,6 +6,34 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.140
+
+- **The safetensors quantizer streams, so a large source no longer needs the whole checkpoint as F32.** The GGUF
+  writer has always interleaved — widen one tensor, quantize it, free the wide copy — but the fp8/int8 path built
+  a complete F32 dictionary before the writer saw anything. That is what made a 13 GB Q4_K source ask for ~50 GB
+  and get the process OOM-killed. `WriteSafetensors` now takes the `CheckpointSource` and does the same
+  one-at-a-time loop the GGUF path does.
+- **Two ownership traps this exposed, both of which would have quietly undone the change.** An ineligible weight
+  is stored AS its wide copy, so that copy has to outlive the loop while every other one is freed — handled by
+  reference identity against what the iteration added to the output, not by key. And the fp8 branch was parking
+  its narrowed BF16 copy of every quantized weight in `owned` until the end; on a streaming loop that is half the
+  checkpoint held for no reason, so it is disposed the moment the fp8 weight and its scale exist.
+- **The refusal is narrowed to what is actually held.** It claimed the whole checkpoint as F32 plus the output;
+  the real peak is the largest single tensor as F32 plus the finished file, because the output still has to be
+  complete before a safetensors header can be written.
+- **Verified as a pure refactor, byte for byte.** The pre-change code from a clean `origin/main` worktree and
+  this one were run over the same SDXL source to the same target: **identical sha256**
+  (`0f6d12f2517a9e60…`), identical size (4111075535). So the interleave changes when memory is held, not what
+  gets written.
+- **And verified against what it replaces.** Old path on this box: refused, `about 0 GiB is free`. New path, same
+  job: `exit=0`, **10.7 GB peak RSS**, 4.1 GB output, and the result loads and renders. Widening SDXL whole is
+  ~26 GB before counting the output, which is why the old one only runs on an idle machine. 80 quantizer tests
+  pass unchanged.
+- One thing the gate does NOT show, stated so it is not misread: the fp8 output renders a visibly different image
+  from the dense original at the same seed (SSIM 0.379). That is fp8 being lossy on a chaotic 8-step trajectory,
+  not a defect — the byte-identical comparison above is what rules out a regression, and SSIM cannot tell the two
+  apart.
+
 ## alpha.139
 
 - **CUDA is on the shared op scope.** `CudaBackend` was still a standalone `IBackend` carrying its own copy of
@@ -29,6 +57,7 @@ stable release will require. Dates are UTC.
 - A lint fails the build on a discarded op scope. `EnterOp();` as a bare statement still compiles — the result is a
   struct and C# will throw it away — and it raises the op depth permanently, so every later op is treated as
   nested: no finalizer drain, no orphan sweep, no flush.
+
 
 ## alpha.138
 
