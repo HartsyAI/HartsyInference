@@ -53,8 +53,19 @@ public abstract class GpuBackendBase
     /// dispatches still read.</remarks>
     protected OpScope EnterOp([CallerMemberName] string opName = "") => new(this, opName);
 
+    /// <summary>Called on entering an op at ANY depth, before <see cref="OnOpBegin"/>.</summary>
+    /// <remarks>For the part of op entry that is about identity rather than cleanup: making a device current,
+    /// binding an ambient state, checking this backend has not been disposed. Those have to happen on every entry,
+    /// because an op that calls into another backend instance — a peer copy, a collective — returns to find the
+    /// other one bound, and its remaining work would then resolve against the wrong device.
+    ///
+    /// <para>Kept separate from <see cref="OnOpBegin"/> precisely because the drain and sweep must NOT run at every
+    /// depth: an op built out of other ops would reclaim buffers its own later dispatches still read.</para></remarks>
+    protected virtual void OnOpEnter(string opName) { }
+
     /// <summary>Called as the outermost op begins, before the drain and sweep.</summary>
-    /// <remarks>Where a backend makes itself current, binds its ambient state, or opens a profiling range.</remarks>
+    /// <remarks>Where a backend opens a profiling range, or does anything else that belongs to a whole op rather
+    /// than to each entry into one.</remarks>
     protected virtual void OnOpBegin(string opName) { }
 
     /// <summary>Called as the outermost op ends.</summary>
@@ -73,6 +84,10 @@ public abstract class GpuBackendBase
             _backend = backend;
             _opName = opName;
             _startTicks = backend.ProfilingEnabled ? Stopwatch.GetTimestamp() : 0;
+            // Every depth, before anything else: binding identity is not the same question as reclaiming buffers.
+            // A backend that resolves its state ambiently must bind on re-entry too, because an op that called into
+            // ANOTHER instance mid-op comes back to find that instance bound.
+            backend.OnOpEnter(opName);
             if (backend._opDepth == 0)
             {
                 backend._dispatchesThisOp = 0;
@@ -263,11 +278,27 @@ public abstract class GpuBackendBase
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0)
         {
+            OnDisposeRepeated();
             return;
         }
-        DisposeCore();
-        GC.SuppressFinalize(this);
+        try
+        {
+            DisposeCore();
+        }
+        finally
+        {
+            // In a finally because DisposeCore surfaces a teardown failure by throwing, and skipping suppression
+            // there would hand a torn object to the finalizer.
+            GC.SuppressFinalize(this);
+        }
     }
+
+    /// <summary>Called when Dispose is entered again after the first caller claimed teardown.</summary>
+    /// <remarks>The default returns immediately, which is right for a backend whose teardown is synchronous. One
+    /// that runs teardown outside the caller's thread, or wants a second caller to observe the failure the first
+    /// one hit, waits here — returning early would otherwise let that caller proceed against a half-torn-down
+    /// native object graph believing disposal had finished.</remarks>
+    protected virtual void OnDisposeRepeated() { }
 
     /// <summary>Backend teardown, run exactly once.</summary>
     protected abstract void DisposeCore();
