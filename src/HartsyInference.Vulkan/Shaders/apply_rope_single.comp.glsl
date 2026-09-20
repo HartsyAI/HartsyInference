@@ -47,7 +47,8 @@ layout(push_constant) uniform Push {
     uint seqLen;
     uint numHeads;
     uint headDim;
-    uint half_;      // rotaryDim / 2
+    uint half_;      // pairs per head: rotaryDim/2 split-half, headDim/2 interleaved
+    uint rdim;       // rotaryDim, resolved; only the interleaved path needs it
 } pc;
 
 void main() {
@@ -56,6 +57,10 @@ void main() {
     if (gid >= total) return;
 
     uint i   = gid % pc.half_;
+    // Interleaved dispatches over headDim/2 pairs and drops the ones past the rotary window, rather than
+    // dispatching rdim/2 of them. That is what the CPU reference and the CUDA kernel both do, and for an ODD
+    // rotaryDim the two rules differ: at rdim 5 this rotates the pair (4,5) and the other would not.
+    if (INTERLEAVED && 2u * i >= pc.rdim) return;
     uint rest = gid / pc.half_;
     uint h   = rest % pc.numHeads;
     uint bs  = rest / pc.numHeads;          // batch * seqLen + position

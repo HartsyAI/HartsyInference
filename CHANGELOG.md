@@ -14,13 +14,19 @@ stable release will require. Dates are UTC.
 - **One kernel now serves both rotary conventions.** GPT-NeoX split-half pairs `(i, i+half)` with frequencies at
   `i` and `i+half`; GPT-J interleaved pairs `(2i, 2i+1)` with one frequency serving both. Same dispatch shape, one
   invocation per pair, so a spec constant picks the offsets rather than a second committed binary.
+- **The partial-rotary boundary follows CUDA, not the tidier rule.** Interleaved dispatches every pair in the head
+  and drops the ones past the rotary window, rather than dispatching `rotaryDim/2` pairs — which is what the CPU
+  reference and the CUDA kernel have always done. For an ODD `rotaryDim` the two rules genuinely differ: at 5 the
+  shipped rule rotates the pair `(4, 5)` and the tidier one would not. Aligning the reference instead would have
+  changed a shipped backend's numerics to make a new one look neater.
 - **`IBackend.ApplyRopeInterleavedReference`** joins the other reference statics. An override cannot reach its own
   interface default — `((IBackend)this).X(...)` binds back to the class and recurses until the stack ends, which a
   lint already fails the build on — so a backend bailing on a dtype or rank needs somewhere to bail TO.
 - Parity rows for both conventions, including a partial rotary. They differ only in which elements pair and where
   the frequencies live, so a kernel that confuses them still writes plausible numbers of the right magnitude in the
   right places; only a reference comparison separates them. Flipping the spec constant fails both interleaved rows
-  and leaves the split-half ones green — checked by doing it.
+  and leaves the split-half ones green — checked by doing it. An odd rotary dim is among the rows, because that is
+  the one input where the two boundary rules disagree.
 
 ## alpha.141
 

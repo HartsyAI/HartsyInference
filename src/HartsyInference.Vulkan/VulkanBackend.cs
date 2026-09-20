@@ -2118,7 +2118,10 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         int numHeads = (int)x.Shape[2];
         int headDim = (int)x.Shape[3];
         int rdim = rotaryDim <= 0 || rotaryDim > headDim ? headDim : rotaryDim;
-        int half = rdim / 2;
+        // Split-half rotates rdim/2 pairs and dispatches exactly those. Interleaved dispatches every pair in the
+        // head and drops the ones past the window inside the shader, which is what both the CPU reference and the
+        // CUDA kernel do — and for an odd rotaryDim the two rules genuinely differ, so this is not a free choice.
+        int half = interleaved ? headDim / 2 : rdim / 2;
         if (half == 0)
         {
             return;
@@ -2149,6 +2152,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             pc.U32((uint)numHeads);
             pc.U32((uint)headDim);
             pc.U32((uint)half);
+            pc.U32((uint)rdim);
 
             long total = (long)batch * seqLen * numHeads * half;
             Span<ulong> bufs = stackalloc ulong[] { xBuf.Handle, cosEff.Handle, sinEff.Handle };
@@ -2160,7 +2164,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
         catch (Exception ex)
         {
-            Logs.Error("Vulkan ApplyRopeSingle dispatch failed", ex);
+            Logs.Error($"Vulkan {(interleaved ? "ApplyRopeInterleaved" : "ApplyRopeSingle")} dispatch failed", ex);
             throw;
         }
         finally

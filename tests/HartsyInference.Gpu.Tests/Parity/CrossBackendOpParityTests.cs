@@ -56,14 +56,20 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
     }
 
     /// <summary>The GPT-J pairing, against the GPT-NeoX one it now shares a kernel with.</summary>
-    /// <remarks>Both conventions are exercised, and a partial rotary too: the two differ only in which elements
+    /// <remarks>Both conventions are exercised, and two partial rotaries: the two differ only in which elements
     /// pair up and where their frequencies live, so a kernel that confused them still produces plausible numbers
-    /// of the right magnitude in the right places. Only a reference comparison separates them.</remarks>
+    /// of the right magnitude in the right places. Only a reference comparison separates them.
+    ///
+    /// <para>An ODD rotary dim is in there because it is where a pair-based convention has to decide what to do
+    /// with the pair straddling the boundary, and the reference and the kernel answered that differently until it
+    /// was asked. Five is not a shape any model ships, which is exactly why nothing caught it.</para></remarks>
     [Theory]
     [InlineData("cuda", 0)]
     [InlineData("cuda", 4)]
+    [InlineData("cuda", 5)]
     [InlineData("vulkan", 0)]
     [InlineData("vulkan", 4)]
+    [InlineData("vulkan", 5)]
     public void ApplyRopeInterleaved_Matches_The_Cpu(string kind, int rotaryDim)
     {
         if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
