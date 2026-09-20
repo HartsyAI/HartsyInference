@@ -144,6 +144,13 @@ public sealed class VulkanDevice : IDisposable
         VkPhysicalDeviceVulkan13Features f13 = new() { sType = VkStructureType.PhysicalDeviceVulkan13Features, pNext = (nint)(&f12) };
         VkPhysicalDeviceFeatures2 feat2 = new() { sType = VkStructureType.PhysicalDeviceFeatures2, pNext = (nint)(&f13) };
         VulkanApi.vkGetPhysicalDeviceFeatures2(pd, ref feat2);
+        // Raw, before any fallback ORs a value in. All-zero here on a 1.3 device is the signature of a feature
+        // struct the driver skipped, which is what a wrong sType looks like from the outside.
+        Logs.Verbose($"[vk-features] raw query: fp16={f12.shaderFloat16} timeline={f12.timelineSemaphore} "
+            + $"bda={f12.bufferDeviceAddress} sgSizeControl={f13.subgroupSizeControl} "
+            + $"fullSubgroups={f13.computeFullSubgroups} sync2={f13.synchronization2} "
+            + $"int8dot={f13.shaderIntegerDotProduct} maintenance4={f13.maintenance4} "
+            + $"storage16={f11.storageBuffer16BitAccess}");
 
         VulkanApi.vkGetPhysicalDeviceMemoryProperties(pd, out VkPhysicalDeviceMemoryProperties memProps);
 
