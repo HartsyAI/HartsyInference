@@ -379,12 +379,6 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         return (Math.Max(0, total - reservedDeviceBytes), total);
     }
 
-    /// <summary>Sums what this process may still allocate across the device-local heaps.</summary>
-    /// <remarks>Budget minus usage, per heap, and never negative: the spec allows usage to exceed budget, which is
-    /// the driver saying this process is already over its share rather than that it has negative memory.
-    ///
-    /// <para>Returns false rather than zero when the driver reports nothing usable, so the caller falls back to the
-    /// allocator's own figure instead of telling a planner the card is full.</para></remarks>
     /// <summary>Whether the driver answered, and what it said. Exposed so a test can assert which path was taken:
     /// the two produce different numbers, and a query that quietly stopped working would otherwise look like a
     /// card that happens to be busy.</summary>
@@ -398,6 +392,13 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         return TryQueryHeapBudget(out freeBytes);
     }
 
+    /// <summary>What this process may still allocate on the device, as the driver accounts for it.</summary>
+    /// <remarks>Budget minus usage, and never negative: the spec allows usage to exceed budget, which is the driver
+    /// saying this process is already over its share rather than that it has negative memory left.
+    ///
+    /// <para>Returns false only when the device exposes no device-local heap at all. Zero free is an ANSWER — the
+    /// most important one a driver can give — so it must not read as "no answer" and send the caller back to
+    /// arithmetic that cannot see the process filling the card.</para></remarks>
     private unsafe bool TryQueryHeapBudget(out long freeBytes)
     {
         freeBytes = 0;

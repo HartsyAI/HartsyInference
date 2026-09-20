@@ -165,7 +165,6 @@ public abstract class GpuBackendBase
     /// <summary>Free and total device memory, as the driver reports it.</summary>
     public abstract (long FreeBytes, long TotalBytes) GetVramInfo();
 
-
     // ── Reclaiming device memory ─────────────────────────────────────────────────────────────────────────
     //
     // These four are what an engine calls at a phase, generation or model-swap boundary, and they are the
