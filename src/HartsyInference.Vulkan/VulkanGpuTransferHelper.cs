@@ -151,11 +151,20 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     /// threshold early. Harmless — a submit with nothing recorded is a no-op — but it makes the number a lie.</remarks>
     internal Action? StreamDrained { get; set; }
 
-    /// <summary>Runs a bulk release with the stream drained first and the frees taken immediately.</summary>
-    private void ReleaseInBulk(Action release)
+    /// <summary>Submits what is recorded, waits for it, and tells the backend the submit happened.</summary>
+    /// <remarks>Every drain in this class goes through here for the same reason the backend routes its own through
+    /// one helper: a drain always submits first, and a drain the batching count never hears about leaves that count
+    /// holding dispatches already sent.</remarks>
+    private void DrainStream()
     {
         _stream.WaitIdleHost();
         StreamDrained?.Invoke();
+    }
+
+    /// <summary>Runs a bulk release with the stream drained first and the frees taken immediately.</summary>
+    private void ReleaseInBulk(Action release)
+    {
+        DrainStream();
         _releasingInBulk = true;
         try
         {
@@ -173,7 +182,7 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     /// <inheritdoc/>
     protected override void DownloadSynced(nint hostDestination, VulkanBuffer source, long bytes)
     {
-        _stream.WaitIdleHost();
+        DrainStream();
         DownloadToHost(hostDestination, source, (ulong)bytes);
     }
 

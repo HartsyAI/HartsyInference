@@ -30,8 +30,8 @@ stable release will require. Dates are UTC.
 - **Every stream drain tells the backend it happened.** A drain always submits first, and the dispatch count that
   drives submit batching did not learn about it, so the next op crossed the flush threshold early against a number
   that was simply wrong. Harmless in effect — a submit with nothing recorded is a no-op — which is exactly why it
-  survived at five separate call sites, including the scalar read-back that runs on every decode step. They now go
-  through one drain helper.
+  survived at seven separate call sites, including the scalar read-back that runs on every decode step and the
+  device-to-host sync behind every lazy activation read. Each class now has one drain helper and every site uses it.
 - **The fallback describes the same heap the driver path does.** Fixing the free/total basis in the driver query
   left `Vk.TotalVramBytes` — a sum over every device-local heap — under the fallback's free figure for one heap, so
   the defect was relocated rather than removed, reachable whenever the budget extension is absent. And a disposed
