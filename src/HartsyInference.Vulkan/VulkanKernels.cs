@@ -109,13 +109,23 @@ public sealed class VulkanKernelRegistry : IDisposable
                     pData = specDataPtr,
                 };
 
-                // Pin a required-subgroup-size struct only if the device supports it
+                // Ask for a full subgroup of a fixed size only when the workgroup can actually hold whole ones.
+                // Every kernel here declares its workgroup size through LocalSizeId, i.e. spec constant 0, so the
+                // value is right here; a kernel dispatched 8 wide cannot be made of 32-wide subgroups, and asking
+                // is invalid usage. It was invisible until the features were really enabled (see VulkanEnums), and
+                // a driver that enforces it would refuse the pipeline rather than quietly ignore the request.
+                uint localX = 0;
+                for (int i = 0; i < specCount; i++)
+                {
+                    if (specConstants[i].ConstantId == 0) { localX = specConstants[i].AsUInt32; break; }
+                }
+                bool wholeSubgroups = _caps.SubgroupSize > 0 && localX > 0 && localX % _caps.SubgroupSize == 0;
                 VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subgroupSizeCi = new()
                 {
                     sType = VkStructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
                     requiredSubgroupSize = _caps.SubgroupSize,
                 };
-                if (_caps.SubgroupSizeControl)
+                if (_caps.SubgroupSizeControl && wholeSubgroups)
                 {
                     subgroupCi = Marshal.AllocHGlobal(Marshal.SizeOf<VkPipelineShaderStageRequiredSubgroupSizeCreateInfo>());
                     Marshal.StructureToPtr(subgroupSizeCi, subgroupCi, false);
@@ -125,7 +135,9 @@ public sealed class VulkanKernelRegistry : IDisposable
                 {
                     sType = VkStructureType.PipelineShaderStageCreateInfo,
                     pNext = subgroupCi,
-                    flags = _caps.ComputeFullSubgroups ? VkPipelineShaderStageCreateFlags.RequireFullSubgroups : VkPipelineShaderStageCreateFlags.None,
+                    flags = _caps.ComputeFullSubgroups && wholeSubgroups
+                        ? VkPipelineShaderStageCreateFlags.RequireFullSubgroups
+                        : VkPipelineShaderStageCreateFlags.None,
                     stage = VkShaderStageFlags.Compute,
                     module = module,
                     pName = _mainEntry,
