@@ -201,6 +201,21 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
   `<fromto[99]:cat,dog>` is 0.44 mean-abs-pixel from the plain `cat` baseline and `<fromto[0]:cat,dog>` is 0.13
   from the plain `dog` baseline, against a 21.40 baseline separation; `<weight[1.5]:orange>` is byte-identical
   to `(orange:1.5)`.
+- [ ] **HunyuanImage 2.1 loads only from GGUF, and its catalog asset is dead — found 2026-09-19, PRE-EXISTING.**
+  Two separate problems, both surfaced while gating prompt weighting. (1) The declared asset
+  `QuantStack/HunyuanImage-2.1-GGUF` **no longer resolves on HuggingFace** — the API returns
+  `Invalid username or password`, its answer for a repo that is gone or newly gated — so
+  `ModelCatalog.cs:632` points at nothing. (2) The safetensors build cannot be loaded at all:
+  `Comfy-Org/HunyuanImage_2.1_ComfyUI`'s `hunyuanimage2.1_fp8_e4m3fn.safetensors` names its tensors
+  `model.model.double_blocks.0.img_attn.norm.query_norm.scale` — a `model.model.` prefix with DOTTED
+  sub-modules — while `HunyuanImageCheckpointConverter` detects the Tencent layout by the fused underscore form
+  (`double_blocks.0.img_attn_qkv.weight`) and strips only `model.diffusion_model.`. The remap never fires and
+  construction dies on the first key it would have produced, `x_embedder.proj.weight`. The SwarmUI-named local
+  copy has the identical layout, so this is the format, not one bad file. Supporting it is a new mapping over
+  856 tensors — checkpoint-container work, not weighting — so it is recorded rather than attempted here.
+  A surviving 2.1 GGUF is `svjack/HunyuanImage_gguf` (`hunyuanimage2.1-q4_0.gguf` / `-q8_0.gguf`);
+  `calcuis/hunyuanimage-gguf` and `sanyixiansheng/hunyuanimage-gguf` publish "hunyuanimage-lite", a DIFFERENT
+  model, and should not be substituted.
 - [ ] **AuraFlow's Pile-T5 special ids may not match the reference — found 2026-09-19, PRE-EXISTING, unverified.**
   ComfyUI's `aura_t5.py` declares `special_tokens={"end": 2, "pad": 1}`, while our `T5Tokenizer` hardcodes
   `EosTokenId = 1` / `PadTokenId = 0` for every T5 family it serves. If Pile-T5's vocab really puts `</s>` at 2,
