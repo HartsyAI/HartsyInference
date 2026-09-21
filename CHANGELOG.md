@@ -6,6 +6,30 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.153
+
+- **Converted checkpoints can now say what they are.** Every safetensors the engine wrote was anonymous: of the
+  48 artifacts staged for publishing, none carried a `modelspec.*` key and 26 had no `__metadata__` block at all.
+  `SafeTensorsWriter.Save` and `PickleCheckpointRepacker.Repack` both took an optional metadata map that defaulted
+  to null, and six of the eight places that write a checkpoint passed nothing. SwarmUI classifies a scanned model
+  from `modelspec.architecture` before it reads a single tensor, so a repack we produced landed with a null class —
+  which for an audio model means its parameters silently disappear from the UI.
+- **`ModelIdentityCatalog` is the one place a family's publishing identity lives.** Class id, title, author,
+  license, upstream repo and standard resolution, keyed by engine model id, for 74 families. That information was
+  split across three tables that no conversion site could reach: the backend extension's `ModelSupport`, the
+  classes that extension registers itself, and a JSON file beside a Python tool. It sits in `ModelAssets` rather
+  than `Engine` so the conversion sites in `Audio` can read it.
+- **`ArtifactMetadata` builds the header, and knows the one rule that silently breaks a model.** A resolution is
+  emitted only when the class declares one. `IdentifyClassFor` accepts a model whose resolution matches the class
+  standard or is absent, and for anything else it clones the class *with its matcher disabled* — so an audio
+  artifact must carry none, and Qwen-Image 2.1 must carry its own 1024 rather than Qwen-Image v1's 1328.
+- **`ArtifactNaming` writes down the file-name convention that was never written down.**
+  `<engine-id>[-<variant>]_<precision>.<ext>`, so `fp8_scaled` and `fp8 scaled` cannot produce two names for one
+  build, while GGUF presets keep their upstream `Q4_K_M` casing.
+
+No behaviour changes yet: this release adds the catalog and the builder. Threading them through the conversion
+sites, and the `hartsy pack` command that produces a whole upload-ready bundle, follow.
+
 ## alpha.152
 
 - **Community benchmark runs now attest the GPU and sample it while they run.** `EnvironmentRecord.PowerProfile`
