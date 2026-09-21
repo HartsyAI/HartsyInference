@@ -80,14 +80,11 @@ public static class KnobFile
         EnsureLoaded();
     }
 
-    private static string? Discover()
-    {
-        if (!string.IsNullOrWhiteSpace(ExplicitPath) && !File.Exists(ExplicitPath))
-        {
-            throw new FileNotFoundException($"Engine settings file not found: '{ExplicitPath}'.", ExplicitPath);
-        }
-        return File.Exists(Path) ? Path : null;
-    }
+    /// <remarks>A path that does not exist yet is not an error, for either the default location or an
+    /// <see cref="ExplicitPath"/>: it is the normal state before the first setting is written, and
+    /// <see cref="Save"/> creates it. Throwing here made the file impossible to create through
+    /// <see cref="Save"/> at all, because writing a setting reads one first.</remarks>
+    private static string? Discover() => File.Exists(Path) ? Path : null;
 
     /// <summary>Writes one setting to <see cref="Path"/> and applies it, so it survives a restart.</summary>
     /// <remarks>Validates through the same parse the file load uses, so an unknown id, a wrong type or a value

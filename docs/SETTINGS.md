@@ -77,6 +77,18 @@ settings file governs the CLI, the API and any headless host. Both are deliberat
 its own tree, so loading them from a different one would be worse than useless. `settings get` reports `host`
 for such a value.
 
+## A long-running process reads the file once
+
+The file is loaded on the first setting read and then cached for the process. A CLI invocation is a fresh
+process, so it always sees the current file; a **running server does not** — write to it through
+`PUT /settings/engine/{id}` and it applies immediately, but an edit made elsewhere (the CLI, an editor) is
+not picked up until that server restarts.
+
+This is deliberate rather than an omission. Re-reading the file would have to discard the in-process
+overrides to apply cleanly, and those include the ones a host set: SwarmUI pushes `paths.modelsRoot` at
+backend init, so a reload triggered by an unrelated edit would drop the models folder out from under a
+running generation. A server changes its own settings through its own API.
+
 ## Scope: when a setting takes effect
 
 | scope | meaning |

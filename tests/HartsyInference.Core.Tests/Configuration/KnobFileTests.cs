@@ -114,6 +114,28 @@ public sealed class KnobFileTests : IDisposable
         Assert.Equal("host", KnobStore.SourceOf("paths.modelsRoot"));
     }
 
+    /// <summary>A settings file that does not exist yet is the normal state, not an error — Save has to be able
+    /// to create it. Discover used to throw for an ExplicitPath that was absent, which made writing the first
+    /// setting impossible for any host that names its own file, because writing one reads one first.</summary>
+    [Fact]
+    public void Save_CreatesTheFileWhenItDoesNotExistYet()
+    {
+        Assert.False(File.Exists(KnobFile.ExplicitPath!));
+
+        KnobFile.Save("paths.modelsRoot", "/mnt/created");
+
+        Assert.True(File.Exists(KnobFile.ExplicitPath!));
+        Assert.Equal("/mnt/created", EngineKnobs.ModelsRoot.Value);
+    }
+
+    /// <summary>Reading a setting before any file exists yields the declared defaults rather than throwing.</summary>
+    [Fact]
+    public void Reading_WithNoFileYet_UsesDefaults()
+    {
+        Assert.False(File.Exists(KnobFile.ExplicitPath!));
+        Assert.Equal(4, EngineKnobs.GemvWpb.Value);
+    }
+
     /// <summary>An unset setting reports the declared default as its source, so "where did this come from" always has an answer.</summary>
     [Fact]
     public void UnsetSettingReportsTheDefault()
