@@ -91,12 +91,20 @@ persistence and ECC mode become a cohort component, so a power-limited card no l
 and a device nvidia-smi cannot describe is recorded as unattested and pools only with other unattested runs.
 `run` refuses a GPU another compute process already holds; `--allow-shared-device` records the sharing and
 proceeds, and sampled VRAM then includes whatever that tenant holds because the figure is device-wide. A
-tenant that appears mid-campaign is recorded on the session, which is retained but not published. A fixed-cadence sampler runs for each measured request and stores per-request aggregates only —
-peak VRAM, utilization, power, temperature, clocks and throttle-reason counts. `gpu_idle` is not a throttle
-and a software power cap is normal under load; a session whose samples exceed the suite's hardware or thermal
-slowdown limit is retained but never published. Telemetry is disclosure checked for internal consistency, not
-recomputed from the outputs the way the timings are. Vulkan and CPU campaigns record no telemetry and are not
-disqualified for its absence.
+tenant that appears mid-campaign is recorded on the session, which is retained but not published.
+
+A fixed-cadence sampler runs for each measured request and stores per-request aggregates only: peak VRAM,
+utilization, power, temperature, clocks, sample coverage and throttle-reason counts. `gpu_idle` is not a
+throttle and a software power cap is normal under load; a session whose samples exceed the suite's hardware
+or thermal slowdown limit is retained but never published. Telemetry is disclosure checked for internal
+consistency, not recomputed from the outputs the way the timings are. Vulkan and CPU campaigns record no
+telemetry and are not disqualified for its absence.
+
+Let the card cool between campaigns. Measured on an RTX 3060 here: a first run sat at 66 C with no throttle
+samples, while a second run twenty minutes later reached 93 C, reported `sw_thermal_slowdown` on every sample
+and lost 12-17% of its SM clock. Those later sessions are retained as throttled rather than published, which
+is the intended outcome — they are not comparable with the cool run — but it does mean a card in a cramped
+case may only complete whichever cases run first.
 
 Automated checks establish structural consistency and detect obviously broken output. They do not establish
 semantic/numerical parity or prove that a contributor's timings are honest. Maintainers inspect every output,
