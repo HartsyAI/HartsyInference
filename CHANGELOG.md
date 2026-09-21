@@ -22,8 +22,11 @@ stable release will require. Dates are UTC.
 - **Fixed: the Qwen-Image 2.1 VAE downloaded to a second path.** `SideModels.QwenImage21Vae` wrote
   `VAE/qwen_image_2.1_vae_bf16.safetensors` while SwarmUI core registers
   `VAE/QwenImage/qwen_image_2.1_vae_bf16.safetensors`, so the two backends each fetched their own copy. Same sha,
-  same file, now the same path — matching what every other VAE in `SideModels` already did. Anyone who pulled it
-  on alpha.149 can move the existing file into `VAE/QwenImage/` instead of re-downloading it.
+  same file, now the same path — matching what every other VAE in `SideModels` already did. An install that
+  already has it under the alpha.149 name keeps using it: the asset carries `LegacyTargetNames`, so
+  `ModelDownloader.TargetPath` resolves to the existing file rather than re-fetching 675 MB. (Deliberately *not*
+  done for the text encoder — bf16→int8 is a content swap, not a rename, and falling back would silently keep
+  serving the wrong file.)
 - **Fixed: Qwen-Image 2.1 reported that it takes no sampler or scheduler.** It had no row in
   `SamplingCapabilities`, and a miss there is indistinguishable from a family that owns its own solver — so
   SwarmUI hid the Sampler and Scheduler controls and refused any explicit pick, while the pipeline was calling

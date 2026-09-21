@@ -356,6 +356,9 @@ public static class SideModels
         TargetSubdir = "VAE",
         // Path matches SwarmUI core's CommonModels "qwen-image-2.1-vae" entry so the two backends share one file.
         TargetName = "QwenImage/qwen_image_2.1_vae_bf16.safetensors",
+        // alpha.149 wrote it flat in VAE/. Same bytes, same sha — an install that already has it keeps using it
+        // rather than re-fetching 675 MB to a path one directory over.
+        LegacyTargetNames = ["qwen_image_2.1_vae_bf16.safetensors"],
         Role = "vae",
         Sha256 = "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
     };

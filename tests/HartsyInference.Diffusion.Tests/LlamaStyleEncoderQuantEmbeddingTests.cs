@@ -74,6 +74,36 @@ public sealed class LlamaStyleEncoderQuantEmbeddingTests
         original.Dispose();
     }
 
+    /// <summary>ConvRot only rotates a layer when <c>in_features % 256 == 0</c>, so an <c>int8_tensorwise</c> table
+    /// can legitimately arrive with <c>ConvRotGroupSize == 0</c>. The codec skips the rotation in that case; this
+    /// pins that the embedding path passes the group size through rather than assuming one.</summary>
+    [Fact]
+    public void AnUnrotatedInt8EmbeddingDequantizesToo()
+    {
+        Tensor original = BuildTable();
+        float[] expected = original.AsReadOnlySpan<float>().ToArray();
+
+        Tensor toQuantize = BuildTable();
+        (Tensor packed, Tensor rowScale) = Int8ConvRotCodec.QuantizeFromF32(toQuantize, convRotGroupSize: 0);
+        packed.QuantInfo = new QuantWeightInfo { Format = "int8_tensorwise", RowScale = rowScale, ConvRotGroupSize = 0 };
+
+        using LlamaStyleEncoder encoder = new LlamaStyleEncoder(ZeroLayerConfig);
+        encoder.LoadWeights(new Dictionary<string, Tensor> { ["model.embed_tokens.weight"] = packed });
+
+        using Tensor looked = encoder.LookupEmbeddings([0, 1, 2, 3]);
+        ReadOnlySpan<float> actual = looked.AsReadOnlySpan<float>();
+        float worst = 0f;
+        for (int i = 0; i < expected.Length; i++)
+        {
+            worst = MathF.Max(worst, MathF.Abs(expected[i] - actual[i]));
+        }
+        Assert.True(worst < 0.01f, $"unrotated int8 embedding is {worst} off the source table.");
+
+        packed.Dispose();
+        rowScale.Dispose();
+        original.Dispose();
+    }
+
     /// <summary>A plain BF16 table still loads unchanged — the int8 branch must not capture the ordinary case.</summary>
     [Fact]
     public void ABf16EmbeddingIsStillWidenedDirectly()
