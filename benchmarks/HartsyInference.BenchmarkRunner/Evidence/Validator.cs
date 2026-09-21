@@ -35,7 +35,8 @@ public static class Validator
             Require(attestation.Source is AttestationRecord.Smi or AttestationRecord.Unavailable, "Unknown attestation source.");
             Require(attestation.Fields.Count <= 64 && attestation.Fields.All(p => !string.IsNullOrWhiteSpace(p.Key) && p
                 .Value is not null && p.Value.Length < 100 && !p.Value.Any(char.IsControl)), "Invalid attested device fields.");
-            // Recomputable, unlike the samples: the cohort key must be the profile this attestation describes.
+            // Self-consistency, not fraud detection: a hand-written record can satisfy both sides. It catches
+            // the two drifting apart, which is what a serialization bug or a patched resume looks like.
             Require(environment.PowerProfile == DeviceAttestation.Profile(attestation), "Power profile contradicts the attestation.");
             Require(attestation.SharedProcessCount >= 0 && attestation.SharedProcessBytes >= 0, "Invalid tenant accounting.");
             Require(attestation.SharedProcessCount == 0 || attestation.SharedDeviceAllowed,

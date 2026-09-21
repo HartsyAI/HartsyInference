@@ -43,7 +43,16 @@ public sealed class DeviceSampler : IDisposable
     }
 
     /// <summary>Why telemetry is missing or partial, when it is.</summary>
-    public string? Note => _note;
+    public string? Note
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _note;
+            }
+        }
+    }
 
     /// <summary>The sampler child's process id, for the controller to reap if this worker dies without
     /// disposing. Local bookkeeping only: it is never written into the campaign record.</summary>
@@ -98,7 +107,12 @@ public sealed class DeviceSampler : IDisposable
                 long ticks = Stopwatch.GetTimestamp();
                 string[] row = NvidiaSmi.Fields(line);
                 if (row.Length != Queried.Length)
+                {
+                    // A locale that prints a comma decimal separator shifts every column. Without this note a
+                    // session that dropped every sample looks exactly like one that never sampled at all.
+                    Record("A telemetry row had an unexpected field count; samples were dropped.");
                     continue;
+                }
                 Sample sample = new(ticks, Number(row[0]), Number(row[1]), Number(row[2]) is { } mib ? (long)(mib * 1024 * 1024) : null,
                     Number(row[3]), Number(row[4]), Number(row[5]) is { } clock ? (int)clock : null, Active(row[6]), Active(row[7]),
                     Active(row[8]), Active(row[9]), Active(row[10]));
@@ -111,12 +125,13 @@ public sealed class DeviceSampler : IDisposable
         }
         catch (Exception error)when (error is not OutOfMemoryException)
         {
-            _note ??= "Telemetry stream ended early: " + error.GetType().Name;
+            Record("Telemetry stream ended early: " + error.GetType().Name);
         }
     }
 
     /// <summary>Aggregates the samples inside one measured request. Coverage spans the whole window, so a
-    /// sampler that started late or died partway reads as a gap instead of as a clean partial aggregate.</summary>
+    /// sampler that started late or died partway reads as a gap instead of as a clean partial aggregate.
+    /// Windows must be requested in order: everything before one is discarded when it is aggregated.</summary>
     public DeviceTelemetry Aggregate(long startTicks, long endTicks)
     {
         Sample[] window;
@@ -128,7 +143,7 @@ public sealed class DeviceSampler : IDisposable
         }
 
         if (_process?.HasExited == true)
-            _note ??= "Telemetry sampler exited before the session completed.";
+            Record("Telemetry sampler exited before the session completed.");
         if (_source == DeviceTelemetry.Unavailable || window.Length == 0)
             return new DeviceTelemetry
             {
@@ -143,7 +158,7 @@ public sealed class DeviceSampler : IDisposable
         // whichever part it happened to catch — the request itself is still perfectly good evidence.
         if (gap > DeviceTelemetry.MaxCoveragePeriods * _cadenceMs)
         {
-            _note ??= "Telemetry coverage gap exceeded the sampling tolerance; aggregates were dropped.";
+            Record("Telemetry coverage gap exceeded the sampling tolerance; aggregates were dropped.");
             return new DeviceTelemetry
             {
                 Source = DeviceTelemetry.Unavailable,
@@ -181,6 +196,16 @@ public sealed class DeviceSampler : IDisposable
             _reader?.Join(5000);
             _errors?.Wait(1000);
             _process.Dispose();
+        }
+    }
+
+    /// <summary>First note wins. Under the gate because the reader thread and the aggregating thread both
+    /// record one, and <c>??=</c> is a read then a write.</summary>
+    private void Record(string note)
+    {
+        lock (_gate)
+        {
+            _note ??= note;
         }
     }
 

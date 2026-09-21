@@ -65,11 +65,23 @@ public static class NvidiaSmi
         {
             if (!process.HasExited)
                 process.Kill(entireProcessTree: true);
-            process.WaitForExit(5000);
         }
         catch (Exception error)when (error is not OutOfMemoryException)
         {
             Logs.Debug("Telemetry sampler had already exited: " + error.GetType().Name);
+        }
+        finally
+        {
+            // Unconditional: a Kill that throws must not skip confirming the child actually left, or the
+            // caller disposes the stream while the reader is still blocked on a live process.
+            try
+            {
+                process.WaitForExit(5000);
+            }
+            catch (Exception error)when (error is not OutOfMemoryException)
+            {
+                Logs.Debug("Telemetry sampler could not be waited on: " + error.GetType().Name);
+            }
         }
     }
 
