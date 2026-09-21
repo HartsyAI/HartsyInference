@@ -61,7 +61,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
     private Tensor? _w1; // gate
     private Tensor? _w2; // down
     private Tensor? _w3; // up
-    private Tensor? _w13; // fused [gate; up] (converter HARTSY_FUSED_FFN=1 — one GEMM, INFERENCE_ACCEL_GRIND §H3.2)
+    private Tensor? _w13; // fused [gate; up] (converter numerics.fusedFfn=true — one GEMM, INFERENCE_ACCEL_GRIND §H3.2)
 
     // AdaLN modulation: Linear(adalnDim → 4*hidden), bias=True.
     private Tensor? _adalnWeight;
@@ -93,7 +93,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         _normQ.LoadWeights(weights[$"{prefix}.attention.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attention.norm_k.weight"]);
 
-        // Fused-FFN path (converter emits w13 = [w1; w3] under HARTSY_FUSED_FFN=1) — else the split pair.
+        // Fused-FFN path (converter emits w13 = [w1; w3] under numerics.fusedFfn=true) — else the split pair.
         if (weights.TryGetValue($"{prefix}.feed_forward.w13.weight", out Tensor? w13))
         {
             _w13 = w13;
@@ -274,7 +274,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         return projected;
     }
 
-    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c> (HARTSY_FUSED_FFN) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
+    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c> (numerics.fusedFfn) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
     {
         TensorShape ff = new TensorShape(batch, seqLen, _ffnHidden);

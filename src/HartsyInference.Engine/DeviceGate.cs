@@ -8,7 +8,7 @@ namespace HartsyInference.Engine;
 /// caches/streams) but their concurrent kernel/allocator use is not yet audited, so generations on the SAME device
 /// ordinal serialize here. No cost in the common cases: a device with one backend never has two concurrent
 /// generations trying the gate (each backend already serializes its own), and different devices use different
-/// gates. <c>HARTSY_SAME_GPU_CONCURRENT=1</c> disables the gate once the concurrency milestone lands/soaks.</summary>
+/// gates. <c>vram.sameGpuConcurrent=true</c> disables the gate once the concurrency milestone lands/soaks.</summary>
 public static class DeviceGate
 {
     private static bool _concurrent => EngineKnobs.SameGpuConcurrent.Value;

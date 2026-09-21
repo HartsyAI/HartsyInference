@@ -219,14 +219,14 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                     ? new LtxVideo25DiffusionDecoder(new LtxVideo25DiffusionDecoderConfig { ChunkWorkspaceBytes = chunkMb << 20 })
                     : new LtxVideo25DiffusionDecoder();
                 diffusionVae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.VaeDiffusionDecoder, DType.F32));
-                Logs.Info($"[LtxVideo2Recipe] HARTSY_LTX2_DIFFUSION_VAE set — decoding with the LTX-2.5 diffusion "
+                Logs.Info($"[LtxVideo2Recipe] numerics.ltx2DiffusionVae set — decoding with the LTX-2.5 diffusion "
                     + $"video decoder ({conv.VaeDiffusionDecoder.Count} tensors). Temporally chunked: no geometry "
                     + "ceiling, but ~13 s at 768x512x97f against the conv decoder's ~3 s.");
             }
             else if (conv.VaeDiffusionDecoder.Count > 0 && haveConvDecoder)
             {
                 Logs.Info("[LtxVideo2Recipe] Checkpoint carries the LTX-2.5 diffusion video decoder; using the conv "
-                    + "decoder, which is ~40x faster at matched geometry (HARTSY_LTX2_DIFFUSION_VAE=1 to select "
+                    + "decoder, which is ~40x faster at matched geometry (numerics.ltx2DiffusionVae=true to select "
                     + "the diffusion one).");
             }
             else if (conv.VaeDiffusionDecoder.Count > 0)
@@ -236,7 +236,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                     + $"({conv.VaeDiffusionDecoder.Count} decoder tensors), which decodes correctly but is currently "
                     + "~40x slower at matched geometry. Supply the convolutional VAE "
                     + "(ltx-2.5-video-vae-conv-bf16.safetensors) for the fast path, or set "
-                    + "HARTSY_LTX2_DIFFUSION_VAE=1 to use this one.");
+                    + "numerics.ltx2DiffusionVae=true to use this one.");
             }
             // Gemma 4 (LTX-2.5) vs Gemma 3 (LTX-2.3). `layer_scalar` is the discriminator because it is per-block
             // and Gemma 3 has no counterpart; do NOT probe for a missing v_proj — layer 0 is a sliding layer and
@@ -260,7 +260,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             {
                 throw new InvalidOperationException(
                     $"LTX-2 checkpoint '{context.CheckpointPath}' has no usable video decoder: no conv decoder keys "
-                    + "and no diffusion decoder (or HARTSY_LTX2_DIFFUSION_VAE selected one that is not in the checkpoint).");
+                    + "and no diffusion decoder (or numerics.ltx2DiffusionVae selected one that is not in the checkpoint).");
             }
 
             LtxAudioVaeDecoder? audioVae = null;

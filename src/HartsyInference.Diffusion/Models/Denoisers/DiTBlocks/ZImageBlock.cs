@@ -17,7 +17,7 @@ public sealed unsafe class ZImageBlock
     /// ~4× past step 1's (raw ffnOut traced to ~1.05M at step 6 — 1/16 left exactly ONE element at INF).</summary>
     private const float F16SandwichDamp = 1.0f / 64.0f;
 
-    /// <summary>HARTSY_ZIMAGE_F16TRACE=1: logs min/max/nan of every block intermediate for the first few block
+    /// <summary>diagnostics.zimageF16trace=true: logs min/max/nan of every block intermediate for the first few block
     /// forwards — locates the first F16 overflow site. Each probe D2H-drains the tensor (very slow); debug only.</summary>
     private static bool F16TraceEnabled => EngineKnobs.ZimageF16trace.Value;
     private static int _traceCallsLeft = F16TraceEnabled ? 300 : 0;   // covers all blocks of an 8-step gen
@@ -137,7 +137,7 @@ public sealed unsafe class ZImageBlock
         int batch = (int)x.Shape[0];
         int seqLen = (int)x.Shape[1];
         // Activation dtype follows the INPUT (the Krea2Block pattern): the transformer casts the token stream
-        // to F16 once before the block loop on the HARTSY_DIT_F16 path, and every block activation follows.
+        // to F16 once before the block loop on the numerics.ditF16 path, and every block activation follows.
         // The AdaLN modulation vectors stay F32 (tiny per-channel params — the F16 norm/affine/gate kernels
         // take an F16 activation + F32 params); the classic F32 path is byte-identical to the baseline.
         DType act = x.DType;
@@ -321,7 +321,7 @@ public sealed unsafe class ZImageBlock
         return results;
     }
 
-    /// <summary>Debug probe (HARTSY_ZIMAGE_F16TRACE): min/max/nan of a tensor, F16 or F32. D2H-drains.</summary>
+    /// <summary>Debug probe (diagnostics.zimageF16trace): min/max/nan of a tensor, F16 or F32. D2H-drains.</summary>
     private static void Trace(string name, Tensor t)
     {
         float min = float.MaxValue, max = float.MinValue;

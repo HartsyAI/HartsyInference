@@ -79,7 +79,7 @@ see the [initial dataset snapshot](benchmarks/generated/overview.svg) until it i
 - [Model support](docs/Checklists/MODEL_STATUS.md) and [numerical evidence](docs/Checklists/PARITY_VERIFICATION.md).
 - [Open work](docs/Checklists/ROADMAP.md), [troubleshooting](docs/Checklists/TROUBLESHOOTING.md).
 - [Historical performance scoreboards](benchmarks/scoreboards/) — hardware, settings, dates, and external baselines.
-- [Multi-GPU configuration](docs/MULTI_GPU.md) and [environment controls](docs/ENV_VARS.md).
+- [Multi-GPU configuration](docs/MULTI_GPU.md) and [settings](docs/SETTINGS.md).
 
 Code and packages are [MIT licensed](LICENSE). Model weights retain their publishers' licenses;
 consult the checkpoint's license, including the [MiniMax-H3 license](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE),

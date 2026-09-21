@@ -28,17 +28,17 @@ public readonly ref struct NvtxRange
     private static int _disabled;
     private static readonly bool _isWindows = RuntimeInformation.IsOSPlatform(OSPlatform.Windows);
 
-    // ── Env-gated CPU wall-time profiler (HARTSY_PROFILE=1). Accumulates per-label (calls, ticks) across all
+    // ── Env-gated CPU wall-time profiler (diagnostics.profile=true). Accumulates per-label (calls, ticks) across all
     // NvtxRange-wrapped ops, regardless of whether NVTX itself is available. Zero overhead when off. ──
     internal static bool ProfileEnabled => EngineKnobs.Profile.Value;
 
-    /// <summary>HARTSY_PROFILE_SYNC=1: sync the compute stream on each range Dispose so per-op timing = GPU time.</summary>
+    /// <summary>diagnostics.profileSync=true: sync the compute stream on each range Dispose so per-op timing = GPU time.</summary>
     internal static bool ProfileSync => EngineKnobs.ProfileSync.Value;
 
-    /// <summary>HARTSY_PROFILE_FINE=1: enable sub-op ranges (see <see cref="PushFine"/>), off by default.</summary>
+    /// <summary>diagnostics.profileFine=true: enable sub-op ranges (see <see cref="PushFine"/>), off by default.</summary>
     internal static bool ProfileFine => EngineKnobs.ProfileFine.Value;
 
-    /// <summary>HARTSY_PROFILE_SHAPES=1: split selected op labels by shape, so one label's total can be attributed to the call regimes inside it. Off by default — it multiplies the label count.</summary>
+    /// <summary>diagnostics.profileShapes=true: split selected op labels by shape, so one label's total can be attributed to the call regimes inside it. Off by default — it multiplies the label count.</summary>
     internal static bool ProfileShapes => EngineKnobs.ProfileShapes.Value;
 
     private static readonly ConcurrentDictionary<string, long[]> _profStats = new();
@@ -79,7 +79,7 @@ public readonly ref struct NvtxRange
     /// <summary>Returns true once any NVTX call has thrown a DllNotFoundException — subsequent pushes are skipped. Test hook for unit tests.</summary>
     public static bool IsDisabled => Volatile.Read(ref _disabled) != 0;
 
-    /// <summary>Like <see cref="Push"/> but for sub-op ranges nested inside an op that already pushes one — a no-op unless <c>HARTSY_PROFILE_FINE=1</c>.</summary>
+    /// <summary>Like <see cref="Push"/> but for sub-op ranges nested inside an op that already pushes one — a no-op unless <c>diagnostics.profileFine=true</c>.</summary>
     /// <remarks>A single op can hide several launches (the Sage attention prologue hides four), and attributing
     /// them needs a range per launch. Those extra pushes are pure overhead in a production run, and this model
     /// launches enough of them per step to be measurable — so they stay off unless explicitly asked for.</remarks>
@@ -123,7 +123,7 @@ public readonly ref struct NvtxRange
     {
         if (_profName is not null)
         {
-            // HARTSY_PROFILE_SYNC=1: drain the compute stream before timestamping so each op's recorded time is its
+            // diagnostics.profileSync=true: drain the compute stream before timestamping so each op's recorded time is its
             // TRUE GPU execution time (not just the async launch cost). Serializes execution — profiling only — but
             // it's the only way, without Nsight, to attribute where GPU time actually goes across async ops.
             // Resolved via the ambient backend State (not a static field): a static stream handle here was

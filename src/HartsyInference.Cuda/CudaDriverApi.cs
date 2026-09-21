@@ -244,7 +244,7 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuGraphLaunch(nint graphExec, nint stream);
 
-    /// <summary>Enumerates a graph's nodes. Call with nodes = null (nint.Zero array semantics) via the count-query overload first: pass numNodes by ref; when <paramref name="nodes"/> is null the count is returned. Diagnostic use only (HARTSY_GRAPH_DUMP).</summary>
+    /// <summary>Enumerates a graph's nodes. Call with nodes = null (nint.Zero array semantics) via the count-query overload first: pass numNodes by ref; when <paramref name="nodes"/> is null the count is returned. Diagnostic use only (diagnostics.graphDump).</summary>
     [LibraryImport(LibName)]
     internal static partial int cuGraphGetNodes(nint graph, [In, Out] nint[]? nodes, ref nuint numNodes);
 

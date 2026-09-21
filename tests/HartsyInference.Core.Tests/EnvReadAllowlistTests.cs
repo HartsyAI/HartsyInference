@@ -81,7 +81,7 @@ public sealed class EnvReadAllowlistTests
             sb.AppendLine("These files read the environment but are not on the allowlist:");
             foreach (string f in offenders) sb.AppendLine($"  {f} ({found[f]} read(s))");
             sb.AppendLine();
-            sb.AppendLine("The engine is moving to typed configuration — see docs/ENV_VARS.md. Take the value as a");
+            sb.AppendLine("The engine is configured through EngineKnobs — see docs/SETTINGS.md. Take the value as a");
             sb.AppendLine("parameter or put it on a typed options/policy record instead of reading it here.");
             Assert.Fail(sb.ToString());
         }

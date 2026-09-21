@@ -65,7 +65,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
         // never attempted an allocation (measured: 1 s, 82 MiB peak), which read as a capacity limit in benchmark
         // results when it was a policy.
         //
-        // The threshold is therefore now only enforced when streaming is unavailable — HARTSY_LOWVRAM=off, or a
+        // The threshold is therefore now only enforced when streaming is unavailable — vram.lowVram=off, or a
         // backend with no streaming cache. Otherwise the planner decides per generation against real free VRAM.
         // Asked of the backend, not of its class: any GPU backend that reports memory can answer this, and the
         // preflight is about how much VRAM there is rather than about which vendor supplies it.
@@ -80,7 +80,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
                 throw new InvalidOperationException(
                     $"Ideogram 4 needs >= {MinRequiredVramGb:F0} GB free VRAM to hold both 9.3B transformers resident for asymmetric CFG; " +
                     $"this GPU has {freeGb:F1} GB free of {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB total, and weight streaming is " +
-                    $"disabled ({LowVramPolicy.EnvironmentVariable}=off). Unset {LowVramPolicy.EnvironmentVariable} to let the engine " +
+                    $"disabled ({LowVramPolicy.SettingId}=off). Unset {LowVramPolicy.SettingId} to let the engine " +
                     "stream the transformers, or use a higher-VRAM GPU.");
             }
             if (freeGb < MinRequiredVramGb)

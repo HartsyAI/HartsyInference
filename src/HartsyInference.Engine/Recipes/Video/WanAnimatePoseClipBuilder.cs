@@ -47,7 +47,7 @@ internal static class WanAnimatePoseClipBuilder
         return VideoRecipeUtils.PackRgbFramesToClip(skeletons, width, height);
     }
 
-    /// <summary>Writes the rendered skeletons as PPMs under <c>HARTSY_ANIMATE_POSE_DUMP</c>. The pose clip is the one driving input nothing else can show you — it is VAE-encoded straight into the latent, so a bad render reads as a model failure.</summary>
+    /// <summary>Writes the rendered skeletons as PPMs under <c>diagnostics.animatePoseDump</c>. The pose clip is the one driving input nothing else can show you — it is VAE-encoded straight into the latent, so a bad render reads as a model failure.</summary>
     private static void DumpSkeletons(byte[][] skeletons, int width, int height)
     {
         string? dir = EngineKnobs.AnimatePoseDump.Value;

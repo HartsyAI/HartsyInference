@@ -35,11 +35,11 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
     private const int OutputImageIndicator = 2;
     private const int ImagePositionOffset = 65536;
 
-    /// <summary>Keeps BOTH 9.3B DiTs GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~4.6 s re-upload). The TE cannot coexist with the resident DiTs (8 + 18.6 GB), so a prompt-cache MISS under this flag frees the DiTs first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    /// <summary>Keeps BOTH 9.3B DiTs GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~4.6 s re-upload). The TE cannot coexist with the resident DiTs (8 + 18.6 GB), so a prompt-cache MISS under this flag frees the DiTs first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (vram.keepModels=false disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
-    /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): raw budget 0.3 confined to the LATE half of the schedule — 1.39× at SSIM 0.9530 on the 4090 A/B. No poly: Ideogram's block-0 indicator is schedule-flat while true residual drift falls 0.72→0.15, so a fitted map inverts the relationship (results doc 2026-07-22_accel_stepcache_ideogram_4090.md).</summary>
+    /// <summary>Calibrated step-cache ship point (vram.stepCache=1): raw budget 0.3 confined to the LATE half of the schedule — 1.39× at SSIM 0.9530 on the 4090 A/B. No poly: Ideogram's block-0 indicator is schedule-flat while true residual drift falls 0.72→0.15, so a fitted map inverts the relationship (results doc 2026-07-22_accel_stepcache_ideogram_4090.md).</summary>
     private static readonly StepCacheProfile CalibratedStepCache =
         new(Threshold: 0.3f, Cap: 3, Poly: null, LateWindow: 0.5f);
 
@@ -196,7 +196,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         {
             if (_ditResident)
             {
-                // The 8 GB TE cannot coexist with the 18.6 GB of resident DiTs (HARTSY_KEEP_MODELS); evict
+                // The 8 GB TE cannot coexist with the 18.6 GB of resident DiTs (vram.keepModels); evict
                 // them for this new-prompt generation and re-preload below.
                 Backend.Sync();
                 Backend.FreeWeights(_conditional.EnumerateWeights());
@@ -292,7 +292,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             latentMask.Dispose();
         }
 
-        // ── 4b. Optional across-step First-Block cache (HARTSY_STEP_CACHE, default off — reference wiring
+        // ── 4b. Optional across-step First-Block cache (vram.stepCache, default off — reference wiring
         // is QwenImagePipeline / INFERENCE_ACCEL_GRIND §H1.4). One instance per transformer: the conditional
         // and unconditional models are DIFFERENT 9.3B weight sets, so their hidden states never mix. Regional
         // plans are excluded — the per-step attention bias changes the block math under the residual's feet.
@@ -311,7 +311,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }
@@ -407,7 +407,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
                 regionalPlan!.ResolveStep(steps - 1 - i, regionWeights!);
                 regionBias = RegionalAttentionBias.Build(effSeqLen, effNumText, numImageTokens, regionRanges!, regionGridMasks!, regionWeights!);
             }
-            // Late-window gate (HARTSY_STEP_CACHE_LATE): pass the caches only inside the last `late` fraction
+            // Late-window gate (vram.stepCacheLate): pass the caches only inside the last `late` fraction
             // of the schedule — Ideogram's residual drift falls ~5× from early to late steps while its
             // block-0 indicator stays flat, so early reuse is where the quality damage concentrates. Outside
             // the window the forward is byte-identical uncached (first armed step recomputes and snapshots).
@@ -424,7 +424,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
             // Conditioning-effect probe (profile-gated): relative RMS difference between the conditional
             // and unconditional velocities. ~0 means the prompt has no effect (encoder/feature bug);
             // a substantial value means text conditioning is live. Reads DataPointer (2 D2H syncs), so
-            // it only runs under HARTSY_DIT_PROFILE=1 to keep real runs fully resident.
+            // it only runs under diagnostics.ditProfile=true to keep real runs fully resident.
             double cfgDelta = -1;
             if (HartsyInference.Diffusion.Models.Denoisers.DiTBlocks.Ideogram4Profile.Enabled)
             {
@@ -516,7 +516,7 @@ public sealed unsafe class Ideogram4Pipeline : DiffusionPipelineBase
         sourceTokens?.Dispose();
         packedMask?.Dispose();
 
-        // ── 6. Free DiT weights before VAE decode (skipped under HARTSY_KEEP_MODELS — the Flux.2 VAE decode
+        // ── 6. Free DiT weights before VAE decode (skipped under vram.keepModels — the Flux.2 VAE decode
         // falls back to tiled if the resident DiTs leave too little room for the full-res im2col) ──
         Backend.Sync();
         if (condStreamer is not null || uncondStreamer is not null)

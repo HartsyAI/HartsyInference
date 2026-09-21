@@ -18,7 +18,7 @@ namespace HartsyInference.Audio.Pipelines;
 /// through a single batch-2 forward: at one token per step the language model is bound by streaming its weights,
 /// so two batch-1 forwards read all of them twice per frame. The branches differ only in their prompt — the
 /// unconditional one replaces every token except the first and the last two with the audio-CFG token — so they stay
-/// position-aligned and can share a step. <c>HARTSY_MM3_CFG_BATCH=0</c> restores the two-forward decode.</para>
+/// position-aligned and can share a step. <c>numerics.mm3CfgBatch=false</c> restores the two-forward decode.</para>
 ///</summary>
 public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
 {
@@ -193,7 +193,7 @@ public sealed unsafe class MiniMaxMusic3ArPipeline : IDisposable
     }
 
     /// <summary>The pre-batching decode: one batch-1 forward per branch, stacked into the same <c>[2, 4096]</c> the
-    /// batched step returns. Reachable only through <c>HARTSY_MM3_CFG_BATCH=0</c>.</summary>
+    /// batched step returns. Reachable only through <c>numerics.mm3CfgBatch=false</c>.</summary>
     private Tensor ForwardBranches(IBackend backend, Tensor feedback, IKvCache conditionalCache,
         IKvCache unconditionalCache, int hidden)
     {

@@ -82,10 +82,10 @@ public sealed unsafe class FLiteTransformer : IDisposable
         if (_finalProjBias is not null) yield return _finalProjBias;
     }
 
-    // Diagnostic (HARTSY_FLITE_PROBE=1): per-stage absmax — host sync per probe, debug only.
+    // Diagnostic (diagnostics.fliteProbe=true): per-stage absmax — host sync per probe, debug only.
     private static bool FliteProbe => EngineKnobs.FliteProbe.Value;
     private static bool _probedOnce;
-    // Binary stage dumps for the Python block-0 oracle (HARTSY_FLITE_DUMP=<dir>): raw F32 .bin per
+    // Binary stage dumps for the Python block-0 oracle (diagnostics.fliteDump=<dir>): raw F32 .bin per
     // stage on the FIRST forward only, plus a shapes manifest.
     private static string? FliteDumpDir => EngineKnobs.FliteDump.Value;
     private static int _dumpForwardIndex = -1;

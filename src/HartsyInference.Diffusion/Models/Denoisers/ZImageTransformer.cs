@@ -31,7 +31,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
     private long _refinerRopeSig = long.MinValue;
     private long _fullRopeSig = long.MinValue;
 
-    // ── Step-graph state (HARTSY_DIT_GRAPH; the Krea2Transformer recipe — see ForwardPacked) ──────────────
+    // ── Step-graph state (numerics.ditGraph; the Krea2Transformer recipe — see ForwardPacked) ──────────────
     // Every per-step-varying boundary lives in a FIXED device buffer the captured graph reads: the packed
     // latent (_latentFixed, updated in-place by the pipeline's CfgEulerStep), the timestep embedding
     // (_tEmbFixed, refreshed per step via CopyInto), and the velocity output (_graphVelocity, a pre-capture
@@ -278,7 +278,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
     /// in the SAME packed space — no per-step patchify/unpatchify, no host excursions, so the pipeline's Euler
     /// update can run on-device (<c>CfgEulerStep</c> with <c>delta = −dt</c>, folding Z-Image's velocity negation
     /// into the sign) and the loop never drains the pipeline. Used by unmasked t2i/img2img without regional prompts.
-    /// <para>With <c>HARTSY_DIT_GRAPH=1</c> and the latent routed through <see cref="PrepareGraphLatent"/>, the
+    /// <para>With <c>numerics.ditGraph=true</c> and the latent routed through <see cref="PrepareGraphLatent"/>, the
     /// fixed per-step region (<see cref="PackedCore"/>) is CUDA-graph-captured once and replayed per step —
     /// tEmb is refreshed into a fixed buffer, the cached caption is pinned device-resident (a pageable re-upload
     /// inside capture is illegal), and the velocity lands in a fixed pre-capture buffer the caller must NOT

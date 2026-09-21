@@ -3,7 +3,7 @@ using Spectre.Console;
 
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Turns <c>--profile</c> / <c>--set</c> into a <see cref="KnobProfile"/>, and prints <c>--list-settings</c>.</summary>
+/// <summary>Turns <c>--profile</c> / <c>--set</c> into a <see cref="KnobProfile"/>, and backs <c>hartsy settings list</c>.</summary>
 /// <remarks>Settings are applied as a scoped profile rather than by exporting environment variables, so one run's
 /// overrides cannot leak into another process or outlive the command.</remarks>
 public static class KnobCli
@@ -34,22 +34,38 @@ public static class KnobCli
             string value = entry[(eq + 1)..];
             if (!profile.TrySet(id, value, out KnobProfile updated, out string? error))
             {
-                throw new ArgumentException($"{error} Run --list-settings to see valid ids.");
+                throw new ArgumentException($"{error} Run 'hartsy settings list' to see valid ids.");
             }
             profile = updated;
         }
         return profile;
     }
 
-    /// <summary>Prints every declared setting grouped by domain.</summary>
-    public static void ListSettings()
+    /// <summary>The value a knob resolves to right now, and which layer supplied it.</summary>
+    /// <remarks>The source is the whole point of the command: an operator looking at a value that is not what
+    /// their settings file says needs to see that a host overrode it, which is exactly what SwarmUI does to
+    /// <c>paths.modelsRoot</c>.</remarks>
+    public static (object? Value, string Source) Effective(string id)
     {
-        List<(string Id, string? Legacy, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> all =
+        object? knob = KnobRegistry.Find(id);
+        if (knob is null)
+        {
+            return (null, "unknown");
+        }
+        object? value = KnobRegistry.ValueOf(knob);
+        return (value, KnobStore.SourceOf(id));
+    }
+
+    /// <summary>Prints every declared setting grouped by domain.</summary>
+    public static void ListSettings(bool includeDiagnostics = false)
+    {
+        List<(string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> all =
             [.. KnobRegistry.All.Select(KnobRegistry.Describe)
                 .Where(k => !k.Id.StartsWith("test.", StringComparison.Ordinal))
+                .Where(k => includeDiagnostics || k.Domain != KnobDomain.Diagnostics)
                 .OrderBy(k => k.Domain).ThenBy(k => k.Id, StringComparer.Ordinal)];
 
-        foreach (IGrouping<KnobDomain, (string Id, string? Legacy, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> group
+        foreach (IGrouping<KnobDomain, (string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> group
             in all.GroupBy(k => k.Domain))
         {
             Table table = new Table().Border(TableBorder.Rounded).Title($"[bold]{group.Key}[/]");
@@ -58,7 +74,7 @@ public static class KnobCli
             table.AddColumn("default");
             table.AddColumn("scope");
             table.AddColumn("what it does");
-            foreach ((string id, _, string type, object? def, KnobScope scope, _, string summary) in group)
+            foreach ((string id, string type, object? def, KnobScope scope, _, string summary) in group)
             {
                 table.AddRow(
                     Markup.Escape(id),

@@ -94,7 +94,7 @@ public sealed class CudaGraph : IDisposable
         DestroyGraph(graph, throwOnError: true);
     }
 
-    /// <summary>HARTSY_GRAPH_DUMP=1: logs the captured graph's node count and per-type histogram — the direct measurement of how many kernel vs mem-alloc/free vs other nodes a decode step replays (alloc/free nodes come from per-intermediate AllocateDevice/Dispose during capture).</summary>
+    /// <summary>diagnostics.graphDump=true: logs the captured graph's node count and per-type histogram — the direct measurement of how many kernel vs mem-alloc/free vs other nodes a decode step replays (alloc/free nodes come from per-intermediate AllocateDevice/Dispose during capture).</summary>
     private static void DumpNodeHistogram(nint graph)
     {
         if (!EngineKnobs.GraphDump.Value) return;

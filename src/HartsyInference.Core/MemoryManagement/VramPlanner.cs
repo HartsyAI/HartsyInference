@@ -49,7 +49,7 @@ public sealed class VramPlanner
 
     /// <summary>Returns the stream-ordered pool's reservations to the driver so the availability query below measures what is really free, not what the allocator happens to be holding.</summary>
     /// <remarks><b>This is load-bearing, not hygiene.</b> Weights freed moments earlier — a text encoder released just
-    /// before the denoise phase, say — go back via <c>cuMemFreeAsync</c>, and with <c>HARTSY_MEMPOOL_KEEP</c> (on by
+    /// before the denoise phase, say — go back via <c>cuMemFreeAsync</c>, and with <c>vram.mempoolKeep</c> (on by
     /// default) the pool keeps those bytes reserved. <c>QueryAvailableWeightCacheBytes</c> then reports them as
     /// unavailable. Measured on Krea2/3060: the planner saw <c>3879 MB</c> available while the card was really holding
     /// only ~5.9 GB of 12 GB, an under-report of roughly 5 GB — the size of the text encoder freed 146 ms earlier.
@@ -69,7 +69,7 @@ public sealed class VramPlanner
     /// <param name="phase">Phase name for the log, e.g. "text-encode", "denoise", "vae-decode".</param>
     /// <param name="weightBytes">Total bytes of the weights this phase needs resident.</param>
     /// <param name="activationReserveBytes">Bytes this phase's activations and workspace will need alongside those weights.</param>
-    /// <param name="alreadyResident">True when these weights are ALREADY on the device (HARTSY_KEEP_MODELS). Must be honored: the availability query cannot see past weights that are themselves occupying the space it measures, so asking about a resident model reports "does not fit" and flips warm generations between resident and streamed on alternate runs.</param>
+    /// <param name="alreadyResident">True when these weights are ALREADY on the device (vram.keepModels). Must be honored: the availability query cannot see past weights that are themselves occupying the space it measures, so asking about a resident model reports "does not fit" and flips warm generations between resident and streamed on alternate runs.</param>
     /// <param name="canStream">Whether the caller's denoiser actually exposes an <see cref="IStreamingBlock"/> decomposition AND the caller is wired to drive it. Required rather than defaulted: as streaming is rolled out across denoisers, a pipeline that asks the planner before it has a streaming path would otherwise be handed <see cref="PhasePlacement.Streamed"/> and silently do the wrong thing.</param>
     public PhasePlacement PlanPhase(
         string phase,

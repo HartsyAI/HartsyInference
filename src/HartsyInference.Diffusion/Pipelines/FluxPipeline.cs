@@ -30,7 +30,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly FluxConfig _config;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations on the eager (non-streaming) path — skips the post-loop FreeWeights + next-gen re-upload. A prompt-cache MISS frees the DiT before the T5 encode (the TE cannot always coexist with the resident DiT), then the loop re-preloads. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables); the streaming (low-VRAM) path always evicts.</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations on the eager (non-streaming) path — skips the post-loop FreeWeights + next-gen re-upload. A prompt-cache MISS frees the DiT before the T5 encode (the TE cannot always coexist with the resident DiT), then the loop re-preloads. Standard-profile default ON (vram.keepModels=false disables); the streaming (low-VRAM) path always evicts.</summary>
     /// <summary>True when the current residency is the sharded asymmetric layout (shared + [0, split) on <see cref="DiffusionPipelineBase.Backend"/>, [split, BlockCount) on <see cref="DiffusionPipelineBase.DitShardBackend"/>) rather than the whole DiT on the primary — the free path must mirror whichever preload shape actually ran or the shard backend's range leaks.</summary>
     private bool _ditShardResident;
 
@@ -51,7 +51,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
     // Only ever built when a request actually carries a weight, so an unweighted workload never pays for it.
     private Tensor? _cachedEmptyT5;
 
-    /// <summary>HARTSY_FLUX_STATS=1 re-enables the per-tensor debug statistics (min/max/mean/NaN scans and per-channel means). Each scan is a full host read of a device-resident tensor — a forced D2H sync that serializes the denoise loop — so they are strictly opt-in diagnostics, never on by default.</summary>
+    /// <summary>diagnostics.fluxStats=true re-enables the per-tensor debug statistics (min/max/mean/NaN scans and per-channel means). Each scan is a full host read of a device-resident tensor — a forced D2H sync that serializes the denoise loop — so they are strictly opt-in diagnostics, never on by default.</summary>
     private static bool StatsEnabled => EngineKnobs.FluxStats.Value;
 
     /// <summary>Creates a new Flux pipeline. Img2img is unavailable; use the overload accepting a <see cref="VaeEncoder"/> to enable it.</summary>
@@ -260,7 +260,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
         {
             Logs.Info("Encoding text with CLIP-L (pooled) + T5-XXL (per-token)...");
 
-            // The T5 cannot always coexist with a resident DiT (HARTSY_KEEP_MODELS); evict for this
+            // The T5 cannot always coexist with a resident DiT (vram.keepModels); evict for this
             // encode, the denoise section re-preloads. Cache hits never pay this — and a text encoder placed
             // on its OWN device (TextEncoderBackend) never contends with the DiT at all, so skip the evict.
             if (_ditResident && ReferenceEquals(TextEncoderBackend, Backend))
@@ -589,7 +589,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
             // The resident-vs-streamed decision (including the already-resident short-circuit that keeps warm
             // generations from oscillating resident→streaming→resident) now lives in VramPlanner, so every
-            // pipeline makes it the same way and HARTSY_LOWVRAM can override it. On the default `auto` policy
+            // pipeline makes it the same way and vram.lowVram can override it. On the default `auto` policy
             // this is exactly the comparison that was inlined here.
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "Flux", Backend);
             // Forced streaming has to displace a warm DiT before the planner measures, or the already-resident
@@ -688,7 +688,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }
@@ -1073,7 +1073,7 @@ public sealed unsafe class FluxPipeline : DiffusionPipelineBase
 
         // Tear down the streaming controller (frees still-resident blocks) and free the
         // shared weights, making room for VAE decode on tight VRAM budgets. On the eager path under
-        // HARTSY_KEEP_MODELS the DiT stays resident across generations instead (the full-res VAE decode's
+        // vram.keepModels the DiT stays resident across generations instead (the full-res VAE decode's
         // banded im2col fits beside it, falling back to tiles if not — the Chroma pattern); a future
         // prompt-cache miss evicts it before the T5 encode.
         _transformer.BeforeBlockForward = null;

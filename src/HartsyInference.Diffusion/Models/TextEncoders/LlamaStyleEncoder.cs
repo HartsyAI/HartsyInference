@@ -82,7 +82,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
     /// <summary>Number of transformer blocks. Useful for callers that want to request a specific HF-indexed hidden state via <see cref="EncodeMultiLayer"/> (e.g., Z-Image needs <c>NumLayers - 1</c> for diffusers' <c>hidden_states[-2]</c>).</summary>
     public int NumLayers => _config.NumLayers;
 
-    // Diagnostic (HARTSY_TE_PROBE=1): per-layer absmax of the hidden stream — forces a host sync per
+    // Diagnostic (diagnostics.teProbe=true): per-layer absmax of the hidden stream — forces a host sync per
     // layer, so leave off outside debugging sessions.
     private static bool TeProbe => EngineKnobs.TeProbe.Value;
 
@@ -575,7 +575,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
     // ──────────────────────────────────────────────────────────────────────
     private sealed unsafe class LlamaBlock
     {
-        // Diagnostic: first-block-only stage probes for HARTSY_TE_PROBE.
+        // Diagnostic: first-block-only stage probes for diagnostics.teProbe.
         private static bool _probedDetail;
 
         private readonly LlamaStyleEncoderConfig _config;

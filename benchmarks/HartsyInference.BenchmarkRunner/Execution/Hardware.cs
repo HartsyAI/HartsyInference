@@ -74,7 +74,7 @@ public static class Hardware
         KnobProfile profile = KnobProfile.Create("benchmark-defaults");
         foreach (object knob in KnobRegistry.All)
         {
-            (string id, string? env, string type, object? value, KnobScope scope, KnobDomain domain, string summary) = KnobRegistry
+            (string id, string type, object? value, KnobScope scope, KnobDomain domain, string summary) = KnobRegistry
                 .Describe(knob);
             settings[id] = Convert.ToString(value, CultureInfo.InvariantCulture) ?? "<null>";
             profile = knob switch

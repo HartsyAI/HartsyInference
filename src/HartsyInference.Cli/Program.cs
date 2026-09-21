@@ -24,18 +24,7 @@ public static class Program
         // --set profile is pushed below, since that is where a caller raising it for one run supplies it.
         Logs.MinLevel = ResolveLogLevel();
 
-        foreach ((string variable, string setting) in KnobStore.ReportStaleEnvironmentVariables())
-        {
-            AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(variable)} is exported but no longer read. "
-                + $"Set [/][#2ea5e0]{Markup.Escape(setting)}[/][yellow] in hartsyinference.settings.json, "
-                + "or pass --set.[/]");
-        }
 
-        if (args.Contains("--list-settings", StringComparer.Ordinal))
-        {
-            KnobCli.ListSettings();
-            return 0;
-        }
 
         // Applied here rather than per command: it must be in force before the engine is constructed, since
         // construction-scoped settings are read while the model loads. The CLI is one run per process, so a
@@ -106,6 +95,22 @@ public static class Program
             config.AddCommand<ConvertCommand>("convert")
                 .WithDescription("Re-voice audio using a target speaker reference.")
                 .WithExample("convert", "source.wav", "-m", "openvoice", "--target", "reference.wav");
+            config.AddBranch("settings", settings =>
+            {
+                settings.SetDescription("Read and change engine settings. They live in one file; 'settings path' prints it.");
+                settings.AddCommand<SettingsListCommand>("list")
+                    .WithDescription("List every setting with its type, default and scope.")
+                    .WithExample("settings", "list");
+                settings.AddCommand<SettingsGetCommand>("get")
+                    .WithDescription("Show one setting's effective value and which layer supplied it.")
+                    .WithExample("settings", "get", "paths.modelsRoot");
+                settings.AddCommand<SettingsSetCommand>("set")
+                    .WithDescription("Write one setting to the settings file so it survives a restart.")
+                    .WithExample("settings", "set", "paths.modelsRoot", "/mnt/models");
+                settings.AddCommand<SettingsPathCommand>("path")
+                    .WithDescription("Print the settings file this process reads and writes.")
+                    .WithExample("settings", "path");
+            });
             config.AddBranch("fx", fx =>
             {
                 fx.SetDescription("Audio effects: stem separation (Demucs) and speech enhancement (Resemble-Enhance).");

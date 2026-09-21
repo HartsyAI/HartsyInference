@@ -47,10 +47,10 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
     private (int Frames, int Height, int Width, double Fps, int AudioFrames) _ropeKey = (-1, -1, -1, 0, -1);
     private Tensor? _vCosC, _vSinC, _aCosC, _aSinC, _cvCosC, _cvSinC;
 
-    // ── Step-graph capture (HARTSY_DIT_GRAPH) — the whole dual-stream CFG pair (proj_in ×4 → 48 blocks interleaved
+    // ── Step-graph capture (numerics.ditGraph) — the whole dual-stream CFG pair (proj_in ×4 → 48 blocks interleaved
     // → 4 output layers) captured once and replayed. FULLY RESIDENT only (BeforeBlockForward null): a captured graph
     // bakes weight pointers, so the streamed-block path is incompatible — on 24 GB the 22B streams and this stays
-    // eager; a bigger GPU (or HARTSY_LTX2_HEADROOM_MB=0 at a small geometry) holds all 48 resident and captures.
+    // eager; a bigger GPU (or vram.ltx2HeadroomMb=0 at a small geometry) holds all 48 resident and captures.
     // The per-step timestep tables (8 block-modulation + embV/embA) build OUTSIDE the capture into the fixed buffers
     // below; the latents live in the pipeline's device-Euler'd videoLat/audioLat; velocities land in fixed buffers
     // consumed by the pipeline's device CfgEulerStep (no host read → no snapshot needed). ──
@@ -85,7 +85,7 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
         _graphPinned = false;
     }
 
-    // Diagnostic (HARTSY_LTX2_PROBE=1): per-block residual-stream absmax/rms on the FIRST forward only — the
+    // Diagnostic (diagnostics.ltx2Probe=true): per-block residual-stream absmax/rms on the FIRST forward only — the
     // F16-activation headroom probe (streams riding >60k overflow F16). Host sync per probe, debug only.
     // Reads whichever dtype the stream is in: since the block path went F16 this must decode halves, and the
     // old raw-float read would have reported nonsense at exactly the moment the probe is worth running.

@@ -32,7 +32,7 @@ public sealed unsafe class F5Dit : IDisposable
     private int _txtCacheLen = -1;
     private int _disposed;
 
-    // ── CUDA-graph step capture (opt-in via HARTSY_F5_GRAPH; ZImage pattern) ───────────────────────────
+    // ── CUDA-graph step capture (opt-in via numerics.f5Graph; ZImage pattern) ───────────────────────────
     // The 22-block core has an identical op sequence every forward (cond/uncond differ only in the embedding
     // stage, which stays outside the graph). Capturing it once and replaying via a single cuGraphLaunch
     // collapses the ~7k per-op host calls that dominate the eager path. Fixed input buffers (_xFixed embedded

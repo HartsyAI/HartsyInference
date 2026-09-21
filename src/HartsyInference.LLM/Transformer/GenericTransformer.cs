@@ -1708,7 +1708,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 }
             }
             else if (!_cfg.QkNorm && !_cfg.VNorm && _qkW is not null
-                && EngineKnobs.QkScatter.Value)   // kill-switch, mirrors HARTSY_QK_FUSION
+                && EngineKnobs.QkScatter.Value)   // kill-switch, mirrors numerics.qkFusion
             {
                 // Partial fusion (mixed-dtype v, no QK-norm): one [q|k] GEMV plus v's own projection feed the
                 // same rope+scatter kernel — q/k come from the concatenated buffer, v from its own tensor.

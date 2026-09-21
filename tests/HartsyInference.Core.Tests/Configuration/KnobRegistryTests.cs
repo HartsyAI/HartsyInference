@@ -16,13 +16,6 @@ public sealed class KnobRegistryTests
 
     public KnobRegistryTests(ITestOutputHelper output) => _output = output;
 
-    /// <summary>Knobs deliberately NOT in the registry yet, with the reason. Emptied by C3.</summary>
-    /// <remarks>All five are the step-cache family. Their resolution throws on malformed input — deliberate, so a
-    /// silently-ignored perf knob cannot invalidate an A/B run — and <c>HARTSY_STEP_CACHE</c> resolves against the
-    /// pipeline's <c>StepCacheProfile</c>, which a nullary <c>Knob.Value</c> cannot express. <c>StepCacheEnv</c> is
-    /// already the single reader for the family, which is the shape C3 wants anyway.</remarks>
-    /// <summary>Empty: every engine knob is now declared. Kept as the place to record a deliberate exemption if one ever returns.</summary>
-    private static readonly HashSet<string> Deferred = new(StringComparer.Ordinal);
 
     /// <summary>Third-party and platform names the engine consumes but does not own. Not knobs.</summary>
     private static readonly HashSet<string> Foreign = new(StringComparer.Ordinal)
@@ -32,17 +25,7 @@ public sealed class KnobRegistryTests
         "PATH", "HOME", "TEMP", "TMP", "USERPROFILE", "LD_LIBRARY_PATH",
     };
 
-    /// <summary>Engine knobs that exist but are not declared yet, with why. Emptied as the migration proceeds.</summary>
-    /// <remarks>Found while piloting the Video package: the first inventory only matched <c>HARTSY_</c>/<c>HM_</c>
-    /// prefixes, so these were invisible to it. They are ordinary engine knobs that happen to be named after their
-    /// model or subsystem instead. Listed rather than quietly excluded so the registry cannot claim a completeness
-    /// it does not have.</remarks>
-    /// <summary>Empty: the backlog was cleared when the environment layer was removed.</summary>
-    private static readonly HashSet<string> NotYetDeclared = new(StringComparer.Ordinal);
 
-    /// <summary>Names already absorbed into <c>VramPolicy</c>, where the environment read is the documented lowest-precedence fallback rather than a knob to declare.</summary>
-    /// <summary>Empty: HARTSY_LOWVRAM and HARTSY_KEEP_MODELS are now declared knobs like everything else.</summary>
-    private static readonly HashSet<string> Absorbed = new(StringComparer.Ordinal);
 
     /// <remarks>Three forms, because a literal-only scan of <c>GetEnvironmentVariable</c> understated the surface
     /// badly. It missed every name reached through the <c>EnvFlag</c> helper (a whole family of GEMM and SDPA
@@ -85,88 +68,58 @@ public sealed class KnobRegistryTests
     /// <summary>Ids declared by the tests themselves, which must not count toward the real surface.</summary>
     private static bool IsTestKnob(string id) => id.StartsWith("test.", StringComparison.Ordinal);
 
-    private static Dictionary<string, List<string>> DeclaredByLegacyName()
-    {
-        Dictionary<string, List<string>> byEnv = new(StringComparer.Ordinal);
-        foreach (object knob in KnobRegistry.All)
-        {
-            (string id, string? legacy, _, _, _, _, _) = KnobRegistry.Describe(knob);
-            if (IsTestKnob(id) || legacy is null)
-            {
-                continue;
-            }
-            (byEnv.TryGetValue(legacy, out List<string>? ids) ? ids : byEnv[legacy] = []).Add(id);
-        }
-        return byEnv;
-    }
 
     /// <summary>Every environment name the source still reads is either declared or explicitly deferred.</summary>
+    /// <summary>No engine code reads the process environment, except the handful of third-party names we do not own.</summary>
+    /// <remarks>This is the ratchet the environment removal left behind. It replaces the older
+    /// "every name is declared or deferred" check, which could only ever be satisfied by recording a dead
+    /// variable name on every knob — the surface this test now guarantees stays empty.</remarks>
     [Fact]
-    public void EveryEnvironmentNameIsDeclaredOrDeferred()
+    public void NoEngineCodeReadsTheEnvironment()
     {
-        HashSet<string> inSource = ScanSourceForEnvNames();
-        Dictionary<string, List<string>> declared = DeclaredByLegacyName();
+        List<string> offenders = [.. ScanSourceForEnvNames().Where(n => !Foreign.Contains(n)).Order()];
 
-        List<string> undeclared = [.. inSource
-            .Where(n => !declared.ContainsKey(n) && !Deferred.Contains(n)
-                     && !Foreign.Contains(n) && !NotYetDeclared.Contains(n) && !Absorbed.Contains(n))
-            .Order()];
-
-        Assert.True(undeclared.Count == 0,
-            "These environment names are read by src/ but are neither declared in EngineKnobs nor listed:\n"
-            + string.Join("\n", undeclared.Select(n => "  " + n))
-            + "\n\nDeclare them in EngineKnobs, or add them to Deferred / NotYetDeclared / Foreign with the reason.");
+        Assert.True(offenders.Count == 0,
+            "src/ reads these environment variables. The engine is configured through EngineKnobs and the settings\n"
+            + "file; a second source of truth is what the removal was for:\n"
+            + string.Join("\n", offenders.Select(n => "  " + n))
+            + "\n\nDeclare a knob instead, or add the name to Foreign if it is a third-party convention we only honour.");
     }
 
-    /// <summary>A deferred entry that nothing reads any more must be deleted, so the list cannot hold stale exemptions.</summary>
+    /// <summary>The two behaviours split across a PAIR of knobs still have both halves, with their opposite defaults.</summary>
+    /// <remarks>Caught a real regression once: a generator rewrite dropped the second graph-capture knob while
+    /// name-coverage stayed green, which would have quietly stopped the default-ON tier capturing graphs. The pins
+    /// used to key off a shared environment name; they key off the ids now, which is what actually matters.</remarks>
     [Fact]
-    public void DeferredListHasNoStaleEntries()
+    public void DeliberateKnobPairsKeepBothHalves()
     {
-        HashSet<string> inSource = ScanSourceForEnvNames();
-        List<string> stale = [.. Deferred.Concat(NotYetDeclared).Concat(Absorbed).Where(n => !inSource.Contains(n)).Order()];
+        (string Id, bool Default)[] pairs =
+        [
+            // Graph capture: the opt-in tier and the default-ON tier. Changing one alone moves half the behaviour.
+            ("numerics.ditGraph", false),
+            ("numerics.ditGraphDefaultOn", true),
+            // SageAttention: the default-ON kernel, and the explicit opt-in that ALONE unlocks the unsafe
+            // F32 -> F16 V-narrowing. Collapsing these would open that path by default.
+            ("numerics.sageAttn", true),
+            ("numerics.sageAttnExplicit", false),
+        ];
 
-        Assert.True(stale.Count == 0,
-            "These names are deferred or backlogged but nothing reads them any more — delete the entries:\n"
-            + string.Join("\n", stale.Select(n => "  " + n)));
-    }
-
-    /// <summary>One legacy name backing several knobs is deliberate and enumerated here, so collapsing a pair is a failure rather than a silent default change.</summary>
-    /// <remarks>Caught a real regression: a generator rewrite dropped the second <c>HARTSY_DIT_GRAPH</c> knob, and
-    /// <see cref="EveryEnvironmentNameIsDeclaredOrDeferred"/> stayed green because the NAME was still covered. The
-    /// surviving knob defaults to false, so the default-ON tier would have quietly stopped capturing graphs.</remarks>
-    [Fact]
-    public void SharedLegacyNamesAreExactlyTheIntendedOnes()
-    {
-        Dictionary<string, int> expected = new(StringComparer.Ordinal)
-        {
-            // Enabled (default OFF) and EnabledDefaultOn (default ON): =0 kills both, =1 forces both.
-            ["HARTSY_DIT_GRAPH"] = 2,
-            // Default-ON (!= "0") plus an explicit opt-in (== "1") that alone unlocks the unsafe V-narrowing path.
-            ["HARTSY_SAGE_ATTN"] = 2,
-        };
-
-        Dictionary<string, List<string>> declared = DeclaredByLegacyName();
         List<string> problems = [];
-        foreach ((string env, List<string> ids) in declared.Where(kv => kv.Value.Count > 1))
+        foreach ((string id, bool want) in pairs)
         {
-            if (!expected.TryGetValue(env, out int want))
+            object? knob = KnobRegistry.Find(id);
+            if (knob is null)
             {
-                problems.Add($"  {env} unexpectedly backs {ids.Count} knobs: {string.Join(", ", ids)}");
+                problems.Add($"  {id} is gone — half of a deliberate pair");
+                continue;
             }
-            else if (ids.Count != want)
+            object? got = KnobRegistry.Describe(knob).Default;
+            if (got is not bool b || b != want)
             {
-                problems.Add($"  {env} backs {ids.Count} knobs, expected {want}: {string.Join(", ", ids)}");
+                problems.Add($"  {id} defaults to {got}, expected {want}");
             }
         }
-        foreach ((string env, int want) in expected)
-        {
-            int got = declared.TryGetValue(env, out List<string>? ids) ? ids.Count : 0;
-            if (got != want)
-            {
-                problems.Add($"  {env} backs {got} knobs, expected {want} — a deliberate multi-knob name was collapsed");
-            }
-        }
-        Assert.True(problems.Count == 0, "Legacy names backing multiple knobs:\n" + string.Join("\n", problems));
+        Assert.True(problems.Count == 0, "Deliberate knob pairs:\n" + string.Join("\n", problems));
     }
 
     /// <summary>Ids are unique, dotted, domain-prefixed, and carry no vendor prefix.</summary>
@@ -176,7 +129,7 @@ public sealed class KnobRegistryTests
         List<string> bad = [];
         foreach (object knob in KnobRegistry.All)
         {
-            (string id, _, _, _, _, KnobDomain domain, string summary) = KnobRegistry.Describe(knob);
+            (string id, _, _, _, KnobDomain domain, string summary) = KnobRegistry.Describe(knob);
             if (IsTestKnob(id))
             {
                 continue;
@@ -205,17 +158,21 @@ public sealed class KnobRegistryTests
         Assert.True(bad.Count == 0, "Malformed knob ids:\n" + string.Join("\n", bad));
     }
 
-    /// <summary>Reports the declared surface, so the migration's progress is visible in the test log.</summary>
+    /// <summary>Reports the declared surface by domain and scope, so a knob landing in the wrong bucket is visible in the test log.</summary>
     [Fact]
     public void ReportDeclaredSurface()
     {
-        Dictionary<string, List<string>> declared = DeclaredByLegacyName();
-        int real = KnobRegistry.All.Count(k => !IsTestKnob(KnobRegistry.Describe(k).Id));
-        _output.WriteLine($"{real} knobs declared, covering {declared.Count} legacy environment names; {Deferred.Count} deferred.");
-        foreach ((string env, List<string> ids) in declared.Where(kv => kv.Value.Count > 1))
+        List<(string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> real =
+            [.. KnobRegistry.All.Select(KnobRegistry.Describe).Where(d => !IsTestKnob(d.Id))];
+        _output.WriteLine($"{real.Count} knobs declared.");
+        foreach (IGrouping<KnobDomain, (string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> byDomain
+                 in real.GroupBy(d => d.Domain).OrderBy(g => g.Key.ToString(), StringComparer.Ordinal))
         {
-            _output.WriteLine($"  {env} backs {ids.Count} knobs: {string.Join(", ", ids)}");
+            string scopes = string.Join(", ", byDomain.GroupBy(d => d.Scope)
+                .OrderBy(g => g.Key.ToString(), StringComparer.Ordinal)
+                .Select(g => $"{g.Key} {g.Count()}"));
+            _output.WriteLine($"  {byDomain.Key,-12} {byDomain.Count(),3}  ({scopes})");
         }
-        Assert.True(real > 0);
+        Assert.True(real.Count > 0);
     }
 }
