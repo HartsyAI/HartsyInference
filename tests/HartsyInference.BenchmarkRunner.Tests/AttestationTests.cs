@@ -54,6 +54,30 @@ public sealed class AttestationTests
         Assert.NotNull(sampler.Note);
     }
 
+    [Fact]
+    public void ReapingNeverKillsAProcessThatIsNotASampler()
+    {
+        string directory = Path.Combine(Path.GetTempPath(), "hartsy-reap-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            // No record to act on.
+            DeviceSampler.Reap(directory);
+            string file = Path.Combine(directory, DeviceSampler.PidFile);
+            // This test's own process id: a reused id must not be killed just because it was recorded.
+            File.WriteAllText(file, Environment.ProcessId.ToString());
+            DeviceSampler.Reap(directory);
+            Assert.False(File.Exists(file));
+            File.WriteAllText(file, "not-a-number");
+            DeviceSampler.Reap(directory);
+            Assert.False(File.Exists(file));
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
+    }
+
     private static DeviceRecord Device(string selector) => new()
     {
         Selector = selector,

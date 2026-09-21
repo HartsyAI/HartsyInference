@@ -297,7 +297,7 @@ public sealed class EvidenceTests : IDisposable
         {
             sound with { SampleCount = 0 },
             sound with { PeakUsedDeviceBytes = 2048 },
-            sound with { MaxSampleIntervalMs = 501 },
+            sound with { MaxSampleIntervalMs = DeviceTelemetry.MaxCoveragePeriods * 100 + 1 },
             sound with { MeanPowerWatts = 500 },
             sound with { HwThermalSamples = 11 },
             sound with { Source = "hand-written" },

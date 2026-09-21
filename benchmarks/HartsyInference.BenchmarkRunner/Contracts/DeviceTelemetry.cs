@@ -7,6 +7,10 @@ public sealed record DeviceTelemetry
 {
     public const string Unavailable = "unavailable";
     public const string DeviceWide = "nvidia-smi-device-wide";
+    /// <summary>Sampling periods a window may go unsampled before its aggregate stops being trustworthy. The
+    /// sampler applies it when aggregating and the validator re-applies it, so a hand-written record cannot
+    /// claim coverage it did not have.</summary>
+    public const int MaxCoveragePeriods = 5;
 
     /// <summary>Whether a record names a source this build produces.</summary>
     public static bool IsKnownSource(string source) => source is Unavailable or DeviceWide;

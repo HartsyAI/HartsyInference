@@ -33,6 +33,8 @@ public static class Worker
         string relative = $"sessions/{caseId}/{session}/{attempt}";
         string directory = Hashes.SafePath(root, relative);
         Directory.CreateDirectory(directory);
+        if (sampler.ProcessId is int samplerPid)
+            await File.WriteAllTextAsync(Path.Combine(directory, DeviceSampler.PidFile), samplerPid.ToString(), cancel);
         string journal = Path.Combine(directory, "session.json");
         List<Measurement> measurements = [];
         BenchDiagnostics diagnostics = new(selector);

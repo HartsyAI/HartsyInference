@@ -150,6 +150,8 @@ public static class Campaign
                     };
                 }
 
+                // A worker killed by the deadline, or by anything else, can leave its sampler running.
+                DeviceSampler.Reap(directory);
                 BenchJson.Write(journal, record, BenchJson.Default.SessionRecord);
                 sessions.Add(record);
                 campaign = campaign with

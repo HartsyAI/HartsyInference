@@ -199,8 +199,8 @@ public static class Validator
         }
 
         Require(telemetry.SampleCount > 0, "Telemetry source reports no samples.");
-        Require(telemetry.MaxSampleIntervalMs >= 0 && telemetry.MaxSampleIntervalMs <= 5.0 * suite.TelemetryCadenceMs,
-            "Telemetry coverage gap exceeds five sampling periods.");
+        Require(telemetry.MaxSampleIntervalMs >= 0 && telemetry.MaxSampleIntervalMs <= DeviceTelemetry.MaxCoveragePeriods
+            * (double)suite.TelemetryCadenceMs, "Telemetry coverage gap exceeds the sampling tolerance.");
         Require(telemetry.PeakUsedDeviceBytes is null || telemetry.PeakUsedDeviceBytes is > 0 && telemetry
             .PeakUsedDeviceBytes <= deviceMemoryBytes, "Sampled device memory exceeds the device capacity.");
         Require(Within(telemetry.PeakGpuUtilizationPercent, 100) && Within(telemetry.MeanGpuUtilizationPercent, 100)

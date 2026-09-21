@@ -17,17 +17,21 @@ public sealed class DeviceSampler : IDisposable
     ];
 
     private const int MaximumSamples = 65536;
+    /// <summary>Not exported: <see cref="Evidence.Bundle"/> ships only campaign records and trial outputs.</summary>
+    public const string PidFile = "sampler.pid";
 
     private readonly List<Sample> _samples = [];
     private readonly object _gate = new();
+    private readonly int _cadenceMs;
     private readonly Process? _process;
     private readonly Thread? _reader;
     private readonly Task<string>? _errors;
     private readonly string _source;
     private string? _note;
 
-    private DeviceSampler(Process? process, string source, string? note)
+    private DeviceSampler(Process? process, string source, string? note, int cadenceMs)
     {
+        _cadenceMs = cadenceMs;
         _process = process;
         _source = source;
         _note = note;
@@ -41,17 +45,48 @@ public sealed class DeviceSampler : IDisposable
     /// <summary>Why telemetry is missing or partial, when it is.</summary>
     public string? Note => _note;
 
+    /// <summary>The sampler child's process id, for the controller to reap if this worker dies without
+    /// disposing. Local bookkeeping only: it is never written into the campaign record.</summary>
+    public int? ProcessId => _process?.Id;
+
+    /// <summary>Terminates a sampler whose worker was killed before it could dispose one. A worker that takes
+    /// SIGKILL leaves the child running at its sampling cadence forever, so the controller reaps by the
+    /// recorded id and only when that id still names an nvidia-smi.</summary>
+    public static void Reap(string attemptDirectory)
+    {
+        string file = Path.Combine(attemptDirectory, PidFile);
+        if (!File.Exists(file))
+            return;
+        try
+        {
+            if (int.TryParse(File.ReadAllText(file), out int pid))
+            {
+                using Process orphan = Process.GetProcessById(pid);
+                if (orphan.ProcessName.Contains("nvidia-smi", StringComparison.OrdinalIgnoreCase))
+                    NvidiaSmi.Kill(orphan);
+            }
+        }
+        catch (ArgumentException)
+        {
+            // The usual case: the sampler exited with its worker and the id no longer names a process.
+        }
+        finally
+        {
+            File.Delete(file);
+        }
+    }
+
     /// <summary>Starts sampling, or returns an inert sampler when the device could not be attested. A missing
     /// sampler is recorded as unavailable telemetry, never as a failed session.</summary>
     public static DeviceSampler Start(string? uuid, int cadenceMs)
     {
         if (uuid is null)
-            return new DeviceSampler(null, DeviceTelemetry.Unavailable, "Device was not attested by nvidia-smi.");
+            return new DeviceSampler(null, DeviceTelemetry.Unavailable, "Device was not attested by nvidia-smi.", cadenceMs);
         Process? process = NvidiaSmi.Start(["-i", uuid, "--query-gpu=" + string.Join(',', Queried), "--format=csv,noheader,nounits",
             "-lms", cadenceMs.ToString(CultureInfo.InvariantCulture)]);
         return process is null
-            ? new DeviceSampler(null, DeviceTelemetry.Unavailable, "nvidia-smi could not be started.")
-            : new DeviceSampler(process, DeviceTelemetry.DeviceWide, null);
+            ? new DeviceSampler(null, DeviceTelemetry.Unavailable, "nvidia-smi could not be started.", cadenceMs)
+            : new DeviceSampler(process, DeviceTelemetry.DeviceWide, null, cadenceMs);
     }
 
     private void Read()
@@ -104,6 +139,18 @@ public sealed class DeviceSampler : IDisposable
         for (int i = 1; i < window.Length; i++)
             gap = Math.Max(gap, Milliseconds(window[i].Ticks - window[i - 1].Ticks));
         gap = Math.Max(gap, Milliseconds(endTicks - window[^1].Ticks));
+        // A sampler that died partway saw part of the request. Report nothing rather than an aggregate over
+        // whichever part it happened to catch — the request itself is still perfectly good evidence.
+        if (gap > DeviceTelemetry.MaxCoveragePeriods * _cadenceMs)
+        {
+            _note ??= "Telemetry coverage gap exceeded the sampling tolerance; aggregates were dropped.";
+            return new DeviceTelemetry
+            {
+                Source = DeviceTelemetry.Unavailable,
+                MaxSampleIntervalMs = 0
+            };
+        }
+
         return new DeviceTelemetry
         {
             Source = _source,
