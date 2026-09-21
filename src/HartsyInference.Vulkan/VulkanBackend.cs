@@ -393,9 +393,8 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>The device-local heap with the most memory, and its size.</summary>
-    /// <remarks>Which heap the fallback describes has to match what the driver path picks — one heap, because no
-    /// allocation spans two. The driver path picks by what is LEFT, which needs a live query; without one, largest
-    /// is the same heap on every device that has only one, and the best available guess where there are more.</remarks>
+    /// <remarks>The fallback has to describe the same heap the driver path picks. That one picks by what is left,
+    /// which needs a live query; largest is the best guess without one.</remarks>
     private (uint HeapIndex, long SizeBytes) LargestDeviceLocalHeap()
     {
         uint best = 0;
@@ -413,21 +412,11 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>What the driver says this process may still allocate, and out of how much.</summary>
-    /// <remarks>Both figures describe ONE heap — the device-local heap with the most left — because that is the
-    /// question a caller is asking: no allocation spans two heaps, so a free figure summed across them is a number
-    /// nothing can use, and some drivers expose a second device-local heap carved from the same physical memory,
-    /// where summing reports twice what exists. Reporting the free half from one heap and the total from all of
-    /// them would leave a caller comparing two different bases.
-    ///
-    /// <para>Budget minus usage, never negative: the spec allows usage to exceed budget, which is the driver saying
-    /// this process is already over its share rather than that it has negative memory left. Zero free is an ANSWER,
-    /// and the most important one a driver can give — it must not read as "no answer" and send a caller back to
-    /// arithmetic that cannot see the process filling the card. False therefore means only that the extension is
-    /// absent, this backend is torn down, or the device exposes no device-local heap at all.</para>
-    ///
-    /// <para>Internal so a test can assert which path <see cref="GetVramInfo"/> took: the two produce different
-    /// numbers, and a query that quietly stopped answering would otherwise look like a card that happens to be
-    /// busy.</para></remarks>
+    /// <remarks>Both figures describe ONE heap, since no allocation spans two and some drivers expose a second
+    /// device-local heap carved from the same physical memory. Budget minus usage, clamped at zero: the spec lets
+    /// usage exceed budget, and zero free is an answer, not a missing one. False means only that the extension is
+    /// absent, the backend is torn down, or there is no device-local heap. Internal so a test can assert which
+    /// path <see cref="GetVramInfo"/> took.</remarks>
     internal unsafe bool TryQueryDriverVram(out long freeBytes, out long totalBytes)
     {
         freeBytes = 0;
@@ -599,12 +588,8 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     // M does NOT need to be a multiple of 16 when transposeA is false: matmul_coopmat_partial_m.comp.glsl (a
     // separate shader file, not a branch in matmul_coopmat.comp.glsl — see its doc comment) handles a
     // non-aligned M via bounds-checked shared-memory staging, mirroring matmul_tiled.comp.glsl's own proven
-    // idiom. This is the SECOND attempt at this problem (2026-07-31): the first (a host-side scratch-buffer +
-    // device-to-device copy) passed every test thrown at it but caused a real `ErrorDeviceLost` on a full
-    // Krea2 run and was reverted — see docs/Checklists/TROUBLESHOOTING.md. This shared-memory design avoids
-    // that whole risk class (no separate command buffer, no cross-submission barrier — everything happens
-    // inside one dispatch). Scoped to transposeA=false because that's the only case Linear (the real caller
-    // this exists for) ever uses and the only case tested; transposeB may be either.
+    // idiom, which keeps everything inside one dispatch. Scoped to transposeA=false, the only case Linear uses
+    // and the only one tested; transposeB may be either.
     private bool TryDispatchCoopmat(
         Tensor output, VulkanBuffer aRes, VulkanBuffer bRes,
         int M, int N, int K, bool transposeA, bool transposeB, DType gemmDtype,
@@ -715,7 +700,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         return true;
     }
 
-    /// <summary>Diagnostic-only entry point for <c>matmul_coopmat_blocked.comp.glsl</c> (2026-07-31) — NOT called from <see cref="DispatchMatmul"/> or any production path. Exists purely so correctness/throughput can be measured in isolation (unit test + GPU benchmark) before any decision to integrate register blocking into the real dispatch path. Fixed BM=BN=64, WM=WN=32 (no device-aware tile shrinking yet — this is a diagnostic, not production code); requires N, K exact multiples of 16 (M may be anything — the shader bounds-checks it the same way <c>matmul_coopmat_partial_m.comp.glsl</c> does) and F16 GEMM dtype. See docs/Checklists/TROUBLESHOOTING.md for the full writeup and benchmark results.</summary>
+    /// <summary>Diagnostic-only entry point for <c>matmul_coopmat_blocked.comp.glsl</c> — NOT on any production
+    /// path, so register blocking can be measured in isolation. Fixed BM=BN=64, WM=WN=32; needs N and K exact
+    /// multiples of 16 and an F16 GEMM dtype.</summary>
     internal bool TryDispatchCoopmatBlockedDiagnostic(
         Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint wm = 32, uint wn = 32)
     {
@@ -809,10 +796,15 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         return true;
     }
 
-    /// <summary>Switch for <see cref="TryDispatchCoopMat2"/> being tried (before <see cref="TryDispatchCoopmat"/>) from <see cref="DispatchMatmul"/>. Default-ON as of 2026-07-31 (settable/overridable via <c>HARTSYINFERENCE_VK_COOPMAT2=0</c>) after a full validation pass against real Krea2 weights on the RTX 4090: correctness held byte-identical to the coopmat1 baseline across every configuration tested — 2-step, 4-step, and 8-step generations (the exact step count at which an EARLIER, unrelated coopmat1 M-padding fix passed every synthetic test and then hit a real `ErrorDeviceLost` — see docs/Checklists/TROUBLESHOOTING.md), aligned and non-16-aligned M, with and without bias, F16 and F32 output, across dozens of real generations. Performance: a controlled same-session comparison (4 runs each config, alternating, isolating this box's real GPU-contention variance) showed a statistically significant ~4% real-wall-clock win at 2 steps (Welch's t≈2.88) and a ~10% win at 8 steps — this SUPERSEDES an earlier same-day finding of a "~5% regression," which turned out to be a cross-session comparison artifact (this shared box's run-to-run variance from contending processes, not a real property of coopmat2 — see the full writeup for how that got sorted out). The only failure mode found anywhere in this investigation (a step-graph-capture VRAM peak causing a graceful OOM-and-fallback on this box at 4+ steps) is root-caused, unrelated to coopmat2 specifically (reproduces identically with this flag off), and already recovers correctly via the existing capture-fallback path.</summary>
+    /// <summary>Whether <see cref="TryDispatchCoopMat2"/> is tried before <see cref="TryDispatchCoopmat"/>.
+    /// Default-on; byte-identical to the coopmat1 baseline across the configurations tested.</summary>
     public bool EnableCoopMat2 { get; set; } = EngineKnobs.VkCoopmat2.Value;
 
-    /// <summary>Cooperative-matrix-2 fast path for <see cref="DispatchMatmul"/>, tried before <see cref="TryDispatchCoopmat"/> when <see cref="EnableCoopMat2"/> is set. Built on <c>matmul_coopmat2.comp.glsl</c> (<c>VK_NV_cooperative_matrix2</c> — workgroup-scope, tensor-layout-addressed, hardware-clamped GEMM; see docs/Checklists/TROUBLESHOOTING.md for the full coopmat1-vs-coopmat2 investigation this came out of). Unlike <see cref="TryDispatchCoopmat"/>, this has NO M/N/K alignment requirement at all — the hardware clamp mode zero-fills/drops out-of-bounds tensor accesses. Specialized for transposeA=false, transposeB=true (the only combination <see cref="Linear"/> — the real caller this exists for — ever uses) — throws for any other combination rather than silently computing the wrong answer. Bias is fused directly into the shader via a broadcast tensorLayoutNV (2026-07-31 revision) — an earlier follow-up-BroadcastAdd-dispatch design measured FASTER in isolated GPU-only-time benchmarks but SLOWER in a real Krea2 e2e run: the extra dispatch's host-side submission + the unconditional per-dispatch VkMemoryBarrier2 (see ROADMAP.md's "per-dispatch barrier scoping" entry) isn't visible to VkQueryPool-timestamp-only measurement, but it's very real — see docs/Checklists/TROUBLESHOOTING.md for the full writeup.</summary>
+    /// <summary>Cooperative-matrix-2 fast path, tried before <see cref="TryDispatchCoopmat"/>.</summary>
+    /// <remarks>No M/N/K alignment requirement — the hardware clamp mode drops out-of-bounds accesses.
+    /// Specialized for transposeA=false, transposeB=true, the only combination <see cref="Linear"/> uses; throws
+    /// for any other rather than computing the wrong answer. Bias is fused into the shader, because a separate
+    /// BroadcastAdd dispatch measured faster in GPU-only time and slower end to end.</remarks>
     internal bool TryDispatchCoopMat2(
         Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint bk = 0)
     {
@@ -1238,16 +1230,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Resolves the GEMM compute dtype: FP8 outputs compute in F16; F16 falls back to F32 without device support.</summary>
-    // Deliberately does NOT promote F32 outputs to F16 to reach coopmat: tried this (2026-07-31), reverted the
-    // same session. Measured payoff was ~0 (16/2112 GEMMs on a real Krea2 run — see the coopmat engagement
-    // counters below) because the real blocker turns out to be shape, not dtype (see DispatchMatmul's M/N/K
-    // comment), so there was no throughput win to weigh against the real, unverified precision cost: F16 has
-    // a 5-bit exponent (max ~65504) vs F32/TF32's 8-bit range, and this path would have applied to FP8-
-    // dequantized-weight GEMMs specifically, exactly where activation magnitudes are least predictable — never
-    // actually exercised under that condition before it was reverted. If the shape blocker (below) gets fixed
-    // and F32-output coopmat becomes worth revisiting, re-derive this from a real e2e SSIM/pixel-diff gate,
-    // not from "CUDA already runs GEMMs at reduced precision by default" alone — that's necessary but not
-    // sufficient (TF32's wider exponent range is not the same guarantee as F16's).
+    // Deliberately does NOT promote F32 outputs to F16 to reach coopmat: shape, not dtype, is what keeps GEMMs
+    // off that path, and F16's 5-bit exponent would apply to fp8-dequantized weights, where activation
+    // magnitudes are least predictable. Revisit only behind a real e2e pixel-diff gate.
     private DType ResolveGemmDtype(DType outputDType)
     {
         DType gemmDtype = outputDType;
@@ -1258,67 +1243,16 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     private void DispatchMatmul(Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias)
     {
-        // Resolve M, N, K from the OPERAND shapes (mirrors CudaBackend.LinearImpl: n/k come from the
-        // weight, m from element-count / k) — NOT from output.Shape's rank structure. A caller may
-        // legitimately shape the output as [B, S, heads, headDim] (e.g. Krea2Attention's Q/K/V, split
-        // this way so RmsNorm/RoPE can normalize over headDim without a reshape) where the true GEMM
-        // column count (heads·headDim) spans TWO trailing dims, not just the last one. Naively flattening
-        // "all-but-last dims into M, last dim into N" silently computes the wrong-shaped GEMM in that case
-        // (M too large, N too small) — reading input rows past its actual extent (out-of-bounds VRAM) and
-        // using only a slice of the weight matrix, producing near-zero/garbage output for most rows.
-        // N is fully determined by B's column count regardless of how output happens to be shaped, so
-        // deriving M as ElementCount/N is always correct and a strict generalization of the old rank==2
-        // and "last dim is the real N" cases (both keep the same M/N here).
+        // M/N/K come from the OPERAND shapes, not output.Shape's rank structure: an output legitimately shaped
+        // [B, S, heads, headDim] spans the GEMM's column count across two trailing dims.
         int N = transposeB ? (int)b.Shape[0] : (int)b.Shape[b.Shape.Rank - 1];
         int M = (int)(output.ElementCount / N);
         int K = transposeA ? (int)a.Shape[0] : (int)a.Shape[a.Shape.Rank - 1];
 
-        // TryDispatchCoopmat below hard-requires M/N/K all multiples of 16 (its own doc comment: "spec
-        // handles partial fragments IF the host pads the buffer" — this codebase doesn't pad, so it needs
-        // exact multiples). Measured on a real Krea2 run (2026-07-31, the coopmat engagement counters
-        // below): 0.8% (16/2112) of this model's GEMMs reach coopmat at all, and the 16 that do aren't the
-        // expensive ones — every per-block QKV/FFN/out-proj Linear operates on the joint [txtSeq+imgSeq]
-        // sequence, and txtSeq comes straight from the tokenized+encoded prompt length (Krea2Transformer.cs:
-        // `txtSeq = (int)encoderHidden.Shape[1]`) with no padding to a fixed length. Root-caused on this
-        // exact prompt: imgSeq=4096 (a multiple of 16, as expected for a square patchified latent), but
-        // txtSeq=13 → jointSeq=4109, 3 short of the next multiple of 16 — and since txtSeq is
-        // prompt-length-dependent, essentially no real prompt will land on a multiple of 16 by chance. This
-        // was chased down a dtype path first (an F32-output Linear could never reach coopmat's OUTPUT_F32
-        // support because gemmDtype was derived from output.DType with no F32→F16 promotion) — that fix was
-        // real and correct but bought ~0 wall-clock (see ResolveGemmDtype's comment for why it was reverted
-        // the same session) BECAUSE this shape gate blocks the same GEMMs regardless of dtype.
-        //
-        // A host-side M-padding fix (allocate a scratch A/output buffer padded to the next multiple of 16,
-        // device-to-device copy the real M rows in, dispatch coopmat against the padded shape, let the
-        // caller's tensor size naturally ignore the padding tail) was ATTEMPTED AND REVERTED 2026-07-31.
-        // It passed every test thrown at it — a from-scratch CPU-reference correctness check, a 200-iteration
-        // no-sync leak/stress test at Krea2's exact real M/K/N scale, and two full real-CLI runs (2-step,
-        // 4-step) with correct-looking output and coopmat engagement climbing to 48-75% — but a subsequent
-        // full 8-step real Krea2 run failed with `Vulkan error -4 (ErrorDeviceLost): vkQueueSubmit2` — a
-        // genuine GPU driver-level fault/reset, not a logical bug or an allocation failure (which would throw
-        // ErrorOutOfDeviceMemory, not lose the device). This happened on an otherwise-clean 4090 (an earlier,
-        // separate 40-minute apparent "hang" on the SAME fix turned out to be caused by an unrelated external
-        // process — a ComfyUI backend — silently consuming ~12.7GB of VRAM on this shared box; that was ruled
-        // out as the sole explanation once the device-loss reproduced on a verified-clean GPU). No root cause
-        // was found before reverting — the leading suspects are (a) RecordCopyAndBarrier's barrier not
-        // actually bridging the copy and the coopmat dispatch's read if VulkanCommandStream.AcquireRecording
-        // ever splits them across two separately-submitted command buffers (same-queue submission order does
-        // NOT by itself guarantee memory-visibility ordering across separate vkQueueSubmit2 calls — only an
-        // explicit barrier within the SAME command buffer does), or (b) a genuine out-of-bounds access from a
-        // size/offset miscalculation that only manifests under the real model's specific op-interleaving
-        // (SDPA's per-head shared-buffer reuse, Concat, CfgEulerStep's address-preserving in-place update)
-        // rather than a simple repeated-Linear loop. Debugging this properly needs Vulkan validation layers
-        // or compute-sanitizer-class tooling (already used elsewhere in this repo for exactly this bug class
-        // — see TROUBLESHOOTING.md), not more blind full-CLI-run attempts. See benchmarks/scoreboards/
-        // VULKAN.md and docs/Checklists/ROADMAP.md §3 for the full writeup; the ggml/llama.cpp shared-memory-
-        // staged-clamp alternative (see TryDispatchCoopmat's neighborhood) sidesteps this whole class of risk
-        // by never allocating a separate scratch buffer at all, and is the recommended next attempt.
-        //
-        // Pick GEMM dtype to MATCH the output's storage dtype — otherwise the matmul kernel writes
-        // a smaller element type (e.g. F16) into an F32-sized buffer and the model reads garbage
-        // when it interprets the bytes as F32. The model's choice of output dtype dictates the
-        // pipeline. F8 inputs always need to be cast (no F8 matmul kernel); cast all the way to
-        // the output dtype, not just to F16.
+        // Coopmat needs M/N/K all multiples of 16 and nothing here pads, so a prompt-length-dependent joint
+        // sequence almost never qualifies; benchmarks/scoreboards/VULKAN.md has the measurement and the reverted
+        // padding attempt. The GEMM dtype must match the output's storage dtype, or the kernel writes a narrower
+        // element into a wider buffer and the model reads the bytes back as garbage.
         DType gemmDtype = ResolveGemmDtype(output.DType);
 
         // Coopmat2 fast path — tried BEFORE coopmat1, opt-in only (see EnableCoopMat2's doc comment for
@@ -1546,17 +1480,10 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         int gemmK = inCh * kH * kW;
         int fullN = outH * outW;
 
-        // Tile over output positions (fullN) so peak im2col memory is bounded regardless of spatial
-        // resolution — a real Krea2-on-Vulkan finding (2026-07-30): the untiled path materialized one
-        // [gemmK, fullN] column matrix per Conv2D call, which at 1024x1024 VAE-decode resolution with
-        // ~192 input channels needs ~7 GB for a SINGLE allocation and OOM'd even with the transformer's
-        // weights already freed (QwenImageVaeDecoder.Decode -> QwenImageResample.Forward -> Conv2D).
-        // colOffset=0/tileCols=fullN (the tileN==fullN case below) reproduces the prior untiled
-        // dispatch exactly, so small convs (the overwhelming majority of call sites) pay zero extra
-        // allocations or dispatches — this only kicks in above Conv2DMaxColTileBytes.
-        // The budget covers the whole batch: im2col materializes every image's columns for a tile before the
-        // GEMMs consume them, so a batch=2 conv holds two of these at once. Dividing here keeps the cap meaning
-        // what it says instead of being exceeded by a factor of the batch.
+        // Tile over output positions so peak im2col memory is bounded regardless of resolution; one untiled
+        // [gemmK, fullN] column matrix runs to gigabytes at VAE-decode sizes. tileN == fullN reproduces the
+        // untiled dispatch exactly, so small convs pay nothing. The budget is divided by batch because im2col
+        // materializes every image's columns for a tile before the GEMMs consume them.
         long maxTileN = Math.Max(1L, (long)(Conv2DMaxColTileBytes / ((ulong)gemmK * (ulong)batch * (ulong)gemmDtype.SizeInBytes)));
         long tileN = Math.Min(fullN, maxTileN);
         // Whole-batch element count. Per-image offsets below are computed from thisTileN, not from this, because
@@ -2124,14 +2051,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     /// <summary>The same split-half rotation on a head-major <c>x [B, heads, seq, headDim]</c>, cos/sin still
     /// <c>[B, seq, headDim]</c>.</summary>
-    /// <remarks>Its own entry point rather than a flag on <see cref="ApplyRopeSingle"/> because the layouts are
-    /// indistinguishable from the tensor alone — the element count is identical with heads and seq swapped, and
-    /// only the cos/sin row count catches a caller that picked the wrong one, which is why the reference checks
-    /// it. MiniMaxH3's DiT and Gemma-4's text encoder rope head-major q/k straight out of
-    /// <see cref="QkvSplitNormHeadMajor"/>, so the interface default's D2H sync sat between the projection and
-    /// attention on every block of every step.
-    ///
-    /// <para>Non-F32/F16 and non-rank-4 take the shared reference, as the token-major form does.</para></remarks>
+    /// <remarks>Its own entry point because the two layouts are indistinguishable from the tensor alone — same
+    /// element count with heads and seq swapped — and only the cos/sin row count catches a caller that picked the
+    /// wrong one. Non-F32/F16 and non-rank-4 take the shared reference.</remarks>
     public void ApplyRopeSingleHeadMajor(Tensor x, Tensor cos, Tensor sin, int rotaryDim = 0)
     {
         using OpScope _op = EnterOp();
@@ -2364,16 +2286,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     /// <summary>The head-major, subset-emitting form: same split and per-head QK-RMSNorm, but q/k/v come out
     /// <c>[B, heads, seq, headDim]</c> and any of them may be omitted.</summary>
-    /// <remarks>Its own kernel rather than a flag on <see cref="QkvSplitNorm"/>, for the reason CUDA split its
-    /// own: that one is on a shipped generation path and folding the slot guards in changes its codegen.
-    ///
-    /// <para>The interface default is a host loop over <c>DataPointer</c>, so on Vulkan every MiniMaxH3 attention
-    /// block synced the whole packed projection down, normalized it on the CPU and re-uploaded three tensors —
-    /// twice per block on the chunked path, which projects k+v in one pass and q in the next precisely to keep a
-    /// full-sequence q from staying resident.</para>
-    ///
-    /// <para>Falls to the shared reference for anything but F32/F16 with matching output dtypes, and for the
-    /// layout errors, so the message a caller gets does not depend on which backend it ran on.</para></remarks>
+    /// <remarks>Its own kernel rather than a flag on <see cref="QkvSplitNorm"/>, which is on a shipped generation
+    /// path. Anything but F32/F16 with matching output dtypes, and every layout error, goes to the shared
+    /// reference so the message does not depend on the backend.</remarks>
     public void QkvSplitNormHeadMajor(Tensor? q, Tensor? k, Tensor? v, Tensor qkv, Tensor qWeight, Tensor kWeight, float eps)
     {
         using OpScope _op = EnterOp();
@@ -2521,7 +2436,8 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         DispatchPerRowNorm(shader, 3, output, input, weight, null, eps, normDim, totalRows);
     }
 
-    /// <summary>Wan2.2 VAE channel-wise RMS norm (mirrors <c>CudaBackend.WanRmsNormChannel</c>). No override existed at all before this — every call fell through to <c>IBackend</c>'s CPU-loop default, which reads <c>input.DataPointer</c>/writes <c>output.DataPointer</c> directly: a full D2H sync, a single-threaded scalar reduction over C with a cache-hostile stride-<c>spatial</c> access pattern (each channel step is a full row apart), then an H2D re-upload for whatever consumes the result. Found via the Krea2 VAE decode profiling pass (2026-07-31): the decoder's one call site (<c>QwenImageVaeDecoder</c>'s final head norm) runs at the FULL 1024×1024 output resolution — <c>[1,96,1024,1024]</c>, ~402 MB — the worst possible shape for this fallthrough, and a real contributor to Krea2's ~2300× VAE-decode gap vs CUDA (which has always had a real kernel for this op). F32 only, matching both references (CUDA and the CPU default read/write <c>float*</c> unconditionally); anything else falls back to the CPU default.</summary>
+    /// <summary>Wan2.2 VAE channel-wise RMS norm. F32 only, matching both references; anything else falls back
+    /// to the CPU default.</summary>
     public void WanRmsNormChannel(Tensor output, Tensor input, Tensor? gamma, float eps)
     {
         using OpScope _op = EnterOp();
@@ -3503,7 +3419,8 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         DispatchElementwise(7u, output, input, null, scalar: 0, minVal: min, maxVal: max);
     }
 
-    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): no <c>VulkanBackend</c> override existed, so every call fell through to <c>IBackend</c>'s CPU-loop default — found capture-illegal via a real <c>numerics.ditGraph=true</c> Krea2 run (<c>DiTUtils.Modulate</c>'s <c>AddScalar(scale, +1)</c>, called TWICE per block × 28 blocks per forward pass — the (1+scale) modulation convention every DiT block uses) and, independent of graph mode, a D2H sync 56 times per denoise step regardless.</summary>
+    /// <summary>Kept as a real dispatch because the interface default reads <c>DataPointer</c>, which is
+    /// capture-illegal: every DiT block modulates with <c>AddScalar(scale, +1)</c> twice.</summary>
     public void AddScalar(Tensor output, Tensor input, float scalar)
     {
         using OpScope _op = EnterOp();
@@ -3750,28 +3667,10 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     /// <summary>Writes a <c>[1, heads, c, hd]</c> chunk into sequence rows <c>[seqOffset, seqOffset + c)</c> of a
     /// head-major <c>[1, heads, seq, hd]</c> tensor, in place and accumulating across calls.</summary>
-    /// <remarks>Data movement, so one multi-region <c>vkCmdCopyBuffer</c> rather than a compute shader — a head's
-    /// chunk rows are contiguous, heads are not (the destination stride is the full sequence, the source stride
-    /// the chunk), which is exactly the per-slice shape <see cref="Concat"/>'s <c>dim &gt; 0</c> path already
-    /// issues. CUDA spends one device-to-device copy per head; this spends one command for all of them.
-    ///
-    /// <para>The destination persists ACROSS calls — that is the whole point, and what separates this from a
-    /// concat: MiniMaxH3's chunked attention and Wan's per-frame attention both fill one buffer chunk by chunk
-    /// without ever holding the chunk list alive alongside the result. So a destination that already has a device
-    /// buffer keeps it, and the copy lands next to what the earlier chunks wrote.</para>
-    ///
-    /// <para>A destination that does NOT have one yet is allocated, deliberately WITHOUT uploading its host
-    /// contents, which is what CUDA does and is a real divergence from the interface reference: the reference
-    /// writes only the chunk rows, so on the host everything outside every chunk survives, while on both GPUs it
-    /// is whatever the allocation came with. Uploading is not a option a caller would want — the destination is
-    /// the whole attention key/value buffer (Wan-Animate-2 builds a <c>[1, heads, s + hw, headDim]</c> one per
-    /// forward, hundreds of megabytes) and this would move all of it to write one chunk. Every caller fills the
-    /// whole buffer across its chunks, so the region is unreachable; a future one that does not must zero it
-    /// itself.</para>
-    ///
-    /// <para>The barriers are not the ones a dispatch leaves behind. Every compute dispatch ends with a
-    /// compute→compute barrier whose destination scope is <c>ShaderStorageRead</c>; a transfer reading or writing
-    /// the same memory is outside it in both directions, so this closes both explicitly.</para></remarks>
+    /// <remarks>One multi-region <c>vkCmdCopyBuffer</c>: a head's chunk rows are contiguous, heads are not. A
+    /// destination with no buffer yet is allocated WITHOUT uploading host contents, matching CUDA, so rows outside
+    /// every chunk hold whatever the allocation came with — unlike the interface reference, which leaves them
+    /// intact. Every caller fills the whole buffer.</remarks>
     public unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
     {
         using OpScope _op = EnterOp();
@@ -4457,20 +4356,10 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Writes <paramref name="values"/> into a scalar control buffer outside any capture region — the "refresh fixed-address contents between replays" half of the decode-graph design.</summary>
-    /// <remarks>MUST sync first: <see cref="Dispatch"/> batches multiple dispatches into one command
-    /// buffer, submitted only at <c>FlushThreshold</c> or on an explicit sync — a dispatch that reads this
-    /// buffer may still be sitting unsubmitted when this is called. Without waiting for it to actually
-    /// execute, this write can race ahead and land before the GPU ever reads the OLD value the pending
-    /// dispatch needed, silently corrupting decode-step state (caught by
-    /// <c>ApplyRepetitionPenaltyStep_MatchesHfConventionWithRepeats</c> on llvmpipe: 5 distinct token ids
-    /// written in a loop, each immediately followed by a dispatch reading the CURRENT id — every dispatch
-    /// ended up reading the LAST id written, since none had actually run before the next overwrite).
-    /// CUDA avoids this cost entirely via an ASYNC copy on the same in-order stream (no host wait needed —
-    /// stream ordering alone guarantees the old value is consumed first); a Vulkan equivalent would record
-    /// the write as a <c>vkCmdUpdateBuffer</c> into the SAME batched command buffer instead of a host-side
-    /// write, keeping it stream-ordered without blocking. Correctness-first for now, since this executes
-    /// once per decode step, not per dispatch — the real optimization target once a full decode loop's
-    /// wall-clock is being tuned, not before.</remarks>
+    /// <remarks>MUST sync first. <see cref="Dispatch"/> batches dispatches into one command buffer, so a
+    /// dispatch that reads this buffer may still be unsubmitted; without the wait this host write lands before
+    /// the GPU reads the value that dispatch needed. Recording it as a <c>vkCmdUpdateBuffer</c> into the same
+    /// batched buffer would keep it ordered without blocking.</remarks>
     private unsafe void WriteScalarBuffer(ulong handle, ReadOnlySpan<int> values)
     {
         if (handle == 0 || !_scalarBuffers.TryGetValue(handle, out VulkanBuffer? buf)) return;
@@ -4613,15 +4502,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Per-row argmax over the last dimension, one workgroup per row.</summary>
-    /// <remarks>The batched form of what <see cref="ArgMaxInto"/> does for a single decode step, off the same
-    /// kernel. The interface default reads <c>input.DataPointer</c>, so on a resident logits tensor it syncs the
-    /// whole vocabulary-wide row set to host to pick one index per row.
-    ///
-    /// <para>Ties go to the lower index, matching the reference: the per-thread scan keeps the earliest with a
-    /// strict compare, and the tree reduction breaks ties explicitly, since which thread holds which candidate is
-    /// an artifact of the stride order.</para>
-    /// <para>F32 logits into I32 indices; anything else takes the host reference, which is also where the shape
-    /// and dtype errors are raised.</para></remarks>
+    /// <remarks>The batched form of <see cref="ArgMaxInto"/>, off the same kernel. Ties go to the lower index,
+    /// matching the reference. F32 logits into I32 indices; anything else takes the host reference, which is also
+    /// where the shape and dtype errors are raised.</remarks>
     public void ArgMaxLastDim(Tensor indices, Tensor input)
     {
         using OpScope _op = EnterOp();

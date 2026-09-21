@@ -158,11 +158,8 @@ internal sealed class VulkanMemoryBlock : IDisposable
 /// one, and a block is only destroyed under memory pressure via <see cref="ReleaseEmptySlabs"/>. This
 /// matters: a large activation buffer is freed and re-allocated at the SAME size every dispatch in a hot
 /// loop (e.g. every <c>Silu</c>/<c>RmsNorm</c> call), and a real <c>vkAllocateMemory</c>/<c>vkFreeMemory</c>
-/// pair per call was measured at ~30x the cost of reusing a pooled block for a ~21 MB buffer (see
-/// <c>benchmarks/scoreboards/VULKAN.md</c>) — dedicated blocks used to be destroyed the instant they emptied,
-/// which is the anti-pattern <c>docs/Research/VULKAN_MEMORY_MANAGEMENT.md</c>'s suballocation guidance
-/// already warns about; this fixes the one path that still did it. Not thread-safe — the engine uses one
-/// allocator per <see cref="VulkanBackend"/>.</remarks>
+/// pair per call costs far more than reusing a pooled block. Not thread-safe — the engine uses one allocator
+/// per <see cref="VulkanBackend"/>.</remarks>
 public sealed class VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemoryProperties memProps) : IDisposable
 {
     public const ulong SlabLarge = 64UL * 1024 * 1024;

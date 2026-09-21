@@ -1,22 +1,11 @@
-// chw_f32_to_hwc_u8: the last step of an image generation. Takes the VAE's [B,3,H,W] F32 output in
-// [-1,1] and writes [H,W,3] u8 in [0,255], which is what an encoder wants.
+// chw_f32_to_hwc_u8: VAE output [B,3,H,W] F32 in [-1,1] -> [H,W,3] u8 in [0,255].
+//   byte = uint(clamp((x + 1) * 0.5, 0, 1) * 255 + 0.5)
+// The +0.5 before the truncating cast is round-half-up, matching IBackend.ChwF32ToHwcU8; one pixel off by
+// one is a byte off by one in the PNG.
 //
-//   v = clamp((x + 1) * 0.5, 0, 1)
-//   byte = uint(v * 255 + 0.5)
-//
-// Matches IBackend.ChwF32ToHwcU8's reference exactly, including the +0.5 before the truncating cast —
-// that is round-half-up, not round-to-even, and one pixel differing by one is a byte differing in the PNG.
-//
-// One invocation per output WORD, not per pixel. GLSL has no byte-addressable storage without an
-// extension, so the destination is declared as uint and each invocation composes four bytes and stores
-// them whole. Per-pixel invocations would instead have to merge into shared words, which means either
-// atomics over a buffer somebody has to zero first or a read-modify-write race — and a pixel is three
-// bytes, so pixels straddle word boundaries and no per-pixel scheme avoids that.
-//
-// The caller rounds the allocation up to a whole number of words for the same reason: the last word may
-// cover bytes past the image, and those lanes write zero rather than reading out of bounds.
-//
-// Compile: glslc chw_f32_to_hwc_u8.comp.glsl -o chw_f32_to_hwc_u8_f32.spv
+// One invocation per output WORD, not per pixel: GLSL has no byte-addressable storage here, and a pixel is
+// three bytes, so pixels straddle word boundaries and no per-pixel scheme avoids a read-modify-write race.
+// The caller rounds the allocation up to whole words; lanes past the image write zero.
 
 #version 460
 
