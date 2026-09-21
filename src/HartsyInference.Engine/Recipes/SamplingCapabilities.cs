@@ -64,6 +64,7 @@ public static class SamplingCapabilities
         ["mage-flow"] = FullSeam,
         ["omnigen2"] = FullSeam,
         ["qwen-image"] = FullSeam,
+        ["qwen-image-2.1"] = FullSeam,
         ["sd3"] = FullSeam,
         ["zeta-chroma"] = FullSeam,
         ["zimage"] = FullSeam,
@@ -105,6 +106,15 @@ public static class SamplingCapabilities
     /// <summary>What the video family <paramref name="familyId"/> accepts, or <see cref="Unknown"/> if unrecognized.</summary>
     public static SamplingSupport ForVideo(string familyId)
         => familyId is not null && Video.TryGetValue(familyId, out SamplingSupport? support) ? support : Unknown;
+
+    /// <summary>Whether the table has an explicit row for the image family <paramref name="familyId"/>. The only way
+    /// to tell a deliberate <c>SolverOwned</c> from a family nobody added: both answer <see cref="Unknown"/>-shaped
+    /// through <see cref="ForImage"/>, and a missing row silently tells SwarmUI the family takes no sampler at all,
+    /// which hides the Sampler and Scheduler dropdowns and refuses any explicit pick.</summary>
+    public static bool HasImageEntry(string familyId) => familyId is not null && Image.ContainsKey(familyId);
+
+    /// <summary>Every image family id the table names, so a stale row for a deleted recipe can be caught.</summary>
+    public static IEnumerable<string> ImageFamilies => Image.Keys;
 
     /// <summary>Whether <paramref name="familyId"/> (image or video) accepts any sampler selection at all.</summary>
     public static bool AcceptsSelection(string familyId)

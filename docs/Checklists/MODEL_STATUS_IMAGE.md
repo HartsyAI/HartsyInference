@@ -426,8 +426,12 @@ Clean photoreal astronaut-on-horse @1024 (Q4_K GGUF + Qwen2.5-VL fp8 TE). 4 bugs
 
 ### Qwen-Image 2.1
 
-**Text-to-image verified end to end 2026-09-20** (`Comfy-Org/Qwen-Image-2.1` bf16 DiT + `qwen3vl_8b_bf16` TE +
-`qwen_image_2.1_vae_bf16`, 4090): clean, on-prompt red apple on a wooden table. Despite the version number this
+**Text-to-image verified end to end 2026-09-20** (`Comfy-Org/Qwen-Image-2.1` bf16 DiT + `qwen3vl_8b_int8_convrot`
+TE + `qwen_image_2.1_vae_bf16`, 4090): clean, on-prompt red apple on a wooden table at 1024²/25 steps/cfg 1/seed
+42. The int8 encoder is the file SwarmUI core downloads for its ComfyUI backend, and it was A/B'd against the
+`qwen3vl_8b_bf16` build it replaced on the same seed and prompt: **SSIM 0.993**, same composition, same lighting —
+the difference is encoder quantization noise, not a different image. It also surfaced a real bug in the shared
+encoder loader, see below. Despite the version number this
 shares no block structure with Qwen-Image v1 — it is a **single-stream** DiT over the concatenated
 `[text, image]` sequence (32 blocks, hidden 4096, 32 heads of 128), with **one modulation shared by every block**,
 a fused-`gate_up` SwiGLU MLP, **scale-only adaLN with no shift term**, zero biases anywhere, and a 64-channel
@@ -442,6 +446,13 @@ a `QwenImage21PrefixCache` and the image rows run alone against it each step. Co
 from the other side (evaluate the whole sequence, cache the prefix afterwards), but factoring it up front means
 every block call sees a *uniform* modulation and needs none of the per-row-range scale/gate splitting the
 reference performs.
+
+**The int8 embedding table is dequantized, not widened.** `DType.I8` reports `IsQuantized == false`, so
+`LlamaStyleEncoder` used to widen `embed_tokens` through `Tensor.CastTo` — which returns the raw sbyte values as
+floats, dropping both the per-row scale and the ConvRot rotation, for embeddings ~100× their true magnitude.
+Every int8 encoder shipped before this one (LTX-2.5's Gemma-4) keeps its embedding BF16, which is why the path
+had never been reached; Comfy-Org's Qwen-Image 2.1 encoder quantizes `embed_tokens` *and* `lm_head`. Pinned by
+`LlamaStyleEncoderQuantEmbeddingTests`, including the bf16 control that keeps the ordinary path unchanged.
 
 Three bugs found during bring-up, each of which fails as plausible output rather than an error: (1) the VAE's
 **temporal kernel threads through every conv**, not just the resample — `conv3x3(in, out, k)` is
@@ -474,10 +485,20 @@ all pixel-identical, the plain prompt run twice identical (determinism), and a *
 (the control proving conditioning reaches the model at all). Pinned by
 `QwenImage21WeightSeamTests.APerRowScaleIsCancelledByTheTextProjectionsRmsNorm`.
 
+**SwarmUI core owns this model class.** As of SwarmUI `2de300f6` ("Adds Qwen2.1 support") core registers the
+`qwen-image-2.1` compat class, model class and VAE family itself, with `StandardWidth/Height` 1024,
+`ResolutionPrecision` 32 and `LorasTargetTextEnc = false`. The backend extension therefore *maps* that compat id
+and must not register it — `T2IModelClassSorter.RegisterCompat` is backed by `Dictionary.Add`, so a second
+registration throws `ArgumentException: An item with the same key has already been added` at pre-init and takes
+the extension down with it. Side-model paths and the text-encoder file are pinned to core's own
+`CommonModels` / `GetQwenImage21TextEncoder` choices so one download serves both backends.
+
 **Not wired:** reference-image editing (needs the Wan 2.2 VAE *encoder* parameterized the same way the decoder now
-is, plus the interleaved text/reference sequence and per-reference RoPE), LoRA (adapters address
-`img_mlp.gate_layer`/`proj`, the two halves of the fused `gate_up` this loads whole), and the `int8_convrot`
-build. `CliDrivable=true`.
+is, plus the interleaved text/reference sequence and per-reference RoPE), and LoRA (adapters address
+`img_mlp.gate_layer`/`proj`, the two halves of the fused `gate_up` this loads whole). Note that SwarmUI's native
+support *does* advertise Prompt Images (up to 10) and Init Image for this class; the extension hides both when the
+recipe declares neither `RefEdit` nor `Img2Img`, so the gap shows in the UI rather than as a refusal after
+Generate. `CliDrivable=true`.
 
 ### Qwen-Image-Edit 2511
 

@@ -6,6 +6,36 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.151
+
+- **Qwen-Image 2.1 now matches SwarmUI's own native support.** SwarmUI core gained a `qwen-image-2.1` model
+  class, compat class and VAE family of its own (`2de300f6`, "Adds Qwen2.1 support"), so this release lines the
+  engine up with what its ComfyUI backend does rather than running a parallel set of choices.
+- **The text encoder is `qwen3vl_8b_int8_convrot.safetensors`, the same file SwarmUI downloads for ComfyUI**
+  (`GetQwenImage21TextEncoder`), instead of `qwen3vl_8b_bf16`. One 8.6 GB copy serves both backends where two
+  backends previously wanted 8.6 + 16.4 GB of the same encoder. Per-row int8 with a Hadamard rotation is also a
+  tighter fit than fp8 at this model's no-final-norm tap.
+- **Fixed: an int8-quantized token embedding loaded at ~100× its true magnitude.** `DType.I8` reports
+  `IsQuantized == false`, so `LlamaStyleEncoder` widened `embed_tokens` through `Tensor.CastTo` and dropped both
+  the per-row scale and the ConvRot rotation. Every int8 encoder shipped so far (LTX-2.5's Gemma-4) keeps its
+  embedding BF16, which is why nothing had hit it; Comfy-Org's Qwen-Image 2.1 encoder quantizes it.
+- **Fixed: the Qwen-Image 2.1 VAE downloaded to a second path.** `SideModels.QwenImage21Vae` wrote
+  `VAE/qwen_image_2.1_vae_bf16.safetensors` while SwarmUI core registers
+  `VAE/QwenImage/qwen_image_2.1_vae_bf16.safetensors`, so the two backends each fetched their own copy. Same sha,
+  same file, now the same path — matching what every other VAE in `SideModels` already did. An install that
+  already has it under the alpha.149 name keeps using it: the asset carries `LegacyTargetNames`, so
+  `ModelDownloader.TargetPath` resolves to the existing file rather than re-fetching 675 MB. (Deliberately *not*
+  done for the text encoder — bf16→int8 is a content swap, not a rename, and falling back would silently keep
+  serving the wrong file.)
+- **Fixed: Qwen-Image 2.1 reported that it takes no sampler or scheduler.** It had no row in
+  `SamplingCapabilities`, and a miss there is indistinguishable from a family that owns its own solver — so
+  SwarmUI hid the Sampler and Scheduler controls and refused any explicit pick, while the pipeline was calling
+  `FlowMatchSampling.Resolve` all along. It now declares the full seam, as Qwen-Image v1 does.
+- **Fixed: the test that was supposed to catch that could not fail.** `CapabilityTable_NamesOnlyRealFamilies`
+  asserted `Count > 0 || == Unknown || Count == 0`, which is a tautology. Replaced with
+  `CapabilityTable_CoversEveryImageRecipe` over the new `SamplingCapabilities.HasImageEntry`, plus a negative
+  control so the coverage check cannot silently become vacuous again.
+
 ## alpha.150
 
 - **Settings have one home and can be written.** The file is now exactly `~/.config/hartsyinference/settings.json`

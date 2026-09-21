@@ -329,17 +329,21 @@ public static class SideModels
         Sha256 = "a70580f0213e67967ee9c95f05bb400e8fb08307e017a924bf3441223e023d1f"
     };
 
-    /// <summary>Qwen3-VL-8B (bf16) as repackaged for Qwen-Image 2.1. Distinct from <see cref="Qwen3VL_8B"/>, which
-    /// is Ideogram 4's fp8_scaled copy: 2.1 conditions on the last decoder layer with <b>no final norm</b>, a tap
-    /// where fp8 weight error is not re-normalized away, so the bf16 file is the one pinned here.</summary>
+    /// <summary>Qwen3-VL-8B (int8_convrot) as repackaged for Qwen-Image 2.1. The exact file SwarmUI core downloads
+    /// for its ComfyUI backend (<c>GetQwenImage21TextEncoder</c>), so the two backends share one 8.6 GB copy
+    /// instead of holding 8.6 + 16.4 GB of the same encoder. Distinct from <see cref="Qwen3VL_8B"/>, Ideogram 4's
+    /// fp8_scaled copy: 2.1 conditions on the last decoder layer with <b>no final norm</b>, a tap where weight
+    /// error is not re-normalized away, and int8_convrot's per-row scale plus Hadamard rotation is far tighter
+    /// there than per-tensor fp8. Unlike Comfy-Org's LTX-2.5 int8 encoder this one also quantizes
+    /// <c>embed_tokens</c> — see <c>LlamaStyleEncoder.MaterializeEmbedding</c>.</summary>
     public static readonly ModelAsset Qwen3VL_8B_QwenImage21 = new ModelAsset
     {
         Repo = "Comfy-Org/Qwen-Image-2.1",
-        RepoPath = "text_encoders/qwen3vl_8b_bf16.safetensors",
+        RepoPath = "text_encoders/qwen3vl_8b_int8_convrot.safetensors",
         TargetSubdir = "text_encoders",
-        TargetName = "qwen3vl_8b_bf16.safetensors",
+        TargetName = "qwen3vl_8b_int8_convrot.safetensors",
         Role = "text encoder",
-        Sha256 = "68bdc82bc1b66851162ae656225e7e2068166b603db19bd5d5a3b90eb12669a9"
+        Sha256 = "8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f"
     };
 
     /// <summary>Qwen-Image 2.1 VAE — the Wan 2.2 architecture at 64 channels / 16x spatial / patch 1, and the only
@@ -350,7 +354,11 @@ public static class SideModels
         Repo = "Comfy-Org/Qwen-Image-2.1",
         RepoPath = "vae/qwen_image_2.1_vae_bf16.safetensors",
         TargetSubdir = "VAE",
-        TargetName = "qwen_image_2.1_vae_bf16.safetensors",
+        // Path matches SwarmUI core's CommonModels "qwen-image-2.1-vae" entry so the two backends share one file.
+        TargetName = "QwenImage/qwen_image_2.1_vae_bf16.safetensors",
+        // alpha.149 wrote it flat in VAE/. Same bytes, same sha — an install that already has it keeps using it
+        // rather than re-fetching 675 MB to a path one directory over.
+        LegacyTargetNames = ["qwen_image_2.1_vae_bf16.safetensors"],
         Role = "vae",
         Sha256 = "bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9"
     };
