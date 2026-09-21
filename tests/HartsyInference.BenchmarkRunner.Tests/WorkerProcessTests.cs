@@ -15,8 +15,8 @@ public sealed class WorkerProcessTests
         try
         {
             string caseId = Suites.Load("quick-v1").Cases[0].Id;
-            int code = await ChildProcess.RunAsync(["worker", root, root, "quick-v1", caseId, "cpu", "0", "1"], Path.Combine(root,
-                "worker.log"), TimeSpan.FromSeconds(30), CancellationToken.None);
+            int code = await ChildProcess.RunAsync(["worker", root, root, "quick-v1", caseId, "cpu", "0", "1", "-"], Path.Combine(
+                root, "worker.log"), TimeSpan.FromSeconds(30), CancellationToken.None);
             Assert.Equal(1, code);
             SessionRecord session = BenchJson.Read(Path.Combine(root, "sessions", caseId, "0", "1", "session.json"), BenchJson.Default
                 .SessionRecord);

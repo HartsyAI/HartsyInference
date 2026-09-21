@@ -25,9 +25,10 @@ public static class Worker
         _ => "failed",
     };
     public static async Task<int> RunAsync(string root, string cache, string suiteId, string caseId, string selector, int session,
-        int attempt, CancellationToken cancel)
+        int attempt, string deviceUuid, CancellationToken cancel)
     {
         SuiteDefinition suite = Suites.Load(suiteId);
+        using DeviceSampler sampler = DeviceSampler.Start(deviceUuid == "-" ? null : deviceUuid, suite.TelemetryCadenceMs);
         CaseDefinition definition = suite.Cases.Single(c => c.Id == caseId);
         string relative = $"sessions/{caseId}/{session}/{attempt}";
         string directory = Hashes.SafePath(root, relative);
@@ -104,7 +105,7 @@ public static class Worker
                     DecodeTokensPerSecond = diagnostics.DecodeRate, PromptTokens = text?.PromptTokens ?? 0, CompletionTokens = text?
                     .CompletionTokens ?? 0, StopReason = text?.Stop.ToString() ?? "completed", Output = output, OutputSha256 = Hashes
                     .FileHash(file), QualityPassed = quality, QualityDetail = qualityDetail, HostPeakBytes = Process.GetCurrentProcess()
-                    .PeakWorkingSet64 });
+                    .PeakWorkingSet64, Telemetry = sampler.Aggregate(start, end) });
                 record = record with
                 {
                     Measurements = measurements.ToArray(),
@@ -115,8 +116,10 @@ public static class Worker
 
             record = record with
             {
-                Status = measurements.All(m => m.QualityPassed) ? "completed" : "quality-failed",
-                NativeLibraries = Hardware.NativeLibraries()
+                Status = !measurements.All(m => m.QualityPassed) ? "quality-failed"
+                    : Throttled(measurements, suite) ? "throttled" : "completed",
+                NativeLibraries = Hardware.NativeLibraries(),
+                TelemetryNote = sampler.Note
             };
         }
         catch (Exception error)
@@ -126,11 +129,17 @@ public static class Worker
             record = record with
             {
                 Status = ClassifyFailure(error),
-                Failure = error.GetType().Name
+                Failure = error.GetType().Name,
+                TelemetryNote = sampler.Note
             };
         }
 
         BenchJson.Write(journal, record, BenchJson.Default.SessionRecord);
         return record.Status == "completed" ? 0 : 1;
     }
+
+    /// <summary>A session is incomparable once too many samples report a disqualifying throttle reason. The
+    /// validator re-derives this from the same records, so a contributor cannot publish by claiming otherwise.</summary>
+    public static bool Throttled(IEnumerable<Measurement> measurements, SuiteDefinition suite) =>
+        measurements.Any(m => m.Telemetry.ThrottledFraction > suite.MaxThrottledSampleFraction);
 }

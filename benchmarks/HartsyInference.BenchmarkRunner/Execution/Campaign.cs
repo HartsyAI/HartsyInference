@@ -12,13 +12,16 @@ public static class Campaign
         && recorded.Runtime == current.Runtime && recorded.Architecture == current.Architecture
         && recorded.CpuCount == current.CpuCount && recorded.Device == current.Device
         && recorded.EngineRevision == current.EngineRevision
+        // The profile, not the whole attestation: tenant counts legitimately differ between the original run
+        // and a resume, while a changed power limit or clock cap must refuse.
+        && recorded.PowerProfile == current.PowerProfile
         && recorded.Binaries.OrderBy(p => p.Key, StringComparer.Ordinal)
             .SequenceEqual(current.Binaries.OrderBy(p => p.Key, StringComparer.Ordinal))
         && recorded.Settings.OrderBy(p => p.Key, StringComparer.Ordinal)
             .SequenceEqual(current.Settings.OrderBy(p => p.Key, StringComparer.Ordinal));
 
     public static async Task<int> RunAsync(string root, string cache, string suiteId, string selector, int budgetMinutes, bool resume,
-        CancellationToken cancel)
+        bool allowShared, CancellationToken cancel)
     {
         SuiteDefinition suite = Suites.Load(suiteId);
         string manifest = Path.Combine(root, "campaign.json");
@@ -33,7 +36,16 @@ public static class Campaign
         if (probe != 0)
             throw new IOException("Backend probe failed. Inspect probe.log; no CPU fallback was used.");
         DeviceRecord device = BenchJson.Read(devicePath, BenchJson.Default.DeviceRecord);
-        EnvironmentRecord environment = Hardware.Capture(device);
+        DeviceAttestation.Result attestation = DeviceAttestation.Capture(device, allowShared);
+        // Pre-flight, before the budget starts: nothing has been produced yet, so refusing here costs nothing,
+        // while a tenant discovered mid-campaign is recorded and the run continues.
+        if (attestation.Tenants.Length > 0 && !allowShared)
+            throw new InvalidOperationException("Another process is using this GPU, so the timings would not be comparable:"
+                + Environment.NewLine + string.Join(Environment.NewLine, attestation.Tenants) + Environment.NewLine
+                + "Stop them, or pass --allow-shared-device to record the sharing and run anyway.");
+        if (attestation.Record.Source == AttestationRecord.Unavailable && device.Selector.StartsWith("cuda:", StringComparison.Ordinal))
+            Console.WriteLine("nvidia-smi did not attest this device; the campaign will publish in its own unattested cohort.");
+        EnvironmentRecord environment = Hardware.Capture(device, attestation.Record);
         CampaignRecord campaign = resume ? BenchJson.Read(manifest, BenchJson.Default.CampaignRecord) : new CampaignRecord
         {
             SuiteId = suiteId,
@@ -109,9 +121,10 @@ public static class Campaign
                 else
                 {
                     Console.WriteLine($"{definition.Id}: session {session + 1}/{suite.Sessions}, attempt {attempt}");
+                    int shared = attestation.Uuid is null ? 0 : DeviceAttestation.Tenants(attestation.Uuid).Count;
                     int code = await ChildProcess.RunAsync(["worker", root, cache, suiteId, definition.Id, selector, session.ToString(),
-                        attempt.ToString()], Path.Combine(directory, "worker.log"), TimeSpan.FromSeconds(Math.Min(remaining, definition
-                        .TimeoutSeconds)), cancel);
+                        attempt.ToString(), attestation.Uuid ?? "-"], Path.Combine(directory, "worker.log"), TimeSpan.FromSeconds(Math
+                        .Min(remaining, definition.TimeoutSeconds)), cancel);
                     record = File.Exists(journal) ? BenchJson.Read(journal, BenchJson.Default.SessionRecord) : new SessionRecord
                     {
                         CaseId = definition.Id,
@@ -128,6 +141,10 @@ public static class Campaign
                                 .Status,
                             Failure = record.Failure ?? "worker-exit-" + code,
                         };
+                    record = record with
+                    {
+                        SharedProcessCount = shared
+                    };
                 }
 
                 BenchJson.Write(journal, record, BenchJson.Default.SessionRecord);

@@ -65,13 +65,13 @@ Vendor-library P/Invoke is used in GPU backends; this is not a ban on native dri
 
 ## Community benchmarks
 
-[![Reviewed community benchmark results](https://hartsyai.github.io/HartsyInference/overview.svg)](https://hartsyai.github.io/HartsyInference/)
+[![Reviewed community benchmark results](benchmarks/generated/overview.svg)](benchmarks/README.md)
 
 Run the same frozen workloads on your GPU and submit the complete evidence by PR.
 The [benchmark guide](benchmarks/README.md) covers setup, methodology and review;
 the [explorer](https://hartsyai.github.io/HartsyInference/) compares accepted runs on matching workloads.
-No historical scores are presented as verified community results. The explorer requires Pages activation;
-see the [initial dataset snapshot](benchmarks/generated/overview.svg) until it is available.
+No historical scores are presented as verified community results. The image above is the checked-in dataset
+snapshot; it is replaced by the live explorer once Pages is activated for this repository.
 
 ## Documentation
 

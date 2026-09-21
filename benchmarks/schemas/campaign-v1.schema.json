@@ -107,6 +107,36 @@
             ]
           }
         },
+        "attestation": {
+          "type": "object",
+          "properties": {
+            "source": {
+              "type": "string"
+            },
+            "fields": {
+              "type": "object",
+              "additionalProperties": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "sharedProcessCount": {
+              "type": "integer"
+            },
+            "sharedProcessBytes": {
+              "type": "integer"
+            },
+            "sharedDeviceAllowed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "source"
+          ],
+          "additionalProperties": false
+        },
         "powerProfile": {
           "type": "string"
         }
@@ -222,14 +252,92 @@
                 "hostPeakBytes": {
                   "type": "integer"
                 },
-                "sampledUsedDeviceBytes": {
-                  "type": [
-                    "integer",
-                    "null"
-                  ]
-                },
-                "memorySource": {
-                  "type": "string"
+                "telemetry": {
+                  "type": "object",
+                  "properties": {
+                    "source": {
+                      "type": "string"
+                    },
+                    "sampleCount": {
+                      "type": "integer"
+                    },
+                    "maxSampleIntervalMs": {
+                      "type": "number"
+                    },
+                    "peakUsedDeviceBytes": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "peakGpuUtilizationPercent": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "meanGpuUtilizationPercent": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "meanMemoryUtilizationPercent": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "peakPowerWatts": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "meanPowerWatts": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "maxTemperatureCelsius": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "minSmClockMhz": {
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "meanSmClockMhz": {
+                      "type": [
+                        "number",
+                        "null"
+                      ]
+                    },
+                    "hwSlowdownSamples": {
+                      "type": "integer"
+                    },
+                    "hwThermalSamples": {
+                      "type": "integer"
+                    },
+                    "hwPowerBrakeSamples": {
+                      "type": "integer"
+                    },
+                    "swThermalSamples": {
+                      "type": "integer"
+                    },
+                    "swPowerCapSamples": {
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "source"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -294,6 +402,15 @@
                 "null"
               ]
             }
+          },
+          "sharedProcessCount": {
+            "type": "integer"
+          },
+          "telemetryNote": {
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "failure": {
             "type": [

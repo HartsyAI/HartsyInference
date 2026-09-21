@@ -13,11 +13,16 @@ public sealed class HardwareTests
     [Fact]
     public void ResumeAcceptsRoundTrippedProvenanceButRejectsChangedValues()
     {
-        EnvironmentRecord original = Hardware.Capture(Hardware.Probe("cpu"));
+        EnvironmentRecord original = Hardware.Capture(Hardware.Probe("cpu"), new AttestationRecord
+        {
+            Source = AttestationRecord.Unavailable
+        });
         string json = JsonSerializer.Serialize(original, BenchJson.Default.EnvironmentRecord);
         EnvironmentRecord restored = JsonSerializer.Deserialize(json, BenchJson.Default.EnvironmentRecord)!;
         Assert.True(Campaign.SameEnvironment(restored, original));
         Assert.False(Campaign.SameEnvironment(restored with { CpuCount = original.CpuCount + 1 }, original));
+        // A card power-limited between the original run and the resume is a different machine for comparison.
+        Assert.False(Campaign.SameEnvironment(restored with { PowerProfile = "power.limit=300.00 W" }, original));
         restored.Settings[restored.Settings.Keys.First()] = "changed";
         Assert.False(Campaign.SameEnvironment(restored, original));
     }

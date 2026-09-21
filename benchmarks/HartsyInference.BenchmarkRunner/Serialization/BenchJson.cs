@@ -11,6 +11,8 @@ namespace HartsyInference.BenchmarkRunner.Serialization;
 [JsonSerializable(typeof(CaseDefinition))]
 [JsonSerializable(typeof(SuiteDefinition))]
 [JsonSerializable(typeof(DeviceRecord))]
+[JsonSerializable(typeof(AttestationRecord))]
+[JsonSerializable(typeof(DeviceTelemetry))]
 [JsonSerializable(typeof(EnvironmentRecord))]
 [JsonSerializable(typeof(Measurement))]
 [JsonSerializable(typeof(SessionRecord))]

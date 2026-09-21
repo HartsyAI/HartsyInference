@@ -16,7 +16,7 @@ The GPU driver must work inside the pod. `doctor` probes the selected backend; i
 ```bash
 git rev-parse HEAD
 dotnet publish benchmarks/HartsyInference.BenchmarkRunner -c Release -r linux-x64 --self-contained true -p:BenchmarkRevision=<commit-sha> -o artifacts/linux-x64
-./artifacts/linux-x64/hartsy-bench doctor --device cuda:0
+./artifacts/linux-x64/hartsy-bench doctor --device cuda:0   # also prints the attestation and any other GPU tenants
 ./artifacts/linux-x64/hartsy-bench fetch --suite standard-v1 --cache benchmark-cache
 ./artifacts/linux-x64/hartsy-bench run --suite standard-v1 --device cuda:0 --cache benchmark-cache --output benchmark-runs/run-1
 ./artifacts/linux-x64/hartsy-bench validate --input benchmark-runs/run-1
@@ -76,14 +76,26 @@ Measurements retain monotonic clock frequency/ticks and every native token times
 request latency, time to first token, and decode rate `(tokens - 1) / (last - first)` from these traces;
 stream chunks are not tokens. Prefill completion includes first-token sampling. Image latency includes the
 engine's complete returned RGB output. File encoding, hashing and quality checks occur outside warm timing.
-Host memory is the worker's cumulative peak working set, not incremental model memory. GPU memory is currently
-explicitly unavailable; it is not reported as zero or inferred from total VRAM.
+Host memory is the worker's cumulative peak working set, not incremental model memory. GPU memory is the
+device-wide peak sampled during the request, which is a per-run figure only because the campaign refuses to
+start on a shared device; it is never inferred from total VRAM.
 
 The registry's default knobs are pinned in a request scope; resolved defaults, selected environment controls,
 managed/runtime/kernel hashes and loaded CUDA/Vulkan library hashes are retained. CUDA driver values are the
-Driver API version, Vulkan values are vendor-specific. Power/clocks and background utilization are currently
-operator-controlled and unverified; disclose unusual power limits or sharing in the PR. These runs do not
-support energy-efficiency or cost claims.
+Driver API version, Vulkan values are vendor-specific. These runs do not support energy-efficiency or cost
+claims.
+
+On CUDA the controller attests the device through `nvidia-smi` before the budget starts, binding by GPU UUID
+because CUDA enumerates fastest-first and need not match nvidia-smi's order. Power limit, clock caps,
+persistence and ECC mode become a cohort component, so a power-limited card no longer pools with a stock one,
+and a device nvidia-smi cannot describe is recorded as unattested and pools only with other unattested runs.
+`run` refuses a GPU another compute process already holds; `--allow-shared-device` records the sharing and
+proceeds. A fixed-cadence sampler runs for each measured request and stores per-request aggregates only —
+peak VRAM, utilization, power, temperature, clocks and throttle-reason counts. `gpu_idle` is not a throttle
+and a software power cap is normal under load; a session whose samples exceed the suite's hardware or thermal
+slowdown limit is retained but never published. Telemetry is disclosure checked for internal consistency, not
+recomputed from the outputs the way the timings are. Vulkan and CPU campaigns record no telemetry and are not
+disqualified for its absence.
 
 Automated checks establish structural consistency and detect obviously broken output. They do not establish
 semantic/numerical parity or prove that a contributor's timings are honest. Maintainers inspect every output,
@@ -91,7 +103,7 @@ configuration and provenance before acceptance. Independent reproduction is a st
 no automatic “independently verified” badge or external-engine speedup is currently emitted.
 
 The explorer groups identical suite, case, engine revision, backend, GPU capacity/name, driver, OS/runtime,
-settings, native libraries and binary hashes. Each session contributes its warm-input median; each physical
+attested power profile, settings, native libraries and binary hashes. Each session contributes its warm-input median; each physical
 GPU contributes the median of its sessions; the chart reports the median across those GPUs. Repeated uploads
 use the earliest accepted campaign for that cohort, never the fastest. The 95% interval is a deterministic
 2,000-resample percentile bootstrap across GPUs. A single GPU has no population uncertainty estimate.
