@@ -233,7 +233,7 @@ public sealed class InferenceEngine : IInferenceEngine
             return cached;
 
         // Switch-pressure eviction: pipelines for OTHER checkpoints keep their multi-GB weights resident
-        // (HARTSY_KEEP_MODELS) and cannot share the card with the incoming model at fleet sizes — a
+        // (vram.keepModels) and cannot share the card with the incoming model at fleet sizes — a
         // Krea2(13 GB)→Z-Image switch measured 74 MB free on 24 GB before this existed
         // (benchmarks/results/2026-07-23_swarm_stepcache_verification.md §engine bugs).
         EvictOtherCheckpointPipelines(spec.LocalPath, alsoKeepPath);
@@ -269,7 +269,7 @@ public sealed class InferenceEngine : IInferenceEngine
     /// on the success path. An <see cref="OutOfVramException"/> partway through therefore leaves every earlier phase
     /// resident with nothing running — the measured symptom was ~11.5 GB held after a failed request, which then made a
     /// *separate* ComfyUI process on the same card fail too. Scoped deliberately to capacity failures: a cancellation or
-    /// a validation error must not evict a healthy resident model (HARTSY_KEEP_MODELS) and pay a re-upload for nothing.
+    /// a validation error must not evict a healthy resident model (vram.keepModels) and pay a re-upload for nothing.
     /// The reclaim is best-effort — an exception inside it must never replace the real one the caller needs to see.</remarks>
     internal T GenerateWithVramCleanup<T>(Func<T> generate)
     {

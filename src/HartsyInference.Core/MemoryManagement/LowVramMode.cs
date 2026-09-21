@@ -17,7 +17,7 @@ public enum LowVramMode
     ForceOff = 2,
 }
 
-/// <summary>Resolves <see cref="LowVramMode"/> from the <c>HARTSY_LOWVRAM</c> environment variable.</summary>
+/// <summary>Resolves <see cref="LowVramMode"/> from the <c>vram.lowVram</c> setting.</summary>
 /// <remarks>Deliberately three-state rather than the boolean <c>EnvSwitch</c> shape used by the proven-profile
 /// features: "measure and decide" is a genuinely different behavior from "always stream", and conflating them
 /// would leave no way to exercise the streamed path on a card with headroom. <c>ForceOff</c> exists because
@@ -25,13 +25,13 @@ public enum LowVramMode
 /// streaming speed.</remarks>
 public static class LowVramPolicy
 {
-    /// <summary>The environment variable read by <see cref="Resolve()"/>.</summary>
-    public const string EnvironmentVariable = "HARTSY_LOWVRAM";
+    /// <summary>The setting id <see cref="Resolve()"/> reads, named in the log lines so an operator can find it.</summary>
+    public const string SettingId = "vram.lowVram";
 
     /// <summary>The last value logged, so a stable setting announces itself once instead of every phase.</summary>
     private static string? _lastLogged;
 
-    /// <summary>Pins the policy for <paramref name="backend"/>; wins over the environment variable in <see cref="Resolve(IBackend?)"/>. Hosts with a per-backend low-VRAM setting (the SwarmUI extension) use this instead of the env var, whose process-wide last-writer-wins semantics broke multi-backend setups.</summary>
+    /// <summary>Pins the policy for <paramref name="backend"/>; wins over the process-wide setting in <see cref="Resolve(IBackend?)"/>. Hosts with a per-backend low-VRAM setting (the SwarmUI extension) use this instead, because one process-wide value is last-writer-wins and broke multi-backend setups.</summary>
     /// <remarks>Storage lives in <see cref="VramPolicyRegistry"/> so the legacy three-state mode and the full
     /// <see cref="VramPolicy"/> can never disagree about the same backend.</remarks>
     public static void SetOverride(IBackend backend, LowVramMode mode)
@@ -40,14 +40,14 @@ public static class LowVramPolicy
         VramPolicyRegistry.Set(backend, VramPolicyResolver.FromLegacyMode(mode));
     }
 
-    /// <summary>Removes <paramref name="backend"/>'s override so it falls back to the environment variable.</summary>
+    /// <summary>Removes <paramref name="backend"/>'s override so it falls back to the process-wide setting.</summary>
     public static void ClearOverride(IBackend backend)
     {
         ArgumentNullException.ThrowIfNull(backend);
         VramPolicyRegistry.Clear(backend);
     }
 
-    /// <summary>The mode governing <paramref name="backend"/>: its override when one is set, else the process-wide environment resolution. Null backend = environment only.</summary>
+    /// <summary>The mode governing <paramref name="backend"/>: its override when one is set, else the process-wide setting. Null backend = the setting only.</summary>
     public static LowVramMode Resolve(IBackend? backend)
         => VramPolicyResolver.ToLegacyMode(VramPolicyRegistry.Resolve(backend));
 
@@ -95,16 +95,16 @@ public static class LowVramPolicy
         if (normalized == "1" || normalized.Equals("on", StringComparison.OrdinalIgnoreCase)
             || normalized.Equals("true", StringComparison.OrdinalIgnoreCase))
         {
-            if (log) Logs.Info($"[VRAM] {EnvironmentVariable}={value} — forcing the streamed layout even where the resident one would fit.");
+            if (log) Logs.Info($"[VRAM] {SettingId}={value} — forcing the streamed layout even where the resident one would fit.");
             return LowVramMode.ForceOn;
         }
         if (normalized == "0" || normalized.Equals("off", StringComparison.OrdinalIgnoreCase)
             || normalized.Equals("false", StringComparison.OrdinalIgnoreCase))
         {
-            if (log) Logs.Info($"[VRAM] {EnvironmentVariable}={value} — low-VRAM handling disabled; oversized models will fail rather than stream.");
+            if (log) Logs.Info($"[VRAM] {SettingId}={value} — low-VRAM handling disabled; oversized models will fail rather than stream.");
             return LowVramMode.ForceOff;
         }
-        if (log) Logs.Warning($"[VRAM] Unrecognized {EnvironmentVariable}='{value}' — using auto. Valid: auto, on/1/true, off/0/false.");
+        if (log) Logs.Warning($"[VRAM] Unrecognized {SettingId}='{value}' — using auto. Valid: auto, on/1/true, off/0/false.");
         return LowVramMode.Auto;
     }
 }

@@ -418,7 +418,7 @@ public sealed unsafe class OmniGen2Block
     {
         // Q/K/V projected as [B, S, H, D] (byte-identical to [B, S, H·D]) so QK-norm RmsNorm normalizes over the
         // head dim and Permute0213 needs no reshape view. Fully GPU-resident. `act` = the stream dtype (F16 on the
-        // HARTSY_DIT_F16 hot path, else F32); QK-norm bounds the attention scores so F16 SDPA is safe.
+        // numerics.ditF16 hot path, else F32); QK-norm bounds the attention scores so F16 SDPA is safe.
         DType act = input.DType;
         Tensor q = new Tensor(new TensorShape(batch, seqLen, _numQHeads, _headDim), act);
         backend.Linear(q, input, _toQWeight!, null);

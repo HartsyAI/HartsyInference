@@ -26,7 +26,7 @@ public sealed unsafe class OasisDit : IDisposable
     private Tensor? _finalModW, _finalModB;           // FinalLayer adaLN Linear(dim → 2·dim)
     private Tensor? _finalW, _finalB;                 // Linear(dim → p²·C)
 
-    // ── Step-graph state (HARTSY_DIT_GRAPH): the 16-block loop is fully device-resident, so it captures once and
+    // ── Step-graph state (numerics.ditGraph): the 16-block loop is fully device-resident, so it captures once and
     //    replays with a single cuGraphLaunch per DDIM step — the interactive AR loop has FIXED geometry, so the
     //    signature never flips and the graph is reused every forward. Host patchify/cond-build/final-layer stay
     //    OUTSIDE capture, refreshing the fixed input/cond buffers before each launch. Geometry-invariant RoPE

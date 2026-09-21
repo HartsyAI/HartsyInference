@@ -18,7 +18,7 @@ public static class CudaLibraryResolver
         }
     }
 
-    /// <summary>Directories probed for CUDA userspace libs (cuBLAS/cuBLASLt/cuDNN/cudart) BEFORE the plain soname search. The toolkit userspace on dev boxes often lives outside the loader's paths (this project's documented install is <c>~/.local/lib/cuda13</c>), and <c>LD_LIBRARY_PATH</c> only works when whoever launched the process remembered to export it — a bare SwarmUI relaunch without it kills the whole backend (DllNotFoundException: libcublas.so.13). Probing here makes the engine self-sufficient regardless of launcher environment. <c>HARTSY_CUDA_LIB_DIR</c> overrides/prepends. libcuda.so.1 is NOT probed here — it's the driver, always in the system loader path.</summary>
+    /// <summary>Directories probed for CUDA userspace libs (cuBLAS/cuBLASLt/cuDNN/cudart) BEFORE the plain soname search. The toolkit userspace on dev boxes often lives outside the loader's paths (this project's documented install is <c>~/.local/lib/cuda13</c>), and <c>LD_LIBRARY_PATH</c> only works when whoever launched the process remembered to export it — a bare SwarmUI relaunch without it kills the whole backend (DllNotFoundException: libcublas.so.13). Probing here makes the engine self-sufficient regardless of launcher environment. <c>paths.cudaLibDir</c> overrides/prepends. libcuda.so.1 is NOT probed here — it's the driver, always in the system loader path.</summary>
     private static readonly string[] ProbeDirs = BuildProbeDirs();
 
     private static string[] BuildProbeDirs()
@@ -117,7 +117,7 @@ public static class CudaLibraryResolver
                 return LoadFirst("libcublas.so.13", "libcublas.so.12", "libcublas.so.11");
         }
 
-        // cuDNN (fused flash-attention SDPA fast path, HARTSY_SDPA_CUDNN). Ships only as a versioned soname
+        // cuDNN (fused flash-attention SDPA fast path, numerics.sdpaCudnn). Ships only as a versioned soname
         // (libcudnn.so.9 / cudnn64_9.dll) — no unversioned alias — so the bare [LibraryImport("cudnn")] name
         // fails without this case. Default-off, loaded lazily on first cuDNN SDPA call.
         if (libraryName == "cudnn")

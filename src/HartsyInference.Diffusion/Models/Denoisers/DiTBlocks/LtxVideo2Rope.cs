@@ -28,7 +28,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// reference's per-head apply).</para></summary>
 public sealed unsafe class LtxVideo2Rope
 {
-    /// <summary>F16 cos/sin tables, OPT-IN via <c>HARTSY_LTX2_ROPEF16=1</c>. Off by default: measured 2026-08-13
+    /// <summary>F16 cos/sin tables, OPT-IN via <c>numerics.ltx2Ropef16=true</c>. Off by default: measured 2026-08-13
     /// it takes the fused QK kernel 0.189 -> 0.156 ms (-17.5%) but only 1461.0 -> 1456.0 ms/step end-to-end,
     /// because that kernel is just ~2.5% of the step — and it costs a real output change (SSIM 0.9956 across the
     /// clip). Not a trade worth taking by default; the seam stays so the experiment is repeatable.</summary>

@@ -9,9 +9,7 @@ namespace HartsyInference.Core.Configuration;
 /// <para>The environment was removed rather than kept as a lowest-precedence fallback because a fallback is what
 /// let the old surface rot: ~210 names accumulated in six mutually inconsistent value grammars, several
 /// documented as working that nothing read, and a doc that was always one commit stale. A second source of truth
-/// re-creates that pressure no matter how tidy the first one is.
-/// <para>Removing it silently would have been its own trap, so <see cref="ReportStaleEnvironmentVariables"/>
-/// names any legacy variable still exported and points at the setting that replaced it.</para></remarks>
+/// re-creates that pressure no matter how tidy the first one is.</para></remarks>
 public static class KnobStore
 {
     private static readonly ConcurrentDictionary<string, object?> _overrides = new(StringComparer.Ordinal);
@@ -51,7 +49,6 @@ public static class KnobStore
         return knob.Default;
     }
 
-    private static string? ReadEnvironmentVariable(string variable) => Environment.GetEnvironmentVariable(variable);
 
     /// <summary>Applies the knob's range rule to a supplied value. The declared default is trusted as already valid.</summary>
     /// <remarks>Load-bearing for settings that arrive from a file or <c>--set</c>: without it
@@ -60,25 +57,4 @@ public static class KnobStore
     private static T Coerce<T>(Knob<T> knob, T value)
         => knob.Coerce is null ? value : knob.Coerce(value);
 
-    /// <summary>Legacy environment variables that are still exported but are no longer read, paired with the setting that replaced each.</summary>
-    /// <remarks>A machine that exported <c>HARTSY_LTX2_TWO_STAGE=1</c> for months would otherwise just quietly
-    /// stop two-stage sampling. Hosts call this at startup and log the result.</remarks>
-    public static IReadOnlyList<(string Variable, string Setting)> ReportStaleEnvironmentVariables()
-    {
-        List<(string, string)> stale = [];
-        foreach (object knob in KnobRegistry.All)
-        {
-            (string id, string? legacy, _, _, _, _, _) = KnobRegistry.Describe(knob);
-            if (legacy is null || id.StartsWith("test.", StringComparison.Ordinal))
-            {
-                continue;
-            }
-            if (!string.IsNullOrEmpty(ReadEnvironmentVariable(legacy)))
-            {
-                stale.Add((legacy, id));
-            }
-        }
-        stale.Sort((a, b) => string.CompareOrdinal(a.Item1, b.Item1));
-        return stale;
-    }
 }

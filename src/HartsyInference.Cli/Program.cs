@@ -24,12 +24,6 @@ public static class Program
         // --set profile is pushed below, since that is where a caller raising it for one run supplies it.
         Logs.MinLevel = ResolveLogLevel();
 
-        foreach ((string variable, string setting) in KnobStore.ReportStaleEnvironmentVariables())
-        {
-            AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(variable)} is exported but no longer read. "
-                + $"Set [/][#2ea5e0]{Markup.Escape(setting)}[/][yellow] in hartsyinference.settings.json, "
-                + "or pass --set.[/]");
-        }
 
         if (args.Contains("--list-settings", StringComparer.Ordinal))
         {

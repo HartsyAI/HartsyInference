@@ -31,7 +31,7 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
     private Tensor? _addVWeight, _addVBias;
     private Tensor? _toAddOutWeight, _toAddOutBias;
 
-    // Fused attention projections (HARTSY_CHROMA_FUSED_QKV: the converter kept the BFL qkv whole).
+    // Fused attention projections (numerics.chromaFusedQkv: the converter kept the BFL qkv whole).
     // When set, the split projections above stay null and the forward runs one qkv GEMM + QkvSplitNorm
     // per stream (the Hunyuan3DFluxBlocks recipe).
     private Tensor? _imgQkvWeight, _imgQkvBias;
@@ -78,7 +78,7 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix, float branchDamp = 1.0f)
     {
         // Image Q/K/V (bias=True per FluxAttention). Fused qkv when the converter kept it whole
-        // (HARTSY_CHROMA_FUSED_QKV), split projections otherwise.
+        // (numerics.chromaFusedQkv), split projections otherwise.
         if (weights.TryGetValue($"{prefix}.attn.qkv.weight", out Tensor? imgQkvW))
         {
             _imgQkvWeight = imgQkvW;
@@ -224,7 +224,7 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
         // Activation dtype follows the INPUT (the Krea2/Z-Image pattern): ChromaTransformer casts the token
-        // streams to F16 once before the block loop on the HARTSY_DIT_F16 path; the tiny modulation vectors
+        // streams to F16 once before the block loop on the numerics.ditF16 path; the tiny modulation vectors
         // stay F32 (the F16 norm/affine/gate kernels take an F16 activation + F32 params), and the additive
         // SDPA mask stays F32 (cuDNN fused bias). The F32 path is byte-identical to the baseline.
         DType act = image.DType;
@@ -250,7 +250,7 @@ public sealed unsafe class ChromaDoubleStreamBlock : IStreamingBlock
         Tensor imgModulated = DiTUtils.NormModulate(backend, image, imgMod[0], imgMod[1], imgShape);
         Tensor txtModulated = DiTUtils.NormModulate(backend, text, txtMod[0], txtMod[1], txtShape);
 
-        // ── 3+4. Q/K/V projections + QK-Norm. Fused path (HARTSY_CHROMA_FUSED_QKV): one qkv GEMM per
+        // ── 3+4. Q/K/V projections + QK-Norm. Fused path (numerics.chromaFusedQkv): one qkv GEMM per
         //         stream + QkvSplitNorm (split + per-head RMSNorm + v copy in one kernel — 3 GEMMs +
         //         2 RmsNorm passes → 1 GEMM + 1 kernel, the Hunyuan3DFluxBlocks recipe). Split path:
         //         3 Linears per stream + 2 separate RmsNorm passes (outputs declared [B, S, H, D]). ──

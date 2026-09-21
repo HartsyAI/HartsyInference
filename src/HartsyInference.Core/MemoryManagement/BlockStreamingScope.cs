@@ -8,7 +8,7 @@ namespace HartsyInference.Core.MemoryManagement;
 /// <remarks>The eight pipelines that streamed before this existed each hand-rolled the same twenty lines with a
 /// different policy — a hard-coded 6 GB margin here, a planner call there, a resident prefix in a third — so a fix or
 /// a measurement in one never reached the others, and a denoiser that had not been hand-wired (Wan) silently ignored
-/// <c>HARTSY_LOWVRAM</c> entirely.
+/// <c>vram.lowVram</c> entirely.
 /// <para><see cref="VramPlanner"/> resolves the policy (<see cref="LowVramMode"/>) here rather than the split:
 /// <see cref="VramPlanner.PlanPhase"/> measures <see cref="IStreamingWeightCache.QueryAvailableWeightCacheBytes"/>
 /// while the prefix sizing measures <see cref="IBackend.FreeMemoryBytes"/> after a trim, and near the boundary the

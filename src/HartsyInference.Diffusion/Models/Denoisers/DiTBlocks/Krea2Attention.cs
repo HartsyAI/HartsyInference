@@ -78,7 +78,7 @@ public sealed unsafe class Krea2Attention
         TensorShape flatShape = new TensorShape(batch, seqLen, _hidden);
 
         // Activation dtype follows the INPUT: the main blocks feed preIn in DitDtype.Act (F16 on the
-        // HARTSY_DIT_F16 path), while the text-fusion blocks (whose surrounding ops are F32 and cached
+        // numerics.ditF16 path), while the text-fusion blocks (whose surrounding ops are F32 and cached
         // once per prompt) feed F32 and keep the baseline path. Weights stay packed fp8; the norm weights
         // (_normQ/_normK) are F32 — the F16 RmsNorm/RoPE/Sigmoid/RepeatKv kernels take F16 activation + F32 params.
         DType act = x.DType;

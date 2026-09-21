@@ -32,7 +32,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
     private Tensor? _normOutLinearWeight;
     private Tensor? _projOutWeight;
 
-    /// <summary>True when this instance runs the audited F16 block loop (HARTSY_DIT_F16) with the exact
+    /// <summary>True when this instance runs the audited F16 block loop (numerics.ditF16) with the exact
     /// <see cref="ChromaF16.ResidualDamp"/> residual damp — every branch input passes a no-affine LayerNorm
     /// and the final AdaLN-continuous norm cancels the factor before proj_out (the Chroma/Flux.1 recipe).</summary>
     private bool _f16Mode;
@@ -126,7 +126,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             }
         }
         if (_hasQuantizedWeights && !DitStepGraph.Enabled)
-            Logs.Info("[Flux2] quantized DiT (transient per-GEMM dequant) — persistent step graph is opt-in (HARTSY_DIT_GRAPH=1); eager loop by default.");
+            Logs.Info("[Flux2] quantized DiT (transient per-GEMM dequant) — persistent step graph is opt-in (numerics.ditGraph=true); eager loop by default.");
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -191,7 +191,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         Tensor txtTokens = new Tensor(txtTokShape, DType.F32);
         backend.Linear(txtTokens, textEmbeddings, _contextEmbedWeight!, null);
 
-        // ── 2. F16 block loop (HARTSY_DIT_F16, B=1): one cast per stream before the loop; every block
+        // ── 2. F16 block loop (numerics.ditF16, B=1): one cast per stream before the loop; every block
         //       activation follows; streams already ride at ResidualDamp scale from the damped embedders.
         //       Cast back to F32 after the loop for the final norm (which cancels the damp). ──
         bool f16Loop = _f16Mode && batch == 1;
@@ -339,7 +339,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
     /// cannot fit) dequantize TRANSIENTLY per GEMM, so during capture every per-Linear dequant alloc/free becomes a
     /// graph-memory node and instantiate must physically reserve that high-water beside the ~18 GB resident quant
     /// weights — measured capture OOM on 24 GB (worklog 2026-07-10), eager fallback every session. Quantized
-    /// checkpoints therefore require the explicit <c>HARTSY_DIT_GRAPH=1</c> opt-in; the opt-in capture path
+    /// checkpoints therefore require the explicit <c>numerics.ditGraph=true</c> opt-in; the opt-in capture path
     /// pre-trims the eager pool (see <see cref="ForwardGraphable"/>) to give instantiate the best headroom.</summary>
     public bool StepGraphEnabled => _hasQuantizedWeights ? DitStepGraph.Enabled : DitStepGraph.EnabledDefaultOn;
 

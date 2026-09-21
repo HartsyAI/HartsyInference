@@ -269,7 +269,7 @@ public sealed unsafe class WanAnimateTransformer : IStreamableDenoiser, IDisposa
         return outVel;
     }
 
-    /// <summary>Env-gated stage dump (<c>HARTSY_ANIMATE_DUMP</c>): writes a tensor's shape + raw F32 bytes and a
+    /// <summary>Env-gated stage dump (<c>diagnostics.animateDump</c>): writes a tensor's shape + raw F32 bytes and a
     /// per-token variance summary to diagnose the checkerboard (near-constant tokens = a collapsed sequence).</summary>
     private static void DumpTensor(IBackend backend, string dir, string name, Tensor t)
     {

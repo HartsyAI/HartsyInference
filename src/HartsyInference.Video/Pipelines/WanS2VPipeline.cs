@@ -147,7 +147,7 @@ public sealed unsafe class WanS2VPipeline : DiffusionPipelineBase
         // Text-only CFG: run the SAME audio on both branches so guidance steers text adherence without pushing the
         // sample away from the audio contribution. The reference zeroes the negative branch's audio, but our
         // silence-audio uncond darkens the output roughly linearly in (cfg−1) until the numeric parity of that path
-        // is settled — this mode is the usable interim for cfg>2 (HARTSY_S2V_TEXT_CFG=1).
+        // is settled — this mode is the usable interim for cfg>2 (numerics.s2vTextCfg=true).
         bool textOnlyCfg = EngineKnobs.S2vTextCfg.Value;
         Tensor uncondLocal = textOnlyCfg ? audioLocalC : audioLocalU;
         Tensor uncondGlobal = textOnlyCfg ? audioGlobalC : audioGlobalU;

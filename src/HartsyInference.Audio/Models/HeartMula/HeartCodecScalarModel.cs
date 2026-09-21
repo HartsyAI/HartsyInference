@@ -165,7 +165,7 @@ public sealed unsafe class HeartCodecScalarModel
         return perFrame;
     }
 
-    // HARTSY_HEARTCODEC_SCALAR_CHUNK overrides the decode chunk length in latent frames; 0 (or negative)
+    // vram.heartcodecScalarChunk overrides the decode chunk length in latent frames; 0 (or negative)
     // restores the monolithic whole-latent decode.
     private static int ReadChunkOverride() => EngineKnobs.HeartcodecScalarChunk.Value ?? ChunkFrames;
 

@@ -36,16 +36,16 @@ public enum KnobDomain
 /// would decide for every later request and every device. That is what <c>KnobScopeIsEnforcedTests</c> checks. If a
 /// value genuinely is baked in when something is built, declare the knob <see cref="KnobScope.Construction"/> and say
 /// why — that scope exists precisely to make the freeze legible instead of accidental.</para>
-/// <para>Two knobs may share a <paramref name="legacyEnv"/> name with different defaults; <c>HARTSY_DIT_GRAPH</c>
-/// deliberately drives both an opt-in and a default-on flag so <c>=0</c> kills both and <c>=1</c> forces both. A
-/// caller setting one of a pair must set both, or it changes only half of what the single name used to.</para></remarks>
+/// <para>Some behaviours are deliberately split across a PAIR of knobs with opposite defaults — an opt-in and a
+/// default-on flag, where the opt-in alone unlocks an unsafe path. <c>numerics.ditGraph*</c> and
+/// <c>numerics.sageAttention*</c> are the two such pairs; changing one of a pair without the other changes only half
+/// the behaviour. <c>KnobRegistryTests</c> pins both pairs.</para></remarks>
 public sealed class Knob<T>
 {
-    internal Knob(string id, string? legacyEnv, T defaultValue, KnobScope scope, KnobDomain domain, string summary,
+    internal Knob(string id, T defaultValue, KnobScope scope, KnobDomain domain, string summary,
         Func<T, T>? coerce = null)
     {
         Id = id;
-        LegacyEnv = legacyEnv;
         Default = defaultValue;
         Scope = scope;
         Domain = domain;
@@ -63,9 +63,6 @@ public sealed class Knob<T>
 
     /// <summary>Dotted id, e.g. <c>numerics.sageAttention</c>. The name used by CLI <c>--set</c> and the API.</summary>
     public string Id { get; }
-
-    /// <summary>Environment name this knob used to be read from. NOT read any more — kept so a stale exported variable can be reported by name.</summary>
-    public string? LegacyEnv { get; }
 
     public T Default { get; }
 

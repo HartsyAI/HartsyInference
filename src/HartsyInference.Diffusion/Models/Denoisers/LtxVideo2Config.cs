@@ -108,7 +108,7 @@ public sealed record LtxVideo2Config
     /// 3-step refine) instead of a single full-resolution pass. Default ON for <see cref="V25Distilled"/> (it is
     /// the shipped template flow); needs the latent upsampler side file (auto-downloaded), and is verified only
     /// for the DISTILLED family — the dev checkpoints ship no two-stage reference configuration.
-    /// <c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch (or =1 the opt-in where it is off).</summary>
+    /// <c>numerics.ltx2TwoStage=false</c> is the single-pass kill-switch (or =1 the opt-in where it is off).</summary>
     public bool TwoStage { get; init; }
 
     /// <summary>Use ancestral (eta=1) Euler instead of plain Euler: the deterministic step lands on
@@ -130,13 +130,13 @@ public sealed record LtxVideo2Config
     /// <summary>Caps the token count fed to the dynamic shift formula; 0 leaves it uncapped. The formula is an
     /// exponential fit over 1024→4096 tokens, so a 10-second 1080p generation (27,280 tokens) extrapolates it to
     /// shift 31,306 and the schedule stops moving. 4096 reproduces the constant 7.768 the diffusers pipeline
-    /// pins. Env override: <c>HARTSY_LTX2_SHIFT_MAX_TOKENS</c>.</summary>
+    /// pins. Env override: <c>numerics.ltx2ShiftMaxTokens</c>.</summary>
     public int ShiftMaxTokens { get; init; }
 
     /// <summary>Uses this shift verbatim instead of the fit; 0 leaves the fit in charge. Independent of
     /// <see cref="ShiftMaxTokens"/> and wins over it, because a token cap cannot express the low end — the
     /// formula floors at exp(0.583) = 1.79, and 1.0 (no shift) is what SwarmUI's ComfyUI backend actually runs
-    /// for LTX-2, which builds a plain <c>BasicScheduler</c>. Env override: <c>HARTSY_LTX2_SHIFT</c>.</summary>
+    /// for LTX-2, which builds a plain <c>BasicScheduler</c>. Env override: <c>numerics.ltx2Shift</c>.</summary>
     public float ShiftOverride { get; init; }
 
     /// <summary>Distilled 2.5 schedule (8 steps: 9 sigmas ending at 0), from the reference pipeline's
@@ -164,7 +164,7 @@ public sealed record LtxVideo2Config
     /// a model version, config and tensor keys — so this is selected by the caller's intent (the distilled id, or
     /// a "distilled" filename routed by <c>LtxVideo2Recipe.RemapFamilyId</c>). Two-stage ON: the shipped 2.5
     /// templates are all two-stage, so the 8-step base + x2 upsample + 3-step refine IS the normal distilled
-    /// generation (<c>HARTSY_LTX2_TWO_STAGE=0</c> is the single-pass kill-switch).</summary>
+    /// generation (<c>numerics.ltx2TwoStage=false</c> is the single-pass kill-switch).</summary>
     public static LtxVideo2Config V25Distilled => V25 with
     {
         FixedSigmas = Ltx25DistilledSigmas,

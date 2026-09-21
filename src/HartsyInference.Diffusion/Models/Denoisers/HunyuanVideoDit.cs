@@ -21,7 +21,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable, IStreamableDenoiser
     private Tensor? _finalModW, _finalModB; // [2*hidden, hidden]
     private Tensor? _outW, _outB;           // [outCh*pT*pH*pW, hidden]
 
-    // ── Step-graph capture (HARTSY_DIT_GRAPH, opt-in) ─────────────────────────────────────────────────────────
+    // ── Step-graph capture (numerics.ditGraph, opt-in) ─────────────────────────────────────────────────────────
     // HunyuanVideo is single-forward (embedded guidance, no CFG) → the Krea2 single-forward template. The captured
     // body is img_in → double+single blocks → final AdaLN → proj_out, reading ONLY the persistent fixed buffers
     // below; the host boundary work (Patchify, the token refiner, BuildTemb, Unpatchify, and the pipeline's host

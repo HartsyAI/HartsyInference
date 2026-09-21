@@ -4,7 +4,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Probe/enable memo for CUDA peer (P2P/NVLink) access between device pairs. Enablement is per DIRECTED context pair and sticky for the contexts' lifetime, so each pair is probed once and remembered. <c>HARTSY_P2P_DISABLE=1</c> forces every query to false — the deterministic consumer-path test switch (and escape hatch for the flaky-P2P boards the design doc warns about).</summary>
+/// <summary>Probe/enable memo for CUDA peer (P2P/NVLink) access between device pairs. Enablement is per DIRECTED context pair and sticky for the contexts' lifetime, so each pair is probed once and remembered. <c>vram.p2pDisable=true</c> forces every query to false — the deterministic consumer-path test switch (and escape hatch for the flaky-P2P boards the design doc warns about).</summary>
 internal static class CudaPeerAccess
 {
     private static bool _disabled => EngineKnobs.P2pDisable.Value;

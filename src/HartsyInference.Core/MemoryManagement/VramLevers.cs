@@ -13,7 +13,7 @@ namespace HartsyInference.Core.MemoryManagement;
 public static class VramLevers
 {
     /// <summary>Legacy switch for keeping a pipeline's weights on the device between generations.</summary>
-    public const string KeepModelsVariable = "HARTSY_KEEP_MODELS";
+    public const string KeepModelsVariable = "vram.keepModels";
 
     /// <summary>Whether <paramref name="backend"/>'s pipelines keep their weights resident between generations.</summary>
     public static bool KeepResident(IBackend? backend) => KeepResident(VramPolicyRegistry.Resolve(backend));

@@ -16,7 +16,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
     private readonly FluxSingleStreamBlock[] _singleBlocks;
     private readonly FluxRope _rope;
 
-    /// <summary>True when this instance runs the audited F16 block loop (HARTSY_DIT_F16): token streams are
+    /// <summary>True when this instance runs the audited F16 block loop (numerics.ditF16): token streams are
     /// cast to F16 around the block loop and the residual stream rides at <see cref="ChromaF16.ResidualDamp"/>
     /// scale — the exact-damp recipe transplanted from Chroma (same Flux block architecture: every branch
     /// input passes a scale-invariant no-affine LayerNorm, and the final AdaLN-continuous norm cancels the
@@ -261,7 +261,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
 
     /// <summary>DiT-sharded forward, v1 PLAIN PATH ONLY: batch 1, no ControlNet residuals, no Kontext reference
     /// tokens, no attention bias (regional/Redux). Runs the same activation dtype as <see cref="Forward"/>'s plain
-    /// path (F16 under the default-ON HARTSY_DIT_F16, else F32) — required for same-device parity, and F16 halves
+    /// path (F16 under the default-ON numerics.ditF16, else F32) — required for same-device parity, and F16 halves
     /// the boundary-copy bytes. The FLAT block space is <c>[0, Depth)</c> double blocks then <c>[Depth, Depth+DepthSingleBlocks)</c>
     /// single blocks; blocks <c>[0, splitBlock)</c> run on <paramref name="backendA"/> (which owns the shared
     /// embed/head weights), the rest on <paramref name="backendB"/>. A double-region split crosses img+txt+temb;
@@ -293,7 +293,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
         // FluxRope keys its GPU cos/sin tables per backend, so one shared _rope serves both ranges.
         EnsureRope(txtSeqLen, hPacked, wPacked, 0, 0, 0);
 
-        // Mirror Forward's F16 hot path exactly (HARTSY_DIT_F16 is default-ON, and the load-time weight damp is
+        // Mirror Forward's F16 hot path exactly (numerics.ditF16 is default-ON, and the load-time weight damp is
         // baked either way): the sharded loop must run the SAME dtype as the unsharded one or same-device parity
         // is impossible. F16 also halves the boundary-copy bytes for free.
         if (_f16Mode)
@@ -482,7 +482,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
             }
         }
 
-        // ── 4b. F16 block loop (HARTSY_DIT_F16, B=1): one cast per stream before the loop — every block
+        // ── 4b. F16 block loop (numerics.ditF16, B=1): one cast per stream before the loop — every block
         //       activation follows, halving the bandwidth-bound glue traffic and making all 57 SDPAs
         //       zero-cast cuDNN F16. Streams are already at ResidualDamp scale from the damped embedders.
         //       Cast back to F32 after the loop for the final norm (which cancels the damp) + Euler step.

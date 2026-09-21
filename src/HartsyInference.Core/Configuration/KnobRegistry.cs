@@ -32,13 +32,13 @@ public static class KnobRegistry
         return _all.TryGetValue(id, out object? k) ? k : null;
     }
 
-    /// <summary>Describes a knob for <c>--list-knobs</c> output.</summary>
-    public static (string Id, string? LegacyEnv, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary) Describe(object knob)
+    /// <summary>Describes a knob for <c>settings list</c> output.</summary>
+    public static (string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary) Describe(object knob)
     {
         Type t = knob.GetType();
         Type arg = t.GetGenericArguments()[0];
         object? Get(string n) => t.GetProperty(n)!.GetValue(knob);
-        return ((string)Get("Id")!, (string?)Get("LegacyEnv"), arg.Name, Get("Default"),
+        return ((string)Get("Id")!, arg.Name, Get("Default"),
             (KnobScope)Get("Scope")!, (KnobDomain)Get("Domain")!, (string)Get("Summary")!);
     }
 }

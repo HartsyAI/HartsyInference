@@ -150,7 +150,7 @@ public sealed unsafe class Hunyuan3DDit
     {
         int b = (int)img.Shape[0], width = _cfg.Width;
 
-        // F16 hot path (HARTSY_DIT_F16): one cast into F16 at the block-loop boundary — the double/single blocks
+        // F16 hot path (numerics.ditF16): one cast into F16 at the block-loop boundary — the double/single blocks
         // dtype-follow their input, so the whole loop runs in F16 (half the HBM traffic + F16 tensor-core GEMMs).
         // The timestep-modulation vec stays F32; the final layer casts back to F32 below. Matches Python fp16.
         DType act = DitDtype.Act;

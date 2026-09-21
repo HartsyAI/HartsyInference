@@ -52,7 +52,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     // so we keep only the active one loaded and swap once at the boundary crossing (high→low noise).
     private WanVideoTransformer? _loadedExpert;
 
-    /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS, default on): the single-expert DiT stays GPU-resident across generations so the next gen's preload is a cache-hit no-op; every VAE phase beside it is gated on measured free VRAM (evict when short).</summary>
+    /// <summary>Standard-profile residency (vram.keepModels, default on): the single-expert DiT stays GPU-resident across generations so the next gen's preload is a cache-hit no-op; every VAE phase beside it is gated on measured free VRAM (evict when short).</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     // Cross-generation I2V conditioning cache: the [mask, cond-latent] tensor is a deterministic function of
@@ -72,7 +72,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         _loadedExpert = expert;
     }
 
-    // Env-gated (HARTSY_WAN_DEBUG=1) per-step numerical diagnostic for the all-zero-output hunt. Reads host data only
+    // Env-gated (diagnostics.wanDebug=true) per-step numerical diagnostic for the all-zero-output hunt. Reads host data only
     // (scheduler writes latents host-side; velocity is host-coherent per the working Flux/Lance pattern). Identical
     // velocity stats across steps ⇒ the GPU is re-reading a stale (frozen) latent input; NaN/inf or exploding
     // magnitudes ⇒ transformer/scheduler math. See memory wan22-video-first-run-state.
@@ -306,7 +306,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         float[]? frameTs = (firstFrameLatent is null && lastFrameLatent is null) ? null : new float[tLat];
 
         // Default-off perf knobs (Qwen-Image is the reference wiring — INFERENCE_ACCEL_GRIND §H1.5/H2.3):
-        // HARTSY_STEP_CACHE = First-Block cache per CFG stream; HARTSY_CFG_INTERVAL = skip the uncond forward
+        // vram.stepCache = First-Block cache per CFG stream; numerics.cfgInterval = skip the uncond forward
         // outside the normalized-σ band (NOTE the Qwen finding: early-step skipping changes image identity —
         // late-only bands like "0.15,1" are the quality-safe shape). Unset ⇒ byte-identical baseline.
         GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
@@ -324,7 +324,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }
@@ -936,7 +936,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         return perForward + (1536L * 1024 * 1024);
     }
 
-    /// <summary>Post-denoise DiT residency (the HARTSY_KEEP_MODELS idiom): keeps the single-expert transformer device-resident across generations — the next gen's PreloadWeights becomes a cache-hit no-op — unless measured free VRAM can't cover the VAE decode (grid-scaled estimate; an OOM is worse than one re-upload). MoE experts always free: two 14B experts never co-reside. A VAE on its OWN device (<see cref="DiffusionPipelineBase.VaeBackend"/>) never contends with the DiT's VRAM on <see cref="DiffusionPipelineBase.Backend"/>, so the decode-headroom check is skipped when split — the DiT just stays resident.</summary>
+    /// <summary>Post-denoise DiT residency (the vram.keepModels idiom): keeps the single-expert transformer device-resident across generations — the next gen's PreloadWeights becomes a cache-hit no-op — unless measured free VRAM can't cover the VAE decode (grid-scaled estimate; an OOM is worse than one re-upload). MoE experts always free: two 14B experts never co-reside. A VAE on its OWN device (<see cref="DiffusionPipelineBase.VaeBackend"/>) never contends with the DiT's VRAM on <see cref="DiffusionPipelineBase.Backend"/>, so the decode-headroom check is skipped when split — the DiT just stays resident.</summary>
     private void ReleaseOrKeepTransformer(int numFrames, int width, int height)
     {
         if (_transformer2 is not null)

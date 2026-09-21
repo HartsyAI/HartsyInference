@@ -257,12 +257,12 @@ public sealed class VaeDecoder
     /// AutoencoderKL is always 8×, but exposed here so callers don't hardcode it.</summary>
     public const int SpatialScale = 8;
 
-    /// <summary>Diagnostic gate (HARTSY_VAE_STATS=1) for the per-tile/per-image min/max/mean scans below.
+    /// <summary>Diagnostic gate (diagnostics.vaeStats=true) for the per-tile/per-image min/max/mean scans below.
     /// These were bring-up instrumentation for the black-tile bug; unconditional they force full host scans
     /// of multi-megapixel tensors every generation.</summary>
     private static bool VaeStatsEnabled => EngineKnobs.VaeStats.Value;
 
-    /// <summary>Kill switch (HARTSY_VAE_FULLRES=0) for the full-resolution direct-decode attempt in
+    /// <summary>Kill switch (vram.vaeFullres=false) for the full-resolution direct-decode attempt in
     /// <see cref="DecodeTiled"/>, forcing the always-tiled behavior.</summary>
     private static bool FullResEnabled => EngineKnobs.VaeFullres.Value;
 
@@ -336,7 +336,7 @@ public sealed class VaeDecoder
             fullResWorkspace = Math.Min(fullResWorkspace, backend.Capabilities.Im2ColWorkspaceCapBytes);
         // Post-trim headroom the attempt needs beyond the single worst im2col: neighboring layer activations
         // plus a second in-flight im2col whose async free hasn't recycled yet. Below this, skip to tiled for
-        // THIS generation only — a resident-DiT host (HARTSY_KEEP_MODELS) may free VRAM later, and a skipped
+        // THIS generation only — a resident-DiT host (vram.keepModels) may free VRAM later, and a skipped
         // attempt costs nothing, unlike an OOM-failed one (~0.5 s + session-tiled).
         const long FullResHeadroomBytes = 3L << 29;   // 1.5 GB
         if (FullResEnabled && !_fullResDisabled && fullResWorkspace <= FullResWorkspaceCapBytes)

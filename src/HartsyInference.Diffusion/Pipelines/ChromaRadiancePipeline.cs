@@ -441,7 +441,7 @@ public sealed unsafe class ChromaRadiancePipeline : DiffusionPipelineBase
                 if (noisedSource != sourcePadded) noisedSource.Dispose();
             }
 
-            // retainBehind:0 frees every block through cuMemFreeAsync, and HARTSY_MEMPOOL_KEEP holds those bytes
+            // retainBehind:0 frees every block through cuMemFreeAsync, and vram.mempoolKeep holds those bytes
             // reserved — without a per-step trim the pool grows by roughly a block per step until it owns the card.
             streamer?.TrimAfterStep();
 

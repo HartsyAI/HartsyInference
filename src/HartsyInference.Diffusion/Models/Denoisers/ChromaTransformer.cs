@@ -47,7 +47,7 @@ public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
     // proj_out: Linear(hidden_size, patch_size² * out_channels=64, bias=True)
     private Tensor? _projOutWeight, _projOutBias;
 
-    /// <summary>True when this instance runs the F16 block loop (HARTSY_DIT_F16): token streams are cast to F16
+    /// <summary>True when this instance runs the F16 block loop (numerics.ditF16): token streams are cast to F16
     /// around the block loop and the residual stream rides at <see cref="ChromaF16.ResidualDamp"/> scale (exact —
     /// see <see cref="ChromaF16"/>). Now enabled for Radiance too: it has no <c>x_embedder</c>/<c>proj_out</c> to
     /// carry the damp, so the img stream is scaled into the damped regime at the ForwardCore F16 cast (see
@@ -241,7 +241,7 @@ public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
     /// <paramref name="backendB"/>. The modulation table is per-step and built on A, so it is COPIED across once
     /// per pass (A's copy feeds the final-norm rows after B's range); the live streams MOVE. A double-region split
     /// crosses img+txt; a single-region split crosses the concatenated stream. Runs the same activation dtype as
-    /// <see cref="Forward"/> (F16 under the default-ON HARTSY_DIT_F16, else F32) — required for same-device parity.
+    /// <see cref="Forward"/> (F16 under the default-ON numerics.ditF16, else F32) — required for same-device parity.
     /// The rope's GPU tables and the SDPA mask are cached per backend (never peer-copied). VRAM pooling, not
     /// latency — the two backends run sequentially. No step-graph, no step cache, no block streaming
     /// (<see cref="BeforeBlockForward"/> must be null); the pipeline routes CFG as two sequential passes. Callers
@@ -288,7 +288,7 @@ public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
         backendA.Linear(txt, encoderHidden, _contextEmbedWeight!, _contextEmbedBias);
         ChromaDebugDump.Dump("txt_in", txt);
 
-        // Mirror ForwardCore's F16 hot path exactly (HARTSY_DIT_F16 is default-ON and the load-time weight damp
+        // Mirror ForwardCore's F16 hot path exactly (numerics.ditF16 is default-ON and the load-time weight damp
         // is baked either way): the sharded loop must run the SAME dtype as the unsharded one or same-device
         // parity is impossible. F16 also halves the boundary-copy bytes. Classic-only — the streams already ride
         // at damp scale from the damped embedders, so no Radiance-style pre-cast scale here.
@@ -643,7 +643,7 @@ public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
         backend.Linear(txt, encoderHidden, _contextEmbedWeight!, _contextEmbedBias);
         ChromaDebugDump.Dump("txt_in", txt);
 
-        // ── F16 block loop (classic Chroma + HARTSY_DIT_F16, B=1): one cast into F16 per stream before the
+        // ── F16 block loop (classic Chroma + numerics.ditF16, B=1): one cast into F16 per stream before the
         //    loop — every block activation then follows (half the HBM traffic of the bandwidth-bound glue
         //    kernels, and all 57 SDPAs ride the zero-cast F16 cuDNN engine). The streams are already at
         //    ResidualDamp scale from the damped embedders (see ChromaF16), so late-block residual growth

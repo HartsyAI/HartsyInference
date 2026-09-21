@@ -40,7 +40,7 @@ public sealed class ChromaRadianceTransformer : IDisposable, IStreamableDenoiser
         _patchifier.LoadWeights(weights);
         _nerfHead.LoadWeights(weights);
 
-        // F16 block loop (HARTSY_DIT_F16): the backbone runs its residual stream at ChromaF16.ResidualDamp scale.
+        // F16 block loop (numerics.ditF16): the backbone runs its residual stream at ChromaF16.ResidualDamp scale.
         // The img stream is damped into that regime at the ForwardCore F16 cast (Radiance has no x_embedder); the
         // backbone returns pre-head img tokens still at damp scale, so un-damp them exactly at the NeRF head's
         // param_generator GEMM alpha (img tokens feed only that Linear).

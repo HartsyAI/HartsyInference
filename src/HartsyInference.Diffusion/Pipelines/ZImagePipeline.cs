@@ -243,7 +243,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 Logs.Debug($"Z-Image packed-caption preparation D2H syncs: {captionPreparationD2h}.");
             }
             long denoiseD2hStart = Backend.GetD2hSyncCount();
-            // Default-off across-step First-Block cache (HARTSY_STEP_CACHE / _LATE — fleet knobs, wired on the
+            // Default-off across-step First-Block cache (vram.stepCache / _LATE — fleet knobs, wired on the
             // packed t2i path only; source-conditioned img2img needs its own quality calibration before this
             // approximate reuse is admitted. No calibrated profile yet: "=1" resolves to the generic raw 0.10
             // until the Z-Image A/B lands. Armed cache forces the eager path (no graph).
@@ -260,11 +260,11 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 }
                 else
                 {
-                    Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                    Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                         "(stepcache.ptx not compiled?) — running uncached.");
                 }
             }
-            // Step-graph mode (HARTSY_DIT_GRAPH, fast path only): route the latent through the transformer's FIXED
+            // Step-graph mode (numerics.ditGraph, fast path only): route the latent through the transformer's FIXED
             // buffer so the captured graph's baked address stays valid across steps and gens. The fixed tensor is
             // transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
             bool nonDefaultSampler = FlowMatchSampling.IsNonDefault(request.Scheduler);
@@ -476,7 +476,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
                 Logs.Info($"Step cache: {stepCacheInst.Computes} computes / {stepCacheInst.Reuses} reuses");
             }
 
-            // HARTSY_KEEP_MODELS controls only the expensive DiT residency. The current Z-Image path deliberately
+            // vram.keepModels controls only the expensive DiT residency. The current Z-Image path deliberately
             // keeps its proven lazy/auto-promotion behavior rather than forcing a 6.2 GB bulk preload on 12 GB cards;
             // this exact free still removes every promoted weight and cached dtype cast when residency is disabled.
             // Invalidate the step graph before freeing because its captured kernels bake those weight addresses.
@@ -680,7 +680,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         }
     }
 
-    /// <summary>Releases only Z-Image's resident denoiser state before a same-device text-encoder phase or when <c>HARTSY_KEEP_MODELS=0</c>. The model intentionally remains lazily promoted; this method is the exact teardown mirror and also invalidates graph/attention plans that contain device addresses.</summary>
+    /// <summary>Releases only Z-Image's resident denoiser state before a same-device text-encoder phase or when <c>vram.keepModels=false</c>. The model intentionally remains lazily promoted; this method is the exact teardown mirror and also invalidates graph/attention plans that contain device addresses.</summary>
     public void EvictResidentWeights()
     {
         Exception? firstError = null;
@@ -784,7 +784,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
         ValidatePredictionFinite(tensor, label, logStats: false);
     }
 
-    /// <summary>Host diagnostic used by HARTSY_ZIMAGE_PRED_STATS=1. This intentionally forces a D2H sync and must not be enabled for performance measurements.</summary>
+    /// <summary>Host diagnostic used by diagnostics.zimagePredStats=1. This intentionally forces a D2H sync and must not be enabled for performance measurements.</summary>
     internal static void ValidatePredictionFinite(Tensor tensor, string label, bool logStats)
     {
         ArgumentNullException.ThrowIfNull(tensor);
@@ -931,7 +931,7 @@ public sealed unsafe class ZImagePipeline : DiffusionPipelineBase
     }
 
     /// <summary>Per-channel min/max/mean diagnostic for a 4D NCHW tensor at Verbose level. Used to bracket the pre/post VAE state when tracking down all-black output bugs — healthy Z-Image / Flux latents have per-channel min ~-5 to -1, max ~+1 to +5, mean within ±2. RGB outputs should land in roughly [-1, 1] with mean near 0. Outside those bands means the model or VAE saturated.</summary>
-    /// <summary>Diagnostic gate for the per-channel latent/VAE stats (HARTSY_ZIMAGE_STATS=1). Unconditional stats forced a D2H drain + a host scan of the full tensors every generation — pure overhead outside bring-up.</summary>
+    /// <summary>Diagnostic gate for the per-channel latent/VAE stats (diagnostics.zimageStats=true). Unconditional stats forced a D2H drain + a host scan of the full tensors every generation — pure overhead outside bring-up.</summary>
     private static bool LatentStatsEnabled => EngineKnobs.ZimageStats.Value;
 
     private static void LogLatentStatsPerChannel(string name, Tensor t)

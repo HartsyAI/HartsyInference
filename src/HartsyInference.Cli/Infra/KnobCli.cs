@@ -44,12 +44,12 @@ public static class KnobCli
     /// <summary>Prints every declared setting grouped by domain.</summary>
     public static void ListSettings()
     {
-        List<(string Id, string? Legacy, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> all =
+        List<(string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> all =
             [.. KnobRegistry.All.Select(KnobRegistry.Describe)
                 .Where(k => !k.Id.StartsWith("test.", StringComparison.Ordinal))
                 .OrderBy(k => k.Domain).ThenBy(k => k.Id, StringComparer.Ordinal)];
 
-        foreach (IGrouping<KnobDomain, (string Id, string? Legacy, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> group
+        foreach (IGrouping<KnobDomain, (string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> group
             in all.GroupBy(k => k.Domain))
         {
             Table table = new Table().Border(TableBorder.Rounded).Title($"[bold]{group.Key}[/]");
@@ -58,7 +58,7 @@ public static class KnobCli
             table.AddColumn("default");
             table.AddColumn("scope");
             table.AddColumn("what it does");
-            foreach ((string id, _, string type, object? def, KnobScope scope, _, string summary) in group)
+            foreach ((string id, string type, object? def, KnobScope scope, _, string summary) in group)
             {
                 table.AddRow(
                     Markup.Escape(id),

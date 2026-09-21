@@ -30,7 +30,7 @@ public sealed unsafe class Flux2Pipeline : DiffusionPipelineBase
     private readonly float _bnEps;
     private readonly int[] _hiddenLayers;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop free + next-gen re-upload). A prompt-cache MISS frees the DiT before the text-encoder forward — Dev's Mistral-Small (~12 GB fp4) and the 32B Q4 DiT (~18 GB) cannot coexist on a 24 GB card, which is also why this pipeline stages weights at all. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop free + next-gen re-upload). A prompt-cache MISS frees the DiT before the text-encoder forward — Dev's Mistral-Small (~12 GB fp4) and the 32B Q4 DiT (~18 GB) cannot coexist on a 24 GB card, which is also why this pipeline stages weights at all. Standard-profile default ON (vram.keepModels=false disables).</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
@@ -316,9 +316,9 @@ _transformer.InvalidateStepGraph(Backend);
         // FIXED buffer so the whole forward is captured once per (prompt ref, grid) signature and replayed
         // with one cuGraphLaunch per step; it survives across generations (this pipeline never sweeps
         // activations on the drain-free route, and the post-decode reclaim below trims instead).
-        // StepGraphEnabled is per-checkpoint: default-ON for Klein (BF16), opt-in HARTSY_DIT_GRAPH=1 for the
+        // StepGraphEnabled is per-checkpoint: default-ON for Klein (BF16), opt-in numerics.ditGraph=true for the
         // Q4-GGUF Dev whose transient per-GEMM dequants OOM the capture on 24 GB (see Flux2Transformer).
-        // Default-off across-step First-Block cache (HARTSY_STEP_CACHE + HARTSY_STEP_CACHE_LATE — the
+        // Default-off across-step First-Block cache (vram.stepCache + vram.stepCacheLate — the
         // fleet knobs, INFERENCE_ACCEL_GRIND §H1.5). Flux.2 has no true CFG (guidance is embedded), so ONE
         // cache serves the single stream. An armed cache is per-step-variable topology → forces eager.
         // Calibrated ship point (Dev only — Klein is unmeasured, no profile): poly gate at budget 0.25 —
@@ -343,7 +343,7 @@ _transformer.InvalidateStepGraph(Backend);
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }

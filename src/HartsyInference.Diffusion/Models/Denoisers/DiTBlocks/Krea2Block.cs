@@ -84,7 +84,7 @@ public sealed unsafe class Krea2Block : IStreamingBlock
         // 6 modulation vectors [B, hidden] = tembMod.unflatten(6, hidden) + scale_shift_table. These stay F32 (tiny
         // per-channel vectors); the F16 norm/modulate/gate kernels take an F16 activation + F32 params.
         Tensor[] mod = SplitModulation(backend, tembMod, _scaleShiftTable!, batch);
-        DType act = DitDtype.Act;   // F16 hot path (HARTSY_DIT_F16) else F32; `hidden` arrives in this dtype
+        DType act = DitDtype.Act;   // F16 hot path (numerics.ditF16) else F32; `hidden` arrives in this dtype
 
         TensorShape hShape = new TensorShape(batch, seqLen, _hidden);
         Tensor n1 = new Tensor(hShape, act);

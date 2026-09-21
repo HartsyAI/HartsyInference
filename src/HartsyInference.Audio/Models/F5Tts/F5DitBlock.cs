@@ -18,7 +18,7 @@ namespace HartsyInference.Audio.Models.F5Tts;
 // magnitudes to other DiTs).
 internal sealed unsafe class F5DitBlock
 {
-    // ── Section profiling (HARTSY_F5_PROFILE=1): sync-bracketed ms accumulators, dumped per generation ──
+    // ── Section profiling (diagnostics.f5Profile=true): sync-bracketed ms accumulators, dumped per generation ──
     internal static bool Prof => EngineKnobs.F5Profile.Value;
     internal static double _tAttn, _tQkv, _tFfn, _tBlock; internal static int _nBlocks;
     private static readonly System.Diagnostics.Stopwatch _swAttn = new(), _swQkv = new(), _swFfn = new(), _swBlk = new();

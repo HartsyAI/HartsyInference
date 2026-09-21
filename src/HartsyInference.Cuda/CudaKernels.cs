@@ -82,7 +82,7 @@ public sealed class CudaKernels : IDisposable
 
     // Optional: the register-resident mma.sync rewrite of the flash stage (sage_attn_int8_v1.ptx) — no
     // Sq%32 restriction (fully row-guarded) and the perf-viable implementation. Preferred over the wmma v0
-    // when present; HARTSY_SAGE_V0=1 forces the old kernel for debugging.
+    // when present; numerics.sageV0=true forces the old kernel for debugging.
     private readonly CudaModule? _sageAttnV1Module;
     private readonly nint _sageAttnV1D128;
     private readonly nint _sageAttnV1D64;
@@ -1022,7 +1022,7 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ6KF32 = _mulMatVecQ6KModule.GetFunction("mul_mat_vec_q6k_f32");
         _mulMatVecQ8_0Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q8_0_f32.ptx"));
         _mulMatVecQ8_0F32 = _mulMatVecQ8_0Module.GetFunction("mul_mat_vec_q8_0_f32");
-        // On by default (HARTSY_BF16_GEMV=0 disables). The PTX targets sm_80 like the engine's other lm/world
+        // On by default (numerics.bf16Gemv=false disables). The PTX targets sm_80 like the engine's other lm/world
         // kernels, so it JITs on every GPU this engine already runs on; a genuine load failure is caught below
         // and falls back to cuBLAS. This is a large decode win — see the lm_head GEMV note in GenericTransformer.
         if (EngineKnobs.Bf16Gemv.Value)
@@ -2349,7 +2349,7 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Dynamic shared bytes the PADDED control entry point needs (rows × <c>BK+16</c>). The two kernels must never be launched with each other's budget: over-budgeting the swizzled one throws away exactly the occupancy headroom the unpadded layout buys, and under-budgeting the padded one corrupts its last stage.</summary>
     internal const uint Int8MmaSharedBytesPad = 3u * (128u + 256u) * 80u;
 
-    /// <summary>Selects the swizzled (default) or padded-control operand layout — <c>HARTSY_INT8_MMA_SWIZZLE=0</c> picks the padded kernel the swizzle replaced. This is an A/B control, NOT the feature kill switch; that is <c>HARTSY_INT8_FUSED_MMA=0</c>, which drops to cuBLASLt + a separate dequant entirely.</summary>
+    /// <summary>Selects the swizzled (default) or padded-control operand layout — <c>numerics.int8MmaSwizzle=false</c> picks the padded kernel the swizzle replaced. This is an A/B control, NOT the feature kill switch; that is <c>numerics.int8FusedMma=false</c>, which drops to cuBLASLt + a separate dequant entirely.</summary>
     internal static bool Int8MmaSwizzle => EngineKnobs.Int8MmaSwizzle.Value;
 
     /// <summary>N tile of the fused mma GEMM; N must be a whole multiple (M is predicated, N and K are not).</summary>
@@ -2451,7 +2451,7 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Whether the register-resident v1 flash kernel is available (no Sq%32 restriction).</summary>
     public bool HasSageV1 => _sageAttnV1Module is not null;
 
-    /// <summary>True when the v1 path will actually be dispatched (module present, not forced off via HARTSY_SAGE_V0=1) — the caller must then provide the pre-transposed F16 V workspace.</summary>
+    /// <summary>True when the v1 path will actually be dispatched (module present, not forced off via numerics.sageV0=true) — the caller must then provide the pre-transposed F16 V workspace.</summary>
     public bool UseSageV1 => _sageAttnV1Module is not null && !EngineKnobs.SageV0.Value;
 
     /// <summary>v1 prologue — one-shot V transpose+cast: [B,H,Skv,D] f32 → [B,H,D,skvPad] f16, amortizing per-tile re-transpose.</summary>
@@ -2480,7 +2480,7 @@ public sealed class CudaKernels : IDisposable
         uint bArg = (uint)b, hArg = (uint)h, sqArg = (uint)sq, skvArg = (uint)skv;
         // Register-resident mma.sync v1 (grid ceil(Sq/64)×H×B, block 128, ~24.3 KB SMEM, any Sq) when compiled,
         // else the wmma v0 (grid Sq/32×H×B, block 64 — caller must gate Sq % 32 == 0 for v0).
-        // HARTSY_SAGE_V0=1 forces v0 for debugging.
+        // numerics.sageV0=true forces v0 for debugging.
         if (UseSageV1)
         {
             if (vt16 == 0) throw new ArgumentException("v1 path requires the pre-transposed V workspace (LaunchSageVF16T).");
@@ -2492,11 +2492,11 @@ public sealed class CudaKernels : IDisposable
             // in-kernel (BC=32 keeps d128 at 155 regs / 0 spills / 3 blocks-per-SM; 2 stages ≈ 24.8 KB < 48 KB).
             const int bc = 32;
             uint smemBytes = (uint)(2 * (bc * d + d * bc * 2 + bc * sizeof(float)));
-            // E1 experiment knob: HARTSY_SAGE_PV=f16acc selects the F16-accumulate PV variant (2× PV mma
+            // E1 experiment knob: numerics.sagePv=f16acc selects the F16-accumulate PV variant (2× PV mma
             // rate on GeForce Ampere; P pre-scaled 1/16 in-kernel for overflow headroom to ~349k keys).
             bool f16Acc = EngineKnobs.SagePv.Value == "f16acc";
             if (f16Io && !UseSageV1)
-                throw new InvalidOperationException("F16-ingest Sage requires the v1 module (HARTSY_SAGE_V0=1 is F32-only).");
+                throw new InvalidOperationException("F16-ingest Sage requires the v1 module (numerics.sageV0=true is F32-only).");
             nint func = f16Io
                 ? (d == 128 ? _sageAttnV1D128F16Io : _sageAttnV1D64F16Io)   // native-F16 contract implies f16acc PV
                 : d == 128
@@ -3087,7 +3087,7 @@ public sealed class CudaKernels : IDisposable
     // microbenchmark (20.5 vs 55 µs/call — the block-per-row shape's 512-byte blocks can't hide
     // DRAM latency; a plain Add over the same tensors streams at 7.4 µs). An earlier e2e A/B
     // wrongly concluded "no gain": it predated the per-head scalar hoist, whose per-thread
-    // transcendentals were masking the schedule win. Kill-switch HARTSY_SSM_DELTA_WARPROW=0.
+    // transcendentals were masking the schedule win. Kill-switch numerics.ssmDeltaWarprow=0.
     private static bool _ssmDeltaWarpRow => EngineKnobs.SsmDeltaWarprow.Value;
 
     public unsafe void LaunchSsmDeltaStep(ulong output, ulong state, ulong q, ulong k, ulong v, ulong z,
@@ -3098,7 +3098,7 @@ public sealed class CudaKernels : IDisposable
         // block-per-head kernel serializes sv tree-reductions behind block syncs (192 µs/layer on
         // Qwen3.5-0.8B, ~50% of the whole decode step). Bit-identical values; needs the caller's
         // [hv*sv]-float scratch for the pre-norm readout. sk ≤ 1024 = the rows kernel's per-thread
-        // register cache bound (CACHE_COLS·blockDim). Kill-switch HARTSY_SSM_DELTA_V2=0.
+        // register cache bound (CACHE_COLS·blockDim). Kill-switch numerics.ssmDeltaV2=0.
         if (_ssmDeltaRowParallel && oScratch != 0 && sk <= 1024 && hv <= 256)
         {
             // Per-head gate scalars first (one tiny launch): the row kernels then load 2 floats
@@ -4652,10 +4652,10 @@ public sealed class CudaKernels : IDisposable
     // (the ffn_down class — DeepSeek-1.5B's 8960×1536 measured 51% of DRAM peak, ~1.1 waves of warps)
     // under-occupied; splitting each row across 4 warps multiplies resident parallelism with a
     // deterministic shared-memory combine. Gated tightly: at N ≥ ~2560 warp-per-row measured equal or
-    // better (2026-07-22 sweep). HARTSY_GEMV_KSPLIT=0 disables, =W forces W warps/row everywhere.
+    // better (2026-07-22 sweep). numerics.gemvKsplit=0 disables, =W forces W warps/row everywhere.
     private static int _ksplitOverride => EngineKnobs.GemvKsplit.Value;
 
-    // Rows-per-block for the warp-per-row GEMV kernels (sweep knob HARTSY_GEMV_WPB). Default 4: the
+    // Rows-per-block for the warp-per-row GEMV kernels (sweep knob numerics.gemvWpb). Default 4: the
     // 2026-07-23 sweep measured WPB=4 equal-or-faster than the original 8 at every production shape class
     // (Q4_K K=4096: N=256 11.4 vs 13.0 µs, N=4096 37.8 vs 38.4, N=27392 197.1 vs 198.1) — finer blocks
     // (128 threads) smooth the launch/drain tail; resident-warp occupancy is unchanged (12 blocks/SM).

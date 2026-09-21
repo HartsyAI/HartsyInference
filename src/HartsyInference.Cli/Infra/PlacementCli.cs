@@ -34,7 +34,7 @@ public class PlacementCliSettings : CommandSettings
     public int[]? ContextParallelGpus { get; init; }
 
     [CommandOption("--lm-shard-gpu")]
-    [Description("Split large LMs' layers across the primary GPU and this CUDA ordinal (weights POOLED). Text models layer-split as with --device \"cuda:0+cuda:1\"; big audio LMs (YuE Stage-1) then default to UN-quantized checkpoint precision instead of Q4_K (override with HARTSY_AUDIO_LM_QUANT=q4k|q8|off). Implied by --dit-shard-gpu, which feeds the same shard list.")]
+    [Description("Split large LMs' layers across the primary GPU and this CUDA ordinal (weights POOLED). Text models layer-split as with --device \"cuda:0+cuda:1\"; big audio LMs (YuE Stage-1) then default to UN-quantized checkpoint precision instead of Q4_K (override with numerics.audioLmQuant=q4k|q8|off). Implied by --dit-shard-gpu, which feeds the same shard list.")]
     public int? LmShardGpu { get; init; }
 
     [CommandOption("--parallel")]

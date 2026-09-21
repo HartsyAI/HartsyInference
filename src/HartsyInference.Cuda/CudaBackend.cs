@@ -291,13 +291,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <remarks>Reports the same flag <see cref="LinearImpl"/> consults, so the two cannot drift.</remarks>
     public bool NativeFp8Gemm => EnableNativeFp8Gemm;
 
-    /// <summary>Use the division-free head-major rope kernel (<c>HARTSY_ROPE_V2=0</c> to fall back). Bit-identical.</summary>
+    /// <summary>Use the division-free head-major rope kernel (<c>numerics.ropeV2=false</c> to fall back). Bit-identical.</summary>
     public bool EnableRopeHeadMajorV2 { get; set; }
 
-    /// <summary>Quantize fp8 activations with the checkpoint's <c>.input_scale</c> instead of a per-call absmax (<c>HARTSY_FP8_STATIC_INPUT_SCALE=0</c> to force the dynamic path). Changes numerics — see the doc comment.</summary>
+    /// <summary>Quantize fp8 activations with the checkpoint's <c>.input_scale</c> instead of a per-call absmax (<c>numerics.fp8StaticInputScale=false</c> to force the dynamic path). Changes numerics — see the doc comment.</summary>
     public bool EnableStaticFp8InputScale { get; set; }
 
-    /// <summary>Let a modulate producer write e4m3 for its consuming fp8 Linear (<c>HARTSY_MODULATE_EMIT_FP8=0</c> to disable).</summary>
+    /// <summary>Let a modulate producer write e4m3 for its consuming fp8 Linear (<c>numerics.modulateEmitFp8=false</c> to disable).</summary>
     public bool EnableModulateEmitFp8 { get; set; }
 
     /// <summary>Device-resident copy of a weight's static activation scale, allocated once per weight.</summary>
@@ -421,18 +421,18 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Fuses a Linear bias add into the cuBLASLt GEMM epilogue. Enabled by default; set <c>HARTSY_EPILOGUE_FUSION=0</c> to disable it.</summary>
+    /// <summary>Fuses a Linear bias add into the cuBLASLt GEMM epilogue. Enabled by default; set <c>numerics.epilogueFusion=false</c> to disable it.</summary>
     /// <remarks>Works on every targeted SM, including the RTX 3060. A supported biased Linear runs as one
     /// <c>cublasLtMatmul</c>; unavailable libraries, unsupported shapes, and no-algorithm results fall back to
     /// <c>cublasGemmEx</c> plus the existing <c>BiasAdd</c> path with the same resolved precision policy.</remarks>
     public bool EnableEpilogueFusion { get; set; }
 
-    /// <summary>int8-activation dp4a decode GEMV for Q4_K/Q6_K/Q8_0 weights (default ON, kill-switch <c>HARTSY_DP4A_ON=0</c>).</summary>
+    /// <summary>int8-activation dp4a decode GEMV for Q4_K/Q6_K/Q8_0 weights (default ON, kill-switch <c>numerics.dp4aOn=false</c>).</summary>
     /// <remarks>Lossy within the Q8_1 rounding bound (see Dp4aGemvGroundTruthTests); measured 2026-07-22:
     /// Llama-3.2-1B 159→195 tok/s, Qwen3-4B 71→90 tok/s (RTX 3060, graph-on).</remarks>
     public bool EnableDp4aGemv { get; set; }
 
-    /// <summary>Opt-in W8A8 INT8 tensor-core (IMMA) GEMM path (<c>HARTSY_W8A8=1</c>, INFERENCE_ACCEL_GRIND §H5).</summary>
+    /// <summary>Opt-in W8A8 INT8 tensor-core (IMMA) GEMM path (<c>numerics.w8a8=true</c>, INFERENCE_ACCEL_GRIND §H5).</summary>
     /// <remarks>Large-M Linears with 16-bit-float weights run as per-channel-int8 weight (host-quantized once,
     /// cached) × per-row dynamic-int8 activation on <see cref="Int8Gemm"/>, dequantized by the w8a8.ptx epilogue.
     /// The Ampere lever — SM 8.6 has no fp8 MMA, and IMMA measured 3.2–3.7× over the F16 GEMM (chain 2.57× at
@@ -585,7 +585,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// free VRAM keeps the chunk large where there is room and shrinks it rather than failing where there is not;
     /// <c>cuMemGetInfo</c> is a cheap driver query with no stream sync, which is why the H3 transformer already
     /// polls it per forward.</para></remarks>
-    /// <summary>Output-column tile for the resident int8 GEMM, in units of N. Tiling over N (not over M, which the row chunk above already showed is monotonically worse — it shrinks the GEMM's m) keeps the int32 accumulator small enough to be consumed by the dequant epilogue while still in L2, instead of streamed to HBM and read straight back. 0 or >= n disables tiling. Override with HARTSY_INT8_N_CHUNK.</summary>
+    /// <summary>Output-column tile for the resident int8 GEMM, in units of N. Tiling over N (not over M, which the row chunk above already showed is monotonically worse — it shrinks the GEMM's m) keeps the int32 accumulator small enough to be consumed by the dequant epilogue while still in L2, instead of streamed to HBM and read straight back. 0 or >= n disables tiling. Override with vram.int8NChunk.</summary>
     private static int Int8ResidentColChunk(int n)
         => EngineKnobs.Int8NChunk.Value is int env ? (env <= 0 ? int.MaxValue : env) : DefaultInt8ColChunk;
 
@@ -596,7 +596,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     // Int8GemmEpilogueProbeTests) and which our own mma kernel is not yet fast enough to justify.
     private const int DefaultInt8ColChunk = int.MaxValue;
 
-    /// <summary>HARTSY_INT8_ROW_BUDGET_MB — pins <see cref="Int8ResidentRowChunk"/>'s byte budget instead of deriving it from free VRAM. 0 keeps the derived behaviour.</summary>
+    /// <summary>vram.int8RowBudgetMb — pins <see cref="Int8ResidentRowChunk"/>'s byte budget instead of deriving it from free VRAM. 0 keeps the derived behaviour.</summary>
     private static long RowChunkBudgetOverrideBytes => EngineKnobs.Int8RowBudgetMb.Value << 20;
 
     private int Int8ResidentRowChunk(int m, int n, int k, int activationBytes)
@@ -611,7 +611,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         // across ~2,700 resident-int8 Linears — but caching it buys nothing, because this path is GPU-bound at
         // 99-100% SM and host queuing time never reaches the wall clock. See Int8GemmExecutor's remarks for the
         // interleaved 4-rep campaign that measured the same null on a 45k-call-per-step version of this idea.
-        // HARTSY_INT8_ROW_BUDGET_MB pins the budget. Deriving it from free VRAM makes the chunk count — and with it
+        // vram.int8RowBudgetMb pins the budget. Deriving it from free VRAM makes the chunk count — and with it
         // the launch count and the GEMM's M — a function of whatever else is transiently allocated, so any A/B that
         // changes device-memory pressure silently changes this too and stops being a controlled comparison.
         long budget = RowChunkBudgetOverrideBytes > 0 ? RowChunkBudgetOverrideBytes
@@ -923,7 +923,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Fused BF16/F16 decode GEMV for small-m (≤8) F32-activation matmuls; replaces cuBLAS GemmEx (slow at m=1). On by default.</summary>
     /// <remarks>Faster and at least as accurate as the cuBLAS BF16 path (activations stay F32). Set
-    /// <c>HARTSY_BF16_GEMV=0</c> to fall back to cuBLAS for A/B.</remarks>
+    /// <c>numerics.bf16Gemv=false</c> to fall back to cuBLAS for A/B.</remarks>
     public bool EnableBf16Gemv { get; set; } = EngineKnobs.Bf16Gemv.Value;
 
     /// <summary>Lazily-initialized tensor-core HGEMM launcher. Requires PTX directory and SM 8.0+.</summary>
@@ -953,13 +953,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         _context.EnsureCurrent();
     }
 
-    /// <summary>Native-F16 SageAttention policy; enabled by default and disabled with <c>HARTSY_SAGE_ATTN=0</c>.</summary>
+    /// <summary>Native-F16 SageAttention policy; enabled by default and disabled with <c>numerics.sageAttn=false</c>.</summary>
     private static bool UseSageAttn => EngineKnobs.SageAttn.Value;
 
     /// <summary>The explicit <c>=1</c> sense of the Sage switch, distinct from the default-ON <see cref="UseSageAttn"/>.</summary>
     private static bool SageExplicitlyEnabled => EngineKnobs.SageAttnExplicit.Value;
 
-    /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>HARTSY_LTX25_NA3D_TILED=0</c> falls back to the per-query one. Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
+    /// <summary>Query-tiled LTX-2.5 na3d kernel; <c>numerics.ltx25Na3dTiled=false</c> falls back to the per-query one. Changes numerics: the tiled path is an online softmax over the tile's union window, not one dense pass.</summary>
     private static bool UseLtx25Na3dTiled => EngineKnobs.Ltx25Na3dTiled.Value;
 
     /// <summary>True only when the caller explicitly accepts Sage's F32-to-F16 V-storage narrowing.</summary>
@@ -968,32 +968,32 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     internal static bool SageF32ValueNarrowingEnabled =>
         SageExplicitlyEnabled && EngineKnobs.SageUnsafeF32VNarrow.Value;
 
-    /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — PyTorch's default. Opt out: <c>HARTSY_NO_TF32=1</c>.</summary>
+    /// <summary>TF32 tensor-core math for F32-operand GEMMs on Ampere+ (SM ≥ 8.0) — PyTorch's default. Opt out: <c>numerics.noTf32=true</c>.</summary>
     /// <remarks>Plain-F32 GEMMs have no tensor-core path on consumer Ampere (a 3060 runs them at a fraction of
     /// tensor-core throughput), leaving F32 pipelines compute-bound far below the hardware. TF32 keeps F32 range
     /// with a 10-bit mantissa.</remarks>
     private readonly bool _allowTf32;
 
-    /// <summary>HARTSY_GEMM_F16=1: F16-mantissa (COMPUTE_32F_FAST_16F) tensor-core math for F32 GEMMs — faster than TF32 on Ada.</summary>
+    /// <summary>numerics.gemmF16=true: F16-mantissa (COMPUTE_32F_FAST_16F) tensor-core math for F32 GEMMs — faster than TF32 on Ada.</summary>
     /// <remarks>F32 accumulate is kept. Opt-in per parity-checked model (Oasis interactive DiT).</remarks>
     private readonly bool _gemmFast16;
 
-    /// <summary>HARTSY_SDPA_F16=1: force the F16 SDPA path on for ALL callers (not just allowF16 ones) — testing/override.</summary>
+    /// <summary>numerics.sdpaF16=true: force the F16 SDPA path on for ALL callers (not just allowF16 ones) — testing/override.</summary>
     private readonly bool _sdpaF16ForceOn;
-    /// <summary>HARTSY_SDPA_NO_F16=1: global kill-switch for the F16 SDPA path even when a caller passes allowF16.</summary>
+    /// <summary>numerics.sdpaNoF16=true: global kill-switch for the F16 SDPA path even when a caller passes allowF16.</summary>
     private readonly bool _sdpaF16Disabled;
     /// <summary>Routes MHA (D∈{64,128,256}, no mask or broadcastable F32 mask) through cuDNN's fused attention, not materialized cuBLAS.</summary>
-    /// <remarks>~34× on the Krea2 self-attention shape. Standard-profile default ON; HARTSY_SDPA_CUDNN=0 disables.
+    /// <remarks>~34× on the Krea2 self-attention shape. Standard-profile default ON; numerics.sdpaCudnn=false disables.
     /// Missing cuDNN or engine rejections fall back to the materialized paths automatically.</remarks>
     private readonly bool _sdpaCudnn;
 
     /// <summary>Routes F16/BF16 NCHW convolutions through cuDNN conv-forward engines instead of the im2col→cuBLAS GEMM path.</summary>
-    /// <remarks>Standard-profile default ON; HARTSY_CONV_CUDNN=0 disables. Failures self-disable for the session and fall back to im2col.</remarks>
+    /// <remarks>Standard-profile default ON; numerics.convCudnn=false disables. Failures self-disable for the session and fall back to im2col.</remarks>
     private readonly bool _convCudnn;
 
     /// <summary>Routes the audio 1D convs and transposed convs (vocoders/codecs/VITS) through cuDNN (mapped to 2D, H=1).</summary>
     /// <remarks>Includes causal/asymmetric pads via the graph API's separate PRE/POST padding attributes. Standard-profile
-    /// default ON; HARTSY_AUDIO_CONV_CUDNN=0 restores the direct kernels exactly. Failures self-disable for the session.</remarks>
+    /// default ON; numerics.audioConvCudnn=false restores the direct kernels exactly. Failures self-disable for the session.</remarks>
     private readonly bool _audioConvCudnn;
 
     /// <summary>Compute type for a GEMM whose operands resolved to <paramref name="gemmType"/>.</summary>
@@ -1002,7 +1002,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     private int Compute32F(int gemmType)
     {
         if (HighPrecisionGemm || gemmType != CublasApi.CUDA_R_32F) return CublasApi.CUBLAS_COMPUTE_32F;
-        // HARTSY_GEMM_F16=1: F16-mantissa tensor-core matmul with F32 storage+accumulate — ~2× TF32 on Ada for
+        // numerics.gemmF16=true: F16-mantissa tensor-core matmul with F32 storage+accumulate — ~2× TF32 on Ada for
         // GEMM-heavy small-DiT loops (Oasis). Safer than F16 SDPA (which Oasis already tolerates at corr>0.9999)
         // since accumulation stays F32; opt-in per model that has been parity-checked.
         if (_gemmFast16) return CublasApi.CUBLAS_COMPUTE_32F_FAST_16F;
@@ -1022,7 +1022,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         // data from in-progress H2D transfers. Fix: switch to cuMemcpyHtoDAsync on this stream.
         _stream = new CudaStream(nonBlocking: false);
         GC.SuppressFinalize(_stream);
-        // HARTSY_PROFILE_SYNC's per-op GPU-time attribution resolves ITS stream from the ambient backend State
+        // diagnostics.profileSync's per-op GPU-time attribution resolves ITS stream from the ambient backend State
         // (see NvtxRange.Dispose) — no registration needed here.
         // Upload stream is non-blocking so its in-flight work doesn't gate the compute
         // stream's NULL-stream "wait for everything" semantics — without that, prefetched
@@ -1034,7 +1034,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         _ptxDir = ptxDir;
         Device = DeviceKind.Cuda(deviceOrdinal);
 
-        // Keep freed activation buffers warm in the stream-ordered pool (HARTSY_MEMPOOL_KEEP, default on): a 0
+        // Keep freed activation buffers warm in the stream-ordered pool (vram.mempoolKeep, default on): a 0
         // release threshold returns every freed activation to the driver and re-acquires it on the next alloc,
         // stalling the compute stream (Krea2 1024² measured ~13 s of pure alloc/free round-trips). The threshold is
         // DEVICE state, so it is owned by the refcounted DeviceMempoolPolicy — the first backend on the device
@@ -1056,7 +1056,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         // cuBLASLt bias-epilogue GEMM: promoted to the standard profile 2026-07-09 — every biased Linear
         // otherwise pays a separate BiasAdd kernel + an output-sized HBM round-trip (~700/step on the SDXL
         // UNet, measured −0.16 s/gen). Falls back to GemmEx+BiasAdd when Lt is unavailable or shapes
-        // don't qualify; HARTSY_EPILOGUE_FUSION=0 is the kill-switch.
+        // don't qualify; numerics.epilogueFusion=false is the kill-switch.
         EnableEpilogueFusion = EngineKnobs.EpilogueFusion.Value;
         // dp4a int8-activation decode GEMV: promoted to the standard profile 2026-07-22 after the
         // full Q4_K/Q6_K/Q8_0 kernel set measured +13-27% end-to-end decode on both benchmark models
@@ -1212,7 +1212,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <remarks>Bounds the 512-ch 3×3 @1024² VAE conv (9.2 GB naive) so full-res decode fits next to resident model
     /// weights — 1 GB verified live for the Flux.2 VAE beside Ideogram 4's 18.6 GB resident DiTs (2 GB still OOM'd
     /// there); band size costs no GEMM efficiency (m stays ≥ tens of thousands of rows). Override via
-    /// HARTSY_IM2COL_BAND_MB (also lets tests force banding on small shapes).</remarks>
+    /// vram.im2colBandMb (also lets tests force banding on small shapes).</remarks>
     private static long Im2ColBandCapBytes => EngineKnobs.Im2colBandMb.Value << 20;
 
     #region Linear Algebra
@@ -1376,7 +1376,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         if (failures is not null) throw new AggregateException("One or more W8A8 cache buffers failed to release.", failures);
     }
 
-    /// <summary>Kill switch for the fused GEMM+dequant mma kernel (<c>HARTSY_INT8_FUSED_MMA=0</c>). ON by default: −10.5 ms/step end-to-end (4 interleaved reps, all pairs same-sign, paired t = 4.15). It only got there once <see cref="UseFusedMmaGemm"/> was narrowed to the shapes it actually wins on — wired in less carefully it measured +38.7 ms/step, and +6.9 with only a row floor.</summary>
+    /// <summary>Kill switch for the fused GEMM+dequant mma kernel (<c>numerics.int8FusedMma=false</c>). ON by default: −10.5 ms/step end-to-end (4 interleaved reps, all pairs same-sign, paired t = 4.15). It only got there once <see cref="UseFusedMmaGemm"/> was narrowed to the shapes it actually wins on — wired in less carefully it measured +38.7 ms/step, and +6.9 with only a row floor.</summary>
     internal static bool FusedMmaGemm => EngineKnobs.Int8FusedMma.Value;
 
     /// <summary>Rows below which the fused mma GEMM is not used. Its block tile is 128×256, so a few hundred rows is two M-blocks — a grid that covers a fraction of one wave across 128 SMs, where cuBLASLt's small-m heuristic wins outright. Every measured win is at m ≥ 1543 (ffn_up's smaller row chunk); everything below this floor — audio attention and FFN, the text-side k/v projections — was never measured and must not be assumed. Wiring the fused path in WITHOUT this floor cost +38.7 ms/step end-to-end while winning +5.2% on the three shapes the microbenchmark covered.</summary>
@@ -1396,10 +1396,10 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <para>Every bound exists because a per-shape microbenchmark is NOT evidence about the workload: this gate
     /// must admit only the regime actually measured, under conditions that resemble a real step. Re-measure
     /// end-to-end, not per shape, before widening it — and on a different card before trusting it there.</para></remarks>
-    /// <summary>Widens the N bound from <c>n &lt;= 2k</c> to <c>n &lt;= 4k</c> (<c>HARTSY_INT8_MMA_WIDE_GATE=1</c>), which admits ffn_up 4992×16384×4096 and nothing else at LTX-2.5's shapes; ffn_down stays excluded by the unchanged <c>k &lt;= 2n</c>. OFF by default and deliberately an env switch rather than an edit: ffn_up was −7.0% against cold L2 under the padded layout, so re-admitting it is a claim that the swizzle flipped that sign, and this file's rule is that such a claim is settled end-to-end, not per shape. An env arm is also the only way to A/B the gate without swapping the binary mid-campaign, which corrupts the whole run.</summary>
+    /// <summary>Widens the N bound from <c>n &lt;= 2k</c> to <c>n &lt;= 4k</c> (<c>numerics.int8MmaWideGate=true</c>), which admits ffn_up 4992×16384×4096 and nothing else at LTX-2.5's shapes; ffn_down stays excluded by the unchanged <c>k &lt;= 2n</c>. OFF by default and deliberately an env switch rather than an edit: ffn_up was −7.0% against cold L2 under the padded layout, so re-admitting it is a claim that the swizzle flipped that sign, and this file's rule is that such a claim is settled end-to-end, not per shape. An env arm is also the only way to A/B the gate without swapping the binary mid-campaign, which corrupts the whole run.</summary>
     private static bool WideMmaGate => EngineKnobs.Int8MmaWideGate.Value;
 
-    /// <summary>The f16-staged wide ConvRot+quant kernel, bit-identical to the rotate-then-quant pair it replaces. **OFF, and measured**: it cuts that pair's 7 bytes/element to 3, and at LTX-2.5's 1280x736x145f FFN-down (17480x16384, 96 calls/step) `Int8.Quant` still went 1557.7 -> 1607.8 ms over 3 steps, with the end-to-end A/B inside its own 19 ms spread. Staging a 16384-wide row costs 40 KB of shared, which is 2 blocks/SM against the split pair's simple high-occupancy streaming kernels — the traffic saving does not pay for the occupancy. Kept unit-pinned (<c>ConvRotFusedQuantTests</c>) as the record: recomputing the byte ratio is not evidence. <c>HARTSY_CONVROT_WIDE=1</c> re-enables.</summary>
+    /// <summary>The f16-staged wide ConvRot+quant kernel, bit-identical to the rotate-then-quant pair it replaces. **OFF, and measured**: it cuts that pair's 7 bytes/element to 3, and at LTX-2.5's 1280x736x145f FFN-down (17480x16384, 96 calls/step) `Int8.Quant` still went 1557.7 -> 1607.8 ms over 3 steps, with the end-to-end A/B inside its own 19 ms spread. Staging a 16384-wide row costs 40 KB of shared, which is 2 blocks/SM against the split pair's simple high-occupancy streaming kernels — the traffic saving does not pay for the occupancy. Kept unit-pinned (<c>ConvRotFusedQuantTests</c>) as the record: recomputing the byte ratio is not evidence. <c>numerics.convrotWide=true</c> re-enables.</summary>
     private static bool UseWideConvRotQuant => EngineKnobs.ConvrotWide.Value;
 
     private bool UseFusedMmaGemm(bool outF16, int rows, int n, int k) =>
@@ -1457,7 +1457,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 ulong inputChunk = pInput + (ulong)((long)firstRow * k * inputElementBytes);
                 ulong quantSource = inputChunk;
                 // Sub-scopes: "Linear" is FOUR kernels (rotate, quant, GEMM, dequant) and the whole-chain
-                // label cannot say which one costs. HARTSY_PROFILE_FINE only — thousands of pushes per step.
+                // label cannot say which one costs. diagnostics.profileFine only — thousands of pushes per step.
                 using (NvtxRange.PushFine("Int8.Quant"))
                 if (preGate.Logits != 0)
                 {
@@ -1548,7 +1548,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
         => LinearImpl(output, input, weight, bias, cacheWeightCast: true);
 
-    /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization (<c>HARTSY_LTX2_GATEFUSE=0</c>).</summary>
+    /// <summary>Kill switch for folding LTX-2's per-head gate into the activation quantization (<c>numerics.ltx2Gatefuse=false</c>).</summary>
     internal static bool FuseHeadGateIntoQuant => EngineKnobs.Ltx2Gatefuse.Value;
 
     /// <summary><c>Linear(gate(input))</c> where <c>gate</c> is LTX-2's per-head output scaling — folded into the activation's rotate+quant pass when the resident int8 chain can serve it, so the gate costs no traffic of its own. Falls back to the explicit gate-then-Linear pair, which mutates <paramref name="input"/> in place exactly as the caller's own sequence did.</summary>
@@ -1598,7 +1598,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         if (!fused) Gelu(output, output);
     }
 
-    /// <summary>Kill switch for grouped resident-int8 Linears (<c>HARTSY_GROUPED_LINEAR=0</c>). Also the seam the bit-identity test flips to run the grouped and per-op routes against one another on one backend.</summary>
+    /// <summary>Kill switch for grouped resident-int8 Linears (<c>numerics.groupedLinear=false</c>). Also the seam the bit-identity test flips to run the grouped and per-op routes against one another on one backend.</summary>
     internal static bool GroupedLinear => EngineKnobs.GroupedLinear.Value;
 
     /// <summary>Projections sharing one input, sharing one activation rotate+quant pass. Ops the resident int8 chain cannot serve — or that disagree on k or on the ConvRot group, since those decide the quantized bytes — fall out to an ordinary <see cref="Linear"/> each, so a mixed group is served, not refused.</summary>
@@ -1885,7 +1885,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             // the general GEMM costs nothing rather than needing an offset threaded through each launcher.
             if (!rowRange && m <= 8 && input.DType == DType.F32 && output.DType == DType.F32)
             {
-                // dp4a int8-activation paths (standard profile, kill-switch HARTSY_DP4A_ON=0): quantize the
+                // dp4a int8-activation paths (standard profile, kill-switch numerics.dp4aOn=false): quantize the
                 // activation to int8
                 // (Q8_1, per-32-block scale + int-sum) once per call, then run the GEMV as int8×int8 dot
                 // products via __dp4a (4 MACs/instruction) instead of per-element float dequant — the fused
@@ -2012,7 +2012,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 // Dense 16-bit-float weights (BF16/F16 checkpoints, e.g. Orpheus and most audio LMs). cuBLAS
                 // GemmEx is inefficient at m=1; the fused GEMV reads each weight row once with an F32 accumulate
                 // (activation stays F32 — at least as accurate as the cuBLAS BF16 cast). On by default; set
-                // HARTSY_BF16_GEMV=0 to fall back to cuBLAS.
+                // numerics.bf16Gemv=false to fall back to cuBLAS.
                 if (EnableBf16Gemv && _kernels!.HasFloatGemv && (weight.DType == DType.BF16 || weight.DType == DType.F16))
                 {
                     // The fused GEMV kernels take an F32 bias pointer. Checkpoints that keep their small
@@ -2127,7 +2127,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 return;
             }
 
-            // W8A8 IMMA path (HARTSY_W8A8=1, INFERENCE_ACCEL_GRIND §H5): large-m Linear with a 16-bit-float
+            // W8A8 IMMA path (numerics.w8a8=true, INFERENCE_ACCEL_GRIND §H5): large-m Linear with a 16-bit-float
             // (or F32) weight → per-channel int8 weight (host-quantized ONCE, persistent-cached with its
             // F32 wScale[n]) × per-row dynamic-int8 activation on the INT8 tensor cores, then the w8a8.ptx
             // dequant+bias epilogue. The Ampere lever: SM 8.6 has no fp8 MMA; measured chain 2.57× over the
@@ -2315,7 +2315,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             {
                 // Fused path: fold the bias into the cuBLASLt epilogue, saving a BiasAdd launch plus an
                 // output-sized HBM round-trip. Compute32F is the single precision-policy source for BOTH the
-                // fused and GemmEx paths: HighPrecisionGemm/HARTSY_NO_TF32/HARTSY_GEMM_F16 must not change
+                // fused and GemmEx paths: HighPrecisionGemm/numerics.noTf32/numerics.gemmF16 must not change
                 // semantics merely because this Linear has a bias. A missing Lt algorithm is an ordinary
                 // per-shape capability result, so TryRun returns false and the existing GemmEx+BiasAdd path runs.
                 if (EnableEpilogueFusion && bias is not null && !outNeedsCast)
@@ -2992,7 +2992,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Diagnostic counters for the prefill weight-cast paths (HARTSY_CAST_STATS=1 logs on read via <see cref="DumpCastStats"/>).</summary>
+    /// <summary>Diagnostic counters for the prefill weight-cast paths; <see cref="DumpCastStats"/> logs them when a caller asks.</summary>
     /// <remarks>transient-because-budget-gate, transient-because-uncached-path (QuantizedMatMul / non-preloaded), and newly-cached casts.</remarks>
     private static long _castTransientGated, _castTransientUncachedPath, _castCachedNew, _castWhyLogged;
 
@@ -6812,7 +6812,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         //     [totalHeads, Br, Skv] is materialized per tile, reusing the same TF32 tensor-core GEMMs + softmax kernel
         //     (numerically identical to the small-seq GEMM path, and ~10× faster than the online-softmax flash kernel
         //     which re-reads all K/V per query row).
-        //   • HARTSY_SDPA_FORCE_FLASH=1 forces the online-softmax flash kernel (O(1) score memory; validation/fallback).
+        //   • numerics.sdpaForceFlash=true forces the online-softmax flash kernel (O(1) score memory; validation/fallback).
         // Gated on the score matrix eating most of free VRAM so small/medium attention keeps the plain GEMM path;
         // masked (Matrix-Game block-causal) callers always keep the plain GEMM path.
         // cuDNN fused flash-attention for NATIVE F16 Q/K/V/output (the DiT F16-activation path): zero casts —
@@ -6823,7 +6823,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         // engine as a bias score-modifier; incompatible mask layouts fall through to the materialized path.
         // SageAttention F16-ingest (opt-in): native-F16 Q/K/V/out via the f16h prologues + f16io flash
         // kernel. Competes with the CAST-FREE cuDNN branch below, which Sage only beats at long seq —
-        // gate high (HARTSY_SAGE_F16_MIN_SKV, default 8192) until the crossover is measured per-arch.
+        // gate high (numerics.sageF16MinSkv, default 8192) until the crossover is measured per-arch.
         if (SageF16Preferred(query, key, value, output, mask, sq, skv, d))
         {
             SageAttentionInt8(output, query, key, value, scale);
@@ -6845,7 +6845,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             // transpose (LaunchSageVF16T). Any architecture whose |V| exceeds F16's 65504 therefore gets INF in
             // V, which softmax·V smears across every query row.
             //
-            // This path now requires HARTSY_SAGE_UNSAFE_F32_V_NARROW=1 in addition to HARTSY_SAGE_ATTN=1.
+            // This path now requires numerics.sageUnsafeF32VNarrow=true in addition to numerics.sageAttn=1.
             // allowF16 is not a V-range contract and therefore cannot make this narrowing safe.
             //
             // Diagnostic fingerprint, if a future model renders black/NaN: exactly ONE bad element per token in
@@ -6855,14 +6855,14 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             // SDPA and back after — exact, since attention is linear in V, and power-of-two so exponent-only.
             //
             // MiniMax-H3 was measured against this and is CLEAR: peak max|V| = 1201 (1.83% of 65504, a 55x margin)
-            // over a full 30-step generation, 1500 block-probes, zero non-finite (HARTSY_H3_VPROBE=1, 2026-08-08).
+            // over a full 30-step generation, 1500 block-probes, zero non-finite (diagnostics.h3Vprobe=true, 2026-08-08).
             // It grows with depth (81 at block 0 to ~1200 at block 48) but oscillates in a band across steps rather
             // than compounding like Lens did. Its documented ~2.7e6 residual never reaches V: norm1 precedes the
             // qkv projection, so V is a projection of a NORMALIZED tensor, not of the raw residual stream.
             // A model-agnostic fix belongs inside SageAttentionInt8, not here: a blanket V damp would push small
             // values toward F16 subnormals, so it needs its own range analysis.
             // ──────────────────────────────────────────────────────────────────────────────────────────────
-            // SageAttention preference (opt-in, HARTSY_SAGE_ATTN=1): for no-mask F32 calls the INT8 flash
+            // SageAttention preference (opt-in, numerics.sageAttn=true): for no-mask F32 calls the INT8 flash
             // path beats the cuDNN-F16-cast branch below at large seq (110.6 vs 130.4 ms at 16384²/D=128,
             // 2026-07-22 BDN A/B) — and unlike it, keeps F32-fidelity accumulation. Gate on Skv ≥ 2048:
             // below that the quant prologue outweighs the win (small-seq shapes measured 0.93× vs cuDNN).
@@ -6876,7 +6876,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 }
             }
 
-            // cuDNN fused flash-attention (HARTSY_SDPA_CUDNN): a single fused kernel — no materialized
+            // cuDNN fused flash-attention (numerics.sdpaCudnn): a single fused kernel — no materialized
             // [heads,Sq,Skv] score matrix — via cuDNN's runtime-compiled attention engine. ~34× over the
             // materialized cuBLAS path at Krea2 shape. MHA only, D∈{64,128}. Safe for RMS-normed-Q/K archs
             // (bounded scores) since we run fp16 I/O; callers gate the same way as the F16 path (allowF16).
@@ -6911,7 +6911,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             }
 
             // Fused FlashAttention-2 (TF32 tensor cores, F32 accum, no materialized score matrix). Opt-in while
-            // validating (HARTSY_SDPA_V2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
+            // validating (numerics.sdpaV2); MHA only (Hq==Hkv here — single B×H×S×D layout), D∈{64,128}.
             if (EngineKnobs.SdpaV2.Value
                 && FlashAttentionV2ContractSatisfied(output, query, key, value, mask, scale, _allowTf32))
             {
@@ -7008,7 +7008,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             else if (query.DType == DType.F32 && mask is null && (allowF16 || _sdpaF16ForceOn) && !_sdpaF16Disabled)
             {
                 // F16 speed path — enabled per-call via allowF16 (callers with bounded/normalized scores, e.g. Wan's
-                // RMS-normed Q/K) or globally via HARTSY_SDPA_F16; disabled globally via HARTSY_SDPA_NO_F16. NOT safe
+                // RMS-normed Q/K) or globally via numerics.sdpaF16; disabled globally via numerics.sdpaNoF16. NOT safe
                 // for unbounded-score archs (Z-Image fp8 → F16 overflow → black), which simply don't pass allowF16.
                 // The non-tiled SDPA cost is dominated by the
                 // [totalHeads, Sq, Skv] score matrix (Wan-1.3B self-attn: 12·4480²·4B ≈ 963 MB, written by QK then
@@ -7641,7 +7641,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>HARTSY_LTX2_SAGE_TOKENMAJOR=1 — let a token-major SDPA call detour through the permute pair into the head-major SageAttention path. Off by default; the measurement is at the call site.</summary>
+    /// <summary>numerics.ltx2SageTokenmajor=true — let a token-major SDPA call detour through the permute pair into the head-major SageAttention path. Off by default; the measurement is at the call site.</summary>
     private static bool SageTokenMajorDetour => EngineKnobs.Ltx2SageTokenmajor.Value;
 
     /// <summary>Whether the native-F16 SageAttention ingest should take this call instead of cuDNN's fp16 flash. Shared by the head-major and token-major entry points: the token-major layout has no Sage kernel, so above the crossover it is worth permuting into head-major rather than keeping the layout.</summary>
@@ -7659,7 +7659,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         return _kernels!.HasSageAttentionKernels && _kernels.HasSageV1;
     }
 
-    /// <summary>Min Skv (override: HARTSY_SAGE_F16_MIN_SKV) above which native-F16 SageAttention ingest is preferred over cuDNN.</summary>
+    /// <summary>Min Skv (override: numerics.sageF16MinSkv) above which native-F16 SageAttention ingest is preferred over cuDNN.</summary>
     // Measured: 1.11x at 8192, 1.15x at 12288, parity at 4096 (3060).
     private static int SageF16MinSkv() => EngineKnobs.SageF16MinSkv.Value;
 
@@ -7747,7 +7747,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <remarks>Never materializes the full <c>[totalHeads, Sq, Skv]</c> matrix (24×14040²×4B ≈ 19 GB). Each tile
     /// reuses the same TF32 tensor-core QK^T / softmax / scores·V ops as <see cref="ScaledDotProductAttention"/>, so
     /// results are numerically identical to the plain path. <c>Br</c> is sized to a quarter of free VRAM
-    /// (override: <c>HARTSY_SDPA_TILE</c>).</remarks>
+    /// (override: <c>numerics.sdpaTile</c>).</remarks>
     private unsafe void SdpaTiledF32(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
         Tensor? keyBias = null)
     {
@@ -7778,7 +7778,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
 
             // Query-tile height: fit [totalHeads, Br, Skv] into ~a quarter of free VRAM (leaves room for Q/K/V/out
-            // and the model weights). Env override HARTSY_SDPA_TILE forces a fixed Br (benchmarking).
+            // and the model weights). Env override numerics.sdpaTile forces a fixed Br (benchmarking).
             (nuint freeBytes, _) = _context.GetMemoryInfo();
             long perRow = totalHeads * skv * sizeof(float);            // bytes for one query row across all heads
             long Br = (long)((ulong)freeBytes / 4) / Math.Max(1, perRow);
@@ -8837,7 +8837,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             // F16 (10-bit mantissa) is more accurate than BF16 (7-bit) for the activation cast; BF16 is the default only
             // because SwiGLU MLPs can momentarily exceed F16's 65504. For GELU-FFN models (Wan) F16 is safe AND needed:
             // over a deep DiT (40 layers) + CFG, BF16's coarser mantissa lets a small per-step velocity bias compound
-            // into a diverging trajectory. HARTSY_FP8_F16 opts the fp8 path into F16.
+            // into a diverging trajectory. numerics.fp8F16 opts the fp8 path into F16.
             if (EnableFp8F32Gemm) return DType.F32;
             if (EnableFp8F16Gemm) return DType.F16;
             return (a == DType.F32 || b == DType.F32) ? DType.BF16 : DType.F16;
@@ -9107,7 +9107,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     {
         using OpScope _op = EnterOp();
         CudaDriverApi.cuStreamSynchronize(_stream.Handle).ThrowOnError();
-        // HARTSY_PROFILE_EACH=1: dump the accumulated per-op profile at each Sync (end of a generation) — the Swarm
+        // diagnostics.profileEach=true: dump the accumulated per-op profile at each Sync (end of a generation) — the Swarm
         // ShutdownServer path does not reliably dispose the backend, so this is the reliable per-gen dump hook.
         if (EngineKnobs.ProfileEach.Value)
             Profiling.NvtxRange.DumpProfile(EngineKnobs.ProfileOut.Value ?? "/tmp/hartsy_profile.txt");
@@ -10664,7 +10664,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             foreach (Tensor weight in weights)
             {
                 // Only weights this call actually uploaded are rollback candidates — one already resident from
-                // an earlier phase (or from HARTSY_KEEP_MODELS) is not ours to free. PreloadWeight reports this
+                // an earlier phase (or from vram.keepModels) is not ours to free. PreloadWeight reports this
                 // itself so ownership is decided by the same lookup that does the registration.
                 if (GpuTransferHelper.PreloadWeight(weight))
                 {

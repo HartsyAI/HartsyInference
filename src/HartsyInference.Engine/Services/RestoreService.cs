@@ -146,7 +146,7 @@ public sealed class RestoreService : IRestoreService
             dit.LoadWeights(ditWeights);
             _dit = dit;
             // BF16 VAE activations on CUDA (reference precision): halves the fp32 activation peak that
-            // OOMs 24 GB at 720p-area. HARTSY_SEEDVR2_VAE_F32=1 is the kill-switch back to full precision.
+            // OOMs 24 GB at 720p-area. numerics.seedvr2VaeF32=true is the kill-switch back to full precision.
             // The question is whether the backend computes in BF16, which is what the capability says. Keying on
             // the device kind meant a backend that gained BF16 would keep paying the fp32 activation peak.
             bool vaeBf16 = _engine.Backend.Capabilities.SupportsBF16

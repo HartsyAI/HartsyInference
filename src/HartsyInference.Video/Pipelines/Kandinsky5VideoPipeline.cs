@@ -227,7 +227,7 @@ public sealed unsafe class Kandinsky5VideoPipeline : DiffusionPipelineBase
                     {
                         if (useCfg)
                         {
-                            // Paired forward: cond+uncond, captured as one CUDA graph under HARTSY_DIT_GRAPH (both
+                            // Paired forward: cond+uncond, captured as one CUDA graph under numerics.ditGraph (both
                             // passes share the packed latent's patch-embed), else two eager forwards. Same numerics
                             // either way, and both branches return fresh caller-owned velocities.
                             (Tensor cond, Tensor uncond) = _transformer.ForwardVideoPaired(Backend, packed, stepT,

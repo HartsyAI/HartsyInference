@@ -26,7 +26,7 @@ public sealed class BooguImagePipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly BooguImageConfig _config;
 
-    /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): the ~10 GB fp8 transformer stays GPU-resident across generations. The caller (loader) owns the Qwen3-VL TE staging — it must evict the resident DiT via <see cref="EvictResidentWeights"/> before an encode that needs the VRAM.</summary>
+    /// <summary>Standard-profile DiT residency (vram.keepModels, default ON): the ~10 GB fp8 transformer stays GPU-resident across generations. The caller (loader) owns the Qwen3-VL TE staging — it must evict the resident DiT via <see cref="EvictResidentWeights"/> before an encode that needs the VRAM.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 

@@ -30,7 +30,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly float _vaeScalingFactor;
 
-    /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS): UNet weights stay GPU-resident across generations, skipping the per-generation free + ~2 s re-upload. SDXL's UNet (2.5 GB F16) + BF16 VAE + dual CLIP fit 24 GB together, so no evict-for-TE dance is needed.</summary>
+    /// <summary>Standard-profile residency (vram.keepModels): UNet weights stay GPU-resident across generations, skipping the per-generation free + ~2 s re-upload. SDXL's UNet (2.5 GB F16) + BF16 VAE + dual CLIP fit 24 GB together, so no evict-for-TE dance is needed.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _unetResident;
 
@@ -276,7 +276,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // 5. Denoise loop (both paths run the same loop from their respective startStep)
         // Bulk-upload UNet weights before the denoise loop. SDXL UNet is ~2.5 GB at F16 —
         // without preload the first step would pay cache-miss overhead for every parameter.
-        // Under HARTSY_KEEP_MODELS the weights stay resident across generations and the
+        // Under vram.keepModels the weights stay resident across generations and the
         // preload is skipped. No-op on backends without a weight cache.
         Stopwatch preloadSw = Stopwatch.StartNew();
         if (!_unetResident)
@@ -377,7 +377,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             clipGForRefiner.Dispose();
         }
 
-        // 6. VAE decode. Under HARTSY_KEEP_MODELS the UNet stays resident (2.5 GB F16 beside the
+        // 6. VAE decode. Under vram.keepModels the UNet stays resident (2.5 GB F16 beside the
         // VAE's banded-conv workspace fits 24 GB with ~14 GB headroom — measured peak 10.2 GB);
         // otherwise free it to reclaim VRAM for the high-res VAE conv2d buffers. CLIP-L/CLIP-G were
         // already released at the end of the text-encode phase above.

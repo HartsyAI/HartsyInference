@@ -41,7 +41,7 @@ internal sealed unsafe class AceStep15Attention
     // loops D2H-synced every intermediate around every GEMM). Head split = declaring Q/K/V directly as [1, S, H, D]
     // (byte-identical to [1, S, H·D]) so RmsNorm normalizes over headDim with no reshape; RoPE runs on that
     // pre-permute layout via ApplyRopeSingle (broadcast over heads → GQA-correct per tensor); then Permute0213 to
-    // [1, H, S, D] for SDPA. Activation dtype follows the input (F16 on the HARTSY_DIT_F16 path; norm/rope tables
+    // [1, H, S, D] for SDPA. Activation dtype follows the input (F16 on the numerics.ditF16 path; norm/rope tables
     // stay F32). Q and K carry per-head RMSNorm, so pre-softmax scores are bounded and the F16 SDPA path is safe.
     public Tensor Forward(IBackend backend, Tensor x, Tensor? crossKv, float[]? ropeCos, float[]? ropeSin, Tensor? mask)
     {

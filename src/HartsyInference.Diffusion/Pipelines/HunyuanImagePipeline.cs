@@ -37,7 +37,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
     private readonly HunyuanImageVaeDecoder? _hyVaeDecoder;
     private readonly HunyuanImageConfig _config;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The 7B Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both (the QwenImagePipeline staging pattern). Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The 7B Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both (the QwenImagePipeline staging pattern). Standard-profile default ON (vram.keepModels=false disables).</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
@@ -360,7 +360,7 @@ public sealed unsafe class HunyuanImagePipeline : DiffusionPipelineBase
             foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
             // The resident-vs-streamed decision — including the already-resident short-circuit that stops warm
             // generations oscillating resident→streaming→resident — belongs to VramPlanner, so every pipeline
-            // decides identically and HARTSY_LOWVRAM can override it. The reserve estimate above stays here:
+            // decides identically and vram.lowVram can override it. The reserve estimate above stays here:
             // it is genuinely per-architecture, unlike the decision.
             VramPlanner planner = new VramPlanner(Backend.StreamingCache, "HunyuanImage", Backend);
             // Forced streaming has to displace a warm DiT before the planner measures, or the already-resident

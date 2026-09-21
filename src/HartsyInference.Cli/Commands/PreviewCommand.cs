@@ -36,7 +36,7 @@ public sealed class PreviewCommand : Command<PreviewCommand.Settings>
         (byte[] rgb, int width, int height) = ImageIo.DecodeFile(settings.Image);
         if (!TerminalImage.IsSupported)
         {
-            AnsiConsole.MarkupLine("[yellow]Inline preview unavailable[/] [#9aa4af](stdout is redirected, NO_COLOR, or HARTSY_NO_IMAGE=1).[/]");
+            AnsiConsole.MarkupLine("[yellow]Inline preview unavailable[/] [#9aa4af](stdout is redirected, NO_COLOR, or diagnostics.noImage=true).[/]");
             AnsiConsole.MarkupLine($"[#9aa4af]{width}x{height} · {Markup.Escape(Path.GetFileName(settings.Image))}[/]");
             return 0;
         }

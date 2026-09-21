@@ -68,7 +68,7 @@ public sealed unsafe class Hunyuan3DShapeVae
             throw new ArgumentException($"latent must be [1,N,C]; got {latent.Shape}.", nameof(latent));
         // Larger chunks = fewer per-chunk host stream-drains (the occ.DataPointer readback). The old 4096 bound the
         // MATERIALIZED cross-attn scores buffer, but the geo-decoder SDPA runs cuDNN fused-flash (allowF16), so no
-        // scores materialize — the chunk is bounded only by activation memory. HARTSY_HY3D_VAE_CHUNK overrides.
+        // scores materialize — the chunk is bounded only by activation memory. vram.hy3dVaeChunk overrides.
         if (EngineKnobs.Hy3dVaeChunk.Value is int envChunk && envChunk > 0)
             chunkSize = envChunk;
 

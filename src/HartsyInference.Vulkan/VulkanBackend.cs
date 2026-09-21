@@ -3503,7 +3503,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         DispatchElementwise(7u, output, input, null, scalar: 0, minVal: min, maxVal: max);
     }
 
-    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): no <c>VulkanBackend</c> override existed, so every call fell through to <c>IBackend</c>'s CPU-loop default — found capture-illegal via a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run (<c>DiTUtils.Modulate</c>'s <c>AddScalar(scale, +1)</c>, called TWICE per block × 28 blocks per forward pass — the (1+scale) modulation convention every DiT block uses) and, independent of graph mode, a D2H sync 56 times per denoise step regardless.</summary>
+    /// <summary>Regression gate for a real Krea2-on-Vulkan bug (2026-07-30): no <c>VulkanBackend</c> override existed, so every call fell through to <c>IBackend</c>'s CPU-loop default — found capture-illegal via a real <c>numerics.ditGraph=true</c> Krea2 run (<c>DiTUtils.Modulate</c>'s <c>AddScalar(scale, +1)</c>, called TWICE per block × 28 blocks per forward pass — the (1+scale) modulation convention every DiT block uses) and, independent of graph mode, a D2H sync 56 times per denoise step regardless.</summary>
     public void AddScalar(Tensor output, Tensor input, float scalar)
     {
         using OpScope _op = EnterOp();
@@ -3691,7 +3691,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
     #region Shape ops
 
-    /// <summary>Device-resident concat along <paramref name="dim"/>: one <c>vkCmdCopyBuffer</c> (multi-region when <c>dim</c> isn't the leading axis) per input, straight into <paramref name="output"/>'s buffer at the right byte offset — no compute shader needed, concatenation with contiguous inner strides is pure data movement. Overrides <c>IBackend</c>'s CPU-loop default (found capture-illegal via a real <c>HARTSY_DIT_GRAPH=1</c> Krea2 run: `ForwardCore`'s `Concat(joint, [txt, img], dim: 1)` — the text+image sequence join every DiT forward pass — read both inputs' <c>DataPointer</c> directly, which is capture-illegal and, outside capture, forced a D2H sync on every forward regardless of graph mode). Capture-aware, matching <see cref="CopyInto"/>'s pattern.</summary>
+    /// <summary>Device-resident concat along <paramref name="dim"/>: one <c>vkCmdCopyBuffer</c> (multi-region when <c>dim</c> isn't the leading axis) per input, straight into <paramref name="output"/>'s buffer at the right byte offset — no compute shader needed, concatenation with contiguous inner strides is pure data movement. Overrides <c>IBackend</c>'s CPU-loop default (found capture-illegal via a real <c>numerics.ditGraph=true</c> Krea2 run: `ForwardCore`'s `Concat(joint, [txt, img], dim: 1)` — the text+image sequence join every DiT forward pass — read both inputs' <c>DataPointer</c> directly, which is capture-illegal and, outside capture, forced a D2H sync on every forward regardless of graph mode). Capture-aware, matching <see cref="CopyInto"/>'s pattern.</summary>
     public unsafe void Concat(Tensor output, ReadOnlySpan<Tensor> inputs, int dim)
     {
         using OpScope _op = EnterOp();
@@ -4248,7 +4248,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         Buffer.MemoryCopy(source.DataPointer, destination.DataPointer, hostByteCount, hostByteCount);
     }
 
-    /// <summary>In-place flow-match Euler step with the CFG combine folded in: <c>z += (guidance·pos + (1-guidance)·neg)·delta</c>. Overrides <c>IBackend</c>'s CPU-loop default (mirrors <c>CudaBackend.CfgEulerStep</c>) — the default reads/writes <c>z.DataPointer</c> directly, which for a GPU-resident z (Krea2's fixed per-step latent, <c>_latentFixed</c>) forces a full D2H sync + evicts it from the activation cache every step: a real, previously-undiscovered perf cost on every Krea2 Vulkan generation (not just step-graph mode — this call happens once per denoise step regardless), and the exact bug that broke step-graph capture (found via a genuine `HARTSY_DIT_GRAPH=1` Krea2 run: capture failed with a cache-miss on the patchified latent, because THIS default eviction between steps left it uncached by the time the next capture attempt read it).</summary>
+    /// <summary>In-place flow-match Euler step with the CFG combine folded in: <c>z += (guidance·pos + (1-guidance)·neg)·delta</c>. Overrides <c>IBackend</c>'s CPU-loop default (mirrors <c>CudaBackend.CfgEulerStep</c>) — the default reads/writes <c>z.DataPointer</c> directly, which for a GPU-resident z (Krea2's fixed per-step latent, <c>_latentFixed</c>) forces a full D2H sync + evicts it from the activation cache every step: a real, previously-undiscovered perf cost on every Krea2 Vulkan generation (not just step-graph mode — this call happens once per denoise step regardless), and the exact bug that broke step-graph capture (found via a genuine `numerics.ditGraph=true` Krea2 run: capture failed with a cache-miss on the patchified latent, because THIS default eviction between steps left it uncached by the time the next capture attempt read it).</summary>
     public unsafe void CfgEulerStep(Tensor z, Tensor pos, Tensor neg, float guidance, float delta)
     {
         using OpScope _op = EnterOp();

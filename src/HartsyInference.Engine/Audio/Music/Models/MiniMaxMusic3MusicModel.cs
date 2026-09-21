@@ -114,7 +114,7 @@ internal static class MiniMaxMusic3MusicModel
 
         IReadOnlyDictionary<string, Tensor> preparedLanguage =
             MiniMaxMusic3WeightPolicy.PrepareLanguageModel(languageWeights, repo, quant, out IDisposable? quantCache);
-        // HARTSY_MM3_DEPTH_QUANT=0 leaves the depth decoder at checkpoint precision, so its share of the
+        // numerics.mm3DepthQuant=false leaves the depth decoder at checkpoint precision, so its share of the
         // autoregressive stage can be measured independently of the language model's.
         string? depthQuant = EngineKnobs.Mm3DepthQuant.Value ? quant : null;
         IReadOnlyDictionary<string, Tensor> preparedDepth =

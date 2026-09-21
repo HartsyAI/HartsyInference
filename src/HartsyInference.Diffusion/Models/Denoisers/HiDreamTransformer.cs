@@ -31,7 +31,7 @@ public sealed unsafe class HiDreamTransformer : IDisposable
     }
     private int _disposed;
 
-    // Diagnostic (HARTSY_HIDREAM_PROBE=1): per-block absmax/rms of the residual streams — forces a host
+    // Diagnostic (diagnostics.hidreamProbe=true): per-block absmax/rms of the residual streams — forces a host
     // sync per probe, first forward only. Used to decide F16-activation viability (needs absmax << 65k).
     private static bool StreamProbe => EngineKnobs.HidreamProbe.Value;
     private static bool _probedOnce;

@@ -222,7 +222,7 @@ public sealed unsafe class ChromaRadianceNerfHead : IDisposable
         if (paramDim != 3 * chunk)
             throw new ArgumentException($"param_generator out dim {paramDim} != 3·{nh}·{inner}; NeRF head dims inconsistent.");
 
-        // F16 hot path (HARTSY_DIT_F16): run the per-pixel GLU stream + the batched hypernetwork matmuls (the
+        // F16 hot path (numerics.ditF16): run the per-pixel GLU stream + the batched hypernetwork matmuls (the
         // profiled ~1.6 s BatchedMatMul + the norm/silu/add HBM) in F16. The `param_generator` GEMM and its
         // L2-normalize stay F32: imgTokens arrive at ResidualDamp scale and the param_generator GEMM alpha
         // UN-DAMPS them to FULL scale, which can exceed F16's 65504 BEFORE the normalize clamps it — F32 there

@@ -406,10 +406,10 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Per-tensor H2D upload bookkeeping for weight auto-promotion.</summary>
     internal sealed class UploadState { public int Count; public bool Promoted; public bool Blocked; }
 
-    /// <summary>Auto-promotion kill switch: set <c>HARTSY_NO_AUTOPROMOTE=1</c> to reproduce the old always-re-upload behavior (A/B benchmarking, or if a pipeline mutates host weight data through a stashed raw pointer that bypasses <c>DataPointer</c>/<c>AsSpan</c> and so can't be seen by the demote-on-host-access hook).</summary>
+    /// <summary>Auto-promotion kill switch: set <c>vram.noAutopromote=true</c> to reproduce the old always-re-upload behavior (A/B benchmarking, or if a pipeline mutates host weight data through a stashed raw pointer that bypasses <c>DataPointer</c>/<c>AsSpan</c> and so can't be seen by the demote-on-host-access hook).</summary>
     public static bool AutoPromoteWeights => !EngineKnobs.NoAutopromote.Value;
 
-    /// <summary>Free-VRAM floor preserved by auto-promotion (activations, transients, cuBLAS workspaces need room). A promotion that would dip below this floor is skipped and the tensor streams as before. Override via <c>HARTSY_AUTOPROMOTE_HEADROOM_MB</c>.</summary>
+    /// <summary>Free-VRAM floor preserved by auto-promotion (activations, transients, cuBLAS workspaces need room). A promotion that would dip below this floor is skipped and the tensor streams as before. Override via <c>vram.autopromoteHeadroomMb</c>.</summary>
     private static long _autoPromoteHeadroomBytes => EngineKnobs.AutopromoteHeadroomMb.Value << 20;
 
     /// <summary>Tensors below this size are never auto-promoted: small hot tensors are cheap to re-upload and are the most likely to be mutated scratch buffers.</summary>
@@ -434,7 +434,7 @@ internal static unsafe class GpuTransferHelper
     /// <summary>Context handles already warned about ambiguous ambient-less resolution.</summary>
     private static readonly ConcurrentDictionary<nint, bool> _ambiguityWarned = new();
 
-    /// <summary>Debug tripwire (HARTSY_ASSERT_AMBIENT=1): throw instead of falling back when an ambient-less call happens while multiple backends are live — catches op entry points the EnterOp transform missed.</summary>
+    /// <summary>Debug tripwire (diagnostics.assertAmbient=true): throw instead of falling back when an ambient-less call happens while multiple backends are live — catches op entry points the EnterOp transform missed.</summary>
     private static bool _assertAmbient => EngineKnobs.AssertAmbient.Value;
 
     /// <summary>Fallback state for calls made before any backend registers (unit tests exercising pure helpers). Its stream is 0 and context null, so every code path degrades to the safe no-op branch.</summary>
@@ -571,7 +571,7 @@ internal static unsafe class GpuTransferHelper
         {
             throw new InvalidOperationException(
                 "GpuTransferHelper.Resolve: no ambient State with multiple backends registered — an op entry point "
-                + "missed the EnterOp transform (HARTSY_ASSERT_AMBIENT=1).");
+                + "missed the EnterOp transform (diagnostics.assertAmbient=true).");
         }
         if (CudaDriverApi.cuCtxGetCurrent(out nint current) == 0
             && _byContext.TryGetValue(current, out State? state) && IsResolvable(state))
@@ -638,7 +638,7 @@ internal static unsafe class GpuTransferHelper
         // this OOM needs (each backend frees onto its own stream). Draining a sibling touches only its streams
         // and the shared device pool, never its caches — but CudaStreamingWeightCache.Enter() rebinds the
         // THREAD AMBIENT to the sibling's State as a side effect (same-device backends share a primary context,
-        // so context identity can't route these calls). Under HARTSY_SAME_GPU_CONCURRENT=1 the sibling is NOT
+        // so context identity can't route these calls). Under vram.sameGpuConcurrent=true the sibling is NOT
         // guaranteed quiescent — that "it cannot stall its in-flight work" assumption only ever held behind
         // DeviceGate — so a sibling stream/pool call here CAN throw (e.g. the sibling tears down concurrently,
         // or a transient driver error). A throw here used to skip the ambient restore below, leaving this
@@ -687,7 +687,7 @@ internal static unsafe class GpuTransferHelper
         TrimPool();
     }
 
-    // Diagnostic: HARTSY_H2D_TRACE=1 logs the first cache misses with shape/dtype so a re-uploaded weight set is
+    // Diagnostic: diagnostics.h2dTrace=true logs the first cache misses with shape/dtype so a re-uploaded weight set is
     // distinguishable from ordinary activation traffic. Small misses are logged too — a DiT that re-uploads a
     // handful of tiny per-channel vectors every block hides thousands of them per step behind a trace that only
     // showed the megabyte-scale ones.
@@ -732,7 +732,7 @@ internal static unsafe class GpuTransferHelper
             {
                 s.ArenaOverflowLogged = true;
                 Logs.Warning($"[Cuda] graph-capture arena exhausted ({(long)s.ArenaCapacity >> 20} MB) — " +
-                    "remaining capture allocations fall back to pool nodes (set HARTSY_GRAPH_ARENA_MB higher).");
+                    "remaining capture allocations fall back to pool nodes (set vram.graphArenaMb higher).");
             }
         }
         return CudaMemory.Allocate(byteSize);
@@ -848,7 +848,7 @@ internal static unsafe class GpuTransferHelper
     /// <remarks>Called at the start of each op, so every previous op's <c>finally</c> has already run and anything
     /// still parked provably has no owner. Sweeping here rather than inside CacheActivation is what keeps the
     /// in-place case (where the displaced buffer is the op's own input) from being double-freed.</remarks>
-    /// <summary><c>HARTSY_ORPHAN_SWEEP=0</c> restores the pre-fix behaviour (displaced buffers leak) — a bisect handle for a change that sits on every op's allocation path.</summary>
+    /// <summary><c>vram.orphanSweep=false</c> restores the pre-fix behaviour (displaced buffers leak) — a bisect handle for a change that sits on every op's allocation path.</summary>
     private static bool OrphanSweepEnabled => EngineKnobs.OrphanSweep.Value;
 
 
