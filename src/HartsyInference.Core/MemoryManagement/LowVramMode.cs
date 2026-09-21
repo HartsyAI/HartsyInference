@@ -52,15 +52,15 @@ public static class LowVramPolicy
         => VramPolicyResolver.ToLegacyMode(VramPolicyRegistry.Resolve(backend));
 
     /// <summary>The current mode: unset/unrecognized → <see cref="LowVramMode.Auto"/>; <c>1</c>/<c>on</c>/<c>true</c> → <see cref="LowVramMode.ForceOn"/>; <c>0</c>/<c>off</c>/<c>false</c> → <see cref="LowVramMode.ForceOff"/>.</summary>
-    /// <remarks>Deliberately re-read every call rather than cached. A host may set the variable after the process has
+    /// <remarks>Deliberately re-read every call rather than cached. A host may set the setting after the process has
     /// already resolved it once — the SwarmUI backend writes it during backend init, which can land after an earlier
     /// backend or a warm-up generation has run — and a cached first answer would silently ignore that, making the
-    /// setting appear to do nothing. This is read once per generation phase (not per step), so an environment lookup
-    /// is free relative to the weight uploads it governs. Only the log line is de-duplicated.</remarks>
-    public static LowVramMode Resolve() => ResolveEnvironment();
+    /// setting appear to do nothing. This is read once per generation phase (not per step), so resolving it is free
+    /// relative to the weight uploads it governs. Only the log line is de-duplicated.</remarks>
+    public static LowVramMode Resolve() => ResolveProcessWide();
 
-    /// <summary>The environment variable's mode, ignoring any per-backend policy. <see cref="VramPolicyRegistry"/> calls this for its fallback, so it must never route back through <see cref="Resolve(IBackend?)"/>.</summary>
-    public static LowVramMode ResolveEnvironment()
+    /// <summary>The process-wide setting's mode, ignoring any per-backend policy. <see cref="VramPolicyRegistry"/> calls this for its fallback, so it must never route back through <see cref="Resolve(IBackend?)"/>.</summary>
+    public static LowVramMode ResolveProcessWide()
     {
         string? value = EngineKnobs.LowVram.Value;
         return Parse(value, ShouldLog(value));

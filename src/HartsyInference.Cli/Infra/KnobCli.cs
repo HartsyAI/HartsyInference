@@ -3,7 +3,7 @@ using Spectre.Console;
 
 namespace HartsyInference.Cli.Infra;
 
-/// <summary>Turns <c>--profile</c> / <c>--set</c> into a <see cref="KnobProfile"/>, and prints <c>--list-settings</c>.</summary>
+/// <summary>Turns <c>--profile</c> / <c>--set</c> into a <see cref="KnobProfile"/>, and backs <c>hartsy settings list</c>.</summary>
 /// <remarks>Settings are applied as a scoped profile rather than by exporting environment variables, so one run's
 /// overrides cannot leak into another process or outlive the command.</remarks>
 public static class KnobCli
@@ -34,7 +34,7 @@ public static class KnobCli
             string value = entry[(eq + 1)..];
             if (!profile.TrySet(id, value, out KnobProfile updated, out string? error))
             {
-                throw new ArgumentException($"{error} Run --list-settings to see valid ids.");
+                throw new ArgumentException($"{error} Run 'hartsy settings list' to see valid ids.");
             }
             profile = updated;
         }
@@ -53,13 +53,7 @@ public static class KnobCli
             return (null, "unknown");
         }
         object? value = KnobRegistry.ValueOf(knob);
-        object? declared = KnobRegistry.Describe(knob).Default;
-        string source = KnobStore.SourceOf(id);
-        if (source == "default" && !Equals(value, declared))
-        {
-            source = "host";
-        }
-        return (value, source);
+        return (value, KnobStore.SourceOf(id));
     }
 
     /// <summary>Prints every declared setting grouped by domain.</summary>

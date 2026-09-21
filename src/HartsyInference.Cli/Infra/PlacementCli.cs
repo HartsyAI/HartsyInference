@@ -42,16 +42,12 @@ public class PlacementCliSettings : CommandSettings
     public string? Parallel { get; init; }
 
     [CommandOption("--set")]
-    [Description("Override an engine setting for this run: --set numerics.sageAttn=0. Repeatable. Beats the machine's configuration. See --list-settings.")]
+    [Description("Override an engine setting for this run: --set numerics.sageAttn=0. Repeatable. Beats the machine's configuration. See 'hartsy settings list'.")]
     public string[]? Settings { get; init; }
 
     [CommandOption("--profile")]
     [Description("Apply a named settings profile before any --set. 'reference' disables every approximation and fast path for parity work; 'default' is a no-op.")]
     public string? Profile { get; init; }
-
-    [CommandOption("--list-settings")]
-    [Description("Print every engine setting with its type, default and scope, then exit.")]
-    public bool ListSettings { get; init; }
 }
 
 /// <summary>Builds the engine placement from CLI options with the same eager validation the extension does, so a bad ordinal fails at startup rather than mid-generation.</summary>

@@ -231,7 +231,7 @@ public static class KnobFile
     {
         object? knob = KnobRegistry.Find(entry.Name)
             ?? throw new InvalidOperationException(
-                $"Engine settings file '{origin}' sets unknown setting '{entry.Name}'. Run the CLI with --list-settings.");
+                $"Engine settings file '{origin}' sets unknown setting '{entry.Name}'. Run 'hartsy settings list'.");
         Type declared = knob.GetType().GetGenericArguments()[0];
         Type t = Nullable.GetUnderlyingType(declared) ?? declared;
         object? value = entry.Value.ValueKind switch
