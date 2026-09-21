@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HartsyInference.Engine.Services;
 using Spectre.Console;
 
@@ -10,6 +11,7 @@ public sealed class ConsoleStepProgress : IProgress<StepPreview>
 {
     private readonly string _label;
     private readonly string? _previewOutput;
+    private long _previousTick;
     private bool _wrote;
 
     /// <summary>Creates a counter labelled <paramref name="label"/> (e.g. "denoise", "mesh", "rollout").</summary>
@@ -24,8 +26,12 @@ public sealed class ConsoleStepProgress : IProgress<StepPreview>
     /// <inheritdoc/>
     public void Report(StepPreview value)
     {
+        long now = Stopwatch.GetTimestamp();
+        // Interval since the previous tick, so a benchmark harness can read per-step cost off the log.
+        string step = _previousTick == 0 ? "" : $" {Stopwatch.GetElapsedTime(_previousTick, now).TotalMilliseconds:F0} ms";
+        _previousTick = now;
         string counter = value.TotalSteps > 0 ? $"{value.Step}/{value.TotalSteps}" : value.Step.ToString();
-        string line = $"  {_label} [{counter}]";
+        string line = $"  {_label} [{counter}]{step}";
         int width = Console.IsOutputRedirected ? line.Length : Math.Min(Console.WindowWidth - 1, 120);
         Console.Write("\r" + line.PadRight(Math.Max(width, line.Length)));
         _wrote = true;
@@ -40,6 +46,8 @@ public sealed class ConsoleStepProgress : IProgress<StepPreview>
             AnsiConsole.WriteLine();
             _wrote = false;
         }
+
+        _previousTick = 0;
     }
 
     /// <summary>Writes an opt-in preview snapshot for terminals that cannot display pixels inline.</summary>

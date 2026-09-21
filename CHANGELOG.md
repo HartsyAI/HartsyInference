@@ -6,6 +6,45 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.152
+
+- **Community benchmark runs now attest the GPU and sample it while they run.** `EnvironmentRecord.PowerProfile`
+  was a cohort-key component that nothing ever assigned — it was the literal `"unreported"` on every campaign —
+  so a card power-limited to 300 W pooled with a stock 450 W one and their medians were averaged together. The
+  controller now reads the device's power limit, clock caps, persistence and ECC mode from `nvidia-smi` before
+  the budget starts and makes that the cohort profile.
+- **A campaign refuses to start on a GPU another process is already using.** Nothing checked before, and the
+  protocol notes conceded as much ("background utilization is currently operator-controlled and unverified").
+  `run` names the offending PIDs and their VRAM and stops before producing anything; `--allow-shared-device`
+  records the sharing and proceeds. `doctor` reports the same two things without running a workload.
+- **Per-request GPU telemetry replaces the two dead memory fields.** Each worker session runs one long-lived
+  `nvidia-smi -lms` child and stores aggregates per measured request: peak device VRAM, utilization, power,
+  temperature, clocks, sample coverage, and throttle-reason counts. `Measurement.SampledUsedDeviceBytes` and
+  `MemorySource`, which the validator previously *required* to be absent, are gone in favour of a
+  `DeviceTelemetry` record. Only aggregates ship, because `Bundle.Export` whitelists what leaves the machine.
+- **A thermally or hardware-throttled session is retained but never published.** The limit is frozen in the
+  suite manifest (`maxThrottledSampleFraction`), the worker marks the session `throttled`, and the validator
+  re-derives the same fraction so a session cannot publish by claiming otherwise. `gpu_idle` is not counted as
+  a throttle — an idle card reports it continuously — and neither is a software power cap, which is what a
+  stock card under sustained load looks like.
+- **A device `nvidia-smi` cannot describe stays publishable, in its own cohort.** Its profile records as
+  `unattested`, so it never pools with attested runs and the explorer marks it. Vulkan and CPU campaigns record
+  no telemetry and are not disqualified for its absence.
+- **Binding is by GPU UUID, never by ordinal.** CUDA enumerates fastest-first, so on a two-card host
+  `cuda:0` is nvidia-smi's index 1. The controller matches a device by hashing each `nvidia-smi` UUID with the
+  recipe that produced `DeviceRecord.Identity`, which keeps the raw UUID out of the exported record, and
+  refuses rather than guessing when nothing matches. NVML is deliberately not used: its process-list entry
+  point is struct-size versioned and its throttle reasons are header constants, while `nvidia-smi` names both
+  as CSV columns readable with no toolkit installed.
+- **The explorer shows peak VRAM, peak power, and ms/step for image cases**, and marks unattested rows. The
+  image scoreboards already quote ms/step, so community data is now in the same unit as our own tables.
+- **The CLI step counter prints each step's own duration** (`denoise [7/20] 691 ms`). It printed only the
+  counter, which is why `benchmarks/minimax_h3/h3_bench.sh` could never report a per-step mean; that harness now
+  parses the timing and resolves its checkpoint through the engine's configured models root instead of a repo
+  path that does not exist.
+- **The README benchmark badge points at the checked-in snapshot.** The Pages URL it used returns 404 until
+  Pages is activated for the repository, so the badge was a broken image.
+
 ## alpha.151
 
 - **Qwen-Image 2.1 now matches SwarmUI's own native support.** SwarmUI core gained a `qwen-image-2.1` model

@@ -52,10 +52,9 @@ public static class Validator
                 Require(session.Session >= 0 && session.Session < suite.Sessions && session.Attempt is> 0 and <= 200, "Invalid session index.");
                 Require(attempts.Add($"{session.CaseId}/{session.Session}/{session.Attempt}"), "Duplicate attempt.");
                 Require(session
-                    .Status is "completed" or "quality-failed" or "throttled" or "failed" or "oom"
+                    .Status is "completed" or "quality-failed" or "throttled" or "shared" or "failed" or "oom"
                     or "unsupported" or "timeout" or "cancelled" or "budget-skipped" or "crashed", "Invalid session status.");
-                Require(session.SharedProcessCount >= 0 && (session.SharedProcessCount == 0 || attestation.SharedDeviceAllowed),
-                    "Session ran beside another process without the operator override.");
+                Require(session.SharedProcessCount >= 0, "Invalid session tenant count.");
                 Require(session.Measurements.Length <= suite.Warmups + definition.Inputs.Length, "Too many measurements.");
                 if (session.Measurements.Length > 0)
                     Require(session.ActualDevice == environment.Device, "Actual backend differs from declared device.");
@@ -146,6 +145,8 @@ public static class Validator
                         .QualityPassed), "Completed session lacks passing full protocol.");
                     // Re-derived from the same samples the worker saw, so a session cannot publish by claiming it was not throttled.
                     Require(!Worker.Throttled(session.Measurements, suite), "Completed session exceeds the suite's throttle limit.");
+                    Require(session.SharedProcessCount == 0 || attestation.SharedDeviceAllowed,
+                        "Completed session shared the device without the operator override.");
                 }
             }
 
@@ -189,7 +190,7 @@ public static class Validator
     /// a record may claim rather than proving the claim.</summary>
     private static void Telemetry(DeviceTelemetry telemetry, SuiteDefinition suite, long deviceMemoryBytes)
     {
-        Require(DeviceTelemetry.Sources.Contains(telemetry.Source, StringComparer.Ordinal), "Unknown telemetry source.");
+        Require(DeviceTelemetry.IsKnownSource(telemetry.Source), "Unknown telemetry source.");
         if (telemetry.Source == DeviceTelemetry.Unavailable)
         {
             Require(telemetry.SampleCount == 0 && telemetry.PeakUsedDeviceBytes is null && telemetry.ThrottledSamples == 0

@@ -57,7 +57,8 @@ public static class Campaign
         };
         if (!SameEnvironment(campaign.Environment, environment) || campaign.SuiteId != suiteId
             || campaign.SuiteSha256 != Hashes.FileHash(Suites.PathFor(suiteId)))
-            throw new InvalidDataException("Resume requires the same suite, binary hashes, device, settings, and engine revision.");
+            throw new InvalidDataException("Resume requires the same suite, binary hashes, device, attested power profile, "
+                + "settings, and engine revision.");
         foreach (AssetDefinition asset in suite.Cases.Select(c => c.Asset).DistinctBy(a => a.Sha256))
             Assets.Verify(cache, asset);
         BenchJson.Write(manifest, campaign, BenchJson.Default.CampaignRecord);
@@ -143,7 +144,9 @@ public static class Campaign
                         };
                     record = record with
                     {
-                        SharedProcessCount = shared
+                        SharedProcessCount = shared,
+                        // A tenant that appeared mid-campaign: keep the evidence, drop the publishable claim.
+                        Status = shared > 0 && !allowShared && record.Status == "completed" ? "shared" : record.Status
                     };
                 }
 

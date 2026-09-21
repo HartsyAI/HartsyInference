@@ -353,6 +353,27 @@ public sealed class EvidenceTests : IDisposable
         Assert.True(Validator.Validate(root).Valid);
     }
 
+    [Fact]
+    public void ASessionThatSharedTheDeviceCannotClaimToBeCompleted()
+    {
+        string root = Fixture("standard-v1");
+        CampaignRecord campaign = Read(root);
+        CampaignRecord shared = campaign with
+        {
+            Sessions = campaign.Sessions.Select(s => s.Measurements.Length == 0 ? s : s with { SharedProcessCount = 1 }).ToArray()
+        };
+        Save(root, shared);
+        Assert.False(Validator.Validate(root).Valid);
+        // A tenant that appeared mid-campaign keeps its evidence; it just stops being publishable.
+        Save(root, shared with { Sessions = shared.Sessions.Select(s => s.Measurements.Length == 0 ? s : s with
+        {
+            Status = "shared"
+        }).ToArray() });
+        ValidationReport report = Validator.Validate(root);
+        Assert.True(report.Valid);
+        Assert.False(report.HeadlineEligible);
+    }
+
     private static CampaignRecord Stamp(CampaignRecord campaign, DeviceTelemetry telemetry, string? status = null) => campaign with
     {
         Sessions = campaign.Sessions.Select(s => s.Measurements.Length == 0 ? s : s with

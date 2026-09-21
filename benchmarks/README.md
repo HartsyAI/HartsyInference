@@ -90,7 +90,8 @@ because CUDA enumerates fastest-first and need not match nvidia-smi's order. Pow
 persistence and ECC mode become a cohort component, so a power-limited card no longer pools with a stock one,
 and a device nvidia-smi cannot describe is recorded as unattested and pools only with other unattested runs.
 `run` refuses a GPU another compute process already holds; `--allow-shared-device` records the sharing and
-proceeds. A fixed-cadence sampler runs for each measured request and stores per-request aggregates only —
+proceeds, and sampled VRAM then includes whatever that tenant holds because the figure is device-wide. A
+tenant that appears mid-campaign is recorded on the session, which is retained but not published. A fixed-cadence sampler runs for each measured request and stores per-request aggregates only —
 peak VRAM, utilization, power, temperature, clocks and throttle-reason counts. `gpu_idle` is not a throttle
 and a software power cap is normal under load; a session whose samples exceed the suite's hardware or thermal
 slowdown limit is retained but never published. Telemetry is disclosure checked for internal consistency, not

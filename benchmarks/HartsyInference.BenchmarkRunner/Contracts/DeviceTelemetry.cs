@@ -7,16 +7,17 @@ public sealed record DeviceTelemetry
 {
     public const string Unavailable = "unavailable";
     public const string DeviceWide = "nvidia-smi-device-wide";
-    public const string PerProcess = "nvidia-smi-process";
-    public static readonly string[] Sources = [Unavailable, DeviceWide, PerProcess];
+
+    /// <summary>Whether a record names a source this build produces.</summary>
+    public static bool IsKnownSource(string source) => source is Unavailable or DeviceWide;
 
     public required string Source { get; init; }
     public int SampleCount { get; init; }
     /// <summary>Largest gap between consecutive samples. A sampler that died mid-request reads as a gap here
     /// rather than as a clean aggregate over the part it did see.</summary>
     public double MaxSampleIntervalMs { get; init; }
-    /// <summary>Device-wide unless <see cref="Source"/> is <see cref="PerProcess"/>; honest as a per-run figure
-    /// only because the campaign refused to start on a shared device.</summary>
+    /// <summary>Always device-wide, which is a per-run figure only because the campaign refused to start on a
+    /// shared device; under <c>--allow-shared-device</c> it includes whatever the other tenant holds.</summary>
     public long? PeakUsedDeviceBytes { get; init; }
     public double? PeakGpuUtilizationPercent { get; init; }
     public double? MeanGpuUtilizationPercent { get; init; }
