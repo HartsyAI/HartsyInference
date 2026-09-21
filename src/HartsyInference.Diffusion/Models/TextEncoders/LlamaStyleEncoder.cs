@@ -110,8 +110,7 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         // bare (e.g. Qwen3-Embedding-0.6B: `embed_tokens.weight`, `layers.N.*`, `norm.weight`). Auto-detect.
         string prefix = weights.ContainsKey("model.embed_tokens.weight") ? "model." : "";
 
-        Tensor rawEmbed = weights[$"{prefix}embed_tokens.weight"];
-        _embedWeight = TensorCasts.EnsureF32(rawEmbed);
+        _embedWeight = MaterializeEmbedding(weights[$"{prefix}embed_tokens.weight"]);
 
         if (_config.HasFinalNorm)
         {
@@ -543,6 +542,29 @@ public sealed unsafe class LlamaStyleEncoder : ILtx2TextTower
         for (int k = 0; k < halfDim; k++)
             inverseFrequencies[k] = 1.0 / Math.Pow(theta, (double)(2 * k) / _config.HeadDim);
         return TextEncoderTensorHelpers.BuildHalfRopeTable(inverseFrequencies, targetLen);
+    }
+
+    /// <summary>Materializes the token embedding table as the F32 <c>[vocab, hidden]</c> the gather contract wants.
+    /// An <c>int8_tensorwise</c> table has to be dequantized rather than cast: <see cref="DType.I8"/> reports
+    /// <c>IsQuantized == false</c>, so <see cref="Tensor.CastTo"/> would happily widen the raw bytes and drop both
+    /// the per-row scale and the ConvRot rotation — embeddings ~100× too large, which reads as a broken prompt
+    /// rather than as a load error. Comfy-Org's Qwen-Image 2.1 encoder quantizes this table; their LTX-2.5 one
+    /// leaves it BF16, which is why the case went unseen until now.</summary>
+    private static Tensor MaterializeEmbedding(Tensor rawEmbed)
+    {
+        if (rawEmbed.DType != DType.I8)
+        {
+            return TensorCasts.EnsureF32(rawEmbed);
+        }
+        QuantWeightInfo? quant = rawEmbed.QuantInfo;
+        if (quant?.RowScale is null)
+        {
+            throw new InvalidOperationException(
+                "Token embedding table is I8 but carries no dequant scale; the checkpoint's '.weight_scale' "
+                + "companion was dropped before LoadWeights.");
+        }
+        using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(rawEmbed, quant.RowScale, quant.ConvRotGroupSize);
+        return TensorCasts.EnsureF32(bf16);
     }
 
     /// <summary>Pre-adds 1.0 to every element of an F32 RMSNorm scale tensor in place. Gemma 2 stores

@@ -474,10 +474,20 @@ all pixel-identical, the plain prompt run twice identical (determinism), and a *
 (the control proving conditioning reaches the model at all). Pinned by
 `QwenImage21WeightSeamTests.APerRowScaleIsCancelledByTheTextProjectionsRmsNorm`.
 
+**SwarmUI core owns this model class.** As of SwarmUI `2de300f6` ("Adds Qwen2.1 support") core registers the
+`qwen-image-2.1` compat class, model class and VAE family itself, with `StandardWidth/Height` 1024,
+`ResolutionPrecision` 32 and `LorasTargetTextEnc = false`. The backend extension therefore *maps* that compat id
+and must not register it — `T2IModelClassSorter.RegisterCompat` is backed by `Dictionary.Add`, so a second
+registration throws `ArgumentException: An item with the same key has already been added` at pre-init and takes
+the extension down with it. Side-model paths and the text-encoder file are pinned to core's own
+`CommonModels` / `GetQwenImage21TextEncoder` choices so one download serves both backends.
+
 **Not wired:** reference-image editing (needs the Wan 2.2 VAE *encoder* parameterized the same way the decoder now
-is, plus the interleaved text/reference sequence and per-reference RoPE), LoRA (adapters address
-`img_mlp.gate_layer`/`proj`, the two halves of the fused `gate_up` this loads whole), and the `int8_convrot`
-build. `CliDrivable=true`.
+is, plus the interleaved text/reference sequence and per-reference RoPE), and LoRA (adapters address
+`img_mlp.gate_layer`/`proj`, the two halves of the fused `gate_up` this loads whole). Note that SwarmUI's native
+support *does* advertise Prompt Images (up to 10) and Init Image for this class; the extension hides both when the
+recipe declares neither `RefEdit` nor `Img2Img`, so the gap shows in the UI rather than as a refusal after
+Generate. `CliDrivable=true`.
 
 ### Qwen-Image-Edit 2511
 

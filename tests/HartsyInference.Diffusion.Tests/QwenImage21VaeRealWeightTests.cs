@@ -18,8 +18,9 @@ public sealed class QwenImage21VaeRealWeightTests
     {
         foreach (string candidate in new[]
         {
-            "/mnt/model-storage/Models/VAE/qwen_image_2.1_vae_bf16.safetensors",
-            Path.Combine(AppContext.BaseDirectory, "../../../../../Models/VAE/qwen_image_2.1_vae_bf16.safetensors"),
+            // SideModels.QwenImage21Vae's target, which matches SwarmUI core's own VAE/QwenImage/ layout.
+            "/mnt/model-storage/Models/VAE/QwenImage/qwen_image_2.1_vae_bf16.safetensors",
+            Path.Combine(AppContext.BaseDirectory, "../../../../../Models/VAE/QwenImage/qwen_image_2.1_vae_bf16.safetensors"),
         })
         {
             if (File.Exists(candidate)) return candidate;
