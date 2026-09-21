@@ -14,13 +14,17 @@ namespace HartsyInference.BenchmarkRunner.Execution;
 /// <summary>Actual backend identity and bounded, non-secret execution provenance.</summary>
 public static class Hardware
 {
+    /// <summary>The single hashing recipe for machine and device identity. Attestation resolves a device by
+    /// hashing each nvidia-smi UUID through here and matching, so the raw UUID never enters the record.</summary>
+    public static string IdentityHash(string value) => Hashes.Text("hartsy-bench-v1:" + value);
+
     public static string MachineId()
     {
         string path = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "hartsy-bench", "identity");
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         if (!File.Exists(path))
             File.WriteAllText(path, Guid.NewGuid().ToString("N"));
-        return Hashes.Text("hartsy-bench-v1:" + File.ReadAllText(path));
+        return IdentityHash(File.ReadAllText(path));
     }
 
     public static DeviceRecord Describe(string selector, IBackend backend)
@@ -32,7 +36,7 @@ public static class Hardware
         {
             hardwareKind = "gpu";
             name = cuda.Context.DeviceName;
-            identity = Hashes.Text("hartsy-bench-v1:" + cuda.Context.QueryDeviceUuid());
+            identity = IdentityHash(cuda.Context.QueryDeviceUuid());
             driver = cuda.Context.QueryDriverVersion().ToString(CultureInfo.InvariantCulture);
             memory = checked((long)cuda.Context.TotalMemory);
             capabilities = $"sm_{cuda.Context.ComputeCapabilityMajor}{cuda.Context.ComputeCapabilityMinor}";
@@ -42,7 +46,7 @@ public static class Hardware
             hardwareKind = vulkan.Vk.DeviceType is VkPhysicalDeviceType.DiscreteGpu or VkPhysicalDeviceType
                 .IntegratedGpu or VkPhysicalDeviceType.VirtualGpu ? "gpu" : "cpu";
             name = vulkan.Vk.DeviceName;
-            identity = Hashes.Text("hartsy-bench-v1:" + vulkan.Vk.DeviceUuid);
+            identity = IdentityHash(vulkan.Vk.DeviceUuid);
             driver = $"{vulkan.Vk.VendorId}:{vulkan.Vk.DriverVersion}";
             memory = checked((long)vulkan.Vk.TotalVramBytes);
             capabilities = $"vulkan-api:{vulkan.Vk.ApiVersion};device-type:{vulkan.Vk.DeviceType}";
@@ -109,7 +113,7 @@ public static class Hardware
         return result;
     }
 
-    public static EnvironmentRecord Capture(DeviceRecord device)
+    public static EnvironmentRecord Capture(DeviceRecord device, AttestationRecord attestation)
     {
         Defaults(out SortedDictionary<string, string> settings);
         SortedDictionary<string, string> binaries = new(StringComparer.Ordinal);
@@ -152,7 +156,9 @@ public static class Hardware
             CpuCount = Environment.ProcessorCount,
             Device = device,
             Binaries = binaries,
-            Settings = settings
+            Settings = settings,
+            Attestation = attestation,
+            PowerProfile = DeviceAttestation.Profile(attestation)
         };
     }
 }

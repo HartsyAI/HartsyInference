@@ -31,6 +31,16 @@ public static class Validator
             Require(!environment.Device.Name.Any(char.IsControl) && !environment.Device.Driver.Any(char.IsControl),
                 "Control characters in device provenance.");
             Require(environment.Device.HardwareKind is "gpu" or "cpu", "Missing hardware class.");
+            AttestationRecord attestation = environment.Attestation;
+            Require(attestation.Source is AttestationRecord.Smi or AttestationRecord.Unavailable, "Unknown attestation source.");
+            Require(attestation.Fields.Count <= 64 && attestation.Fields.All(p => !string.IsNullOrWhiteSpace(p.Key) && p
+                .Value is not null && p.Value.Length < 100 && !p.Value.Any(char.IsControl)), "Invalid attested device fields.");
+            // Self-consistency, not fraud detection: a hand-written record can satisfy both sides. It catches
+            // the two drifting apart, which is what a serialization bug or a patched resume looks like.
+            Require(environment.PowerProfile == DeviceAttestation.Profile(attestation), "Power profile contradicts the attestation.");
+            Require(attestation.SharedProcessCount >= 0 && attestation.SharedProcessBytes >= 0, "Invalid tenant accounting.");
+            Require(attestation.SharedProcessCount == 0 || attestation.SharedDeviceAllowed,
+                "Device was shared without the operator override.");
             Require(environment.Device.Error is null && environment.Device.Name.Length is> 0 and < 200 && environment.Device.Driver
                 .Length is> 0 and < 100, "Invalid backend provenance.");
             Require(environment.Device.Selector == "cpu" || System.Text.RegularExpressions.Regex.IsMatch(environment.Device.Selector,
@@ -43,8 +53,9 @@ public static class Validator
                 Require(session.Session >= 0 && session.Session < suite.Sessions && session.Attempt is> 0 and <= 200, "Invalid session index.");
                 Require(attempts.Add($"{session.CaseId}/{session.Session}/{session.Attempt}"), "Duplicate attempt.");
                 Require(session
-                    .Status is "completed" or "quality-failed" or "failed" or "oom"
+                    .Status is "completed" or "quality-failed" or "throttled" or "shared" or "failed" or "oom"
                     or "unsupported" or "timeout" or "cancelled" or "budget-skipped" or "crashed", "Invalid session status.");
+                Require(session.SharedProcessCount >= 0, "Invalid session tenant count.");
                 Require(session.Measurements.Length <= suite.Warmups + definition.Inputs.Length, "Too many measurements.");
                 if (session.Measurements.Length > 0)
                     Require(session.ActualDevice == environment.Device, "Actual backend differs from declared device.");
@@ -70,8 +81,8 @@ public static class Validator
                         previousToken = timestamp;
                     }
 
-                    Require(measurement.HostPeakBytes >= 0 && measurement.SampledUsedDeviceBytes is null && measurement
-                        .MemorySource == "unavailable", "Unsupported memory measurement semantics.");
+                    Require(measurement.HostPeakBytes >= 0, "Invalid host memory measurement.");
+                    Telemetry(measurement.Telemetry, suite, environment.Device.MemoryBytes);
                     string suffix = definition.Adapter == "text" ? ".txt" : ".png";
                     string expected = $"sessions/{session.CaseId}/{session.Session}/{session.Attempt}/{lane}-{input}{suffix}";
                     Require(measurement.Output == expected && outputs.Add(expected), "Output path does not match trial identity.");
@@ -130,8 +141,14 @@ public static class Validator
                     Require(session.NativeLibraries.Count is> 0 and <= 100 && session.NativeLibraries.Values.All(Hashes.IsHash),
                         "Missing loaded native library identities.");
                 if (session.Status == "completed")
+                {
                     Require(session.Measurements.Length == suite.Warmups + definition.Inputs.Length && session.Measurements.All(m => m
                         .QualityPassed), "Completed session lacks passing full protocol.");
+                    // Re-derived from the same samples the worker saw, so a session cannot publish by claiming it was not throttled.
+                    Require(!Worker.Throttled(session.Measurements, suite), "Completed session exceeds the suite's throttle limit.");
+                    Require(session.SharedProcessCount == 0 || attestation.SharedDeviceAllowed,
+                        "Completed session shared the device without the operator override.");
+                }
             }
 
             Require(campaign.Sessions.Where(s => s.Status == "completed").GroupBy(s => (s.CaseId, s.Session))
@@ -148,6 +165,10 @@ public static class Validator
                 notes.Add("Development build: no immutable engine revision.");
             if (!completeCase)
                 notes.Add("No case has all independent sessions. Partial results are retained but excluded.");
+            if (attestation.Source == AttestationRecord.Unavailable && environment.Device.Selector.StartsWith("cuda:",
+                StringComparison.Ordinal))
+                notes.Add("Device was not attested by nvidia-smi; this campaign publishes in its own unattested cohort.");
+            notes.Add("Telemetry is contributor disclosure checked for internal consistency, not recomputed from the outputs.");
             notes.Add("Automated validation proves format/protocol consistency. Maintainer output review is still required.");
         }
         catch (Exception error)when (error is not OutOfMemoryException)
@@ -166,6 +187,37 @@ public static class Validator
 
     public static bool Complete(CampaignRecord campaign, SuiteDefinition suite, string caseId) => Enumerable.Range(0, suite.Sessions).All(
         i => campaign.Sessions.Any(s => s.CaseId == caseId && s.Session == i && s.Status == "completed"));
+    /// <summary>Structural consistency only. Nothing here can be recomputed from the outputs, so it bounds what
+    /// a record may claim rather than proving the claim.</summary>
+    private static void Telemetry(DeviceTelemetry telemetry, SuiteDefinition suite, long deviceMemoryBytes)
+    {
+        Require(DeviceTelemetry.IsKnownSource(telemetry.Source), "Unknown telemetry source.");
+        if (telemetry.Source == DeviceTelemetry.Unavailable)
+        {
+            Require(telemetry.SampleCount == 0 && telemetry.PeakUsedDeviceBytes is null && telemetry.ThrottledSamples == 0
+                && telemetry.SwPowerCapSamples == 0, "Unavailable telemetry carries samples.");
+            return;
+        }
+
+        Require(telemetry.SampleCount > 0, "Telemetry source reports no samples.");
+        Require(telemetry.MaxSampleIntervalMs >= 0 && telemetry.MaxSampleIntervalMs <= DeviceTelemetry.MaxCoveragePeriods
+            * (double)suite.TelemetryCadenceMs, "Telemetry coverage gap exceeds the sampling tolerance.");
+        Require(telemetry.PeakUsedDeviceBytes is null || telemetry.PeakUsedDeviceBytes is > 0 && telemetry
+            .PeakUsedDeviceBytes <= deviceMemoryBytes, "Sampled device memory exceeds the device capacity.");
+        Require(Within(telemetry.PeakGpuUtilizationPercent, 100) && Within(telemetry.MeanGpuUtilizationPercent, 100)
+            && Within(telemetry.MeanMemoryUtilizationPercent, 100), "Utilization outside zero to one hundred percent.");
+        Require(Within(telemetry.PeakPowerWatts, 2000) && Within(telemetry.MeanPowerWatts, 2000), "Implausible power draw.");
+        Require(Within(telemetry.MaxTemperatureCelsius, 120), "Implausible temperature.");
+        Require(NotBelow(telemetry.PeakGpuUtilizationPercent, telemetry.MeanGpuUtilizationPercent)
+            && NotBelow(telemetry.PeakPowerWatts, telemetry.MeanPowerWatts)
+            && NotBelow(telemetry.MeanSmClockMhz, telemetry.MinSmClockMhz), "Aggregate peak is below its mean.");
+        foreach (int count in new[] { telemetry.HwSlowdownSamples, telemetry.HwThermalSamples, telemetry.HwPowerBrakeSamples,
+            telemetry.SwThermalSamples, telemetry.SwPowerCapSamples })
+            Require(count >= 0 && count <= telemetry.SampleCount, "Throttle count exceeds the sample count.");
+    }
+
+    private static bool Within(double? value, double limit) => value is null || value >= 0 && value <= limit;
+    private static bool NotBelow(double? high, double? low) => high is null || low is null || high >= low;
     private static void Require(bool condition, string message)
     {
         if (!condition)

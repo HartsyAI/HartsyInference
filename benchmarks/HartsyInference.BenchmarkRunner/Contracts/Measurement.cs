@@ -21,6 +21,5 @@ public sealed record Measurement
     public required bool QualityPassed { get; init; }
     public required string QualityDetail { get; init; }
     public long HostPeakBytes { get; init; }
-    public long? SampledUsedDeviceBytes { get; init; }
-    public string MemorySource { get; init; } = "unavailable";
+    public DeviceTelemetry Telemetry { get; init; } = new() { Source = DeviceTelemetry.Unavailable };
 }

@@ -10,6 +10,9 @@ namespace HartsyInference.BenchmarkRunner;
 /// <summary>Portable community benchmark command entry point.</summary>
 public static class Program
 {
+    /// <summary>Options that stand alone; everything else is a --option value pair.</summary>
+    private static readonly string[] Flags = ["allow-shared-device"];
+
     public static async Task<int> Main(string[] args)
     {
         using CancellationTokenSource cancellation = new();
@@ -26,9 +29,9 @@ public static class Program
                 return 0;
             }
 
-            if (args.Length == 8 && args[0] == "worker")
+            if (args.Length == 9 && args[0] == "worker")
                 return await Worker.RunAsync(args[1], args[2], args[3], args[4], args[5], int.Parse(args[6]), int.Parse(args[7]),
-                    cancellation.Token);
+                    args[8], cancellation.Token);
             if (args.Length == 0 || args[0] is "help" or "--help")
             {
                 Console.WriteLine("""
@@ -37,6 +40,7 @@ public static class Program
                       doctor --device cuda:0
                       fetch --suite standard-v1 [--cache <directory>]
                       run|resume --suite standard-v1 --device cuda:0 [--cache <directory>] --output <campaign> [--minutes 30]
+                                 [--allow-shared-device]
                       validate --input <campaign-or-extracted-bundle>
                       export --input <campaign> --bundle <new.zip>
                       extract --bundle <zip> --output <empty-directory>
@@ -48,6 +52,7 @@ public static class Program
                              --reviewer <github-login> --pr <url> --head <sha> --reason <text>
                       publish --input <submissions-root> --reviews <trusted-receipts> --evidence <extracted-root> --output <site>
                     All model downloads happen in fetch. run never silently changes device, model, or workload.
+                    run refuses a GPU another process is already using; --allow-shared-device records it and proceeds.
                     --cache defaults to $HARTSY_BENCH_CACHE, else ~/.cache/hartsy-bench.
                     """);
                 return 0;
@@ -56,6 +61,7 @@ public static class Program
             Dictionary<string, string> options = Parse(args);
             string Need(string key) => options.Remove(key, out string? value) ? value : throw new ArgumentException("Missing --" + key);
             string Get(string key, string fallback) => options.Remove(key, out string? value) ? value : fallback;
+            bool Flag(string key) => options.Remove(key);
             // Model cache location: --cache, else $HARTSY_BENCH_CACHE, else the per-user default. A machine that
             // already stores large checkpoints on a separate volume sets the variable once instead of repeating the
             // path on every command; the layout stays content-addressed (<cache>/<sha256>/<file>) so any volume works.
@@ -99,9 +105,22 @@ public static class Program
                     Directory.CreateDirectory(root);
                     int code = await ChildProcess.RunAsync(["probe", device, Path.Combine(root, "device.json")], Path.Combine(root,
                         "probe.log"), TimeSpan.FromMinutes(2), cancellation.Token);
-                    Console.WriteLine(code == 0 ? File.ReadAllText(Path.Combine(root, "device.json")) : "Probe failed: " + Path.Combine(
-                        root, "probe.log"));
-                    return code;
+                    if (code != 0)
+                    {
+                        Console.WriteLine("Probe failed: " + Path.Combine(root, "probe.log"));
+                        return code;
+                    }
+
+                    Console.WriteLine(File.ReadAllText(Path.Combine(root, "device.json")));
+                    DeviceAttestation.Result attestation = DeviceAttestation.Capture(
+                        BenchJson.Read(Path.Combine(root, "device.json"), BenchJson.Default.DeviceRecord), allowShared: true);
+                    Console.WriteLine(attestation.Record.Source == AttestationRecord.Unavailable
+                        ? "Attestation: unavailable (this device would publish in its own unattested cohort)."
+                        : "Attestation: " + DeviceAttestation.Profile(attestation.Record));
+                    Console.WriteLine(attestation.Tenants.Length == 0
+                        ? "Exclusive: no other compute process is using this device."
+                        : "Shared with:" + Environment.NewLine + string.Join(Environment.NewLine, attestation.Tenants));
+                    return 0;
                 }
 
                 case "fetch":
@@ -118,10 +137,12 @@ public static class Program
                     string suite = Get("suite", "standard-v1"), device = Need("device"), cache = Cache();
                     string output = Path.GetFullPath(Need("output"));
                     int minutes = int.Parse(Get("minutes", suite == "extended-v1" ? "120" : "30"), CultureInfo.InvariantCulture);
+                    bool allowShared = Flag("allow-shared-device");
                     End();
                     if (minutes is < 1 or > 1440)
                         throw new ArgumentOutOfRangeException("minutes");
-                    return await Campaign.RunAsync(output, cache, suite, device, minutes, args[0] == "resume", cancellation.Token);
+                    return await Campaign.RunAsync(output, cache, suite, device, minutes, args[0] == "resume", allowShared,
+                        cancellation.Token);
                 }
 
                 case "validate":
@@ -223,9 +244,18 @@ public static class Program
     private static Dictionary<string, string> Parse(string[] args)
     {
         Dictionary<string, string> result = new(StringComparer.Ordinal);
-        for (int i = 1; i < args.Length; i += 2)
-            if (!args[i].StartsWith("--", StringComparison.Ordinal) || i + 1 >= args.Length || !result.TryAdd(args[i][2..], args[i + 1]))
+        for (int i = 1; i < args.Length; i++)
+        {
+            if (!args[i].StartsWith("--", StringComparison.Ordinal))
                 throw new ArgumentException("Expected unique --option value pairs.");
+            string name = args[i][2..];
+            bool flag = Flags.Contains(name, StringComparer.Ordinal);
+            if (!flag && i + 1 >= args.Length || !result.TryAdd(name, flag ? "true" : args[i + 1]))
+                throw new ArgumentException("Expected unique --option value pairs.");
+            if (!flag)
+                i++;
+        }
+
         return result;
     }
 }

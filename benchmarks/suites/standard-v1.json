@@ -4,6 +4,8 @@
   "sessions": 3,
   "warmups": 2,
   "publishable": true,
+  "telemetryCadenceMs": 100,
+  "maxThrottledSampleFraction": 0.02,
   "cases": [
     {
       "id": "qwen3-4b-q4-short",
