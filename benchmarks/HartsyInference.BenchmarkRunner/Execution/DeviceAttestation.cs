@@ -69,12 +69,13 @@ public static class DeviceAttestation
         foreach (string line in NvidiaSmi.Query(
             ["--query-compute-apps=pid,process_name,used_memory,gpu_uuid", "--format=csv,noheader,nounits"], Deadline) ?? [])
         {
+            // Anchored at both ends: a process path may contain a comma, and a positional parse would then
+            // shift the uuid out of its column and silently drop that tenant.
             string[] row = NvidiaSmi.Fields(line);
-            if (row.Length != 4 || NvidiaSmi.NormalizeUuid(row[3]) != NvidiaSmi.NormalizeUuid(uuid))
+            if (row.Length < 4 || NvidiaSmi.NormalizeUuid(row[^1]) != NvidiaSmi.NormalizeUuid(uuid))
                 continue;
-            long used = long.TryParse(row[2], out long mib) ? mib * 1024 * 1024 : 0;
-            bytes += used;
-            lines.Add($"pid {row[0]} ({row[1]}) holding {row[2]} MiB");
+            bytes += long.TryParse(row[^2], out long mib) ? mib * 1024 * 1024 : 0;
+            lines.Add($"pid {row[0]} ({string.Join(',', row[1..^2])}) holding {row[^2]} MiB");
         }
 
         return (lines.Count, bytes, lines.ToArray());
