@@ -7,7 +7,8 @@ namespace HartsyInference.ModelAssets.Tests.Metadata;
 /// whether a stamped model keeps its class or loses its parameters.</summary>
 public sealed class ArtifactMetadataTests
 {
-    private static readonly ArtifactProvenance Repack = new() { Converter = "test" };
+    private static readonly ArtifactProvenance Repack =
+        new() { Converter = "test", Component = ArtifactProvenance.MainComponent };
 
     [Fact]
     public void Build_EmitsTheKeysSwarmClassifiesOn()
@@ -64,7 +65,10 @@ public sealed class ArtifactMetadataTests
     [Fact]
     public void Build_PrecisionAppearsInTheTitleAndItsOwnKey()
     {
-        ArtifactProvenance provenance = new() { Converter = "test", Precision = "Q4_K_M" };
+        ArtifactProvenance provenance = new()
+        {
+            Converter = "test", Component = ArtifactProvenance.MainComponent, Precision = "Q4_K_M",
+        };
         Dictionary<string, string> metadata =
             ArtifactMetadata.WithoutHash(ModelIdentityCatalog.All["krea2"], provenance);
 
@@ -77,8 +81,8 @@ public sealed class ArtifactMetadataTests
     {
         ArtifactProvenance provenance = new()
         {
-            Converter = "test", SourceRepo = "someone/their-repack", SourceFile = "kokoro-v1_0.pth",
-            SourceSha256 = "abc123",
+            Converter = "test", Component = ArtifactProvenance.MainComponent,
+            SourceRepo = "someone/their-repack", SourceFile = "kokoro-v1_0.pth", SourceSha256 = "abc123",
         };
         Dictionary<string, string> metadata =
             ArtifactMetadata.WithoutHash(ModelIdentityCatalog.All["kokoro"], provenance);
@@ -123,5 +127,49 @@ public sealed class ArtifactMetadataTests
             EngineId = "nameless", SwarmClassId = "  ", DisplayName = "Nameless", Author = "n/a", License = "other",
         };
         Assert.Throws<ArgumentException>(() => ArtifactMetadata.WithoutHash(broken, Repack));
+    }
+
+    /// <summary>A codec or vocoder in its own file is part of a model, not a model. Without this it would be
+    /// admitted to the model list as something selectable that generates nothing.</summary>
+    [Fact]
+    public void Build_ComponentCarriesNoArchitecture()
+    {
+        ArtifactProvenance component = new() { Converter = "test", Component = "codec" };
+        Dictionary<string, string> metadata = ArtifactMetadata.WithoutHash(ModelIdentityCatalog.All["yue"], component);
+
+        Assert.False(metadata.ContainsKey("modelspec.architecture"));
+        Assert.False(metadata.ContainsKey("modelspec.resolution"));
+        Assert.Equal("codec", metadata["hartsy.component"]);
+        Assert.Equal("yue", metadata["hartsy.engine_id"]);
+        Assert.Equal("YuE (codec)", metadata["modelspec.title"]);
+    }
+
+    /// <summary>Negative control: the same identity stamped as primary does carry an architecture, so the test
+    /// above cannot pass on a builder that stopped emitting the key entirely.</summary>
+    [Fact]
+    public void Build_PrimaryDoesCarryArchitecture()
+    {
+        Assert.True(ArtifactMetadata.WithoutHash(ModelIdentityCatalog.All["yue"], Repack)
+            .ContainsKey("modelspec.architecture"));
+    }
+
+    /// <summary>A component makes no claim about who wrote it: ContentVec and RMVPE ship inside RVC but are other
+    /// people's work under other terms, and inheriting the family's author would state something false.</summary>
+    [Fact]
+    public void Build_ComponentClaimsNoAuthorOrLicense()
+    {
+        ArtifactProvenance component = new() { Converter = "test", Component = "pitch-estimator" };
+        Dictionary<string, string> metadata = ArtifactMetadata.WithoutHash(ModelIdentityCatalog.All["rvc"], component);
+
+        Assert.False(metadata.ContainsKey("modelspec.author"));
+        Assert.False(metadata.ContainsKey("modelspec.license"));
+    }
+
+    [Fact]
+    public void Build_RefusesProvenanceWithNoComponent()
+    {
+        ArtifactProvenance nameless = new() { Converter = "test", Component = " " };
+        Assert.Throws<ArgumentException>(
+            () => ArtifactMetadata.WithoutHash(ModelIdentityCatalog.All["kokoro"], nameless));
     }
 }

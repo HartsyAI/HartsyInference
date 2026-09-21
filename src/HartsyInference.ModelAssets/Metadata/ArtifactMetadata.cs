@@ -12,7 +12,11 @@ namespace HartsyInference.ModelAssets.Metadata;
 /// its parameters silently vanish from the UI.</para>
 ///
 /// <para>The same keys work in a GGUF: SwarmUI parses every GGUF metadata KV into the same
-/// <c>__metadata__</c> object it builds for safetensors, so a quantized artifact needs no sidecar either.</para></summary>
+/// <c>__metadata__</c> object it builds for safetensors, so a quantized artifact needs no sidecar either.</para>
+///
+/// <para>Only the primary weights get an architecture. A codec, vocoder or encoder that happens to live in its own
+/// file is part of a model, not a model — stamping one as classifiable would offer it in the model list as
+/// something a user could select and generate nothing with.</para></summary>
 public static class ArtifactMetadata
 {
     /// <summary>SAI ModelSpec revision these keys conform to.</summary>
@@ -54,33 +58,46 @@ public static class ArtifactMetadata
     {
         ArgumentNullException.ThrowIfNull(identity);
         ArgumentNullException.ThrowIfNull(provenance);
-        if (string.IsNullOrWhiteSpace(identity.SwarmClassId))
+        if (string.IsNullOrWhiteSpace(provenance.Component))
         {
             throw new ArgumentException(
-                $"Identity '{identity.EngineId}' has no SwarmClassId. A published artifact without an architecture "
-                + "classifies as null, which hides every parameter the model would offer.", nameof(identity));
+                $"Provenance for '{identity.EngineId}' names no component. Use "
+                + $"'{ArtifactProvenance.MainComponent}' for the primary weights, or the part's role.",
+                nameof(provenance));
         }
+        bool isPrimary = string.Equals(provenance.Component, ArtifactProvenance.MainComponent, StringComparison.Ordinal);
         Dictionary<string, string> metadata = new(StringComparer.Ordinal)
         {
             ["modelspec.sai_model_spec"] = SpecVersion,
-            ["modelspec.architecture"] = identity.SwarmClassId,
             ["modelspec.implementation"] = Implementation,
-            ["modelspec.title"] = Title(identity, provenance),
-            ["modelspec.author"] = identity.Author,
-            ["modelspec.license"] = identity.License,
+            ["modelspec.title"] = Title(identity, provenance, isPrimary),
             ["modelspec.date"] = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             ["hartsy.engine_id"] = identity.EngineId,
+            ["hartsy.component"] = provenance.Component,
             ["hartsy.converter"] = provenance.Converter,
         };
-        // Emitted only when the class declares one: a resolution that disagrees makes SwarmUI clone the class with
-        // its matcher disabled, and audio classes declare none at all.
-        if (!string.IsNullOrWhiteSpace(identity.StandardResolution))
+        if (isPrimary)
         {
-            metadata["modelspec.resolution"] = identity.StandardResolution;
-        }
-        if (identity.Tags.Count > 0)
-        {
-            metadata["modelspec.tags"] = string.Join(",", identity.Tags);
+            if (string.IsNullOrWhiteSpace(identity.SwarmClassId))
+            {
+                throw new ArgumentException(
+                    $"Identity '{identity.EngineId}' has no SwarmClassId. A published artifact without an "
+                    + "architecture classifies as null, which hides every parameter the model would offer.",
+                    nameof(identity));
+            }
+            metadata["modelspec.architecture"] = identity.SwarmClassId;
+            metadata["modelspec.author"] = identity.Author;
+            metadata["modelspec.license"] = identity.License;
+            // Emitted only when the class declares one: a resolution that disagrees makes SwarmUI clone the class
+            // with its matcher disabled, and audio classes declare none at all.
+            if (!string.IsNullOrWhiteSpace(identity.StandardResolution))
+            {
+                metadata["modelspec.resolution"] = identity.StandardResolution;
+            }
+            if (identity.Tags.Count > 0)
+            {
+                metadata["modelspec.tags"] = string.Join(",", identity.Tags);
+            }
         }
         Put(metadata, "modelspec.description", provenance.Description);
         Put(metadata, "hartsy.source_repo", provenance.SourceRepo ?? identity.UpstreamRepo);
@@ -90,10 +107,11 @@ public static class ArtifactMetadata
         return metadata;
     }
 
-    private static string Title(ArtifactIdentity identity, ArtifactProvenance provenance) =>
-        string.IsNullOrWhiteSpace(provenance.Precision)
-            ? identity.DisplayName
-            : $"{identity.DisplayName} ({provenance.Precision})";
+    private static string Title(ArtifactIdentity identity, ArtifactProvenance provenance, bool isPrimary)
+    {
+        string qualifier = isPrimary ? provenance.Precision ?? "" : provenance.Component;
+        return string.IsNullOrWhiteSpace(qualifier) ? identity.DisplayName : $"{identity.DisplayName} ({qualifier})";
+    }
 
     private static void Put(Dictionary<string, string> metadata, string key, string? value)
     {

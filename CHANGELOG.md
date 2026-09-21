@@ -23,6 +23,12 @@ stable release will require. Dates are UTC.
   emitted only when the class declares one. `IdentifyClassFor` accepts a model whose resolution matches the class
   standard or is absent, and for anything else it clones the class *with its matcher disabled* — so an audio
   artifact must carry none, and Qwen-Image 2.1 must carry its own 1024 rather than Qwen-Image v1's 1328.
+- **Only the primary weights get an architecture.** A codec, vocoder or pitch estimator that lives in its own
+  file is part of a model, not a model, and the index admits only `hartsy.component=main`. Naming the component
+  is required rather than defaulted, because the default is the dangerous one: four of the five conversion sites
+  in the engine write components, and stamping them as primary would put each one in the model list as something
+  a user can select and generate nothing with. A component also claims no author or license — ContentVec and
+  RMVPE ship inside RVC but are other people's work under other terms.
 - **`ArtifactNaming` writes down the file-name convention that was never written down.**
   `<engine-id>[-<variant>]_<precision>.<ext>`, so `fp8_scaled` and `fp8 scaled` cannot produce two names for one
   build, while GGUF presets keep their upstream `Q4_K_M` casing.

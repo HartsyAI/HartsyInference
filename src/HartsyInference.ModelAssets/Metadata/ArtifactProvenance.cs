@@ -4,8 +4,18 @@ namespace HartsyInference.ModelAssets.Metadata;
 /// file answers the question without its manifest.</summary>
 public sealed record ArtifactProvenance
 {
+    /// <summary>Value of <see cref="Component"/> that marks a file as the model's primary weights.</summary>
+    public const string MainComponent = "main";
+
     /// <summary>Component that produced the output, e.g. <c>"HartsyInference.PickleCheckpointRepacker"</c>.</summary>
     public required string Converter { get; init; }
+
+    /// <summary>Which part of the model this file is: <see cref="MainComponent"/> for the primary weights, else a
+    /// role such as <c>"codec"</c> or <c>"vocoder"</c>.
+    /// <para>Required, because the default is the dangerous one. A model's index admits only
+    /// <c>hartsy.component=main</c>, and a component stamped as primary becomes a separately selectable model that
+    /// cannot generate anything — so every conversion site has to say which it is writing.</para></summary>
+    public required string Component { get; init; }
 
     /// <summary>Repo the source came from, when it was fetched rather than supplied.</summary>
     public string? SourceRepo { get; init; }
