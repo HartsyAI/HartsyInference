@@ -87,10 +87,14 @@ public sealed class LlamaStyleEncoderQuantEmbeddingTests
         using Tensor looked = encoder.LookupEmbeddings([1]);
         ReadOnlySpan<float> actual = looked.AsReadOnlySpan<float>();
         ReadOnlySpan<float> expected = f32.AsReadOnlySpan<float>();
+        // One bf16 ulp at this magnitude is ~1.2e-4, so compare on an absolute tolerance rather than on rounded
+        // decimal places — Assert.Equal(.., 2) fails on 0.03504 vs 0.03491 purely because they round either side.
+        float worst = 0f;
         for (int i = 0; i < Hidden; i++)
         {
-            Assert.Equal(expected[Hidden + i], actual[i], 2);
+            worst = MathF.Max(worst, MathF.Abs(expected[Hidden + i] - actual[i]));
         }
+        Assert.True(worst < 5e-4f, $"bf16 embedding round-trip is {worst} off, well past one ulp.");
         bf16.Dispose();
     }
 

@@ -116,9 +116,6 @@ public static class SamplingCapabilities
     /// <summary>Every image family id the table names, so a stale row for a deleted recipe can be caught.</summary>
     public static IEnumerable<string> ImageFamilies => Image.Keys;
 
-    /// <summary>Whether the table has an explicit row for the video family <paramref name="familyId"/>.</summary>
-    public static bool HasVideoEntry(string familyId) => familyId is not null && Video.ContainsKey(familyId);
-
     /// <summary>Whether <paramref name="familyId"/> (image or video) accepts any sampler selection at all.</summary>
     public static bool AcceptsSelection(string familyId)
         => ForImage(familyId).Samplers.Count > 0 || ForVideo(familyId).Samplers.Count > 0;
