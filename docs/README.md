@@ -15,7 +15,7 @@ file trees, completed-task journals, or benchmark tables. Git preserves removed 
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Upstream constants, formats, methods, and unresolved research | [Research/](Research/) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |
-| Environment controls and unsafe switches | [ENV_VARS.md](ENV_VARS.md) |
+| Settings: where they live, how to change them | [SETTINGS.md](SETTINGS.md) |
 | Reproducible community performance | [Benchmark guide](../benchmarks/README.md) |
 
 ## Maintenance

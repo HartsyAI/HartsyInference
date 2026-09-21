@@ -6,13 +6,11 @@ namespace HartsyInference.Core.Configuration;
 /// <remarks>Discovered rather than passed, because the engine has no single entry point: the CLI has a
 /// <c>Main</c>, but the SwarmUI extension is loaded as a library and never gets one, so anything requiring an
 /// explicit startup call would silently do nothing there. Loading happens once, on the first knob resolution.
-/// <para>Search order, first hit wins:</para>
-/// <list type="number">
-/// <item>the path in <see cref="ExplicitPath"/>, if a host set one;</item>
-/// <item><c>hartsyinference.settings.json</c> in the current directory;</item>
-/// <item><c>hartsyinference.settings.json</c> beside the entry assembly;</item>
-/// <item><c>~/.config/hartsyinference/settings.json</c>.</item>
-/// </list>
+/// <para>There is exactly ONE file: <c>~/.config/hartsyinference/settings.json</c> (see <see cref="Path"/>),
+/// unless a host points <see cref="ExplicitPath"/> somewhere else. It used to be searched for in the working
+/// directory and beside the entry assembly too, which meant the settings that applied depended on where the
+/// process happened to be started from — the same engine could read a different file per host, which is the
+/// opposite of what a settings file is for.</para>
 /// <para>File shape — a profile applied first, then individual settings on top, matching the CLI and the API:</para>
 /// <code>
 /// {
@@ -24,19 +22,26 @@ namespace HartsyInference.Core.Configuration;
 /// ends up benchmarking a configuration they never actually applied.</para></remarks>
 public static class KnobFile
 {
-    private const string FileName = "hartsyinference.settings.json";
-
     private static readonly object _gate = new();
     private static bool _loaded;
 
-    /// <summary>Set by a host that knows where its settings live; overrides discovery. Must be set before the first knob is read.</summary>
+    /// <summary>Set by a host that keeps its settings elsewhere; overrides <see cref="Path"/>. Must be set before the first knob is read.</summary>
     public static string? ExplicitPath { get; set; }
+
+    /// <summary>The settings file this process reads and writes, whether or not it exists yet.</summary>
+    public static string Path => string.IsNullOrWhiteSpace(ExplicitPath)
+        ? System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".config", "hartsyinference", "settings.json")
+        : ExplicitPath;
 
     /// <summary>The file actually loaded, or null when none was found. For diagnostics and the CLI banner.</summary>
     public static string? LoadedFrom { get; private set; }
 
     /// <summary>How many settings the file applied.</summary>
     public static int LoadedCount { get; private set; }
+
+
 
     /// <summary>Loads the settings file once. Safe to call repeatedly and from multiple threads.</summary>
     internal static void EnsureLoaded()
@@ -77,26 +82,102 @@ public static class KnobFile
 
     private static string? Discover()
     {
-        if (!string.IsNullOrWhiteSpace(ExplicitPath))
+        if (!string.IsNullOrWhiteSpace(ExplicitPath) && !File.Exists(ExplicitPath))
         {
-            return File.Exists(ExplicitPath)
-                ? ExplicitPath
-                : throw new FileNotFoundException($"Engine settings file not found: '{ExplicitPath}'.", ExplicitPath);
+            throw new FileNotFoundException($"Engine settings file not found: '{ExplicitPath}'.", ExplicitPath);
         }
-        string cwd = Path.Combine(Directory.GetCurrentDirectory(), FileName);
-        if (File.Exists(cwd))
+        return File.Exists(Path) ? Path : null;
+    }
+
+    /// <summary>Writes one setting to <see cref="Path"/> and applies it, so it survives a restart.</summary>
+    /// <remarks>Validates through the same parse the file load uses, so an unknown id, a wrong type or a value
+    /// outside a clamped range fails here rather than at the next startup. The rest of the document is preserved
+    /// — the <c>profile</c> line and any other settings — because a user editing one value must not silently drop
+    /// the others. Written to a temporary file and renamed, so a crash mid-write cannot leave a truncated file
+    /// that the next load would reject outright.
+    /// <para>Returns the parsed value that was stored. A <see cref="KnobScope.Construction"/> setting is written
+    /// but does not take effect until the process restarts; the caller is expected to say so.</para></remarks>
+    public static object? Save(string id, string rawValue)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        object knob = KnobRegistry.Find(id)
+            ?? throw new InvalidOperationException($"Unknown setting '{id}'. Run 'hartsy settings list' to see them all.");
+
+        // Round-trip through the loader's own parse so "true"/"1"/"256" are read exactly as the file would read them.
+        string probe = "{\"settings\":{" + JsonSerializer.Serialize(id) + ":"
+            + JsonSerializer.Serialize(rawValue) + "}}";
+        using (JsonDocument parsed = JsonDocument.Parse(probe))
         {
-            return cwd;
+            ApplyOne(parsed.RootElement.GetProperty("settings").EnumerateObject().First(), "(set)");
         }
-        string beside = Path.Combine(AppContext.BaseDirectory, FileName);
-        if (File.Exists(beside))
+        // The effective value, not the raw one: two knobs CLAMP rather than reject, and a file holding
+        // a number the engine would quietly narrow is exactly the kind of lie this rewrite is removing.
+        object? stored = KnobRegistry.ValueOf(knob);
+        KnobStore.SetByIdRaw(id, stored, "settings file");
+
+        Dictionary<string, JsonElement> settings = new(StringComparer.Ordinal);
+        string? profile = null;
+        if (File.Exists(Path))
         {
-            return beside;
+            using JsonDocument existing = JsonDocument.Parse(File.ReadAllText(Path), new JsonDocumentOptions
+            {
+                CommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true,
+            });
+            if (existing.RootElement.TryGetProperty("profile", out JsonElement p) && p.ValueKind == JsonValueKind.String)
+            {
+                profile = p.GetString();
+            }
+            if (existing.RootElement.TryGetProperty("settings", out JsonElement s) && s.ValueKind == JsonValueKind.Object)
+            {
+                foreach (JsonProperty entry in s.EnumerateObject())
+                {
+                    settings[entry.Name] = entry.Value.Clone();
+                }
+            }
         }
-        string home = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".config", "hartsyinference", "settings.json");
-        return File.Exists(home) ? home : null;
+
+        using (MemoryStream buffer = new())
+        {
+            using (Utf8JsonWriter writer = new(buffer, new JsonWriterOptions { Indented = true }))
+            {
+                writer.WriteStartObject();
+                if (profile is not null)
+                {
+                    writer.WriteString("profile", profile);
+                }
+                writer.WriteStartObject("settings");
+                foreach ((string key, JsonElement value) in settings.Where(kv => !string.Equals(kv.Key, id, StringComparison.Ordinal))
+                             .OrderBy(kv => kv.Key, StringComparer.Ordinal))
+                {
+                    writer.WritePropertyName(key);
+                    value.WriteTo(writer);
+                }
+                writer.WritePropertyName(id);
+                WriteValue(writer, stored);
+                writer.WriteEndObject();
+                writer.WriteEndObject();
+            }
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(Path)!);
+            string temp = Path + ".tmp";
+            File.WriteAllBytes(temp, buffer.ToArray());
+            File.Move(temp, Path, overwrite: true);
+        }
+        LoadedFrom = Path;
+        return stored;
+    }
+
+    private static void WriteValue(Utf8JsonWriter writer, object? value)
+    {
+        switch (value)
+        {
+            case null: writer.WriteNullValue(); break;
+            case bool b: writer.WriteBooleanValue(b); break;
+            case int i: writer.WriteNumberValue(i); break;
+            case long l: writer.WriteNumberValue(l); break;
+            case float f: writer.WriteNumberValue(f); break;
+            default: writer.WriteStringValue(value.ToString()); break;
+        }
     }
 
     /// <summary>Parses and applies one settings document. Public so a host can supply settings it holds in memory.</summary>
@@ -129,7 +210,7 @@ public static class KnobFile
                         + $"Known profiles: {string.Join(", ", KnobProfiles.Names)}.");
                 foreach ((string id, object? value) in profile.Values)
                 {
-                    KnobStore.SetByIdRaw(id, value);
+                    KnobStore.SetByIdRaw(id, value, "settings file");
                     applied++;
                 }
             }
@@ -166,7 +247,7 @@ public static class KnobFile
             _ => throw new InvalidOperationException(
                 $"Engine settings file '{origin}': setting '{entry.Name}' expects {t.Name}, got {entry.Value.ValueKind}."),
         };
-        KnobStore.SetByIdRaw(entry.Name, value);
+        KnobStore.SetByIdRaw(entry.Name, value, "settings file");
     }
 
     private static object ParseString(string raw, Type t, string id, string origin)

@@ -41,12 +41,34 @@ public static class KnobCli
         return profile;
     }
 
+    /// <summary>The value a knob resolves to right now, and which layer supplied it.</summary>
+    /// <remarks>The source is the whole point of the command: an operator looking at a value that is not what
+    /// their settings file says needs to see that a host overrode it, which is exactly what SwarmUI does to
+    /// <c>paths.modelsRoot</c>.</remarks>
+    public static (object? Value, string Source) Effective(string id)
+    {
+        object? knob = KnobRegistry.Find(id);
+        if (knob is null)
+        {
+            return (null, "unknown");
+        }
+        object? value = KnobRegistry.ValueOf(knob);
+        object? declared = KnobRegistry.Describe(knob).Default;
+        string source = KnobStore.SourceOf(id);
+        if (source == "default" && !Equals(value, declared))
+        {
+            source = "host";
+        }
+        return (value, source);
+    }
+
     /// <summary>Prints every declared setting grouped by domain.</summary>
-    public static void ListSettings()
+    public static void ListSettings(bool includeDiagnostics = false)
     {
         List<(string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> all =
             [.. KnobRegistry.All.Select(KnobRegistry.Describe)
                 .Where(k => !k.Id.StartsWith("test.", StringComparison.Ordinal))
+                .Where(k => includeDiagnostics || k.Domain != KnobDomain.Diagnostics)
                 .OrderBy(k => k.Domain).ThenBy(k => k.Id, StringComparer.Ordinal)];
 
         foreach (IGrouping<KnobDomain, (string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary)> group

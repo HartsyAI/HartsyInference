@@ -12,13 +12,30 @@ namespace HartsyInference.Core.Configuration;
 /// re-creates that pressure no matter how tidy the first one is.</para></remarks>
 public static class KnobStore
 {
-    private static readonly ConcurrentDictionary<string, object?> _overrides = new(StringComparer.Ordinal);
+    /// <summary>Each override with the layer that set it, so "where did this value come from" is recorded rather than guessed.</summary>
+    private static readonly ConcurrentDictionary<string, (object? Value, string Source)> _overrides = new(StringComparer.Ordinal);
 
     /// <summary>Sets an explicit value. Beats the settings file; beaten by a scoped profile.</summary>
-    public static void Set<T>(Knob<T> knob, T value) => _overrides[knob.Id] = value;
+    public static void Set<T>(Knob<T> knob, T value) => _overrides[knob.Id] = (value, "host");
 
     /// <summary>Sets by dotted id with an already-parsed value. Used by <see cref="KnobFile"/>, which owns the parsing.</summary>
-    internal static void SetByIdRaw(string id, object? value) => _overrides[id] = value;
+    internal static void SetByIdRaw(string id, object? value, string source) => _overrides[id] = (value, source);
+
+    /// <summary>Which layer supplies <paramref name="id"/>'s current value: a per-request profile, the settings file or a host, else the declared default.</summary>
+    /// <remarks>Recorded when the override is set. Inferring it instead cannot work: a host override and a file
+    /// value land in the same dictionary, so after the file supplies a value a later host Set is invisible.</remarks>
+    public static string SourceOf(string id)
+    {
+        if (KnobProfileScope.Current is { } profile && profile.Values.ContainsKey(id))
+        {
+            return "request profile";
+        }
+        KnobFile.EnsureLoaded();
+        return _overrides.TryGetValue(id, out (object? Value, string Source) entry) ? entry.Source : "default";
+    }
+
+    /// <summary>The value currently overriding <paramref name="id"/>, or null when nothing does. Used by <see cref="KnobFile.Save"/> to persist exactly what the loader parsed.</summary>
+    internal static object? Raw(string id) => _overrides.TryGetValue(id, out (object? Value, string Source) entry) ? entry.Value : null;
 
     /// <summary>Clears an override so the knob falls back to its declared default.</summary>
     public static void Clear<T>(Knob<T> knob) => _overrides.TryRemove(knob.Id, out _);
@@ -42,7 +59,7 @@ public static class KnobStore
             if (scoped is T scopedTyped)
                 return Coerce(knob, scopedTyped);
         }
-        if (_overrides.TryGetValue(knob.Id, out object? o) && o is T typed)
+        if (_overrides.TryGetValue(knob.Id, out (object? Value, string Source) entry) && entry.Value is T typed)
         {
             return Coerce(knob, typed);
         }

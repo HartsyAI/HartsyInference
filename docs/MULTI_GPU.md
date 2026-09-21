@@ -26,7 +26,7 @@ DiT sharding, CFG parallelism and context parallelism are mutually exclusive. Ex
 - Mesh and most world-model placement remain limited; Oasis VAE overlap is implemented. Frame-paced worlds need latency validation before adding boundary transfers.
 - Precision differences across SM generations require controls. Same-device split parity does not establish cross-device equality; matched-SM physical pairs still need testing.
 
-YuE/CosyVoice use shared LM placement. The historical audio-LM policy chooses Q4_K for single-card fit and unquantized weights when sharded; inspect the resolved family policy and settings before comparing quality. Current knobs/defaults are declared by EngineKnobs; legacy names and disposition are in [ENV_VARS](ENV_VARS.md).
+YuE/CosyVoice use shared LM placement. The historical audio-LM policy chooses Q4_K for single-card fit and unquantized weights when sharded; inspect the resolved family policy and settings before comparing quality. Current settings and defaults are declared by EngineKnobs; see [Settings](SETTINGS.md).
 
 Extension settings historically include GPU_ID, TextEncoderGpuId, VaeGpuId, DitShardGpuId, LmShardGpuId and CfgParallelGpuId. Verify the extension's pinned version for its current surface; do not infer deployment state from this repository.
 
