@@ -6,6 +6,38 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.150
+
+- **Settings have one home and can be written.** The file is now exactly `~/.config/hartsyinference/settings.json`
+  (`hartsy settings path` prints it), instead of being searched for in the working directory, beside the entry
+  assembly and then the home directory — which meant the settings that applied depended on where a process was
+  started from. A host that keeps its settings elsewhere still sets `KnobFile.ExplicitPath`.
+- **`hartsy settings list | get <id> | set <id> <value> | path`.** `set` persists, so changing the models folder
+  survives a restart, which is the thing users were expected to change and could not. `get` reports the effective
+  value **and which layer supplied it**. `--set` and `--profile` are unchanged and still affect one run only.
+  `--list-settings` is replaced by `settings list`, which hides the diagnostics domain unless `--all` is passed.
+- **`GET /settings` now describes the engine, not just the host.** It gained an `engine` section listing every
+  setting with its value, source, type, default and when it applies; `GET`/`PUT /settings/engine/{id}` read and
+  persist one setting. Server options (ports, backend, API key) stay ASP.NET-owned and read-only here.
+- **A written value is validated and coerced when it is written.** An unknown id, a wrong type or an
+  out-of-range value fails at `set` rather than at the next startup, through the same parse the file load uses,
+  and the stored value is the one the engine will actually honour — `numerics.gemvWpb=999` is written as `16`
+  because that knob clamps rather than rejects.
+- **`KnobStore` records which layer set each value** instead of inferring it. A host override and a file value
+  share one dictionary, so once the file had supplied a value a later `KnobStore.Set` was indistinguishable from
+  it. This is load-bearing for the SwarmUI extension, which drives `paths.modelsRoot` from SwarmUI's own
+  `ModelRoot`; `settings get` now reports that as `host` rather than claiming the file set it.
+- **The environment names nothing reads are gone.** The environment layer was removed in alpha.40, but every
+  knob still recorded the variable it used to be read from — 219 in the registry, plus 293 comments and `--help`
+  strings telling an operator to export something inert. Those are rewritten to the setting id that replaced
+  each (`HARTSY_KEEP_MODELS=0` → `vram.keepModels=false`), and `LowVramPolicy.EnvironmentVariable` became
+  `SettingId` — it only ever built log lines, so the VRAM logs had been announcing a variable the engine had
+  not read in months. **A stale export is now silently ignored**; the reporter that named it is deleted.
+- Guard tests replaced rather than dropped: the source scan now asserts engine code reads **no** environment
+  variable outside the third-party set we do not own, and the two deliberate knob pairs (graph capture,
+  SageAttention) are pinned by id and default instead of by a shared variable name. `docs/SETTINGS.md` replaces
+  `ENV_VARS.md`.
+
 ## alpha.149
 
 - **Qwen-Image 2.1 (`Comfy-Org/Qwen-Image-2.1`) generates end to end.** Despite the version number it shares no
