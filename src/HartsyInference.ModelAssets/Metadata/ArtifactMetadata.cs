@@ -71,6 +71,9 @@ public static class ArtifactMetadata
             ["modelspec.sai_model_spec"] = SpecVersion,
             ["modelspec.implementation"] = Implementation,
             ["modelspec.title"] = Title(identity, provenance, isPrimary),
+            // When this artifact was packed, not when the model was released — the one field here that makes
+            // Build non-deterministic, and deliberately so: two packs of the same weights are different artifacts
+            // and their headers should say when each was produced.
             ["modelspec.date"] = DateTime.UtcNow.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
             ["hartsy.engine_id"] = identity.EngineId,
             ["hartsy.component"] = provenance.Component,

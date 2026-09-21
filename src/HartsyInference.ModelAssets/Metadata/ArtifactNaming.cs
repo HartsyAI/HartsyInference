@@ -26,6 +26,11 @@ public static class ArtifactNaming
         {
             throw new ArgumentException("An artifact name needs a precision token.", nameof(precision));
         }
+        if (string.IsNullOrWhiteSpace(extension))
+        {
+            throw new ArgumentException(
+                "An artifact name needs an extension; without one the name ends in a bare dot.", nameof(extension));
+        }
         StringBuilder name = new(Slug(engineId));
         if (!string.IsNullOrWhiteSpace(variant))
         {

@@ -43,8 +43,8 @@ public static class ModelIdentityCatalog
             StandardResolution = resolution, UpstreamRepo = repo, Tags = ["video", engineId],
         };
 
-    // No resolution, ever: an audio class declares no standard size, and a mismatched one makes SwarmUI clone the
-    // class with its matcher disabled, which hides every audio parameter.
+    // No resolution, ever: an audio class is registered 0x0, so any stamped value is a mismatch and SwarmUI
+    // substitutes a clone carrying a standard size nobody declared.
     private static ArtifactIdentity Audio(string engineId, string classId, string name, string author,
         string license, string category, string? repo = null) =>
         new()

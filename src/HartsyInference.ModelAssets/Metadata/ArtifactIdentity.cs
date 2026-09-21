@@ -31,9 +31,11 @@ public sealed record ArtifactIdentity
     /// <summary>The class's declared generation size as <c>"{w}x{h}"</c>, or null for a model with no spatial
     /// output.
     /// <para>Null is load-bearing, not merely absent: <c>IdentifyClassFor</c> accepts a model whose resolution
-    /// matches the class standard OR is absent, and for anything else it clones the class <b>with its matcher
-    /// disabled</b>. Audio classes declare no standard, so stamping one on an audio artifact silently breaks its
-    /// classification — which in AudioLab means every audio parameter disappears from the UI.</para></summary>
+    /// matches the class standard OR is absent, and for anything else it substitutes a clone carrying the stamped
+    /// size with its heuristic matcher disabled. The id still resolves, so this is quieter than a wrong
+    /// architecture — the model keeps its class and its parameters — but the class then reports a standard size
+    /// nobody declared, and can no longer be matched by shape if its id is ever missing. Audio classes declare
+    /// 0x0, so for them any value at all is a mismatch.</para></summary>
     public string? StandardResolution { get; init; }
 
     /// <summary>Tags for <c>modelspec.tags</c>; the first is the category (<c>audio</c>/<c>image</c>/<c>video</c>).</summary>

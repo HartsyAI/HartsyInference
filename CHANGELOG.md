@@ -19,10 +19,11 @@ stable release will require. Dates are UTC.
   split across three tables that no conversion site could reach: the backend extension's `ModelSupport`, the
   classes that extension registers itself, and a JSON file beside a Python tool. It sits in `ModelAssets` rather
   than `Engine` so the conversion sites in `Audio` can read it.
-- **`ArtifactMetadata` builds the header, and knows the one rule that silently breaks a model.** A resolution is
-  emitted only when the class declares one. `IdentifyClassFor` accepts a model whose resolution matches the class
-  standard or is absent, and for anything else it clones the class *with its matcher disabled* — so an audio
-  artifact must carry none, and Qwen-Image 2.1 must carry its own 1024 rather than Qwen-Image v1's 1328.
+- **`ArtifactMetadata` builds the header, and emits a resolution only when the class declares one.**
+  `IdentifyClassFor` accepts a model whose resolution matches the class standard or is absent; for anything else
+  it substitutes a clone carrying the stamped size with its heuristic matcher disabled, so the class ends up
+  reporting a standard size nobody declared. Audio classes are registered 0x0, so they must carry none, and
+  Qwen-Image 2.1 must carry its own 1024 rather than Qwen-Image v1's 1328.
 - **Only the primary weights get an architecture.** A codec, vocoder or pitch estimator that lives in its own
   file is part of a model, not a model, and the index admits only `hartsy.component=main`. Naming the component
   is required rather than defaulted, because the default is the dangerous one: four of the five conversion sites

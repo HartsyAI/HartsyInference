@@ -46,6 +46,7 @@ public sealed class ArtifactNamingTests
     {
         Assert.Throws<ArgumentException>(() => ArtifactNaming.FileName("", null, "bf16", ".safetensors"));
         Assert.Throws<ArgumentException>(() => ArtifactNaming.FileName("krea2", null, "  ", ".safetensors"));
+        Assert.Throws<ArgumentException>(() => ArtifactNaming.FileName("krea2", null, "bf16", ""));
     }
 
     [Fact]
