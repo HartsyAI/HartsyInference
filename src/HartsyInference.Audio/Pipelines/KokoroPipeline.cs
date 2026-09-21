@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Kokoro;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
 
@@ -163,10 +164,28 @@ public sealed class KokoroPipeline : IDisposable
                 HartsyInference.Core.Logging.Logs.Info(
                     $"[Kokoro] Repack '{RepackRepo}/{RepackFile}' unavailable ({ex.Message}); converting canonical kokoro-v1_0.pth → {RepackFile} (one-time).");
                 // Strip the nn.DataParallel `module.` wrapper — the exact transform tools/repack bakes offline.
-                PickleCheckpointRepacker.Repack(pth, outPath, k => k.Replace(".module.", "."), recursiveFlatten: true);
+                // Stamped as it is written: this file is what a user's SwarmUI scans, and an unstamped one classifies
+                // as null, which hides every Kokoro parameter in the UI.
+                PickleCheckpointRepacker.Repack(pth, outPath, k => k.Replace(".module.", "."), recursiveFlatten: true,
+                    metadata: RepackMetadata(pth));
             }
             return outPath;
         }
+    }
+
+    /// <summary>Identity for the locally converted repack, so a file the engine produced on a user's machine is as
+    /// self-describing as one we publish. Null when the catalog does not know this family, which leaves the file
+    /// unstamped rather than stamped with a guess.</summary>
+    private static IReadOnlyDictionary<string, string>? RepackMetadata(string sourcePath)
+    {
+        ArtifactIdentity? identity = ModelIdentityCatalog.Find("kokoro");
+        if (identity is null)
+        {
+            return null;
+        }
+        return ArtifactMetadata.ForRepack(identity, ArtifactProvenance.FromSourceFile(
+            "HartsyInference.PickleCheckpointRepacker", ArtifactProvenance.MainComponent, sourcePath,
+            sourceRepo: "hexgrad/Kokoro-82M"));
     }
 
     /// <summary>Synthesizes audio from an IPA phoneme string. <paramref name="voiceName"/>

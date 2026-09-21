@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+
 namespace HartsyInference.ModelAssets.Metadata;
 
 /// <summary>Where a converted artifact came from and what was done to it, recorded in the output's own header so the
@@ -32,4 +34,37 @@ public sealed record ArtifactProvenance
 
     /// <summary>Optional one-line description for the model card.</summary>
     public string? Description { get; init; }
+
+    /// <summary>Provenance for a file converted from <paramref name="sourcePath"/>, hashing the source so the output
+    /// can be traced back to exact bytes rather than to a file name that may since have been replaced.</summary>
+    public static ArtifactProvenance FromSourceFile(string converter, string component, string sourcePath,
+        string? sourceRepo = null, string? precision = null) =>
+        new()
+        {
+            Converter = converter,
+            Component = component,
+            SourceRepo = sourceRepo,
+            SourceFile = Path.GetFileName(sourcePath),
+            SourceSha256 = HashFile(sourcePath),
+            Precision = precision,
+        };
+
+    /// <summary>Lowercase hex SHA-256 of a whole file, or null when it cannot be read — provenance is worth
+    /// recording but never worth failing a conversion over.</summary>
+    public static string? HashFile(string path)
+    {
+        try
+        {
+            using FileStream stream = File.OpenRead(path);
+            return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 }
