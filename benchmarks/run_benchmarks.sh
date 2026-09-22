@@ -176,7 +176,7 @@ echo "[1/6] Capturing hardware + software fingerprints..."
     echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>} (phys idx ${PHYS_IDX}, ${GPU_NAME})"
     echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
     echo "bench_set=${BENCH_SET:-<none>}"
-    dotnet run --project "$REPO/src/HartsyInference.Cli/HartsyInference.Cli.csproj" -c Release -f net10.0 \
+    dotnet run --project "$REPO_ROOT/src/HartsyInference.Cli/HartsyInference.Cli.csproj" -c Release -f net10.0 \
         --no-build -- ${BENCH_SET:-} settings list --all 2>/dev/null \
         || echo "(settings snapshot unavailable)"
 } > "$STAGING/software.txt"
