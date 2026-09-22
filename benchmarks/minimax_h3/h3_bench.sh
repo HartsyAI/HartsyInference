@@ -67,6 +67,8 @@ if [ "$FREE" -lt "$MIN_FREE_MB" ]; then
 fi
 
 cd "$REPO"
+# H3_BENCH_SET carries `--set knob=value` pairs for an A/B arm. H3_BENCH_ENV survives for genuine process
+# environment (CUDA_*, LD_LIBRARY_PATH); it cannot configure the engine, which reads none.
 # `env` rather than a bare assignment prefix: bash does not re-parse KEY=VALUE that arrives via
 # variable expansion, so $H3_BENCH_ENV would be taken as the command name.
 # No HARTSY_LOG_LEVEL here: the engine reads no environment variables at all since the settings rebuild, so
@@ -78,6 +80,7 @@ env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA \
     ${H3_BENCH_ENV:-} \
     dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -c "${H3_BENCH_CONFIG:-Release}" \
     -f net10.0 ${H3_BENCH_NOBUILD:---no-build} -- \
+    ${H3_BENCH_SET:-} \
     video -m minimax-h3 --model-path "$CKPT" \
     --frames "$FRAMES" --width "$WIDTH" --height "$HEIGHT" --steps "$STEPS" --seed "$SEED" \
     -o "$OUT/${LABEL}_out" "$PROMPT" > "$LOG" 2>&1

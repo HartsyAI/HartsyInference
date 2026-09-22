@@ -899,15 +899,9 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
 
 ## Video-specific bugs
 
-- **A component OOM can be another component's fold.** MiniMax-H3 OOM'd in the DiT's `PreloadWeights` for
-  ~50 alphas, 59 MB short of a card that was otherwise empty — and the DiT was innocent. Its nvfp4 text
-  encoder was being widened to F16 at load because `CheckpointSource`'s default folds the `.weight_scale` /
-  `.weight_scale_2` keys that `Nvfp4Linear` locates the format by, so what should have been a memory-mapped
-  open became 50 GB of host RSS and the DiT got what was left. **The diagnostic is the component's own tensor
-  count, not the OOM**: the log prints `Text encoder: N tensors`, and folding halves it (2054 → 1002 here,
-  exactly the companion count). Compare it against the safetensors header before blaming the component that
-  reported the failure. `hartsy settings set diagnostics.logLevel Info` — that line is Info, and no
-  environment variable turns it on any more.
+- **An OOM names the component that asked for memory, not the one that took it.** A component's own
+  `… : N tensors` line against the safetensors header is the check — a fold that widens a packed weight
+  halves the count. Info level, via `diagnostics.logLevel`.
 - **LTX-2 `rope_type = "split"` vs interleaved:** the 22B config declares `split` (rotates two halves
   within each head, compact `dim/2` front-padded freqs) but only interleaved was implemented → persistent
   32-px lattice identical at 8 and 30 steps (colors survive because text cross-attn carries no RoPE). Key
