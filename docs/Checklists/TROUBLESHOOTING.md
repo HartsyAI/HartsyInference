@@ -387,7 +387,7 @@ no bug, any more than one bad seed was proof there was one.
   the glue op to device so activations stay resident. Health assert: ~0 mid-decode D2H syncs; any per-token
   sync is a residency bug (MoE routing readback is a current offender at 2193–3225 syncs/rep).
 - **A step preview must not touch the step-graph's fixed buffer, and must not host-read the loop's packed
-  tokens.** `HARTSY_DIT_GRAPH` is default-off for most models, so that buffer usually does not exist — a
+  tokens.** `numerics.ditGraph` is default-off for most models, so that buffer usually does not exist — a
   `SnapshotGraphLatent` preview hook threw `NullReferenceException` on every Z-Image generation from alpha.42
   to alpha.59. Preview by unpatchifying the loop's tokens with the backend op; a host unpatchify would
   D2H-and-free the device copy each step.
@@ -398,7 +398,7 @@ no bug, any more than one bad seed was proof there was one.
 - **`ConvTranspose2d` silently ran on CPU** (`CudaBackend` never overrode it) — 1549ms for a 32²→64²
   upsample → 3ms with a gather-form kernel. Shared by ClipSeg/YOLO/Demucs/RVC/ResembleEnhance. Grouped
   `ConvTranspose1d` (`groups=768`, BigVGAN) was likewise rejected — add `groups` to the kernel.
-- **F16/CUDA-graph only help when host-launch-bound:** `HARTSY_GEMM_F16=1` moving DiT time 0% proves it's
+- **F16/CUDA-graph only help when host-launch-bound:** `numerics.gemmF16` moving DiT time 0% proves it's
   per-op-launch-bound, not GEMM-bound; graph capture is then the real lever.
 - **The lm_head dominates decode for large-vocab models.** Orpheus: the tied lm_head (3072→156,940 vocab)
   ran as an F32 GEMM at M=1 = 90% of the step. Fused BF16/F16 M=1 GEMV → 221ms→3.8ms/tok. Same class:
@@ -917,10 +917,10 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   padding (unmasked ~120 PAD tokens dilute the caption).
 - See CausalConv3d OOB and Concat-graph bloat under [CUDA kernel pitfalls](#cuda--ptx-kernel-pitfalls--toolchain)
   and [GPU residency](#gpu-residency--throughput-cuda) — both first surfaced on video VAEs.
-- **LTX-2.5 diffusion-VAE symlink footgun:** `HARTSY_LTX2_DIFFUSION_VAE=1` alone is not enough — the model
+- **LTX-2.5 diffusion-VAE symlink footgun:** `numerics.ltx2DiffusionVae` alone is not enough — the model
   folder carries the conv VAE, and `IsDiffusionVideoVae` is one boolean over the *merged* key set, so if both
   VAEs are present it silently falls through to (or corrupts) the conv decoder. You must **swap** the symlink,
-  never add a second one; confirm via the `HARTSY_LTX2_DIFFUSION_VAE set — … (310 tensors)` log line.
+  never add a second one; confirm via the `numerics.ltx2DiffusionVae set — … (310 tensors)` log line.
 - **Deployed SwarmUI extension can refuse a model with a stale error message compiled into it**, while the
   engine itself is already correct — `deploy_extension.sh` only redeploys engine DLLs/PTX, not the extension
   assembly. If the extension's own source checkout doesn't contain the refusal string you're seeing, its

@@ -3,8 +3,30 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N` (the scheme moved
 up from `1.0.0-alpha.N`; entries below that pre-date the change and keep their original numbers). The single
 source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props` — see
-[`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
+[`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
+
+## alpha.156
+
+- **One README serves GitHub and nuget.org.** `README.nuget.md` existed because nuget.org renders a package
+  readme with no repository context — but what that needs is absolute links, not a second file, since
+  nuget.org does not resolve repository-relative paths. Every link and the benchmark badge are now full URLs,
+  `PackageReadmeFile` and the pack include both point at `README.md`, and the packed nupkg carries it without
+  NU5039. The merged file also gains the Configuration section the package-facing copy never had, because a
+  consumer otherwise has no route to "settings live in one file and the engine reads no environment variables".
+- **The docs name knobs again instead of environment variables that stopped working.** The settings rebuild
+  moved every engine switch onto a knob and left the engine reading no environment variables, but 28 mentions
+  across 9 files still told a reader to export something inert — the same failure that had every MiniMax-H3
+  benchmark running at Warning level while its harness claimed Info. Twenty renames (`HARTSY_STEP_CACHE` →
+  `vram.stepCache`, `HARTSY_FP8_NATIVE` → `numerics.fp8Native`, and so on); three switches have no
+  replacement and now say so. `HARTSY_REQUIRE_REAL_WEIGHTS` and `HARTSY_RUN_H3_GUIDE_MASK_REAL` are untouched
+  — those are real variables the test harness reads.
+- **The model status docs say what is missing, from the upstream diff rather than memory.** Both "not yet
+  built" lists are now `RecipeRegistry`/`VideoRecipeRegistry` against SwarmUI's `T2IModelClassSorter.cs` and
+  ComfyUI's `supported_models.py`, dated and attributed; video had no such section at all. "Flux.2 Klein 9B
+  (no public weights)" was false, and the extension already routes both Klein classes into the 32B `flux2`
+  recipe. Wan 2.5/2.6/2.7 video are not open weights and are now a do-not-chase note.
+- **MiniMax-H3's status entry records the alpha.97-to-154 regression**, which it previously read straight past.
 
 ## alpha.155
 
