@@ -754,8 +754,9 @@ public static unsafe class CheckpointConvertUtils
     /// <param name="nvfp4ToFp8">When true, NVFP4 weights are dequantized to <b>fp8 (1 byte/param)</b> with the block scale folded into the value and the global scale carried on <see cref="Tensor.Fp8ScaleFactor"/>, instead of the default F16 (2 byte/param). Halves the resident footprint of an all-nvfp4 model (Ideogram 4: two 9.3B DiTs, 35.9 GB at F16 → 18.6 GB at fp8, the difference between "won't fit a 24 GB card" and "fits"). Leave false for small nvfp4 text encoders (Z-Image's Qwen3-4B) where F16 is free and avoids fp8's smaller range.</param>
     /// <returns>A new dictionary without companion keys, with <c>Fp8ScaleFactor</c> populated on FP8 weights.</returns>
     /// <param name="residentNvfp4">Keep nvfp4 weights PACKED — relabelled <c>F4E2M1 [N, K]</c> with their scales on <see cref="Tensor.QuantInfo"/> — instead of unpacking them here. Opt-in, unlike int8: the eager path works and is what the CPU/Vulkan backends need, so only a caller that knows a CUDA backend will consume the weights should ask for it. AWQ layers carrying <c>pre_quant_scale</c> refuse and take the eager path regardless.</param>
+    /// <param name="keepNvfp4Companions">Leave nvfp4 weights packed AND leave their <c>.weight_scale</c>/<c>.weight_scale_2</c> companions in the dictionary, for a consumer that dequantizes the format itself rather than reading <see cref="Tensor.QuantInfo"/>. Unlike <paramref name="residentNvfp4"/> this also covers AWQ layers, which is the point: <see cref="Tensor.QuantInfo"/> cannot express <c>pre_quant_scale</c>, so those layers have no resident representation and would otherwise be widened. Everything else — fp8, int8, NF4 — folds exactly as it does with this off.</param>
     public static unsafe Dictionary<string, Tensor> ApplyFp8ScaledDequant(Dictionary<string, Tensor> source,
-        bool nvfp4ToFp8 = false, bool residentNvfp4 = false)
+        bool nvfp4ToFp8 = false, bool residentNvfp4 = false, bool keepNvfp4Companions = false)
     {
         // int8_tensorwise uses the same companion suffixes this pass drops, so its scales have to move onto the
         // weight before anything here can strip them.
@@ -804,6 +805,12 @@ public static unsafe class CheckpointConvertUtils
         if (!sawAnyScale)
             return source;
 
+        // The base names whose companions this pass must NOT drop, because the caller reads the packed format
+        // itself. Collected before the drop loop because the decision is per-weight (does this base name name an
+        // nvfp4 group?) while the loop sees companion keys, which carry no dtype evidence of their own.
+        HashSet<string>? keptNvfp4 = keepNvfp4Companions
+            ? CollectNvfp4Groups(source, weightScales, weightScale2s) : null;
+
         Dictionary<string, Tensor> result = new(source.Count);
         foreach (KeyValuePair<string, Tensor> kvp in source)
         {
@@ -817,6 +824,10 @@ public static unsafe class CheckpointConvertUtils
                 key.EndsWith(".comfy_quant", StringComparison.Ordinal) ||
                 key == "scaled_fp8")
             {
+                if (keptNvfp4 is not null && IsKeptNvfp4Companion(key, keptNvfp4))
+                {
+                    result[key] = kvp.Value;
+                }
                 continue;
             }
 
@@ -868,6 +879,13 @@ public static unsafe class CheckpointConvertUtils
             if (kvp.Value.DType == DType.U8 && key.EndsWith(".weight", StringComparison.Ordinal))
             {
                 string baseKey = key[..^".weight".Length];
+                // Asked to leave this group alone: the packed U8 weight passes through beside the companions the
+                // drop loop above kept, which together are the form the caller's own dequantizer reads.
+                if (keptNvfp4 is not null && keptNvfp4.Contains(baseKey))
+                {
+                    result[key] = kvp.Value;
+                    continue;
+                }
                 if (weightScales.TryGetValue(baseKey, out Tensor? blockScales) && blockScales.DType == DType.F8E4M3
                     && blockScales.Shape.Rank == 2
                     && weightScale2s.TryGetValue(baseKey, out Tensor? scale2T) && scale2T.DType == DType.F32)
@@ -891,6 +909,45 @@ public static unsafe class CheckpointConvertUtils
             result[key] = kvp.Value;
         }
         return result;
+    }
+
+    /// <summary>The base names in <paramref name="source"/> that form a complete nvfp4 group: a U8 <c>.weight</c> with
+    /// a rank-2 F8E4M3 <c>.weight_scale</c> and an F32 scalar <c>.weight_scale_2</c>. That combination exists for no
+    /// other format, which is what makes it a safe structural test.</summary>
+    /// <remarks>Deliberately the same three conditions the eager branch checks, so a group this set names is exactly a
+    /// group that branch would otherwise have unpacked — a weight failing any of them keeps its normal handling
+    /// (including the U8 passthrough at the end of the loop) rather than being silently stranded with companions.</remarks>
+    private static HashSet<string> CollectNvfp4Groups(Dictionary<string, Tensor> source,
+        Dictionary<string, Tensor> weightScales, Dictionary<string, Tensor> weightScale2s)
+    {
+        HashSet<string> groups = new HashSet<string>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Tensor> kvp in source)
+        {
+            if (kvp.Value.DType != DType.U8 || !kvp.Key.EndsWith(".weight", StringComparison.Ordinal))
+                continue;
+            string baseKey = kvp.Key[..^".weight".Length];
+            if (weightScales.TryGetValue(baseKey, out Tensor? blockScales) && blockScales.DType == DType.F8E4M3
+                && blockScales.Shape.Rank == 2
+                && weightScale2s.TryGetValue(baseKey, out Tensor? scale2T) && scale2T.DType == DType.F32)
+            {
+                groups.Add(baseKey);
+            }
+        }
+        return groups;
+    }
+
+    /// <summary>True when <paramref name="key"/> is one of the two nvfp4 scale companions of a base name in
+    /// <paramref name="keptNvfp4"/>. Only those two suffixes qualify: an fp8 <c>.scale_weight</c> or a
+    /// <c>.comfy_quant</c> blob sharing the base name is still a companion this pass consumes and drops.</summary>
+    private static bool IsKeptNvfp4Companion(string key, HashSet<string> keptNvfp4)
+    {
+        // `.weight_scale_2` is tested first: ".weight_scale_2".EndsWith(".weight_scale") is false, but stripping the
+        // shorter suffix from the longer key would still yield a wrong base name if the order were reversed.
+        if (key.EndsWith(".weight_scale_2", StringComparison.Ordinal))
+            return keptNvfp4.Contains(key[..^".weight_scale_2".Length]);
+        if (key.EndsWith(".weight_scale", StringComparison.Ordinal))
+            return keptNvfp4.Contains(key[..^".weight_scale".Length]);
+        return false;
     }
 
     /// <summary>In-place: quantizes the large 2-D Linear weights under <paramref name="blockKeyMarker"/> from BF16/F16 to fp8 e4m3, ADDING a <c>.scale_weight</c> [1] F32 companion for each (the ComfyUI <c>fp8_scaled</c> layout). Because the scale rides in a companion tensor — not the un-persisted <see cref="Tensor.Fp8ScaleFactor"/> — the result round-trips through safetensors: write it once with <c>SafeTensorsWriter</c> to build a persistent fp8 <b>repack</b>, then every future load reads it back and <see cref="ApplyFp8ScaledDequant"/> folds the companions in. This halves the DiT's resident footprint (2 → 1 byte/param; the LTX-2.3 22B goes ~35 → ~18 GB, fitting a 24 GB card fully resident and killing the per-step streaming). Only weights with ≥ <paramref name="minElements"/> elements are touched (norms, scale-shift tables, timestep-MLP and projections stay BF16); the VAE/TE and already-fp8 tensors are skipped.</summary>
