@@ -272,10 +272,14 @@ public sealed unsafe class MiniMaxH3TextEncoderTests
         // being so when H3's encoder moved onto the container, and the symptom was a 15.7 GB checkpoint
         // materializing in full and taking the DiT's VRAM headroom — no exception, so nothing here would catch it
         // except asking Nvfp4Linear directly.
+        // 128 output features so UnitBank's scale-row padding is a no-op: Nvfp4Linear tolerates a bank whose scale
+        // rows are padded up to a multiple of 128, but the eager host dequant this compares against requires them to
+        // match the weight exactly, and every layer of the published checkpoint is unpadded. A narrower fixture would
+        // fail in the control arm for that reason alone and prove nothing about retention.
         Dictionary<string, Tensor> kept = CheckpointConvertUtils.ApplyFp8ScaledDequant(
-            UnitBank("q", outFeatures: 8, inFeatures: 32, globalScale: 1f), keepNvfp4Companions: true);
+            UnitBank("q", outFeatures: 128, inFeatures: 32, globalScale: 1f), keepNvfp4Companions: true);
         Dictionary<string, Tensor> folded = CheckpointConvertUtils.ApplyFp8ScaledDequant(
-            UnitBank("q", outFeatures: 8, inFeatures: 32, globalScale: 1f));
+            UnitBank("q", outFeatures: 128, inFeatures: 32, globalScale: 1f));
 
         Nvfp4Linear packed = Nvfp4Linear.Load(kept, "q");
         Nvfp4Linear widened = Nvfp4Linear.Load(folded, "q");
