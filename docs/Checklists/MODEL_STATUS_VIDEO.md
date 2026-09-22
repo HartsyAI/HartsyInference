@@ -58,6 +58,29 @@ Distilled from the retired PHASE_9_VIDEO / VIDEO_CLI_CATALOG_HANDOFF / LTX_PARIT
 `kandinsky5-video` and HunyuanVideo are now CLI-surfaced + verified above, so they are omitted.
 See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, quant, serving).
 
+### Not yet built (more-model support)
+
+Families both upstreams already recognise and this engine has no recipe for. Verified 2026-09-22 by diffing
+`VideoRecipeRegistry` against SwarmUI `T2IModelClassSorter.cs` (`33dc3397`) and the bundled ComfyUI
+`supported_models.py` (`b0f4b7b2`).
+
+- [ ] **Hunyuan Video 1.5**, and its distilled super-resolution model. SwarmUI has had the compat class since
+  2025-11-20 (`IsText2Video` **and** `IsImage2Video`); ComfyUI's `HunyuanVideo15` *subclasses* its
+  `HunyuanVideo` — `vision_in_dim` 1152 and `shift` 7.0, with `in_channels` 98 for the SR variant. So this is a
+  variant of a family already ported here, and it is the only image-to-video Hunyuan class:
+  `HunyuanVideoRecipe.Matches` takes `hunyuan-video`/`hunyuanvideo` only and drives the classic 13B T2V
+  checkpoint. Cheapest worthwhile addition on this list.
+- [ ] Wan conditioning variants ComfyUI ships that this tree does not: `WAN21_HuMo`, `WAN21_SCAIL` /
+  `SCAIL2`, `WAN22_WanDancer` (music-driven dance, Wan2.1 backbone plus a `music_encoder` whose
+  `self_attn.in_proj` splits into q/k/v at load), `WAN21_Camera` / `WAN22_Camera`, `WAN21_FunControl2V`,
+  `WAN21_CausalAR_T2V`, `WAN21_FlowRVS`. ComfyUI only — SwarmUI registers no class for any of them.
+- [ ] CogVideoX (T2V / I2V / Inpaint), Genmo Mochi 1, Stable Video Diffusion, Cosmos-Predict1 T2W. Older, both
+  upstreams carry them, no demand recorded; listed so the diff is complete.
+
+**Not open weights — do not chase.** Alibaba stopped publishing Wan video weights after 2.2; there are no
+official 2.5/2.6/2.7 video checkpoints, only `Wan2.7-Image`. SwarmUI reaches Wan 2.7 solely through its Fal
+API backend extension, which is a hosted provider, not a local model.
+
 ### Numeric validation
 - [ ] All models are built structurally; numeric parity vs a Python reference is pending for every one not already ✅ (LTX 0.9 / 0.9.5 / 13B and LTX-2 22B are verified e2e).
 
@@ -333,6 +356,16 @@ the original conditions, compare before binding or against a Q2_K-only run; our 
 ggml's `dequantize_row_q2_K`. Whether the cause is 2.6 bits being too coarse for an already-pruned DiT or a fault
 in that repack's quantizer is **not established**, and `UD-Q2_K_XL` is untested.
 
+
+**Regression, alpha.97 → alpha.154: this model generated nothing at all, on every path.** The DiT's weight
+preload ran out of VRAM (`requested 250 MB but only 310 MB available`) on an otherwise-empty 4090, and
+`/v1/native/video/stream` answered 200 with zero frame events and one `event: error`. The DiT was not the
+cause — the nvfp4 text encoder was being widened to F16 at load, because opening it through
+`CheckpointSource` folded away the `.weight_scale`/`.weight_scale_2` keys `Nvfp4Linear` locates the packed
+format by. Fixed in alpha.155 (`CheckpointOpenOptions.KeepNvfp4Companions`); the diagnostic generalises and
+is recorded under [Video-specific bugs](TROUBLESHOOTING.md#video-specific-bugs). Everything above this note
+was measured before that regression and was re-confirmed after the fix: 141/141 frames plus a matching
+5.875 s 32 kHz stereo track, CLI and SSE.
 ### SeedVR2-3B (video/image RESTORATION — `Modality.Restore`, not T2V)
 
 **Full parity chain + 7-clip real-footage matrix verified (2026-08-01, 4090).** Per-stage gates: window partition EXACT (40 grids / 2,490 slices, Unit-tier fixture `SeedVr2Tests` (windowing facts)); preprocessing maxAbs 2.3e-6 (`SeedVr2Tests`, env `SEEDVR2_PRE_REF`) — caught 2 real bugs (torchvision AA bicubic is a=−0.5 PIL-kernel not −0.75, and ATen computes resize weights in float32: double-math drifts 3.4e-5 by output index ~1000); VAE enc+dec relL2 ≤2.9e-6 vs REAL weights (`SeedVr2Tests`, `SEEDVR2_VAE`+`SEEDVR2_VAE_REF`); tiny-config DiT per-block relL2 ≤8.9e-4 / output 1.05e-4 (`SeedVr2Tests`, `SEEDVR2_PARITY_DIR`, dump `Parity/seedvr2_transformer_parity_dump.py` w/ flash_attn SDPA shim); **E2E vs Python real-weight restoration: mean SSIM 0.99950 / PSNR 56.6 dB** (`SeedVr2Tests`, `SEEDVR2_DIT/VAE/EMB/E2E_REF/FRAMES/AREA`, staged driver `run_seedvr2_e2e_reference.py` — reference noises injected via `NoiseHook`; torch RNG unmatchable). Reference quirks ported deliberately (SEEDVR2_ARCHITECTURE.md §2.5): tail-ada cache-collision (attn emb slice), last-layer vid_only (plain-normed txt K/V + ungated residual + txt self-doubling), per-frame VAE GroupNorm, (0,1,0,1) downsampler pad, MAGViT (x y z c) shuffle dropping output frame 1. **Matrix (25f clips, 960×540-area, `--clip-frames 5 --overlap 1`): Reagan USIA '87 / Apollo 11 / JFK '61 / Steamboat Willie / Prelinger '62 / BBB ground-truth / still (t==1) — 7/7 rc=0, ~14 s/frame, peak 17.1 GB, zero OOM** (`Models/TestAssets/restore/run_matrix.sh`, log `matrix_results.log`). Ground truth is honest: pixel metrics prefer bicubic (SSIM 0.877 vs 0.926 extreme; strength 0.7 ≈ unchanged — the loss lives in repainted high frequencies) but **LPIPS wins 26–28%** (extreme 0.735→0.541, mild 0.448→0.324) and Reagan crowd faces visibly resolve — the paper's own generative perception-over-distortion profile. CLI catalog path verified (`hartsy restore`, PNG frames + ffmpeg-subprocess MP4).

@@ -147,9 +147,34 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 - [ ] Run a first real-checkpoint layer-diff for each 🔧 built-but-validation-pending model to promote it to verified-e2e.
 
 ### Not yet built (more-model support)
+
+Families both upstreams already recognise and this engine has no recipe for, newest first. Verified
+2026-09-22 by diffing `RecipeRegistry` against SwarmUI `T2IModelClassSorter.cs` (`33dc3397`) and the bundled
+ComfyUI `supported_models.py` (`b0f4b7b2`) — not from memory. The extension's `ModelSupport.cs` maps a compat
+class to a family id, so an unmapped class reports "architecture not supported" rather than failing at load.
+
+- [ ] **SenseNova U1.5** — ComfyUI 2026-08-31, SwarmUI 2026-09-01. Standalone `BASE` class upstream
+  (`shift` 3.0, `noise_scale` 1.0), so a full port rather than a variant of something built.
+- [ ] **JoyImage / JoyImageEdit** — ComfyUI 2026-07-15. ComfyUI only; SwarmUI registers no class.
+- [ ] **HiDream-O1** — ComfyUI 2026-05-11, SwarmUI 2026-05-12. `HiDreamRecipe.Matches` takes `hidream`
+  only and the extension maps `hidream-i1`, so the O1 checkpoints have no route. Also a standalone `BASE`
+  class upstream (`shift` 3.0, `noise_scale` 8.0), not a flag on I1.
+- [ ] **NVIDIA PixelDiT and PiD** — both upstreams 2026-05-26. A pixel-space DiT family, new to this tree.
+- [ ] **LongCat-Image** — SwarmUI since 2026-02-28, ComfyUI `LongCatImage`.
 - [ ] Krea 2 non-turbo base/CFG path (researched, not built; Turbo is ✅).
-- [ ] Flux.2 Klein 9B (no public weights).
 - [ ] F-Lite Freepik / Fal.ai variant (T5-XXL layer-17, ~29.4 GB checkpoint).
+- [ ] **Flux.2 Klein 4B / 9B** — the weights are public (`black-forest-labs/FLUX.2-klein-9B`, plus `-fp8`,
+  `-nvfp4` and `-base-9b` builds); this entry previously said otherwise and was stale. Note the extension
+  already maps `flux-2-klein-4b` and `flux-2-klein-9b` onto the **`flux2`** recipe, so a Klein checkpoint
+  routes into the 32B Flux.2 pipeline today — confirm that is correct before treating this as unstarted.
+
+Older families both upstreams carry that this engine has never had: Stable Cascade, SD2, PixArt-Σ,
+NVIDIA Sana, Segmind SSD-1B, Cosmos-Predict2 T2I. No demand recorded; listed so the diff is complete.
+
+Neither upstream supports it, so there is no reference pipeline to layer-diff against: **NVIDIA Cosmos 3**
+(open weights under OpenMDW-1.1, 2026-07-20) currently leads the open-weight text-to-image and
+image-to-video arenas. The ranked entry is the *agentic* harness over the 64B `Cosmos3-Super`, which no
+consumer card here can hold; whether the 8B/32B variants ship their own distills is unchecked.
 
 ### Pipeline / plumbing
 - [ ] Quality-preset per-pipeline constructor wiring.
