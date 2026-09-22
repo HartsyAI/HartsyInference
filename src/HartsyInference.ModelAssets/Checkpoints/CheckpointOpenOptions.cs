@@ -19,6 +19,15 @@ public sealed record CheckpointOpenOptions
     /// <summary>Keep NVFP4 weights packed with their scales on <see cref="Core.Tensors.Tensor.QuantInfo"/> instead of unpacking them, for a caller that knows a CUDA backend will consume them.</summary>
     public bool ResidentNvfp4 { get; init; }
 
+    /// <summary>Keep NVFP4 weights packed with their scales as COMPANION KEYS, for a caller whose own layer reads that
+    /// form — the opposite trade to <see cref="ResidentNvfp4"/>, which moves the scales onto the tensor.</summary>
+    /// <remarks>Set this only for a dictionary that reaches such a consumer directly, never one an architecture
+    /// converter renames: surviving companions are exactly what folding exists to prevent a converter from splitting
+    /// from their weight. It covers AWQ layers, which <see cref="ResidentNvfp4"/> cannot — <c>QuantInfo</c> has no
+    /// <c>pre_quant_scale</c> field, so those layers take the eager path there and widen. Ignored unless
+    /// <see cref="FoldQuantCompanions"/> is on, which is the pass it modifies.</remarks>
+    public bool KeepNvfp4Companions { get; init; }
+
     /// <summary>Relabel rank-2 GGUF tensors from ggml's <c>[in, out]</c> order to the <c>[out, in]</c> order the engine assumes for a matrix weight.</summary>
     /// <remarks>Only a caller that wants GGUF's own layout — a re-quantizer rewriting a GGUF — sets this false. With it
     /// off, every Linear is transposed and the first matmul derives a degenerate <c>M=0</c>.</remarks>
