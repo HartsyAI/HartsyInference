@@ -275,7 +275,7 @@ Stage-1 7B LM corr 1.0 (argmax 8/8) + XCodec (SoundStream) decode corr 1.0 → g
 
 ### HeartMuLa
 
-LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). **Perf (RTX 3060, 3b-base):** ~91 ms/frame ≈ 11 fr/s bf16 (~0.9× realtime, memory-bandwidth-bound). CUDA-graph decode of the backbone + depth steps (`numerics.csmGraph`, default on) is bit-identical + ~5% (launch overhead is only ~8/91 ms). Disk-cached weight quant (`numerics.audioLmQuant=q8_0`) is **1.41× faster** (64.8 ms/frame ≈ 15.4 fr/s, past real-time) + ~1/2 VRAM — the fix was pinning the quant weights GPU-resident (`PreloadWeights`, quantized-only); the Q8 fused GEMV is faster than bf16 when resident.
+LM corr 0.9996–0.9999 + HeartCodec rewritten: flow-match estimator corr 1.0 + ScalarModel corr 1.0 → generates 48 kHz audio (CPU + CUDA). **Perf (RTX 3060, 3b-base):** ~91 ms/frame ≈ 11 fr/s bf16 (~0.9× realtime, memory-bandwidth-bound). CUDA-graph decode of the backbone + depth steps (`numerics.csmGraph`, default on) is bit-identical + ~5% (launch overhead is only ~8/91 ms). Disk-cached weight quant (a `-q8` model id, not the `numerics.audioLmQuant` knob) is **1.41× faster** (64.8 ms/frame ≈ 15.4 fr/s, past real-time) + ~1/2 VRAM — the fix was pinning the quant weights GPU-resident (`PreloadWeights`, quantized-only); the Q8 fused GEMV is faster than bf16 when resident.
 
 ### Stable Audio Open Small
 
