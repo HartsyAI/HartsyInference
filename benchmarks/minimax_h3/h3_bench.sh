@@ -69,9 +69,15 @@ fi
 cd "$REPO"
 # `env` rather than a bare assignment prefix: bash does not re-parse KEY=VALUE that arrives via
 # variable expansion, so $H3_BENCH_ENV would be taken as the command name.
-env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA HARTSY_LOG_LEVEL=Info \
+# No HARTSY_LOG_LEVEL here: the engine reads no environment variables at all since the settings rebuild, so
+# that used to silently leave the run at Warning — which hides the component tensor counts and the residency
+# line, the two things a load problem shows up in. Ask for them with:
+#   hartsy settings set diagnostics.logLevel Info
+# -c Release because Debug is roughly an order of magnitude slower here and no timing from it is comparable.
+env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA \
     ${H3_BENCH_ENV:-} \
-    dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -f net10.0 ${H3_BENCH_NOBUILD:---no-build} -- \
+    dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -c "${H3_BENCH_CONFIG:-Release}" \
+    -f net10.0 ${H3_BENCH_NOBUILD:---no-build} -- \
     video -m minimax-h3 --model-path "$CKPT" \
     --frames "$FRAMES" --width "$WIDTH" --height "$HEIGHT" --steps "$STEPS" --seed "$SEED" \
     -o "$OUT/${LABEL}_out" "$PROMPT" > "$LOG" 2>&1

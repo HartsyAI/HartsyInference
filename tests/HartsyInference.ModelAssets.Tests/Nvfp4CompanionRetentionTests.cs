@@ -31,6 +31,15 @@ public sealed unsafe class Nvfp4CompanionRetentionTests
         return t;
     }
 
+    /// <summary>A <c>.comfy_quant</c> descriptor blob, which ships as UTF-8 JSON in a U8 tensor.</summary>
+    private static Tensor Utf8Blob(string json)
+    {
+        byte[] bytes = System.Text.Encoding.UTF8.GetBytes(json);
+        Tensor t = new Tensor(new TensorShape(bytes.Length), DType.U8);
+        bytes.CopyTo(t.AsSpan<byte>());
+        return t;
+    }
+
     /// <summary>A complete nvfp4 group: U8 nibble bank, rank-2 F8E4M3 block scales, F32 scalar global scale.</summary>
     private static Dictionary<string, Tensor> Nvfp4Group(string prefix, Dictionary<string, Tensor>? into = null)
     {
@@ -104,10 +113,15 @@ public sealed unsafe class Nvfp4CompanionRetentionTests
     {
         // int8_tensorwise shares the `.weight_scale` suffix with nvfp4's block scales. The retention rule is keyed on
         // the WEIGHT's dtype, so an I8 weight still folds onto QuantInfo — where MiniMaxH3TextEncoder reads it for
-        // the published int8_convrot build, which is the build this flag must not regress.
+        // the published int8_convrot build, which is the build this flag must not regress. The descriptor is not
+        // optional padding here: without it the fold refuses the weight outright rather than guessing whether it was
+        // ConvRot-rotated, so a fixture missing it would prove nothing about retention.
+        const int Rows = 4, Cols = 256;
         Dictionary<string, Tensor> source = Nvfp4Group("nv");
-        source["int8blk.weight"] = Filled(new TensorShape(4, 8), DType.I8, 1);
-        source["int8blk.weight_scale"] = Filled(new TensorShape(4), DType.F32, 0);
+        source["int8blk.weight"] = Filled(new TensorShape(Rows, Cols), DType.I8, 1);
+        source["int8blk.weight_scale"] = Filled(new TensorShape(Rows, 1), DType.F32, 0);
+        source["int8blk.comfy_quant"] = Utf8Blob(
+            "{\"format\": \"int8_tensorwise\", \"convrot\": true, \"convrot_groupsize\": 256, \"per_row\": true}");
 
         Dictionary<string, Tensor> result = CheckpointConvertUtils.ApplyFp8ScaledDequant(
             source, keepNvfp4Companions: true);
@@ -115,6 +129,8 @@ public sealed unsafe class Nvfp4CompanionRetentionTests
         Assert.NotNull(result["int8blk.weight"].QuantInfo);
         Assert.NotNull(result["int8blk.weight"].QuantInfo!.RowScale);
         Assert.False(result.ContainsKey("int8blk.weight_scale"));
+        Assert.False(result.ContainsKey("int8blk.comfy_quant"));
+        Assert.Equal(DType.U8, result["nv.weight"].DType);
     }
 
     [Fact]
