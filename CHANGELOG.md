@@ -6,6 +6,32 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.155
+
+- **MiniMax-H3 generates again.** It has produced nothing since alpha.97: the DiT's weight preload runs out of
+  VRAM 310 weights in (`requested 250 MB but only 310 MB available`) on a 4090 with the card otherwise empty, at
+  the same 141f 512x288 geometry that completed in 215 s on alpha.75. Both consumer paths fail identically —
+  the CLI errors out, and `/v1/native/video/stream` answers 200 and then emits one `event: error` carrying that
+  message and zero frames — because the engine has a single video path and both consume it.
+- **The cause was the text encoder materializing in full, not the DiT.** alpha.97 moved H3's components onto
+  `CheckpointSource`, and its default folds quantization companions onto the weights they describe. H3's
+  conditioning tower is the one consumer in the tree that does not want that: it binds every projection as
+  `Nvfp4Linear`, which keeps the U8 bank packed and dequantizes one BF16 slice per forward out of a shared
+  scratch, and it finds the block scales by KEY (`.weight_scale`, `.weight_scale_2`, `.pre_quant_scale`). Folding
+  removes those keys, so the pass widened all 350 banks to F16 instead: `qwen3vl_32b_minimax_h3_nvfp4_awq`'s 2054
+  tensors arrived as 1002, the load went from a memory-mapped open to 50 GB of host RSS, and what it left on the
+  card was 59 MB short of the DiT.
+- **`CheckpointOpenOptions.KeepNvfp4Companions` leaves a complete nvfp4 group exactly as the file wrote it** —
+  the packed U8 weight plus its two scale companions — while fp8, int8 and NF4 fold as before. A group is
+  identified structurally (U8 `.weight` + rank-2 F8E4M3 `.weight_scale` + F32 scalar `.weight_scale_2`), by the
+  same three conditions the eager branch tests, so a weight this does not cover keeps its existing handling
+  rather than being stranded with companions no loader expects.
+- **The two narrower options do not reach this case.** `ResidentNvfp4` moves the scales onto `Tensor.QuantInfo`,
+  which has no `pre_quant_scale` field, so `Nvfp4Codec.TryAttachResident` refuses AWQ layers — and this encoder
+  ships 100 of them. Turning `FoldQuantCompanions` off wholesale would stop H3's `model.embed_tokens.weight`,
+  which is int8 with an F32 `[151936, 1]` row scale read through `QuantInfo.RowScale`, from getting a scale at
+  all, taking the published `int8_convrot` build down with it.
+
 ## alpha.153
 
 - **Converted checkpoints can now say what they are.** Every safetensors the engine wrote was anonymous: of the
