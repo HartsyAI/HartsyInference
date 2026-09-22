@@ -63,7 +63,7 @@ echo "GPU $GPU_SMI = $NAME, ${FREE} MB free"
 rm -rf "$OUT/frames_$LABEL"
 START=$(date +%s.%N)
 CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA \
-    dotnet "$CLI" video "$PROMPT" -m ltx-2.5 --model-path "$MODEL_DIR" \
+    dotnet "$CLI" --set diagnostics.logLevel=Info video "$PROMPT" -m ltx-2.5 --model-path "$MODEL_DIR" \
     --width "$WIDTH" --height "$HEIGHT" --frames "$FRAMES" --steps "$STEPS" --cfg 3.0 --seed "$SEED" \
     -q -o "$OUT/frames_$LABEL" > "$LOG" 2>&1
 RC=$?

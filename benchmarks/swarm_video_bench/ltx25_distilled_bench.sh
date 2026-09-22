@@ -74,7 +74,7 @@ SMI_PID=$!
 rm -rf "$OUT/frames_$LABEL"
 START=$(date +%s.%N)
 env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA \
-    dotnet "$CLI" "${SET_ARGS[@]}" video "$PROMPT" -m "$MODEL_ID" --model-path "$STAGE" \
+    dotnet "$CLI" --set diagnostics.logLevel=Info "${SET_ARGS[@]}" video "$PROMPT" -m "$MODEL_ID" --model-path "$STAGE" \
     --width "$WIDTH" --height "$HEIGHT" --frames "$FRAMES" --seed "$SEED" \
     -q -o "$OUT/frames_$LABEL" > "$LOG" 2>&1
 RC=$?

@@ -158,8 +158,11 @@ public static class Program
     /// <summary>Drops each <c>--profile</c>/<c>--set</c> flag and the value that follows it, leaving the command line the parser should see.</summary>
     /// <remarks>A trailing flag with no value is left in place on purpose: <see cref="ArgValues"/> cannot have read
     /// it, so silently swallowing it here would run the generation while ignoring what the operator asked for —
-    /// the same failure mode <c>StrictParsing</c> exists to prevent. The parser rejects it by name instead.</remarks>
-    private static string[] WithoutKnobArgs(string[] args)
+    /// the same failure mode <c>StrictParsing</c> exists to prevent. The parser rejects it by name instead.
+    /// <para>Both names are stripped wherever they appear, not only ahead of the subcommand, because
+    /// <see cref="ArgValues"/> reads them the same way. No command declares an option by either name today; one
+    /// that did would have its value removed before the parser saw it.</para></remarks>
+    internal static string[] WithoutKnobArgs(string[] args)
     {
         List<string> kept = new List<string>(args.Length);
         for (int i = 0; i < args.Length; i++)
