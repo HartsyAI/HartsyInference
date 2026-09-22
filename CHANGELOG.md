@@ -3,7 +3,7 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N` (the scheme moved
 up from `1.0.0-alpha.N`; entries below that pre-date the change and keep their original numbers). The single
 source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props` — see
-[`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
+[`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
 ## alpha.156
