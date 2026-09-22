@@ -6,7 +6,7 @@
     <authors>kalebbroo</authors>
     <license type="expression">MIT</license>
     <licenseUrl>https://licenses.nuget.org/MIT</licenseUrl>
-    <readme>README.nuget.md</readme>
+    <readme>README.md</readme>
     <projectUrl>https://github.com/HartsyAI/HartsyInference</projectUrl>
     <description>Meta-package for HartsyInference — a pure C#/.NET AI inference engine for text, diffusion images, speech, music, vision, video, 3D, and interactive world models. Adds all backends (CPU, CUDA, Vulkan) and modality packages in one reference.</description>
     <copyright>Copyright (c) 2026 kalebbroo</copyright>
@@ -49,6 +49,6 @@
        Directory.Build.targets adds for other (non-nuspec-mode) projects — it must be declared here
        explicitly or `dotnet pack` fails with NU5039 ("readme file does not exist in the package"). -->
   <files>
-    <file src="../../README.nuget.md" target="" />
+    <file src="../../README.md" target="" />
   </files>
 </package>
