@@ -1,5 +1,7 @@
+using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Vulkan;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -201,6 +203,46 @@ public sealed class BackendSelectorTests
     public void CanonicalDeviceKey_Leaves_What_It_Cannot_Name_Alone(string selector)
     {
         Assert.Equal(selector, BackendFactory.CanonicalDeviceKey(selector));
+    }
+
+    /// <summary>'auto' tries CUDA, then Vulkan, then CPU. Asserted as the ordering rather than a fixed answer,
+    /// because the answer is whatever hardware this runs on, but the ordering holds everywhere, and CPU being
+    /// last is the part that matters: resolving to it while a Vulkan GPU sat idle is what this order fixes.</summary>
+    [Fact]
+    public void Resolve_Auto_Prefers_Cuda_Then_Vulkan_Then_Cpu()
+    {
+        string resolved = BackendFactory.Resolve("auto");
+        bool cuda = CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0;
+        Assert.Equal(cuda ? "cuda" : VulkanContext.IsAvailable() ? "vulkan" : "cpu", resolved);
+        Assert.Contains(resolved, new[] { "cuda", "vulkan", "cpu" });
+    }
+
+    /// <summary>'auto' never resolves to something <see cref="BackendFactory.Create"/> would refuse to build.
+    /// <see cref="BackendFactory.Create"/> routes through <see cref="BackendFactory.Resolve"/>, so a resolution the
+    /// factory cannot construct would be a startup crash rather than a fallback.</summary>
+    [Fact]
+    public void Resolve_Auto_Names_A_Buildable_Backend()
+    {
+        string resolved = BackendFactory.Resolve("auto");
+        Assert.True(BackendFactory.IsValidSelector(resolved));
+        BackendFactory.Validate(resolved);
+    }
+
+    /// <summary>An explicit 'vulkan' is refused up front when the machine has no Vulkan GPU, the way an explicit
+    /// 'cuda' already was, and the refusal carries the loader's reason, since "it does not work" without a cause
+    /// is what sends people to the issue tracker. Driver-free: it asserts refusal and availability agree, not which
+    /// one this machine is.</summary>
+    [Fact]
+    public void Validate_Vulkan_Refuses_Exactly_When_No_Vulkan_Gpu_Is_Present()
+    {
+        if (VulkanContext.IsAvailable())
+        {
+            BackendFactory.Validate("vulkan");
+            return;
+        }
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => BackendFactory.Validate("vulkan"));
+        Assert.Contains("Vulkan", ex.Message);
+        Assert.False(string.IsNullOrWhiteSpace(VulkanContext.LastUnavailableReason));
     }
 
     /// <summary>A registered recipe name resolves as its own family id. The video error text advertises these names as
