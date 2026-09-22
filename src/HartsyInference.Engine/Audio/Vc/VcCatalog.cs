@@ -1,3 +1,4 @@
+using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Hubert;
@@ -132,7 +133,8 @@ internal static class VcCatalog
         Logs.Info($"[Audio][RVC] ContentVec encoder missing — fetching {ContentVecRepo} and converting to {ContentVecFile}...");
         string binPath = await AudioModelCache.GetAsync(ContentVecRepo, ContentVecSourceFile, category: "clone", ct: cancel).ConfigureAwait(false);
         // Straight passthrough — ContentVec's keys already match the engine's Hubert layout.
-        PickleCheckpointRepacker.Repack(binPath, contentVecPath);
+        PickleCheckpointRepacker.Repack(binPath, contentVecPath,
+            metadata: ComponentMetadata("rvc", "content-encoder", binPath, ContentVecRepo));
         Logs.Info($"[Audio][RVC] {ContentVecFile} ready.");
     }
 
@@ -145,7 +147,8 @@ internal static class VcCatalog
         }
         Logs.Info($"[Audio][RVC] RMVPE pitch extractor missing — fetching {RmvpeRepo} and converting to {RmvpeFile}...");
         string ptPath = await AudioModelCache.GetAsync(RmvpeRepo, RmvpeSourceFile, category: "clone", ct: cancel).ConfigureAwait(false);
-        PickleCheckpointRepacker.Repack(ptPath, rmvpePath);
+        PickleCheckpointRepacker.Repack(ptPath, rmvpePath,
+            metadata: ComponentMetadata("rvc", "pitch-estimator", ptPath, RmvpeRepo));
         Logs.Info($"[Audio][RVC] {RmvpeFile} ready.");
     }
 
@@ -220,5 +223,18 @@ internal static class VcCatalog
         float[] aligned = new float[targetLength];
         Array.Copy(f0, aligned, Math.Min(f0.Length, targetLength));
         return aligned;
+    }
+
+    /// <summary>Identity for a converted component. A codec or vocoder gets provenance but no architecture — it is
+    /// part of a model, not one, and a classifiable component would be offered in the model list as something a user
+    /// can select and generate nothing with.</summary>
+    private static IReadOnlyDictionary<string, string>? ComponentMetadata(string engineId, string component,
+        string sourcePath, string? sourceRepo = null)
+    {
+        ArtifactIdentity? identity = ModelIdentityCatalog.Find(engineId);
+        return identity is null
+            ? null
+            : ArtifactMetadata.ForRepack(identity, ArtifactProvenance.FromSourceFile(
+                "HartsyInference.PickleCheckpointRepacker", component, sourcePath, sourceRepo));
     }
 }

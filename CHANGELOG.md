@@ -32,6 +32,20 @@ stable release will require. Dates are UTC.
   which is int8 with an F32 `[151936, 1]` row scale read through `QuantInfo.RowScale`, from getting a scale at
   all, taking the published `int8_convrot` build down with it.
 
+## alpha.154
+
+- **Every checkpoint the engine converts now stamps itself.** The five conversion sites that ran on a user's own
+  machine — Kokoro's `.pth` fallback, RVC's ContentVec encoder and RMVPE pitch estimator, YuE's x-codec and its
+  Vocos vocoders — wrote anonymous files. Nothing ever stamped them afterwards either: the install-time sidecar
+  only runs for models fetched whole from a repo, so a locally converted file had no identity by any route.
+- **Kokoro's repack is the one primary artifact and carries a full ModelSpec block**; the other four are
+  components and carry provenance without an architecture, so converting them cannot add four unusable entries
+  to the model list.
+- **Provenance records the source, not just the family.** `ArtifactProvenance.FromSourceFile` hashes the input, so
+  a converted file names the exact bytes it came from rather than a file name that may since have been replaced.
+  Hashing failures are swallowed — provenance is worth recording and never worth failing a conversion over.
+- `YuePipeline`'s `yue_dump.safetensors` is deliberately left unstamped: it is a parity diagnostic, not a model.
+
 ## alpha.153
 
 - **Converted checkpoints can now say what they are.** Every safetensors the engine wrote was anonymous: of the
