@@ -1,12 +1,11 @@
 <Project>
 
-  <!-- Pack the public-facing README into every packable project. PackageReadmeFile (set in
-       Directory.Build.props) points at README.nuget.md — the clean, nuget.org-facing readme,
-       distinct from the repo-root README.md which is the GitHub/contributor doc. The file must
-       also be physically included or `dotnet pack` errors with NU5039. Imported here (after the
-       csproj has set IsPackable) so non-packable projects (Cli, Server, tests, samples) skip it. -->
+  <!-- Pack the README into every packable project. One README serves both GitHub and nuget.org, so its
+       links are absolute: nuget.org does not resolve repository-relative paths. The file must also be
+       physically included or `dotnet pack` errors with NU5039. Imported here (after the csproj has set
+       IsPackable) so non-packable projects (Cli, API, tests) skip it. -->
   <ItemGroup Condition=" '$(IsPackable)' != 'false' ">
-    <None Include="$(MSBuildThisFileDirectory)README.nuget.md" Pack="true" PackagePath="\" Visible="false" />
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="\" Visible="false" />
   </ItemGroup>
 
 </Project>

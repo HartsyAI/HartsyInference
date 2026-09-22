@@ -32,7 +32,7 @@
     <RepositoryUrl>https://github.com/HartsyAI/HartsyInference</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
     <PackageTags>ai;inference;diffusion;stable-diffusion;flux;whisper;cuda;dotnet;csharp</PackageTags>
-    <PackageReadmeFile>README.nuget.md</PackageReadmeFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <Copyright>Copyright (c) 2026 kalebbroo</Copyright>
   </PropertyGroup>
 

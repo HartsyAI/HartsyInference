@@ -4,8 +4,10 @@ C#/.NET inference libraries for text, images, video, speech, music, vision, 3D, 
 Load safetensors, GGUF, and supported PyTorch checkpoints with CUDA, Vulkan, or CPU backends.
 Inference does not require a Python runtime; reference-generation tooling may use Python.
 
-**Alpha:** pin package versions. Model, checkpoint-format, feature, and backend coverage differ;
-[model status](docs/Checklists/MODEL_STATUS.md) records verified paths and known gaps.
+**Alpha: pin an exact package version.** Model, checkpoint-format, feature, and backend coverage differ, and
+implementation does not imply real-weight verification —
+[model status](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Checklists/MODEL_STATUS.md)
+records verified paths and known gaps.
 
 ## Get started
 
@@ -43,13 +45,21 @@ dotnet run -c Release -f net10.0 --project src/HartsyInference.API
 
 The CLI provides catalog/download tools and modality commands; use --help for current options.
 The HTTP application wraps Engine with native routes and OpenAI-compatible routes. See
-[endpoint implementations](src/HartsyInference.API/Endpoints/),
-[server options](src/HartsyInference.API/HartsyInferenceServerOptions.cs), and [deployment](deploy/README.md).
+[endpoint implementations](https://github.com/HartsyAI/HartsyInference/tree/main/src/HartsyInference.API/Endpoints),
+[server options](https://github.com/HartsyAI/HartsyInference/blob/main/src/HartsyInference.API/HartsyInferenceServerOptions.cs),
+and [deployment](https://github.com/HartsyAI/HartsyInference/blob/main/deploy/README.md).
 The HTTP text path does not currently expose the LLM package's continuous-batching scheduler.
 
 Video supports preflight at POST /v1/native/video/plan and SSE generation at POST /v1/native/video/stream.
 Plans govern compatibility, artifacts, defaults, and release gates before loading weights. H3 expansion
-features remain subject to their individual [release gates](docs/Checklists/MODEL_STATUS_VIDEO.md#minimax-h3).
+features remain subject to their individual
+[release gates](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Checklists/MODEL_STATUS_VIDEO.md#minimax-h3).
+
+## Configuration
+
+Settings live in one file, `~/.config/hartsyinference/settings.json`, and are read and written through
+`hartsy settings list | get | set`. The engine reads no environment variables; see
+[settings](https://github.com/HartsyAI/HartsyInference/blob/main/docs/SETTINGS.md) for the knobs and their scopes.
 
 ## Requirements and backends
 
@@ -65,22 +75,29 @@ Vendor-library P/Invoke is used in GPU backends; this is not a ban on native dri
 
 ## Community benchmarks
 
-[![Reviewed community benchmark results](benchmarks/generated/overview.svg)](benchmarks/README.md)
+[![Reviewed community benchmark results](https://raw.githubusercontent.com/HartsyAI/HartsyInference/main/benchmarks/generated/overview.svg)](https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/README.md)
 
 Run the same frozen workloads on your GPU and submit the complete evidence by PR.
-The [benchmark guide](benchmarks/README.md) covers setup, methodology and review;
-the [explorer](https://hartsyai.github.io/HartsyInference/) compares accepted runs on matching workloads.
-No historical scores are presented as verified community results. The image above is the checked-in dataset
-snapshot; it is replaced by the live explorer once Pages is activated for this repository.
+The [benchmark guide](https://github.com/HartsyAI/HartsyInference/blob/main/benchmarks/README.md) covers setup,
+methodology and review; the [explorer](https://hartsyai.github.io/HartsyInference/) compares accepted runs on
+matching workloads. No historical scores are presented as verified community results. The image above is the
+checked-in dataset snapshot; it is replaced by the live explorer once Pages is activated for this repository.
 
 ## Documentation
 
-- [Documentation map](docs/README.md), [contributing](CONTRIBUTING.md), [agent instructions](AGENTS.md).
-- [Model support](docs/Checklists/MODEL_STATUS.md) and [numerical evidence](docs/Checklists/PARITY_VERIFICATION.md).
-- [Open work](docs/Checklists/ROADMAP.md), [troubleshooting](docs/Checklists/TROUBLESHOOTING.md).
-- [Historical performance scoreboards](benchmarks/scoreboards/) — hardware, settings, dates, and external baselines.
-- [Multi-GPU configuration](docs/MULTI_GPU.md) and [settings](docs/SETTINGS.md).
+- [Documentation map](https://github.com/HartsyAI/HartsyInference/blob/main/docs/README.md),
+  [contributing](https://github.com/HartsyAI/HartsyInference/blob/main/CONTRIBUTING.md),
+  [agent instructions](https://github.com/HartsyAI/HartsyInference/blob/main/AGENTS.md).
+- [Model support](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Checklists/MODEL_STATUS.md) and
+  [numerical evidence](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Checklists/PARITY_VERIFICATION.md).
+- [Open work](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Checklists/ROADMAP.md),
+  [troubleshooting](https://github.com/HartsyAI/HartsyInference/blob/main/docs/Checklists/TROUBLESHOOTING.md).
+- [Historical performance scoreboards](https://github.com/HartsyAI/HartsyInference/tree/main/benchmarks/scoreboards)
+  — hardware, settings, dates, and external baselines.
+- [Multi-GPU configuration](https://github.com/HartsyAI/HartsyInference/blob/main/docs/MULTI_GPU.md) and
+  [settings](https://github.com/HartsyAI/HartsyInference/blob/main/docs/SETTINGS.md).
 
-Code and packages are [MIT licensed](LICENSE). Model weights retain their publishers' licenses;
-consult the checkpoint's license, including the [MiniMax-H3 license](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE),
+Code and packages are [MIT licensed](https://github.com/HartsyAI/HartsyInference/blob/main/LICENSE).
+Model weights retain their publishers' licenses; consult the checkpoint's license, including the
+[MiniMax-H3 license](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/LICENSE),
 before use or redistribution.
