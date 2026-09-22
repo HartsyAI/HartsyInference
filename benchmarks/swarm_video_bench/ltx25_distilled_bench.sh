@@ -6,7 +6,7 @@
 #
 # Sampling flags are DELIBERATELY OMITTED from the invocation: the defaults are the thing under test — the
 # run must show the filename remap firing (when driven via the dev id), the 8-step base ladder, the latent
-# upsample, and the 3-step refine. MODE=single sets HARTSY_LTX2_TWO_STAGE=0 for the kill-switch arm.
+# upsample, and the 3-step refine. MODE=single passes --set numerics.ltx2TwoStage=false for the kill-switch arm.
 # Geometry defaults to the template's 1280x736x121f; pass smaller values for quick turnarounds.
 set -u
 
@@ -62,8 +62,10 @@ FREE=$(nvidia-smi -i "$GPU_SMI" --query-gpu=memory.free --format=csv,noheader,no
 [ "$FREE" -ge "$MIN_FREE_MB" ] || { echo "FATAL: only ${FREE} MB free on $NAME (need $MIN_FREE_MB) — another CUDA tenant is resident"; exit 1; }
 echo "GPU $GPU_SMI = $NAME, ${FREE} MB free; mode=$MODE id=$MODEL_ID"
 
-EXTRA_ENV=()
-[ "$MODE" = "single" ] && EXTRA_ENV=(HARTSY_LTX2_TWO_STAGE=0)
+# A --set knob, not an env var: the engine stopped reading the environment at the settings rebuild, so
+# the export this used to do left the kill-switch arm running the two-stage path it meant to disable.
+SET_ARGS=()
+[ "$MODE" = "single" ] && SET_ARGS=(--set numerics.ltx2TwoStage=false)
 
 # VRAM peak sampled alongside — the F32 upsampler adds a ~1.9 GB transient the single-pass arm never sees.
 nvidia-smi -i "$GPU_SMI" --query-gpu=memory.used --format=csv,noheader,nounits -lms 1000 > "$OUT/${LABEL}_${MODE}.vram" 2>&1 &
@@ -71,8 +73,8 @@ SMI_PID=$!
 
 rm -rf "$OUT/frames_$LABEL"
 START=$(date +%s.%N)
-env "${EXTRA_ENV[@]}" CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA HARTSY_LOG_LEVEL=Info \
-    dotnet "$CLI" video "$PROMPT" -m "$MODEL_ID" --model-path "$STAGE" \
+env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA \
+    dotnet "$CLI" --set diagnostics.logLevel=Info "${SET_ARGS[@]}" video "$PROMPT" -m "$MODEL_ID" --model-path "$STAGE" \
     --width "$WIDTH" --height "$HEIGHT" --frames "$FRAMES" --seed "$SEED" \
     -q -o "$OUT/frames_$LABEL" > "$LOG" 2>&1
 RC=$?

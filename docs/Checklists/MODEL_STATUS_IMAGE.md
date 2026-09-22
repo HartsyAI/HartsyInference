@@ -163,10 +163,12 @@ class to a family id, so an unmapped class reports "architecture not supported" 
 - [ ] **LongCat-Image** — SwarmUI since 2026-02-28, ComfyUI `LongCatImage`.
 - [ ] Krea 2 non-turbo base/CFG path (researched, not built; Turbo is ✅).
 - [ ] F-Lite Freepik / Fal.ai variant (T5-XXL layer-17, ~29.4 GB checkpoint).
-- [ ] **Flux.2 Klein 4B / 9B** — the weights are public (`black-forest-labs/FLUX.2-klein-9B`, plus `-fp8`,
-  `-nvfp4` and `-base-9b` builds); this entry previously said otherwise and was stale. Note the extension
-  already maps `flux-2-klein-4b` and `flux-2-klein-9b` onto the **`flux2`** recipe, so a Klein checkpoint
-  routes into the 32B Flux.2 pipeline today — confirm that is correct before treating this as unstarted.
+- [ ] **Flux.2 Klein 9B** — the recipe already handles it (`Flux2Recipe` detects the variant from the
+  transformer's hidden size, 3072/4096/6144 → Klein 4B / Klein 9B / Dev, and `KleinDefaults` carries the
+  10-step CFG-distilled schedule). What blocks 9B is its canonical text encoder being FP4-quantized and the
+  engine having no FP4 GEMM path; the recipe refuses with that message rather than mis-running. Klein 4B is
+  the verified path. Weights are **gated** on HuggingFace, not open — fetching them needs an accepted
+  license and an `HF_TOKEN`, so neither variant has been run here.
 
 Older families both upstreams carry that this engine has never had: Stable Cascade, SD2, PixArt-Σ,
 NVIDIA Sana, Segmind SSD-1B, Cosmos-Predict2 T2I. No demand recorded; listed so the diff is complete.

@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.157
+
+- **`--set` works.** It has never worked: it shipped in alpha.39 on 2026-08-26 parsing the flag out of `args`
+  but never removing it, and `StrictParsing` then refused the run with `Unexpected option 'set'`. So the only
+  way to change a setting for one run, without writing to the settings file, failed on every invocation.
+  `--profile` was broken the same way and is fixed with it. A trailing `--set` with no value is deliberately
+  still rejected rather than silently dropped.
+- **The benchmark scripts set knobs instead of environment variables.** They exported `HARTSY_*`, which the
+  engine stopped reading at the settings rebuild, so seven scripts had been configuring nothing: `h3_gold.sh`'s
+  deterministic reference ran with neither its precision settings nor its probe, `ltx25_distilled_bench.sh`'s
+  single-pass arm ran the two-stage path it meant to disable, and `run_benchmarks.sh` wrote a "flags this run
+  executed under" section listing flags that were never applied — that section now asks the engine what is in
+  force rather than asserting it.
+- **`h3_gold.sh` resolves its checkpoint through the configured models root**, as `h3_bench.sh` does. The
+  hardcoded repo path stopped existing when the checkpoints moved to the array, so the script could not run.
+- **Flux.2 Klein is not unsupported.** `Flux2Recipe` already detects it from the transformer's hidden size
+  (3072/4096/6144 → Klein 4B / Klein 9B / Dev) and carries its 10-step distilled defaults. Klein 9B is blocked
+  on its FP4 text encoder, which the recipe refuses by name; the weights are gated on HuggingFace, not open.
+
 ## alpha.156
 
 - **One README serves GitHub and nuget.org.** `README.nuget.md` existed because nuget.org renders a package

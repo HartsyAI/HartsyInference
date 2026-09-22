@@ -15,10 +15,10 @@
 # instead of being rejected as a regression.
 #
 # What is disabled, and why:
-#   HARTSY_FP8_NATIVE=0  - no native fp8 GEMM, so activations are never quantized to e4m3. The fp8
+#   numerics.fp8Native=false  - no native fp8 GEMM, so activations are never quantized to e4m3. The fp8
 #                          WEIGHTS are inherent to the checkpoint and still exact; only the
 #                          activation-side approximation goes away.
-#   HARTSY_FP8_F32=1     - and the fallback GEMM runs in F32 rather than its default BF16, so the
+#   numerics.fp8F32=true      - and the fallback GEMM runs in F32 rather than its default BF16, so the
 #                          weight cast is exact too and nothing in the Linear path is approximated.
 #                          (Without this the default is BF16, not F16 — ResolveGemmDtype picks BF16
 #                          whenever the other operand is F32 precisely because F16 would overflow on
@@ -37,9 +37,16 @@ STEPS=${1:-30}
 SEED=${2:-1}
 REPO=/home/hartsy/Desktop/HartsyInference
 OUT=${H3_BENCH_OUT:-$REPO/benchmarks/results/h3}
-CKPT=$REPO/Models/Stable-Diffusion/MiniMaxH3/flat/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors
+# The engine's configured models root, not the repo's Models/ symlink farm — the checkpoints live on the
+# array, and this path had stopped resolving, so the script could not run at all. Same resolution as
+# h3_bench.sh, which the gold run has to stay comparable with.
+SETTINGS=${XDG_CONFIG_HOME:-$HOME/.config}/hartsyinference/settings.json
+MODELS=$(sed -n 's/.*"paths.modelsRoot"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -n1)
+[ -n "$MODELS" ] || MODELS=$REPO/Models
+CKPT=${H3_GOLD_CKPT:-$MODELS/Stable-Diffusion/MiniMaxH3/flat/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors}
 GPU_SMI=${H3_BENCH_GPU:-1}
 
+[ -f "$CKPT" ] || { echo "FATAL: checkpoint not found: $CKPT"; exit 1; }
 mkdir -p "$OUT"
 LOG=$OUT/gold_s${STEPS}_seed${SEED}.log
 
@@ -52,9 +59,14 @@ trap restore EXIT INT TERM
 cd "$REPO"
 # The probe forces a D2H sync, so this run's step times are NOT comparable to h3_bench.sh. That is
 # fine: this run exists for its pixels, and the probe is how we know they are finite.
-CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_SMI HARTSY_LOG_LEVEL=Info \
-    HARTSY_SAGE_ATTN=$GOLD_SAGE HARTSY_FP8_NATIVE=0 HARTSY_FP8_F32=1 HARTSY_H3_PROBE=1 \
-    dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -f net10.0 --no-build -- \
+# These are --set knobs, not environment variables: the engine has read nothing from the environment
+# since the settings rebuild, so the exports this used to carry were silently doing nothing and every
+# "gold" run was really a default run.
+CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_SMI \
+    dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -c "${H3_GOLD_CONFIG:-Release}" \
+    -f net10.0 --no-build -- \
+    --set diagnostics.logLevel=Info --set numerics.sageAttn=$GOLD_SAGE --set numerics.fp8Native=false \
+    --set numerics.fp8F32=true --set diagnostics.h3Probe=true \
     video -m minimax-h3 --model-path "$CKPT" --frames 141 --width 512 --height 288 \
     --steps "$STEPS" --seed "$SEED" -o "$OUT/gold_out" "$(cat "$REPO/Models/bench-comfy/prompt.txt")" \
     > "$LOG" 2>&1

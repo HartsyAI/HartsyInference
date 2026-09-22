@@ -356,17 +356,6 @@ the original conditions, compare before binding or against a Q2_K-only run; our 
 ggml's `dequantize_row_q2_K`. Whether the cause is 2.6 bits being too coarse for an already-pruned DiT or a fault
 in that repack's quantizer is **not established**, and `UD-Q2_K_XL` is untested.
 
-
-**Regression, alpha.97 → alpha.154: this model generated nothing at all, on every path.** The DiT's weight
-preload ran out of VRAM (`requested 250 MB but only 310 MB available`) on an otherwise-empty 4090, and
-`/v1/native/video/stream` answered 200 with zero frame events and one `event: error`. The DiT was not the
-cause — the nvfp4 text encoder was being widened to F16 at load, because opening it through
-`CheckpointSource` folded away the `.weight_scale`/`.weight_scale_2` keys `Nvfp4Linear` locates the packed
-format by. Fixed in alpha.155 (`CheckpointOpenOptions.KeepNvfp4Companions`); the diagnostic generalises and
-is recorded under [Video-specific bugs](TROUBLESHOOTING.md#video-specific-bugs). Everything above this note
-was measured before that regression and was re-confirmed after the fix: 141/141 frames plus a matching
-5.875 s 32 kHz stereo track, CLI and SSE.
-
 ### SeedVR2-3B (video/image RESTORATION — `Modality.Restore`, not T2V)
 
 **Full parity chain + 7-clip real-footage matrix verified (2026-08-01, 4090).** Per-stage gates: window partition EXACT (40 grids / 2,490 slices, Unit-tier fixture `SeedVr2Tests` (windowing facts)); preprocessing maxAbs 2.3e-6 (`SeedVr2Tests`, env `SEEDVR2_PRE_REF`) — caught 2 real bugs (torchvision AA bicubic is a=−0.5 PIL-kernel not −0.75, and ATen computes resize weights in float32: double-math drifts 3.4e-5 by output index ~1000); VAE enc+dec relL2 ≤2.9e-6 vs REAL weights (`SeedVr2Tests`, `SEEDVR2_VAE`+`SEEDVR2_VAE_REF`); tiny-config DiT per-block relL2 ≤8.9e-4 / output 1.05e-4 (`SeedVr2Tests`, `SEEDVR2_PARITY_DIR`, dump `Parity/seedvr2_transformer_parity_dump.py` w/ flash_attn SDPA shim); **E2E vs Python real-weight restoration: mean SSIM 0.99950 / PSNR 56.6 dB** (`SeedVr2Tests`, `SEEDVR2_DIT/VAE/EMB/E2E_REF/FRAMES/AREA`, staged driver `run_seedvr2_e2e_reference.py` — reference noises injected via `NoiseHook`; torch RNG unmatchable). Reference quirks ported deliberately (SEEDVR2_ARCHITECTURE.md §2.5): tail-ada cache-collision (attn emb slice), last-layer vid_only (plain-normed txt K/V + ungated residual + txt self-doubling), per-frame VAE GroupNorm, (0,1,0,1) downsampler pad, MAGViT (x y z c) shuffle dropping output frame 1. **Matrix (25f clips, 960×540-area, `--clip-frames 5 --overlap 1`): Reagan USIA '87 / Apollo 11 / JFK '61 / Steamboat Willie / Prelinger '62 / BBB ground-truth / still (t==1) — 7/7 rc=0, ~14 s/frame, peak 17.1 GB, zero OOM** (`Models/TestAssets/restore/run_matrix.sh`, log `matrix_results.log`). Ground truth is honest: pixel metrics prefer bicubic (SSIM 0.877 vs 0.926 extreme; strength 0.7 ≈ unchanged — the loss lives in repainted high frequencies) but **LPIPS wins 26–28%** (extreme 0.735→0.541, mild 0.448→0.324) and Reagan crowd faces visibly resolve — the paper's own generative perception-over-distortion profile. CLI catalog path verified (`hartsy restore`, PNG frames + ffmpeg-subprocess MP4).
