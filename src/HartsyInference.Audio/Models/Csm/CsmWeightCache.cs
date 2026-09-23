@@ -58,8 +58,9 @@ public static class CsmWeightCache
 
         GgufLoader loader = new();
         loader.Load(cacheGgufPath);
-        Dictionary<string, Tensor> weights = new(loader.Descriptors.Count);
-        foreach (string name in loader.Descriptors.Keys) weights[name] = loader.GetTensor(name);
+        // Shapes come back from the source, not the file: the writer emits ggml order, and a raw read of that hands
+        // every projection over transposed (see GgufQuantizer.ReadBack).
+        Dictionary<string, Tensor> weights = GgufQuantizer.ReadBack(loader, source);
         Logs.Info($"[HeartMuLa] Loaded {backbone.Value.Name} quantized weights from cache ({weights.Count} tensors, {new FileInfo(cacheGgufPath).Length / (1024 * 1024)} MB).");
         return (weights, loader);
     }

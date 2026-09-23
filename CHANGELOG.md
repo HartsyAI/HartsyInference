@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.160
+
+- **HeartMuLa and MiniMax Music 3 quant caches were read back transposed.** Since alpha.130 (#41) `GgufWriter`
+  emits ggml `ne` order, the reverse of the engine's, and the checkpoint loader relabels on the way back in. The
+  two disk-cached quantizations never did: `CsmWeightCache.LoadQuantized` and
+  `MiniMaxMusic3WeightPolicy.QuantizeToCache` read their own cache through the raw `GgufLoader`, so every
+  projection came back `[in, out]`, the backend derived `M = 0` from it and the first dp4a launch failed with
+  `CUDA_ERROR_INVALID_VALUE` after the model had spent its minutes loading. Every `:q8`/`:q4` HeartLib and
+  MiniMax variant on the CUDA path was affected; bf16 never touched the cache and kept working, which is what made
+  it look like a card problem. `CsmWeightCacheTests` asserted the source shapes all along and has been failing
+  since the writer changed.
+- **The shape now comes from the source dictionary, not from a guess about the writer.** New
+  `GgufQuantizer.ReadBack(loader, source)` hands each cached tensor back under its source tensor's shape, which is
+  a no-op for a cache written before the writer changed and a swap for one written after, so no cache on any host
+  has to be deleted and re-converted. A tensor with no source falls back to reversing the file's axes, which is
+  right for anything the current writer produced. Both readers use it; a MiniMax depth-decoder test and a
+  quantizer round trip over both file orders join the CSM one.
+
 ## alpha.159
 
 - **NVFP4 weights were being dequantized with the wrong block scales.** ComfyUI stores them in NVIDIA's blocked
