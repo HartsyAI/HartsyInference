@@ -73,7 +73,8 @@ public sealed class BenchmarkFixture : IDisposable
             {
                 throw new DirectoryNotFoundException($"SPIR-V directory not found at {spvDir}. The csproj should copy `src/HartsyInference.Vulkan/Spirv/*.spv` here on build.");
             }
-            Backend = new VulkanBackend(deviceOrdinal: 0, spvDir: spvDir);
+            // Ranked, not raw index 0: a box that also exposes a software rasterizer would otherwise benchmark that.
+            Backend = new VulkanBackend(deviceOrdinal: null, spvDir: spvDir);
         }
     }
 

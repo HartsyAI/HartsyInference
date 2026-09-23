@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.161
+## alpha.162
 
 - **Hosts can now ask whether a generation fits a GPU before sending it there.** New
   `IInferenceEngine.MemoryEstimation` (`IMemoryEstimationService`): `EstimateAsync` returns the per-phase VRAM a
@@ -29,6 +29,42 @@ stable release will require. Dates are UTC.
   planner cannot drift. Families without it get header weights plus a pixel-scaled allowance, reported as
   `MemoryEstimateAccuracy.HeaderOnly`.
 - `ByteFormat.GbF1` and `BlockStreamingOptions.DefaultPrefetchAhead` join the shared primitives.
+
+## alpha.161
+
+- **A bare `vulkan` selector pinned the loader's device 0, so alpha.158's fallthrough could land on a software
+  rasterizer with a real GPU sitting next to it.** `VulkanDevice.Create` has always taken a nullable ordinal whose
+  null path ranks devices (discrete GPU first, rejecting anything that fails the kernels' capability requirements),
+  and `VulkanBackend`'s own summary claims it creates "a Vulkan backend on the best discrete GPU". Its parameter
+  defaulted to `0`, and `BackendFactory.CreateVulkan` took a plain `int`, so nothing in production ever reached the
+  ranking: `PickBest` was live only in tests. That was survivable while Vulkan had to be asked for by name. It stopped
+  being survivable in alpha.158, when `auto` started choosing Vulkan on its own, because the machines that gain are
+  exactly the ones that enumerate Mesa's lavapipe alongside the real card. `VulkanContext` would correctly count one
+  GPU, `auto` would correctly answer `vulkan`, and `Create` would then bind raw index 0 and run the model on a CPU
+  implementation of Vulkan. The test harness already knew: `BackendGate` hand-rolls a scan for a non-software device,
+  its comment noting that probing only ordinal 0 "would report a machine with a 4090 in it as having no usable
+  Vulkan". Selection now reaches production, and an explicit `vulkan:N` still means raw index N.
+- **New `BackendFactory.HasExplicitOrdinal`, because `ParseOrdinal` answers 0 for a selector that named nothing.**
+  `vulkan` and `vulkan:0` are different requests (rank the devices versus pin index 0) and no existing API could tell
+  them apart, so `Resolve`, `Create` and the probes all treated an absent ordinal as an explicit zero.
+- **The Vulkan probe now builds the device it is vouching for.** `ResolveProbed` probed ordinal 0 and then let `Create`
+  choose, so on a box whose index 0 is a rasterizer the probe tested the one device guaranteed to pass and reported
+  the real GPU as proven. Both take the same nullable ordinal now and agree by construction.
+- **Probe results are cached per device rather than once per API.** A single `bool?` handed the first caller's verdict
+  to every later one, so `ProbeCuda(1)` returned device 0's answer. Latent while one ordinal was ever probed; live as
+  soon as "ranked best" and "index 0" became distinct requests.
+- **The LLM path built its backend from the slot key, which pinned index 0 on exactly the boxes ranking exists for.**
+  `TextService` canonicalizes a request device into a slot-and-gate key, and `CanonicalDeviceKey` MANUFACTURES an
+  ordinal — a bare `vulkan` comes back as `vulkan:0`. That key was then handed to `CreateBackendFor`, so the one
+  spelling that should rank was the one guaranteed not to, and an explicit `vulkan` request reached the rasterizer
+  even after the fix above. Blank requests were unaffected and so disagreed with named ones, because `PrimaryDeviceKey`
+  goes through `WithOrdinal`, which keeps ordinal 0 bare. The key still identifies the slot and the gate; the backend
+  is now built from the selector as written.
+- **New `IBackend.DeviceKey`: the identity of the device a backend actually bound to.** Hosts that track which engines
+  share a GPU were composing a key from the selector they requested, which stops being the device in use the moment
+  selection is left to the engine. Vulkan reports its device UUID, so two identical cards stay distinguishable and one
+  shared card cannot read as two; CUDA reports its ordinal, which it honours as given. `VulkanDevice` also exposes the
+  index it chose, and `VulkanBackend`'s `DeviceKind` now carries that instead of the one it was handed.
 
 ## alpha.160
 

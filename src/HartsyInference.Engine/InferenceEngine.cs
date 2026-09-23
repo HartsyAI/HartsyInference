@@ -120,8 +120,17 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public string BackendSelector => _backendSelector;
 
-    /// <summary>The device ordinal this engine's backend will be (or was) constructed on; 0 unless the selector carries a suffix.</summary>
+    /// <summary>The device ordinal this engine's selector ASKED for; 0 unless the selector carries a suffix.</summary>
+    /// <remarks>A property of the string, not of the hardware, and it does not query anything. When no ordinal was
+    /// written the backend picks its own device and this still reads 0, which on Vulkan need not be the device in use.
+    /// <see cref="DeviceKey"/> is the one to key or log.</remarks>
     public int DeviceOrdinal => BackendFactory.ParseOrdinal(_backendSelector);
+
+    /// <summary>Identity of the physical device this engine is actually running on, for logging and for telling two
+    /// engines that share a GPU apart from two engines on separate GPUs.</summary>
+    /// <remarks>Forces the backend to exist, since nothing can honestly answer this before a device is chosen. Read it
+    /// at startup, where paying for construction is the point, rather than on a request path.</remarks>
+    public string DeviceKey => EnsureBackend().DeviceKey;
 
     /// <inheritdoc/>
     public string BackendDescription => BackendFactory.Describe(_backendSelector);

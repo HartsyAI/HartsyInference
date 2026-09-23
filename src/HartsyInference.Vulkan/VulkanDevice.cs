@@ -16,6 +16,11 @@ public sealed class VulkanDevice : IDisposable
     private nint _queue;
 
     public nint PhysicalDevice => _physicalDevice;
+
+    /// <summary>Index of the chosen device in the loader's enumeration, whether it was named or ranked for.</summary>
+    /// <remarks>What was picked, not what was asked for. The two differ on every call that left the choice open, and
+    /// reporting the request there would name a device the engine is not on.</remarks>
+    public int PhysicalDeviceIndex { get; private set; }
     public nint Handle
     {
         get
@@ -60,6 +65,7 @@ public sealed class VulkanDevice : IDisposable
         VulkanApi.vkGetDeviceQueue(device, caps.ComputeQueueFamilyIndex, 0, out nint queue);
 
         VulkanDevice d = new(instance) { Capabilities = caps, MemoryProperties = memProps };
+        d.PhysicalDeviceIndex = Array.IndexOf(phys, chosen);
         d._physicalDevice = chosen;
         d._device = device;
         d._queue = queue;

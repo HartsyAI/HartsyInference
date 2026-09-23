@@ -52,8 +52,13 @@ public static class BackendFactory
     /// so every caller (facade, TextService, recipes) agrees on where kernels live.</summary>
     public static IBackend CreateCuda(int ordinal) => new CudaBackend(ordinal, KernelDir(PtxDirName));
 
-    /// <summary>Constructs a Vulkan backend on <paramref name="ordinal"/> with the resolved SPIR-V directory.</summary>
-    public static IBackend CreateVulkan(int ordinal) => new VulkanBackend(ordinal, KernelDir(SpirvDirName));
+    /// <summary>Constructs a Vulkan backend with the resolved SPIR-V directory; a null <paramref name="ordinal"/> lets
+    /// the engine rank the devices and take the best.</summary>
+    /// <remarks>Null is not a synonym for 0. A raw index pins whatever the loader happens to list first, which on a
+    /// machine that also exposes a software rasterizer (Mesa's lavapipe, standard on Linux CI images) is routinely not
+    /// the GPU; the null path scores devices by type and by the capabilities the kernels need. So a caller who did not
+    /// name a device has to pass null, or a host with its real GPU at index 1 quietly runs on the rasterizer at 0.</remarks>
+    public static IBackend CreateVulkan(int? ordinal = null) => new VulkanBackend(ordinal, KernelDir(SpirvDirName));
 
     /// <summary>Constructs the backend named by <paramref name="selector"/>, mapping <c>auto</c> via <see cref="Resolve"/>
     /// and honoring a <c>cuda:1</c>-style device-ordinal suffix.</summary>
@@ -64,7 +69,7 @@ public static class BackendFactory
         return chosen switch
         {
             "cuda" => CreateCuda(ValidateCudaOrdinal(ordinal, selector)),
-            "vulkan" => CreateVulkan(ordinal),
+            "vulkan" => CreateVulkan(HasExplicitOrdinal(selector) ? ordinal : null),
             "cpu" => new CpuBackend(),
             _ => throw new ArgumentException($"Unknown backend '{selector}'. Valid: {string.Join(", ", ValidSelectors)}."),
         };
@@ -84,7 +89,12 @@ public static class BackendFactory
     /// to Vulkan, which need not be the same card, or exist. The ambiguity predates the Vulkan step (an ordinal has
     /// always been written before the backend was known) but only became reachable through <c>auto</c> with it, so a
     /// caller that cares which physical device it gets should name the backend rather than leave it to
-    /// <c>auto</c>.</para></summary>
+    /// <c>auto</c>.</para>
+    ///
+    /// <para>With no ordinal written at all, nothing is pinned and each API picks for itself: CUDA's ordinal 0 is its
+    /// own fastest-first choice, and Vulkan ranks the devices (see <see cref="CreateVulkan"/>) rather than taking raw
+    /// index 0. That difference matters on exactly the machines this fallthrough was added for, where the loader lists
+    /// a software rasterizer alongside the real card.</para></summary>
     public static string Resolve(string selector)
     {
         string s = Kind(selector);
@@ -107,12 +117,19 @@ public static class BackendFactory
 
     // One lock per API, not one shared: the two probes touch independent hardware and cache independent answers,
     // so a slow or wedged CUDA probe has no business blocking a caller asking about Vulkan.
+    // Cached per device rather than once overall, because the answer is per device: one box can hold a card that
+    // computes and a card that does not, and a single bool hands the first caller's verdict to every later one.
     private static readonly object _cudaProbeLock = new();
-    private static bool? _probeResult;
+    private static readonly Dictionary<int, (bool Ok, string? Reason)> _cudaProbes = [];
     private static string? _probeReason;
     private static readonly object _vulkanProbeLock = new();
-    private static bool? _vulkanProbeResult;
+    private static readonly Dictionary<int, (bool Ok, string? Reason)> _vulkanProbes = [];
     private static string? _vulkanProbeReason;
+
+    /// <summary>Probe-cache key for "no device named, let the engine rank them", which is a different request from raw
+    /// index 0 and must not share its cached answer. A sentinel rather than a nullable key because <see cref="Dictionary{TKey, TValue}"/>
+    /// rejects a null key even when TKey is a nullable value type; ordinals are non-negative, so this cannot collide.</summary>
+    private const int UnspecifiedDevice = -1;
 
     /// <summary>Why <see cref="ProbeCuda"/> last failed; <c>null</c> when it passed or has not run.</summary>
     public static string? CudaProbeFailureReason => _probeReason;
@@ -141,12 +158,14 @@ public static class BackendFactory
     {
         lock (_cudaProbeLock)
         {
-            if (_probeResult is bool cached)
+            if (!_cudaProbes.TryGetValue(ordinal, out (bool Ok, string? Reason) cached))
             {
-                return cached;
+                bool ok = RunCudaProbe(ordinal, out string? reason);
+                cached = (ok, reason);
+                _cudaProbes[ordinal] = cached;
             }
-            _probeResult = RunCudaProbe(ordinal, out _probeReason);
-            return _probeResult.Value;
+            _probeReason = cached.Reason;
+            return cached.Ok;
         }
     }
 
@@ -160,7 +179,7 @@ public static class BackendFactory
         return RunMatMulProbe(() => CreateCuda(ordinal), out reason);
     }
 
-    private static bool RunVulkanProbe(int ordinal, out string? reason)
+    private static bool RunVulkanProbe(int? ordinal, out string? reason)
     {
         if (!VulkanContext.IsAvailable())
         {
@@ -245,18 +264,24 @@ public static class BackendFactory
     /// fail to meet the engine's own requirements (FP16, the subgroup ops the kernels are written against, a
     /// compute queue), which surfaces as a throw from device creation rather than a missing device. And the SPIR-V
     /// directory can be absent exactly as the PTX one can.</para></summary>
-    /// <param name="ordinal">Device to probe.</param>
+    /// <param name="ordinal">Device to probe; null probes whichever device <see cref="CreateVulkan"/> would rank best.</param>
     /// <returns>True when a real matmul ran on the GPU and agreed with the CPU.</returns>
-    public static bool ProbeVulkan(int ordinal = 0)
+    /// <remarks>Pass what will actually be built. Probing raw index 0 and then running on the ranked-best device
+    /// tests the wrong card, and on a box whose index 0 is a software rasterizer it is the one test that passes
+    /// regardless of whether the real GPU works.</remarks>
+    public static bool ProbeVulkan(int? ordinal = null)
     {
         lock (_vulkanProbeLock)
         {
-            if (_vulkanProbeResult is bool cached)
+            int key = ordinal ?? UnspecifiedDevice;
+            if (!_vulkanProbes.TryGetValue(key, out (bool Ok, string? Reason) cached))
             {
-                return cached;
+                bool ok = RunVulkanProbe(ordinal, out string? reason);
+                cached = (ok, reason);
+                _vulkanProbes[key] = cached;
             }
-            _vulkanProbeResult = RunVulkanProbe(ordinal, out _vulkanProbeReason);
-            return _vulkanProbeResult.Value;
+            _vulkanProbeReason = cached.Reason;
+            return cached.Ok;
         }
     }
 
@@ -283,8 +308,16 @@ public static class BackendFactory
         {
             return "cuda";
         }
-        return ProbeVulkan(ordinal) ? "vulkan" : "cpu";
+        // Null rather than the parsed 0 when the caller named no device, so the probe builds the device Create will.
+        return ProbeVulkan(HasExplicitOrdinal(selector) ? ordinal : null) ? "vulkan" : "cpu";
     }
+
+    /// <summary>Whether <paramref name="selector"/> names a device outright (<c>vulkan:1</c>) instead of leaving the
+    /// choice to the engine (<c>vulkan</c>, <c>auto</c>).</summary>
+    /// <remarks>Not the same question as <c>ParseOrdinal(selector) == 0</c>, which cannot tell <c>vulkan:0</c> from
+    /// <c>vulkan</c>. Vulkan honors the distinction: the first pins the loader's raw index 0, the second ranks the
+    /// devices (see <see cref="CreateVulkan"/>).</remarks>
+    public static bool HasExplicitOrdinal(string? selector) => (selector ?? "").Trim().Contains(':');
 
     /// <summary>The bare backend kind of <paramref name="selector"/> with any <c>:{ordinal}</c> suffix removed; <c>auto</c> stays <c>auto</c>.</summary>
     public static string Kind(string? selector)
@@ -397,7 +430,12 @@ public static class BackendFactory
     ///
     /// <para>A layer-split composite (<c>cuda:0+cuda:1</c>) and anything <see cref="IsValidSelector"/> rejects come
     /// back unchanged: the first is a list of selectors rather than one, and the second has no concrete device to
-    /// name. Both are the caller's to handle.</para></remarks>
+    /// name. Both are the caller's to handle.</para>
+    ///
+    /// <para>This keys the REQUEST, not the hardware. It reports <c>vulkan:0</c> for a bare <c>vulkan</c> because that
+    /// is what the string says, while the backend built from it runs on whichever device ranked best. A caller asking
+    /// "are these two engines on one physical GPU" wants <see cref="IBackend.DeviceKey"/> from the built backend
+    /// instead; this answers only "did these two callers ask for the same thing".</para></remarks>
     public static string CanonicalDeviceKey(string? selector)
     {
         string key = (selector ?? "").Trim().ToLowerInvariant();
