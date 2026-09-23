@@ -928,13 +928,18 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     /// token count is the patchified grid, not the pixel grid. A generous constant rides on top for cuBLAS
     /// workspace, RoPE tables and the encoder projections — under-reserving here does not fail cleanly, it
     /// over-commits VRAM at exactly the geometries streaming exists to rescue.</remarks>
-    private static long WanActivationReserveBytes(int tLat, int hLat, int wLat, int innerDim)
+    internal static long WanActivationReserveBytes(int tLat, int hLat, int wLat, int innerDim)
     {
         long tokens = (long)tLat * hLat * wLat;
         // q/k/v + attention output + the FFN's two wide intermediates, all F32, plus the block's own residual.
         long perForward = tokens * innerDim * 4L * 8L;
         return perForward + (1536L * 1024 * 1024);
     }
+
+    /// <summary>Estimated VAE-decode peak beside the VAE weights, scaled by the output grid: the number the post-denoise
+    /// residency decision frees the DiT against, shared so a pre-flight estimate charges the same decode.</summary>
+    internal static long WanDecodeReserveBytes(int numFrames, int width, int height) =>
+        Math.Max(3L << 30, (long)numFrames * height * width * 160);
 
     /// <summary>Post-denoise DiT residency (the vram.keepModels idiom): keeps the single-expert transformer device-resident across generations — the next gen's PreloadWeights becomes a cache-hit no-op — unless measured free VRAM can't cover the VAE decode (grid-scaled estimate; an OOM is worse than one re-upload). MoE experts always free: two 14B experts never co-reside. A VAE on its OWN device (<see cref="DiffusionPipelineBase.VaeBackend"/>) never contends with the DiT's VRAM on <see cref="DiffusionPipelineBase.Backend"/>, so the decode-headroom check is skipped when split — the DiT just stays resident.</summary>
     private void ReleaseOrKeepTransformer(int numFrames, int width, int height)
@@ -955,7 +960,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             return;
         }
         Backend.TrimMemoryPool();
-        long decodeNeed = Math.Max(3L << 30, (long)numFrames * height * width * 160);
+        long decodeNeed = WanDecodeReserveBytes(numFrames, width, height);
         long free = Backend.FreeMemoryBytes();
         if (free < decodeNeed)
         {

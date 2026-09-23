@@ -6,6 +6,30 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.162
+
+- **Hosts can now ask whether a generation fits a GPU before sending it there.** New
+  `IInferenceEngine.MemoryEstimation` (`IMemoryEstimationService`): `EstimateAsync` returns the per-phase VRAM a
+  model needs at a geometry (text encoder, denoiser, VAE, each with its weights and working memory), and
+  `AssessAsync` judges that against the engine's own device as `Resident`, `Streamed`, `Infeasible` or `Unknown`.
+  Nothing is loaded: weights are sized from checkpoint headers (quantized weights the backend cannot hold packed
+  are widened, as `QuantizedWeightPolicy` does at load), read once per checkpoint per process and cached, so every
+  later answer is arithmetic. This is what lets the SwarmUI extension route a large video model to the large card
+  instead of the one that was idle longest.
+- **The verdict uses the VRAM policy the generation will actually run with.** The backend's policy with the
+  request's `VramOverrides` applied (`VramPolicyRegistry.Resolve`), so Performance never streams and keeps every
+  phase resident, and a per-request tier override changes the answer exactly as it changes the generation.
+  Only memory levers the engine acts on count: block streaming when the recipe wires it and the backend has a
+  streaming cache, phase unload unless pinned off, DiT sharding and component placement when the recipe wires them.
+  Capacity is total VRAM less the placement planner's per-device reserve, never free VRAM, so identical requests
+  get identical answers.
+- **Recipes can describe their own activations.** New default-null `DescribeMemory(CheckpointHeader)` on
+  `IArchitectureRecipe` and `IVideoRecipe`. Wan implements it with the pipeline's own
+  `WanActivationReserveBytes` and the decode estimate now shared as `WanDecodeReserveBytes`, so the estimate and the
+  planner cannot drift. Families without it get header weights plus a pixel-scaled allowance, reported as
+  `MemoryEstimateAccuracy.HeaderOnly`.
+- `ByteFormat.GbF1` and `BlockStreamingOptions.DefaultPrefetchAhead` join the shared primitives.
+
 ## alpha.161
 
 - **A bare `vulkan` selector pinned the loader's device 0, so alpha.158's fallthrough could land on a software

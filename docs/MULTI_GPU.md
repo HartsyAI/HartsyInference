@@ -13,6 +13,10 @@ Choose placement by purpose and measure on the actual topology. Engine Placement
 
 DiT sharding, CFG parallelism and context parallelism are mutually exclusive. Explicit settings take priority over ParallelPlanner suggestions (--parallel auto); inspect the logged decision. Confirm ordinal-to-physical-GPU mapping; CUDA_DEVICE_ORDER=PCI_BUS_ID makes it explicit.
 
+## Routing requests across cards
+
+`IInferenceEngine.MemoryEstimation` answers, without loading weights, whether a request fits this engine's card: `AssessAsync(spec, new MemoryEstimateRequest(width, height, frames, Vram: overrides))` returns `Resident`, `Streamed`, `Infeasible` or `Unknown` under the effective VRAM policy, placement and the levers the model wires. Headers are read once per checkpoint per process, so a host can ask every engine about every queued request. Capacity is total VRAM less a 2 GB reserve, not free VRAM. Families that implement `DescribeMemory` (Wan today) are sized with their pipeline's own activation formulas; the rest report `HeaderOnly` accuracy, so route on them but let the engine's pre-flight have the final word. The SwarmUI extension's fit gate is the reference consumer.
+
 ## Contracts and limits
 
 - Layer/block sharding places contiguous ranges using available memory or explicit ratios. It pools weights, but sequential boundaries add transfers. LLM final norm/head/sampler live on the final stage; stage-local KV follows layer placement.

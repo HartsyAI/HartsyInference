@@ -31,6 +31,10 @@ public interface IInferenceEngine : IDisposable
     IVideoPlanningService VideoPlanning => Video as IVideoPlanningService
         ?? throw new NotSupportedException("This inference-engine implementation does not expose video planning.");
 
+    /// <summary>Header-only VRAM estimation and per-device fit, for hosts that route requests across GPUs.</summary>
+    IMemoryEstimationService MemoryEstimation =>
+        throw new NotSupportedException("This inference-engine implementation does not expose memory estimation.");
+
     /// <summary>Chat / text generation, including the multimodal VLM path.</summary>
     ITextService Text { get; }
 

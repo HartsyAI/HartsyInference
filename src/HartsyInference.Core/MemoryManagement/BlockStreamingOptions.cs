@@ -37,7 +37,10 @@ public sealed record BlockStreamingOptions
     public ResidentPrefixPin? Pin { get; init; }
 
     /// <summary>In-flight upload depth for the streamed suffix.</summary>
-    public int PrefetchAhead { get; init; } = 2;
+    public int PrefetchAhead { get; init; } = DefaultPrefetchAhead;
+
+    /// <summary>The prefetch depth a streamed denoiser runs with unless a policy or caller overrides it.</summary>
+    public const int DefaultPrefetchAhead = 2;
 
     /// <summary>Whether <see cref="BlockStreamingScope.EndStep"/> returns pool reservations to the driver. Turning this off is a deliberate choice a caller has to write down — the streamed path otherwise grows the pool by roughly a block per step (Ideogram 4 measured 4.1 → 11.6 GiB by step 17).</summary>
     public bool PerStepTrim { get; init; } = true;

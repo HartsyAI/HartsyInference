@@ -158,6 +158,65 @@ public sealed class WanVideoRecipe : IVideoRecipe
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.CfgParallel
         | MemoryCapabilities.ContextParallel | MemoryCapabilities.ComponentPlacement;
 
+    /// <inheritdoc/>
+    /// <remarks>Reads the DiT width and the VAE's latent width off <c>patch_embedding.weight</c> and the output head —
+    /// the two tensors every Wan layout (single file, ComfyUI-prefixed, diffusers) names the same way at the end of the
+    /// key — and charges the pipeline's own denoise and decode formulas
+    /// (<see cref="WanVideoPipeline.WanActivationReserveBytes"/>, <see cref="WanVideoPipeline.WanDecodeReserveBytes"/>).
+    /// The VACE / Animate / S2V variants share the backbone and are sized by the same terms. Returns null for a header
+    /// it cannot read those shapes from, so the estimate falls back to the generic allowance instead of guessing.</remarks>
+    public Planning.Memory.RecipeMemoryModel? DescribeMemory(CheckpointHeader header)
+    {
+        ArgumentNullException.ThrowIfNull(header);
+        SafeTensorDescriptor? patch = header.Descriptors.Values.FirstOrDefault(d =>
+            IsTopLevel(d.Name, "patch_embedding.weight") && d.Shape.Rank == 5);
+        if (patch is null)
+        {
+            return null;
+        }
+        int innerDim = (int)patch.Shape[0];
+        int patchVolume = (int)(patch.Shape[2] * patch.Shape[3] * patch.Shape[4]);
+        // The model's own output head, never a block's: VACE blocks carry a proj_out of their own.
+        SafeTensorDescriptor? head = header.Descriptors.Values.FirstOrDefault(d =>
+            IsTopLevel(d.Name, "head.head.weight") || IsTopLevel(d.Name, "proj_out.weight"));
+        int latentChannels = head is not null && patchVolume > 0
+            ? (int)(head.Shape[0] / patchVolume)
+            : (int)patch.Shape[1];
+        // The same rule WanConfigDetector and ConstructBase apply: the z=48 Wan2.2 VAE compresses 16x, z=16 compresses 8x.
+        bool isWan21 = latentChannels < 48;
+        int spatial = isWan21 ? 8 : 16;
+        int temporal = new WanVideoConfig().VaeTemporalCompression;
+        return new Planning.Memory.RecipeMemoryModel
+        {
+            DenoiserActivationBytes = request =>
+            {
+                int frames = Math.Max(1, request.Frames ?? 1);
+                return WanVideoPipeline.WanActivationReserveBytes((frames - 1) / temporal + 1,
+                    Math.Max(1, request.Height / spatial), Math.Max(1, request.Width / spatial), innerDim);
+            },
+            VaeActivationBytes = request =>
+                WanVideoPipeline.WanDecodeReserveBytes(Math.Max(1, request.Frames ?? 1), request.Width, request.Height),
+            TextEncoder = SideModels.Umt5Xxl,
+            Vae = isWan21 ? SideModels.Wan21Vae : SideModels.Wan22Vae,
+        };
+    }
+
+    /// <summary>Whether <paramref name="key"/> is <paramref name="leaf"/> at the model's top level, under any container
+    /// prefix (<c>model.diffusion_model.</c>, <c>transformer.</c>) but not inside a block or a sibling module.</summary>
+    private static bool IsTopLevel(string key, string leaf)
+    {
+        if (key == leaf)
+        {
+            return true;
+        }
+        if (!key.EndsWith("." + leaf, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        string container = key[..^(leaf.Length + 1)];
+        return !container.Contains("blocks", StringComparison.Ordinal);
+    }
+
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
