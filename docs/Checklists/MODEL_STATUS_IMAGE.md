@@ -163,12 +163,14 @@ class to a family id, so an unmapped class reports "architecture not supported" 
 - [ ] **LongCat-Image** — SwarmUI since 2026-02-28, ComfyUI `LongCatImage`.
 - [ ] Krea 2 non-turbo base/CFG path (researched, not built; Turbo is ✅).
 - [ ] F-Lite Freepik / Fal.ai variant (T5-XXL layer-17, ~29.4 GB checkpoint).
-- [ ] **Flux.2 Klein 9B** — the recipe already handles it (`Flux2Recipe` detects the variant from the
-  transformer's hidden size, 3072/4096/6144 → Klein 4B / Klein 9B / Dev, and `KleinDefaults` carries the
-  10-step CFG-distilled schedule). What blocks 9B is its canonical text encoder being FP4-quantized and the
-  engine having no FP4 GEMM path; the recipe refuses with that message rather than mis-running. Klein 4B is
-  the verified path. Weights are **gated** on HuggingFace, not open — fetching them needs an accepted
-  license and an `HF_TOKEN`, so neither variant has been run here.
+- [ ] **Flux.2 Klein 9B** — the refusal is gone (it scanned for an FP4 dtype the encoder does not contain,
+  and the loader would have thrown first for one that did). The encoder is 173 nvfp4 groups + 76 fp8 + 149
+  BF16, all formats the engine already dequantizes, and opens through `CheckpointSource` with `Nvfp4ToFp8`.
+  `Flux2Recipe` resolves the variant from hidden size 4096 and `KleinDefaults` carries its 10-step schedule.
+  **Not yet run**: no Klein 9B checkpoint is on this box. An ungated stack exists —
+  `wikeeyang/Flux2-Klein-9B-True-V3-fp8mixed` (8.79 GB, `img_in.weight` `[4096, 128]`), the encoder already
+  staged with a matching sha256, and the VAE present. Note `Flux2Config.Klein9B` (8 double + 24 single) has
+  never been checked against a real file; a mismatch throws in `LoadWeights`.
 
 Older families both upstreams carry that this engine has never had: Stable Cascade, SD2, PixArt-Σ,
 NVIDIA Sana, Segmind SSD-1B, Cosmos-Predict2 T2I. No demand recorded; listed so the diff is complete.
