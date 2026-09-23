@@ -62,7 +62,9 @@ public sealed class Flux2Recipe : IArchitectureRecipe
     {
         // TODO(E-IMG-4/5): split-file / user overrides from ImageRequest.Components, and img2img are deferred —
         // this ports the text-to-image core.
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        // IDisposable, not SafeTensorsLoader: the text encoder now opens through CheckpointSource. Same widening
+        // a66afece made for MiniMax-H3 — a foreach over the narrower type compiles and throws at teardown.
+        List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;
         try
         {
@@ -105,24 +107,18 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             transformer.LoadWeights(converted);
             converted.Clear();
 
-            // Resolve + load the variant's text encoder. Klein 9B's canonical file is FP4 quantized — the FP4
-            // refusal below fires cleanly (HartsyInference has no FP4 GEMM path yet), exactly as the loader notes.
+            // Resolve + load the variant's text encoder. Opened through the container with Nvfp4ToFp8 so the
+            // nvfp4 groups land at fp8 rather than F16 — Klein 9B's encoder is 173 nvfp4 groups plus 76 fp8, and
+            // the F16 expansion costs ~3 GB more for no accuracy the fp8 GEMM path does not already give. The
+            // container also OWNS what it allocates, which the raw loader route did not: LlamaStyleEncoder.Dispose
+            // never frees projection tensors, so every dequantized weight leaked until process exit.
             (LlamaStyleEncoderConfig encoderConfig, ModelAsset encoderAsset, string encoderLabel) = ResolveTextEncoderForVariant(config);
             string encoderPath = ModelDownloader.EnsureSideModelAsync(encoderAsset, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-            SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
-            qwenLoader.Load(encoderPath);
-            loaders.Add(qwenLoader);
-            Dictionary<string, Tensor> qwenRaw = qwenLoader.GetAllTensors();
-            foreach (KeyValuePair<string, Tensor> kvp in qwenRaw)
-            {
-                string dtypeName = kvp.Value.DType.Name;
-                if (dtypeName.StartsWith("F4", StringComparison.Ordinal) || dtypeName.Contains("FP4", StringComparison.Ordinal))
-                {
-                    throw new NotSupportedException(
-                        $"{encoderLabel} weights at '{Path.GetFileName(encoderPath)}' contain FP4 tensors (e.g. '{kvp.Key}' is {dtypeName}). " +
-                        "HartsyInference doesn't support FP4 GEMM yet — swap to an fp8/fp16 variant, or pick Klein 4B (Qwen3-4B, fp8-mixed) which works today.");
-                }
-            }
+            CheckpointSource encoderSource = CheckpointSource.Open(
+                encoderPath, new CheckpointOpenOptions { Nvfp4ToFp8 = true });
+            loaders.Add(encoderSource);
+            Dictionary<string, Tensor> qwenRaw = new Dictionary<string, Tensor>(encoderSource.Weights, StringComparer.Ordinal);
+
             // LoadWeights runs the raw dict through TextEncoderQuantNormalizer (folds fp8 weight_scale companions,
             // dequantizes U8-packed NVFP4, drops .comfy_quant blobs) — hand it the RAW dict, do not pre-cast.
             LlamaStyleEncoder encoder = new LlamaStyleEncoder(encoderConfig);
@@ -172,7 +168,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[Flux2Recipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }
@@ -229,7 +225,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
         };
     }
 
-    /// <summary>Picks the LlamaStyleEncoder preset + side-model asset for the variant. Klein 4B → Qwen3-4B (only verified path); Klein 9B → Qwen3-8B (FP4 file, refuses at load); Dev → Mistral-Small-3.</summary>
+    /// <summary>Picks the LlamaStyleEncoder preset + side-model asset for the variant. Klein 4B → Qwen3-4B; Klein 9B → Qwen3-8B (nvfp4-mixed, dequantized at load); Dev → Mistral-Small-3.</summary>
     private static (LlamaStyleEncoderConfig encoder, ModelAsset sideModel, string label) ResolveTextEncoderForVariant(Flux2Config config)
     {
         return config.HiddenSize switch

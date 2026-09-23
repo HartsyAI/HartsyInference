@@ -27,6 +27,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     private readonly CudaKernels? _kernels;
     private nint _cublasHandle;
     private Fp8GemmExecutor? _fp8Executor;
+    private Fp4GemmExecutor? _fp4Executor;
     private LtGemmExecutor? _ltGemmExecutor;
     private TensorCoreGemm? _tensorCoreGemm;
     private readonly object _nativeExecutorLock = new();
@@ -417,6 +418,29 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                     GC.SuppressFinalize(_fp8Executor);
                 }
                 return _fp8Executor;
+            }
+        }
+    }
+
+    /// <summary>Lazily-initialized FP4 GEMM executor. <see cref="Fp4GemmExecutor.IsSupported"/> is false on
+    /// anything before Blackwell, and constructing it there allocates nothing, so callers can ask unconditionally.</summary>
+    /// <remarks>Nothing in the shipped GEMM path reaches native FP4 yet: NVFP4 weights are dequantized at load, so no
+    /// <see cref="DType.F4E2M1"/> tensor survives to dispatch. This exists so the executor is reachable for bring-up on
+    /// a Blackwell card without another code change, and so the unsupported-hardware refusal is testable here.</remarks>
+    public Fp4GemmExecutor Fp4Executor
+    {
+        get
+        {
+            EnsureActiveContextForLazyNativeResource();
+            lock (_nativeExecutorLock)
+            {
+                EnsureActiveContextForLazyNativeResource();
+                if (_fp4Executor is null)
+                {
+                    _fp4Executor = new Fp4GemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
+                    GC.SuppressFinalize(_fp4Executor);
+                }
+                return _fp4Executor;
             }
         }
     }
@@ -11002,6 +11026,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             }
 
             Fp8GemmExecutor? fp8;
+            Fp4GemmExecutor? fp4;
             Int8GemmExecutor? int8;
             LtGemmExecutor? lt;
             TensorCoreGemm? tensorCore;
@@ -11009,6 +11034,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             {
                 fp8 = _fp8Executor;
                 _fp8Executor = null;
+                fp4 = _fp4Executor;
+                _fp4Executor = null;
                 int8 = _int8Executor;
                 _int8Executor = null;
                 lt = _ltGemmExecutor;
@@ -11017,6 +11044,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 _tensorCoreGemm = null;
             }
             if (fp8 is not null) Attempt("FP8 GEMM executor", fp8.Dispose);
+            if (fp4 is not null) Attempt("FP4 GEMM executor", fp4.Dispose);
             if (int8 is not null) Attempt("INT8 GEMM executor", int8.Dispose);
             if (lt is not null) Attempt("cuBLASLt GEMM executor", lt.Dispose);
             if (tensorCore is not null) Attempt("tensor-core GEMM executor", tensorCore.Dispose);
