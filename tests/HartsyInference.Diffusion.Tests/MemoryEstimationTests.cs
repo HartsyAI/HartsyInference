@@ -202,6 +202,22 @@ public sealed class MemoryEstimationTests : IDisposable
     }
 
     [Fact]
+    public void Judge_KeptResidentShardPoolStillHoldsTheOtherComponentsOnThePrimary()
+    {
+        // 42 GB resident together fits the 60 GB pool, but the text encoder, VAE and working memory (12 GB) cannot
+        // leave the 10 GB primary — only denoiser blocks move to the shard device.
+        MemoryEstimate estimate = Estimate(textEncoder: 6 * Gib, denoiser: 30 * Gib, activation: 2 * Gib, vae: 4 * Gib);
+
+        MemoryFit tooMuchPinned = MemoryFitJudge.Judge(estimate, VramPolicy.For(VramTier.Performance), canStream: false,
+            primaryBytes: 10 * Gib, denoiserBytes: 60 * Gib, _ => true);
+        MemoryFit fits = MemoryFitJudge.Judge(estimate, VramPolicy.For(VramTier.Performance), canStream: false,
+            primaryBytes: 22 * Gib, denoiserBytes: 44 * Gib, _ => true);
+
+        Assert.Equal(MemoryFitVerdict.Infeasible, tooMuchPinned.Verdict);
+        Assert.Equal(MemoryFitVerdict.Resident, fits.Verdict);
+    }
+
+    [Fact]
     public void Profile_ReadsEachCheckpointOnceAndRereadsWhenItChanges()
     {
         string path = WriteWanCheckpoint("wan.safetensors", inner: 256);

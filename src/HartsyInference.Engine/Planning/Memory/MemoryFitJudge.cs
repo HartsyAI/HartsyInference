@@ -51,15 +51,21 @@ internal static class MemoryFitJudge
     }
 
     /// <summary>Whether every phase fits the device it runs on, and the largest single requirement for the reason text.</summary>
-    /// <remarks>Phase by phase when phases unload (each must fit its own device on its own); the whole resident set on
-    /// the pooled capacity when they do not. Only the denoiser is pooled across shard devices.</remarks>
+    /// <remarks>Phase by phase when phases unload (each must fit its own device on its own). When they do not, the
+    /// whole resident set must fit the pooled capacity AND everything but the denoiser's weights must fit the primary
+    /// alone: only the denoiser's blocks can move to shard devices, so the text encoder, the VAE and the working memory
+    /// stay on the primary whatever the pool adds.</remarks>
     private static (bool Fits, long Need) Fits(MemoryEstimate estimate, Func<MemoryComponent, bool> onPrimary,
         bool unload, long primaryBytes, long denoiserBytes, bool streamed)
     {
         if (!unload)
         {
             long total = streamed ? estimate.FloorBytes(false, onPrimary) : estimate.PeakBytes(false, onPrimary);
-            return (total <= denoiserBytes, total);
+            long denoiserWeights = estimate.Phases
+                .Where(phase => phase.Component == MemoryComponent.Denoiser && onPrimary(phase.Component))
+                .Sum(phase => streamed ? phase.FloorBytes - phase.ActivationBytes : phase.WeightBytes);
+            long pinnedToPrimary = total - denoiserWeights;
+            return (total <= denoiserBytes && pinnedToPrimary <= primaryBytes, total);
         }
         bool fits = true;
         long need = 0;
