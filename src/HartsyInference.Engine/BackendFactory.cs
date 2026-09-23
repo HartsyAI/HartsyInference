@@ -77,7 +77,14 @@ public static class BackendFactory
     /// and NVIDIA cards whose CUDA toolkit is absent), so resolving straight to CPU when CUDA is missing sent those
     /// machines to the slowest backend they own while a working GPU sat idle. CPU stays the answer only when no GPU
     /// is present at all: a software-rasterizer Vulkan device does not count as one (see
-    /// <see cref="VulkanContext.GetDeviceCount"/>).</para></summary>
+    /// <see cref="VulkanContext.GetDeviceCount"/>).</para>
+    ///
+    /// <para>An ordinal on <c>auto</c> is read by whichever backend wins, and the two APIs enumerate independently:
+    /// <c>auto:2</c> means CUDA device 2 on a machine that resolves to CUDA and Vulkan device 2 on one that resolves
+    /// to Vulkan, which need not be the same card, or exist. The ambiguity predates the Vulkan step (an ordinal has
+    /// always been written before the backend was known) but only became reachable through <c>auto</c> with it, so a
+    /// caller that cares which physical device it gets should name the backend rather than leave it to
+    /// <c>auto</c>.</para></summary>
     public static string Resolve(string selector)
     {
         string s = Kind(selector);
@@ -98,9 +105,12 @@ public static class BackendFactory
     /// Only meaningful after a Resolve/IsAvailable call.</summary>
     public static string? VulkanUnavailableReason => VulkanContext.LastUnavailableReason;
 
-    private static readonly object _probeLock = new();
+    // One lock per API, not one shared: the two probes touch independent hardware and cache independent answers,
+    // so a slow or wedged CUDA probe has no business blocking a caller asking about Vulkan.
+    private static readonly object _cudaProbeLock = new();
     private static bool? _probeResult;
     private static string? _probeReason;
+    private static readonly object _vulkanProbeLock = new();
     private static bool? _vulkanProbeResult;
     private static string? _vulkanProbeReason;
 
@@ -129,7 +139,7 @@ public static class BackendFactory
     /// <returns>True when a real matmul ran on the GPU and agreed with the CPU.</returns>
     public static bool ProbeCuda(int ordinal = 0)
     {
-        lock (_probeLock)
+        lock (_cudaProbeLock)
         {
             if (_probeResult is bool cached)
             {
@@ -239,7 +249,7 @@ public static class BackendFactory
     /// <returns>True when a real matmul ran on the GPU and agreed with the CPU.</returns>
     public static bool ProbeVulkan(int ordinal = 0)
     {
-        lock (_probeLock)
+        lock (_vulkanProbeLock)
         {
             if (_vulkanProbeResult is bool cached)
             {
