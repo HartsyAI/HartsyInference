@@ -14,7 +14,7 @@ stable release will require. Dates are UTC.
   and `VulkanBackend`'s own summary claims it creates "a Vulkan backend on the best discrete GPU". Its parameter
   defaulted to `0`, and `BackendFactory.CreateVulkan` took a plain `int`, so nothing in production ever reached the
   ranking: `PickBest` was live only in tests. That was survivable while Vulkan had to be asked for by name. It stopped
-  being survivable in alpha.158, when `auto` started choosing Vulkan on its own, because the machines that gains are
+  being survivable in alpha.158, when `auto` started choosing Vulkan on its own, because the machines that gain are
   exactly the ones that enumerate Mesa's lavapipe alongside the real card. `VulkanContext` would correctly count one
   GPU, `auto` would correctly answer `vulkan`, and `Create` would then bind raw index 0 and run the model on a CPU
   implementation of Vulkan. The test harness already knew: `BackendGate` hand-rolls a scan for a non-software device,
