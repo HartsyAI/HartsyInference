@@ -242,6 +242,11 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <summary>The CUDA context used by this backend.</summary>
     public CudaContext Context => _context;
 
+    /// <inheritdoc/>
+    /// <remarks>The ordinal is enough here, unlike on Vulkan: CUDA enumerates GPUs only, and the ordinal a caller
+    /// asks for is the one it gets.</remarks>
+    public string DeviceKey => $"cuda:{_context.DeviceOrdinal}";
+
     /// <summary>The default compute stream.</summary>
     public CudaStream Stream => _stream;
 

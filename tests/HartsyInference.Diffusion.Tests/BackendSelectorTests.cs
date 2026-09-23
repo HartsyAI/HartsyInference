@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
@@ -203,6 +204,65 @@ public sealed class BackendSelectorTests
     public void CanonicalDeviceKey_Leaves_What_It_Cannot_Name_Alone(string selector)
     {
         Assert.Equal(selector, BackendFactory.CanonicalDeviceKey(selector));
+    }
+
+    /// <summary>A canonical key must never be fed back into <see cref="BackendFactory.Create"/>. Canonicalization
+    /// MANUFACTURES an ordinal — a bare <c>vulkan</c> comes back as <c>vulkan:0</c> — so a caller that keys a slot
+    /// and then builds from that same string turns a rankable request into a pin on loader index 0, which is the
+    /// rasterizer on exactly the machines ranking exists for.</summary>
+    [Theory]
+    [InlineData("vulkan")]
+    [InlineData("cuda")]
+    public void A_Canonical_Key_Is_Not_A_Construction_Selector(string selector)
+    {
+        Assert.False(BackendFactory.HasExplicitOrdinal(selector));
+        Assert.True(BackendFactory.HasExplicitOrdinal(BackendFactory.CanonicalDeviceKey(selector)));
+    }
+
+    /// <summary>A written ordinal and an absent one are different requests, and this is the only thing that separates
+    /// them: <see cref="BackendFactory.ParseOrdinal"/> answers 0 for both, so every caller that asked it "did the user
+    /// pick a device?" has been getting "yes, device 0" from a selector that named nothing.</summary>
+    [Theory]
+    [InlineData("vulkan:0", true)]
+    [InlineData("auto:0", true)]
+    [InlineData("cuda:2", true)]
+    [InlineData("vulkan", false)]
+    [InlineData("auto", false)]
+    [InlineData("cpu", false)]
+    [InlineData(null, false)]
+    public void HasExplicitOrdinal_Separates_A_Written_Zero_From_No_Ordinal(string? selector, bool expected)
+    {
+        Assert.Equal(expected, BackendFactory.HasExplicitOrdinal(selector));
+        if (!expected)
+        {
+            Assert.Equal(0, BackendFactory.ParseOrdinal(selector));
+        }
+    }
+
+    /// <summary>The identity a backend reports is the device it bound to, and asking twice gives the same answer.
+    ///
+    /// <para>That stability is what a host's device-sharing map rests on: two engines that landed on one GPU have to
+    /// collide in it. Keying such a map on the SELECTOR instead cannot do that once selection is left to the engine,
+    /// since <c>vulkan</c> and <c>vulkan:1</c> can name the same card while reading as two.</para></summary>
+    [Fact]
+    public void A_Backend_Reports_The_Device_It_Bound_To()
+    {
+        using IBackend a = BackendFactory.Create("cpu");
+        using IBackend b = BackendFactory.Create("cpu");
+        Assert.Equal("cpu", a.DeviceKey);
+        Assert.Equal(a.DeviceKey, b.DeviceKey);
+
+        if (!VulkanContext.IsAvailable())
+        {
+            return;
+        }
+        // Ranking is deterministic, so two bare selectors must land on one device and say so identically.
+        using IBackend v1 = BackendFactory.Create("vulkan");
+        using IBackend v2 = BackendFactory.Create("vulkan");
+        Assert.StartsWith("vulkan:", v1.DeviceKey);
+        Assert.Equal(v1.DeviceKey, v2.DeviceKey);
+        // And it is not the request laundered into a device name: that would read "vulkan:0" whatever was chosen.
+        Assert.NotEqual(BackendFactory.CanonicalDeviceKey("vulkan"), v1.DeviceKey);
     }
 
     /// <summary>'auto' tries CUDA, then Vulkan, then CPU. Asserted as the ordering rather than a fixed answer,
