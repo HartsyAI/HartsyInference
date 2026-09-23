@@ -99,6 +99,12 @@ public sealed class VulkanCapabilities
     /// <summary>True if the device supports <c>shaderIntegerDotProduct</c> (core 1.3), enabling the INT8 GEMM path via <c>dotPacked4x8</c>.</summary>
     public required bool HasInt8DotProduct { get; init; }
 
+    /// <summary>Whether shaders may use 64-bit integers (<c>shaderInt64</c>); im2col's index math declares it.</summary>
+    public required bool ShaderInt64 { get; init; }
+
+    /// <summary>Whether shaders may use 16-bit integers (<c>shaderInt16</c>); the BF16 casts declare it.</summary>
+    public required bool ShaderInt16 { get; init; }
+
     /// <summary>Whether the device supports configuring a required subgroup size per shader stage.</summary>
     public required bool SubgroupSizeControl { get; init; }
 

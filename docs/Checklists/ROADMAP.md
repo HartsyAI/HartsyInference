@@ -42,7 +42,9 @@ Benchmark infrastructure already exists in [benchmarks](../../benchmarks/README.
   batched convolution, the batch-independence of GroupNorm/Silu/Linear/SDPA, `CfgEulerStep` and TF32 are all
   ruled out; attention and the GEMM dtype path are untested. A cross-backend SSIM gate cannot be set until this
   is understood — for scale, toggling TF32 inside CUDA alone costs ~2% over 20 steps.
-- [ ] Subgroup-size pinning, im2col 64-bit indexing, descriptor-pool timeline lifetime checks.
+- [x] Subgroup-size pinning (to the device default; `sdpa_flash` passes no spec constants and is not pinned),
+  descriptor-pool reuse waits on the timeline, and the int64/int16 shader features are enabled. im2col past
+  2^31 elements is refused on the host rather than indexed in 64 bits.
 - [ ] Real-model Vulkan decode parity/throughput before enabling GraphDecodeSupported by default.
 - [ ] INT8 loading policy, end-to-end quality gate, cached quantized-weight lifetime, and shape-specific tuning.
   The opt-in Linear primitive already exists; that alone does not establish model support.

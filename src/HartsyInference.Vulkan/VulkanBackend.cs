@@ -137,7 +137,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         // costs more than the pool-flip approach. Default off; enable via HARTSYINFERENCE_VK_PUSH_DESCRIPTORS=1
         // when measuring on AMD/Intel — outcome there may differ.
         bool enablePushDescriptor = Vk.HasPushDescriptor && EngineKnobs.VkPushDescriptors.Value;
-        _descriptors = new VulkanDescriptorManager(_vkDevice.Handle, enablePushDescriptor: enablePushDescriptor);
+        _descriptors = new VulkanDescriptorManager(_vkDevice.Handle, _stream, enablePushDescriptor: enablePushDescriptor);
         _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
         _xfer = new VulkanGpuTransferHelper(_vkDevice.Handle, _allocator, in memProps, Vk, _stream);
@@ -257,7 +257,9 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         => (uint)((total + localX - 1) / localX);
 
     /// <summary>Resolve the dtype suffix for kernel selection: f16 if both inputs/output are F16; f32 otherwise.</summary>
-    private static string DtypeSuffix(DType dt) => dt == DType.F16 ? "_f16" : "_f32";
+    private static string DtypeSuffix(DType dt) => dt == DType.F16 ? "_f16"
+        : dt == DType.F32 ? "_f32"
+        : throw new NotSupportedException($"No Vulkan shader variant computes in {dt}; cast to F16 or F32 first.");
 
     /// <summary>The kernel binding count (number of SSBOs) for a given shape — drives descriptor-set-layout selection.</summary>
     private VulkanKernel GetKernel(string shaderName, int storageBufferCount, ReadOnlySpan<SpecConstant> spec)
@@ -330,6 +332,15 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
             return;
         }
 
+        // A pool set is taken before the command buffer is touched: allocating can flip pools, and a flip may
+        // submit the open recording to retire the other pool, which must not split this dispatch across buffers.
+        ulong dstSet = 0;
+        if (!_descriptors.PushDescriptorActive)
+        {
+            dstSet = _descriptors.AllocateSet(kernel.DescriptorSetLayout);
+            _descriptors.WriteSet(dstSet, bufferHandles);
+        }
+
         nint cb = _stream.AcquireRecording();
         VulkanApi.vkCmdBindPipeline(cb, VkPipelineBindPoint.Compute, kernel.Pipeline);
 
@@ -342,9 +353,6 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
         else
         {
-            ulong setLayout = kernel.DescriptorSetLayout;
-            ulong dstSet = _descriptors.AllocateSet(setLayout);
-            _descriptors.WriteSet(dstSet, bufferHandles);
             VulkanApi.vkCmdBindDescriptorSets(cb, VkPipelineBindPoint.Compute, layout,
                 0, 1, (nint)(&dstSet), 0, 0);
         }

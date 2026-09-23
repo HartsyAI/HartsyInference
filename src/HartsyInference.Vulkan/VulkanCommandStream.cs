@@ -240,6 +240,12 @@ public sealed class VulkanCommandStream : IDisposable
         list.Add(cb);
     }
 
+    /// <summary>The tick the next submit will signal — what is recorded from now on completes at it. <see cref="DeferredFree"/> tags with the same value.</summary>
+    public ulong NextSubmitTick => _value + 1;
+
+    /// <summary>The highest tick handed to the queue; anything above it is still recording and cannot be waited on.</summary>
+    public ulong LastSubmitted => _lastSubmitted;
+
     /// <summary>Returns true when the GPU has completed up to <paramref name="tick"/>.</summary>
     public bool TimelineReached(ulong tick)
     {

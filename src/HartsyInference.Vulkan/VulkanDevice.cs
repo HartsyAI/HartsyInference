@@ -237,6 +237,8 @@ public sealed class VulkanDevice : IDisposable
         bool cfs   = f13.computeFullSubgroups != 0;
         bool sync2 = f13.synchronization2 != 0;
         bool int8dot = f13.shaderIntegerDotProduct != 0;
+        bool int64 = feat2.features.shaderInt64 != 0;
+        bool int16 = feat2.features.shaderInt16 != 0;
 
         VulkanCapabilities caps = new()
         {
@@ -272,6 +274,8 @@ public sealed class VulkanDevice : IDisposable
             SupportsFp16 = fp16,
             Storage16Bit = f11.storageBuffer16BitAccess != 0,
             HasInt8DotProduct = int8dot,
+            ShaderInt64 = int64,
+            ShaderInt16 = int16,
             SubgroupSizeControl = sgs,
             ComputeFullSubgroups = cfs,
             Synchronization2 = sync2,
@@ -444,6 +448,13 @@ public sealed class VulkanDevice : IDisposable
             pNext = caps.HasCooperativeMatrix2 ? (nint)(&fCoop2)
                   : caps.HasCooperativeMatrix ? (nint)(&fCoop)
                   : (nint)(&f13),
+            // The 1.0 feature block rides inside features2; left default it enables nothing, and the shaders
+            // that declare int64/int16 then depend on the driver not checking.
+            features = new VkPhysicalDeviceFeatures
+            {
+                shaderInt64 = caps.ShaderInt64 ? 1u : 0u,
+                shaderInt16 = caps.ShaderInt16 ? 1u : 0u,
+            },
         };
 
         float prio = 1.0f;
