@@ -1,9 +1,10 @@
+using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using Xunit;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Pins the FP4 interop constants and the Blackwell gate.
+/// <summary>Pins the FP4 interop constants, the dtype map and the Blackwell gate.
 ///
 /// <para>These are transcribed from <c>library_types.h</c> and <c>cublasLt.h</c>, and a wrong value is invisible
 /// locally: no card here runs the FP4 path, so nothing would fail until it reached Blackwell and either errored
@@ -35,6 +36,36 @@ public sealed class Fp4ConstantsAndGateTests
         Assert.Equal(expected, actual);
     }
 
+    /// <summary>Every layout an executor creates goes through this map, so it is the one place an operand's element
+    /// type can be wrong. The E5M2 row is the one that used to be missing: the fp8 executor spelled E4M3 for both
+    /// operands and would have multiplied an E5M2 weight as E4M3.</summary>
+    [Theory]
+    [InlineData("F32", 0)]
+    [InlineData("F16", 2)]
+    [InlineData("BF16", 14)]
+    [InlineData("F8_E4M3", 28)]
+    [InlineData("F8_E5M2", 29)]
+    [InlineData("F4_E2M1", 33)]
+    [InlineData("I8", 3)]
+    [InlineData("I32", 10)]
+    public void DataTypeOfMatchesTheHeader(string dtypeName, int expected)
+    {
+        DType dtype = dtypeName switch
+        {
+            "F32" => DType.F32, "F16" => DType.F16, "BF16" => DType.BF16,
+            "F8_E4M3" => DType.F8E4M3, "F8_E5M2" => DType.F8E5M2, "F4_E2M1" => DType.F4E2M1,
+            "I8" => DType.I8, "I32" => DType.I32,
+            _ => throw new ArgumentOutOfRangeException(nameof(dtypeName), dtypeName, "unmapped dtype"),
+        };
+        Assert.Equal(expected, CublasApi.DataTypeOf(dtype));
+    }
+
+    [Fact]
+    public void DataTypeOfRefusesWhatCublasCannotHold()
+    {
+        Assert.Throws<NotSupportedException>(() => CublasApi.DataTypeOf(DType.Q4_K));
+    }
+
     [Theory]
     // cublasLtMatmulDescAttributes_t and cublasLtMatmulMatrixScale_t, cublasLt.h
     [InlineData("A_SCALE_MODE", 31)]
@@ -52,6 +83,23 @@ public sealed class Fp4ConstantsAndGateTests
             _ => throw new ArgumentOutOfRangeException(nameof(name), name, "unmapped constant"),
         };
         Assert.Equal(expected, actual);
+    }
+
+    /// <summary>The one arch predicate every gate reads. SM 10.x sits between the "major >= 12" the cuBLAS warning
+    /// used to test and the "major >= 10" the FP4 executor tested, which is how one Blackwell tier could pass a gate
+    /// the other failed.</summary>
+    [Theory]
+    [InlineData(8, 6, false, false)]   // Ampere — this box's 3060
+    [InlineData(8, 9, true, false)]    // Ada — this box's 4090
+    [InlineData(9, 0, true, false)]    // Hopper: FP8, no FP4
+    [InlineData(10, 0, true, true)]    // Blackwell datacenter
+    [InlineData(10, 3, true, true)]    // B300
+    [InlineData(12, 0, true, true)]    // Blackwell consumer (RTX 50xx)
+    public void ArchTiersOrderTheWayTheHardwareDoes(int major, int minor, bool fp8, bool fp4)
+    {
+        int sm = CudaArch.Sm(major, minor);
+        Assert.Equal(fp8, sm >= CudaArch.Ada);
+        Assert.Equal(fp4, sm >= CudaArch.Blackwell);
     }
 
     [Theory]

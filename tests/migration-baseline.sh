@@ -71,13 +71,10 @@ fi
 [ -f "$CLI" ] || { echo "build the CLI first: dotnet build src/HartsyInference.Cli -c Release -f net10.0" >&2; exit 2; }
 mkdir -p "$REF"
 
-# case id | checkpoint (relative to MODELS) | command|positional|arguments
-CASES=$(cat <<'MATRIX'
-sd15	bench-cache/e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916/v1-5-pruned-emaonly-fp16.safetensors	image|a red apple on a table|--steps 8 --width 512 --height 512 --seed 42
-krea2	Stable-Diffusion/Krea2/Turbo/krea2_turbo_fp8_scaled.safetensors	image|a red apple on a wooden table|-m krea2 --steps 8 --width 1024 --height 1024 --seed 42
-llama32-1b	llm/llama32-1b/llama-3.2-1b-instruct-q8_0.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0 --seed 42
-MATRIX
-)
+# The case list is shared with regression-ab.sh so a digest recorded here is comparable to a run made there.
+# shellcheck source=regression-cases.sh
+. "$REPO/tests/regression-cases.sh"
+CASES=$(regression_cases baseline)
 
 # A digest is the only thing this script compares, so an unusable one must never reach the comparison. md5sum
 # failing leaves the substitution empty, and an empty value is stable — record and compare would both produce it and
@@ -117,7 +114,7 @@ while IFS=$'\t' read -r id ckpt spec; do
     out="$WORK/$id"
     mkdir -p "$out"
     # shellcheck disable=SC2086
-    if ! timeout 1800 dotnet "$CLI" "$cmd" "$positional" --model-path "$path" -b "$BACKEND" -o "$out" $args \
+    if ! timeout 1800 dotnet "$CLI" "$cmd" "$positional" --model-path "$path" -b "$BACKEND" -o "$out" --seed 42 $args \
         >"$WORK/$id.log" 2>&1 </dev/null; then
         printf '%s\t%s\tCRASH\tsee %s\n' "$id" "$BACKEND" "$WORK/$id.log"
         status=1

@@ -333,7 +333,7 @@ internal static partial class CudaDriverApi
     internal const int CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16;
     internal const int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75;
     internal const int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
-    internal const int CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 81;
+    internal const int CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97;
 
     // ── P2P Attribute Constants (cuDeviceGetP2PAttribute) ───────────────
 
