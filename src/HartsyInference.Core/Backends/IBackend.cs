@@ -12,6 +12,15 @@ public interface IBackend : IDisposable
     /// <summary>The device this backend targets.</summary>
     DeviceKind Device { get; }
 
+    /// <summary>Stable identity of the physical device this backend actually bound to, for callers that must tell two
+    /// backends sharing one GPU apart from two backends on two GPUs.</summary>
+    /// <remarks>Deliberately not the selector that was requested. A host composing <c>"vulkan:0"</c> out of its own
+    /// settings names the device it ASKED for, and the two part company whenever selection is left to the engine: a
+    /// bare <c>vulkan</c> or <c>auto</c> ranks the devices rather than taking raw index 0. Keying a sharing map on the
+    /// request instead of on this reads one shared GPU as two, and the VRAM it was meant to protect is gone before
+    /// anything notices.</remarks>
+    string DeviceKey => Device.ToString().ToLowerInvariant();
+
     /// <summary>Count of lazy device-to-host syncs since <see cref="ResetD2hSyncCount"/>; ~0 GPU-resident, 0 with no device sync.</summary>
     long GetD2hSyncCount() => 0;
 

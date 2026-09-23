@@ -61,6 +61,13 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     public BackendCapabilities Capabilities { get; }
     public VulkanCapabilities Vk => _vkDevice.Capabilities;
 
+    /// <inheritdoc/>
+    /// <remarks>Vulkan's own device UUID, not an index. The index depends on loader order and on whether the caller
+    /// named a device at all, while the UUID keeps two identical cards distinguishable. Falls back to the device name
+    /// only if a driver reports no UUID, which is worse (two identical cards collide) but still better than an index
+    /// that may not be the one in use.</remarks>
+    public string DeviceKey => string.IsNullOrWhiteSpace(Vk.DeviceUuid) ? $"vulkan:{Vk.DeviceName}" : $"vulkan:{Vk.DeviceUuid}";
+
     /// <summary>The GGUF block quants this backend has dequant shaders for, and only on a device that can run them.</summary>
     /// <remarks>Every <c>dequant_*.comp.glsl</c> here writes F16 and so requires
     /// <c>GL_EXT_shader_explicit_arithmetic_types_float16</c>. On a device without it — Polaris under RADV, for one —
@@ -105,8 +112,12 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Creates a Vulkan backend on the best discrete GPU. Validation layers enabled if HARTSYINFERENCE_VK_VALIDATION=1.</summary>
-    public VulkanBackend(int deviceOrdinal = 0, string? spvDir = null)
+    /// <summary>Creates a Vulkan backend on the best discrete GPU, or on <paramref name="deviceOrdinal"/> when one is
+    /// named. Validation layers enabled if HARTSYINFERENCE_VK_VALIDATION=1.</summary>
+    /// <remarks>The default is null, not 0, and the difference is the whole point: 0 pins the loader's first device,
+    /// which on any box that also exposes a software rasterizer is not the GPU. Null is what makes the summary above
+    /// true.</remarks>
+    public VulkanBackend(int? deviceOrdinal = null, string? spvDir = null)
     {
         _instance = new VulkanInstance();
         _vkDevice = VulkanDevice.Create(_instance, deviceOrdinal);
@@ -166,7 +177,8 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
                    _xfer.DiagnosticsSummary();
         };
 
-        Device = DeviceKind.Vulkan(deviceOrdinal);
+        // The index that was chosen, not the one that was requested: they differ whenever deviceOrdinal was null.
+        Device = DeviceKind.Vulkan(_vkDevice.PhysicalDeviceIndex);
         Capabilities = new BackendCapabilities
         {
             Name = $"Vulkan ({Vk.DeviceName}, {Vk.VendorString}, {Vk.DeviceType})",
