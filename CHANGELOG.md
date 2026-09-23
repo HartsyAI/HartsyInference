@@ -6,6 +6,36 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.158
+
+- **`auto` considers Vulkan, so a non-NVIDIA GPU stops being treated as no GPU.** `BackendFactory.Resolve` chose
+  between CUDA and CPU and nothing else, so every machine whose GPU is served by Vulkan rather than CUDA (AMD,
+  Intel, and NVIDIA cards with no CUDA toolkit installed) resolved `auto` to the CPU backend while a working GPU
+  sat idle. Vulkan was selectable, but only by naming it explicitly, which means it was reachable only by someone
+  who already knew the default had failed them. The order is now CUDA, then Vulkan, then CPU, in both
+  `Resolve` and `ResolveProbed`.
+- **A software rasterizer does not count as a GPU.** New `VulkanContext.IsAvailable`/`GetDeviceCount` back the
+  decision above, and they exclude `VK_PHYSICAL_DEVICE_TYPE_CPU` devices: Mesa's lavapipe enumerates as a Vulkan
+  device on a machine with no graphics hardware, and it is a CPU implementation of Vulkan, so counting it would
+  make `auto` pick something slower than the CPU backend it was chosen over. Linux CI images ship lavapipe, so
+  without the exclusion this would have moved every containerized `Create("auto")` onto a software rasterizer.
+  The count is cached, because unlike CUDA's device query it has to start the loader, and `Resolve` is called from
+  banner and cache-key paths that assume it is cheap.
+- **`ProbeVulkan` is the Vulkan twin of `ProbeCuda`**, sharing its matmul-against-the-CPU body. It earns its keep
+  for a reason CUDA's does not have: a Vulkan device can enumerate and still fail the engine's own requirements
+  (FP16, the subgroup ops the kernels are written against, a compute queue), which surfaces as a throw from device
+  creation rather than as a missing device.
+- **`Validate("vulkan")` checks for a device instead of only checking spelling.** Its remark that "Vulkan has no
+  cheap availability probe" stopped being true with `VulkanContext`. An explicit `vulkan` selector on a machine
+  with no Vulkan GPU now fails at startup with the loader's reason, matching what an explicit `cuda` already did,
+  rather than deferring to a driver error mid-generation. Only presence is checked, not the ordinal: a
+  `vulkan:{n}` ordinal indexes the loader's raw device list, software rasterizers included, so bounding it by the
+  GPU count would reject valid ordinals.
+
+Behavior change worth calling out: a machine with a Vulkan GPU and no usable CUDA now runs on the GPU where it
+previously ran on the CPU. That is the point, but it is a change of device for anyone who was relying on `auto`
+meaning "CUDA or CPU"; naming `cpu` explicitly still pins it.
+
 ## alpha.157
 
 - **`--set` works.** It has never worked: it shipped in alpha.39 on 2026-08-26 parsing the flag out of `args`
