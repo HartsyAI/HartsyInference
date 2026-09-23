@@ -206,6 +206,19 @@ public sealed class BackendSelectorTests
         Assert.Equal(selector, BackendFactory.CanonicalDeviceKey(selector));
     }
 
+    /// <summary>A canonical key must never be fed back into <see cref="BackendFactory.Create"/>. Canonicalization
+    /// MANUFACTURES an ordinal — a bare <c>vulkan</c> comes back as <c>vulkan:0</c> — so a caller that keys a slot
+    /// and then builds from that same string turns a rankable request into a pin on loader index 0, which is the
+    /// rasterizer on exactly the machines ranking exists for.</summary>
+    [Theory]
+    [InlineData("vulkan")]
+    [InlineData("cuda")]
+    public void A_Canonical_Key_Is_Not_A_Construction_Selector(string selector)
+    {
+        Assert.False(BackendFactory.HasExplicitOrdinal(selector));
+        Assert.True(BackendFactory.HasExplicitOrdinal(BackendFactory.CanonicalDeviceKey(selector)));
+    }
+
     /// <summary>A written ordinal and an absent one are different requests, and this is the only thing that separates
     /// them: <see cref="BackendFactory.ParseOrdinal"/> answers 0 for both, so every caller that asked it "did the user
     /// pick a device?" has been getting "yes, device 0" from a selector that named nothing.</summary>

@@ -29,6 +29,13 @@ stable release will require. Dates are UTC.
 - **Probe results are cached per device rather than once per API.** A single `bool?` handed the first caller's verdict
   to every later one, so `ProbeCuda(1)` returned device 0's answer. Latent while one ordinal was ever probed; live as
   soon as "ranked best" and "index 0" became distinct requests.
+- **The LLM path built its backend from the slot key, which pinned index 0 on exactly the boxes ranking exists for.**
+  `TextService` canonicalizes a request device into a slot-and-gate key, and `CanonicalDeviceKey` MANUFACTURES an
+  ordinal — a bare `vulkan` comes back as `vulkan:0`. That key was then handed to `CreateBackendFor`, so the one
+  spelling that should rank was the one guaranteed not to, and an explicit `vulkan` request reached the rasterizer
+  even after the fix above. Blank requests were unaffected and so disagreed with named ones, because `PrimaryDeviceKey`
+  goes through `WithOrdinal`, which keeps ordinal 0 bare. The key still identifies the slot and the gate; the backend
+  is now built from the selector as written.
 - **New `IBackend.DeviceKey`: the identity of the device a backend actually bound to.** Hosts that track which engines
   share a GPU were composing a key from the selector they requested, which stops being the device in use the moment
   selection is left to the engine. Vulkan reports its device UUID, so two identical cards stay distinguishable and one
