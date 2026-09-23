@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.160
+## alpha.161
 
 - **A bare `vulkan` selector pinned the loader's device 0, so alpha.158's fallthrough could land on a software
   rasterizer with a real GPU sitting next to it.** `VulkanDevice.Create` has always taken a nullable ordinal whose
@@ -34,6 +34,24 @@ stable release will require. Dates are UTC.
   selection is left to the engine. Vulkan reports its device UUID, so two identical cards stay distinguishable and one
   shared card cannot read as two; CUDA reports its ordinal, which it honours as given. `VulkanDevice` also exposes the
   index it chose, and `VulkanBackend`'s `DeviceKind` now carries that instead of the one it was handed.
+
+## alpha.160
+
+- **HeartMuLa and MiniMax Music 3 quant caches were read back transposed.** Since alpha.130 (#41) `GgufWriter`
+  emits ggml `ne` order, the reverse of the engine's, and the checkpoint loader relabels on the way back in. The
+  two disk-cached quantizations never did: `CsmWeightCache.LoadQuantized` and
+  `MiniMaxMusic3WeightPolicy.QuantizeToCache` read their own cache through the raw `GgufLoader`, so every
+  projection came back `[in, out]`, the backend derived `M = 0` from it and the first dp4a launch failed with
+  `CUDA_ERROR_INVALID_VALUE` after the model had spent its minutes loading. Every `:q8`/`:q4` HeartLib and
+  MiniMax variant on the CUDA path was affected; bf16 never touched the cache and kept working, which is what made
+  it look like a card problem. `CsmWeightCacheTests` asserted the source shapes all along and has been failing
+  since the writer changed.
+- **The shape now comes from the source dictionary, not from a guess about the writer.** New
+  `GgufQuantizer.ReadBack(loader, source)` hands each cached tensor back under its source tensor's shape, which is
+  a no-op for a cache written before the writer changed and a swap for one written after, so no cache on any host
+  has to be deleted and re-converted. A tensor with no source falls back to reversing the file's axes, which is
+  right for anything the current writer produced. Both readers use it; a MiniMax depth-decoder test and a
+  quantizer round trip over both file orders join the CSM one.
 
 ## alpha.159
 
@@ -361,6 +379,7 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   `ShaderModuleCreateInfo` was 15 (image view) instead of 16.
 - **Found by running a real generation under `VK_LAYER_KHRONOS_validation`**, which names each one by VUID. Worth
   keeping as a habit: the backend had been developed for months against a driver that tolerates all of it.
+
 ## alpha.147
 
 - **Buffer copies on Vulkan are synchronized against the dispatches around them.** Every compute dispatch ends with
@@ -558,7 +577,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   struct and C# will throw it away — and it raises the op depth permanently, so every later op is treated as
   nested: no finalizer drain, no orphan sweep, no flush.
 
-
 ## alpha.138
 
 - **The conv half of the LoRA merge is verified against a real adapter.** Rank-4 convolution support has existed
@@ -580,7 +598,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   skipped, and the 49 convs are inside that UNet count.
 - The adapter is Pony-trained, which is irrelevant to what is being shown: it shares SDXL's UNet and kohya's key
   grammar, and the claim is that the conv path resolves and fits, not that the output looks like anything.
-
 
 ## alpha.137
 
@@ -1072,7 +1089,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   dispatched, wrote the device buffer and returned without rebinding, so a later host read got the untouched host
   copy and the op looked like it did nothing — a 3.3 absolute error against the reference, versus 2e-7 after.
 
-
 ## alpha.121
 
 - **The fp8 quantize path leaked every weight it wrote.** It worked out what it owned by rescanning the whole
@@ -1124,7 +1140,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   and a dim that is not a multiple of the subgroup, since the cross-subgroup fold is where a norm like this goes
   wrong on small-subgroup hardware. Max absolute error 1.4e-6 in F32, 4.9e-4 in F16 — the latter being F16's own
   precision rather than a disagreement.
-
 
 ## alpha.118
 

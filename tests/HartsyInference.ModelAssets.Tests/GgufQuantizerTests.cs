@@ -169,6 +169,107 @@ public sealed class GgufQuantizerTests : IDisposable
         }
     }
 
+    /// <summary>A quant cache read back through <see cref="GgufQuantizer.ReadBack"/> carries its source shapes,
+    /// whichever axis order the file was written in. The writer emits ggml order, so a raw read hands a
+    /// <c>[256, 512]</c> projection over as <c>[512, 256]</c>; a cache written before the writer changed is in the
+    /// engine's order already. Both come back as the dictionary they were made from.</summary>
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public unsafe void ReadBack_RestoresSourceShapes(bool legacyFile)
+    {
+        string path = Path.Combine(_tempDir, legacyFile ? "legacy.gguf" : "ne.gguf");
+        Random rng = new Random(7);
+        Dictionary<string, Tensor> source = new()
+        {
+            ["down_proj.weight"] = new Tensor(new TensorShape(256, 512), DType.F32),
+            ["head.weight"] = new Tensor(new TensorShape(512, 256), DType.F32),
+            ["square.weight"] = new Tensor(new TensorShape(256, 256), DType.F32),
+            ["norm.weight"] = new Tensor(new TensorShape(256), DType.F32),
+        };
+        foreach (Tensor t in source.Values) Fill(t, rng);
+        try
+        {
+            // The old writer emitted the engine's order verbatim, which is what the current writer produces for a
+            // tensor whose shape is already reversed - so a legacy file is written from transposed views.
+            Dictionary<string, Tensor> toWrite = new();
+            foreach (KeyValuePair<string, Tensor> kv in source)
+            {
+                toWrite[kv.Key] = legacyFile && kv.Value.Shape.Rank == 2
+                    ? kv.Value.Reshape(new TensorShape(kv.Value.Shape[1], kv.Value.Shape[0]))
+                    : kv.Value;
+            }
+            GgufQuantizer.ConvertDictionaryToGguf(toWrite, path, GgufQuantPolicy.Q8_0, architecture: "test_arch");
+
+            using GgufLoader loader = new();
+            loader.Load(path);
+            Tensor raw = loader.GetTensor("down_proj.weight");
+            Assert.Equal(legacyFile ? new long[] { 256, 512 } : new long[] { 512, 256 }, Dims(raw.Shape));
+
+            Dictionary<string, Tensor> weights = GgufQuantizer.ReadBack(loader, source);
+            Assert.Equal(new long[] { 256, 512 }, Dims(weights["down_proj.weight"].Shape));
+            Assert.Equal(new long[] { 512, 256 }, Dims(weights["head.weight"].Shape));
+            Assert.Equal(new long[] { 256, 256 }, Dims(weights["square.weight"].Shape));
+            Assert.Equal(new long[] { 256 }, Dims(weights["norm.weight"].Shape));
+            Assert.Equal(DType.Q8_0, weights["down_proj.weight"].DType);
+            Assert.Equal(DType.F16, weights["norm.weight"].DType);
+
+            // The bytes are row-major in the engine's order either way: the relabelled projection dequantizes to
+            // the source, row for row.
+            Tensor back = GgufDequantizer.Dequantize(weights["down_proj.weight"], DType.F32);
+            try
+            {
+                float* expected = (float*)source["down_proj.weight"].DataPointer;
+                float* actual = (float*)back.DataPointer;
+                for (long i = 0; i < back.ElementCount; i += 97)
+                {
+                    Assert.InRange(actual[i], expected[i] - 0.02f, expected[i] + 0.02f);
+                }
+            }
+            finally
+            {
+                back.Dispose();
+            }
+
+            // A tensor the caller no longer has a source for is assumed to be in the file's ggml order.
+            Dictionary<string, Tensor> partial = new() { ["norm.weight"] = source["norm.weight"] };
+            Dictionary<string, Tensor> guessed = GgufQuantizer.ReadBack(loader, partial);
+            Assert.Equal(legacyFile ? new long[] { 512, 256 } : new long[] { 256, 512 }, Dims(guessed["down_proj.weight"].Shape));
+        }
+        finally
+        {
+            foreach (Tensor t in source.Values) t.Dispose();
+        }
+    }
+
+    [Fact]
+    public unsafe void ReadBack_RejectsACacheWrittenFromAnotherDictionary()
+    {
+        string path = Path.Combine(_tempDir, "other.gguf");
+        Dictionary<string, Tensor> written = new() { ["w.weight"] = new Tensor(new TensorShape(256, 256), DType.F32) };
+        Dictionary<string, Tensor> other = new() { ["w.weight"] = new Tensor(new TensorShape(256, 512), DType.F32) };
+        try
+        {
+            Fill(written["w.weight"], new Random(1));
+            GgufQuantizer.ConvertDictionaryToGguf(written, path, GgufQuantPolicy.Q8_0, architecture: "test_arch");
+            using GgufLoader loader = new();
+            loader.Load(path);
+            Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => GgufQuantizer.ReadBack(loader, other));
+        }
+        finally
+        {
+            written["w.weight"].Dispose();
+            other["w.weight"].Dispose();
+        }
+    }
+
+    private static long[] Dims(TensorShape shape)
+    {
+        long[] dims = new long[shape.Rank];
+        for (int i = 0; i < shape.Rank; i++) dims[i] = shape[i];
+        return dims;
+    }
+
     private unsafe Dictionary<string, Tensor> BuildSyntheticDict()
     {
         Dictionary<string, Tensor> tensors = new();

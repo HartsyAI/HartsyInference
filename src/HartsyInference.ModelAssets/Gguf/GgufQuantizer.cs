@@ -95,6 +95,72 @@ public static class GgufQuantizer
         }
     }
 
+    /// <summary>Reads every tensor of a GGUF that <see cref="ConvertDictionaryToGguf"/> wrote back under the shape its
+    /// source tensor carried, so a disk-cached quantization comes back exactly as the dictionary it was made from.</summary>
+    /// <remarks>
+    /// <para>A raw <see cref="GgufLoader"/> hands a tensor back in the file's own order, which since the writer started
+    /// emitting ggml <c>ne</c> is the reverse of the engine's: a <c>[N, K]</c> projection reads back as <c>[K, N]</c>.
+    /// <see cref="GgufModelLoader"/> relabels that for checkpoints; the two quant caches (HeartMuLa's, MiniMax Music
+    /// 3's) read the raw loader and never did, so every projection they fed the backend was transposed, its GEMV
+    /// derived <c>M = 0</c> and the first CUDA launch failed with an invalid grid. Both readers hold the source
+    /// dictionary, so the shape comes from there rather than from a guess about which writer made the file: a cache
+    /// written before the writer changed already matches its source and is left alone, one written after is
+    /// swapped back. A tensor without a source (a cache the caller no longer feeds the same dictionary) falls back
+    /// to reversing the file's axes, which is right for anything the current writer produced.</para>
+    /// <para>Shapes only. The data is row-major in the engine's order either way, so this is
+    /// <see cref="Tensor.Reshape"/> over the mmap, valid for the quantized dtypes it never reads. The returned
+    /// tensors borrow the loader's mapping; the caller keeps the loader alive for as long as they are used.</para>
+    /// </remarks>
+    public static Dictionary<string, Tensor> ReadBack(GgufLoader loader, IReadOnlyDictionary<string, Tensor> source)
+    {
+        ArgumentNullException.ThrowIfNull(loader);
+        ArgumentNullException.ThrowIfNull(source);
+        Dictionary<string, Tensor> weights = new(loader.Descriptors.Count, StringComparer.Ordinal);
+        foreach (string name in loader.Descriptors.Keys)
+        {
+            Tensor stored = loader.GetTensor(name);
+            weights[name] = stored;
+            if (source.TryGetValue(name, out Tensor? original))
+            {
+                if (original.Shape.ElementCount != stored.Shape.ElementCount)
+                {
+                    throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                        $"GGUF cache tensor '{name}' holds {stored.Shape.ElementCount} elements but its source holds "
+                        + $"{original.Shape.ElementCount}; the cache was not written from this dictionary.");
+                }
+                if (!SameShape(original.Shape, stored.Shape))
+                {
+                    weights[name] = stored.Reshape(original.Shape);
+                }
+                continue;
+            }
+            if (stored.Shape.Rank >= 2)
+            {
+                Logs.Warning($"GgufQuantizer: cache tensor '{name}' has no source tensor to take its shape from; "
+                    + "assuming the file is in ggml order and reversing its axes.");
+                weights[name] = stored.Reshape(Reversed(stored.Shape));
+            }
+        }
+        return weights;
+    }
+
+    private static bool SameShape(TensorShape a, TensorShape b)
+    {
+        if (a.Rank != b.Rank) return false;
+        for (int i = 0; i < a.Rank; i++)
+        {
+            if (a[i] != b[i]) return false;
+        }
+        return true;
+    }
+
+    private static TensorShape Reversed(TensorShape shape)
+    {
+        long[] dims = new long[shape.Rank];
+        for (int i = 0; i < shape.Rank; i++) dims[i] = shape[shape.Rank - 1 - i];
+        return new TensorShape(dims);
+    }
+
     /// <summary>Quantizes a single tensor (F32/F16/BF16 source) to a target quant dtype — Q8_0, Q4_K, Q5_K, or Q6_K. For in-memory quantization of decode-hot weights (projections/heads): the fused GEMV reads the quant bytes directly, so a quantized weight streams 2–4× fewer bytes/token. Keep 1-D norms and host-gathered embed tables unquantized. Returns a new tensor; the source is unchanged.</summary>
     public static Tensor Quantize(Tensor src, DType targetDtype) => QuantizeTensor(src, targetDtype);
 
