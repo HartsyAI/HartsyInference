@@ -29,4 +29,10 @@ public interface IVideoRecipe
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
     /// left null; the generic fallback keeps a recipe that has not declared its own numbers working.</summary>
     VideoDefaults Defaults => VideoDefaults.Standard;
+
+    /// <summary>What this family's activations cost at a given geometry, read from the checkpoint header without
+    /// loading weights; the default describes nothing and the memory estimate falls back to a generic allowance.</summary>
+    /// <remarks>Implementations must call the same formulas the pipeline budgets with, so the estimate a host routes on
+    /// and the planner that later places the weights cannot disagree.</remarks>
+    Planning.Memory.RecipeMemoryModel? DescribeMemory(ModelAssets.Checkpoints.CheckpointHeader header) => null;
 }

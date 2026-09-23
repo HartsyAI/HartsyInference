@@ -70,6 +70,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     private readonly Lazy<ImagesService> _images;
     private readonly Lazy<VideoService> _video;
+    private readonly Lazy<MemoryEstimationService> _memoryEstimation;
     private readonly Lazy<TextService> _text;
     private readonly Lazy<MusicService> _music;
     private readonly Lazy<SpeechService> _speech;
@@ -93,6 +94,7 @@ public sealed class InferenceEngine : IInferenceEngine
         PlacementPlanner.ValidatePlacement(_placement);
         _images = new Lazy<ImagesService>(() => new ImagesService(this));
         _video = new Lazy<VideoService>(() => new VideoService(this));
+        _memoryEstimation = new Lazy<MemoryEstimationService>(() => new MemoryEstimationService(this));
         _text = new Lazy<TextService>(() => new TextService(this));
         _music = new Lazy<MusicService>(() => new MusicService(this));
         _speech = new Lazy<SpeechService>(() => new SpeechService(this));
@@ -139,6 +141,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IVideoPlanningService VideoPlanning => _video.Value;
+
+    /// <inheritdoc/>
+    public IMemoryEstimationService MemoryEstimation => _memoryEstimation.Value;
 
     /// <inheritdoc/>
     public ITextService Text => _text.Value;
@@ -516,7 +521,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The family id (catalog slug) for <paramref name="spec"/>: the catalog id when present, else a slug
     /// mapped from the coarse tensor-signature architecture the Engine can detect from a raw checkpoint.</summary>
-    private static string ResolveFamilyId(ModelSpec spec)
+    internal static string ResolveFamilyId(ModelSpec spec)
     {
         if (spec.Catalog is not null)
             return spec.Catalog.Id;
