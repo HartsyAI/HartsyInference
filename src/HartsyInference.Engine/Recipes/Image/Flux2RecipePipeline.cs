@@ -18,7 +18,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Flux.2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Flux2Pipeline"/> owns the text encoder, so this only produces the token ids — the embedded Qwen3 chat template for Klein, or the spliced Mistral tekken conditioning ids for Dev — and calls <see cref="Flux2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Flux2Loader.Generate</c> text-to-image drive path. Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null. <paramref name="checkpoint"/> holds whatever keeps the transformer's weights alive — the checkpoint's memory map, which pass-through tensors still point into, and any copies the backend needed widened.</summary>
 public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer,
-    string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders, IDisposable? checkpoint = null,
+    string mistralSystemPrompt, LlamaStyleEncoder encoder, List<IDisposable> loaders, IDisposable? checkpoint = null,
     MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly Flux2Pipeline _pipeline = pipeline;
@@ -27,7 +27,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
     private readonly ErnieTokenizer? _mistralTokenizer = mistralTokenizer;
     private readonly string _mistralSystemPrompt = mistralSystemPrompt;
     private readonly LlamaStyleEncoder _encoder = encoder;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly List<IDisposable> _loaders = loaders;
     private readonly IDisposable? _checkpoint = checkpoint;
 
     private readonly MergedLoraStack? _loraStack = loraStack;

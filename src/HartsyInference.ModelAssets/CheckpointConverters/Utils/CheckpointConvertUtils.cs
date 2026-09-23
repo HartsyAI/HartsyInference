@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Nvfp4;
 using HartsyInference.ModelAssets.Quant;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -1219,12 +1220,13 @@ public static unsafe class CheckpointConvertUtils
             Parallel.For(0, (int)rows, r =>
             {
                 byte* rowSrc = src + (long)r * packedCols;
-                byte* rowScales = scales + (long)r * scaleCols;
                 Half* rowDst = dst + (long)r * cols;
                 for (long j = 0; j < packedCols; j++)
                 {
-                    // 8 packed bytes per 16-element scale block → scale index = j/8.
-                    float scale = e4m3[rowScales[j >> 3]] * globalScale;
+                    // 8 packed bytes per 16-element scale block → block column = j/8. The scale for that
+                    // (row, blockColumn) is NOT at [row * scaleCols + blockColumn]: ComfyUI stores these in
+                    // NVIDIA's blocked layout, so the index goes through the one definition of the permutation.
+                    float scale = e4m3[scales[BlockScaleSwizzle.SwizzledIndex(r, j >> 3, scaleCols)]] * globalScale;
                     byte b = rowSrc[j];
                     int hi = b >> 4, lo = b & 0xF;
                     float hiVal = e2m1[hi & 7] * scale;
@@ -1264,12 +1266,12 @@ public static unsafe class CheckpointConvertUtils
             Parallel.For(0, (int)rows, r =>
             {
                 byte* rowSrc = src + (long)r * packedCols;
-                byte* rowScales = scales + (long)r * scaleCols;
                 float* rowDst = dst + (long)r * cols;
                 for (long j = 0; j < packedCols; j++)
                 {
                     // Fold ONLY the block scale into the value (not the global scale — that rides on Fp8ScaleFactor).
-                    float scale = e4m3[rowScales[j >> 3]];
+                    // Swizzled index for the same reason as DequantNvfp4ToF16: the stored scale matrix is blocked.
+                    float scale = e4m3[scales[BlockScaleSwizzle.SwizzledIndex(r, j >> 3, scaleCols)]];
                     byte b = rowSrc[j];
                     int hi = b >> 4, lo = b & 0xF;
                     float hiVal = e2m1[hi & 7] * scale;

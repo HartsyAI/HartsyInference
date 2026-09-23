@@ -143,6 +143,10 @@ public sealed class SafeTensorsLoader : IDisposable
         "BF16" => DType.BF16,
         "F8_E4M3" => DType.F8E4M3,
         "F8_E5M2" => DType.F8E5M2,
+        // No checkpoint we consume declares this: ComfyUI ships NVFP4 as U8 with companion scales, and the
+        // relabel to F4_E2M1 happens in Nvfp4Codec. Mapped anyway so a file that does declare it loads rather
+        // than dying here with "Unsupported safetensors dtype" — the packing is identical either way.
+        "F4_E2M1" => DType.F4E2M1,
         "I64" => DType.I64,
         "I32" => DType.I32,
         "I8" => DType.I8,

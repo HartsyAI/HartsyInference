@@ -1,5 +1,6 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
+using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 using Xunit.Abstractions;
@@ -116,49 +117,71 @@ public sealed unsafe class Nvfp4DequantTests
         Assert.False(result.ContainsKey("blk.weight_scale_2"));
     }
 
-    /// <summary>Full-tensor parity against a comfy_kitchen reference dump (fp4_x2_to_f32 + block scales,
-    /// hi_first default) of qwen_3_4b's layers.1 k_proj. Skips when the model or reference file is absent.
-    /// Regenerate the reference with the ComfyUI venv:
-    /// <c>fp4_x2_to_f32(w) * (weight_scale.f32 * weight_scale_2).repeat_interleave(16, dim=1)</c>.</summary>
+    /// <summary>The block-scale matrix ComfyUI stores is in NVIDIA's blocked layout, not row-major, so the
+    /// dequant has to invert the permutation to find the scale for a logical <c>(row, blockColumn)</c>.
+    ///
+    /// <para>Reading it row-major instead is silent: the stored and padded shapes are identical whenever rows are a
+    /// multiple of 128 and block columns a multiple of 4, so no shape check fires and the weights simply come out
+    /// wrong. Measured against a BF16 copy of the same real tensor (Qwen3-8B <c>layers.0.self_attn.k_proj</c>, the
+    /// Klein 9B encoder), row-major correlates 0.9186 where the swizzled read correlates 0.9954 — degraded output,
+    /// never an exception.</para>
+    ///
+    /// <para>Every scale here is distinct, so any index that lands on the wrong one changes the result. The final
+    /// assertion is the negative control: it pins that a row-major read would actually disagree, without which this
+    /// test would pass against the bug it exists to catch.</para></summary>
     [Fact]
-    public void DequantNvfp4_MatchesComfyKitchenReference()
+    public void DequantNvfp4_ReadsBlockScalesThroughTheSwizzle_NotRowMajor()
     {
-        string modelPath = Environment.GetEnvironmentVariable("NVFP4_PARITY_MODEL")
-            ?? "/home/hartsy/Desktop/HartsyInference/Models/text_encoders/qwen_3_4b.safetensors";
-        string refPath = Environment.GetEnvironmentVariable("NVFP4_PARITY_REF")
-            ?? "/tmp/claude-1000/-home-hartsy-Desktop-Swarm-SwarmUI-not-too-old/72fd855a-7c21-4419-a752-2731856b5954/scratchpad/nvfp4_ref.bin";
-        if (!File.Exists(modelPath) || !File.Exists(refPath))
+        // 128 rows x 8 block columns is exactly one swizzle tile: paddedRows == 128, paddedCols == 8, so the
+        // permutation is onto and every stored byte is addressed. 8 block columns = 128 values = 64 packed bytes.
+        const int Rows = 128, BlockCols = 8, Cols = BlockCols * 16, PackedCols = Cols / 2;
+
+        // A distinct E4M3 exponent per (row, blockColumn): byte 0x30..0x3F is 2^(e-7) for e = 6..7 and friends,
+        // all positive powers of two, so the expected product stays exactly representable in F16.
+        byte ScaleByte(int row, int bcol) => (byte)(0x30 + ((row + bcol * 5) % 8));
+        static float ScaleValue(byte b)
         {
-            _output.WriteLine($"SKIPPED: parity inputs not found ({modelPath}, {refPath})");
-            return;
+            int e = (b >> 3) & 0x0F, m = b & 0x07;
+            return e == 0 ? m / 8.0f * MathF.Pow(2, -6) : (1 + m / 8.0f) * MathF.Pow(2, e - 7);
         }
 
-        using SafeTensorsLoader loader = new();
-        loader.Load(modelPath);
-        Dictionary<string, Tensor> all = loader.GetAllTensors();
-        Tensor packed = all["model.layers.1.self_attn.k_proj.weight"];
-        Tensor blockScales = all["model.layers.1.self_attn.k_proj.weight_scale"];
-        Tensor scale2 = all["model.layers.1.self_attn.k_proj.weight_scale_2"];
-        float globalScale = ((float*)scale2.DataPointer)[0];
+        Tensor packed = new(new TensorShape(Rows, PackedCols), DType.U8);
+        byte* p = (byte*)packed.DataPointer;
+        for (long i = 0; i < packed.ElementCount; i++) p[i] = Pack(2, 4);   // e2m1 1.0 and 2.0
 
-        Tensor deq = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, globalScale);
-
-        byte[] refBytes = File.ReadAllBytes(refPath);
-        Assert.Equal(deq.ElementCount * 4, refBytes.Length);
-        fixed (byte* rb = refBytes)
+        Tensor blockScales = new(new TensorShape(Rows, BlockCols), DType.F8E4M3);
+        byte* s = (byte*)blockScales.DataPointer;
+        for (int r = 0; r < Rows; r++)
         {
-            float* reference = (float*)rb;
-            Half* actual = (Half*)deq.DataPointer;
-            double maxAbsDiff = 0;
-            for (long i = 0; i < deq.ElementCount; i++)
+            for (int c = 0; c < BlockCols; c++)
             {
-                double diff = Math.Abs((float)actual[i] - reference[i]);
-                if (diff > maxAbsDiff) maxAbsDiff = diff;
+                s[BlockScaleSwizzle.SwizzledIndex(r, c, BlockCols)] = ScaleByte(r, c);
             }
-            _output.WriteLine($"max |diff| vs comfy_kitchen over {deq.ElementCount} elements: {maxAbsDiff:E3}");
-            // Reference is exact f32 products; ours rounds once to F16. Products of e2m1 (≤6) and e4m3
-            // scales are small here (max |w| ≈ 0.23), so a couple of F16 ulps covers rounding.
-            Assert.True(maxAbsDiff < 1e-4, $"nvfp4 dequant diverges from comfy_kitchen (max diff {maxAbsDiff})");
         }
+
+        Tensor result = CheckpointConvertUtils.DequantNvfp4ToF16(packed, blockScales, globalScale: 1f);
+        Half* got = (Half*)result.DataPointer;
+
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < Cols; c++)
+            {
+                float expected = (c % 2 == 0 ? 1.0f : 2.0f) * ScaleValue(ScaleByte(r, c / 16));
+                Assert.Equal(expected, (float)got[(long)r * Cols + c]);
+            }
+        }
+
+        // Negative control: the pre-fix reading. If this agreed, the test above could not tell the two apart.
+        int disagreements = 0;
+        for (int r = 0; r < Rows; r++)
+        {
+            for (int c = 0; c < BlockCols; c++)
+            {
+                if (s[r * BlockCols + c] != ScaleByte(r, c)) disagreements++;
+            }
+        }
+        Assert.True(disagreements > 0,
+            "row-major and swizzled indexing agree on this fixture, so it cannot detect the layout bug");
+        _output.WriteLine($"row-major would read a different scale at {disagreements}/{Rows * BlockCols} positions");
     }
 }

@@ -2,7 +2,7 @@ using System.Runtime.CompilerServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Native FP4 (e2m1) GEMM via cublasLtMatmul, gated on Blackwell (SM 10.0+) GPUs. Mirrors <see cref="Fp8GemmExecutor"/>: a per-call descriptor + layout set is created and torn down inside <see cref="Run"/>; the handle and workspace are owned here and reused across calls. <para><b>Hardware requirement.</b> Tensor-core FP4 paths exist only on Blackwell (SM 10.0 for datacenter B100/B200, SM 12.0 for consumer RTX 50xx). On everything earlier the constructor reports <see cref="IsSupported"/> = false and callers must fall back to dequant→F16 GEMM (the same strategy the engine uses for MXFP4/NVFP4/NF4 today).</para> <para><b>Untested locally and not yet wired into dispatch.</b> The author's hardware is RTX 3060 (SM 8.6, Ampere) — exactly the situation <see cref="Fp8GemmExecutor"/> documents. This executor was written from the cuBLASLt 12.8 FP4 documentation but has never been exercised on Blackwell. It is therefore <b>not</b> referenced by <c>CudaBackend</c>'s GEMM dispatch yet; it compiles and is ready for validation. Two things must be confirmed on real hardware before wiring it in:</para> <list type="number"> <item>The block-scaling <b>scale-mode</b> descriptor attribute (VEC16-UE4M3 for NVFP4, VEC32-UE8M0 for MXFP4). The attribute IDs were intentionally not hard-coded here to avoid shipping a wrong/colliding enum value; set them once verified against the installed CUDA headers.</item> <item>The exact block-scale tensor layout cuBLASLt expects via the A/B scale pointers.</item> </list></summary>
+/// <summary>Native FP4 (e2m1) GEMM via cublasLtMatmul, gated on Blackwell (SM 10.0+) GPUs. Mirrors <see cref="Fp8GemmExecutor"/>: a per-call descriptor + layout set is created and torn down inside <see cref="Run"/>; the handle and workspace are owned here and reused across calls. <para><b>Hardware requirement.</b> Tensor-core FP4 paths exist only on Blackwell (SM 10.0 for datacenter B100/B200, SM 12.0 for consumer RTX 50xx). On everything earlier the constructor reports <see cref="IsSupported"/> = false and callers must fall back to dequant→F16 GEMM (the same strategy the engine uses for MXFP4/NVFP4/NF4 today).</para> <para><b>Implemented against the headers, never executed.</b> Tensor-core FP4 needs Blackwell and the hardware here is Ada/Ampere, so no run has ever reached this code. The scale-mode attribute IDs and the block-scale element types are taken from <c>cublasLt.h</c> / <c>library_types.h</c> (CUDA 13.6) rather than guessed, and the block-scale layout question is settled: cuBLASLt wants its own blocked layout, which is exactly what ComfyUI checkpoints already store, so a checkpoint's scale tensor is passed through unaltered. What remains unverified is whether a real Blackwell GEMM accepts this descriptor set and returns correct numbers — treat the first run on such a card as bring-up, not regression.</para></summary>
 public sealed unsafe class Fp4GemmExecutor : IDisposable
 {
     private nint _ltHandle;
@@ -36,9 +36,9 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
         _workspace = CudaMemory.AllocatePersistent(_workspaceBytes);
     }
 
-    /// <summary>Runs an FP4 Linear GEMM matching <see cref="CudaBackend"/>'s row-major convention: <c>output[M, N] = input[M, K] · weight^T[N, K]</c>. Weight and input are e2m1 (2 elements/byte); <paramref name="weightBlockScale"/> / <paramref name="inputBlockScale"/> are the device pointers to their microscaling block-scale tensors. <para><b>Gated.</b> Throws on non-Blackwell hardware — callers must check <see cref="IsSupported"/>. The block-scaling scale-mode attribute is not set here (see type remarks); until that is wired and validated this method must not be relied upon for correctness.</para></summary>
+    /// <summary>Runs an FP4 Linear GEMM matching <see cref="CudaBackend"/>'s row-major convention: <c>output[M, N] = input[M, K] · weight^T[N, K]</c>. Weight and input are e2m1 (2 elements/byte); <paramref name="weightBlockScale"/> / <paramref name="inputBlockScale"/> are the device pointers to their microscaling block-scale tensors. <para><b>Gated.</b> Throws on non-Blackwell hardware — callers must check <see cref="IsSupported"/>. <paramref name="format"/> selects the block-scaling mode, which must accompany the scale pointers: without it cuBLASLt reads each pointer as one per-tensor F32 scalar.</para></summary>
     public void Run(ulong weight, ulong weightBlockScale, ulong input, ulong inputBlockScale, ulong outPtr,
-        int m, int n, int k, nint stream)
+        int m, int n, int k, nint stream, Fp4BlockScaleFormat format = Fp4BlockScaleFormat.Nvfp4)
     {
         if (!IsSupported)
         {
@@ -70,6 +70,16 @@ public sealed unsafe class Fp4GemmExecutor : IDisposable
                 matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_A_SCALE_POINTER, &wScale, (nuint)sizeof(ulong)).ThrowOnCublasError();
             CublasLtApi.cublasLtMatmulDescSetAttribute(
                 matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_B_SCALE_POINTER, &iScale, (nuint)sizeof(ulong)).ThrowOnCublasError();
+
+            // The mode has to accompany the pointers: left unset, cuBLASLt reads each as one F32 scalar for the whole
+            // matrix (the fp8 meaning) instead of a per-block tensor, which misreads the scales rather than failing.
+            int scaleMode = format == Fp4BlockScaleFormat.Nvfp4
+                ? CublasLtApi.CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3
+                : CublasLtApi.CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+            CublasLtApi.cublasLtMatmulDescSetAttribute(
+                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_A_SCALE_MODE, &scaleMode, sizeof(int)).ThrowOnCublasError();
+            CublasLtApi.cublasLtMatmulDescSetAttribute(
+                matmulDesc, CublasLtApi.CUBLASLT_MATMUL_DESC_B_SCALE_MODE, &scaleMode, sizeof(int)).ThrowOnCublasError();
 
             // weight: [N, K] fp4 transposed → operand A. input: [M, K] fp4 → operand B. Output C: [M, N] f16.
             CublasLtApi.cublasLtMatrixLayoutCreate(out layoutA, CublasApi.CUDA_R_4F_E2M1, (ulong)k, (ulong)n, k).ThrowOnCublasError();

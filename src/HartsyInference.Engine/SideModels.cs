@@ -151,7 +151,7 @@ public static class SideModels
         Sha256 = "72450b19758172c5a7273cf7de729d1c17e7f434a104a00167624cba94f68f15"
     };
 
-    /// <summary>Qwen3-8B (fp4 mixed) for Flux.2 Klein 9B — Comfy's fp4-mixed quant; HartsyInference has no FP4 GEMM support yet so Flux2Loader refuses Klein 9B at runtime until FP4 lands or this points at an fp16/fp8 alternative.</summary>
+    /// <summary>Qwen3-8B (fp4 mixed) for Flux.2 Klein 9B. "fp4 mixed" is 173 nvfp4 groups plus 76 fp8 and 149 BF16 tensors — no FP4-typed tensor, so it needs no FP4 GEMM: the nvfp4 groups dequantize at load like every other ComfyUI nvfp4 checkpoint. The repo's fp8mixed sibling is larger on disk and still 85 nvfp4 groups, so it is not an improvement.</summary>
     public static readonly ModelAsset Qwen3_8B_Fp4Mixed = new ModelAsset
     {
         Repo = "Comfy-Org/flux2-klein-9B",

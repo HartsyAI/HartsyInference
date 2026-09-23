@@ -6,6 +6,31 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.159
+
+- **NVFP4 weights were being dequantized with the wrong block scales.** ComfyUI stores them in NVIDIA's blocked
+  layout — `BlockScaleSwizzle` says so and says it was verified byte-exact against `comfy.float.to_blocked`, and
+  `Nvfp4ResidentCodec` and `Nvfp4Linear` both honour it — but `DequantNvfp4ToF16`/`ToFp8` indexed the same bytes
+  row-major. That is the path every `LlamaStyleEncoder` text encoder takes. Nothing caught it: when rows are a
+  multiple of 128 the stored and padded shapes match, so the shape guard passes and the output is merely
+  degraded. Measured against a BF16 copy of the same real tensor (Qwen3-8B `layers.0.self_attn.k_proj`, 20k
+  sampled elements): row-major correlates **0.9186**, swizzled **0.9954**, and 0.9954 is nvfp4's own
+  quantization error. Five staged encoders are affected, Gemma-3-12B worst at 302 nvfp4 groups.
+- **The test that should have caught it asserted the bug.** Its reference was generated with
+  `repeat_interleave(16, dim=1)` — the row-major assumption — and it skipped unless two local files existed.
+  Replaced with a swizzle round-trip over distinct per-block scales, confirmed to fail against the old indexing.
+- **FP4 is finished, and still unexecuted.** `Fp4GemmExecutor` existed but was never wired, its docs listing two
+  things to confirm on hardware. The installed cuBLAS 13.6 headers answer both without a card: the scale-mode
+  attributes are `A/B_SCALE_MODE` 31/32 with `VEC16_UE4M3` for NVFP4 and `VEC32_UE8M0` for MXFP4, and the layout
+  question dissolves — cuBLASLt wants its own blocked layout, which is what checkpoints already store, so their
+  scale tensors pass through untouched. The mode must be set or cuBLASLt reads each pointer as one per-tensor
+  F32. `CUDA_R_8F_UE8M0` was bound to 34, past the end of `cudaDataType`; it is 30. Native FP4 GEMM has **never
+  run** — no Blackwell hardware here — so it stays SM-gated with its refusal tested.
+- **Flux.2 Klein 9B is no longer refused.** The check scanned `DType.Name` for `F4` and the encoder holds only
+  U8/F32/F8_E4M3/BF16, so it never fired; a file that did declare FP4 would have died earlier in `ParseDType`,
+  which now maps it. The encoder opens through `CheckpointSource`, which also frees what it allocates —
+  `LlamaStyleEncoder.Dispose` never released projection tensors, so the previous route leaked them.
+
 ## alpha.158
 
 - **`auto` considers Vulkan, so a non-NVIDIA GPU stops being treated as no GPU.** `BackendFactory.Resolve` chose
