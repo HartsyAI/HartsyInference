@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.166
+
+- **A kernel can ship a per-architecture PTX beside its baseline.** `CudaKernels.PtxPath` loads
+  `<kernel>.sm<CC>.ptx` for the device's exact compute capability when one exists and `<kernel>.ptx` otherwise;
+  every module path in the kernel set, the VSA probe and the tensor-core GEMM go through it, and the backend logs
+  which variants it picked. Exact match only — PTX built for a family-specific arch (`sm_120a`) does not JIT
+  anywhere else, so the baseline serves every other card unchanged. The first and only variant is
+  `block_quant.sm120.ptx`, whose e2m1 packing uses the hardware `cvt` on consumer Blackwell; the `Ptx\*.ptx`
+  packaging glob already carries it.
+- **Nine `build.sh` scripts are now one body and nine kernel lists.** `Kernels/build_common.sh` holds the
+  toolchain resolution, compilation, the PTX ISA 9.0 check and the install step; each domain script declares its
+  lists and calls `build_all`. `--arch sm_120a` builds a domain's `ARCH_VARIANTS` as suffixed variants;
+  `--install-tuned` keeps its meaning for `lm`. Rebuilding every domain through the shared body reproduces 52 of
+  55 shipped artifacts byte for byte; the three that differ — `lm_f32`, `mul_mat_vec_q6k_q8_1`, `h3_vsa` — are the
+  known nvcc-built kernels whose sources match their PTX's commit, and they are left as shipped.
+- `CudaKernels` takes the `CudaContext` it will run under instead of two shared-memory numbers; `TensorCoreGemm`
+  takes the compute capability rather than its major digit.
+
 ## alpha.165
 
 - **Native block-scaled GEMM is wired, behind `numerics.fp4Native`.** `Fp4GemmExecutor` is now
