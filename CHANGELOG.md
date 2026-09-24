@@ -6,6 +6,17 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.173
+
+- **Vulkan computes a 16-bit-weight GEMM in F16.** `ResolveGemmDtype` takes both operands and the output, the CUDA
+  backend's rule: an fp8 or GGUF operand computes in F16 (what it unpacks to), a BF16/F16 operand makes the product
+  F16 with the F32 side cast to it (the weight's cast cached, the activation's transient), F32 × F32 stays F32. Before,
+  the output's dtype decided alone, so an F32-output Linear over F16 weights ran the scalar F32 kernel with the weights
+  widened. An F16 product written to an F32 output goes through the cooperative-matrix kernels' F32 store, or the tiled
+  kernel's transient plus one cast where the shape admits no cooperative-matrix kernel; `Conv2D` computes and adds its
+  bias in the product's dtype and casts once. `numerics.vkF16Gemm=false` restores the output-dtype rule, and the
+  reference profile pins it off.
+
 ## alpha.172
 
 - **Every Vulkan GEMM goes through one dispatcher.** `DispatchGemm` takes a `GemmOperands` record (buffer handles,
