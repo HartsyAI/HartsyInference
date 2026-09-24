@@ -361,7 +361,7 @@ done
         printf '| %s | %s | %s | %s → %s | %s | %s → %s | %s | %s → %s | %s | %s | %s | %s |\n' \
             "$id" "$backend" "$verdict" "$bw" "$hw" "$dw" "$bs" "$hs" "$ds" "$bv" "$hv" "$dv" "$ssim" "$digests" "$notes"
     done <"$ROWS"
-    printf '\nStep ms is the median over warm seeds of the CLI'"'"'s per-step interval (per token for text). SSIM is the minimum over seed pairs; digests compare decoded pixels.\n'
+    printf '\nStep ms is the median over warm seeds of the CLI'"'"'s per-step interval (per token for text, as the CLI streams it — not the engine decode rate). SSIM is the minimum over seed pairs; digests compare decoded pixels.\n'
 } >"$REPORT_DIR/report.md"
 
 cat "$REPORT_DIR/report.md"
