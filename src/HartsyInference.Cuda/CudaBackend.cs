@@ -252,7 +252,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
 
     /// <inheritdoc/>
     public bool SupportsVideoSparseAttention => _context.Sm >= CudaArch.Ampere
-        && _ptxDir is not null && File.Exists(Path.Combine(_ptxDir, "h3_vsa.ptx"));
+        && _ptxDir is not null && File.Exists(CudaKernels.PtxPath(_ptxDir, "h3_vsa", _context.Sm));
 
     /// <inheritdoc/>
     public IVideoSparseAttentionSession CreateVideoSparseAttentionSession(VideoSparseAttentionPlan plan)
@@ -263,7 +263,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             throw new NotSupportedException(
                 "MiniMax-H3 VSA requires CUDA SM80+ and the packaged h3_vsa.ptx kernel.");
         }
-        return new CudaVideoSparseAttentionSession(this, plan, Path.Combine(_ptxDir!, "h3_vsa.ptx"));
+        return new CudaVideoSparseAttentionSession(this, plan, CudaKernels.PtxPath(_ptxDir!, "h3_vsa", _context.Sm));
     }
 
     /// <summary>The loaded kernel table (null if PTX kernels unavailable); internal for tests and optional-kernel launch glue.</summary>
@@ -969,7 +969,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 {
                     _tensorCoreGemm = new TensorCoreGemm(
                         _ptxDir ?? throw new InvalidOperationException("TensorCoreGemm requires a PTX directory; construct CudaBackend with ptxDir."),
-                        _context.ComputeCapabilityMajor);
+                        _context.Sm);
                     GC.SuppressFinalize(_tensorCoreGemm);
                 }
                 return _tensorCoreGemm;
@@ -1189,7 +1189,9 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
 
         if (ptxDir != null && Directory.Exists(ptxDir))
         {
-            _kernels = new CudaKernels(ptxDir, _context.MaxSharedMemoryPerBlock, _context.MaxSharedMemoryPerBlockOptin);
+            _kernels = new CudaKernels(ptxDir, _context);
+            if (_kernels.ArchVariantsLoaded.Count > 0)
+                HartsyInference.Core.Logging.Logs.Info($"[Cuda] SM {_context.ComputeCapabilityMajor}.{_context.ComputeCapabilityMinor} PTX variants: {string.Join(", ", _kernels.ArchVariantsLoaded)}");
             GC.SuppressFinalize(_kernels);
         }
 

@@ -23,7 +23,8 @@ the hand-PTX.
 
 ## Compiling
 
-Each domain folder has a `build.sh` that compiles its `.cu` and copies the `.ptx` into `../Ptx/`:
+Each domain folder has a `build.sh` holding only its kernel lists; the build itself is `build_common.sh`, which
+every domain script sources. It compiles the `.cu` and copies the `.ptx` into `../Ptx/`:
 
 ```bash
 # With nvcc on PATH (the normal case):
@@ -36,7 +37,10 @@ LD_LIBRARY_PATH=~/.local/lib/cuda13 src/HartsyInference.Cuda/Kernels/nvrtc_compi
 cp out.ptx src/HartsyInference.Cuda/Ptx/
 ```
 
-Target `sm_80` minimum (forward-JIT-compatible). Verify emitted PTX ISA compatibility with the deployment driver (see the dated toolchain notes in TROUBLESHOOTING). The ISA ceiling is driver-dependent. Validate a new/changed kernel
+Target `sm_80` minimum (forward-JIT-compatible). A kernel with arch-conditional device code is listed in its
+domain's `ARCH_VARIANTS`; `./build.sh --arch sm_120a` then also emits `<kernel>.sm120.ptx`, which
+`CudaKernels.PtxPath` loads only on that exact compute capability (family-specific PTX is not forward-compatible;
+the baseline serves every other card). The backend logs `PTX variants: …` when it picks one. Verify emitted PTX ISA compatibility with the deployment driver (see the dated toolchain notes in TROUBLESHOOTING). The ISA ceiling is driver-dependent. Validate a new/changed kernel
 against the CPU reference within tolerance before shipping (`docs/Agents/KERNEL.md`).
 
 ### The shipped PTX must reproduce from source — check it
@@ -59,7 +63,7 @@ md5sum -c /tmp/ptx.md5 | grep -v ': OK'      # anything listed is stale or compi
 `lib/cuda13/include` set lacks. The scripts auto-pick the first candidate that has it; override `CUDA_INC`
 explicitly for a different toolkit.
 
-Two kernels, `lm_f32` and `mul_mat_vec_q6k_q8_1`, are **nvcc-built and do not reproduce under nvrtc** — the
-sources are current, only register allocation differs. They are deliberately left as-is: both are LLM-decode
-hot paths whose throughput was tuned against llama.cpp, and swapping codegen without a decode benchmark
-would risk that silently. Regenerate them only alongside a perf run.
+Three kernels, `lm_f32`, `mul_mat_vec_q6k_q8_1` and `h3_vsa`, are **nvcc-built and do not reproduce under nvrtc** —
+the sources are current (same commit as the shipped PTX), only register allocation differs. They are deliberately left as-is (each domain's `TUNED` array keeps a routine rebuild from installing
+them): the two LLM-decode kernels were tuned against llama.cpp and `h3_vsa` is MiniMax-H3's sparse-attention hot
+path, and swapping codegen without a benchmark would risk that silently. Regenerate them only alongside a perf run.
