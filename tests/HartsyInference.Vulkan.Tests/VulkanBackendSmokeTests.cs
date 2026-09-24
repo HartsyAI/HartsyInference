@@ -3526,9 +3526,12 @@ public sealed class VulkanBackendSmokeTests
         "Q4_0" => new[] { 0 },
         "Q5_0" => new[] { 0 },
         "Q8_0" => new[] { 0 },
+        "Q2_K" => new[] { 80, 82 }, // d and dmin sit at the END of the super-block.
+        "Q3_K" => new[] { 108 },
         "Q4_K" => new[] { 0, 2 },
         "Q5_K" => new[] { 0, 2 },
         "Q6_K" => new[] { 208 },   // Q6_K's scale sits at the END of the super-block, not the start.
+        "IQ4_XS" => new[] { 0 },   // scales_h/scales_l after d are integer fields.
         _ => throw new ArgumentException(dtypeName),
     };
 
@@ -3536,9 +3539,12 @@ public sealed class VulkanBackendSmokeTests
     [InlineData("Q4_0")]
     [InlineData("Q5_0")]
     [InlineData("Q8_0")]
+    [InlineData("Q2_K")]
+    [InlineData("Q3_K")]
     [InlineData("Q4_K")]
     [InlineData("Q5_K")]
     [InlineData("Q6_K")]
+    [InlineData("IQ4_XS")]
     public unsafe void Backend_DequantizeToF32_MatchesGgufDequantizer(string dtypeName)
     {
         if (!VulkanAvailable()) return;
@@ -3549,9 +3555,12 @@ public sealed class VulkanBackendSmokeTests
             "Q4_0" => DType.Q4_0,
             "Q5_0" => DType.Q5_0,
             "Q8_0" => DType.Q8_0,
+            "Q2_K" => DType.Q2_K,
+            "Q3_K" => DType.Q3_K,
             "Q4_K" => DType.Q4_K,
             "Q5_K" => DType.Q5_K,
             "Q6_K" => DType.Q6_K,
+            "IQ4_XS" => DType.IQ4_XS,
             _ => throw new ArgumentException(dtypeName),
         };
         // 3 super-blocks/blocks worth of elements — exercises block-boundary handling without a huge buffer.

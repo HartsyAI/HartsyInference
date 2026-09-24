@@ -95,7 +95,8 @@ larger ones (Qwen2.5-VL-7B, Llama-3.2-Vision-11B) are now verified e2e on the 30
 
 Bidirectional post-norm BERT + CLS/mean pooling + L2-normalize; `bert`/`nomic-bert` registered as passthrough archs.
 E2E via GGUF-vocab `BertWordPieceTokenizer`: cos(cat,kitten) 0.91 > cos(cat,car) 0.78. Quant decode verified
-(Q8_0/Q5_K/Q4_K/Q3_K all >0.99 vs F32; codecs for all K-quants + legacy + IQ4_NL).
+(`GgufRealFileCorrelationTests`: every tensor of a lower-bit file against its Q8_0 copy — IQ4_XS 0.996, Q3_K 0.986,
+Q2_K 0.955 at worst; codecs for all K-quants + legacy + IQ4_NL/IQ4_XS).
 
 ## Non-transformer architectures
 

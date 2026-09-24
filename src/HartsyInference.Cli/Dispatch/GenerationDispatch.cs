@@ -149,6 +149,9 @@ public static class GenerationDispatch
 
         StringBuilder text = new StringBuilder();
         StopReason stop = StopReason.Stop;
+        // Decode rate over the streamed pieces after the first (the first carries prefill), for the regression gate.
+        System.Diagnostics.Stopwatch decodeClock = new();
+        int pieces = 0;
         if (quiet)
         {
             TextResult result = await engine.Text.GenerateAsync(spec, request, cancel).ConfigureAwait(false);
@@ -164,6 +167,7 @@ public static class GenerationDispatch
                     case TextChunkKind.Chunk when chunk.Text is { Length: > 0 } piece:
                         text.Append(piece);
                         Console.Write(piece);
+                        if (pieces++ == 0) decodeClock.Start();
                         break;
                     case TextChunkKind.Result when chunk.Text is not null:
                         text.Clear();
@@ -186,6 +190,8 @@ public static class GenerationDispatch
             Streamed = !quiet,
         };
         artifact.Meta["stopped_on"] = stop.ToString().ToLowerInvariant();
+        if (pieces > 1 && decodeClock.Elapsed.TotalSeconds > 0)
+            artifact.Meta["decode_tok_s"] = ((pieces - 1) / decodeClock.Elapsed.TotalSeconds).ToString("F1", CultureInfo.InvariantCulture);
         return artifact;
     }
 

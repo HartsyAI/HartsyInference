@@ -21,19 +21,13 @@
 #define SUPER_ELEMS 256
 #define SUPER_BYTES 110
 
-// Canonical ggml 6-bit signed scale unpack: four low nibbles per byte in scales[0..7], the two high bits
-// per entry spread across scales[8..11], biased by -32.
+// Canonical ggml 6-bit signed scale unpack (dequantize_row_q3_K): entry s takes its low nibble from scales[s]
+// (s < 8) or the high nibble of scales[s - 8], and its two high bits from scales[8 + s % 4] at bit 2·(s / 4).
 __device__ __forceinline__ int unpack_q3k_scale(const unsigned char* packed, int index)
 {
-    const int i = index >> 1;               // which of the 8 low bytes
-    const int lowByte = packed[i];
-    const int high = packed[8 + (i >> 1)];
-    if ((index & 1) == 0) {
-        const int hi = (i % 2 == 0) ? (high & 0x03) : ((high >> 4) & 0x03);
-        return ((lowByte & 0x0F) | (hi << 4)) - 32;
-    }
-    const int hi = (i % 2 == 0) ? ((high >> 2) & 0x03) : ((high >> 6) & 0x03);
-    return ((lowByte >> 4) | (hi << 4)) - 32;
+    const int low = index < 8 ? (packed[index] & 0x0F) : (packed[index - 8] >> 4);
+    const int high = (packed[8 + (index & 3)] >> (2 * (index >> 2))) & 0x03;
+    return (low | (high << 4)) - 32;
 }
 
 extern "C" __global__ void dequant_q3_k_to_f16(

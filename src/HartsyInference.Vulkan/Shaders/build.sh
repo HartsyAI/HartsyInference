@@ -131,9 +131,12 @@ SINGLE_KERNELS=(
     dequant_q4_0
     dequant_q5_0
     dequant_q8_0
+    dequant_q2_k
+    dequant_q3_k
     dequant_q4_k
     dequant_q5_k
     dequant_q6_k
+    dequant_iq4_xs
     embed_gather_decode
     argmax_lastdim
     history_append
