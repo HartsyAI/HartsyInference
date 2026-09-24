@@ -6,6 +6,30 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.169
+
+- **Q3_K weights were decoded wrong everywhere.** The host codec unpacked the sixteen 6-bit scales in Q4_K's
+  interleaved order, and the CUDA dequant kernel had been written to match it; against the same tensors in a Q8_0
+  file the decoded Q3_K weights correlated at 0.21. All four decoders (host, CUDA dequant, the new CUDA GEMV, the
+  new Vulkan shader) now read ggml's `dequantize_row_q3_K` layout — low nibbles of bytes 0..7 are entries 0..7, high
+  nibbles entries 8..15, byte 8 + s % 4 carries entry s's high bits — and correlate at 0.99. Any Q3_K_M GGUF, and
+  the Q3_K tensors inside every Q2_K file, generated garbage before this.
+- **Real weights settle a codec, not synthetic blocks.** `GgufRealFileCorrelationTests` dequantizes every tensor a
+  lower-bit Llama-3.2-1B file stores in the format under test and correlates it with the Q8_0 copy; that is what
+  caught the Q3_K bug that the block-vs-block GPU tests could not (both sides shared the mistake). It runs when the
+  files are staged.
+- **IQ4_XS loads and stays packed on both GPU backends, IQ4_NL on CUDA.** `Codec_IQ4_XS` (host), `dequant_iq4_xs_to_f16`
+  and `dequant_iq4_nl_to_f16` (CUDA) and `dequant_iq4_xs` (Vulkan). The CUDA backend's GGUF dequant is one table —
+  a dtype maps to its kernel and launch width, `SupportsResidentQuant` reads the keys — so a new format is a kernel
+  and one line, not an if-chain entry in three places.
+- **Q2_K and Q3_K decode with fused GEMVs on both tiers.** `mul_mat_vec_q2k_q8_1` / `q3k_q8_1` are the int8
+  dp4a tier (Q2_K's per-run min rides on `dp4a(0x01010101, xq)`, Q3_K's signed 3-bit value on `__vsubss4`, each
+  with the k-split entry the other K-quants have) and `mul_mat_vec_q2k_f32` / `q3k_f32` the float tier; both
+  dispatch at M ≤ 8 like Q4_K, where these formats used to fall to the dequantize-then-cuBLAS route. Vulkan
+  gained `dequant_q2_k` and `dequant_q3_k`, so a Q2_K or Q3_K weight is resident there too.
+- `tests/regression-cases.sh` carries the three new-format text cases under the `quant` tag; they run head-only
+  (`--no-base`) because no prior build could load them.
+
 ## alpha.168
 
 - **`tests/blackwell-run.sh` is the rented-GPU session, scripted.** Preflight (driver ≥ 580 — every nvcc-built PTX

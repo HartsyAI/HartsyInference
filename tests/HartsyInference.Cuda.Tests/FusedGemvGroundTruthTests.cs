@@ -7,7 +7,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Ground-truth correctness for the new Q4_0/Q5_K fused GEMV kernels (decode path,
+/// <summary>Ground-truth correctness for the Q4_0/Q5_K/Q2_K/Q3_K fused GEMV kernels (decode path,
 /// M small): quantizes a random F32 weight, dequantizes it back on the CPU (canonical codec,
 /// independent of the GPU kernel under test), computes the reference matmul in plain C#, and
 /// compares against <see cref="CudaBackend.Linear"/> — which for these dtypes at M&lt;=8 now
@@ -23,6 +23,8 @@ public sealed class FusedGemvGroundTruthTests
     [Theory]
     [InlineData("Q4_0", 128, 96)]
     [InlineData("Q5_K", 512, 32)]
+    [InlineData("Q2_K", 256, 40)]
+    [InlineData("Q3_K", 512, 48)]
     public unsafe void FusedGemv_MatchesCpuDequantReference(string dtypeName, int inDim, int outDim)
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -30,6 +32,8 @@ public sealed class FusedGemvGroundTruthTests
         {
             "Q4_0" => DType.Q4_0,
             "Q5_K" => DType.Q5_K,
+            "Q2_K" => DType.Q2_K,
+            "Q3_K" => DType.Q3_K,
             _ => throw new ArgumentOutOfRangeException(nameof(dtypeName)),
         };
 
@@ -53,9 +57,17 @@ public sealed class FusedGemvGroundTruthTests
             for (long i = 0; i < (long)batch * inDim; i++) ip[i] = (float)((rng.NextDouble() * 2.0 - 1.0) * 0.5);
             if (quantDtype == DType.Q4_0)
             {
-                // Q4_0's codec is read-only (no F32->Q4_0 quantize path — see GgufCodecBase.QuantizeFromF32).
-                // Synthesize raw quantized bytes directly instead: random per-block scale + nibbles.
-                FillQ4_0Random(weightQuant, blocks: (int)((long)outDim * inDim / 32), rng);
+                // Decode-only codecs (no F32->quant path — see GgufCodecBase.QuantizeFromF32): synthesize the raw
+                // block bytes instead, random quants under small positive half scales at the block's scale offsets.
+                FillRandomBlocks(weightQuant, blockBytes: 18, blocks: (int)((long)outDim * inDim / 32), halfOffsets: [0], rng);
+            }
+            else if (quantDtype == DType.Q2_K)
+            {
+                FillRandomBlocks(weightQuant, blockBytes: 84, blocks: (int)((long)outDim * inDim / 256), halfOffsets: [80, 82], rng);
+            }
+            else if (quantDtype == DType.Q3_K)
+            {
+                FillRandomBlocks(weightQuant, blockBytes: 110, blocks: (int)((long)outDim * inDim / 256), halfOffsets: [108], rng);
             }
             else
             {
@@ -223,15 +235,19 @@ public sealed class FusedGemvGroundTruthTests
         }
     }
 
-    private static unsafe void FillQ4_0Random(Tensor t, int blocks, Random rng)
+    private static unsafe void FillRandomBlocks(Tensor t, int blockBytes, int blocks, int[] halfOffsets, Random rng)
     {
         byte* p = (byte*)t.DataPointer;
         for (int b = 0; b < blocks; b++)
         {
-            byte* block = p + b * 18;
-            *(Half*)block = (Half)((rng.NextDouble() * 0.4) + 0.05);
-            byte* qs = block + 2;
-            for (int i = 0; i < 16; i++) qs[i] = (byte)rng.Next(256);
+            byte* block = p + (long)b * blockBytes;
+            for (int i = 0; i < blockBytes; i++) block[i] = (byte)rng.Next(256);
+            foreach (int off in halfOffsets)
+            {
+                Half h = (Half)((rng.NextDouble() * 0.4) + 0.05);
+                block[off] = (byte)BitConverter.HalfToUInt16Bits(h);
+                block[off + 1] = (byte)(BitConverter.HalfToUInt16Bits(h) >> 8);
+            }
         }
     }
 }

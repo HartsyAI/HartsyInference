@@ -194,6 +194,11 @@ run_one() {
     steps="$(grep -aoE '\[[0-9]+/[0-9]+\] [0-9]+ ms' "$dir/run.log" | awk -F'[][/ ]+' '$2 + 0 >= 2 { print $4 }' | sort -n)"
     step_n="$(printf '%s\n' "$steps" | grep -c .)"
     step_med="$(printf '%s\n' "$steps" | awk 'NF { a[++n] = $1 } END { print n ? a[int((n + 1) / 2)] : "-" }')"
+    # Text prints no ticks; its decode rate (decode_tok_s, streamed pieces after the first) becomes ms per token.
+    if [ "$step_n" = 0 ]; then
+        local rate; rate="$(grep -aoE 'decode_tok_s[[:space:]]+[0-9.]+' "$dir/run.log" | tail -1 | awk '{ print $2 }')"
+        if [ -n "$rate" ]; then step_n=1; step_med="$(awk -v r="$rate" 'BEGIN { printf "%.2f", 1000 / r }')"; fi
+    fi
     local status="ok" digest="-" artifact=""
     artifact="$(find "$dir/out" -type f \( -name '*.png' -o -name '*.txt' \) | sort | head -1)"
     if [ "$rc" -ne 0 ] || [ -z "$artifact" ]; then
@@ -356,7 +361,7 @@ done
         printf '| %s | %s | %s | %s → %s | %s | %s → %s | %s | %s → %s | %s | %s | %s | %s |\n' \
             "$id" "$backend" "$verdict" "$bw" "$hw" "$dw" "$bs" "$hs" "$ds" "$bv" "$hv" "$dv" "$ssim" "$digests" "$notes"
     done <"$ROWS"
-    printf '\nStep ms is the median over warm seeds of the CLI'"'"'s per-step interval (per token for text). SSIM is the minimum over seed pairs; digests compare decoded pixels.\n'
+    printf '\nStep ms is the median over warm seeds of the CLI'"'"'s per-step interval (per token for text, as the CLI streams it — not the engine decode rate). SSIM is the minimum over seed pairs; digests compare decoded pixels.\n'
 } >"$REPORT_DIR/report.md"
 
 cat "$REPORT_DIR/report.md"

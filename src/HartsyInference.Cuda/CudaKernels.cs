@@ -419,22 +419,6 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _castF16ToF8E4M3;
 
     // ── GGUF Dequant Modules + Handles ───────────────────────────────────
-    private readonly CudaModule _dequantQ8_0Module;
-    private readonly nint _dequantQ8_0ToF16;
-    private readonly CudaModule _dequantQ4_0Module;
-    private readonly nint _dequantQ4_0ToF16;
-    private readonly CudaModule _dequantQ5_0Module;
-    private readonly nint _dequantQ5_0ToF16;
-    private readonly CudaModule _dequantQ2_KModule;
-    private readonly nint _dequantQ2_KToF16;
-    private readonly CudaModule _dequantQ3_KModule;
-    private readonly nint _dequantQ3_KToF16;
-    private readonly CudaModule _dequantQ4_KModule;
-    private readonly nint _dequantQ4_KToF16;
-    private readonly CudaModule _dequantQ5_KModule;
-    private readonly nint _dequantQ5_KToF16;
-    private readonly CudaModule _dequantQ6_KModule;
-    private readonly nint _dequantQ6_KToF16;
 
     // ── Fused quantized GEMV (decode M=1) ────────────────────────────────
     private readonly CudaModule _mulMatVecQ4KModule;
@@ -463,6 +447,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ4_0F32;
     private readonly CudaModule _mulMatVecQ5KModule;
     private readonly nint _mulMatVecQ5KF32;
+    private readonly CudaModule _mulMatVecQ2KModule;
+    private readonly nint _mulMatVecQ2KF32;
+    private readonly CudaModule _mulMatVecQ3KModule;
+    private readonly nint _mulMatVecQ3KF32;
     private readonly CudaModule _quantActQ8_1Module;
     private readonly nint _quantActQ8_1F32;
     private readonly CudaModule _mulMatVecQ4KQ8_1Module;
@@ -474,6 +462,12 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _mulMatVecQ6KQ8_1Module;
     private readonly nint _mulMatVecQ6KQ8_1;
     private readonly nint _mulMatVecQ6KQ8_1Ksplit;
+    private readonly CudaModule _mulMatVecQ2KQ8_1Module;
+    private readonly nint _mulMatVecQ2KQ8_1;
+    private readonly nint _mulMatVecQ2KQ8_1Ksplit;
+    private readonly CudaModule _mulMatVecQ3KQ8_1Module;
+    private readonly nint _mulMatVecQ3KQ8_1;
+    private readonly nint _mulMatVecQ3KQ8_1Ksplit;
     private readonly CudaModule _mulMatVecQ4_0Q8_1Module;
     private readonly nint _mulMatVecQ4_0Q8_1;
     private readonly CudaModule _mulMatVecQ5_0Q8_1Module;
@@ -483,6 +477,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ5KQ8_1;
 
     private const uint BlockSize = 256;
+    /// <summary>Every GGUF dequant kernel by its dtype: the function, and the threads one launch block runs (one block per quant block). Adding a type is one <see cref="BindGgufDequant"/> line.</summary>
+    private readonly Dictionary<DType, (nint Function, int ThreadsPerBlock)> _ggufDequant = new();
     private readonly List<CudaModule> _ownedModules = [];
     private int _disposed;
 
@@ -1074,22 +1070,16 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuFuncSetAttribute(_flashV2Tf32, 8, 96 * 1024);
 
         // ── GGUF Dequant ─────────────────────────────────────────────────
-        _dequantQ8_0Module = LoadOwnedModule(Ptx("dequant_q8_0_to_f16"));
-        _dequantQ8_0ToF16 = _dequantQ8_0Module.GetFunction("dequant_q8_0_to_f16");
-        _dequantQ4_0Module = LoadOwnedModule(Ptx("dequant_q4_0_to_f16"));
-        _dequantQ4_0ToF16 = _dequantQ4_0Module.GetFunction("dequant_q4_0_to_f16");
-        _dequantQ5_0Module = LoadOwnedModule(Ptx("dequant_q5_0_to_f16"));
-        _dequantQ5_0ToF16 = _dequantQ5_0Module.GetFunction("dequant_q5_0_to_f16");
-        _dequantQ2_KModule = LoadOwnedModule(Ptx("dequant_q2_k_to_f16"));
-        _dequantQ2_KToF16 = _dequantQ2_KModule.GetFunction("dequant_q2_k_to_f16");
-        _dequantQ3_KModule = LoadOwnedModule(Ptx("dequant_q3_k_to_f16"));
-        _dequantQ3_KToF16 = _dequantQ3_KModule.GetFunction("dequant_q3_k_to_f16");
-        _dequantQ4_KModule = LoadOwnedModule(Ptx("dequant_q4_k_to_f16"));
-        _dequantQ4_KToF16 = _dequantQ4_KModule.GetFunction("dequant_q4_k_to_f16");
-        _dequantQ5_KModule = LoadOwnedModule(Ptx("dequant_q5_k_to_f16"));
-        _dequantQ5_KToF16 = _dequantQ5_KModule.GetFunction("dequant_q5_k_to_f16");
-        _dequantQ6_KModule = LoadOwnedModule(Ptx("dequant_q6_k_to_f16"));
-        _dequantQ6_KToF16 = _dequantQ6_KModule.GetFunction("dequant_q6_k_to_f16");
+        BindGgufDequant(DType.Q8_0, "dequant_q8_0_to_f16", threadsPerBlock: 32);
+        BindGgufDequant(DType.Q4_0, "dequant_q4_0_to_f16", threadsPerBlock: 32);
+        BindGgufDequant(DType.Q5_0, "dequant_q5_0_to_f16", threadsPerBlock: 32);
+        BindGgufDequant(DType.Q2_K, "dequant_q2_k_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.Q3_K, "dequant_q3_k_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.Q4_K, "dequant_q4_k_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.Q5_K, "dequant_q5_k_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.Q6_K, "dequant_q6_k_to_f16", threadsPerBlock: 64);
+        BindGgufDequant(DType.IQ4_XS, "dequant_iq4_xs_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ4_NL, "dequant_iq4_nl_to_f16", threadsPerBlock: 32);
 
         _mulMatVecQ4KModule = LoadOwnedModule(Ptx("mul_mat_vec_q4k_f32"));
         _mulMatVecQ4KF32 = _mulMatVecQ4KModule.GetFunction("mul_mat_vec_q4k_f32");
@@ -1131,6 +1121,10 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ4_0F32 = _mulMatVecQ4_0Module.GetFunction("mul_mat_vec_q4_0_f32");
         _mulMatVecQ5KModule = LoadOwnedModule(Ptx("mul_mat_vec_q5k_f32"));
         _mulMatVecQ5KF32 = _mulMatVecQ5KModule.GetFunction("mul_mat_vec_q5k_f32");
+        _mulMatVecQ2KModule = LoadOwnedModule(Ptx("mul_mat_vec_q2k_f32"));
+        _mulMatVecQ2KF32 = _mulMatVecQ2KModule.GetFunction("mul_mat_vec_q2k_f32");
+        _mulMatVecQ3KModule = LoadOwnedModule(Ptx("mul_mat_vec_q3k_f32"));
+        _mulMatVecQ3KF32 = _mulMatVecQ3KModule.GetFunction("mul_mat_vec_q3k_f32");
         _quantActQ8_1Module = LoadOwnedModule(Ptx("quantize_activation_q8_1_f32"));
         _quantActQ8_1F32 = _quantActQ8_1Module.GetFunction("quantize_activation_q8_1_f32");
         _mulMatVecQ4KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q4k_q8_1"));
@@ -1142,6 +1136,12 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ6KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q6k_q8_1"));
         _mulMatVecQ6KQ8_1 = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1");
         _mulMatVecQ6KQ8_1Ksplit = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1_ksplit");
+        _mulMatVecQ2KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q2k_q8_1"));
+        _mulMatVecQ2KQ8_1 = _mulMatVecQ2KQ8_1Module.GetFunction("mul_mat_vec_q2k_q8_1");
+        _mulMatVecQ2KQ8_1Ksplit = _mulMatVecQ2KQ8_1Module.GetFunction("mul_mat_vec_q2k_q8_1_ksplit");
+        _mulMatVecQ3KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q3k_q8_1"));
+        _mulMatVecQ3KQ8_1 = _mulMatVecQ3KQ8_1Module.GetFunction("mul_mat_vec_q3k_q8_1");
+        _mulMatVecQ3KQ8_1Ksplit = _mulMatVecQ3KQ8_1Module.GetFunction("mul_mat_vec_q3k_q8_1_ksplit");
         _mulMatVecQ4_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q4_0_q8_1"));
         _mulMatVecQ4_0Q8_1 = _mulMatVecQ4_0Q8_1Module.GetFunction("mul_mat_vec_q4_0_q8_1");
         _mulMatVecQ5_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q5_0_q8_1"));
@@ -4650,82 +4650,24 @@ public sealed class CudaKernels : IDisposable
 
     // ── GGUF Dequant Launches ────────────────────────────────────────────
 
-    /// <summary>Launches Q8_0 → F16 dequant, one CUDA block (32 threads) per 32-element Q8_0 quant block.</summary>
-    /// <param name="elementCount">Total element count; must be a multiple of 32.</param>
-    public unsafe void LaunchDequantQ8_0ToF16(ulong output, ulong input, int elementCount, nint stream)
+    private void BindGgufDequant(DType dtype, string kernel, int threadsPerBlock)
     {
-        if (elementCount % 32 != 0)
-            throw new ArgumentException($"Q8_0 element count must be a multiple of 32, got {elementCount}.");
-        int superBlockCount = elementCount / 32;
-        LaunchDequantImpl(_dequantQ8_0ToF16, output, input, superBlockCount, threadsPerBlock: 32, stream);
+        CudaModule module = LoadOwnedModule(Ptx(kernel));
+        _ggufDequant[dtype] = (module.GetFunction(kernel), threadsPerBlock);
     }
 
-    /// <summary>Launches Q4_0 → F16 dequant. Legacy 32-element block (18 bytes: fp16 scale + 16 nibble bytes).</summary>
-    public unsafe void LaunchDequantQ4_0ToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 32 != 0)
-            throw new ArgumentException($"Q4_0 element count must be a multiple of 32, got {elementCount}.");
-        int blockCount = elementCount / 32;
-        LaunchDequantImpl(_dequantQ4_0ToF16, output, input, blockCount, threadsPerBlock: 32, stream);
-    }
+    /// <summary>The GGUF dtypes with a resident dequant kernel here — what <c>SupportsResidentQuant</c> answers from.</summary>
+    public IReadOnlyCollection<DType> GgufDequantTypes => _ggufDequant.Keys;
 
-    /// <summary>Launches Q5_0 → F16 dequant. Legacy 32-element block (22 bytes: fp16 scale + uint32 high-bits + 16 nibble bytes).</summary>
-    public unsafe void LaunchDequantQ5_0ToF16(ulong output, ulong input, int elementCount, nint stream)
+    /// <summary>Launches the GGUF → F16 dequant for <paramref name="dtype"/>; one block per quant block, so <paramref name="elementCount"/> must be a multiple of the dtype's block size.</summary>
+    public unsafe void LaunchGgufDequantToF16(DType dtype, ulong output, ulong input, int elementCount, nint stream)
     {
-        if (elementCount % 32 != 0)
-            throw new ArgumentException($"Q5_0 element count must be a multiple of 32, got {elementCount}.");
-        int blockCount = elementCount / 32;
-        LaunchDequantImpl(_dequantQ5_0ToF16, output, input, blockCount, threadsPerBlock: 32, stream);
-    }
-
-    /// <summary>Launches Q2_K → F16 dequant. Element count must be a multiple of 256 (super-block size).</summary>
-    /// <remarks>Q2_K is the smallest K-quant: a 6.7 GB MiniMax-H3 build against 21 GB at Q8_0. Without this the
-    /// loader has to widen it on the host, which at 2.6 bits per weight means roughly a sixfold expansion — enough to
-    /// put a model that would have fit a 12 GB card out of reach of a 24 GB one.</remarks>
-    public unsafe void LaunchDequantQ2_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q2_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        LaunchDequantImpl(_dequantQ2_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
-    }
-
-    /// <summary>Launches Q3_K → F16 dequant. Element count must be a multiple of 256.</summary>
-    public unsafe void LaunchDequantQ3_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q3_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        LaunchDequantImpl(_dequantQ3_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
-    }
-
-    /// <summary>Launches Q4_K → F16 dequant. Element count must be a multiple of 256 (super-block size).</summary>
-    public unsafe void LaunchDequantQ4_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q4_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        LaunchDequantImpl(_dequantQ4_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
-    }
-
-    /// <summary>Launches Q5_K → F16 dequant. Element count must be a multiple of 256.</summary>
-    public unsafe void LaunchDequantQ5_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q5_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        LaunchDequantImpl(_dequantQ5_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
-    }
-
-    /// <summary>Launches Q6_K → F16 dequant. Element count must be a multiple of 256.</summary>
-    public unsafe void LaunchDequantQ6_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q6_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        // 64 threads per CUDA block, each emitting 4 elements at strides {0, +32, +64, +96}
-        // (2 halves × 32 l-values = 64 threads cover all 256 elements of the super-block).
-        LaunchDequantImpl(_dequantQ6_KToF16, output, input, superBlockCount, threadsPerBlock: 64, stream);
+        if (!_ggufDequant.TryGetValue(dtype, out (nint Function, int ThreadsPerBlock) kernel))
+            throw new NotSupportedException($"GPU dequant for {dtype} is not implemented. Supported: {string.Join(", ", _ggufDequant.Keys)}.");
+        int blockElems = dtype.BlockElementCount;
+        if (elementCount % blockElems != 0)
+            throw new ArgumentException($"{dtype} element count must be a multiple of {blockElems}, got {elementCount}.");
+        LaunchDequantImpl(kernel.Function, output, input, elementCount / blockElems, kernel.ThreadsPerBlock, stream);
     }
 
     /// <summary>Fused Q4_K × F32 matrix-vector product for decode (M small). Computes output[M,N] = input[M,K] × dequant(weight[N,K])^T (+ bias), reading the Q4_K bytes once and dequantizing inline — no F16 weight materialization. K must be a multiple of 256 (guaranteed for Q4_K). One CUDA block (256 threads) per output element; grid = (N, M).</summary>
@@ -4775,6 +4717,14 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Fused Q5_K × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV, extended with Q5_K's extra high-bit plane.</summary>
     public void LaunchMulMatVecQ5KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecImpl(_mulMatVecQ5KF32, output, input, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q2_K × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV.</summary>
+    public void LaunchMulMatVecQ2KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ2KF32, output, input, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q3_K × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV.</summary>
+    public void LaunchMulMatVecQ3KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ3KF32, output, input, weight, bias, N, K, M, stream);
 
     /// <summary>Quantizes an F32 activation [M,K] to int8 (Q8_1): xq int8 + per-32-block scale xd + int-sum xs. One warp per 32-block.</summary>
     public unsafe void LaunchQuantizeActivationQ8_1(ulong xq, ulong xd, ulong xs, ulong x, int M, int K, nint stream)
@@ -4839,6 +4789,14 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Fused Q6_K × Q8_1 dp4a matrix-vector product for decode (M small). Q6_K scales are signed (symmetric), so only the int8 activation and per-block scale are consumed (no int-sum term).</summary>
     public unsafe void LaunchMulMatVecQ6KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecQ8_1Impl(_mulMatVecQ6KQ8_1, _mulMatVecQ6KQ8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q2_K × Q8_1 int8 GEMV for decode; the k-split entry takes over for long-K/small-N shapes like the other K-quants.</summary>
+    public unsafe void LaunchMulMatVecQ2KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ2KQ8_1, _mulMatVecQ2KQ8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q3_K × Q8_1 int8 GEMV for decode; the k-split entry takes over for long-K/small-N shapes like the other K-quants.</summary>
+    public unsafe void LaunchMulMatVecQ3KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ3KQ8_1, _mulMatVecQ3KQ8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
 
     /// <summary>Fused Q4_0 × Q8_1 dp4a matrix-vector product for decode (M small). The fixed −8 offset is folded into the packed weights via <c>__vsub4</c>, so no int-sum term is consumed.</summary>
     public unsafe void LaunchMulMatVecQ4_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)

@@ -421,6 +421,8 @@ public static class TestPaths
         /// <summary>Llama-3.2-1B-Instruct, Q8_0 GGUF (~1.3 GB). Small enough that a 2-GPU layer split is a pure
         /// placement change — the exact-token-parity oracle vs the same model unsharded.</summary>
         public static string Llama32_1BQ8 => Resolve("LLAMA32_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama32-1b", "llama-3.2-1b-instruct-q8_0.gguf"));
+        /// <summary>The same Llama-3.2-1B-Instruct in another llama.cpp quantization (<c>IQ4_XS</c>, <c>Q3_K_M</c>, <c>Q2_K</c>), staged beside the Q8_0 as its full-precision reference.</summary>
+        public static string Llama32_1B(string quant) => Resolve($"LLAMA32_1B_{quant}_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama32-1b", $"Llama-3.2-1B-Instruct-{quant}.gguf"));
 
         /// <summary>Qwen3-4B, Q4_K_M GGUF. A different family AND a different quantization from the Llama above,
         /// so swapping between the two crosses the dequantize path as well as the device residency cache.</summary>
