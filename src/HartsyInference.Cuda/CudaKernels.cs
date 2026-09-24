@@ -1080,6 +1080,13 @@ public sealed class CudaKernels : IDisposable
         BindGgufDequant(DType.Q6_K, "dequant_q6_k_to_f16", threadsPerBlock: 64);
         BindGgufDequant(DType.IQ4_XS, "dequant_iq4_xs_to_f16", threadsPerBlock: 256);
         BindGgufDequant(DType.IQ4_NL, "dequant_iq4_nl_to_f16", threadsPerBlock: 32);
+        BindGgufDequant(DType.IQ2_XXS, "dequant_iq2_xxs_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ2_XS, "dequant_iq2_xs_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ2_S, "dequant_iq2_s_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ3_XXS, "dequant_iq3_xxs_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ3_S, "dequant_iq3_s_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ1_S, "dequant_iq1_s_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ1_M, "dequant_iq1_m_to_f16", threadsPerBlock: 256);
 
         _mulMatVecQ4KModule = LoadOwnedModule(Ptx("mul_mat_vec_q4k_f32"));
         _mulMatVecQ4KF32 = _mulMatVecQ4KModule.GetFunction("mul_mat_vec_q4k_f32");

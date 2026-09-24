@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.170
+
+- **The rest of llama.cpp's i-quant family loads and stays packed on CUDA.** IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS,
+  IQ3_S, IQ1_S and IQ1_M each gain a host codec and a CUDA dequant kernel; `IqTables` / `iq_tables.cuh` carry ggml's
+  codebook grids, sign patterns and mask verbatim (a kernel includes only the tables it indexes). The three formats
+  with a small published file — IQ3_S (Llama-3.2-1B IQ3_M, Qwen2.5-1.5B IQ3_XS), IQ3_XXS (Qwen2.5-1.5B IQ3_XS) and
+  IQ2_S (Qwen2.5-1.5B IQ2_M) — are settled against their Q8_0 copies in `GgufRealFileCorrelationTests`; IQ2_XS,
+  IQ2_XXS, IQ1_S and IQ1_M rest on hand-built known-block tests, one field flipped at a time, until a small file
+  exists. Below decode they take the same dequantize-then-GEMM route as IQ4_XS; none has a fused GEMV yet.
+
 ## alpha.169
 
 - **Q3_K weights were decoded wrong everywhere.** The host codec unpacked the sixteen 6-bit scales in Q4_K's

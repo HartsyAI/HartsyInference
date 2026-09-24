@@ -423,6 +423,8 @@ public static class TestPaths
         public static string Llama32_1BQ8 => Resolve("LLAMA32_1B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama32-1b", "llama-3.2-1b-instruct-q8_0.gguf"));
         /// <summary>The same Llama-3.2-1B-Instruct in another llama.cpp quantization (<c>IQ4_XS</c>, <c>Q3_K_M</c>, <c>Q2_K</c>), staged beside the Q8_0 as its full-precision reference.</summary>
         public static string Llama32_1B(string quant) => Resolve($"LLAMA32_1B_{quant}_GGUF_PATH", Path.Combine(ModelsDir, "llm", "llama32-1b", $"Llama-3.2-1B-Instruct-{quant}.gguf"));
+        /// <summary>Qwen2.5-1.5B-Instruct in a llama.cpp quantization (<c>Q8_0</c> is the reference; <c>IQ3_XS</c> carries IQ3_XXS + IQ3_S tensors, <c>IQ2_M</c> IQ2_S + IQ3_S).</summary>
+        public static string Qwen25_15B(string quant) => Resolve($"QWEN25_15B_{quant}_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen25-1.5b", $"Qwen2.5-1.5B-Instruct-{quant}.gguf"));
 
         /// <summary>Qwen3-4B, Q4_K_M GGUF. A different family AND a different quantization from the Llama above,
         /// so swapping between the two crosses the dequantize path as well as the device residency cache.</summary>

@@ -153,6 +153,52 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    /// <summary>The i-quant family: random block bytes with the FP16 super-scale pinned to [0.25, 2) (IQ1_M spreads it over its scale words' top nibbles), decoded by the kernel and the host codec.</summary>
+    [Theory]
+    [InlineData("IQ2_XXS")]
+    [InlineData("IQ2_XS")]
+    [InlineData("IQ2_S")]
+    [InlineData("IQ3_XXS")]
+    [InlineData("IQ3_S")]
+    [InlineData("IQ1_S")]
+    [InlineData("IQ1_M")]
+    public unsafe void IQ_GpuDequant_MatchesCpu(string name)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        DType dtype = name switch
+        {
+            "IQ2_XXS" => DType.IQ2_XXS, "IQ2_XS" => DType.IQ2_XS, "IQ2_S" => DType.IQ2_S, "IQ3_XXS" => DType.IQ3_XXS,
+            "IQ3_S" => DType.IQ3_S, "IQ1_S" => DType.IQ1_S, "IQ1_M" => DType.IQ1_M, _ => throw new ArgumentOutOfRangeException(nameof(name)),
+        };
+        const int superBlocks = 5;
+        const int totalElems = superBlocks * 256;
+        Tensor src = new Tensor(new TensorShape(totalElems), dtype);
+        try
+        {
+            Random rng = new Random(67);
+            byte* p = (byte*)src.DataPointer;
+            for (int sb = 0; sb < superBlocks; sb++)
+            {
+                byte* block = p + sb * dtype.BlockByteSize;
+                for (int i = 0; i < dtype.BlockByteSize; i++) block[i] = (byte)rng.Next(256);
+                ushort d = (ushort)(0x3400 + rng.Next(0x800));   // F16 in [0.25, 2)
+                if (dtype == DType.IQ1_M)
+                {
+                    // d's four nibbles ride in the top nibble of each 16-bit scale word.
+                    block[49] = (byte)((block[49] & 0x0F) | ((d & 0x000F) << 4));
+                    block[51] = (byte)((block[51] & 0x0F) | (d & 0x00F0));
+                    block[53] = (byte)((block[53] & 0x0F) | ((d & 0x0F00) >> 4));
+                    block[55] = (byte)((block[55] & 0x0F) | ((d & 0xF000) >> 8));
+                }
+                else { block[0] = (byte)d; block[1] = (byte)(d >> 8); }
+            }
+            using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
+            using Tensor gpuOut = RunGpuDequant(src, totalElems);
+            CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
+        }
+        finally { src.Dispose(); }
+    }
+
     [Fact]
     public unsafe void IQ4_NL_GpuDequant_MatchesCpu()
     {
