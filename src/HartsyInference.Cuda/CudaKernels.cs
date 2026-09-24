@@ -485,6 +485,33 @@ public sealed class CudaKernels : IDisposable
 
     /// <summary>The most dynamic shared memory an opt-in can raise a block to; a kernel whose tiles exceed it is left unbound rather than failing at launch.</summary>
     public int MaxDynamicSharedBytes { get; }
+
+    /// <summary>The compute capability the modules were resolved for (<see cref="CudaArch"/>), 0 when constructed without a device.</summary>
+    public int Sm { get; }
+
+    /// <summary>Kernels for which an arch-specific PTX (<c>{kernel}.sm{CC}.ptx</c>) was loaded instead of the baseline.</summary>
+    public IReadOnlyList<string> ArchVariantsLoaded => _archVariants;
+
+    private readonly string _ptxDir;
+    private readonly List<string> _archVariants = [];
+
+    /// <summary>The PTX to load for <paramref name="kernel"/>: the device's own variant, <c>{kernel}.sm{sm}.ptx</c> — built with the family-specific arch, so it may use instructions the baseline cannot — when one ships, else the baseline <c>{kernel}.ptx</c>. Exact compute capability only: arch-specific PTX is not forward-compatible, so a variant for another SM must never be picked.</summary>
+    public static string PtxPath(string ptxDir, string kernel, int sm)
+    {
+        if (sm > 0)
+        {
+            string variant = Path.Combine(ptxDir, $"{kernel}.sm{sm}.ptx");
+            if (File.Exists(variant)) return variant;
+        }
+        return Path.Combine(ptxDir, $"{kernel}.ptx");
+    }
+
+    private string Ptx(string kernel)
+    {
+        string path = PtxPath(_ptxDir, kernel, Sm);
+        if (!path.EndsWith($"{kernel}.ptx", StringComparison.Ordinal)) _archVariants.Add(kernel);
+        return path;
+    }
     private static Func<string, Exception?>? _moduleLoadFailureForTests;
 
     /// <summary>Test-only fault injector invoked with each PTX path immediately before it is loaded.</summary>
@@ -519,17 +546,20 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Loads all PTX kernels from the specified directory.</summary>
-    public CudaKernels(string ptxDir, int defaultDynamicSharedBytes = 48 << 10, int maxDynamicSharedBytes = int.MaxValue)
+    /// <param name="context">The device the modules will run on: its shared-memory limits size the opt-ins, and its compute capability selects an arch-specific PTX where one ships. Null keeps Ampere-class limits and loads baseline PTX only.</param>
+    public CudaKernels(string ptxDir, CudaContext? context = null)
     {
-        DefaultDynamicSharedBytes = defaultDynamicSharedBytes;
-        MaxDynamicSharedBytes = maxDynamicSharedBytes;
+        _ptxDir = ptxDir;
+        DefaultDynamicSharedBytes = context?.MaxSharedMemoryPerBlock ?? 48 << 10;
+        MaxDynamicSharedBytes = context?.MaxSharedMemoryPerBlockOptin ?? int.MaxValue;
+        Sm = context?.Sm ?? 0;
         try
         {
             if (!Directory.Exists(ptxDir))
                 throw new DirectoryNotFoundException($"PTX directory not found: {ptxDir}");
 
         // ── F32 modules ──────────────────────────────────────────────────
-        _elementwiseModule = LoadOwnedModule(Path.Combine(ptxDir, "elementwise_f32.ptx"));
+        _elementwiseModule = LoadOwnedModule(Ptx("elementwise_f32"));
         _addF32 = _elementwiseModule.GetFunction("elementwise_add_f32");
         _mulF32 = _elementwiseModule.GetFunction("elementwise_mul_f32");
         _scaleF32 = _elementwiseModule.GetFunction("elementwise_scale_f32");
@@ -537,51 +567,51 @@ public sealed class CudaKernels : IDisposable
         _geluF32 = _elementwiseModule.GetFunction("elementwise_gelu_f32");
         _clampF32 = _elementwiseModule.GetFunction("elementwise_clamp_f32");
 
-        _groupnormModule = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_f32.ptx"));
+        _groupnormModule = LoadOwnedModule(Ptx("groupnorm_f32"));
         _groupnormF32 = _groupnormModule.GetFunction("groupnorm_f32");
 
-        _layernormModule = LoadOwnedModule(Path.Combine(ptxDir, "layernorm_f32.ptx"));
+        _layernormModule = LoadOwnedModule(Ptx("layernorm_f32"));
         _layernormF32 = _layernormModule.GetFunction("layernorm_f32");
 
-        _spatialModule = LoadOwnedModule(Path.Combine(ptxDir, "spatial_f32.ptx"));
+        _spatialModule = LoadOwnedModule(Ptx("spatial_f32"));
         _upsampleNearest2dF32 = _spatialModule.GetFunction("upsample_nearest2d_f32");
         _im2colF32 = _spatialModule.GetFunction("im2col_f32");
         _col2biasAddF32 = _spatialModule.GetFunction("col2bias_add_f32");
 
-        _im2colBandedModule = LoadOwnedModule(Path.Combine(ptxDir, "im2col_banded.ptx"));
+        _im2colBandedModule = LoadOwnedModule(Ptx("im2col_banded"));
         _im2colBandedF32 = _im2colBandedModule.GetFunction("im2col_banded_f32");
         _im2colBandedF16 = _im2colBandedModule.GetFunction("im2col_banded_f16");
         _im2colBandedBf16 = _im2colBandedModule.GetFunction("im2col_banded_bf16");
 
-        _maxpool2dModule = LoadOwnedModule(Path.Combine(ptxDir, "maxpool2d.ptx"));
+        _maxpool2dModule = LoadOwnedModule(Ptx("maxpool2d"));
         _maxpool2dF32 = _maxpool2dModule.GetFunction("maxpool2d_f32");
         _maxpool2dF16 = _maxpool2dModule.GetFunction("maxpool2d_f16");
 
-        _depthwiseConv2dModule = LoadOwnedModule(Path.Combine(ptxDir, "depthwise_conv2d.ptx"));
+        _depthwiseConv2dModule = LoadOwnedModule(Ptx("depthwise_conv2d"));
         _depthwiseConv2dF32 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f32");
         _depthwiseConv2dF16 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f16");
 
-        _msdaModule = LoadOwnedModule(Path.Combine(ptxDir, "msda.ptx"));
+        _msdaModule = LoadOwnedModule(Ptx("msda"));
         _msdaForwardF32 = _msdaModule.GetFunction("msda_forward_f32");
 
-        _softmaxModule = LoadOwnedModule(Path.Combine(ptxDir, "softmax_f32.ptx"));
+        _softmaxModule = LoadOwnedModule(Ptx("softmax_f32"));
         _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
 
-        _transposeModule = LoadOwnedModule(Path.Combine(ptxDir, "transpose_f32.ptx"));
+        _transposeModule = LoadOwnedModule(Ptx("transpose_f32"));
         _transpose2dF32 = _transposeModule.GetFunction("transpose_2d_f32");
         _permute0213F32 = _transposeModule.GetFunction("permute_0213_f32");
 
-        _wanRopeModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_rope.ptx"));
+        _wanRopeModule = LoadOwnedModule(Ptx("wan_rope"));
         _wanRopeInterleaved = _wanRopeModule.GetFunction("wan_rope_interleaved");
         _wanRopeInterleavedPerHead = _wanRopeModule.GetFunction("wan_rope_interleaved_perhead");
 
-        _wanVaeFramesModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_vae_frames.ptx"));
+        _wanVaeFramesModule = LoadOwnedModule(Ptx("wan_vae_frames"));
         _wanVaeExtractFrame = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame");
         _wanVaeWriteFrame = _wanVaeFramesModule.GetFunction("wan_vae_write_frame");
         _wanVaeExtractFrameBf16 = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame_bf16");
         _wanVaeWriteFrameBf16 = _wanVaeFramesModule.GetFunction("wan_vae_write_frame_bf16");
 
-        _wanVaeConv3dModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_vae_conv3d.ptx"));
+        _wanVaeConv3dModule = LoadOwnedModule(Ptx("wan_vae_conv3d"));
         _wanVaeBuildPadded = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded");
         _wanVaeFillBias = _wanVaeConv3dModule.GetFunction("wan_vae_fill_bias");
         _wanVaeAccumulateTap = _wanVaeConv3dModule.GetFunction("wan_vae_accumulate_tap");
@@ -593,7 +623,7 @@ public sealed class CudaKernels : IDisposable
         _seedVr2PadBr = _wanVaeConv3dModule.GetFunction("seedvr2_pad_br_f32");
         _seedVr2PadBrBf16 = _wanVaeConv3dModule.GetFunction("seedvr2_pad_br_bf16");
 
-        _wanVaeNormModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_vae_norm.ptx"));
+        _wanVaeNormModule = LoadOwnedModule(Ptx("wan_vae_norm"));
         _wanVaeRmsNormChannel = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel");
         _wanVaeRmsNormChannelBf16 = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel_bf16");
         _wanVaeUnpatchify = _wanVaeNormModule.GetFunction("wan_vae_unpatchify");
@@ -601,15 +631,15 @@ public sealed class CudaKernels : IDisposable
         _wanVaeSplitQkv = _wanVaeNormModule.GetFunction("wan_vae_split_qkv");
         _wanVaeTokensToFrame = _wanVaeNormModule.GetFunction("wan_vae_tokens_to_frame");
 
-        _gegluModule = LoadOwnedModule(Path.Combine(ptxDir, "geglu_f32.ptx"));
+        _gegluModule = LoadOwnedModule(Ptx("geglu_f32"));
         _gegluF32 = _gegluModule.GetFunction("geglu_f32");
 
-        _broadcastAddModule = LoadOwnedModule(Path.Combine(ptxDir, "broadcast_add_f32.ptx"));
+        _broadcastAddModule = LoadOwnedModule(Ptx("broadcast_add_f32"));
         _broadcastAddF32 = _broadcastAddModule.GetFunction("broadcast_add_f32");
 
         // Optional module: present only after src/HartsyInference.Cuda/Kernels/dit/build.sh has compiled stepcache.cu on a
         // CUDA-toolkit box. Absence is not an error — the step-cache feature reports unsupported instead.
-        string stepCachePath = Path.Combine(ptxDir, "stepcache.ptx");
+        string stepCachePath = Ptx("stepcache");
         if (File.Exists(stepCachePath))
         {
             _stepCacheModule = LoadOwnedModule(stepCachePath);
@@ -619,7 +649,7 @@ public sealed class CudaKernels : IDisposable
 
         // Optional module: LTX-2.5 NA diffusion decoder (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).
         // Absence is not an error — the decoder falls back to the managed reference.
-        string ltx25NaPath = Path.Combine(ptxDir, "ltx25_na_decoder.ptx");
+        string ltx25NaPath = Ptx("ltx25_na_decoder");
         if (File.Exists(ltx25NaPath))
         {
             _ltx25NaModule = LoadOwnedModule(ltx25NaPath);
@@ -643,7 +673,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
-        string w8a8Path = Path.Combine(ptxDir, "w8a8.ptx");
+        string w8a8Path = Ptx("w8a8");
         if (File.Exists(w8a8Path))
         {
             _w8a8Module = LoadOwnedModule(w8a8Path);
@@ -656,7 +686,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: ConvRot rotation (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu). Absence is not an error.
-        string convRotPath = Path.Combine(ptxDir, "convrot.ptx");
+        string convRotPath = Ptx("convrot");
         if (File.Exists(convRotPath))
         {
             _convRotModule = LoadOwnedModule(convRotPath);
@@ -669,7 +699,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: fused-dequant int8 mma GEMM (Kernels/dequant/int8_mma_gemm.cu). Absence is not an error.
-        string mmaPath = Path.Combine(ptxDir, "int8_mma_gemm.ptx");
+        string mmaPath = Ptx("int8_mma_gemm");
         if (File.Exists(mmaPath) && Int8MmaSharedBytesPad > (uint)MaxDynamicSharedBytes)
         {
             HartsyInference.Core.Logging.Logs.Warning($"[Cuda] int8 mma GEMM needs {Int8MmaSharedBytesPad} B of dynamic shared memory per block; this device allows {MaxDynamicSharedBytes}. Using cuBLASLt + dequant instead.");
@@ -698,7 +728,7 @@ public sealed class CudaKernels : IDisposable
 
         // Optional module: block-scaled activation quantization for the Blackwell GEMM path
         // (src/HartsyInference.Cuda/Kernels/dequant/block_quant.cu). Absence is not an error.
-        string blockQuantPath = Path.Combine(ptxDir, "block_quant.ptx");
+        string blockQuantPath = Ptx("block_quant");
         if (File.Exists(blockQuantPath))
         {
             _blockQuantModule = LoadOwnedModule(blockQuantPath);
@@ -708,7 +738,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
-        string nvfp4Path = Path.Combine(ptxDir, "dequant_nvfp4_to_f16.ptx");
+        string nvfp4Path = Ptx("dequant_nvfp4_to_f16");
         if (File.Exists(nvfp4Path))
         {
             _nvfp4Module = LoadOwnedModule(nvfp4Path);
@@ -717,7 +747,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: SageAttention INT8 (src/HartsyInference.Cuda/Kernels/attention/build.sh). Absence is not an error.
-        string sageAttnPath = Path.Combine(ptxDir, "sage_attn_int8.ptx");
+        string sageAttnPath = Ptx("sage_attn_int8");
         if (File.Exists(sageAttnPath))
         {
             _sageAttnModule = LoadOwnedModule(sageAttnPath);
@@ -730,7 +760,7 @@ public sealed class CudaKernels : IDisposable
             _sageQuantKInt8F16H = _sageAttnModule.GetFunction("sage_quant_k_int8_f16h");
 
             // The register-resident v1 flash stage (same prologue kernels) — preferred when present.
-            string sageV1Path = Path.Combine(ptxDir, "sage_attn_int8_v1.ptx");
+            string sageV1Path = Ptx("sage_attn_int8_v1");
             if (File.Exists(sageV1Path))
             {
                 _sageAttnV1Module = LoadOwnedModule(sageV1Path);
@@ -746,7 +776,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // ── F16 modules ──────────────────────────────────────────────────
-        _elementwiseF16Module = LoadOwnedModule(Path.Combine(ptxDir, "elementwise_f16.ptx"));
+        _elementwiseF16Module = LoadOwnedModule(Ptx("elementwise_f16"));
         _addF16 = _elementwiseF16Module.GetFunction("elementwise_add_f16");
         _mulF16 = _elementwiseF16Module.GetFunction("elementwise_mul_f16");
         _scaleF16 = _elementwiseF16Module.GetFunction("elementwise_scale_f16");
@@ -754,32 +784,32 @@ public sealed class CudaKernels : IDisposable
         _geluF16 = _elementwiseF16Module.GetFunction("elementwise_gelu_f16");
         _clampF16 = _elementwiseF16Module.GetFunction("elementwise_clamp_f16");
 
-        _groupnormF16Module = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_f16.ptx"));
+        _groupnormF16Module = LoadOwnedModule(Ptx("groupnorm_f16"));
         _groupnormF16 = _groupnormF16Module.GetFunction("groupnorm_f16");
 
-        _layernormF16Module = LoadOwnedModule(Path.Combine(ptxDir, "layernorm_f16.ptx"));
+        _layernormF16Module = LoadOwnedModule(Ptx("layernorm_f16"));
         _layernormF16 = _layernormF16Module.GetFunction("layernorm_f16");
 
-        _spatialF16Module = LoadOwnedModule(Path.Combine(ptxDir, "spatial_f16.ptx"));
+        _spatialF16Module = LoadOwnedModule(Ptx("spatial_f16"));
         _upsampleNearest2dF16 = _spatialF16Module.GetFunction("upsample_nearest2d_f16");
         _im2colF16 = _spatialF16Module.GetFunction("im2col_f16");
         _col2biasAddF16 = _spatialF16Module.GetFunction("col2bias_add_f16");
 
-        _softmaxF16Module = LoadOwnedModule(Path.Combine(ptxDir, "softmax_f16.ptx"));
+        _softmaxF16Module = LoadOwnedModule(Ptx("softmax_f16"));
         _softmaxF16 = _softmaxF16Module.GetFunction("softmax_f16");
 
-        _transposeF16Module = LoadOwnedModule(Path.Combine(ptxDir, "transpose_f16.ptx"));
+        _transposeF16Module = LoadOwnedModule(Ptx("transpose_f16"));
         _transpose2dF16 = _transposeF16Module.GetFunction("transpose_2d_f16");
         _permute0213F16 = _transposeF16Module.GetFunction("permute_0213_f16");
 
-        _gegluF16Module = LoadOwnedModule(Path.Combine(ptxDir, "geglu_f16.ptx"));
+        _gegluF16Module = LoadOwnedModule(Ptx("geglu_f16"));
         _gegluF16 = _gegluF16Module.GetFunction("geglu_f16");
 
-        _broadcastAddF16Module = LoadOwnedModule(Path.Combine(ptxDir, "broadcast_add_f16.ptx"));
+        _broadcastAddF16Module = LoadOwnedModule(Ptx("broadcast_add_f16"));
         _broadcastAddF16 = _broadcastAddF16Module.GetFunction("broadcast_add_f16");
 
         // ── BF16 modules (subset VAE needs; SDXL VAE F16 overflows) ──────
-        _elementwiseBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "elementwise_bf16.ptx"));
+        _elementwiseBf16Module = LoadOwnedModule(Ptx("elementwise_bf16"));
         _addBf16 = _elementwiseBf16Module.GetFunction("elementwise_add_bf16");
         _mulBf16 = _elementwiseBf16Module.GetFunction("elementwise_mul_bf16");
         _scaleBf16 = _elementwiseBf16Module.GetFunction("elementwise_scale_bf16");
@@ -787,42 +817,42 @@ public sealed class CudaKernels : IDisposable
         _geluBf16 = _elementwiseBf16Module.GetFunction("elementwise_gelu_bf16");
         _clampBf16 = _elementwiseBf16Module.GetFunction("elementwise_clamp_bf16");
 
-        _groupnormBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_bf16.ptx"));
+        _groupnormBf16Module = LoadOwnedModule(Ptx("groupnorm_bf16"));
         _groupnormBf16 = _groupnormBf16Module.GetFunction("groupnorm_bf16");
 
-        _layernormBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "layernorm_bf16.ptx"));
+        _layernormBf16Module = LoadOwnedModule(Ptx("layernorm_bf16"));
         _layernormBf16 = _layernormBf16Module.GetFunction("layernorm_bf16");
 
-        _spatialBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "spatial_bf16.ptx"));
+        _spatialBf16Module = LoadOwnedModule(Ptx("spatial_bf16"));
         _upsampleNearest2dBf16 = _spatialBf16Module.GetFunction("upsample_nearest2d_bf16");
         _im2colBf16 = _spatialBf16Module.GetFunction("im2col_bf16");
         _col2biasAddBf16 = _spatialBf16Module.GetFunction("col2bias_add_bf16");
 
-        _broadcastAddBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "broadcast_add_bf16.ptx"));
+        _broadcastAddBf16Module = LoadOwnedModule(Ptx("broadcast_add_bf16"));
         _broadcastAddBf16 = _broadcastAddBf16Module.GetFunction("broadcast_add_bf16");
 
-        _groupnormSiluBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_silu_bf16.ptx"));
+        _groupnormSiluBf16Module = LoadOwnedModule(Ptx("groupnorm_silu_bf16"));
         _groupnormSiluBf16 = _groupnormSiluBf16Module.GetFunction("groupnorm_silu_bf16");
 
         // ── Fused GroupNorm+SiLU ─────────────────────────────────────────
-        _groupnormSiluModule = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_silu_f32.ptx"));
+        _groupnormSiluModule = LoadOwnedModule(Ptx("groupnorm_silu_f32"));
         _groupnormSiluF32 = _groupnormSiluModule.GetFunction("groupnorm_silu_f32");
 
-        _groupnormSiluF16Module = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_silu_f16.ptx"));
+        _groupnormSiluF16Module = LoadOwnedModule(Ptx("groupnorm_silu_f16"));
         _groupnormSiluF16 = _groupnormSiluF16Module.GetFunction("groupnorm_silu_f16");
 
         // ── Cast ─────────────────────────────────────────────────────────
-        _castModule = LoadOwnedModule(Path.Combine(ptxDir, "cast_f32_f16.ptx"));
+        _castModule = LoadOwnedModule(Ptx("cast_f32_f16"));
         _castF32ToF16 = _castModule.GetFunction("cast_f32_to_f16");
         _castF16ToF32 = _castModule.GetFunction("cast_f16_to_f32");
 
         // ── FP8 Cast ─────────────────────────────────────────────────────
-        _castF8Module = LoadOwnedModule(Path.Combine(ptxDir, "cast_f8e4m3_f16.ptx"));
+        _castF8Module = LoadOwnedModule(Ptx("cast_f8e4m3_f16"));
         _castF8E4M3ToF16 = _castF8Module.GetFunction("cast_f8e4m3_to_f16");
         _castF16ToF8E4M3 = _castF8Module.GetFunction("cast_f16_to_f8e4m3");
 
         // ── FP8 Activation Quantization ──────────────────────────────────
-        _fp8QuantModule = LoadOwnedModule(Path.Combine(ptxDir, "fp8_quant.ptx"));
+        _fp8QuantModule = LoadOwnedModule(Ptx("fp8_quant"));
         _fp8AbsMax = _fp8QuantModule.GetFunction("absmax_f32");
         _fp8AbsMaxFinalizeScale = _fp8QuantModule.GetFunction("absmax_finalize_scale");
         _fp8QuantF32ToE4M3 = _fp8QuantModule.GetFunction("quant_f32_e4m3");
@@ -830,12 +860,12 @@ public sealed class CudaKernels : IDisposable
         _fp8QuantF16ToE4M3 = _fp8QuantModule.GetFunction("quant_f16_e4m3");
 
         // ── BF16 <-> F32 Cast ───────────────────────────────────────────
-        _castBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "cast_bf16_f32.ptx"));
+        _castBf16Module = LoadOwnedModule(Ptx("cast_bf16_f32"));
         _castBf16ToF32 = _castBf16Module.GetFunction("cast_bf16_to_f32");
         _castF32ToBf16 = _castBf16Module.GetFunction("cast_f32_to_bf16");
 
         // ── DiT glue (F32) ───────────────────────────────────────────────
-        _ditF32Module = LoadOwnedModule(Path.Combine(ptxDir, "dit_f32.ptx"));
+        _ditF32Module = LoadOwnedModule(Ptx("dit_f32"));
         _ditRmsNormF32 = _ditF32Module.GetFunction("dit_rmsnorm_f32");
         _ditAffineBroadcastF32 = _ditF32Module.GetFunction("dit_affine_broadcast_lastdim_f32");
         _ditGatedResidualF32 = _ditF32Module.GetFunction("dit_gated_residual_lastdim_f32");
@@ -861,14 +891,14 @@ public sealed class CudaKernels : IDisposable
 
         // Separate module so rebuilding it can't perturb dit_f32.ptx's other 40 kernels. Optional:
         // absent PTX just leaves the handle 0 and callers fall back to the v1 kernel above.
-        string ropeV2Path = Path.Combine(ptxDir, "dit_rope.ptx");
+        string ropeV2Path = Ptx("dit_rope");
         if (File.Exists(ropeV2Path))
         {
             _ditRopeModule = LoadOwnedModule(ropeV2Path);
             _ditRopeHeadMajorV2F32 = _ditRopeModule.GetFunction("dit_rope_head_major_v2_f32");
         }
 
-        string fp8EmitPath = Path.Combine(ptxDir, "dit_fp8emit.ptx");
+        string fp8EmitPath = Ptx("dit_fp8emit");
         if (File.Exists(fp8EmitPath))
         {
             _ditFp8EmitModule = LoadOwnedModule(fp8EmitPath);
@@ -913,7 +943,7 @@ public sealed class CudaKernels : IDisposable
         _ditAffineBroadcastRowIndexedF32 = _ditF32Module.GetFunction("dit_affine_broadcast_rowindexed_f32");
         _ditGatedResidualRowIndexedF32 = _ditF32Module.GetFunction("dit_gated_residual_rowindexed_f32");
 
-        _mg3ActionModule = LoadOwnedModule(Path.Combine(ptxDir, "mg3_action.ptx"));
+        _mg3ActionModule = LoadOwnedModule(Ptx("mg3_action"));
         _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
         _mg3MergeTemporalF32 = _mg3ActionModule.GetFunction("mg3_merge_temporal_f32");
         _mg3RopeBatchedF32 = _mg3ActionModule.GetFunction("mg3_rope_batched_f32");
@@ -921,7 +951,7 @@ public sealed class CudaKernels : IDisposable
         _mg3MouseMlpConcatF32 = _mg3ActionModule.GetFunction("mg3_mouse_mlp_concat_f32");
 
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
-        _ditF16Module = LoadOwnedModule(Path.Combine(ptxDir, "dit_f16.ptx"));
+        _ditF16Module = LoadOwnedModule(Ptx("dit_f16"));
         _ditRmsNormF16 = _ditF16Module.GetFunction("dit_rmsnorm_f16");
         _ditLayerNormNoAffineF16 = _ditF16Module.GetFunction("dit_layernorm_noaffine_f16");
         _ditAffineBroadcastF16 = _ditF16Module.GetFunction("dit_affine_broadcast_lastdim_f16");
@@ -951,7 +981,7 @@ public sealed class CudaKernels : IDisposable
         _ditGluActF16 = _ditF16Module.GetFunction("dit_glu_act_f16");
 
         // ── DiT glue (BF16 I/O, F32 accumulate) — DiT BF16 activation path ─
-        _ditBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "dit_bf16.ptx"));
+        _ditBf16Module = LoadOwnedModule(Ptx("dit_bf16"));
         _ditRmsNormBf16 = _ditBf16Module.GetFunction("dit_rmsnorm_bf16");
         _ditGluActBf16 = _ditBf16Module.GetFunction("dit_glu_act_bf16");
         _ditGeGluBf16 = _ditBf16Module.GetFunction("dit_geglu_bf16");
@@ -961,11 +991,11 @@ public sealed class CudaKernels : IDisposable
         _ditGatedResidualBf16 = _ditBf16Module.GetFunction("dit_gated_residual_lastdim_bf16");
 
         // ── Audio conv (codec/TTS Conv1d + ConvTranspose1d, F32) ─────────
-        _audioConvF32Module = LoadOwnedModule(Path.Combine(ptxDir, "conv1d_f32.ptx"));
+        _audioConvF32Module = LoadOwnedModule(Ptx("conv1d_f32"));
         _conv1dF32 = _audioConvF32Module.GetFunction("conv1d_f32");
         _convTranspose1dF32 = _audioConvF32Module.GetFunction("conv_transpose1d_f32");
 
-        _audioActF32Module = LoadOwnedModule(Path.Combine(ptxDir, "audio_activations_f32.ptx"));
+        _audioActF32Module = LoadOwnedModule(Ptx("audio_activations_f32"));
         _audioSigmoidF32 = _audioActF32Module.GetFunction("audio_sigmoid_f32");
         _audioMishF32 = _audioActF32Module.GetFunction("audio_mish_f32");
         _audioEluF32 = _audioActF32Module.GetFunction("audio_elu_f32");
@@ -975,11 +1005,11 @@ public sealed class CudaKernels : IDisposable
         _audioPreluF32 = _audioActF32Module.GetFunction("audio_prelu_f32");
         _audioRepeatTimeF32 = _audioActF32Module.GetFunction("audio_repeat_time_f32");
 
-        _audioAdain1dF32Module = LoadOwnedModule(Path.Combine(ptxDir, "adain1d_f32.ptx"));
+        _audioAdain1dF32Module = LoadOwnedModule(Ptx("adain1d_f32"));
         _audioAdain1dF32 = _audioAdain1dF32Module.GetFunction("audio_adain1d_f32");
 
         // ── Language-model glue (F32) ────────────────────────────────────
-        _lmF32Module = LoadOwnedModule(Path.Combine(ptxDir, "lm_f32.ptx"));
+        _lmF32Module = LoadOwnedModule(Ptx("lm_f32"));
         _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
         _lmKvAppendF32 = _lmF32Module.GetFunction("lm_kv_append_f32");
         _lmKvAppendF16 = _lmF32Module.GetFunction("lm_kv_append_f16");
@@ -1012,42 +1042,42 @@ public sealed class CudaKernels : IDisposable
         _lmHistoryAppend = _lmF32Module.GetFunction("lm_history_append");
         _lmRepetitionPenaltyF32 = _lmF32Module.GetFunction("lm_repetition_penalty_f32");
         _lmKvSliceTimeF32 = _lmF32Module.GetFunction("lm_kv_slice_time_f32");
-        _flashAttnF32Module = LoadOwnedModule(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
+        _flashAttnF32Module = LoadOwnedModule(Ptx("flash_attn_f32"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
         _flashAttnF16Kv = _flashAttnF32Module.GetFunction("lm_flash_attn_f16kv_f32");
-        _flashAttnF32SplitModule = LoadOwnedModule(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
+        _flashAttnF32SplitModule = LoadOwnedModule(Ptx("flash_attn_f32_split"));
         _flashAttnF32Split = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_split");
         _flashAttnF32SplitF16Kv = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f16kv_f32_split");
         _flashAttnF32Combine = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_combine");
-        _flashV2Module = LoadOwnedModule(Path.Combine(ptxDir, "flash_attn_v2_tf32.ptx"));
+        _flashV2Module = LoadOwnedModule(Ptx("flash_attn_v2_tf32"));
         _flashV2Tf32 = _flashV2Module.GetFunction("lm_flash_attn_v2_tf32");
         // Opt the fused flash kernel into >48 KB dynamic shared memory (K/V/S/O tiles ≈ 72 KB for D=128).
         // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8. Ignore failure (kernel launch will surface it).
         CudaDriverApi.cuFuncSetAttribute(_flashV2Tf32, 8, 96 * 1024);
 
         // ── GGUF Dequant ─────────────────────────────────────────────────
-        _dequantQ8_0Module = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
+        _dequantQ8_0Module = LoadOwnedModule(Ptx("dequant_q8_0_to_f16"));
         _dequantQ8_0ToF16 = _dequantQ8_0Module.GetFunction("dequant_q8_0_to_f16");
-        _dequantQ4_0Module = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q4_0_to_f16.ptx"));
+        _dequantQ4_0Module = LoadOwnedModule(Ptx("dequant_q4_0_to_f16"));
         _dequantQ4_0ToF16 = _dequantQ4_0Module.GetFunction("dequant_q4_0_to_f16");
-        _dequantQ5_0Module = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q5_0_to_f16.ptx"));
+        _dequantQ5_0Module = LoadOwnedModule(Ptx("dequant_q5_0_to_f16"));
         _dequantQ5_0ToF16 = _dequantQ5_0Module.GetFunction("dequant_q5_0_to_f16");
-        _dequantQ2_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q2_k_to_f16.ptx"));
+        _dequantQ2_KModule = LoadOwnedModule(Ptx("dequant_q2_k_to_f16"));
         _dequantQ2_KToF16 = _dequantQ2_KModule.GetFunction("dequant_q2_k_to_f16");
-        _dequantQ3_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q3_k_to_f16.ptx"));
+        _dequantQ3_KModule = LoadOwnedModule(Ptx("dequant_q3_k_to_f16"));
         _dequantQ3_KToF16 = _dequantQ3_KModule.GetFunction("dequant_q3_k_to_f16");
-        _dequantQ4_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q4_k_to_f16.ptx"));
+        _dequantQ4_KModule = LoadOwnedModule(Ptx("dequant_q4_k_to_f16"));
         _dequantQ4_KToF16 = _dequantQ4_KModule.GetFunction("dequant_q4_k_to_f16");
-        _dequantQ5_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q5_k_to_f16.ptx"));
+        _dequantQ5_KModule = LoadOwnedModule(Ptx("dequant_q5_k_to_f16"));
         _dequantQ5_KToF16 = _dequantQ5_KModule.GetFunction("dequant_q5_k_to_f16");
-        _dequantQ6_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q6_k_to_f16.ptx"));
+        _dequantQ6_KModule = LoadOwnedModule(Ptx("dequant_q6_k_to_f16"));
         _dequantQ6_KToF16 = _dequantQ6_KModule.GetFunction("dequant_q6_k_to_f16");
 
-        _mulMatVecQ4KModule = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q4k_f32.ptx"));
+        _mulMatVecQ4KModule = LoadOwnedModule(Ptx("mul_mat_vec_q4k_f32"));
         _mulMatVecQ4KF32 = _mulMatVecQ4KModule.GetFunction("mul_mat_vec_q4k_f32");
-        _mulMatVecQ6KModule = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q6k_f32.ptx"));
+        _mulMatVecQ6KModule = LoadOwnedModule(Ptx("mul_mat_vec_q6k_f32"));
         _mulMatVecQ6KF32 = _mulMatVecQ6KModule.GetFunction("mul_mat_vec_q6k_f32");
-        _mulMatVecQ8_0Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q8_0_f32.ptx"));
+        _mulMatVecQ8_0Module = LoadOwnedModule(Ptx("mul_mat_vec_q8_0_f32"));
         _mulMatVecQ8_0F32 = _mulMatVecQ8_0Module.GetFunction("mul_mat_vec_q8_0_f32");
         // On by default (numerics.bf16Gemv=false disables). The PTX targets sm_80 like the engine's other lm/world
         // kernels, so it JITs on every GPU this engine already runs on; a genuine load failure is caught below
@@ -1056,7 +1086,7 @@ public sealed class CudaKernels : IDisposable
         {
             try
             {
-                _mulMatVecF16Bf16Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_f16_bf16_f32.ptx"));
+                _mulMatVecF16Bf16Module = LoadOwnedModule(Ptx("mul_mat_vec_f16_bf16_f32"));
                 _mulMatVecBf16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_bf16_f32");
                 _mulMatVecF16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_f16_f32");
                 HasFloatGemv = true;
@@ -1071,35 +1101,35 @@ public sealed class CudaKernels : IDisposable
         }
         // Optional module: the additive causal bias the fused cuDNN prefill path needs
         // (src/HartsyInference.Cuda/Kernels/lm/lm_attn_mask.cu). Absence just means prefill keeps the general kernel.
-        string causalMaskPath = Path.Combine(ptxDir, "lm_attn_mask.ptx");
+        string causalMaskPath = Ptx("lm_attn_mask");
         if (File.Exists(causalMaskPath))
         {
             _causalMaskModule = LoadOwnedModule(causalMaskPath);
             _causalBiasMaskF32 = _causalMaskModule.GetFunction("lm_causal_bias_mask_f32");
         }
-        _mulMatVecQ5_0Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5_0_f32.ptx"));
+        _mulMatVecQ5_0Module = LoadOwnedModule(Ptx("mul_mat_vec_q5_0_f32"));
         _mulMatVecQ5_0F32 = _mulMatVecQ5_0Module.GetFunction("mul_mat_vec_q5_0_f32");
-        _mulMatVecQ4_0Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q4_0_f32.ptx"));
+        _mulMatVecQ4_0Module = LoadOwnedModule(Ptx("mul_mat_vec_q4_0_f32"));
         _mulMatVecQ4_0F32 = _mulMatVecQ4_0Module.GetFunction("mul_mat_vec_q4_0_f32");
-        _mulMatVecQ5KModule = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5k_f32.ptx"));
+        _mulMatVecQ5KModule = LoadOwnedModule(Ptx("mul_mat_vec_q5k_f32"));
         _mulMatVecQ5KF32 = _mulMatVecQ5KModule.GetFunction("mul_mat_vec_q5k_f32");
-        _quantActQ8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "quantize_activation_q8_1_f32.ptx"));
+        _quantActQ8_1Module = LoadOwnedModule(Ptx("quantize_activation_q8_1_f32"));
         _quantActQ8_1F32 = _quantActQ8_1Module.GetFunction("quantize_activation_q8_1_f32");
-        _mulMatVecQ4KQ8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q4k_q8_1.ptx"));
+        _mulMatVecQ4KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q4k_q8_1"));
         _mulMatVecQ4KQ8_1 = _mulMatVecQ4KQ8_1Module.GetFunction("mul_mat_vec_q4k_q8_1");
         _mulMatVecQ4KQ8_1Ksplit = _mulMatVecQ4KQ8_1Module.GetFunction("mul_mat_vec_q4k_q8_1_ksplit");
-        _mulMatVecQ8_0Q8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q8_0_q8_1.ptx"));
+        _mulMatVecQ8_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q8_0_q8_1"));
         _mulMatVecQ8_0Q8_1 = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1");
         _mulMatVecQ8_0Q8_1Ksplit = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_ksplit");
-        _mulMatVecQ6KQ8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q6k_q8_1.ptx"));
+        _mulMatVecQ6KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q6k_q8_1"));
         _mulMatVecQ6KQ8_1 = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1");
         _mulMatVecQ6KQ8_1Ksplit = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1_ksplit");
-        _mulMatVecQ4_0Q8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q4_0_q8_1.ptx"));
+        _mulMatVecQ4_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q4_0_q8_1"));
         _mulMatVecQ4_0Q8_1 = _mulMatVecQ4_0Q8_1Module.GetFunction("mul_mat_vec_q4_0_q8_1");
-        _mulMatVecQ5_0Q8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5_0_q8_1.ptx"));
+        _mulMatVecQ5_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q5_0_q8_1"));
         _mulMatVecQ5_0Q8_1 = _mulMatVecQ5_0Q8_1Module.GetFunction("mul_mat_vec_q5_0_q8_1");
         _mulMatVecQ5_0Q8_1Ksplit = _mulMatVecQ5_0Q8_1Module.GetFunction("mul_mat_vec_q5_0_q8_1_ksplit");
-        _mulMatVecQ5KQ8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5k_q8_1.ptx"));
+        _mulMatVecQ5KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q5k_q8_1"));
         _mulMatVecQ5KQ8_1 = _mulMatVecQ5KQ8_1Module.GetFunction("mul_mat_vec_q5k_q8_1");
         }
         catch (Exception constructionFailure)

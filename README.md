@@ -64,7 +64,8 @@ Settings live in one file, `~/.config/hartsyinference/settings.json`, and are re
 ## Requirements and backends
 
 Libraries target .NET 8 and .NET 10; building/testing uses the .NET 10 SDK.
-CUDA requires an NVIDIA GPU supported by the shipped PTX (baseline sm_80), a compatible driver, and
+CUDA requires an NVIDIA GPU supported by the shipped PTX (baseline sm_80, plus per-architecture variants
+where a kernel ships one), a compatible driver, and
 required CUDA userspace libraries. Optional cuDNN paths have additional library requirements.
 Vulkan requires a compatible runtime and the features queried by the backend; AMD/Intel hardware
 validation remains open. CPU has no GPU dependency.
