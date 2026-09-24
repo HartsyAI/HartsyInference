@@ -6,6 +6,32 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.167
+
+- **MXFP8 weights stay packed the way nvfp4 ones do.** `Mxfp8Codec.TryAttachResident` hangs a weight's UE8M0 block
+  scales on `QuantInfo` (`Format = "mxfp8"`) instead of unpacking it at load, and the CUDA backend's resident path
+  is now written for any block-scaled weight: one scale upload, one eligibility check, one unpack substitution
+  (`dequant_mxfp8_to_f16`, the mxfp8 twin of the nvfp4 kernel) and the same native branch — the
+  `BlockScaledGemmExecutor` multiplies MXFP8 operands with `VEC32_UE8M0` scales, and `block_quant` gained the
+  MXFP8 activation quantizer (an OCP MX shared exponent per 32 elements). The weight stays packed only where that
+  native GEMM will consume it — Blackwell with `numerics.fp4Native` on; anywhere else it widens on the host to the
+  same BF16 as before, so a card below Blackwell generates the same bytes at the same speed. `Mxfp8ResidentCodec`
+  in Core is that host decode and what the tests measure against.
+- **Residency is answered per weight, not per dtype.** `IBackend.SupportsResidentQuant(Tensor)` defaults to the
+  dtype answer; CUDA says yes to an mxfp8 weight only where the native GEMM runs. `QuantizedWeightPolicy`'s
+  predicate takes the weight, and `Widen` gained the two arms it lacked — nvfp4 and mxfp8 — so a CPU or Vulkan
+  shard receiving either widens on the host instead of throwing. The Lens pipeline runs the policy like every other
+  recipe, before its LoRA hook: a merge onto a packed weight rides as a runtime adjunct on that tensor, which a
+  later widening would have left behind, and `LoraStack` now treats any block-scaled weight that way regardless of
+  its dtype (an mxfp8 target used to be requantized as per-tensor fp8, dropping its block scales).
+- The native fp8 dispatch gate refuses a weight carrying block scales, so an mxfp8 weight can never be multiplied
+  as per-tensor fp8. A block-scaled weight now splits by whole 128-row tiles of its swizzled scales — the fused QKV
+  weights of the Lens DiT split into Q, K and V with their own scales instead of refusing. MXFP4 (GPT-OSS's ggml blocks) is not repacked in this release: its experts go through the MoE
+  slice path, not `Linear`, and gain nothing here until that path is resident.
+- An `int8_tensorwise` weight without a ConvRot rotation is eligible for the resident int8 path again: the
+  shared-memory ceiling introduced in alpha.163 divided by the rotation group, and a group of zero threw before the
+  check could say no.
+
 ## alpha.166
 
 - **A kernel can ship a per-architecture PTX beside its baseline.** `CudaKernels.PtxPath` loads

@@ -2508,6 +2508,9 @@ public interface IBackend : IDisposable
     /// <para>The default is the honest one for a backend with no packed-weight kernels at all.</para></remarks>
     bool SupportsResidentQuant(DType dtype) => false;
 
+    /// <summary>The same question for a specific weight, for formats the dtype alone cannot name: an MXFP8 weight is plain F8E4M3 with its block scales on <see cref="Tensor.QuantInfo"/>. The default defers to the dtype answer.</summary>
+    bool SupportsResidentQuant(Tensor weight) => SupportsResidentQuant(weight.DType);
+
     /// <summary>Marks a tensor's activation as surviving <see cref="FreeActivations()"/>, for cross-step state living only on-device.</summary>
     void PinActivation(Tensor tensor) { }
 

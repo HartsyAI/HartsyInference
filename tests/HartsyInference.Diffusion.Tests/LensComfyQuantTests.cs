@@ -87,23 +87,26 @@ public sealed unsafe class LensComfyQuantTests
     }
 
     [Fact]
-    public void Mxfp8_DequantInPlace_StripsCompanions_LeavesPlainBf16Alone()
+    public void Mxfp8_AttachResidentInPlace_KeepsTheWeightPacked_StripsCompanions_LeavesPlainBf16Alone()
     {
         Tensor wF32 = Filled(1.0f, 128, 32);
         Dictionary<string, Tensor> dict = new()
         {
             ["transformer_blocks.0.attn.img_qkv.weight"] = wF32.CastTo(DType.F8E4M3),
-            ["transformer_blocks.0.attn.img_qkv.weight_scale"] = ConstU8(128, 4, 127),
+            ["transformer_blocks.0.attn.img_qkv.weight_scale"] = ScaleU8(128, 4, 127),   // the blocked [rows, blockCols] layout real files carry
             ["transformer_blocks.0.attn.img_qkv.comfy_quant"] = ConstU8(74, 1, 0),
             ["transformer_blocks.0.attn.img_qkv.bias"] = new Tensor(new TensorShape(4608), DType.BF16),
             ["img_in.weight"] = new Tensor(new TensorShape(1536, 128), DType.BF16),
         };
         wF32.Dispose();
-        int n = Mxfp8Codec.DequantInPlace(dict);
+        int n = Mxfp8Codec.AttachResidentInPlace(dict);
         try
         {
             Assert.Equal(1, n);
-            Assert.Equal(DType.BF16, dict["transformer_blocks.0.attn.img_qkv.weight"].DType);
+            Tensor packed = dict["transformer_blocks.0.attn.img_qkv.weight"];
+            Assert.Equal(DType.F8E4M3, packed.DType);
+            Assert.Equal("mxfp8", packed.QuantInfo?.Format);
+            Assert.NotNull(packed.QuantInfo!.BlockScale);
             Assert.False(dict.ContainsKey("transformer_blocks.0.attn.img_qkv.weight_scale"));
             Assert.False(dict.ContainsKey("transformer_blocks.0.attn.img_qkv.comfy_quant"));
             Assert.True(dict.ContainsKey("transformer_blocks.0.attn.img_qkv.bias"));   // untouched
@@ -361,6 +364,13 @@ public sealed unsafe class LensComfyQuantTests
         float* p = (float*)t.DataPointer;
         long n = t.Shape.ElementCount;
         for (long i = 0; i < n; i++) p[i] = v;
+        return t;
+    }
+
+    private static Tensor ScaleU8(int rows, int cols, byte val)
+    {
+        Tensor t = new Tensor(new TensorShape(rows, cols), DType.U8);
+        new Span<byte>((void*)t.DataPointer, rows * cols).Fill(val);
         return t;
     }
 

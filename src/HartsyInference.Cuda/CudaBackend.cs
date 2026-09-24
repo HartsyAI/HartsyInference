@@ -518,8 +518,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     // device plus the two host scalars the dequant kernel folds in. One sixteenth of the weight's size, and unlike a
     // dtype cast it is part of the resident representation — keeping it is what makes the weight usable at all, so it
     // is not subject to the cast budget gate. Freed by FreeW8A8Cache.
-    private readonly Dictionary<Core.Tensors.Tensor, Nvfp4WeightScales> _nvfp4ScaleDevice = new();
-    private readonly object _nvfp4ScaleLock = new();
+    private readonly Dictionary<Core.Tensors.Tensor, ResidentBlockScales> _blockScaleDevice = new();
+    private readonly object _blockScaleLock = new();
 
     /// <summary>Sets (or replaces) the SmoothQuant per-input-channel scale s[K] for <paramref name="weight"/>: X_hat = X/s, W_hat = W*s.</summary>
     /// <remarks>Product-preserving pre-quantization — migrates activation outlier difficulty into the weight (see
@@ -664,8 +664,9 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         if (info.FullPrecisionMatMul || weightRowOffset != 0 || weightRowCount >= 0) return false;
         if (_kernels is null || !_kernels.HasW8A8Kernels || !Int8Gemm.IsSupported) return false;
         if (info.ConvRotGroupSize > 0 && !_kernels.HasConvRotKernels) return false;
-        // The rotate kernel stages a group per block; past the no-opt-in shared limit the launch fails opaquely.
-        if (CudaKernels.ConvRotRotateSharedBytes(info.ConvRotGroupSize) > _kernels.DefaultDynamicSharedBytes) return false;
+        // The rotate kernel stages a group per block; past the no-opt-in shared limit the launch fails opaquely. A weight
+        // without a rotation stages nothing.
+        if (info.ConvRotGroupSize > 0 && CudaKernels.ConvRotRotateSharedBytes(info.ConvRotGroupSize) > _kernels.DefaultDynamicSharedBytes) return false;
         if (weight.Shape.Rank != 2) return false;
 
         int n = (int)weight.Shape[0];
@@ -741,39 +742,46 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// layer must run a real GEMM rather than a quantized one", which is exactly what this path does — the weight is
     /// unpacked to F16/BF16 and handed to cuBLAS. Every nvfp4 layer in the Qwen3-VL AWQ encoder carries the flag, so
     /// honouring it the way the int8 IMMA gate does would disable the resident path wholesale.</remarks>
-    private bool CanRunResidentNvfp4(Tensor weight, QuantWeightInfo info, int weightRowOffset, int weightRowCount)
+    private bool CanRunResidentBlockScaled(Tensor weight, QuantWeightInfo info, int weightRowOffset, int weightRowCount)
     {
-        if (info.Format != "nvfp4") return false;
+        if (BlockScaleFormats.FromQuantFormat(info.Format) is not { } format) return false;
         if (weightRowOffset != 0 || weightRowCount >= 0) return false;
-        if (_kernels is null || !_kernels.HasNvfp4Kernels) return false;
-        if (weight.Shape.Rank != 2) return false;
-
-        Tensor blockScale = info.BlockScale!;
-        if (blockScale.DType != DType.F8E4M3 || blockScale.Shape.Rank != 2) return false;
-        if (info.GlobalScale!.DType != DType.F32 || info.GlobalScale.ElementCount != 1) return false;
+        if (_kernels is null || weight.Shape.Rank != 2 || info.BlockScale is not { Shape.Rank: 2 } blockScale) return false;
+        switch (format)
+        {
+            case BlockScaleFormat.Nvfp4:
+                if (weight.DType != DType.F4E2M1 || blockScale.DType != DType.F8E4M3 || !_kernels.HasNvfp4Kernels) return false;
+                if (info.GlobalScale is null || info.GlobalScale.DType != DType.F32 || info.GlobalScale.ElementCount != 1) return false;
+                break;
+            case BlockScaleFormat.Mxfp8:
+                if (weight.DType != DType.F8E4M3 || blockScale.DType != DType.U8 || !_kernels.HasMxfp8Kernels) return false;
+                break;
+            default:
+                return false;
+        }
 
         long n = weight.Shape[0];
         long k = weight.Shape[1];
-        if (k % Nvfp4ResidentCodec.GroupSize != 0) return false;
+        int group = format.GroupSize();
+        if (k % group != 0) return false;
         // Rows are padded up to 128 and block columns up to 4 by the blocked layout, so the stored scale tensor is
         // never smaller than the logical one; smaller means the companion does not belong to this weight.
-        return blockScale.Shape[0] >= n && blockScale.Shape[1] >= k / Nvfp4ResidentCodec.GroupSize
-            && blockScale.Shape[1] % 4 == 0;
+        return blockScale.Shape[0] >= n && blockScale.Shape[1] >= k / group && blockScale.Shape[1] % 4 == 0;
     }
 
     /// <summary>Frees every resident-nvfp4 device block-scale buffer (mirrors FreeW8A8Cache's scope/callers).</summary>
-    private void FreeNvfp4ScaleCache(GpuTransferHelper.State? explicitState = null)
+    private void FreeBlockScaleCache(GpuTransferHelper.State? explicitState = null)
     {
         List<Exception>? failures = null;
-        lock (_nvfp4ScaleLock)
+        lock (_blockScaleLock)
         {
-            foreach ((Tensor weight, Nvfp4WeightScales scales) in _nvfp4ScaleDevice.ToArray())
+            foreach ((Tensor weight, ResidentBlockScales scales) in _blockScaleDevice.ToArray())
             {
                 try
                 {
                     if (explicitState is null) GpuTransferHelper.FreeDevice(scales.BlockScaleDevice);
                     else GpuTransferHelper.FreeDevice(explicitState, scales.BlockScaleDevice);
-                    _nvfp4ScaleDevice.Remove(weight);
+                    _blockScaleDevice.Remove(weight);
                 }
                 catch (Exception error) { (failures ??= []).Add(error); }
             }
@@ -781,15 +789,15 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         if (failures is not null) throw new AggregateException("One or more resident-nvfp4 weight scales failed to release.", failures);
     }
 
-    /// <summary>Uploads (once) the swizzled E4M3 block scales the dequant kernel indexes, and reads the two host scalars.</summary>
+    /// <summary>Uploads (once) a block-scaled weight's swizzled scale tensor for the kernels that index it, and reads its host scalars (nvfp4 carries two; the MX formats none).</summary>
     /// <remarks>Persistent, not pool-allocated: it outlives the call and is read on the compute stream every GEMM.
     /// The two scalars are captured here rather than at launch time because reading them means touching
     /// <c>DataPointer</c> on the host, which must happen before the call reaches the transfer caches.</remarks>
-    private unsafe Nvfp4WeightScales EnsureNvfp4Scales(Tensor weight)
+    private unsafe ResidentBlockScales EnsureBlockScales(Tensor weight)
     {
-        lock (_nvfp4ScaleLock)
+        lock (_blockScaleLock)
         {
-            if (_nvfp4ScaleDevice.TryGetValue(weight, out Nvfp4WeightScales cached)) return cached;
+            if (_blockScaleDevice.TryGetValue(weight, out ResidentBlockScales cached)) return cached;
 
             Tensor blockScale = weight.QuantInfo!.BlockScale!;
             nuint byteSize = (nuint)blockScale.DType.ComputeByteCount(blockScale.ElementCount);
@@ -798,9 +806,11 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             {
                 CudaDriverApi.cuMemcpyHtoDAsync(dev, (nint)blockScale.DataPointer, byteSize, _stream.Handle).ThrowOnError();
                 _stream.Synchronize();
-                Nvfp4WeightScales scales = new Nvfp4WeightScales(dev, blockScale.Fp8ScaleFactor,
-                    ((float*)weight.QuantInfo.GlobalScale!.DataPointer)[0], (int)blockScale.Shape[1]);
-                _nvfp4ScaleDevice[weight] = scales;
+                QuantWeightInfo info = weight.QuantInfo!;
+                float globalScale = info.GlobalScale is null ? 1f : ((float*)info.GlobalScale.DataPointer)[0];
+                ResidentBlockScales scales = new ResidentBlockScales(dev, blockScale.Fp8ScaleFactor, globalScale,
+                    (int)blockScale.Shape[1], BlockScaleFormats.FromQuantFormat(info.Format) ?? BlockScaleFormat.Nvfp4);
+                _blockScaleDevice[weight] = scales;
                 return scales;
             }
             catch
@@ -811,30 +821,37 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Weight-side dtype materialization, substituting the nvfp4 block-scaled unpack for the plain cast.</summary>
+    /// <summary>Weight-side dtype materialization, substituting the block-scaled unpack (nvfp4 or mxfp8) for the plain cast.</summary>
     /// <remarks>Two allocator flavours exist at the call site — the cached cast owns its buffer through
     /// <see cref="GpuTransferHelper"/>, the transient one through <see cref="CudaMemory"/> — so this pair mirrors
     /// <see cref="CastOnGpu"/> and <see cref="CastIfNeeded"/> rather than replacing either.</remarks>
-    private void MaterializeWeight(ulong destination, ulong source, Tensor weight, DType gemmDtype, in Nvfp4WeightScales nvfp4)
+    private void MaterializeWeight(ulong destination, ulong source, Tensor weight, DType gemmDtype, in ResidentBlockScales scales)
     {
-        if (nvfp4.BlockScaleDevice == 0)
+        if (scales.BlockScaleDevice == 0)
         {
             CastOnGpu(destination, source, weight.DType, gemmDtype, (int)weight.ElementCount);
             return;
         }
-        _kernels!.LaunchNvfp4Dequant(destination, source, nvfp4.BlockScaleDevice,
-            (int)weight.Shape[0], (int)(weight.Shape[1] / 2), nvfp4.PaddedCols,
-            nvfp4.ScaleFactor, nvfp4.GlobalScale, _stream.Handle, outBf16: gemmDtype == DType.BF16);
+        if (scales.Format == BlockScaleFormat.Mxfp8)
+        {
+            _kernels!.LaunchMxfp8Dequant(destination, source, scales.BlockScaleDevice,
+                (int)weight.Shape[0], (int)weight.Shape[1], scales.PaddedCols, scales.ScaleFactor, _stream.Handle,
+                outBf16: gemmDtype == DType.BF16);
+            return;
+        }
+        _kernels!.LaunchNvfp4Dequant(destination, source, scales.BlockScaleDevice,
+            (int)weight.Shape[0], (int)(weight.Shape[1] / 2), scales.PaddedCols,
+            scales.ScaleFactor, scales.GlobalScale, _stream.Handle, outBf16: gemmDtype == DType.BF16);
     }
 
     /// <summary>Transient-buffer form of <see cref="MaterializeWeight"/>; <paramref name="castOut"/> is the caller's to free.</summary>
     private unsafe ulong MaterializeWeightIfNeeded(ulong source, Tensor weight, DType gemmDtype, out ulong castOut,
-        in Nvfp4WeightScales nvfp4)
+        in ResidentBlockScales scales)
     {
-        if (nvfp4.BlockScaleDevice == 0)
+        if (scales.BlockScaleDevice == 0)
             return CastIfNeeded(source, weight.DType, gemmDtype, (int)weight.ElementCount, out castOut);
         castOut = CudaMemory.Allocate((nuint)(weight.ElementCount * gemmDtype.SizeInBytes));
-        MaterializeWeight(castOut, source, weight, gemmDtype, nvfp4);
+        MaterializeWeight(castOut, source, weight, gemmDtype, scales);
         return castOut;
     }
 
@@ -1404,7 +1421,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         catch (Exception error) { (failures ??= []).Add(error); }
         try { FreeInt8RowScaleCache(explicitState); }
         catch (Exception error) { (failures ??= []).Add(error); }
-        try { FreeNvfp4ScaleCache(explicitState); }
+        try { FreeBlockScaleCache(explicitState); }
         catch (Exception error) { (failures ??= []).Add(error); }
         if (failures is not null) throw new AggregateException("One or more W8A8 cache buffers failed to release.", failures);
     }
@@ -1815,14 +1832,17 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             return;
         }
 
-        // A resident nvfp4 weight is 4 bits per element with its scales in a separate swizzled tensor, so the generic
-        // CastOnGpu path cannot touch it (that helper is pointer-level and never sees the companions). A layer the
-        // dequant kernel cannot serve — no PTX, a row range, a companion that does not describe this weight — is
-        // unpacked on the host here or it cannot run at all.
-        if (weight.DType == DType.F4E2M1 && weight.QuantInfo is { BlockScale: not null, GlobalScale: not null } nvfp4Info
-            && !CanRunResidentNvfp4(weight, nvfp4Info, weightRowOffset, weightRowCount))
+        // A resident block-scaled weight keeps its scales in a separate swizzled tensor, so the generic CastOnGpu path
+        // cannot touch it (that helper is pointer-level and never sees the companions). A layer the unpack kernel
+        // cannot serve — no PTX, a row range, a companion that does not describe this weight — is unpacked on the
+        // host here or it cannot run at all.
+        if (weight.QuantInfo is { BlockScale: not null } packedInfo
+            && BlockScaleFormats.FromQuantFormat(packedInfo.Format) is { } packedFormat
+            && !CanRunResidentBlockScaled(weight, packedInfo, weightRowOffset, weightRowCount))
         {
-            using Tensor dequantized = Nvfp4ResidentCodec.DequantToBf16(weight, nvfp4Info.BlockScale, nvfp4Info.GlobalScale);
+            using Tensor dequantized = packedFormat == BlockScaleFormat.Mxfp8
+                ? Mxfp8ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale)
+                : Nvfp4ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale, packedInfo.GlobalScale!);
             try
             {
                 LinearCore(output, input, dequantized, bias, cacheWeightCast: false, weightRowOffset, weightRowCount,
@@ -1883,26 +1903,24 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         bool int8Resident = weight.DType == DType.I8 && weight.QuantInfo is { RowScale: not null };
         ulong int8RowScaleDev = int8Resident ? EnsureInt8RowScaleDev(weight, n) : 0;
 
-        // Same ordering rule for nvfp4: the block-scale upload and the two scalar reads are HOST reads of the
+        // Same ordering rule for block-scaled weights: the scale upload and the scalar reads are HOST reads of the
         // companions, so they happen before the transfer caches are touched. Eligibility was already settled by the
-        // fallback gate above, so reaching here with an F4E2M1 weight means the kernel can serve it.
-        Nvfp4WeightScales nvfp4Scales = weight.DType == DType.F4E2M1
-            && weight.QuantInfo is { BlockScale: not null, GlobalScale: not null } ? EnsureNvfp4Scales(weight)
-                : default;
+        // fallback gate above, so reaching here with a packed weight means the kernel can serve it.
+        ResidentBlockScales blockScales = weight.QuantInfo is { BlockScale: not null } residentInfo
+            && BlockScaleFormats.FromQuantFormat(residentInfo.Format) is not null ? EnsureBlockScales(weight) : default;
 
         // Native block-scaled GEMM (Blackwell): the packed weight and its scale tensor are the operands as stored, so
         // the checkpoint's scale layout must be the one cuBLASLt derives from [N, K] — block columns padded to 4 —
         // and a row range, which cannot address the packed layout, takes the unpack path like every other refusal.
         BlockScaleFormat? blockScaled = null;
-        if (!rowRange && EnableNativeFp4Gemm && nvfp4Scales.BlockScaleDevice != 0
-            && BlockScaleFormats.FromQuantFormat(weight.QuantInfo?.Format) is { } bsFormat
-            && nvfp4Scales.PaddedCols == (k / bsFormat.GroupSize() + 3) / 4 * 4
+        if (!rowRange && EnableNativeFp4Gemm && blockScales.BlockScaleDevice != 0
+            && blockScales.PaddedCols == (k / blockScales.Format.GroupSize() + 3) / 4 * 4
             && (input.DType == DType.F32 || input.DType == DType.F16)
             && (output.DType == DType.F16 || output.DType == DType.F32)
             && k % 32 == 0 && (n * output.DType.SizeInBytes) % 16 == 0
             && _kernels!.HasBlockQuantKernels && BlockScaledExecutor.IsSupported)
         {
-            blockScaled = bsFormat;
+            blockScaled = blockScales.Format;
         }
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
@@ -2093,6 +2111,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             // needs 16-byte leading dims (lda/ldb = k fp8 bytes; ldc = n · output element bytes); non-conforming
             // shapes fall through to the cast-to-F16 path below.
             if (EnableNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
+                && weight.QuantInfo?.BlockScale is null   // an MXFP8 weight is not per-tensor fp8
                 && !(weight.DType == DType.F8E5M2 && input.DType == DType.F8E5M2)   // no E5M2 × E5M2 kernel exists
                 && (input.DType.IsFp8 || input.DType == DType.F32 || input.DType == DType.F16)
                 && (output.DType == DType.F16 || output.DType == DType.F32) && k % 16 == 0
@@ -2167,13 +2186,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             {
                 int count = m * k;
                 int paddedRows = (m + 127) / 128 * 128;
-                int paddedCols = nvfp4Scales.PaddedCols;
+                int paddedCols = blockScales.PaddedCols;
                 pInputPacked = CudaMemory.Allocate((nuint)format.OperandType().ComputeByteCount(count));
                 pInputScale = CudaMemory.Allocate((nuint)((long)paddedRows * paddedCols));
                 pBlockScratch = CudaMemory.Allocate((nuint)(CudaKernels.BlockQuantScratchFloats(count) * sizeof(float)));
                 _kernels!.LaunchBlockQuant(format, pInputPacked, pInputScale, pBlockScratch, pInput, input.DType,
-                    m, k, paddedRows, paddedCols, nvfp4Scales.ScaleFactor * nvfp4Scales.GlobalScale, _stream.Handle);
-                BlockScaledExecutor.Run(weight: pWeight, weightBlockScale: nvfp4Scales.BlockScaleDevice,
+                    m, k, paddedRows, paddedCols, blockScales.ScaleFactor * blockScales.GlobalScale, _stream.Handle);
+                BlockScaledExecutor.Run(weight: pWeight, weightBlockScale: blockScales.BlockScaleDevice,
                     input: pInputPacked, inputBlockScale: pInputScale, outPtr: pOutput, m: m, n: n, k: k,
                     alphaBetaDev: pBlockScratch + sizeof(float), stream: _stream.Handle, format: format,
                     outF32: output.DType == DType.F32);
@@ -2302,13 +2321,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                     if (freeBytes > 0 && freeBytes - (long)castBytes < headroom)
                     {
                         System.Threading.Interlocked.Increment(ref _castTransientGated);
-                        weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, nvfp4Scales);
+                        weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, blockScales);
                     }
                     else
                     {
                         System.Threading.Interlocked.Increment(ref _castCachedNew);
                         weightPtr = GpuTransferHelper.AllocateDevice(castBytes);
-                        MaterializeWeight(weightPtr, pWeight, weight, gemmDtype, nvfp4Scales);
+                        MaterializeWeight(weightPtr, pWeight, weight, gemmDtype, blockScales);
                         GpuTransferHelper.CacheWeightCast(weight, gemmDtype, weightPtr, castBytes);
                     }
                 }
@@ -2324,7 +2343,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                             $"hip={hipUpcast} weightCached={GpuTransferHelper.IsWeightCached(weight)} " +
                             $"dtype={weight.DType} gemmDtype={gemmDtype} M={m} N={n} K={k}");
                 }
-                weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, nvfp4Scales);
+                weightPtr = MaterializeWeightIfNeeded(pWeight, weight, gemmDtype, out pWeightCast, blockScales);
             }
 
             // Every branch above leaves weightPtr addressing gemmDtype elements over the WHOLE weight — casts are
@@ -3912,6 +3931,15 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         || dtype == DType.Q2_K || dtype == DType.Q3_K
         || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K
         || dtype == DType.I8 || dtype == DType.F4E2M1;
+
+    /// <inheritdoc/>
+    /// <remarks>An MXFP8 weight is plain F8E4M3 with its block scales on <c>QuantInfo</c>. It stays packed only where the
+    /// native block-scaled GEMM will consume it (Blackwell with <c>numerics.fp4Native</c> on); anywhere else it widens on
+    /// the host to the BF16 a pre-residency build produced, so a card below Blackwell generates the same bytes as before
+    /// rather than unpacking 3.8B parameters every step.</remarks>
+    public bool SupportsResidentQuant(Tensor weight) => weight.QuantInfo is { Format: "mxfp8", BlockScale: not null }
+        ? EnableNativeFp4Gemm && _context.Sm >= CudaArch.Blackwell && _kernels is { HasMxfp8Kernels: true, HasBlockQuantKernels: true }
+        : SupportsResidentQuant(weight.DType);
 
     /// <summary>True once the optional stepcache.ptx module is compiled/shipped; the step-cache stays disabled on CUDA without it.</summary>
     /// <remarks>Built via src/HartsyInference.Cuda/Kernels/dit/build.sh.</remarks>
@@ -9085,7 +9113,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     }
 
     /// <summary>Test hook for the block-scaled activation quantizer: <paramref name="input"/> (F32/F16 <c>[rows, cols]</c>) → <paramref name="packedOut"/> (U8 <c>[rows, cols/2]</c>), <paramref name="scaleOut"/> (F8E4M3 <c>[paddedRows, paddedCols]</c>, blocked layout) and <paramref name="scalarsOut"/> (F32 <c>[3]</c>: sf, alpha = <paramref name="weightScale"/>·sf, beta). Plain compute, so any CUDA GPU validates it.</summary>
-    internal void BlockQuantizeActivationForTest(Tensor packedOut, Tensor scaleOut, Tensor scalarsOut, Tensor input, float weightScale)
+    internal void BlockQuantizeActivationForTest(Tensor packedOut, Tensor scaleOut, Tensor scalarsOut, Tensor input, float weightScale,
+        BlockScaleFormat format = BlockScaleFormat.Nvfp4)
     {
         using OpScope _op = EnterOp();
         EnsureKernels();
@@ -9097,12 +9126,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         try
         {
             pIn = GpuTransferHelper.CopyToDevice(input);
-            pOut = GpuTransferHelper.AllocateDevice((nuint)(count / 2));
+            nuint packedBytes = (nuint)format.OperandType().ComputeByteCount(count);
+            pOut = GpuTransferHelper.AllocateDevice(packedBytes);
             pScale = GpuTransferHelper.AllocateDevice((nuint)((long)paddedRows * paddedCols));
             pScratch = GpuTransferHelper.AllocateDevice((nuint)(CudaKernels.BlockQuantScratchFloats(count) * sizeof(float)));
-            _kernels!.LaunchBlockQuant(BlockScaleFormat.Nvfp4, pOut, pScale, pScratch, pIn, input.DType,
+            _kernels!.LaunchBlockQuant(format, pOut, pScale, pScratch, pIn, input.DType,
                 rows, cols, paddedRows, paddedCols, weightScale, _stream.Handle);
-            GpuTransferHelper.CacheActivation(packedOut, pOut, (nuint)(count / 2));
+            GpuTransferHelper.CacheActivation(packedOut, pOut, packedBytes);
             cachedOut = true;
             GpuTransferHelper.CacheActivation(scaleOut, pScale, (nuint)((long)paddedRows * paddedCols));
             cachedScale = true;
@@ -11188,5 +11218,5 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Everything the nvfp4 dequant kernel needs about one resident weight beyond its packed bytes.</summary>
     /// <param name="BlockScaleDevice">Device copy of the swizzled E4M3 scales; 0 means the weight is not nvfp4.</param>
     /// <param name="PaddedCols">Stored last-dim length of the scale tensor, which is the swizzle's stride.</param>
-    private readonly record struct Nvfp4WeightScales(ulong BlockScaleDevice, float ScaleFactor, float GlobalScale, int PaddedCols);
+    private readonly record struct ResidentBlockScales(ulong BlockScaleDevice, float ScaleFactor, float GlobalScale, int PaddedCols, BlockScaleFormat Format);
 }
