@@ -1,3 +1,5 @@
+using HartsyInference.Core.Backends;
+
 namespace HartsyInference.ModelAssets.Checkpoints;
 
 /// <summary>How a <see cref="CheckpointSource"/> presents a checkpoint's weights to the converter that consumes them.</summary>
@@ -27,6 +29,10 @@ public sealed record CheckpointOpenOptions
     /// <c>pre_quant_scale</c> field, so those layers take the eager path there and widen. Ignored unless
     /// <see cref="FoldQuantCompanions"/> is on, which is the pass it modifies.</remarks>
     public bool KeepNvfp4Companions { get; init; }
+
+    /// <summary>The options for a checkpoint whose nvfp4 groups <paramref name="backend"/> will consume: kept packed where it multiplies them natively, folded to fp8 (half the F16 footprint, the same fp8 GEMM path) everywhere else. One decision, so the native path is reachable on exactly the hardware it targets and nothing else changes.</summary>
+    public static CheckpointOpenOptions ForNvfp4Consumer(IBackend backend)
+        => backend.Capabilities.NativeBlockScaledGemm ? new() { ResidentNvfp4 = true } : new() { Nvfp4ToFp8 = true };
 
     /// <summary>Relabel rank-2 GGUF tensors from ggml's <c>[in, out]</c> order to the <c>[out, in]</c> order the engine assumes for a matrix weight.</summary>
     /// <remarks>Only a caller that wants GGUF's own layout — a re-quantizer rewriting a GGUF — sets this false. With it

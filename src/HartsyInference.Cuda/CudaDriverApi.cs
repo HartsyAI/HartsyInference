@@ -119,6 +119,9 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName, EntryPoint = "cuMemsetD8_v2")]
     internal static partial int cuMemsetD8(ulong dst, byte value, nuint count);
 
+    [LibraryImport(LibName, EntryPoint = "cuMemsetD8Async")]
+    internal static partial int cuMemsetD8Async(ulong dst, byte value, nuint count, nint stream);
+
     [LibraryImport(LibName, EntryPoint = "cuMemsetD32_v2")]
     internal static partial int cuMemsetD32(ulong dst, uint value, nuint count);
 

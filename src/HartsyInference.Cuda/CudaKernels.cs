@@ -66,6 +66,10 @@ public sealed class CudaKernels : IDisposable
     // Optional: NVFP4 packed-weight dequant (dequant_nvfp4_to_f16.ptx, src/HartsyInference.Cuda/Kernels/dequant) — the
     // per-GEMM unpack that lets a ComfyUI nvfp4 checkpoint stay resident at 0.5 byte/param. Null when not compiled.
     private readonly CudaModule? _nvfp4Module;
+    private readonly CudaModule? _blockQuantModule;
+    private readonly nint _blockQuantFinalizeNvfp4;
+    private readonly nint _blockQuantNvfp4F32;
+    private readonly nint _blockQuantNvfp4F16;
     private readonly nint _nvfp4DequantF16;
     private readonly nint _nvfp4DequantBf16;
 
@@ -690,6 +694,17 @@ public sealed class CudaKernels : IDisposable
                 CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16, 8, (int)Int8MmaSharedBytes);
             if (Int8MmaSharedBytesPad > (uint)DefaultDynamicSharedBytes)
                 CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16Pad, 8, (int)Int8MmaSharedBytesPad);
+        }
+
+        // Optional module: block-scaled activation quantization for the Blackwell GEMM path
+        // (src/HartsyInference.Cuda/Kernels/dequant/block_quant.cu). Absence is not an error.
+        string blockQuantPath = Path.Combine(ptxDir, "block_quant.ptx");
+        if (File.Exists(blockQuantPath))
+        {
+            _blockQuantModule = LoadOwnedModule(blockQuantPath);
+            _blockQuantFinalizeNvfp4 = _blockQuantModule.GetFunction("block_quant_finalize_nvfp4");
+            _blockQuantNvfp4F32 = _blockQuantModule.GetFunction("block_quant_nvfp4_f32");
+            _blockQuantNvfp4F16 = _blockQuantModule.GetFunction("block_quant_nvfp4_f16");
         }
 
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
@@ -2401,6 +2416,49 @@ public sealed class CudaKernels : IDisposable
         uint shared = swizzle ? Int8MmaSharedBytes : Int8MmaSharedBytesPad;
         uint gridX = (uint)(n / Int8MmaTileN), gridY = (uint)((m + 127) / 128);
         CudaDriverApi.cuLaunchKernel(fn, gridX, gridY, 1, 256, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional block_quant.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
+    public bool HasBlockQuantKernels => _blockQuantModule is not null;
+
+    /// <summary>Scratch floats <see cref="LaunchBlockQuant"/> needs for <paramref name="count"/> elements: three scalars (sf, alpha, beta) then the reduction's per-block maxes.</summary>
+    public static int BlockQuantScratchFloats(int count) => 3 + Fp8AbsMaxBlockCount(count);
+
+    /// <summary>Block-scaled activation quantization for <see cref="BlockScaledGemmExecutor"/>: <c>x[rows, cols]</c> (F32 or F16) → the packed operand at <paramref name="output"/>, block scales in cuBLASLt's blocked layout at <paramref name="blockScale"/> (<paramref name="paddedRows"/> × <paramref name="paddedCols"/> bytes, zeroed here so the padding reads as a defined value), and at <paramref name="scratch"/> the scalars <c>[sf, alpha = weightScale·sf, beta = 0]</c> followed by the reduction's block maxes. Everything stays on <paramref name="stream"/>; the GEMM reads alpha and beta from <c>scratch + 4</c>.</summary>
+    public unsafe void LaunchBlockQuant(BlockScaleFormat format, ulong output, ulong blockScale, ulong scratch,
+        ulong x, DType xType, int rows, int cols, int paddedRows, int paddedCols, float weightScale, nint stream)
+    {
+        if (_blockQuantModule is null) throw new InvalidOperationException("block_quant.ptx not present in the Ptx folder.");
+        if (format != BlockScaleFormat.Nvfp4)
+            throw new NotSupportedException($"{format} activation quantization has no kernel yet; only NVFP4 does.");
+        if (xType != DType.F32 && xType != DType.F16)
+            throw new ArgumentException($"Block quantization reads F32 or F16 activations, not {xType}.", nameof(xType));
+        int group = format.GroupSize();
+        if (cols % group != 0)
+            throw new ArgumentException($"cols={cols} is not a multiple of the {format} block size {group}.", nameof(cols));
+
+        int count = rows * cols;
+        uint blocks = (uint)Fp8AbsMaxBlockCount(count);
+        ulong blockMax = scratch + 3 * sizeof(float);
+        ulong xA = x, bmA = blockMax; uint nA = (uint)count;
+        void** args = stackalloc void*[3];
+        args[0] = &xA; args[1] = &bmA; args[2] = &nA;
+        CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _fp8AbsMaxF16 : _fp8AbsMax,
+            blocks, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+
+        ulong scA = scratch; uint nbA = blocks; float wsA = weightScale;
+        void** args2 = stackalloc void*[4];
+        args2[0] = &bmA; args2[1] = &nbA; args2[2] = &wsA; args2[3] = &scA;
+        CudaDriverApi.cuLaunchKernel(_blockQuantFinalizeNvfp4, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args2, 0).ThrowOnError();
+
+        CudaDriverApi.cuMemsetD8Async(blockScale, 0, (nuint)((long)paddedRows * paddedCols), stream).ThrowOnError();
+        ulong oA = output, sA = blockScale; uint rA = (uint)rows, cA = (uint)cols, pA = (uint)paddedCols;
+        void** args3 = stackalloc void*[7];
+        args3[0] = &xA; args3[1] = &oA; args3[2] = &sA; args3[3] = &scA; args3[4] = &rA; args3[5] = &cA; args3[6] = &pA;
+        long threads = (long)rows * (cols / group);
+        uint grid = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _blockQuantNvfp4F16 : _blockQuantNvfp4F32,
+            grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args3, 0).ThrowOnError();
     }
 
     /// <summary>Whether the optional dequant_nvfp4_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>

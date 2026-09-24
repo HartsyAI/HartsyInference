@@ -20,6 +20,11 @@ public static partial class EngineKnobs
         BoolOverride("numerics.fp8Native", KnobScope.Runtime, KnobDomain.Numerics,
             "Forces native FP8 tensor-core GEMMs on or off; unset follows the card (on for Ada SM 8.9+, off below).");
 
+    /// <summary>Native block-scaled (NVFP4/MXFP4/MXFP8) tensor-core GEMMs on Blackwell; unset is off until the path is validated on a card, after which it follows the card like <see cref="Fp8Native"/>.</summary>
+    public static readonly Knob<bool?> Fp4Native =
+        BoolOverride("numerics.fp4Native", KnobScope.Runtime, KnobDomain.Numerics,
+            "Native block-scaled (NVFP4/MXFP4/MXFP8) tensor-core GEMMs on Blackwell; unset is off until validated on a card.");
+
     /// <summary>Forces LTX-2 two-stage (base + refine) sampling on or off; unset follows the checkpoint's config.</summary>
     public static readonly Knob<bool?> Ltx2TwoStage =
         BoolOverride("numerics.ltx2TwoStage", KnobScope.Construction, KnobDomain.Numerics,
