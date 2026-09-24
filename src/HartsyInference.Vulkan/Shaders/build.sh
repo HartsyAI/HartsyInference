@@ -112,6 +112,7 @@ SINGLE_KERNELS=(
     chw_f32_to_hwc_u8
     affine_mix
     fill_bias
+    quant_int8_rowwise
     pixel_shuffle2d
     modulation_split4
     affine_broadcast_row_indexed

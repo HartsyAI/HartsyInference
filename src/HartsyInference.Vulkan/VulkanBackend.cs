@@ -883,8 +883,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Opt-in INT8 dot-product GEMM path for <see cref="Linear"/> (<c>HARTSYINFERENCE_VK_INT8=1</c>), wiring the already-validated <see cref="MatMulInt8"/>/<see cref="Int8Quantizer"/> pair (bit-exact on the 3060 per <c>docs/Research/VULKAN_OPTIMIZATION.md</c>) into the normal model-code call path — the explicit open item both that doc and <c>ROADMAP.md</c> tracked as "wire the INT8 quantizer into Vulkan model loading." Re-quantizes BOTH weight and activation on EVERY call via the CPU-side <see cref="Int8Quantizer.RowwiseSymmetric"/> — correct and wired end-to-end, but not yet perf-optimal: caching the weight's quantized form across calls (weights don't change between calls, only activations do) is the natural follow-up and is intentionally NOT done here, to keep this pass bounded — a persistent per-weight INT8 cache needs its own lifecycle wiring (freed alongside <see cref="FreeWeights"/>) that deserves its own review, not a rushed addition here. Narrowly scoped to the plain 2-D F32 case (K%4==0, F32 in/out) on a device exposing the integer dot-product feature; anything else (F16, batched, non-4-divisible K, feature unavailable, opted out) falls through to the normal GEMM path completely unchanged.</summary>
-    private unsafe bool TryDispatchInt8Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    /// <summary>The opt-in INT8 Linear: the activation is quantized per row on the device each call, the weight once (cached
+    /// beside its other casts and freed with it), the product runs on <c>matmul_int8</c> and the bias through
+    /// <c>broadcast_add</c>. Refuses anything but 2-D F32 operands with K a multiple of 4, which the packed kernel needs.</summary>
+    private bool TryDispatchInt8Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         if (!EnableInt8Linear || !Vk.HasInt8DotProduct) return false;
         if (output.Shape.Rank != 2 || input.Shape.Rank != 2 || weight.Shape.Rank != 2) return false;
@@ -893,30 +895,92 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         int M = (int)output.Shape[0], N = (int)output.Shape[1], K = (int)input.Shape[1];
         if ((K & 3) != 0) return false;
         if ((int)weight.Shape[0] != N || (int)weight.Shape[1] != K) return false;
-        if (bias is not null && bias.DType != DType.F32) return false;
+        if (bias is not null && (bias.DType != DType.F32 || bias.ElementCount != N)) return false;
 
-        // Both quantizer calls read .DataPointer directly (CPU-side) — a real, documented D2H sync if
-        // either operand happened to be GPU-resident. Activations from a prior GPU op commonly are; this
-        // is the known cost of this opt-in path until the weight-side cache lands (see doc comment above).
-        (Tensor inQuant, Tensor inScale) = Int8Quantizer.RowwiseSymmetric(input);
-        (Tensor wQuant, Tensor wScale) = Int8Quantizer.RowwiseSymmetric(weight);
+        // The activation is quantized per call into a transient; the weight once, cached beside its other casts.
+        VulkanBuffer xBuf = GetBuffer(input);
+        VulkanBuffer xQ = _xfer.AllocateDevice(Int8RowsBytes(M, K));
+        VulkanBuffer? wOwned = null;
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)((long)M * N * sizeof(float)));
         try
         {
-            MatMulInt8(output, inQuant, wQuant, inScale, wScale);
+            QuantizeInt8Rows(xBuf, xQ, M, K);
+            VulkanBuffer wQ;
+            (wQ, wOwned) = Int8Weight(weight);
+            DispatchInt8Gemm(xQ.Handle, wQ.Handle, outBuf.Handle, M, N, K,
+                saHandle: xQ.Handle, sbHandle: wQ.Handle, saOffset: (uint)((long)M * K / 4), sbOffset: (uint)((long)N * K / 4));
             if (bias is not null)
             {
-                float* outP = (float*)output.DataPointer;
-                float* biasP = (float*)bias.DataPointer;
-                for (int m = 0; m < M; m++)
-                    for (int n = 0; n < N; n++)
-                        outP[m * N + n] += biasP[n];
+                VulkanKernel add = GetKernel("broadcast_add_f32", storageBufferCount: 2, _default1DSpec);
+                Span<byte> pc = stackalloc byte[3 * 4];
+                BinaryWriteUInt(pc, 0, (uint)N);
+                BinaryWriteUInt(pc, 4, 1u);
+                BinaryWriteUInt(pc, 8, (uint)((long)M * N));
+                Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, GetBuffer(bias).Handle };
+                Dispatch(add, bufs, pc, GroupCount((long)M * N, LocalX1D));
             }
+            CacheOutput(output, outBuf);
             return true;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("Vulkan INT8 Linear dispatch failed", ex);
+            outBuf.Dispose();
+            throw;
         }
         finally
         {
-            inQuant.Dispose(); inScale.Dispose(); wQuant.Dispose(); wScale.Dispose();
+            _xfer.FreeDevice(xQ);
+            if (wOwned is not null) _xfer.FreeDevice(wOwned);
         }
+    }
+
+    /// <summary>Bytes of a per-row INT8 quantization of <c>[rows, K]</c>: the packed values, then one F32 scale per row.</summary>
+    private static ulong Int8RowsBytes(long rows, long k) => (ulong)(rows * k + rows * sizeof(float));
+
+    /// <summary>The weight's per-row INT8 form with its scales at the tail, quantized on the device once and cached under
+    /// <see cref="DType.I8"/> beside the weight's other casts, so it is freed with the weight.</summary>
+    private (VulkanBuffer buf, VulkanBuffer? owned) Int8Weight(Tensor weight)
+    {
+        if (_xfer.TryGetWeightCast(weight, DType.I8, out VulkanBuffer? cached)) return (cached!, null);
+        int n = (int)weight.Shape[0], k = (int)weight.Shape[1];
+        VulkanBuffer q = _xfer.AllocateDevice(Int8RowsBytes(n, k));
+        try { QuantizeInt8Rows(GetBuffer(weight), q, n, k); }
+        catch { q.Dispose(); throw; }
+        return FinishCast(weight, DType.I8, q, _xfer.ShouldCacheCast(weight));
+    }
+
+    /// <summary>quant_int8_rowwise: one workgroup per row, the packed int8 at the front of <paramref name="dst"/> and the scales after them.</summary>
+    private void QuantizeInt8Rows(VulkanBuffer src, VulkanBuffer dst, int rows, int k)
+    {
+        VulkanKernel kernel = GetKernel("quant_int8_rowwise", storageBufferCount: 3, _default1DSpec);
+        Span<byte> pc = stackalloc byte[3 * 4];
+        BinaryWriteUInt(pc, 0, (uint)rows);
+        BinaryWriteUInt(pc, 4, (uint)k);
+        BinaryWriteUInt(pc, 8, (uint)((long)rows * k / 4));
+        Span<ulong> bufs = stackalloc ulong[] { src.Handle, dst.Handle, dst.Handle };
+        Dispatch(kernel, bufs, pc, (uint)rows, 1, 1);
+    }
+
+    /// <summary>matmul_int8 on packed operands: the scales come from their own buffers or from the operand buffers' tails at the given float offsets.</summary>
+    private void DispatchInt8Gemm(ulong aHandle, ulong bHandle, ulong cHandle, int M, int N, int K,
+        ulong saHandle, ulong sbHandle, uint saOffset, uint sbOffset)
+    {
+        const uint BM = 64, BN = 64, BKP = 8, TM = 4, TN = 4;
+        VulkanKernel k = GetKernel("matmul_int8", storageBufferCount: 5, new SpecConstant[]
+        {
+            SpecConstant.UInt(0, BN / TN), SpecConstant.UInt(1, BM / TM), SpecConstant.UInt(2, 1),
+            SpecConstant.UInt(10, BM), SpecConstant.UInt(11, BN), SpecConstant.UInt(12, BKP),
+            SpecConstant.UInt(13, TM), SpecConstant.UInt(14, TN),
+        });
+        Span<byte> pc = stackalloc byte[5 * 4];
+        BinaryWriteUInt(pc, 0, (uint)M);
+        BinaryWriteUInt(pc, 4, (uint)N);
+        BinaryWriteUInt(pc, 8, (uint)K);
+        BinaryWriteUInt(pc, 12, saOffset);
+        BinaryWriteUInt(pc, 16, sbOffset);
+        Span<ulong> bufs = stackalloc ulong[] { aHandle, bHandle, cHandle, saHandle, sbHandle };
+        Dispatch(k, bufs, pc, (uint)(((long)N + BN - 1) / BN), (uint)(((long)M + BM - 1) / BM), 1);
     }
 
     public void BatchedMatMul(Tensor output, Tensor a, Tensor b)
@@ -1099,31 +1163,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         VulkanBuffer bBuf = GetBuffer(b);
         VulkanBuffer saBuf = GetBuffer(scaleA);
         VulkanBuffer sbBuf = GetBuffer(scaleB);
-        ulong outBytes = (ulong)((long)M * N * sizeof(float));
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)((long)M * N * sizeof(float)));
         try
         {
-            // Shared-memory tiled: BM x BN output block per workgroup, TM x TN per invocation.
-            // local = (BN/TN, BM/TM) = (16, 16) = 256 threads. BKP is the K tile in packed-int32
-            // units (real K per tile = BKP*4). Tiles are fixed; small shapes just bounds-check out.
-            const uint BM = 64, BN = 64, BKP = 8, TM = 4, TN = 4;
-            VulkanKernel k = GetKernel("matmul_int8", storageBufferCount: 5, new SpecConstant[]
-            {
-                SpecConstant.UInt(0, BN / TN), SpecConstant.UInt(1, BM / TM), SpecConstant.UInt(2, 1),
-                SpecConstant.UInt(10, BM), SpecConstant.UInt(11, BN), SpecConstant.UInt(12, BKP),
-                SpecConstant.UInt(13, TM), SpecConstant.UInt(14, TN),
-            });
-
-            Span<byte> pc = stackalloc byte[3 * 4];
-            BinaryWriteUInt(pc, 0, (uint)M);
-            BinaryWriteUInt(pc, 4, (uint)N);
-            BinaryWriteUInt(pc, 8, (uint)K);
-
-            Span<ulong> bufs = stackalloc ulong[] { aBuf.Handle, bBuf.Handle, outBuf.Handle, saBuf.Handle, sbBuf.Handle };
-            uint groupsX = (uint)(((long)N + BN - 1) / BN);
-            uint groupsY = (uint)(((long)M + BM - 1) / BM);
-            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
-
+            DispatchInt8Gemm(aBuf.Handle, bBuf.Handle, outBuf.Handle, M, N, K, saBuf.Handle, sbBuf.Handle, 0, 0);
             CacheOutput(output, outBuf);
         }
         catch (Exception ex)

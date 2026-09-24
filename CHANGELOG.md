@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.174
+
+- **Vulkan's INT8 Linear runs on the device.** With `numerics.vkInt8=true` the weight is quantized per row by
+  `quant_int8_rowwise` once and cached under `I8` beside its other casts — the scales packed at the buffer's tail
+  behind push-constant offsets, so it is one buffer per weight and dtype and is freed with the weight — the activation
+  is quantized by the same shader per call, and the bias goes through `broadcast_add`. Before, both quantizations and
+  the bias add were host loops and the weight was re-quantized on every call. Still off by default.
+- The Vulkan tests take `HARTSY_TEST_VULKAN_DEVICE` (a test-harness switch, not an engine knob) to run on a second card.
+
 ## alpha.173
 
 - **Vulkan computes a 16-bit-weight GEMM in F16.** `ResolveGemmDtype` takes both operands and the output, the CUDA
