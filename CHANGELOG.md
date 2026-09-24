@@ -6,6 +6,19 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.168
+
+- **`tests/blackwell-run.sh` is the rented-GPU session, scripted.** Preflight (driver ≥ 580 — every nvcc-built PTX
+  here is ISA 9.0 — the right card, cuBLAS resolvable), bootstrap (SDK, build, settings), probe (the shipped PTX
+  JITs or the run stops there), GPU tests with a skipped test counted as a failure, the regression gate head-only
+  and native-block-scaled off vs on, within-session determinism, an optional Vulkan pass capped at five minutes,
+  and a bundle plus summary; stage markers make a rerun repeat only what did not finish, `--budget-minutes` stops
+  the clock, `--auto-stop` stops a RunPod pod. `--rehearsal` runs the same script on the local card with the
+  Blackwell-only rows allowed to skip, so the pod run differs only in hardware. `benchmarks/CLOUD_GPU_RUNBOOK.md`
+  points at it.
+- `tests/regression-ab.sh` labels a knob arm by a hash of its knobs, so off-vs-on arms of one commit never share a
+  run directory, and `--gpu-name ""` with `--gpu N` names the card directly.
+
 ## alpha.167
 
 - **MXFP8 weights stay packed the way nvfp4 ones do.** `Mxfp8Codec.TryAttachResident` hangs a weight's UE8M0 block
