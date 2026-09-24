@@ -475,6 +475,12 @@ public sealed class CudaKernels : IDisposable
     private const uint BlockSize = 256;
     private readonly List<CudaModule> _ownedModules = [];
     private int _disposed;
+
+    /// <summary>Dynamic shared memory a block gets without opting in, as the device reports it (the Ampere-class 48 KB when constructed without one).</summary>
+    public int DefaultDynamicSharedBytes { get; }
+
+    /// <summary>The most dynamic shared memory an opt-in can raise a block to; a kernel whose tiles exceed it is left unbound rather than failing at launch.</summary>
+    public int MaxDynamicSharedBytes { get; }
     private static Func<string, Exception?>? _moduleLoadFailureForTests;
 
     /// <summary>Test-only fault injector invoked with each PTX path immediately before it is loaded.</summary>
@@ -509,8 +515,10 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Loads all PTX kernels from the specified directory.</summary>
-    public CudaKernels(string ptxDir)
+    public CudaKernels(string ptxDir, int defaultDynamicSharedBytes = 48 << 10, int maxDynamicSharedBytes = int.MaxValue)
     {
+        DefaultDynamicSharedBytes = defaultDynamicSharedBytes;
+        MaxDynamicSharedBytes = maxDynamicSharedBytes;
         try
         {
             if (!Directory.Exists(ptxDir))
@@ -658,7 +666,11 @@ public sealed class CudaKernels : IDisposable
 
         // Optional module: fused-dequant int8 mma GEMM (Kernels/dequant/int8_mma_gemm.cu). Absence is not an error.
         string mmaPath = Path.Combine(ptxDir, "int8_mma_gemm.ptx");
-        if (File.Exists(mmaPath))
+        if (File.Exists(mmaPath) && Int8MmaSharedBytesPad > (uint)MaxDynamicSharedBytes)
+        {
+            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] int8 mma GEMM needs {Int8MmaSharedBytesPad} B of dynamic shared memory per block; this device allows {MaxDynamicSharedBytes}. Using cuBLASLt + dequant instead.");
+        }
+        else if (File.Exists(mmaPath))
         {
             // No register cap: at 128x256 the accumulator alone is 128 registers and 90 KB of shared already pins
             // the kernel to one block per SM, so capping could only force spills. Verify with NUM_REGS (attribute
@@ -667,16 +679,16 @@ public sealed class CudaKernels : IDisposable
             _int8MmaModule = LoadOwnedModule(mmaPath);
             _int8MmaGemmF16 = _int8MmaModule.GetFunction("int8_mma_gemm_dequant_f16");
             _int8MmaGemmF16Pad = _int8MmaModule.GetFunction("int8_mma_gemm_dequant_f16_pad");
-            // Opt in to EXACTLY the mainloop's shared footprint, and only when it exceeds the 48 KB default —
+            // Opt in to EXACTLY the mainloop's shared footprint, and only when it exceeds the no-opt-in default —
             // never to the SM ceiling. This budget is what the driver uses to decide blocks-per-SM, so asking for
             // 99 KB "to leave room" makes two blocks arithmetically impossible, which silently overrides the
             // kernel's own `.minnctapersm 2` and lets ptxas spend all 256 registers per thread.
             // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8.
             // The two entry points have DIFFERENT footprints (the padded one carries 16 B of pad per row), so
             // each opts in to its own — a shared "max of both" would mis-budget the swizzled kernel's occupancy.
-            if (Int8MmaSharedBytes > 48 * 1024)
+            if (Int8MmaSharedBytes > (uint)DefaultDynamicSharedBytes)
                 CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16, 8, (int)Int8MmaSharedBytes);
-            if (Int8MmaSharedBytesPad > 48 * 1024)
+            if (Int8MmaSharedBytesPad > (uint)DefaultDynamicSharedBytes)
                 CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16Pad, 8, (int)Int8MmaSharedBytesPad);
         }
 
@@ -2232,6 +2244,16 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Whether the optional convrot.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu).</summary>
     public bool HasConvRotKernels => _convRotModule is not null;
 
+    /// <summary>Groups the rotate kernel packs into one 256-thread block: 1024 shared floats regardless of group size, so a small group packs more groups and a group past 1024 gets a block to itself.</summary>
+    private static uint ConvRotGroupsPerBlock(int group)
+    {
+        uint quarter = (uint)(group >> 2);
+        return quarter >= 256 ? 1u : Math.Max(1u, 256u / quarter);
+    }
+
+    /// <summary>Dynamic shared bytes one rotate block stages — what decides whether a group fits under the device's no-opt-in limit.</summary>
+    public static uint ConvRotRotateSharedBytes(int group) => (uint)((long)ConvRotGroupsPerBlock(group) * group * sizeof(float));
+
     /// <summary>ConvRot rotation — out = x @ H per contiguous <paramref name="group"/>-wide slice, over <c>count</c> elements (a multiple of <paramref name="group"/>). Out-of-place; <paramref name="output"/> may not alias x.</summary>
     public unsafe void LaunchConvRotRotate(ulong output, ulong x, long count, int group, nint stream, bool srcF16)
     {
@@ -2239,11 +2261,9 @@ public sealed class CudaKernels : IDisposable
         if (group < 4 || count % group != 0)
             throw new ArgumentException($"ConvRot needs count ({count}) to be a multiple of group ({group}).", nameof(count));
 
-        // 1024 shared floats per block regardless of group size, so a small group just packs more groups per block.
-        uint quarter = (uint)(group >> 2);
-        uint groupsPerBlock = quarter >= 256 ? 1u : Math.Max(1u, 256u / quarter);
+        uint groupsPerBlock = ConvRotGroupsPerBlock(group);
         ulong totalGroups = (ulong)(count / group);
-        uint sharedBytes = (uint)((long)groupsPerBlock * group * sizeof(float));
+        uint sharedBytes = ConvRotRotateSharedBytes(group);
 
         ulong xArg = x, oArg = output;
         uint groupArg = (uint)group, gpbArg = groupsPerBlock;
@@ -2265,12 +2285,12 @@ public sealed class CudaKernels : IDisposable
         _convRotModule is not null && cols > 0 && cols <= FusedConvRotMaxCols && group >= 4 && cols % group == 0
         && (group & (group - 1)) == 0 && (group & 0x55555554) != 0;
 
-    /// <summary>Float scratch the wide fused kernel rotates through, and the shared ceiling it must stay inside (48 KB is the per-block dynamic limit without a MAX_DYNAMIC_SHARED_SIZE_BYTES opt-in, which would cost occupancy). The static reduction scratch is counted against the same budget.</summary>
+    /// <summary>Float scratch the wide fused kernel rotates through, and the shared ceiling it must stay inside (the device's per-block dynamic limit without a MAX_DYNAMIC_SHARED_SIZE_BYTES opt-in, which would cost occupancy). The static reduction scratch is counted against the same budget.</summary>
     private const int WideConvRotTileFloats = 2048;
-    private const int WideConvRotSharedCeiling = (48 << 10) - 2048;
+    private int WideConvRotSharedCeiling => DefaultDynamicSharedBytes - 2048;
 
     /// <summary>Shared bytes and float-tile width the wide fused kernel needs for a row, or (0, 0) if it cannot serve the shape. The tile carries the group-local butterflies, so it must be a whole number of groups.</summary>
-    private static (uint SharedBytes, uint Tile) WideConvRotPlan(int cols, int group)
+    private (uint SharedBytes, uint Tile) WideConvRotPlan(int cols, int group)
     {
         long tile = Math.Max(group, WideConvRotTileFloats / group * group);
         if (tile > cols) tile = cols;

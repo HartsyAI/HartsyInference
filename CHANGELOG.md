@@ -6,6 +6,27 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.163
+
+- **One home each for the CUDA arch gate, the cuBLASLt executor boilerplate and the dtype map.** `CudaArch` turns
+  a compute capability into one comparable number with the tiers the engine gates on; the FP8 executor, the FP4
+  executor and the cuBLAS-version warning had each spelled their own threshold, and the warning's (`major >= 12`)
+  skipped SM 10.x datacenter Blackwell entirely. `CublasLtExecutorBase` owns the handle, workspace, TN
+  descriptor/layout creation and teardown that `Fp8GemmExecutor`, `Fp4GemmExecutor` and `Int8GemmExecutor` had
+  each carried a copy of. `CublasApi.DataTypeOf` is the single `DType → cudaDataType` map every layout is created
+  through — which is the F8E5M2 fix: the fp8 executor hard-coded E4M3 for both operands and would have multiplied an
+  E5M2 weight as E4M3. The one pairing cuBLASLt cannot run, E5M2 × E5M2, now takes the cast path instead.
+- **Shared-memory limits come from the device.** `CudaContext` reports the per-block default and the opt-in
+  ceiling; the int8 mma GEMM is left unbound, with a warning, on a device whose ceiling is below its tiles rather
+  than failing at launch, and the ConvRot group-size refusal is the rotate kernel's own shared footprint against
+  the default instead of a literal.
+- **`tests/regression-ab.sh` is the regression gate every PR runs.** Both arms are built fresh, PTX and SPIR-V
+  included; generations alternate seed by seed; per-step ms, wall and peak VRAM are medians over the warm seeds;
+  quality is SSIM plus a raw-pixel digest per seed pair (the token stream for text), with a `before | after | diff`
+  montage of each; the verdict is against a declared expectation, `identical` or `bounded:<ssim>`, and a step time
+  past the speed tolerance fails the case either way. The case list lives in `tests/regression-cases.sh`, shared
+  with `migration-baseline.sh`.
+
 ## alpha.162
 
 - **Hosts can now ask whether a generation fits a GPU before sending it there.** New

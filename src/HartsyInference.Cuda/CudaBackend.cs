@@ -251,7 +251,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     public CudaStream Stream => _stream;
 
     /// <inheritdoc/>
-    public bool SupportsVideoSparseAttention => _context.ComputeCapabilityMajor >= 8
+    public bool SupportsVideoSparseAttention => _context.Sm >= CudaArch.Ampere
         && _ptxDir is not null && File.Exists(Path.Combine(_ptxDir, "h3_vsa.ptx"));
 
     /// <inheritdoc/>
@@ -429,9 +429,9 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Lazily-initialized FP4 GEMM executor. <see cref="Fp4GemmExecutor.IsSupported"/> is false on
     /// anything before Blackwell, and constructing it there allocates nothing, so callers can ask unconditionally.</summary>
-    /// <remarks>Nothing in the shipped GEMM path reaches native FP4 yet: NVFP4 weights are dequantized at load, so no
-    /// <see cref="DType.F4E2M1"/> tensor survives to dispatch. This exists so the executor is reachable for bring-up on
-    /// a Blackwell card without another code change, and so the unsupported-hardware refusal is testable here.</remarks>
+    /// <remarks>Not dispatched yet: a resident <see cref="DType.F4E2M1"/> weight unpacks through <c>LaunchNvfp4Dequant</c> on
+    /// every GEMM. This exists so bring-up on a Blackwell card needs no further code change, and so the unsupported-hardware
+    /// refusal is testable here.</remarks>
     public Fp4GemmExecutor Fp4Executor
     {
         get
@@ -662,9 +662,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         if (info.FullPrecisionMatMul || weightRowOffset != 0 || weightRowCount >= 0) return false;
         if (_kernels is null || !_kernels.HasW8A8Kernels || !Int8Gemm.IsSupported) return false;
         if (info.ConvRotGroupSize > 0 && !_kernels.HasConvRotKernels) return false;
-        // Above ~16384 the rotation kernel's dynamic shared memory exceeds the 64 KB opt-out ceiling and the launch
-        // fails opaquely; refuse well short of it so the layer falls back to the dequant path instead.
-        if (info.ConvRotGroupSize > 4096) return false;
+        // The rotate kernel stages a group per block; past the no-opt-in shared limit the launch fails opaquely.
+        if (CudaKernels.ConvRotRotateSharedBytes(info.ConvRotGroupSize) > _kernels.DefaultDynamicSharedBytes) return false;
         if (weight.Shape.Rank != 2) return false;
 
         int n = (int)weight.Shape[0];
@@ -1094,8 +1093,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         EnableTensorCoreGemm = EngineKnobs.TensorcoreGemm.Value;
         // fp8 tensor-core GEMM (activation-quant e4m3) requires SM 8.9+ (Ada); older parts default to the
         // F16-cast path. Verified quality-clean fleet-wide in the standard Swarm config.
-        bool fp8TensorCores = _context.ComputeCapabilityMajor > 8
-            || (_context.ComputeCapabilityMajor == 8 && _context.ComputeCapabilityMinor >= 9);
+        bool fp8TensorCores = _context.Sm >= CudaArch.Ada;
         EnableNativeFp8Gemm = EngineKnobs.Fp8Native.Value ?? fp8TensorCores;
         EnableRopeHeadMajorV2 = EngineKnobs.RopeV2.Value;
         EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
@@ -1104,8 +1102,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         HighPrecisionGemm = EngineKnobs.HighPrecisionGemm.Value;
         EnableFp8F16Gemm = EngineKnobs.Fp8F16.Value;
         EnableFp8F32Gemm = EngineKnobs.Fp8F32.Value;
-        _allowTf32 = _context.ComputeCapabilityMajor >= 8 && !EngineKnobs.NoTf32.Value;
-        _gemmFast16 = _context.ComputeCapabilityMajor >= 8 && EngineKnobs.GemmF16.Value;
+        _allowTf32 = _context.Sm >= CudaArch.Ampere && !EngineKnobs.NoTf32.Value;
+        _gemmFast16 = _context.Sm >= CudaArch.Ampere && EngineKnobs.GemmF16.Value;
         // F16 SDPA is gated PER-CALL via the allowF16 arg (callers with bounded/RMS-normed scores like Wan pass true);
         // safe by default because unbounded-score archs (Z-Image fp8) don't pass it. Env: force-on all callers, or kill.
         _sdpaF16ForceOn = EngineKnobs.SdpaF16.Value;
@@ -1138,7 +1136,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         CublasApi.cublasCreate(out _cublasHandle).ThrowOnCublasError();
         CublasApi.cublasSetStream(_cublasHandle, _stream.Handle).ThrowOnCublasError();
 
-        // Report which cuBLAS we actually loaded. Blackwell (SM 12.x) tensor-core GEMM needs CUDA 12.8+
+        // Report which cuBLAS we actually loaded. Blackwell (SM 10.x / 12.x) tensor-core GEMM needs CUDA 12.8+
         // cuBLAS (version >= 120800); an older system cuBLAS silently falls back to a ~6 TFLOPS generic
         // path — the cause of the Ideogram-4 ~50x slowdown vs ComfyUI (which bundles its own 12.8 cuBLAS).
         try
@@ -1157,9 +1155,9 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 }
             }
             HartsyInference.Core.Logging.Logs.Info($"[Cuda] cuBLAS version {cublasVer} (~{cublasVer / 10000}.{(cublasVer / 100) % 100}) loaded from {cublasPath}.");
-            if (_context.ComputeCapabilityMajor >= 12 && cublasVer is >= 0 and < 120800)
+            if (_context.Sm >= CudaArch.Blackwell && cublasVer is >= 0 and < 120800)
             {
-                HartsyInference.Core.Logging.Logs.Warning($"[Cuda] cuBLAS {cublasVer} predates Blackwell (SM {_context.ComputeCapabilityMajor}.x) support (need >= 120800 / CUDA 12.8). " +
+                HartsyInference.Core.Logging.Logs.Warning($"[Cuda] cuBLAS {cublasVer} predates Blackwell (SM {_context.ComputeCapabilityMajor}.{_context.ComputeCapabilityMinor}) support (need >= 120800 / CUDA 12.8). " +
                     "GEMMs will run a slow non-tensor-core fallback. Fix: point LD_LIBRARY_PATH at a CUDA 12.8+ libcublas " +
                     "(e.g. PyTorch's bundled nvidia/cublas/lib) or install the CUDA 12.8+ runtime.");
             }
@@ -1188,7 +1186,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
 
         if (ptxDir != null && Directory.Exists(ptxDir))
         {
-            _kernels = new CudaKernels(ptxDir);
+            _kernels = new CudaKernels(ptxDir, _context.MaxSharedMemoryPerBlock, _context.MaxSharedMemoryPerBlockOptin);
             GC.SuppressFinalize(_kernels);
         }
 
@@ -1200,7 +1198,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             TotalVramBytes = (long)_context.GetMemoryInfo().totalBytes,
             SupportsF32 = true,
             SupportsF16 = true,
-            SupportsBF16 = _context.ComputeCapabilityMajor >= 8,
+            SupportsBF16 = _context.Sm >= CudaArch.Ampere,
             SupportsQuantized = true,
             SupportsConv2D = true,
             BandsIm2Col = true,
@@ -1279,7 +1277,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             ulong aPtr = CastIfNeeded(pA, a.DType, gemmDtype, (int)a.ElementCount, out pACast);
             ulong bPtr = CastIfNeeded(pB, b.DType, gemmDtype, (int)b.ElementCount, out pBCast);
 
-            int gemmType = CublasDataType(gemmDtype);
+            int gemmType = CublasApi.DataTypeOf(gemmDtype);
             int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
 
             CublasApi.cublasGemmEx(_cublasHandle, CublasApi.CUBLAS_OP_N, CublasApi.CUBLAS_OP_N, n, m, k, &alpha, bPtr, gemmType, n,
@@ -2074,6 +2072,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             // needs 16-byte leading dims (lda/ldb = k fp8 bytes; ldc = n · output element bytes); non-conforming
             // shapes fall through to the cast-to-F16 path below.
             if (EnableNativeFp8Gemm && weight.DType.IsFp8 && Fp8Executor.IsSupported
+                && !(weight.DType == DType.F8E5M2 && input.DType == DType.F8E5M2)   // no E5M2 × E5M2 kernel exists
                 && (input.DType.IsFp8 || input.DType == DType.F32 || input.DType == DType.F16)
                 && (output.DType == DType.F16 || output.DType == DType.F32) && k % 16 == 0
                 && (n * output.DType.SizeInBytes) % 16 == 0)
@@ -2134,7 +2133,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                     : pWeight;
                 Fp8Executor.Run(weight: fp8WeightPtr, input: inputFp8Ptr, outPtr: pOutput, m: m, n: n, k: k,
                     weightScale: alpha, stream: _stream.Handle,
-                    inputScaleDev: inputScaleDev, outF32: output.DType == DType.F32);
+                    inputScaleDev: inputScaleDev, outF32: output.DType == DType.F32,
+                    weightType: weight.DType, inputType: input.DType.IsFp8 ? input.DType : DType.F8E4M3);
 
                 if (bias is not null)
                 {
@@ -2470,7 +2470,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             ulong aPtr = CastIfNeeded(pA, a.DType, gemmDtype, (int)a.ElementCount, out pACast);
             ulong bPtr = CastIfNeeded(pB, b.DType, gemmDtype, (int)b.ElementCount, out pBCast);
 
-            int gemmType = CublasDataType(gemmDtype);
+            int gemmType = CublasApi.DataTypeOf(gemmDtype);
             int cType = output.DType == DType.F16 ? CublasApi.CUDA_R_16F : CublasApi.CUDA_R_32F;
 
             CublasApi.cublasGemmStridedBatchedEx(
@@ -2597,8 +2597,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
 
             ulong weightPtr = CastIfNeeded(pWeight, weight.DType, gemmDtype, (int)weight.ElementCount, out pWeightCast);
 
-            int gemmType = CublasDataType(gemmDtype);
-            int gemmOutType = CublasDataType(output.DType);
+            int gemmType = CublasApi.DataTypeOf(gemmDtype);
+            int gemmOutType = CublasApi.DataTypeOf(output.DType);
 
             for (int b = 0; b < batch; b++)
             {
@@ -8835,17 +8835,9 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int CublasDataTypeForGemm(DType dtype, DType input, DType weight, DType output, int m, int n, int k)
     {
-        if (dtype == DType.F32 || dtype == DType.F16 || dtype == DType.BF16) return CublasDataType(dtype);
+        if (dtype == DType.F32 || dtype == DType.F16 || dtype == DType.BF16) return CublasApi.DataTypeOf(dtype);
         throw new NotSupportedException(
             $"cuBLAS GEMM does not support dtype {dtype} (input={input}, weight={weight}, output={output}, M={m}, N={n}, K={k}).");
-    }
-
-    private static int CublasDataType(DType dtype)
-    {
-        if (dtype == DType.F16) return CublasApi.CUDA_R_16F;
-        if (dtype == DType.BF16) return CublasApi.CUDA_R_16BF;
-        if (dtype == DType.F32) return CublasApi.CUDA_R_32F;
-        throw new NotSupportedException($"cuBLAS GEMM does not support dtype {dtype}.");
     }
 
     /// <summary>Resolves GEMM compute dtype for two operands, preferring F16 over F32 when either is F16 (or fp8, which casts to F16).</summary>
