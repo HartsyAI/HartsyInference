@@ -6,6 +6,17 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.172
+
+- **Every Vulkan GEMM goes through one dispatcher.** `DispatchGemm` takes a `GemmOperands` record (buffer handles,
+  element offsets, transposes, leading dimensions, alpha/beta, a bias in either form) and picks coopmat2, then
+  coopmat, then the tiled kernel by what the operands admit — the three shaders already shared one push-constant
+  layout. `Linear`, `MatMul`, `BatchedMatMul`'s per-slice loop, the naive attention's score and value products and
+  `Conv2D`'s im2col GEMM all call it, so a batched or convolution product on F16 reaches the cooperative-matrix
+  kernels it used to bypass (the column tile of a convolution is now 16-aligned where it can be). GEMMs whose dtype
+  resolves to F32 run the same tiled kernel as before; the compute-dtype policy is a separate change.
+- `matmul_coopmat_blocked` — a diagnostic shader on no production path — is deleted with its benchmark.
+
 ## alpha.171
 
 - The IQ1_S and IQ1_M dequant kernels drop the word and sign helpers they never called (regenerated PTX, same
