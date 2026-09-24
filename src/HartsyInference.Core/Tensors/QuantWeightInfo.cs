@@ -33,18 +33,26 @@ public sealed record QuantWeightInfo
     /// <remarks><para><see cref="RowScale"/> is indexed by output row, so a row slice of the weight needs the matching
     /// slice of the scale; a per-tensor scale (one element) covers every row and is shared as-is. <see cref="ConvRotGroupSize"/>
     /// divides the <b>input</b> dimension, which a row split leaves alone.</para>
-    /// <para>NVFP4 refuses: <see cref="BlockScale"/> is padded to 128 rows and swizzled, so a row range of the weight is
-    /// not a row range of the scales, and slicing it would pair each row with another row's block scales — plausible
-    /// output, silently wrong.</para></remarks>
+    /// <para>A block-scaled companion (NVFP4, MXFP8) is padded to 128 rows and swizzled in 128-row tiles laid out
+    /// tile-row by tile-row, so a range that starts and ends on a tile boundary is a contiguous run of whole tile-rows
+    /// and slices as a view — a fused QKV split at a multiple of 128 rows. Any other range would pair rows with
+    /// another row's block scales — plausible output, silently wrong — and refuses.</para></remarks>
     /// <param name="weightKey">The weight's checkpoint key, named in the refusal so the caller need not re-wrap it.</param>
     public QuantWeightInfo SliceRows(long rowOffset, long rowCount, string weightKey)
     {
-        if (BlockScale is not null)
-            throw new NotSupportedException(
-                $"'{weightKey}' is {Format}, whose block scales use a padded swizzled layout that does not slice by row. "
-                + "Dequantize it before splitting or windowing the weight.");
-        if (RowScale is null || RowScale.ElementCount == 1)
-            return this;
-        return this with { RowScale = RowScale.SliceRows(rowOffset, rowCount) };
+        Tensor? blockScale = BlockScale;
+        if (blockScale is not null)
+        {
+            if (rowOffset % BlockScaleTileRows != 0 || rowCount % BlockScaleTileRows != 0 || blockScale.Shape.Rank != 2)
+                throw new NotSupportedException(
+                    $"'{weightKey}' is {Format}, whose block scales are swizzled in {BlockScaleTileRows}-row tiles, and rows "
+                    + $"[{rowOffset}..{rowOffset + rowCount}) do not start and end on one. Dequantize it before splitting or windowing the weight.");
+            blockScale = blockScale.SliceRows(rowOffset, rowCount);
+        }
+        Tensor? rowScale = RowScale is null || RowScale.ElementCount == 1 ? RowScale : RowScale.SliceRows(rowOffset, rowCount);
+        return ReferenceEquals(rowScale, RowScale) && ReferenceEquals(blockScale, BlockScale) ? this : this with { RowScale = rowScale, BlockScale = blockScale };
     }
+
+    /// <summary>Rows per swizzle tile of a block-scale companion (cuBLASLt's blocked layout: 128 rows × 4 block columns, tiles ordered by tile-row).</summary>
+    public const int BlockScaleTileRows = 128;
 }
