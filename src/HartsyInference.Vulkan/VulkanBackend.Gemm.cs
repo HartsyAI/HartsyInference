@@ -59,11 +59,31 @@ public sealed partial class VulkanBackend
                 return GemmKernel.CoopMat;
             }
         }
-        if (g.OutputDtype != g.Dtype)
-            throw new NotSupportedException(
-                $"The tiled GEMM writes {g.Dtype.Name}; a {g.OutputDtype.Name} output needs a cooperative-matrix kernel, which this shape or device does not admit.");
         long tTiled0 = _profiler.IsEnabled ? Stopwatch.GetTimestamp() : 0;
-        DispatchTiled(in g);
+        if (g.OutputDtype != g.Dtype)
+        {
+            // The tiled kernel writes its compute dtype: a plain [M,N] output of another dtype is computed into a
+            // transient and cast once. An offset or strided output has no such seam and must reach a cooperative-matrix kernel.
+            if (g.COffset != 0 || g.Ldc != g.N || g.Beta != 0f || !outputSupported)
+                throw new NotSupportedException(
+                    $"The tiled GEMM writes {g.Dtype.Name}; a strided, offset or accumulating {g.OutputDtype.Name} output needs a cooperative-matrix kernel, which this shape or device does not admit.");
+            long count = g.M * g.N;
+            VulkanBuffer tmp = _xfer.AllocateDevice((ulong)(count * g.Dtype.SizeInBytes));
+            try
+            {
+                DispatchTiled(g with { C = tmp.Handle, OutputDtype = g.Dtype, BiasF32 = 0 });
+                VulkanKernel cast = GetKernel(g.Dtype == DType.F16 ? "cast_f16_f32" : "cast_f32_f16", storageBufferCount: 2, _default1DSpec);
+                Span<byte> pc = stackalloc byte[4];
+                BinaryWriteUInt(pc, 0, (uint)count);
+                Span<ulong> bufs = stackalloc ulong[] { tmp.Handle, g.C };
+                Dispatch(cast, bufs, pc, GroupCount(count, LocalX1D));
+            }
+            finally { _xfer.FreeDevice(tmp); }
+        }
+        else
+        {
+            DispatchTiled(in g);
+        }
         if (_profiler.IsEnabled) _tiledGemmTicks += Stopwatch.GetTimestamp() - tTiled0;
         _tiledGemmCount++;
         return GemmKernel.Tiled;

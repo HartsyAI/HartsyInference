@@ -25,6 +25,11 @@ public static partial class EngineKnobs
         Bool("numerics.vkInt8", false, KnobScope.Construction, KnobDomain.Numerics,
             "Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.");
 
+    /// <summary>A GEMM with a 16-bit-float, fp8 or GGUF operand computes in F16 even when the other operand and the output are F32 — the CUDA policy, which puts such a Linear on the cooperative-matrix kernels with a transient F16 cast of the activation. Off, the output's dtype decides for every operand.</summary>
+    public static readonly Knob<bool> VkF16Gemm =
+        Bool("numerics.vkF16Gemm", true, KnobScope.Construction, KnobDomain.Numerics,
+            "A GEMM with a 16-bit-float, fp8 or GGUF operand computes in F16 (cooperative matrix) even when the other operand and the output are F32; off, the output's dtype decides.");
+
     /// <summary>Uses VK_KHR_push_descriptor instead of the descriptor-pool ring when the extension is available.</summary>
     public static readonly Knob<bool> VkPushDescriptors =
         Bool("numerics.vkPushDescriptors", false, KnobScope.Construction, KnobDomain.Numerics,

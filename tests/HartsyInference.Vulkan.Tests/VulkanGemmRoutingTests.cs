@@ -96,4 +96,36 @@ public sealed class VulkanGemmRoutingTests(ITestOutputHelper output)
         Assert.Equal(batch, coopAfter - coopBefore);
         Assert.True(MaxRelError(out16, out32) < 2e-2f, "the F16 cooperative-matrix convolution diverges from the F32 tiled one");
     }
+
+    /// <summary>The compute-dtype policy: an F16 weight with an F32 activation and an F32 output computes in F16 on a cooperative-matrix kernel; with the policy off the same call runs the F32 tiled kernel, and the two agree.</summary>
+    [Theory]
+    [InlineData(64, 256, 128)]   // 16-aligned: cooperative matrix, F32 store
+    [InlineData(64, 100, 130)]   // K and N off-alignment: the tiled kernel computes in F16 and casts once
+    public void Linear_WithF16Weight_ComputesInF16_AndMatchesTheF32Rule(int M, int K, int N)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+        using Tensor x = Rand(new TensorShape(M, K), 7);
+        using Tensor w32 = Rand(new TensorShape(N, K), 8);
+        using Tensor w16 = w32.CastTo(DType.F16);
+        using Tensor bias = Rand(new TensorShape(N), 9);
+
+        backend.EnableF16Gemm = false;
+        using Tensor outF32Rule = new(new TensorShape(M, N), DType.F32);
+        backend.Linear(outF32Rule, x, w16, bias);
+        backend.Sync();
+
+        backend.EnableF16Gemm = true;
+        (long c2Before, long cBefore, long tBefore) = backend.GemmEngagementCounts;
+        using Tensor outF16Rule = new(new TensorShape(M, N), DType.F32);
+        backend.Linear(outF16Rule, x, w16, bias);
+        backend.Sync();
+        (long c2After, long cAfter, long tAfter) = backend.GemmEngagementCounts;
+
+        bool aligned = K % 16 == 0 && N % 16 == 0;
+        if (backend.Vk.HasCooperativeMatrix2 && backend.EnableCoopMat2) Assert.Equal(1, c2After - c2Before);
+        else if (backend.Vk.HasCooperativeMatrix && aligned) Assert.Equal(1, cAfter - cBefore);
+        else Assert.Equal(1, tAfter - tBefore);
+        Assert.True(MaxRelError(outF16Rule, outF32Rule) < 2e-2f, "the F16 product diverges from the F32 rule's result");
+    }
 }

@@ -105,6 +105,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.VkDisableCoopmat, true)
         // Opts Vulkan Linear into an INT8 dot-product GEMM path.
         .With(EngineKnobs.VkInt8, false)
+        // Computes a 16-bit-weight GEMM in F16 on the cooperative-matrix kernels with the F32 activation cast down; the reference keeps the output-dtype rule.
+        .With(EngineKnobs.VkF16Gemm, false)
         // Runs large-M float Linears as per-channel-int8 weight x per-row-int8 activation IMMA; the declaration itself calls it lossy.
         .With(EngineKnobs.W8a8, false)
         // 2 is the FlowUniPC solver order Wan's own scheduler ships; the coercion already sends non-positive values back to 2.
