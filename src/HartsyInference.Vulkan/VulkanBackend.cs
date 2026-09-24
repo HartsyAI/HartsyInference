@@ -76,7 +76,8 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     public bool SupportsResidentQuant(DType dtype) =>
         Capabilities.SupportsF16
         && (dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0
-            || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K);
+            || dtype == DType.Q2_K || dtype == DType.Q3_K || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K
+            || dtype == DType.IQ4_XS);
 
 
 
@@ -984,11 +985,14 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
                 "Q4_0" => "dequant_q4_0",
                 "Q5_0" => "dequant_q5_0",
                 "Q8_0" => "dequant_q8_0",
+                "Q2_K" => "dequant_q2_k",
+                "Q3_K" => "dequant_q3_k",
                 "Q4_K" => "dequant_q4_k",
                 "Q5_K" => "dequant_q5_k",
                 "Q6_K" => "dequant_q6_k",
+                "IQ4_XS" => "dequant_iq4_xs",
                 _ => throw new NotSupportedException(
-                    $"Vulkan GGUF dequant for {src.DType.Name} not implemented. Supported: Q4_0, Q5_0, Q8_0, Q4_K, Q5_K, Q6_K."),
+                    $"Vulkan GGUF dequant for {src.DType.Name} not implemented. Supported: Q4_0, Q5_0, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_XS."),
             };
             long blockCount = elements / src.DType.BlockElementCount;
             // dequant_q6_k emits 4 outputs/thread (64 threads/super-block); every other dequant kernel

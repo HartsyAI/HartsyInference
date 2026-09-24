@@ -1961,7 +1961,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 // error rather than guessing. Q8_0/Q6_K are symmetric quants, so their kernels consume only
                 // xq/xd; Q4_K's min term additionally needs the per-block int-sum xs.
                 bool dp4a = EnableDp4aGemv
-                    && (((weight.DType == DType.Q4_K || weight.DType == DType.Q5_K || weight.DType == DType.Q6_K) && k % 256 == 0)
+                    && (((weight.DType == DType.Q4_K || weight.DType == DType.Q5_K || weight.DType == DType.Q6_K
+                          || weight.DType == DType.Q2_K || weight.DType == DType.Q3_K) && k % 256 == 0)
                     || ((weight.DType == DType.Q8_0 || weight.DType == DType.Q4_0 || weight.DType == DType.Q5_0) && k % 32 == 0));
                 if (dp4a)
                 {
@@ -1976,6 +1977,10 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                             _kernels!.LaunchMulMatVecQ5KQ8_1(pOutput, scXq, scXd, scXs, pWeight, pBias, n, k, m, _stream.Handle);
                         else if (weight.DType == DType.Q6_K)
                             _kernels!.LaunchMulMatVecQ6KQ8_1(pOutput, scXq, scXd, pWeight, pBias, n, k, m, _stream.Handle);
+                        else if (weight.DType == DType.Q2_K)
+                            _kernels!.LaunchMulMatVecQ2KQ8_1(pOutput, scXq, scXd, pWeight, pBias, n, k, m, _stream.Handle);
+                        else if (weight.DType == DType.Q3_K)
+                            _kernels!.LaunchMulMatVecQ3KQ8_1(pOutput, scXq, scXd, pWeight, pBias, n, k, m, _stream.Handle);
                         else if (weight.DType == DType.Q4_0)
                             _kernels!.LaunchMulMatVecQ4_0Q8_1(pOutput, scXq, scXd, pWeight, pBias, n, k, m, _stream.Handle);
                         else if (weight.DType == DType.Q5_0)
@@ -2006,6 +2011,10 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                             _kernels!.LaunchMulMatVecQ5KQ8_1(pOutput, pXq, pXd, pXs, pWeight, pBias, n, k, m, _stream.Handle);
                         else if (weight.DType == DType.Q6_K)
                             _kernels!.LaunchMulMatVecQ6KQ8_1(pOutput, pXq, pXd, pWeight, pBias, n, k, m, _stream.Handle);
+                        else if (weight.DType == DType.Q2_K)
+                            _kernels!.LaunchMulMatVecQ2KQ8_1(pOutput, pXq, pXd, pWeight, pBias, n, k, m, _stream.Handle);
+                        else if (weight.DType == DType.Q3_K)
+                            _kernels!.LaunchMulMatVecQ3KQ8_1(pOutput, pXq, pXd, pWeight, pBias, n, k, m, _stream.Handle);
                         else if (weight.DType == DType.Q4_0)
                             _kernels!.LaunchMulMatVecQ4_0Q8_1(pOutput, pXq, pXd, pWeight, pBias, n, k, m, _stream.Handle);
                         else if (weight.DType == DType.Q5_0)
@@ -2071,6 +2080,20 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 if (weight.DType == DType.Q5_K && k % 256 == 0)
                 {
                     _kernels!.LaunchMulMatVecQ5KF32(pOutput, pInput, pWeight, pBias, n, k, m, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                if (weight.DType == DType.Q2_K && k % 256 == 0)
+                {
+                    _kernels!.LaunchMulMatVecQ2KF32(pOutput, pInput, pWeight, pBias, n, k, m, _stream.Handle);
+                    GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                    cachedOutput = true;
+                    return;
+                }
+                if (weight.DType == DType.Q3_K && k % 256 == 0)
+                {
+                    _kernels!.LaunchMulMatVecQ3KF32(pOutput, pInput, pWeight, pBias, n, k, m, _stream.Handle);
                     GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                     cachedOutput = true;
                     return;
@@ -3927,9 +3950,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// from <see cref="Tensor.QuantInfo"/>; fp8 is not listed because it is not a quantized dtype here, it is a storage
     /// dtype with a scalar on the tensor.</remarks>
     public bool SupportsResidentQuant(DType dtype) =>
-        dtype == DType.Q8_0 || dtype == DType.Q4_0 || dtype == DType.Q5_0
-        || dtype == DType.Q2_K || dtype == DType.Q3_K
-        || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K
+        (_kernels is not null && _kernels.GgufDequantTypes.Contains(dtype))
         || dtype == DType.I8 || dtype == DType.F4E2M1;
 
     /// <inheritdoc/>
@@ -9068,28 +9089,9 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             throw new NotSupportedException($"GPU cast from {srcDtype} to {dstDtype} not supported.");
     }
 
-    /// <summary>Dispatches the per-DType GGUF dequant kernel. Count must respect the source dtype's block size (32 for Q8_0, 256 for Q*_K).</summary>
+    /// <summary>Dispatches the GGUF dequant kernel for <paramref name="srcDtype"/>; the kernel set knows which types it has.</summary>
     private void LaunchGgufDequantToF16(ulong output, ulong input, DType srcDtype, int count)
-    {
-        if (srcDtype == DType.Q8_0)
-            _kernels!.LaunchDequantQ8_0ToF16(output, input, count, _stream.Handle);
-        else if (srcDtype == DType.Q4_0)
-            _kernels!.LaunchDequantQ4_0ToF16(output, input, count, _stream.Handle);
-        else if (srcDtype == DType.Q5_0)
-            _kernels!.LaunchDequantQ5_0ToF16(output, input, count, _stream.Handle);
-        else if (srcDtype == DType.Q2_K)
-            _kernels!.LaunchDequantQ2_KToF16(output, input, count, _stream.Handle);
-        else if (srcDtype == DType.Q3_K)
-            _kernels!.LaunchDequantQ3_KToF16(output, input, count, _stream.Handle);
-        else if (srcDtype == DType.Q4_K)
-            _kernels!.LaunchDequantQ4_KToF16(output, input, count, _stream.Handle);
-        else if (srcDtype == DType.Q5_K)
-            _kernels!.LaunchDequantQ5_KToF16(output, input, count, _stream.Handle);
-        else if (srcDtype == DType.Q6_K)
-            _kernels!.LaunchDequantQ6_KToF16(output, input, count, _stream.Handle);
-        else
-            throw new NotSupportedException($"GPU dequant for {srcDtype} not yet implemented. Supported: Q8_0, Q4_0, Q5_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K. Use CPU dequant via GgufDequantizer for other GGUF types.");
-    }
+        => _kernels!.LaunchGgufDequantToF16(srcDtype, output, input, count, _stream.Handle);
 
     /// <summary>Adds <paramref name="bias"/> to a GEMM output that bypassed cuBLAS' own epilogue, cast to the output dtype when they differ; returns the cast buffer (0 if none) for the caller to free.</summary>
     private ulong AddBiasEpilogue(Tensor output, Tensor bias, ulong pOutput, ulong pBias, int m, int n, bool rowRange, int weightRowOffset)

@@ -873,6 +873,11 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   word salad (not a crash).
 - **nn.Linear GGUF weights need a shape relabel to `[out,in]`, NOT a data transpose** (bytes already
   row-major); only raw params like `mm.input_projection` need an actual transpose. Recurs across every VLM.
+- **A GGUF codec that agrees with its GPU kernel can still be wrong** — a kernel written to mirror the host
+  decode shares its mistake, and block-vs-block tests pass on both. Settle a format against real weights:
+  `GgufRealFileCorrelationTests` dequantizes every tensor of a lower-bit file and correlates it with the Q8_0
+  copy of the same model. Near 0.2 is a layout bug (a permuted scale read, a wrong sign table); 0.95–0.99 is
+  the quantization's own loss. A model that loads and generates fluent garbage in one quant only is this.
 
 ---
 

@@ -129,6 +129,56 @@ public sealed class GgufGpuDequantTests
     }
 
     [Fact]
+    public unsafe void IQ4_XS_GpuDequant_MatchesCpu()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int superBlocks = 3;
+        const int totalElems = superBlocks * 256;
+        Tensor src = new Tensor(new TensorShape(totalElems), DType.IQ4_XS);
+        try
+        {
+            Random rng = new Random(53);
+            byte* p = (byte*)src.DataPointer;
+            for (int sb = 0; sb < superBlocks; sb++)
+            {
+                byte* block = p + sb * 136;
+                ushort d = (ushort)(0x3400 + rng.Next(0x800));   // F16 in [0.25, 2)
+                block[0] = (byte)d; block[1] = (byte)(d >> 8);
+                for (int i = 2; i < 136; i++) block[i] = (byte)rng.Next(256);
+            }
+            using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
+            using Tensor gpuOut = RunGpuDequant(src, totalElems);
+            CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
+        }
+        finally { src.Dispose(); }
+    }
+
+    [Fact]
+    public unsafe void IQ4_NL_GpuDequant_MatchesCpu()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int blocks = 24;
+        const int totalElems = blocks * 32;
+        Tensor src = new Tensor(new TensorShape(totalElems), DType.IQ4_NL);
+        try
+        {
+            Random rng = new Random(59);
+            byte* p = (byte*)src.DataPointer;
+            for (int b = 0; b < blocks; b++)
+            {
+                byte* block = p + b * 18;
+                ushort d = (ushort)(0x3400 + rng.Next(0x800));   // F16 in [0.25, 2)
+                block[0] = (byte)d; block[1] = (byte)(d >> 8);
+                for (int i = 2; i < 18; i++) block[i] = (byte)rng.Next(256);
+            }
+            using Tensor cpuRef = GgufDequantizer.Dequantize(src, DType.F16);
+            using Tensor gpuOut = RunGpuDequant(src, totalElems);
+            CompareF16(cpuRef, gpuOut, totalElems, tolerance: 1e-3f);
+        }
+        finally { src.Dispose(); }
+    }
+
+    [Fact]
     public unsafe void Q5_K_GpuDequant_MatchesCpu()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
@@ -208,15 +258,7 @@ public sealed class GgufGpuDequantTests
             CudaMemory.CopyHostToDevice(devSrc, (void*)src.DataPointer, srcBytes);
             nint stream = backend.Stream.Handle;
 
-            if (src.DType == DType.Q8_0) kernels.LaunchDequantQ8_0ToF16(devDst, devSrc, totalElems, stream);
-            else if (src.DType == DType.Q4_0) kernels.LaunchDequantQ4_0ToF16(devDst, devSrc, totalElems, stream);
-            else if (src.DType == DType.Q5_0) kernels.LaunchDequantQ5_0ToF16(devDst, devSrc, totalElems, stream);
-            else if (src.DType == DType.Q2_K) kernels.LaunchDequantQ2_KToF16(devDst, devSrc, totalElems, stream);
-            else if (src.DType == DType.Q3_K) kernels.LaunchDequantQ3_KToF16(devDst, devSrc, totalElems, stream);
-            else if (src.DType == DType.Q4_K) kernels.LaunchDequantQ4_KToF16(devDst, devSrc, totalElems, stream);
-            else if (src.DType == DType.Q5_K) kernels.LaunchDequantQ5_KToF16(devDst, devSrc, totalElems, stream);
-            else if (src.DType == DType.Q6_K) kernels.LaunchDequantQ6_KToF16(devDst, devSrc, totalElems, stream);
-            else throw new ArgumentException($"unsupported dtype {src.DType}");
+            kernels.LaunchGgufDequantToF16(src.DType, devDst, devSrc, totalElems, stream);
             backend.Sync();
 
             Tensor result = new Tensor(new TensorShape(totalElems), DType.F16);
