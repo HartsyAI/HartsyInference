@@ -3605,7 +3605,6 @@ public sealed class VulkanBackendSmokeTests
         quant.Dispose();
     }
 
-
     /// <summary>Correctness gate for <c>matmul_coopmat2.comp.glsl</c> (2026-07-31), the
     /// <c>VK_NV_cooperative_matrix2</c> kernel — a genuinely different instruction/memory path from coopmat1
     /// (workgroup-scope + tensor-layout addressing vs subgroup-scope + manual fragment loads), built after

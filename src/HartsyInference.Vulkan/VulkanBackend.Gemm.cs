@@ -32,8 +32,8 @@ internal readonly record struct GemmOperands(
 public sealed partial class VulkanBackend
 {
     /// <summary>Runs one GEMM on the fastest kernel its operands admit: coopmat2 (F16, the Linear-layer transpose pair,
-    /// no alpha or beta), then coopmat (F16, N and K multiples of 16, any transpose pair, M unaligned only without
-    /// transposeA), then the tiled kernel. A bias rides in whichever form the chosen kernel reads, so a caller with one
+    /// no alpha or beta), then coopmat (F16, N and K multiples of 16, any transpose pair; an unaligned M only without
+    /// transposeA and without beta), then the tiled kernel. A bias rides in whichever form the chosen kernel reads, so a caller with one
     /// supplies both forms. The tiled kernel writes <see cref="GemmOperands.Dtype"/>, so an output of another dtype
     /// must reach a cooperative-matrix kernel.</summary>
     internal GemmKernel DispatchGemm(in GemmOperands g)
@@ -49,7 +49,8 @@ public sealed partial class VulkanBackend
                 _coopmat2GemmCount++;
                 return GemmKernel.CoopMat2;
             }
-            if (!_disableCoopmat && Vk.HasCooperativeMatrix && g.N % 16 == 0 && g.K % 16 == 0 && (g.M % 16 == 0 || !g.TransposeA))
+            // An M off the 16-row fragment runs the partial-M shader, which takes no transposed A and adds no beta·C.
+            if (!_disableCoopmat && Vk.HasCooperativeMatrix && g.N % 16 == 0 && g.K % 16 == 0 && (g.M % 16 == 0 || (!g.TransposeA && g.Beta == 0f)))
             {
                 long t0 = _profiler.IsEnabled ? Stopwatch.GetTimestamp() : 0;
                 DispatchCoopMat(in g);

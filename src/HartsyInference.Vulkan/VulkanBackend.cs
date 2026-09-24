@@ -2559,7 +2559,6 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         Dispatch(k, bufs, pc, GroupCount(count, LocalX1D));
     }
 
-    /// <summary>Dispatch a tiled matmul on raw buffer handles with explicit element offsets. Used by SDPA's per-head loop.</summary>
     /// <summary>A GEMM on raw buffers at element offsets, in <paramref name="dtype"/> on both sides — the batched, attention and convolution callers' form of <see cref="DispatchGemm"/>.</summary>
     private void DispatchMatmulWithOffsets(
         ulong aHandle, ulong bHandle, ulong cHandle,
@@ -2573,6 +2572,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             { Alpha = alpha, Beta = beta, AOffset = aOffset, BOffset = bOffset, COffset = cOffset });
     }
 
+    /// <summary>Row softmax on a raw buffer at an element offset — the attention loop's second step, one workgroup per row.</summary>
     private void DispatchSoftmaxRows(ulong srcHandle, ulong dstHandle, DType dtype, int N, int rows, uint srcOffset, uint dstOffset)
     {
         string shader = "softmax" + DtypeSuffix(dtype);
