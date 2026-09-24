@@ -2,11 +2,11 @@ namespace HartsyInference.Vulkan;
 
 /// <summary>Manages a small set of canonical descriptor-set layouts, pipeline layouts, and a descriptor-pool ring.</summary>
 /// <remarks>Sharing layouts across kernels with the same binding shape keeps total layout count to ~12.
-/// Pool ring: two pools alternated per phase boundary via <c>FlipPool()</c>; active pool can hold up to
-/// <see cref="MaxSetsPerPool"/> allocations before forcing a flip.</remarks>
+/// Pool ring: two pools; when the active one is exhausted <c>FlipPool()</c> moves to the other, after the GPU has
+/// passed every submission that could still bind that pool's sets.</remarks>
 public sealed class VulkanDescriptorManager : IDisposable
 {
-    private const int MaxSetsPerPool = 4096;
+    internal const int MaxSetsPerPool = 4096;
     private const int StorageBuffersPerSet = 8;   // upper bound on bindings per set
     private const int UniformBuffersPerSet = 2;
 
@@ -27,6 +27,8 @@ public sealed class VulkanDescriptorManager : IDisposable
     private readonly ulong[] _pools = new ulong[2];
     private int _activePool;
     private uint _setsInActive;
+    private readonly VulkanCommandStream _stream;
+    private readonly ulong[] _retireTick = new ulong[2];   // once the GPU passes it, nothing references the pool's sets
 
     // vkCmdPushDescriptorSet is NOT statically exported by vulkan-1 on drivers that only expose it via the
     // VK_KHR_push_descriptor extension (the common case as of Vulkan 1.4 — promoted to core there under the
@@ -52,9 +54,10 @@ public sealed class VulkanDescriptorManager : IDisposable
     /// <summary>True when VK_KHR_push_descriptor / Vulkan 1.4 core push descriptors are active. In this mode <see cref="PushSet"/> writes descriptors directly into the command buffer, bypassing the pool ring entirely. Saves a vkAllocateDescriptorSets + vkUpdateDescriptorSets round-trip per dispatch.</summary>
     public bool PushDescriptorActive => _pushDescriptor;
 
-    public VulkanDescriptorManager(nint device, bool enablePushDescriptor = false)
+    public VulkanDescriptorManager(nint device, VulkanCommandStream stream, bool enablePushDescriptor = false)
     {
         _device = device;
+        _stream = stream;
         _pushDescriptor = enablePushDescriptor;
         if (!_pushDescriptor)
         {
@@ -188,10 +191,17 @@ public sealed class VulkanDescriptorManager : IDisposable
         return outSet;
     }
 
-    /// <summary>Switches to the other pool, resetting it so its full capacity is available again. Call at phase boundaries.</summary>
+    /// <summary>Switches to the other pool and resets it — only once the GPU has finished every submission that could still bind its sets. Sets handed out of a pool are bound into command buffers up to the one recording when it fills, so that pool retires at the tick the next submit signals; if that tick is still recording when its turn comes, the recording is submitted first (waiting on an unsubmitted tick never returns).</summary>
     public void FlipPool()
     {
+        _retireTick[_activePool] = _stream.NextSubmitTick;
         _activePool = 1 - _activePool;
+        ulong retire = _retireTick[_activePool];
+        if (retire > 0)
+        {
+            if (retire > _stream.LastSubmitted) _stream.SubmitAndAdvance();
+            if (retire <= _stream.LastSubmitted) _stream.WaitTimeline(retire);
+        }
         VulkanApi.vkResetDescriptorPool(_device, _pools[_activePool], 0).ThrowOnError("vkResetDescriptorPool");
         _setsInActive = 0;
     }

@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.164
+
+- **Vulkan now enables the shader features its own shaders declare.** `im2col` requires 64-bit integer arithmetic
+  and the two BF16 casts require 16-bit, but the 1.0 feature block inside `VkPhysicalDeviceFeatures2` was never
+  filled at device creation, so `shaderInt64` and `shaderInt16` shipped disabled and the pipelines worked only
+  because the NVIDIA driver does not check; a conformant driver may reject them. Both are queried, reported on
+  `VulkanCapabilities` and enabled, and the kernel registry refuses a shader whose feature the device lacks by
+  naming the feature, before pipeline creation. A lint test reads every shader's `#extension … : require` lines
+  and holds the registry's map to them.
+- **A descriptor pool is no longer reset while the GPU may still be reading it.** The pool ring flipped on
+  exhaustion with a bare `vkResetDescriptorPool`, from inside a dispatch, with no check that the submissions
+  binding that pool's sets had completed. A pool now retires at the tick the next submit signals; the flip back
+  to it submits that recording if it is still open and waits for the tick before the reset. The set is also
+  allocated before the command buffer is touched, so that submit cannot split a dispatch across two buffers.
+- `DtypeSuffix` throws for any dtype other than F16/F32 instead of silently choosing the F32 shader.
+- `tests/regression-ab.sh` runs a backend other than CUDA only over the cases tagged with its name (Vulkan takes
+  `sd15` and `krea2`), and a case that crashes on both arms every seed is reported as pre-existing rather than
+  failed; a head crash with a running base still fails.
+
 ## alpha.163
 
 - **One home each for the CUDA arch gate, the cuBLASLt executor boilerplate and the dtype map.** `CudaArch` turns

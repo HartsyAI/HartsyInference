@@ -54,6 +54,14 @@ public sealed class VulkanKernelRegistry : IDisposable
         Marshal.Copy(_mainEntryUtf8, 0, _mainEntry, _mainEntryUtf8.Length);
     }
 
+    /// <summary>The device feature a shader declares beyond the Vulkan 1.3 baseline, or null. Checked before a pipeline is built, so a device lacking it is refused by feature name here rather than by the driver at pipeline creation; the lint test keeps this in step with the shaders' <c>#extension</c> lines.</summary>
+    internal static string? RequiredFeature(string shaderName)
+    {
+        if (shaderName.StartsWith("im2col", StringComparison.Ordinal)) return "shaderInt64";
+        if (shaderName is "cast_bf16_f32" or "cast_f32_bf16") return "shaderInt16";
+        return null;
+    }
+
     /// <summary>Builds (or returns cached) a pipeline for the given kernel + spec constants. <paramref name="forCapture"/> selects the push-descriptor-flavored pipeline used by step-graph capture (see <see cref="KernelKey"/>).</summary>
     public VulkanKernel Get(string shaderName, int storageBufferCount, ReadOnlySpan<SpecConstant> specConstants, bool forCapture = false)
     {
@@ -68,6 +76,17 @@ public sealed class VulkanKernelRegistry : IDisposable
 
     private VulkanKernel Build(string shaderName, int storageBufferCount, ReadOnlySpan<SpecConstant> specConstants, bool forCapture)
     {
+        string? feature = RequiredFeature(shaderName);
+        bool offered = feature switch
+        {
+            null => true,
+            "shaderInt64" => _caps.ShaderInt64,
+            "shaderInt16" => _caps.ShaderInt16,
+            _ => false,
+        };
+        if (!offered)
+            throw new NotSupportedException($"Shader '{shaderName}' needs {feature}, which this device does not offer.");
+
         ulong module = GetOrLoadModule(shaderName);
         ulong setLayout = _descMgr.GetSetLayout(storageBufferCount, forCapture);
         ulong pipelineLayout = _descMgr.GetPipelineLayout(storageBufferCount, forCapture);
