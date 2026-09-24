@@ -11,7 +11,7 @@ namespace HartsyInference.Vulkan;
 /// <summary>Vulkan compute backend implementing <see cref="IBackend"/> via SPIR-V compute shaders.</summary>
 // Mirrors the CUDA backend's GPU weight cache + lazy-sync activation cache so model code that works
 // on CUDA works unchanged here.
-public sealed class VulkanBackend : GpuBackendBase, IBackend
+public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 {
     private readonly VulkanInstance _instance;
     private readonly VulkanDevice _vkDevice;
@@ -611,217 +611,11 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
     // non-aligned M via bounds-checked shared-memory staging, mirroring matmul_tiled.comp.glsl's own proven
     // idiom, which keeps everything inside one dispatch. Scoped to transposeA=false, the only case Linear uses
     // and the only one tested; transposeB may be either.
-    private bool TryDispatchCoopmat(
-        Tensor output, VulkanBuffer aRes, VulkanBuffer bRes,
-        int M, int N, int K, bool transposeA, bool transposeB, DType gemmDtype,
-        VulkanBuffer outBuf, Tensor? bias, VulkanBuffer? biasRes, VulkanBuffer? biasRaw)
-    {
-        const uint FRAG = 16;
-        if (_disableCoopmat) return false;
-        if (!Vk.HasCooperativeMatrix) return false;
-        if (gemmDtype != DType.F16) return false;
-        bool mAligned = (M % FRAG) == 0;
-        if ((!mAligned && transposeA) || (N % FRAG) != 0 || (K % FRAG) != 0) return false;
-        // Output must be FP16 or FP32 — coopmat shader supports both via OUTPUT_F32 spec const.
-        // Other output dtypes (BF16, FP8, etc.) fall through to the tiled path.
-        bool outputIsF32 = output.DType == DType.F32;
-        if (output.DType != DType.F16 && !outputIsF32) return false;
-
-        // BM/BN: 64×64 covers Flux Linear shapes well (1280×3072×3072 → 20×48 = 960 wgs).
-        // Drop to 32×32 when M or N is exactly 16 or 32 (typical of small attention heads).
-        uint BM = (M >= 64) ? 64u : (M >= 32 ? 32u : 16u);
-        uint BN = (N >= 64) ? 64u : (N >= 32 ? 32u : 16u);
-        // SUBGROUP_SIZE matches what we pin via VkPipelineShaderStageRequiredSubgroupSizeCreateInfo.
-        uint subgroupSize = Vk.SubgroupSize;
-        // Workgroup invocations = (BM/16)*(BN/16) * subgroupSize. On NVIDIA (subgroup 32) a 64×64 tile is
-        // 16*32 = 512 — fine. On AMD wave64 it's 16*64 = 1024, and on small devices that can exceed
-        // maxComputeWorkGroupInvocations / sizeX. Shrink the tile (never below the 16×16 fragment, which is
-        // always one subgroup ≤ the limit) so the dispatch stays valid cross-vendor. No-op on NVIDIA.
-        // The partial-M kernel ALSO needs its BM*FRAG_K*2 + BM*BN*4 byte shared-memory scratch (sA + sC —
-        // see matmul_coopmat_partial_m.comp.glsl) to fit the device's budget; the aligned kernel uses no
-        // shared memory at all, so this second condition is a no-op (always false) when mAligned.
-        uint maxInvocations = Math.Min(Vk.MaxComputeWorkGroupInvocations, Vk.MaxComputeWorkGroupSizeX);
-        while ((BM > FRAG || BN > FRAG) &&
-               ((BM / FRAG) * (BN / FRAG) * subgroupSize > maxInvocations ||
-                (!mAligned && (BM * FRAG * 2 + BM * BN * 4) > Vk.MaxComputeSharedMemoryBytes)))
-        {
-            if (BN >= BM && BN > FRAG) BN /= 2;
-            else if (BM > FRAG) BM /= 2;
-            else BN /= 2;
-        }
-        // subgroups per workgroup = (BM/16) * (BN/16). Workgroup size = subgroups * subgroupSize.
-        uint subgroups = (BM / FRAG) * (BN / FRAG);
-        uint localX = subgroups * subgroupSize;
-
-        try
-        {
-            string shader = mAligned ? "matmul_coopmat" : "matmul_coopmat_partial_m";
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, localX),
-                SpecConstant.UInt(1, 1),
-                SpecConstant.UInt(2, 1),
-                SpecConstant.UInt(10, BM),
-                SpecConstant.UInt(11, BN),
-                SpecConstant.UInt(12, subgroupSize),
-                SpecConstant.Bool(13, transposeA),
-                SpecConstant.Bool(14, transposeB),
-                SpecConstant.Bool(15, outputIsF32),
-                SpecConstant.Bool(16, bias is not null),
-            };
-
-            VulkanKernel k = GetKernel(shader, storageBufferCount: 5, spec);
-
-            Span<byte> pc = stackalloc byte[11 * 4];
-            BinaryWriteUInt(pc, 0, (uint)M);
-            BinaryWriteUInt(pc, 4, (uint)N);
-            BinaryWriteUInt(pc, 8, (uint)K);
-            BinaryWriteUInt(pc, 12, (uint)(transposeA ? M : K));
-            BinaryWriteUInt(pc, 16, (uint)(transposeB ? K : N));
-            BinaryWriteUInt(pc, 20, (uint)N);
-            BinaryWriteFloat(pc, 24, 1.0f);
-            BinaryWriteFloat(pc, 28, 0.0f);
-            BinaryWriteUInt(pc, 32, 0u);
-            BinaryWriteUInt(pc, 36, 0u);
-            BinaryWriteUInt(pc, 40, 0u);
-
-            // Five descriptor bindings: 0=A, 1=B, 2=C_fp16, 3=Bias(FP32), 4=C_fp32.
-            // The shader writes slot 2 (fp16) OR slot 4 (fp32) selected by the OUTPUT_F32 spec
-            // constant; both point at the single real output buffer (allocated in output.DType,
-            // so exactly one binding's type matches and is written). The unwritten output slot
-            // binds to outBuf as a placeholder. Slot 3 carries the per-column bias as FP32 when
-            // HAS_BIAS — the shader adds it in the epilogue (fused, no extra dispatch). The bias is
-            // cast to FP32 once and cached (preloaded weight), matching the coopmat accumulator type.
-            ulong outHandle = outBuf.Handle;
-            VulkanBuffer? biasF32Owned = null;
-            ulong biasHandle = outHandle;
-            if (bias is not null)
-            {
-                (VulkanBuffer biasF32, VulkanBuffer? owned) = CastIfNeeded(bias, biasRaw!, DType.F32);
-                biasF32Owned = owned;
-                biasHandle = biasF32.Handle;
-            }
-            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, biasHandle, outHandle };
-
-            uint groupsX = (uint)((N + BN - 1) / BN);
-            uint groupsY = (uint)((M + BM - 1) / BM);
-            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
-
-            CacheOutput(output, outBuf);
-
-            if (biasF32Owned is not null) _xfer.FreeDevice(biasF32Owned);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan TryDispatchCoopmat dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-
-        return true;
-    }
-
-    /// <summary>Diagnostic-only entry point for <c>matmul_coopmat_blocked.comp.glsl</c> — NOT on any production
-    /// path, so register blocking can be measured in isolation. Fixed BM=BN=64, WM=WN=32; needs N and K exact
-    /// multiples of 16 and an F16 GEMM dtype.</summary>
-    internal bool TryDispatchCoopmatBlockedDiagnostic(
-        Tensor output, Tensor a, Tensor b, bool transposeA, bool transposeB, Tensor? bias, uint wm = 32, uint wn = 32)
-    {
-        using OpScope _op = EnterOp();
-        if (!Vk.HasCooperativeMatrix) return false;
-        int N = transposeB ? (int)b.Shape[0] : (int)b.Shape[b.Shape.Rank - 1];
-        int M = (int)(output.ElementCount / N);
-        int K = transposeA ? (int)a.Shape[0] : (int)a.Shape[a.Shape.Rank - 1];
-        if ((N % 16) != 0 || (K % 16) != 0) return false;
-        if (output.DType != DType.F16 && output.DType != DType.F32) return false;
-        bool outputIsF32 = output.DType == DType.F32;
-
-        const uint BM = 64, BN = 64;
-        uint WM = wm, WN = wn;
-        uint subgroupSize = Vk.SubgroupSize;
-        uint subgroupsPerWg = (BM / WM) * (BN / WN);
-        uint localX = subgroupsPerWg * subgroupSize;
-        ulong sharedBytes = (ulong)(BM * 32 * 2 + 32 * BN * 2 + subgroupsPerWg * 16 * 16 * 4);
-        if (sharedBytes > Vk.MaxComputeSharedMemoryBytes)
-            throw new InvalidOperationException($"matmul_coopmat_blocked needs {sharedBytes} B shared memory, device has {Vk.MaxComputeSharedMemoryBytes} B.");
-
-        VulkanBuffer aBuf = GetBuffer(a);
-        VulkanBuffer bBuf = GetBuffer(b);
-        (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, DType.F16);
-        (VulkanBuffer bRes, VulkanBuffer? bOwned) = CastIfNeeded(b, bBuf, DType.F16);
-        VulkanBuffer? biasRaw = null, biasOwned = null;
-        if (bias is not null)
-        {
-            biasRaw = GetBuffer(bias);
-            (VulkanBuffer biasF32, VulkanBuffer? owned) = CastIfNeeded(bias, biasRaw, DType.F32);
-            biasRaw = biasF32;
-            biasOwned = owned;
-        }
-
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-        try
-        {
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, localX),
-                SpecConstant.UInt(1, 1),
-                SpecConstant.UInt(2, 1),
-                SpecConstant.UInt(10, BM),
-                SpecConstant.UInt(11, BN),
-                SpecConstant.UInt(12, subgroupSize),
-                SpecConstant.Bool(13, transposeA),
-                SpecConstant.Bool(14, transposeB),
-                SpecConstant.Bool(15, outputIsF32),
-                SpecConstant.Bool(16, bias is not null),
-                SpecConstant.UInt(17, WM),
-                SpecConstant.UInt(18, WN),
-            };
-            VulkanKernel k = GetKernel("matmul_coopmat_blocked", storageBufferCount: 5, spec);
-
-            Span<byte> pc = stackalloc byte[11 * 4];
-            BinaryWriteUInt(pc, 0, (uint)M);
-            BinaryWriteUInt(pc, 4, (uint)N);
-            BinaryWriteUInt(pc, 8, (uint)K);
-            BinaryWriteUInt(pc, 12, (uint)(transposeA ? M : K));
-            BinaryWriteUInt(pc, 16, (uint)(transposeB ? K : N));
-            BinaryWriteUInt(pc, 20, (uint)N);
-            BinaryWriteFloat(pc, 24, 1.0f);
-            BinaryWriteFloat(pc, 28, 0.0f);
-            BinaryWriteUInt(pc, 32, 0u);
-            BinaryWriteUInt(pc, 36, 0u);
-            BinaryWriteUInt(pc, 40, 0u);
-
-            ulong outHandle = outBuf.Handle;
-            ulong biasHandle = bias is not null ? biasRaw!.Handle : outHandle;
-            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, biasHandle, outHandle };
-
-            uint groupsX = (uint)((N + BN - 1) / BN);
-            uint groupsY = (uint)((M + BM - 1) / BM);
-            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
-
-            CacheOutput(output, outBuf);
-        }
-        catch (Exception ex)
-        {
-            Logs.Error("Vulkan TryDispatchCoopmatBlockedDiagnostic dispatch failed", ex);
-            outBuf.Dispose();
-            throw;
-        }
-        finally
-        {
-            if (aOwned is not null) _xfer.FreeDevice(aOwned);
-            if (bOwned is not null) _xfer.FreeDevice(bOwned);
-            if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
-        }
-        return true;
-    }
-
-    /// <summary>Whether <see cref="TryDispatchCoopMat2"/> is tried before <see cref="TryDispatchCoopmat"/>.
+    /// <summary>Whether <see cref="DispatchGemm"/> tries the cooperative-matrix-2 kernel before the cooperative-matrix one.
     /// Default-on; byte-identical to the coopmat1 baseline across the configurations tested.</summary>
     public bool EnableCoopMat2 { get; set; } = EngineKnobs.VkCoopmat2.Value;
 
-    /// <summary>Cooperative-matrix-2 fast path, tried before <see cref="TryDispatchCoopmat"/>.</summary>
+    /// <summary>Cooperative-matrix-2 fast path on tensors, for the tests that pin its behavior; production GEMMs reach it through <see cref="DispatchGemm"/>.</summary>
     /// <remarks>No M/N/K alignment requirement — the hardware clamp mode drops out-of-bounds accesses.
     /// Specialized for transposeA=false, transposeB=true, the only combination <see cref="Linear"/> uses; throws
     /// for any other rather than computing the wrong answer. Bias is fused into the shader, because a separate
@@ -834,79 +628,28 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         if (transposeA || !transposeB)
             throw new NotSupportedException("TryDispatchCoopMat2 only supports transposeA=false, transposeB=true (the production Linear-layer convention).");
         if (output.DType != DType.F16 && output.DType != DType.F32) return false;
-        bool outputIsF32 = output.DType == DType.F32;
 
         int N = (int)b.Shape[0];
         int M = (int)(output.ElementCount / N);
         int K = (int)a.Shape[a.Shape.Rank - 1];
 
-        uint BM = Vk.CoopMat2MGranularity;
-        uint BN = Vk.CoopMat2NGranularity;
-        // Swept BK in {16,32,64,128,256} against real shapes (see docs/Checklists/TROUBLESHOOTING.md):
-        // BK=16 (the bare K-granularity minimum) was measurably WORSE than larger values on K=3072 shapes
-        // (14983us vs ~9260-9925us) — each coopMatLoadTensorNV is itself an expensive workgroup-cooperative
-        // op, so more, smaller K-steps means paying that overhead more often. BK=64 was best-or-near-best
-        // across both swept shapes; use it as the default when the caller doesn't override.
-        uint BK = bk != 0 ? bk : 64u;
-        uint localX = Vk.CoopMat2WorkgroupInvocations;
-
         VulkanBuffer aBuf = GetBuffer(a);
         VulkanBuffer bBuf = GetBuffer(b);
         (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, DType.F16);
         (VulkanBuffer bRes, VulkanBuffer? bOwned) = CastIfNeeded(b, bBuf, DType.F16);
-
-        // Bias always cast to F32, matching the accumulator's precision and matmul_coopmat.comp.glsl's own
-        // convention (see that kernel's binding-3 comment) — independent of the GEMM's F16 input dtype.
         VulkanBuffer? biasOwned = null;
-        VulkanBuffer? biasRaw = null;
-        ulong biasHandle;
+        ulong biasHandle = 0;
         if (bias is not null)
         {
-            biasRaw = GetBuffer(bias);
-            (VulkanBuffer biasF32, VulkanBuffer? owned) = CastIfNeeded(bias, biasRaw, DType.F32);
+            (VulkanBuffer biasF32, VulkanBuffer? owned) = CastIfNeeded(bias, GetBuffer(bias), DType.F32);
             biasOwned = owned;
             biasHandle = biasF32.Handle;
         }
-        else
-        {
-            biasHandle = aRes.Handle;   // placeholder — HAS_BIAS=false means the shader never reads binding 4
-        }
-
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * output.DType.SizeInBytes));
         try
         {
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, localX),
-                SpecConstant.UInt(1, 1),
-                SpecConstant.UInt(2, 1),
-                SpecConstant.UInt(10, BM),
-                SpecConstant.UInt(11, BN),
-                SpecConstant.UInt(12, BK),
-                SpecConstant.Bool(15, outputIsF32),
-                SpecConstant.Bool(16, bias is not null),
-            };
-            VulkanKernel k = GetKernel("matmul_coopmat2", storageBufferCount: 5, spec);
-
-            Span<byte> pc = stackalloc byte[9 * 4];
-            BinaryWriteUInt(pc, 0, (uint)M);
-            BinaryWriteUInt(pc, 4, (uint)N);
-            BinaryWriteUInt(pc, 8, (uint)K);
-            BinaryWriteUInt(pc, 12, (uint)K);   // lda: A is [M,K] row-major
-            BinaryWriteUInt(pc, 16, (uint)K);   // ldb: B is [N,K] row-major (transposeB)
-            BinaryWriteUInt(pc, 20, (uint)N);   // ldc: C is [M,N] row-major
-            BinaryWriteUInt(pc, 24, 0u);
-            BinaryWriteUInt(pc, 28, 0u);
-            BinaryWriteUInt(pc, 32, 0u);
-
-            ulong outHandle = outBuf.Handle;
-            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outHandle, outHandle, biasHandle };
-
-            uint groupsX = (uint)((N + BN - 1) / BN);
-            uint groupsY = (uint)((M + BM - 1) / BM);
-            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
-
+            DispatchCoopMat2(new GemmOperands(aRes.Handle, bRes.Handle, outBuf.Handle, M, N, K, false, true, DType.F16, output.DType) { BiasF32 = biasHandle });
+            _coopmat2GemmCount++;
             CacheOutput(output, outBuf);
         }
         catch (Exception ex)
@@ -1279,139 +1022,46 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         // element into a wider buffer and the model reads the bytes back as garbage.
         DType gemmDtype = ResolveGemmDtype(output.DType);
 
-        // Coopmat2 fast path — tried BEFORE coopmat1, opt-in only (see EnableCoopMat2's doc comment for
-        // why it isn't unconditional yet). Self-contained (does its own buffer acquisition/allocation), so
-        // this must run before the coopmat1/tiled path's own outBuf is allocated below, or a successful
-        // coopmat2 dispatch would leak that unused allocation. Gated on !transposeA && transposeB HERE
-        // (not just inside TryDispatchCoopMat2, which throws on any other combination) because
-        // DispatchMatmul is also the shared entry point for MatMul/BatchedMatMul, which call with
-        // transposeB=false — must fall through to coopmat1/tiled cleanly for those, not throw.
-        if (EnableCoopMat2 && gemmDtype == DType.F16 && !transposeA && transposeB)
-        {
-            long t0 = _profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-            bool coopmat2Ok = TryDispatchCoopMat2(output, a, b, transposeA, transposeB, bias);
-            if (_profiler.IsEnabled) _coopmat2GemmTicks += System.Diagnostics.Stopwatch.GetTimestamp() - t0;
-            if (coopmat2Ok)
-            {
-                _coopmat2GemmCount++;
-                return;
-            }
-        }
-
         VulkanBuffer aBuf = GetBuffer(a);
         VulkanBuffer bBuf = GetBuffer(b);
         (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, gemmDtype);
         (VulkanBuffer bRes, VulkanBuffer? bOwned) = CastIfNeeded(b, bBuf, gemmDtype);
 
-        VulkanBuffer? biasOwned = null;
-        VulkanBuffer? biasRes = null;
-        VulkanBuffer? biasRaw = null;
+        // The tiled kernel reads the bias in the output dtype, the cooperative-matrix kernels in F32; both are
+        // prepared and the dispatcher binds the one its kernel reads (a cast to the tensor's own dtype is free).
+        VulkanBuffer? biasOutOwned = null, biasF32Owned = null;
+        ulong biasOut = 0, biasF32 = 0;
         if (bias is not null)
         {
-            biasRaw = GetBuffer(bias);
-            (biasRes, biasOwned) = CastIfNeeded(bias, biasRaw, output.DType);
+            VulkanBuffer biasRaw = GetBuffer(bias);
+            (VulkanBuffer biasRes, biasOutOwned) = CastIfNeeded(bias, biasRaw, gemmDtype);
+            biasOut = biasRes.Handle;
+            (VulkanBuffer biasRes32, biasF32Owned) = CastIfNeeded(bias, biasRaw, DType.F32);
+            biasF32 = biasRes32.Handle;
         }
 
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
-
-        // Coopmat fast path — VK_KHR_cooperative_matrix tensor-core-style 16x16x16 ops on FP16.
-        // Only applicable when (a) the device exposes coopmat, (b) GEMM dtype is FP16, and
-        // (c) M, N, K are all multiples of 16 (the fragment size). Bias is folded as a separate
-        // BroadcastAdd dispatch after the matmul. Falls through to the tiled path otherwise.
-        long tCoopmat0 = _profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-        bool coopmatOk = TryDispatchCoopmat(output, aRes, bRes, M, N, K, transposeA, transposeB,
-                               gemmDtype, outBuf, bias, biasRes, biasRaw);
-        if (_profiler.IsEnabled) _coopmatGemmTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tCoopmat0;
-        if (coopmatOk)
-        {
-            _coopmatGemmCount++;
-            if (aOwned is not null) _xfer.FreeDevice(aOwned);
-            if (bOwned is not null) _xfer.FreeDevice(bOwned);
-            if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
-            return;
-        }
-
-        _tiledGemmCount++;
-        long tTiled0 = _profiler.IsEnabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * output.DType.SizeInBytes));
         try
         {
-            // Tile shape selected from M, N, K — see PickMatmulTile. Big tiles (128x128) win on
-            // Flux/SDXL Linear shapes (M, N >= 128); small tiles (32x32) avoid wasted dispatch
-            // threads on tiny GEMMs.
-            (uint BM, uint BN, uint BK, uint TM, uint TN) = PickMatmulTile(M, N, K);
-            uint localX = BN / TN;
-            uint localY = BM / TM;
-
-            string shader = "matmul_tiled" + DtypeSuffix(gemmDtype);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, localX),
-                SpecConstant.UInt(1, localY),
-                SpecConstant.UInt(2, 1),
-                SpecConstant.UInt(10, BM),
-                SpecConstant.UInt(11, BN),
-                SpecConstant.UInt(12, BK),
-                SpecConstant.UInt(13, TM),
-                SpecConstant.UInt(14, TN),
-                SpecConstant.Bool(15, transposeA),
-                SpecConstant.Bool(16, transposeB),
-                SpecConstant.Bool(17, bias is not null),
-                SpecConstant.UInt(18, 0u),    // no fused activation in v1
-                SpecConstant.Bool(19, false),
-            };
-
-            VulkanKernel k = GetKernel(shader, storageBufferCount: 5, spec);
-
-            Span<byte> pc = stackalloc byte[11 * 4];
-            BinaryWriteUInt(pc, 0, (uint)M);
-            BinaryWriteUInt(pc, 4, (uint)N);
-            BinaryWriteUInt(pc, 8, (uint)K);
-            BinaryWriteUInt(pc, 12, (uint)(transposeA ? M : K));
-            BinaryWriteUInt(pc, 16, (uint)(transposeB ? K : N));
-            BinaryWriteUInt(pc, 20, (uint)N);
-            // FP8 scale: only fold weight (b) scale into alpha when both are FP8 we already cast,
-            // or when only one operand was FP8. For non-FP8 inputs, scale factors default to 1.0.
-            BinaryWriteFloat(pc, 24, 1.0f);
-            BinaryWriteFloat(pc, 28, 0.0f);
-            BinaryWriteUInt(pc, 32, 0u);   // aOffset
-            BinaryWriteUInt(pc, 36, 0u);   // bOffset
-            BinaryWriteUInt(pc, 40, 0u);   // cOffset
-
-            // Bias slot 3 must be valid even when not used; bind out as a placeholder.
-            ulong biasHandle = (biasRes ?? outBuf).Handle;
-            ulong residualHandle = outBuf.Handle;
-            Span<ulong> bufs = stackalloc ulong[] { aRes.Handle, bRes.Handle, outBuf.Handle, biasHandle, residualHandle };
-
-            uint groupsX = (uint)((N + BN - 1) / BN);
-            uint groupsY = (uint)((M + BM - 1) / BM);
-            Dispatch(k, bufs, pc, groupsX, groupsY, 1);
-
+            DispatchGemm(new GemmOperands(aRes.Handle, bRes.Handle, outBuf.Handle, M, N, K, transposeA, transposeB, gemmDtype, output.DType)
+                { BiasOut = biasOut, BiasF32 = biasF32 });
             CacheOutput(output, outBuf);
         }
         catch (Exception ex)
         {
-            Logs.Error("Vulkan DispatchMatmul tiled-path dispatch failed", ex);
+            Logs.Error("Vulkan DispatchMatmul dispatch failed", ex);
             outBuf.Dispose();
             throw;
         }
         finally
         {
-            // a/b/bias buffers from GetBuffer are tracked by VulkanGpuTransferHelper as transients;
-            // they're freed during the next flush. Cast buffers are caller-owned and freed here.
             if (aOwned is not null) _xfer.FreeDevice(aOwned);
             if (bOwned is not null) _xfer.FreeDevice(bOwned);
-            if (biasOwned is not null) _xfer.FreeDevice(biasOwned);
-            if (_profiler.IsEnabled) _tiledGemmTicks += System.Diagnostics.Stopwatch.GetTimestamp() - tTiled0;
+            if (biasOutOwned is not null) _xfer.FreeDevice(biasOutOwned);
+            if (biasF32Owned is not null) _xfer.FreeDevice(biasF32Owned);
         }
     }
 
-    /// <summary>INT8 quantized matmul via the cross-vendor integer dot-product extension.</summary>
-    /// <remarks><c>output[m,n] = (a[M,K] @ b[N,K]^T) * scaleA[m] * scaleB[n]</c>.</remarks>
-    // b follows the Linear weight convention ([N,K], row n contiguous along K). Scales are per row:
-    // scaleA is F32 length M (per token/activation row), scaleB is F32 length N (per output channel) — the
-    // standard scheme for accurate INT8 inference. The int32 accumulation is exact; only the dequant rounds.
-    // Requires VulkanCapabilities.HasInt8DotProduct and K a multiple of 4. Shared-memory tiled.
     public void MatMulInt8(Tensor output, Tensor a, Tensor b, Tensor scaleA, Tensor scaleB)
     {
         using OpScope _ = EnterOp();
@@ -1510,6 +1160,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         // materializes every image's columns for a tile before the GEMMs consume them.
         long maxTileN = Math.Max(1L, (long)(Conv2DMaxColTileBytes / ((ulong)gemmK * (ulong)batch * (ulong)gemmDtype.SizeInBytes)));
         long tileN = Math.Min(fullN, maxTileN);
+        if (tileN < fullN && tileN > 16) tileN -= tileN % 16;   // a 16-aligned column tile admits the cooperative-matrix kernel
         // Whole-batch element count. Per-image offsets below are computed from thisTileN, not from this, because
         // the final tile is short and each image's block is packed at that shorter stride.
         long tileColElements = (long)gemmK * tileN * batch;
@@ -1538,34 +1189,11 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
 
         try
         {
-            (uint BM, uint BN, uint BK, uint TM, uint TN) = PickMatmulTile(outCh, (int)tileN, gemmK);
-            uint localX = BN / TN;
-            uint localY = BM / TM;
-            string matmulShader = "matmul_tiled" + DtypeSuffix(gemmDtype);
-            ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-            {
-                SpecConstant.UInt(0, localX),
-                SpecConstant.UInt(1, localY),
-                SpecConstant.UInt(2, 1),
-                SpecConstant.UInt(10, BM),
-                SpecConstant.UInt(11, BN),
-                SpecConstant.UInt(12, BK),
-                SpecConstant.UInt(13, TM),
-                SpecConstant.UInt(14, TN),
-                SpecConstant.Bool(15, false),
-                SpecConstant.Bool(16, false),
-                SpecConstant.Bool(17, false),
-                SpecConstant.UInt(18, 0u),
-                SpecConstant.Bool(19, false),
-            };
-            VulkanKernel matmulKernel = GetKernel(matmulShader, 5, spec);
             string im2colShader = "im2col" + DtypeSuffix(gemmDtype);
             VulkanKernel im2colKernel = GetKernel(im2colShader, 2, _default1DSpec);
 
             Span<byte> im2colPc = stackalloc byte[14 * 4];
             Span<ulong> im2colBufs = stackalloc ulong[] { inRes.Handle, colBuf.Handle };
-            Span<byte> matmulPc = stackalloc byte[11 * 4];
-            Span<ulong> matmulBufs = stackalloc ulong[] { wRes.Handle, colBuf.Handle, outBuf.Handle, outBuf.Handle, outBuf.Handle };
 
             for (long nStart = 0; nStart < fullN; nStart += tileN)
             {
@@ -1596,24 +1224,15 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
                 // so only B and C move: bOffset walks the column blocks im2col just wrote, cOffset walks the output
                 // planes. Batching this way needs no kernel change — matmul_tiled has carried aOffset/bOffset/cOffset
                 // "for batched dispatch" all along, and BatchedMatMul already drives it the same way.
+                // One [outCh, K] × [K, tileN] product per image, written into its own rows of the [outCh, fullN] output.
                 for (int n = 0; n < batch; n++)
                 {
-                    int M = outCh, K = gemmK, N = (int)thisTileN;
-                    BinaryWriteUInt(matmulPc, 0, (uint)M);
-                    BinaryWriteUInt(matmulPc, 4, (uint)N);
-                    BinaryWriteUInt(matmulPc, 8, (uint)K);
-                    BinaryWriteUInt(matmulPc, 12, (uint)K);
-                    BinaryWriteUInt(matmulPc, 16, (uint)N);
-                    BinaryWriteUInt(matmulPc, 20, (uint)fullN);
-                    BinaryWriteFloat(matmulPc, 24, 1.0f);
-                    BinaryWriteFloat(matmulPc, 28, 0.0f);
-                    BinaryWriteUInt(matmulPc, 32, 0u);
-                    BinaryWriteUInt(matmulPc, 36, (uint)((long)n * gemmK * thisTileN));
-                    BinaryWriteUInt(matmulPc, 40, (uint)((long)n * outCh * fullN + nStart));
-
-                    uint groupsX = (uint)(((uint)N + BN - 1) / BN);
-                    uint groupsY = (uint)((M + BM - 1) / BM);
-                    Dispatch(matmulKernel, matmulBufs, matmulPc, groupsX, groupsY, 1);
+                    DispatchGemm(new GemmOperands(wRes.Handle, colBuf.Handle, outBuf.Handle, outCh, thisTileN, gemmK, false, false, gemmDtype, gemmDtype)
+                    {
+                        BOffset = (uint)((long)n * gemmK * thisTileN),
+                        COffset = (uint)((long)n * outCh * fullN + nStart),
+                        Ldc = fullN,
+                    });
                 }
             }
 
@@ -2940,7 +2559,7 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         Dispatch(k, bufs, pc, GroupCount(count, LocalX1D));
     }
 
-    /// <summary>Dispatch a tiled matmul on raw buffer handles with explicit element offsets. Used by SDPA's per-head loop.</summary>
+    /// <summary>A GEMM on raw buffers at element offsets, in <paramref name="dtype"/> on both sides — the batched, attention and convolution callers' form of <see cref="DispatchGemm"/>.</summary>
     private void DispatchMatmulWithOffsets(
         ulong aHandle, ulong bHandle, ulong cHandle,
         long M, long N, long K,
@@ -2949,49 +2568,11 @@ public sealed class VulkanBackend : GpuBackendBase, IBackend
         uint aOffset, uint bOffset, uint cOffset,
         DType dtype)
     {
-        (uint BM, uint BN, uint BK, uint TM, uint TN) = PickMatmulTile(M, N, K);
-        uint localX = BN / TN;
-        uint localY = BM / TM;
-
-        string shader = "matmul_tiled" + DtypeSuffix(dtype);
-        ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
-        {
-            SpecConstant.UInt(0, localX),
-            SpecConstant.UInt(1, localY),
-            SpecConstant.UInt(2, 1),
-            SpecConstant.UInt(10, BM),
-            SpecConstant.UInt(11, BN),
-            SpecConstant.UInt(12, BK),
-            SpecConstant.UInt(13, TM),
-            SpecConstant.UInt(14, TN),
-            SpecConstant.Bool(15, transposeA),
-            SpecConstant.Bool(16, transposeB),
-            SpecConstant.Bool(17, false),
-            SpecConstant.UInt(18, 0u),
-            SpecConstant.Bool(19, false),
-        };
-        VulkanKernel k = GetKernel(shader, 5, spec);
-
-        Span<byte> pc = stackalloc byte[11 * 4];
-        BinaryWriteUInt(pc, 0, (uint)M);
-        BinaryWriteUInt(pc, 4, (uint)N);
-        BinaryWriteUInt(pc, 8, (uint)K);
-        BinaryWriteUInt(pc, 12, (uint)(transposeA ? M : K));
-        BinaryWriteUInt(pc, 16, (uint)(transposeB ? K : N));
-        BinaryWriteUInt(pc, 20, (uint)N);
-        BinaryWriteFloat(pc, 24, alpha);
-        BinaryWriteFloat(pc, 28, beta);
-        BinaryWriteUInt(pc, 32, aOffset);
-        BinaryWriteUInt(pc, 36, bOffset);
-        BinaryWriteUInt(pc, 40, cOffset);
-
-        Span<ulong> bufs = stackalloc ulong[] { aHandle, bHandle, cHandle, cHandle, cHandle };
-        uint groupsX = (uint)((N + BN - 1) / BN);
-        uint groupsY = (uint)((M + BM - 1) / BM);
-        Dispatch(k, bufs, pc, groupsX, groupsY, 1);
+        DispatchGemm(new GemmOperands(aHandle, bHandle, cHandle, M, N, K, transposeA, transposeB, dtype, dtype)
+            { Alpha = alpha, Beta = beta, AOffset = aOffset, BOffset = bOffset, COffset = cOffset });
     }
 
-    /// <summary>Dispatch softmax over a contiguous block of rows starting at the given element offsets in src/dst buffers.</summary>
+    /// <summary>Row softmax on a raw buffer at an element offset — the attention loop's second step, one workgroup per row.</summary>
     private void DispatchSoftmaxRows(ulong srcHandle, ulong dstHandle, DType dtype, int N, int rows, uint srcOffset, uint dstOffset)
     {
         string shader = "softmax" + DtypeSuffix(dtype);
