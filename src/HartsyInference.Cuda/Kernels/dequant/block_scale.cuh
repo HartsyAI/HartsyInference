@@ -52,6 +52,21 @@ __device__ __forceinline__ float nvfp4_e2m1_decode(unsigned int nibble)
     return (nibble & 0x8u) ? -magnitude : magnitude;
 }
 
+// UE8M0 byte -> float: 2^(byte - 127), and 0 for byte 0 — the bit reinterpretation byte << 23.
+__device__ __forceinline__ float e8m0_decode(unsigned int b) { return __uint_as_float(b << 23); }
+
+// The UE8M0 shared exponent for a block whose |max| is amax, chosen so the largest element lands at or under e4m3's
+// max normal (448 = 1.75·2^8): 2^(floor(log2 amax) - 8), as OCP MX specifies. 0 for an all-zero block. frexpf gives
+// floor(log2) exactly, which log2f does not at powers of two.
+__device__ __forceinline__ unsigned int e8m0_of(float amax)
+{
+    if (!(amax > 0.0f)) return 0u;
+    int e;
+    frexpf(amax, &e);                       // amax = m·2^e, m in [0.5, 1)  =>  floor(log2 amax) = e - 1
+    int stored = (e - 1) - 8 + 127;
+    return (unsigned int)(stored < 1 ? 1 : stored > 254 ? 254 : stored);
+}
+
 // float -> e4m3fn (bias 7, max normal 448, no inf; 0x7F/0xFF = NaN). Round-half-away-from-zero on
 // the mantissa (vs the IEEE ties-to-even a hardware cvt would do) — a <=0.5-ulp difference on exact
 // ties only, irrelevant for activation quantization. Values past the 448+16 rounding midpoint clamp

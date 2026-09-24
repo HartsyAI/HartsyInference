@@ -1,6 +1,7 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.ModelAssets.BlockScale;
+using HartsyInference.ModelAssets.Mxfp8;
 using HartsyInference.ModelAssets.Nvfp4;
 using Xunit;
 using Xunit.Abstractions;
@@ -143,6 +144,47 @@ public sealed class BlockQuantKernelTests
             }
         }
         _output.WriteLine($"identity round-trip max abs err {maxErr:E3}");
+    }
+
+    /// <summary>MXFP8 activations: a UE8M0 exponent per 32 elements and e4m3 values, decoded on the host through
+    /// <see cref="Mxfp8ResidentCodec"/> — the same codec the resident-weight unpack is measured against. fp8 keeps
+    /// three mantissa bits, so the round trip correlates far above nvfp4's.</summary>
+    [Theory]
+    [InlineData(5, 64, false)]
+    [InlineData(200, 320, true)]
+    public unsafe void Mxfp8QuantizedActivationDecodesBackToTheInput(int rows, int cols, bool f16)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        using CudaBackend backend = new CudaBackend(0, PtxDir());
+        int paddedRows = (rows + 127) / 128 * 128, paddedCols = (cols / 32 + 3) / 4 * 4;
+        using Tensor input = new Tensor(new TensorShape(rows, cols), f16 ? DType.F16 : DType.F32);
+        using Tensor packed = new Tensor(new TensorShape(rows, cols), DType.F8E4M3);
+        using Tensor scales = new Tensor(new TensorShape(paddedRows, paddedCols), DType.U8);
+        using Tensor scalars = new Tensor(new TensorShape(3), DType.F32);
+        Random rng = new Random(41);
+        float[] x = new float[rows * cols];
+        for (int i = 0; i < x.Length; i++)
+        {
+            x[i] = (float)(rng.NextDouble() * 200.0 - 100.0);
+            if (f16) { ((Half*)input.DataPointer)[i] = (Half)x[i]; x[i] = (float)(Half)x[i]; } else ((float*)input.DataPointer)[i] = x[i];
+        }
+        backend.BlockQuantizeActivationForTest(packed, scales, scalars, input, weightScale: 0.5f, BlockScaleFormat.Mxfp8);
+        backend.Sync();
+        Assert.Equal(1f, ((float*)scalars.DataPointer)[0]);
+        Assert.Equal(0.5f, ((float*)scalars.DataPointer)[1]);
+
+        using Tensor decoded = Mxfp8ResidentCodec.DequantToBf16(packed, scales);
+        using Tensor decodedF32 = decoded.CastTo(DType.F32);
+        float* d = (float*)decodedF32.DataPointer;
+        double sxy = 0, sxx = 0, syy = 0;
+        for (int i = 0; i < x.Length; i++) { sxy += (double)d[i] * x[i]; sxx += (double)d[i] * d[i]; syy += (double)x[i] * x[i]; }
+        double corr = sxy / Math.Sqrt(sxx * syy);
+        _output.WriteLine($"mxfp8 {rows}x{cols} {(f16 ? "f16" : "f32")}: corr={corr:F6}");
+        Assert.True(corr > 0.999, $"decoded activation correlates {corr:F5} with the input");
+        byte* s = (byte*)scales.DataPointer;
+        for (int r = 0; r < rows; r++)
+            for (int b = 0; b < cols / 32; b++)
+                Assert.InRange(s[BlockScaleSwizzle.SwizzledIndex(r, b, paddedCols)], 1, 254);
     }
 
     private static float DecodeE4M3(byte b)

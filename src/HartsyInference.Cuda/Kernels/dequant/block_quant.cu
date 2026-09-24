@@ -11,6 +11,9 @@
 // NVFP4 recipe (TensorRT-LLM / comfy.float): sf = amax / (448·6) is the per-tensor DEQUANT scale; a block's E4M3
 // scale is block_amax / (6·sf), which cannot exceed 448; an element is e2m1(x / (e4m3(scale)·sf)). Dequantization
 // is then e2m1 · e4m3 · sf — the same left-to-right product the weight side forms.
+//
+// MXFP8 recipe (OCP MX): no per-tensor scale; each 32-element block gets the UE8M0 exponent 2^(floor(log2 amax) - 8)
+// and its elements are e4m3(x / 2^exp). Dequantization is e4m3 · 2^exp.
 #include "block_scale.cuh"
 
 #define REDUCE_THREADS 256u
@@ -85,4 +88,56 @@ extern "C" __global__ void block_quant_nvfp4_f16(
     const float* __restrict__ scalars, unsigned int rows, unsigned int cols, unsigned int paddedCols)
 {
     BLOCK_QUANT_NVFP4_BODY(LOAD_F16)
+}
+
+// MX formats carry no per-tensor scale: alpha is the weight side's alone, and the block exponent does the rest.
+extern "C" __global__ void block_quant_finalize_mx(float weightScale, float* __restrict__ scalars)
+{
+    if (threadIdx.x == 0)
+    {
+        scalars[0] = 1.0f;
+        scalars[1] = weightScale;
+        scalars[2] = 0.0f;
+    }
+}
+
+// One thread per 32-element block: its shared exponent (UE8M0, blocked layout) -> 32 e4m3 bytes in four 8-byte stores.
+#define BLOCK_QUANT_MXFP8_BODY(LOAD)                                                                       \
+    unsigned long long block = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;                   \
+    unsigned int blocksPerRow = cols >> 5;                                                                  \
+    if (block >= (unsigned long long)rows * blocksPerRow) return;                                           \
+    unsigned int row = (unsigned int)(block / blocksPerRow);                                                \
+    unsigned int blockCol = (unsigned int)(block % blocksPerRow);                                           \
+    unsigned long long base = (unsigned long long)row * cols + (unsigned long long)blockCol * 32u;          \
+    float v[32];                                                                                            \
+    float amax = 0.0f;                                                                                      \
+    for (unsigned int i = 0; i < 32u; i++)                                                                  \
+    {                                                                                                       \
+        v[i] = LOAD(base + i);                                                                              \
+        float a = fabsf(v[i]);                                                                              \
+        if (a > amax) amax = a;                                                                             \
+    }                                                                                                       \
+    unsigned int e = e8m0_of(amax);                                                                         \
+    blockScale[swizzled_scale_index(row, blockCol, paddedCols)] = (unsigned char)e;                         \
+    float inv = e ? 1.0f / e8m0_decode(e) : 0.0f;                                                           \
+    for (unsigned int j = 0; j < 4u; j++)                                                                   \
+    {                                                                                                       \
+        unsigned long long packed = 0ull;                                                                   \
+        for (unsigned int i = 0; i < 8u; i++)                                                               \
+            packed |= (unsigned long long)f32_to_e4m3(v[j * 8u + i] * inv) << (8u * i);                     \
+        *(unsigned long long*)(out + base + j * 8u) = packed;                                               \
+    }
+
+extern "C" __global__ void block_quant_mxfp8_f32(
+    const float* __restrict__ x, unsigned char* __restrict__ out, unsigned char* __restrict__ blockScale,
+    unsigned int rows, unsigned int cols, unsigned int paddedCols)
+{
+    BLOCK_QUANT_MXFP8_BODY(LOAD_F32)
+}
+
+extern "C" __global__ void block_quant_mxfp8_f16(
+    const unsigned short* __restrict__ x, unsigned char* __restrict__ out, unsigned char* __restrict__ blockScale,
+    unsigned int rows, unsigned int cols, unsigned int paddedCols)
+{
+    BLOCK_QUANT_MXFP8_BODY(LOAD_F16)
 }

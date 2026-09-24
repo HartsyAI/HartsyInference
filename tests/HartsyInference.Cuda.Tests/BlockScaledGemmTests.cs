@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
+using HartsyInference.ModelAssets.Mxfp8;
 using HartsyInference.ModelAssets.Nvfp4;
 using Xunit;
 using Xunit.Abstractions;
@@ -86,5 +87,56 @@ public sealed class BlockScaledGemmTests
         }
         double nativeMs = TimePerLinear(true), unpackMs = TimePerLinear(false);
         _output.WriteLine($"TIMING {m}x{n}x{k}: native {nativeMs:F3} ms/Linear, unpack {unpackMs:F3} ms/Linear ({unpackMs / nativeMs:F2}x)");
+    }
+
+    [Theory]
+    [InlineData(64, 256, 128)]
+    [InlineData(200, 320, 256)]
+    public unsafe void NativeMxfp8Gemm_MatchesTheUnpackPath(int m, int n, int k)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        string ptxDir = Path.Combine(AppContext.BaseDirectory, "Ptx");
+        if (!Directory.Exists(ptxDir))
+            ptxDir = Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
+        using CudaBackend backend = new CudaBackend(0, ptxDir);
+        if (!backend.BlockScaledExecutor.IsSupported)
+        {
+            _output.WriteLine("SKIPPED: block-scaled GEMM needs Blackwell.");
+            return;
+        }
+        int paddedRows = (n + 127) / 128 * 128, paddedCols = (k / 32 + 3) / 4 * 4;
+        using Tensor weight = new Tensor(new TensorShape(n, k), DType.F8E4M3);
+        using Tensor scales = new Tensor(new TensorShape(paddedRows, paddedCols), DType.U8);
+        using Tensor input = new Tensor(new TensorShape(m, k), DType.F32);
+        using Tensor outNative = new Tensor(new TensorShape(m, n), DType.F16);
+        using Tensor outRef = new Tensor(new TensorShape(m, n), DType.F16);
+        Random rng = new Random(43);
+        byte* wp = (byte*)weight.DataPointer;
+        for (long i = 0; i < (long)n * k; i++) wp[i] = (byte)(rng.Next(0x30, 0x40) | (rng.Next(2) << 7));   // |w| in [0.5, 2)
+        byte* sp = (byte*)scales.DataPointer;
+        for (long i = 0; i < (long)paddedRows * paddedCols; i++) sp[i] = (byte)(124 + rng.Next(7));   // 2^-3 .. 2^3
+        for (long i = 0; i < (long)m * k; i++) ((float*)input.DataPointer)[i] = (float)(rng.NextDouble() * 8.0 - 4.0);
+        Assert.True(Mxfp8Codec.TryAttachResident(weight, scales));
+
+        backend.EnableNativeFp4Gemm = true;
+        backend.Linear(outNative, input, weight, bias: null);
+        backend.Sync();
+        backend.EnableNativeFp4Gemm = false;
+        backend.Linear(outRef, input, weight, bias: null);
+        backend.Sync();
+
+        double sumAbs = 0, sumRefAbs = 0;
+        Half* np = (Half*)outNative.DataPointer;
+        Half* rp = (Half*)outRef.DataPointer;
+        for (long i = 0; i < (long)m * n; i++)
+        {
+            float a = (float)np[i], r = (float)rp[i];
+            Assert.False(float.IsNaN(a) || float.IsInfinity(a), $"native output non-finite at {i}: {a}");
+            sumAbs += MathF.Abs(a - r);
+            sumRefAbs += MathF.Abs(r);
+        }
+        float relErr = (float)(sumAbs / Math.Max(sumRefAbs, 1e-9));
+        _output.WriteLine($"native mxfp8 {m}x{n}x{k}: rel_err={relErr:E3} vs the unpack path");
+        Assert.True(relErr < 5e-2f, $"native MXFP8 GEMM rel_err {relErr:E3} exceeds the activation-quantization budget");
     }
 }

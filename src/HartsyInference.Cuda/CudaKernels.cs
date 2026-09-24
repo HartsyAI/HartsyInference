@@ -70,6 +70,12 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _blockQuantFinalizeNvfp4;
     private readonly nint _blockQuantNvfp4F32;
     private readonly nint _blockQuantNvfp4F16;
+    private readonly nint _blockQuantFinalizeMx;
+    private readonly nint _blockQuantMxfp8F32;
+    private readonly nint _blockQuantMxfp8F16;
+    private readonly CudaModule? _mxfp8Module;
+    private readonly nint _mxfp8DequantF16;
+    private readonly nint _mxfp8DequantBf16;
     private readonly nint _nvfp4DequantF16;
     private readonly nint _nvfp4DequantBf16;
 
@@ -735,6 +741,18 @@ public sealed class CudaKernels : IDisposable
             _blockQuantFinalizeNvfp4 = _blockQuantModule.GetFunction("block_quant_finalize_nvfp4");
             _blockQuantNvfp4F32 = _blockQuantModule.GetFunction("block_quant_nvfp4_f32");
             _blockQuantNvfp4F16 = _blockQuantModule.GetFunction("block_quant_nvfp4_f16");
+            _blockQuantFinalizeMx = _blockQuantModule.GetFunction("block_quant_finalize_mx");
+            _blockQuantMxfp8F32 = _blockQuantModule.GetFunction("block_quant_mxfp8_f32");
+            _blockQuantMxfp8F16 = _blockQuantModule.GetFunction("block_quant_mxfp8_f16");
+        }
+
+        // Optional module: MXFP8 unpack (Kernels/dequant/dequant_mxfp8_to_f16.cu). Absence is not an error.
+        string mxfp8Path = Ptx("dequant_mxfp8_to_f16");
+        if (File.Exists(mxfp8Path))
+        {
+            _mxfp8Module = LoadOwnedModule(mxfp8Path);
+            _mxfp8DequantF16 = _mxfp8Module.GetFunction("dequant_mxfp8_to_f16");
+            _mxfp8DequantBf16 = _mxfp8Module.GetFunction("dequant_mxfp8_to_bf16");
         }
 
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
@@ -2459,8 +2477,8 @@ public sealed class CudaKernels : IDisposable
         ulong x, DType xType, int rows, int cols, int paddedRows, int paddedCols, float weightScale, nint stream)
     {
         if (_blockQuantModule is null) throw new InvalidOperationException("block_quant.ptx not present in the Ptx folder.");
-        if (format != BlockScaleFormat.Nvfp4)
-            throw new NotSupportedException($"{format} activation quantization has no kernel yet; only NVFP4 does.");
+        if (format == BlockScaleFormat.Mxfp4)
+            throw new NotSupportedException("MXFP4 activation quantization has no kernel yet.");
         if (xType != DType.F32 && xType != DType.F16)
             throw new ArgumentException($"Block quantization reads F32 or F16 activations, not {xType}.", nameof(xType));
         int group = format.GroupSize();
@@ -2468,27 +2486,60 @@ public sealed class CudaKernels : IDisposable
             throw new ArgumentException($"cols={cols} is not a multiple of the {format} block size {group}.", nameof(cols));
 
         int count = rows * cols;
-        uint blocks = (uint)Fp8AbsMaxBlockCount(count);
-        ulong blockMax = scratch + 3 * sizeof(float);
-        ulong xA = x, bmA = blockMax; uint nA = (uint)count;
-        void** args = stackalloc void*[3];
-        args[0] = &xA; args[1] = &bmA; args[2] = &nA;
-        CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _fp8AbsMaxF16 : _fp8AbsMax,
-            blocks, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-
-        ulong scA = scratch; uint nbA = blocks; float wsA = weightScale;
-        void** args2 = stackalloc void*[4];
-        args2[0] = &bmA; args2[1] = &nbA; args2[2] = &wsA; args2[3] = &scA;
-        CudaDriverApi.cuLaunchKernel(_blockQuantFinalizeNvfp4, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args2, 0).ThrowOnError();
-
-        CudaDriverApi.cuMemsetD8Async(blockScale, 0, (nuint)((long)paddedRows * paddedCols), stream).ThrowOnError();
-        ulong oA = output, sA = blockScale; uint rA = (uint)rows, cA = (uint)cols, pA = (uint)paddedCols;
-        void** args3 = stackalloc void*[7];
-        args3[0] = &xA; args3[1] = &oA; args3[2] = &sA; args3[3] = &scA; args3[4] = &rA; args3[5] = &cA; args3[6] = &pA;
+        ulong xA = x, scA = scratch; float wsA = weightScale;
         long threads = (long)rows * (cols / group);
         uint grid = (uint)((threads + BlockSize - 1) / BlockSize);
-        CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _blockQuantNvfp4F16 : _blockQuantNvfp4F32,
-            grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args3, 0).ThrowOnError();
+        CudaDriverApi.cuMemsetD8Async(blockScale, 0, (nuint)((long)paddedRows * paddedCols), stream).ThrowOnError();
+        ulong oA = output, sA = blockScale; uint rA = (uint)rows, cA = (uint)cols, pA = (uint)paddedCols;
+        if (format == BlockScaleFormat.Nvfp4)
+        {
+            uint blocks = (uint)Fp8AbsMaxBlockCount(count);
+            ulong blockMax = scratch + 3 * sizeof(float);
+            ulong bmA = blockMax; uint nA = (uint)count;
+            void** args = stackalloc void*[3];
+            args[0] = &xA; args[1] = &bmA; args[2] = &nA;
+            CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _fp8AbsMaxF16 : _fp8AbsMax,
+                blocks, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+            uint nbA = blocks;
+            void** args2 = stackalloc void*[4];
+            args2[0] = &bmA; args2[1] = &nbA; args2[2] = &wsA; args2[3] = &scA;
+            CudaDriverApi.cuLaunchKernel(_blockQuantFinalizeNvfp4, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args2, 0).ThrowOnError();
+            void** args3 = stackalloc void*[7];
+            args3[0] = &xA; args3[1] = &oA; args3[2] = &sA; args3[3] = &scA; args3[4] = &rA; args3[5] = &cA; args3[6] = &pA;
+            CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _blockQuantNvfp4F16 : _blockQuantNvfp4F32,
+                grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args3, 0).ThrowOnError();
+            return;
+        }
+        // MX formats have no per-tensor pass: the block exponent is the whole scale.
+        void** mxArgs = stackalloc void*[2];
+        mxArgs[0] = &wsA; mxArgs[1] = &scA;
+        CudaDriverApi.cuLaunchKernel(_blockQuantFinalizeMx, 1, 1, 1, 32, 1, 1, 0, stream, (nint)mxArgs, 0).ThrowOnError();
+        void** mxArgs2 = stackalloc void*[6];
+        mxArgs2[0] = &xA; mxArgs2[1] = &oA; mxArgs2[2] = &sA; mxArgs2[3] = &rA; mxArgs2[4] = &cA; mxArgs2[5] = &pA;
+        CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _blockQuantMxfp8F16 : _blockQuantMxfp8F32,
+            grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)mxArgs2, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional dequant_mxfp8_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
+    public bool HasMxfp8Kernels => _mxfp8Module is not null;
+
+    /// <summary>MXFP8 unpack — F8E4M3 <c>[rows, cols]</c> × swizzled UE8M0 block scales × the scale tensor's own factor → dense F16 or BF16 <c>[rows, cols]</c>.</summary>
+    /// <param name="paddedCols">Last-dim length of the stored block-scale tensor (its swizzle stride).</param>
+    public unsafe void LaunchMxfp8Dequant(ulong output, ulong weight, ulong blockScale,
+        int rows, int cols, int paddedCols, float scaleFactor, nint stream, bool outBf16)
+    {
+        if (_mxfp8Module is null) throw new InvalidOperationException("dequant_mxfp8_to_f16.ptx not present in the Ptx folder.");
+        ulong wArg = weight, sArg = blockScale, oArg = output;
+        uint rowsArg = (uint)rows, colsArg = (uint)cols, paddedArg = (uint)paddedCols;
+        float sfArg = scaleFactor;
+        void** args = stackalloc void*[7];
+        args[0] = &wArg; args[1] = &sArg; args[2] = &oArg;
+        args[3] = &rowsArg; args[4] = &colsArg; args[5] = &paddedArg; args[6] = &sfArg;
+        const uint BlockSize = 256;
+        uint gridX = (uint)(((long)cols + BlockSize - 1) / BlockSize);
+        uint gridY = (uint)Math.Min(rows, 65535);
+        CudaDriverApi.cuLaunchKernel(outBf16 ? _mxfp8DequantBf16 : _mxfp8DequantF16,
+            gridX, gridY, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Whether the optional dequant_nvfp4_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>

@@ -340,7 +340,8 @@ public sealed class LoraStack : IDisposable
     /// have no quantizer at all, and even where one exists, requantizing a merged result degrades the base as well as
     /// the LoRA. fp8 and int8_tensorwise are excluded on purpose: both have a working requantizer, and the round trip
     /// keeps them on their native packed GEMM path — which is also what ComfyUI does for those two.</remarks>
-    private static bool RequiresRuntimeAdjunct(Tensor weight) => weight.DType.IsQuantized;
+    private static bool RequiresRuntimeAdjunct(Tensor weight)
+        => weight.DType.IsQuantized || weight.QuantInfo is { BlockScale: not null };   // block scales have no requantizer
 
     /// <summary>Refuses a block-quantized target that is not a 2-D Linear weight — a quantized rank-4 convolution has no GEMM to hang an adjunct off.</summary>
     private static void RequireRank2AdjunctTarget(Tensor baseW, string canonicalKey)
