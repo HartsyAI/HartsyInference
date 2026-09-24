@@ -16,13 +16,21 @@ public sealed class GgufRealFileCorrelationTests
     public GgufRealFileCorrelationTests(ITestOutputHelper o) { _out = o; }
 
     [Theory]
-    [InlineData("IQ4_XS", "IQ4_XS", 0.98)]
-    [InlineData("Q3_K_M", "Q3_K", 0.95)]
-    [InlineData("Q2_K", "Q2_K", 0.90)]
-    public unsafe void EveryTensorInTheFormatCorrelatesWithQ8_0(string file, string format, double floor)
+    [InlineData("llama32-1b", "IQ4_XS", "IQ4_XS", 0.98)]
+    [InlineData("llama32-1b", "Q3_K_M", "Q3_K", 0.95)]
+    [InlineData("llama32-1b", "Q2_K", "Q2_K", 0.90)]
+    [InlineData("llama32-1b", "IQ3_M", "IQ3_S", 0.95)]
+    [InlineData("qwen25-1.5b", "IQ3_XS", "IQ3_XXS", 0.93)]
+    [InlineData("qwen25-1.5b", "IQ3_XS", "IQ3_S", 0.95)]
+    [InlineData("qwen25-1.5b", "IQ2_M", "IQ2_S", 0.88)]
+    public unsafe void EveryTensorInTheFormatCorrelatesWithQ8_0(string family, string file, string format, double floor)
     {
-        string path = TestPaths.Llm.Llama32_1B(file);
-        string refPath = TestPaths.Llm.Llama32_1BQ8;
+        (string path, string refPath) = family switch
+        {
+            "llama32-1b" => (TestPaths.Llm.Llama32_1B(file), TestPaths.Llm.Llama32_1BQ8),
+            "qwen25-1.5b" => (TestPaths.Llm.Qwen25_15B(file), TestPaths.Llm.Qwen25_15B("Q8_0")),
+            _ => throw new ArgumentOutOfRangeException(nameof(family)),
+        };
         if (!File.Exists(path) || !File.Exists(refPath))
         {
             _out.WriteLine($"SKIPPED: {path} or {refPath} is not staged");
