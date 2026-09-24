@@ -73,6 +73,8 @@ internal static partial class CublasLtApi
 
     // ── Matmul Descriptor Attributes ────────────────────────────────────
 
+    internal const int CUBLASLT_MATMUL_DESC_POINTER_MODE = 2;   // cublasLtPointerMode_t; DEVICE reads alpha AND beta from device memory
+    internal const int CUBLASLT_POINTER_MODE_DEVICE = 1;
     internal const int CUBLASLT_MATMUL_DESC_TRANSA = 3;
     internal const int CUBLASLT_MATMUL_DESC_TRANSB = 4;
     internal const int CUBLASLT_MATMUL_DESC_EPILOGUE = 7;

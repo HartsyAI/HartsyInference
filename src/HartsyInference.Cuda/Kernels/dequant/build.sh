@@ -45,6 +45,7 @@ KERNELS_SM75=(
 )
 KERNELS_SM80=(
     "fp8_quant"
+    "block_quant"
     "int8_mma_gemm"   # cp.async + mma.m16n8k32.s8 are Ampere+
 )
 
@@ -70,7 +71,8 @@ compile_one() {
             exit 1
         fi
         echo "[$(date +%H:%M:%S)] nvrtc_compile compute_${sm} ${kernel}.cu"
-        LD_LIBRARY_PATH="$CUDA_LIB" "$NVRTC" "$src" "$ptx" "compute_${sm}" "$CUDA_INC"
+        # The kernel's own directory is an include path too: NVRTC compiles from a string and resolves #include "x.cuh" only through them.
+        LD_LIBRARY_PATH="$CUDA_LIB" "$NVRTC" "$src" "$ptx" "compute_${sm}" "$CUDA_INC" "$(dirname "$src")"
     fi
     if ! head -20 "$ptx" | grep -q '^\.version 9\.0$'; then
         echo "ERROR: ${kernel}.ptx is not PTX ISA 9.0 (driver JIT ceiling) — check toolchain pin." >&2

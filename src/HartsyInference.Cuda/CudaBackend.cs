@@ -27,7 +27,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     private readonly CudaKernels? _kernels;
     private nint _cublasHandle;
     private Fp8GemmExecutor? _fp8Executor;
-    private Fp4GemmExecutor? _fp4Executor;
+    private BlockScaledGemmExecutor? _blockScaledExecutor;
     private LtGemmExecutor? _ltGemmExecutor;
     private TensorCoreGemm? _tensorCoreGemm;
     private readonly object _nativeExecutorLock = new();
@@ -293,6 +293,9 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// against the F16 fallback.</remarks>
     public bool EnableNativeFp8Gemm { get; set; }
 
+    /// <summary>Native block-scaled GEMM (NVFP4 today) on Blackwell: the packed weight and its scale tensor are the operands and the activation is block-quantized per call. Off until validated on a card (<c>numerics.fp4Native</c>).</summary>
+    public bool EnableNativeFp4Gemm { get; set; }
+
     /// <inheritdoc/>
     /// <remarks>Reports the same flag <see cref="LinearImpl"/> consults, so the two cannot drift.</remarks>
     public bool NativeFp8Gemm => EnableNativeFp8Gemm;
@@ -427,12 +430,11 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    /// <summary>Lazily-initialized FP4 GEMM executor. <see cref="Fp4GemmExecutor.IsSupported"/> is false on
-    /// anything before Blackwell, and constructing it there allocates nothing, so callers can ask unconditionally.</summary>
-    /// <remarks>Not dispatched yet: a resident <see cref="DType.F4E2M1"/> weight unpacks through <c>LaunchNvfp4Dequant</c> on
-    /// every GEMM. This exists so bring-up on a Blackwell card needs no further code change, and so the unsupported-hardware
-    /// refusal is testable here.</remarks>
-    public Fp4GemmExecutor Fp4Executor
+    /// <summary>Lazily-initialized block-scaled GEMM executor. <see cref="BlockScaledGemmExecutor.IsSupported"/> is false
+    /// on anything before Blackwell, and constructing it there allocates nothing, so callers can ask unconditionally.</summary>
+    /// <remarks>Reached from <c>LinearCore</c> when <see cref="EnableNativeFp4Gemm"/> is on and the card is Blackwell;
+    /// everywhere else a resident <see cref="DType.F4E2M1"/> weight unpacks through <c>LaunchNvfp4Dequant</c> per GEMM.</remarks>
+    public BlockScaledGemmExecutor BlockScaledExecutor
     {
         get
         {
@@ -440,12 +442,12 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             lock (_nativeExecutorLock)
             {
                 EnsureActiveContextForLazyNativeResource();
-                if (_fp4Executor is null)
+                if (_blockScaledExecutor is null)
                 {
-                    _fp4Executor = new Fp4GemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
-                    GC.SuppressFinalize(_fp4Executor);
+                    _blockScaledExecutor = new BlockScaledGemmExecutor(_context.ComputeCapabilityMajor, _context.ComputeCapabilityMinor);
+                    GC.SuppressFinalize(_blockScaledExecutor);
                 }
-                return _fp4Executor;
+                return _blockScaledExecutor;
             }
         }
     }
@@ -1095,6 +1097,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         // F16-cast path. Verified quality-clean fleet-wide in the standard Swarm config.
         bool fp8TensorCores = _context.Sm >= CudaArch.Ada;
         EnableNativeFp8Gemm = EngineKnobs.Fp8Native.Value ?? fp8TensorCores;
+        EnableNativeFp4Gemm = EngineKnobs.Fp4Native.Value ?? false;
         EnableRopeHeadMajorV2 = EngineKnobs.RopeV2.Value;
         EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
         EnableModulateEmitFp8 = EngineKnobs.ModulateEmitFp8.Value;
@@ -1200,6 +1203,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             SupportsF16 = true,
             SupportsBF16 = _context.Sm >= CudaArch.Ampere,
             SupportsQuantized = true,
+            NativeBlockScaledGemm = EnableNativeFp4Gemm && _context.Sm >= CudaArch.Blackwell && _kernels is { HasBlockQuantKernels: true },
             SupportsConv2D = true,
             BandsIm2Col = true,
             Im2ColWorkspaceCapBytes = Im2ColBandCapBytes,
@@ -1884,8 +1888,23 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             && weight.QuantInfo is { BlockScale: not null, GlobalScale: not null } ? EnsureNvfp4Scales(weight)
                 : default;
 
+        // Native block-scaled GEMM (Blackwell): the packed weight and its scale tensor are the operands as stored, so
+        // the checkpoint's scale layout must be the one cuBLASLt derives from [N, K] — block columns padded to 4 —
+        // and a row range, which cannot address the packed layout, takes the unpack path like every other refusal.
+        BlockScaleFormat? blockScaled = null;
+        if (!rowRange && EnableNativeFp4Gemm && nvfp4Scales.BlockScaleDevice != 0
+            && BlockScaleFormats.FromQuantFormat(weight.QuantInfo?.Format) is { } bsFormat
+            && nvfp4Scales.PaddedCols == (k / bsFormat.GroupSize() + 3) / 4 * 4
+            && (input.DType == DType.F32 || input.DType == DType.F16)
+            && (output.DType == DType.F16 || output.DType == DType.F32)
+            && k % 32 == 0 && (n * output.DType.SizeInBytes) % 16 == 0
+            && _kernels!.HasBlockQuantKernels && BlockScaledExecutor.IsSupported)
+        {
+            blockScaled = bsFormat;
+        }
+
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
-        ulong pInputFp8 = 0, pFp8Scratch = 0;
+        ulong pInputFp8 = 0, pFp8Scratch = 0, pInputPacked = 0, pInputScale = 0, pBlockScratch = 0;
         bool cachedOutput = false;
         try
         {
@@ -2136,21 +2155,27 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                     inputScaleDev: inputScaleDev, outF32: output.DType == DType.F32,
                     weightType: weight.DType, inputType: input.DType.IsFp8 ? input.DType : DType.F8E4M3);
 
-                if (bias is not null)
-                {
-                    int totalElementsFp8 = m * n;
-                    ulong biasPtr = rowRange ? pBias + (ulong)((long)weightRowOffset * bias!.DType.SizeInBytes) : pBias;
-                    if (output.DType != bias!.DType)
-                    {
-                        pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
-                        CastOnGpu(pBiasCast, pBias, bias.DType, output.DType, (int)bias.ElementCount);
-                        biasPtr = pBiasCast;
-                    }
-                    if (output.DType == DType.F32)
-                        _kernels!.LaunchBiasAdd(pOutput, biasPtr, n, 1, totalElementsFp8, _stream.Handle);
-                    else
-                        _kernels!.LaunchBiasAddF16(pOutput, biasPtr, n, 1, totalElementsFp8, _stream.Handle);
-                }
+                if (bias is not null) pBiasCast = AddBiasEpilogue(output, bias, pOutput, pBias, m, n, rowRange, weightRowOffset);
+                GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+                cachedOutput = true;
+                return;
+            }
+
+            if (blockScaled is { } format)
+            {
+                int count = m * k;
+                int paddedRows = (m + 127) / 128 * 128;
+                int paddedCols = nvfp4Scales.PaddedCols;
+                pInputPacked = CudaMemory.Allocate((nuint)format.OperandType().ComputeByteCount(count));
+                pInputScale = CudaMemory.Allocate((nuint)((long)paddedRows * paddedCols));
+                pBlockScratch = CudaMemory.Allocate((nuint)(CudaKernels.BlockQuantScratchFloats(count) * sizeof(float)));
+                _kernels!.LaunchBlockQuant(format, pInputPacked, pInputScale, pBlockScratch, pInput, input.DType,
+                    m, k, paddedRows, paddedCols, nvfp4Scales.ScaleFactor * nvfp4Scales.GlobalScale, _stream.Handle);
+                BlockScaledExecutor.Run(weight: pWeight, weightBlockScale: nvfp4Scales.BlockScaleDevice,
+                    input: pInputPacked, inputBlockScale: pInputScale, outPtr: pOutput, m: m, n: n, k: k,
+                    alphaBetaDev: pBlockScratch + sizeof(float), stream: _stream.Handle, format: format,
+                    outF32: output.DType == DType.F32);
+                if (bias is not null) pBiasCast = AddBiasEpilogue(output, bias, pOutput, pBias, m, n, rowRange, weightRowOffset);
                 GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
                 cachedOutput = true;
                 return;
@@ -2428,6 +2453,9 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             if (pBiasCast != 0) CudaMemory.FreeAsync(pBiasCast, _stream.Handle);
             if (pInputFp8 != 0) CudaMemory.FreeAsync(pInputFp8, _stream.Handle);
             if (pFp8Scratch != 0) CudaMemory.FreeAsync(pFp8Scratch, _stream.Handle);
+            if (pInputPacked != 0) CudaMemory.FreeAsync(pInputPacked, _stream.Handle);
+            if (pInputScale != 0) CudaMemory.FreeAsync(pInputScale, _stream.Handle);
+            if (pBlockScratch != 0) CudaMemory.FreeAsync(pBlockScratch, _stream.Handle);
             if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
         }
     }
@@ -9033,6 +9061,61 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             throw new NotSupportedException($"GPU dequant for {srcDtype} not yet implemented. Supported: Q8_0, Q4_0, Q5_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K. Use CPU dequant via GgufDequantizer for other GGUF types.");
     }
 
+    /// <summary>Adds <paramref name="bias"/> to a GEMM output that bypassed cuBLAS' own epilogue, cast to the output dtype when they differ; returns the cast buffer (0 if none) for the caller to free.</summary>
+    private ulong AddBiasEpilogue(Tensor output, Tensor bias, ulong pOutput, ulong pBias, int m, int n, bool rowRange, int weightRowOffset)
+    {
+        ulong pBiasCast = 0;
+        ulong biasPtr = pBias;
+        int elementBytes = bias.DType.SizeInBytes;
+        if (output.DType != bias.DType)
+        {
+            pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
+            CastOnGpu(pBiasCast, pBias, bias.DType, output.DType, (int)bias.ElementCount);
+            biasPtr = pBiasCast;
+            elementBytes = output.DType.SizeInBytes;
+        }
+        if (rowRange) biasPtr += (ulong)((long)weightRowOffset * elementBytes);
+        if (output.DType == DType.F32)
+            _kernels!.LaunchBiasAdd(pOutput, biasPtr, n, 1, m * n, _stream.Handle);
+        else
+            _kernels!.LaunchBiasAddF16(pOutput, biasPtr, n, 1, m * n, _stream.Handle);
+        return pBiasCast;
+    }
+
+    /// <summary>Test hook for the block-scaled activation quantizer: <paramref name="input"/> (F32/F16 <c>[rows, cols]</c>) → <paramref name="packedOut"/> (U8 <c>[rows, cols/2]</c>), <paramref name="scaleOut"/> (F8E4M3 <c>[paddedRows, paddedCols]</c>, blocked layout) and <paramref name="scalarsOut"/> (F32 <c>[3]</c>: sf, alpha = <paramref name="weightScale"/>·sf, beta). Plain compute, so any CUDA GPU validates it.</summary>
+    internal void BlockQuantizeActivationForTest(Tensor packedOut, Tensor scaleOut, Tensor scalarsOut, Tensor input, float weightScale)
+    {
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        int rows = (int)input.Shape[0], cols = (int)input.Shape[1];
+        int paddedRows = (int)scaleOut.Shape[0], paddedCols = (int)scaleOut.Shape[1];
+        int count = rows * cols;
+        ulong pIn = 0, pOut = 0, pScale = 0, pScratch = 0;
+        bool cachedOut = false, cachedScale = false, cachedScalars = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            pOut = GpuTransferHelper.AllocateDevice((nuint)(count / 2));
+            pScale = GpuTransferHelper.AllocateDevice((nuint)((long)paddedRows * paddedCols));
+            pScratch = GpuTransferHelper.AllocateDevice((nuint)(CudaKernels.BlockQuantScratchFloats(count) * sizeof(float)));
+            _kernels!.LaunchBlockQuant(BlockScaleFormat.Nvfp4, pOut, pScale, pScratch, pIn, input.DType,
+                rows, cols, paddedRows, paddedCols, weightScale, _stream.Handle);
+            GpuTransferHelper.CacheActivation(packedOut, pOut, (nuint)(count / 2));
+            cachedOut = true;
+            GpuTransferHelper.CacheActivation(scaleOut, pScale, (nuint)((long)paddedRows * paddedCols));
+            cachedScale = true;
+            GpuTransferHelper.CacheActivation(scalarsOut, pScratch, 3 * sizeof(float));
+            cachedScalars = true;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pIn);
+            if (!cachedOut) GpuTransferHelper.FreeDevice(pOut);
+            if (!cachedScale) GpuTransferHelper.FreeDevice(pScale);
+            if (!cachedScalars) GpuTransferHelper.FreeDevice(pScratch);
+        }
+    }
+
     /// <summary>Test hook for the native-fp8 activation quantization kernels.</summary>
     /// <remarks>Computes the per-tensor e4m3 dequant scale and quantized bytes.</remarks>
     /// <remarks>Scale (<c>amax/448</c>) goes into <paramref name="scaleOut"/> (1-element F32), quantized bytes into
@@ -11023,7 +11106,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             }
 
             Fp8GemmExecutor? fp8;
-            Fp4GemmExecutor? fp4;
+            BlockScaledGemmExecutor? fp4;
             Int8GemmExecutor? int8;
             LtGemmExecutor? lt;
             TensorCoreGemm? tensorCore;
@@ -11031,8 +11114,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             {
                 fp8 = _fp8Executor;
                 _fp8Executor = null;
-                fp4 = _fp4Executor;
-                _fp4Executor = null;
+                fp4 = _blockScaledExecutor;
+                _blockScaledExecutor = null;
                 int8 = _int8Executor;
                 _int8Executor = null;
                 lt = _ltGemmExecutor;

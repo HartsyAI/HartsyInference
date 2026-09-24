@@ -107,15 +107,15 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             transformer.LoadWeights(converted);
             converted.Clear();
 
-            // Resolve + load the variant's text encoder. Opened through the container with Nvfp4ToFp8 so the
-            // nvfp4 groups land at fp8 rather than F16 — Klein 9B's encoder is 173 nvfp4 groups plus 76 fp8, and
-            // the F16 expansion costs ~3 GB more for no accuracy the fp8 GEMM path does not already give. The
-            // container also OWNS what it allocates, which the raw loader route did not: LlamaStyleEncoder.Dispose
-            // never frees projection tensors, so every dequantized weight leaked until process exit.
+            // Resolve + load the variant's text encoder. Opened through the container so the nvfp4 groups land where
+            // the backend can use them — packed on a card that multiplies them natively, at fp8 elsewhere (Klein 9B's
+            // encoder is 173 nvfp4 groups plus 76 fp8; the F16 expansion costs ~3 GB more for no accuracy the fp8
+            // GEMM path does not already give). The container also OWNS what it allocates, which the raw loader route
+            // did not: LlamaStyleEncoder.Dispose never frees projection tensors, so every dequantized weight leaked.
             (LlamaStyleEncoderConfig encoderConfig, ModelAsset encoderAsset, string encoderLabel) = ResolveTextEncoderForVariant(config);
             string encoderPath = ModelDownloader.EnsureSideModelAsync(encoderAsset, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
             CheckpointSource encoderSource = CheckpointSource.Open(
-                encoderPath, new CheckpointOpenOptions { Nvfp4ToFp8 = true });
+                encoderPath, CheckpointOpenOptions.ForNvfp4Consumer(context.Backend));
             loaders.Add(encoderSource);
             Dictionary<string, Tensor> qwenRaw = new Dictionary<string, Tensor>(encoderSource.Weights, StringComparer.Ordinal);
 

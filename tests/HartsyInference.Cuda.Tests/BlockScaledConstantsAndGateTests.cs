@@ -4,16 +4,16 @@ using Xunit;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>Pins the FP4 interop constants, the dtype map and the Blackwell gate.
+/// <summary>Pins the block-scaled GEMM interop constants, the dtype map, the format descriptor and the Blackwell gate.
 ///
 /// <para>These are transcribed from <c>library_types.h</c> and <c>cublasLt.h</c>, and a wrong value is invisible
-/// locally: no card here runs the FP4 path, so nothing would fail until it reached Blackwell and either errored
-/// obscurely or multiplied by a misread scale. <c>CUDA_R_8F_UE8M0</c> was 34 — past the end of <c>cudaDataType</c>
-/// — for exactly that reason.</para>
+/// locally: no card here runs the block-scaled path, so nothing would fail until it reached Blackwell and either
+/// errored obscurely or multiplied by a misread scale. <c>CUDA_R_8F_UE8M0</c> was 34 — past the end of
+/// <c>cudaDataType</c> — for exactly that reason.</para>
 ///
 /// <para>Unit tier: no GPU, no CUDA runtime. Values below are the enum members, not a second opinion about them;
 /// re-derive from the headers rather than from this file if they ever disagree.</para></summary>
-public sealed class Fp4ConstantsAndGateTests
+public sealed class BlockScaledConstantsAndGateTests
 {
     [Theory]
     // cudaDataType, library_types.h
@@ -67,7 +67,9 @@ public sealed class Fp4ConstantsAndGateTests
     }
 
     [Theory]
-    // cublasLtMatmulDescAttributes_t and cublasLtMatmulMatrixScale_t, cublasLt.h
+    // cublasLtMatmulDescAttributes_t, cublasLtMatmulMatrixScale_t and cublasLtPointerMode_t, cublasLt.h
+    [InlineData("POINTER_MODE", 2)]
+    [InlineData("POINTER_MODE_DEVICE", 1)]
     [InlineData("A_SCALE_MODE", 31)]
     [InlineData("B_SCALE_MODE", 32)]
     [InlineData("VEC16_UE4M3", 1)]
@@ -76,6 +78,8 @@ public sealed class Fp4ConstantsAndGateTests
     {
         int actual = name switch
         {
+            "POINTER_MODE" => CublasLtApi.CUBLASLT_MATMUL_DESC_POINTER_MODE,
+            "POINTER_MODE_DEVICE" => CublasLtApi.CUBLASLT_POINTER_MODE_DEVICE,
             "A_SCALE_MODE" => CublasLtApi.CUBLASLT_MATMUL_DESC_A_SCALE_MODE,
             "B_SCALE_MODE" => CublasLtApi.CUBLASLT_MATMUL_DESC_B_SCALE_MODE,
             "VEC16_UE4M3" => CublasLtApi.CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3,
@@ -83,6 +87,28 @@ public sealed class Fp4ConstantsAndGateTests
             _ => throw new ArgumentOutOfRangeException(nameof(name), name, "unmapped constant"),
         };
         Assert.Equal(expected, actual);
+    }
+
+    /// <summary>One descriptor per format: the quantizer, the executor and the checkpoint codecs all read it, so its
+    /// rows are what "NVFP4" means everywhere.</summary>
+    [Theory]
+    [InlineData(BlockScaleFormat.Nvfp4, 16, "F4_E2M1", 1, "nvfp4")]
+    [InlineData(BlockScaleFormat.Mxfp4, 32, "F4_E2M1", 2, "mxfp4")]
+    [InlineData(BlockScaleFormat.Mxfp8, 32, "F8_E4M3", 2, "mxfp8")]
+    public void FormatDescriptorRows(BlockScaleFormat format, int group, string operand, int mode, string quant)
+    {
+        Assert.Equal(group, format.GroupSize());
+        Assert.Equal(operand, format.OperandType().Name);
+        Assert.Equal(mode, format.ScaleMode());
+        Assert.Equal(quant, format.QuantFormat());
+        Assert.Equal(format, BlockScaleFormats.FromQuantFormat(quant));
+    }
+
+    [Fact]
+    public void OnlyBlockScaledFormatsResolve()
+    {
+        Assert.Null(BlockScaleFormats.FromQuantFormat("int8_tensorwise"));
+        Assert.Null(BlockScaleFormats.FromQuantFormat(null));
     }
 
     /// <summary>The one arch predicate every gate reads. SM 10.x sits between the "major >= 12" the cuBLAS warning
@@ -116,16 +142,16 @@ public sealed class Fp4ConstantsAndGateTests
         {
             return;
         }
-        using Fp4GemmExecutor executor = new(major, minor);
+        using BlockScaledGemmExecutor executor = new(major, minor);
         Assert.False(executor.IsSupported);
     }
 
     [Fact]
     public void RunRefusesOnNonBlackwellRatherThanProducingGarbage()
     {
-        using Fp4GemmExecutor executor = new(8, 9);
+        using BlockScaledGemmExecutor executor = new(8, 9);
         InvalidOperationException ex = Assert.Throws<InvalidOperationException>(
-            () => executor.Run(0, 0, 0, 0, 0, m: 1, n: 1, k: 16, stream: 0));
+            () => executor.Run(0, 0, 0, 0, 0, m: 1, n: 1, k: 16, alphaBetaDev: 0, stream: 0, format: BlockScaleFormat.Nvfp4));
         Assert.Contains("Blackwell", ex.Message, StringComparison.Ordinal);
     }
 }
