@@ -29,6 +29,6 @@ llama32-1b	baseline,core	llm/llama32-1b/llama-3.2-1b-instruct-q8_0.gguf	text|Wri
 llama32-1b-iq4xs	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-IQ4_XS.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 llama32-1b-q3km	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-Q3_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 llama32-1b-q2k	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-Q2_K.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
-lens-mxfp8	mxfp8	Stable-Diffusion/Lens/lens_turbo_mxfp8.safetensors	image|a red bicycle leaning on a brick wall, photograph|--steps 4 --width 1024 --height 1024
+lens-mxfp8	mxfp8	Stable-Diffusion/Lens/lens_turbo_mxfp8.safetensors	image|a red bicycle leaning on a brick wall, photograph|-m lens --steps 4 --width 1024 --height 1024
 MATRIX
 }
