@@ -4,14 +4,6 @@
 #include "iq_tables.cuh"
 #include <cuda_fp16.h>
 
-__device__ __forceinline__ unsigned int ld_u32(const unsigned char* p)
-{
-    return (unsigned int)p[0] | ((unsigned int)p[1] << 8) | ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
-}
-#ifdef IQ_TABLE_kmask_iq2xs
-__device__ __forceinline__ float sign_of(unsigned int signs, int j) { return (signs & kmask_iq2xs[j]) ? -1.0f : 1.0f; }
-#endif
-
 extern "C" __global__ void dequant_iq1_s_to_f16(__half* __restrict__ output, const unsigned char* __restrict__ input, unsigned int superBlockCount)
 {
     const unsigned int sb = blockIdx.x;
