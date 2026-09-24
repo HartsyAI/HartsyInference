@@ -6,6 +6,12 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.171
+
+- The IQ1_S and IQ1_M dequant kernels drop the word and sign helpers they never called (regenerated PTX, same
+  code path), and the GGUF format table gives IQ1_M its 56-byte block and IQ1_S / IQ2_S their exact bits per
+  weight — the two follow-ups from the alpha.170 review that a mid-rebase push left behind.
+
 ## alpha.170
 
 - **The rest of llama.cpp's i-quant family loads and stays packed on CUDA.** IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS,
