@@ -6,6 +6,28 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.165
+
+- **Native block-scaled GEMM is wired, behind `numerics.fp4Native`.** `Fp4GemmExecutor` is now
+  `BlockScaledGemmExecutor`, one executor for NVFP4, MXFP4 and MXFP8 driven by a `BlockScaleFormat` descriptor
+  (group size, operand type, cuBLASLt scale mode, checkpoint format string) that the quantizer, the dispatch gate
+  and the codecs all read. On Blackwell with the knob on, a resident nvfp4 weight and its checkpoint scale tensor
+  are the GEMM operands as stored; the activation is block-quantized on the stream by the new `block_quant`
+  kernel — e2m1 nibbles, E4M3 scales written straight into cuBLASLt's blocked layout, and the per-tensor scalars
+  left in device memory where the GEMM reads alpha (pointer mode DEVICE), so dynamic quantization costs no host
+  sync. Below Blackwell nothing changes: the knob is off by default, and stays off until a card has run it.
+- **The nvfp4 fold now follows the backend.** `Flux2Recipe` opened its encoder with `Nvfp4ToFp8` unconditionally,
+  which would have made the native path unreachable on exactly the hardware it targets.
+  `CheckpointOpenOptions.ForNvfp4Consumer` keeps the groups packed where `BackendCapabilities.NativeBlockScaledGemm`
+  says they multiply natively and folds to fp8 everywhere else, which is today's behaviour on every card here.
+- **The device-side block-scale codecs live in one header.** `swizzled_scale_index`, the e4m3/e2m1 decoders, the
+  e4m3 encoder and the F16 bit reader moved from `dequant_nvfp4_to_f16.cu` and `fp8_quant.cu` into
+  `block_scale.cuh`, joined by the e2m1 encoder; both kernels' PTX reproduces byte for byte. The e2m1 packer uses
+  the hardware `cvt.rn.satfinite.e2m1x2.f32` under the sm_100a/sm_120a family-feature macros and bit math
+  elsewhere, with the same rounding.
+- The bias epilogue the native fp8 branch applied by hand is one helper both native branches call; it now
+  applies a row range after the dtype cast rather than before, which the cast used to discard.
+
 ## alpha.164
 
 - **Vulkan now enables the shader features its own shaders declare.** `im2col` requires 64-bit integer arithmetic
