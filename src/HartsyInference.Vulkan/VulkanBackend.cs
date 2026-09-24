@@ -150,6 +150,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // matching this constructor's push-descriptor switch above — an experimental switch, not a proven
         // default-on profile feature (see EnvSwitch's remarks on that distinction).
         EnableInt8Linear = EngineKnobs.VkInt8.Value;
+        EnableF16Gemm = EngineKnobs.VkF16Gemm.Value;
 
         // OOM retry path: when an allocation fails, force the stream to submit and wait for the
         // GPU, drain the deferred-free list, then release any fully-empty slab blocks back to the
@@ -862,6 +863,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Opt-in switch for <see cref="Linear"/>'s INT8 dot-product GEMM path (see <see cref="TryDispatchInt8Linear"/>). Defaults from <c>HARTSYINFERENCE_VK_INT8=1</c> at construction, same as <c>CudaBackend.EnableW8A8</c>; settable afterward so tests/tooling can toggle it without an env var and a fresh process.</summary>
     public bool EnableInt8Linear { get; set; }
 
+    /// <summary>Whether a GEMM with a 16-bit-float operand computes in F16 even when the other operand and the output are F32 — CUDA's policy, which puts a BF16/F16-weight Linear on the cooperative-matrix kernels with a transient F16 cast of the activation. Off computes in the output's dtype.</summary>
+    public bool EnableF16Gemm { get; set; } = EngineKnobs.VkF16Gemm.Value;
+
     public void Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         using (OpScope _ = EnterOp())
@@ -934,7 +938,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         long M = a.Shape[1], K = a.Shape[2], N = b.Shape[2];
         if ((ulong)(batch * M * K) > uint.MaxValue || (ulong)(batch * K * N) > uint.MaxValue || (ulong)(batch * M * N) > uint.MaxValue)
             throw new NotSupportedException("VulkanBackend.BatchedMatMul: operand exceeds the shader's uint element-offset range.");
-        DType gemmDtype = ResolveGemmDtype(output.DType);
+        DType gemmDtype = ResolveGemmDtype(a.DType, b.DType, output.DType);
         VulkanBuffer aBuf = GetBuffer(a);
         VulkanBuffer bBuf = GetBuffer(b);
         (VulkanBuffer aRes, VulkanBuffer? aOwned) = CastIfNeeded(a, aBuf, gemmDtype);
@@ -996,14 +1000,19 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         _xfer.FreeDevice(computed);
     }
 
-    /// <summary>Resolves the GEMM compute dtype: FP8 outputs compute in F16; F16 falls back to F32 without device support.</summary>
-    // Deliberately does NOT promote F32 outputs to F16 to reach coopmat: shape, not dtype, is what keeps GEMMs
-    // off that path, and F16's 5-bit exponent would apply to fp8-dequantized weights, where activation
-    // magnitudes are least predictable. Revisit only behind a real e2e pixel-diff gate.
-    private DType ResolveGemmDtype(DType outputDType)
+    /// <summary>Resolves the compute dtype for a product of <paramref name="a"/> and <paramref name="b"/> written to
+    /// <paramref name="output"/>. With <see cref="EnableF16Gemm"/>, the CUDA backend's rule: an fp8 or GGUF operand computes
+    /// in F16 (what it unpacks to; CUDA would pick BF16 beside an F32 operand, which no Vulkan GEMM kernel offers), a
+    /// 16-bit-float operand makes the product F16 with the F32 side cast to it, and F32 × F32 stays F32. Off, the output's
+    /// dtype decides, which is what every product computed in before this policy. F16 falls back to F32 on a device
+    /// without it. A product in F16 written to an F32 output goes through the cooperative-matrix kernels' F32 store or the
+    /// tiled kernel's cast (<see cref="DispatchGemm"/>).</summary>
+    private DType ResolveGemmDtype(DType a, DType b, DType output)
     {
-        DType gemmDtype = outputDType;
-        if (gemmDtype.IsFp8) gemmDtype = DType.F16;
+        DType gemmDtype;
+        if (EnableF16Gemm && (a.IsFp8 || b.IsFp8 || a.IsQuantized || b.IsQuantized)) gemmDtype = DType.F16;
+        else if (EnableF16Gemm && (a == DType.F16 || a == DType.BF16 || b == DType.F16 || b == DType.BF16)) gemmDtype = DType.F16;
+        else gemmDtype = output.IsFp8 ? DType.F16 : output;
         if (gemmDtype == DType.F16 && !Capabilities.SupportsF16) gemmDtype = DType.F32;
         return gemmDtype;
     }
@@ -1018,9 +1027,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
         // Coopmat needs M/N/K all multiples of 16 and nothing here pads, so a prompt-length-dependent joint
         // sequence almost never qualifies; benchmarks/scoreboards/VULKAN.md has the measurement and the reverted
-        // padding attempt. The GEMM dtype must match the output's storage dtype, or the kernel writes a narrower
-        // element into a wider buffer and the model reads the bytes back as garbage.
-        DType gemmDtype = ResolveGemmDtype(output.DType);
+        // padding attempt. The output buffer is sized by the output dtype; a product computed narrower lands in it
+        // through the cooperative-matrix F32 store or the dispatcher's transient and cast.
+        DType gemmDtype = ResolveGemmDtype(a.DType, b.DType, output.DType);
 
         VulkanBuffer aBuf = GetBuffer(a);
         VulkanBuffer bBuf = GetBuffer(b);
@@ -1143,8 +1152,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         int outH = (inH + 2 * padH - kH) / strideH + 1;
         int outW = (inW + 2 * padW - kW) / strideW + 1;
 
-        // GEMM dtype must match output's storage dtype (see DispatchMatmul note).
-        DType gemmDtype = ResolveGemmDtype(output.DType);
+        DType gemmDtype = ResolveGemmDtype(input.DType, weight.DType, output.DType);
 
         VulkanBuffer inBuf = GetBuffer(input);
         VulkanBuffer wBuf = GetBuffer(weight);
@@ -1184,8 +1192,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         ulong colBytes = (ulong)(tileColElements * gemmDtype.SizeInBytes);
         VulkanBuffer colBuf = _xfer.AllocateDevice(colBytes);
 
-        ulong outBytes = (ulong)(output.ElementCount * output.DType.SizeInBytes);
-        VulkanBuffer outBuf = _xfer.AllocateDevice(outBytes);
+        VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * gemmDtype.SizeInBytes));
 
         try
         {
@@ -1240,10 +1247,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             if (bias is not null)
             {
                 VulkanBuffer biasRaw = GetBuffer(bias);
-                (VulkanBuffer biasRes, VulkanBuffer? biasOwned) = CastIfNeeded(bias, biasRaw, output.DType);
+                (VulkanBuffer biasRes, VulkanBuffer? biasOwned) = CastIfNeeded(bias, biasRaw, gemmDtype);
                 try
                 {
-                    string shader = "col2bias_add" + DtypeSuffix(output.DType);
+                    string shader = "col2bias_add" + DtypeSuffix(gemmDtype);
                     VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
                     Span<byte> pc = stackalloc byte[3 * 4];
                     BinaryWriteUInt(pc, 0, (uint)outCh);
@@ -1258,7 +1265,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
                 }
             }
 
-            CacheOutput(output, outBuf);
+            CacheOutputCastingFrom(output, outBuf, gemmDtype, "Conv2D");
         }
         catch (Exception ex)
         {
@@ -2256,7 +2263,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     {
         int batch = (int)query.Shape[0], hq = (int)query.Shape[1], sq = (int)query.Shape[2], headDim = (int)query.Shape[3];
 
-        DType dtype = ResolveGemmDtype(output.DType);
+        DType dtype = ResolveGemmDtype(query.DType, key.DType, output.DType);
         VulkanBuffer qBuf = GetBuffer(query);
         VulkanBuffer kBuf = GetBuffer(key);
         VulkanBuffer vBuf = GetBuffer(value);
@@ -2422,9 +2429,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         long Skv = key.Shape[2];
         long totalHeads = B * H;
 
-        // Resolve dtype: must match output's storage dtype so the SDPA matmul writes match the
-        // model's expected element size. FP8 inputs cast to F16 first.
-        DType dtype = ResolveGemmDtype(output.DType);
+        // The product's dtype follows the operands; the output is cast once at the end when it differs.
+        DType dtype = ResolveGemmDtype(query.DType, key.DType, output.DType);
 
         VulkanBuffer qBuf = GetBuffer(query);
         VulkanBuffer kBuf = GetBuffer(key);
