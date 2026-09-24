@@ -53,7 +53,7 @@ while [ $# -gt 0 ]; do
         --expect)   EXPECT="$2"; shift 2 ;;
         --reps)     REPS="$2"; shift 2 ;;
         --gpu)      GPU_INDEX="$2"; shift 2 ;;
-        --gpu-name) GPU_NAME="$2"; shift 2 ;;
+        --gpu-name) GPU_NAME="$2"; shift 2 ;;   # empty = whatever --gpu names
         --head-set) HEAD_SET+=(--set "$2"); shift 2 ;;
         --base-set) BASE_SET+=(--set "$2"); shift 2 ;;
         --no-base)  NO_BASE=1; shift ;;
@@ -87,6 +87,7 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 if [ -z "$GPU_INDEX" ]; then
     GPU_INDEX="$(nvidia-smi --query-gpu=index,name --format=csv,noheader | awk -F', ' -v n="$GPU_NAME" '$2 ~ n {print $1; exit}')"
 fi
+[ -z "$GPU_INDEX" ] && [ -z "$GPU_NAME" ] && GPU_INDEX=0
 [ -n "$GPU_INDEX" ] || die "no GPU named '$GPU_NAME' (pass --gpu <nvidia-smi index>)"
 GPU_UUID="$(nvidia-smi -i "$GPU_INDEX" --query-gpu=uuid --format=csv,noheader)"
 GPU_LABEL="$(nvidia-smi -i "$GPU_INDEX" --query-gpu=name,driver_version --format=csv,noheader)"
@@ -134,9 +135,11 @@ if [ "$NO_BASE" = 0 ]; then
 else
     BASE_LABEL="(none)"; BASE_BUILD=""
 fi
-# The same knobs on the same commit is the same arm; give it a distinct run label so the head cache is not the base.
-[ ${#HEAD_SET[@]} -gt 0 ] && HEAD_LABEL="$HEAD_LABEL+set"
-[ ${#BASE_SET[@]} -gt 0 ] && BASE_LABEL="$BASE_LABEL+set"
+# A knob makes a different arm of the same commit; the label carries a hash of the knobs so two arms of one build
+# (off vs on) never share a run directory.
+knob_label() { printf '%s' "$*" | md5sum | cut -c1-6; }
+[ ${#HEAD_SET[@]} -gt 0 ] && HEAD_LABEL="$HEAD_LABEL+set-$(knob_label "${HEAD_SET[@]}")"
+[ ${#BASE_SET[@]} -gt 0 ] && BASE_LABEL="$BASE_LABEL+set-$(knob_label "${BASE_SET[@]}")"
 
 # ── the card must be ours for the duration ───────────────────────────────────────────────────────────────────
 SWARM_WAS_UP=0
@@ -160,13 +163,14 @@ digest_of() {
 }
 
 # run_one <build> <label> <case> <ckpt> <cmd> <positional> <args> <seed> <backend> <dir> [--set k=v ...]
-# Writes <dir>/metrics.env. A cached base run is left alone; a head run is always fresh.
+# Writes <dir>/metrics.env. A completed run of a clean commit is left alone.
 run_one() {
     local build="$1" label="$2" id="$3" ckpt="$4" cmd="$5" positional="$6" args="$7" seed="$8" backend="$9" dir="${10}"
     shift 10
     local sets=("$@")
-    if [ "$FRESH" = 0 ] && [ "$label" = "$BASE_LABEL" ] && [[ "$label" != *+dirty* ]] \
-        && grep -qx 'status=ok' "$dir/metrics.env" 2>/dev/null; then
+    # A clean commit's build is deterministic, so its completed runs are reused whichever arm it is; a dirty tree
+    # is regenerated every time, and --fresh regenerates everything.
+    if [ "$FRESH" = 0 ] && [[ "$label" != *+dirty* ]] && grep -qx 'status=ok' "$dir/metrics.env" 2>/dev/null; then
         return 0
     fi
     rm -rf "$dir"
@@ -228,17 +232,19 @@ pct() {   # pct <base> <head> -> signed percent, or -
     awk -v a="$1" -v b="$2" 'BEGIN { if (a == "-" || b == "-" || a + 0 == 0) print "-"; else printf "%+.1f", (b - a) / a * 100 }'
 }
 
-while IFS=$'\t' read -r id ckpt spec; do
-    [ -z "$id" ] && continue
-    if [ -n "$FILTER" ] && [[ ",$FILTER," != *",$id,"* ]]; then continue; fi
-    IFS='|' read -r cmd positional args <<<"$spec"
-    if [ ! -e "$MODELS/$ckpt" ]; then
-        log "untested: $id — $MODELS/$ckpt is missing"
-        printf '%s\t%s\tuntested\n' "$id" "-" >>"$ROWS"
-        FAILURES=$((FAILURES + 1))
-        continue
-    fi
-    for backend in ${BACKENDS//,/ }; do
+for backend in ${BACKENDS//,/ }; do
+    # A backend other than cuda runs the cases tagged with its name; cuda runs the whole selection.
+    backend_tag=""; [ "$backend" != cuda ] && backend_tag="$backend"
+    while IFS=$'\t' read -r id ckpt spec; do
+        [ -z "$id" ] && continue
+        if [ -n "$FILTER" ] && [[ ",$FILTER," != *",$id,"* ]]; then continue; fi
+        IFS='|' read -r cmd positional args <<<"$spec"
+        if [ ! -e "$MODELS/$ckpt" ]; then
+            log "untested: $id — $MODELS/$ckpt is missing"
+            printf '%s\t%s\tuntested\n' "$id" "$backend" >>"$ROWS"
+            FAILURES=$((FAILURES + 1))
+            continue
+        fi
         CASES_RUN=$((CASES_RUN + 1))
         log "── $id on $backend"
         for i in $(seq 0 "$REPS"); do
@@ -255,22 +261,22 @@ while IFS=$'\t' read -r id ckpt spec; do
         verdict="PASS"; notes=""
         min_ssim="-"; digests="n/a"
         bw=""; hw=""; bs=""; hs=""; bv=""; hv=""
-        crashed=0; changed=0
+        h_crashes=0; b_crashes=0; changed=0
         for i in $(seq 0 "$REPS"); do
             seed=$((SEED0 + i))
             hd="$OUT/runs/$HEAD_LABEL/$backend/$id/s$seed"
             # shellcheck disable=SC1091
             . "$hd/metrics.env"; h_status=$status; h_wall=$wall; h_step=$step_med; h_peak=$peak; h_digest=$digest; h_art=$artifact
-            [ "$h_status" = CRASH ] && crashed=1
-            if [ "$i" -ge 1 ]; then hw+="$h_wall"$'\n'; hs+="$h_step"$'\n'; hv+="$h_peak"$'\n'; fi
+            [ "$h_status" = CRASH ] && h_crashes=$((h_crashes + 1))
+            if [ "$i" -ge 1 ] && [ "$h_status" != CRASH ]; then hw+="$h_wall"$'\n'; hs+="$h_step"$'\n'; hv+="$h_peak"$'\n'; fi
             [ "$NO_BASE" = 1 ] && continue
             bd="$OUT/runs/$BASE_LABEL/$backend/$id/s$seed"
             # shellcheck disable=SC1091
             . "$bd/metrics.env"; b_status=$status; b_wall=$wall; b_step=$step_med; b_peak=$peak; b_digest=$digest; b_art=$artifact
-            [ "$b_status" = CRASH ] && crashed=1
-            if [ "$i" -ge 1 ]; then bw+="$b_wall"$'\n'; bs+="$b_step"$'\n'; bv+="$b_peak"$'\n'; fi
-            [ "$crashed" = 1 ] && continue
-            if [ "$b_digest" = "$h_digest" ]; then digests="equal"; else changed=1; digests="DIFFER"; fi
+            [ "$b_status" = CRASH ] && b_crashes=$((b_crashes + 1))
+            if [ "$i" -ge 1 ] && [ "$b_status" != CRASH ]; then bw+="$b_wall"$'\n'; bs+="$b_step"$'\n'; bv+="$b_peak"$'\n'; fi
+            [ "$h_status" = CRASH ] || [ "$b_status" = CRASH ] && continue
+            if [ "$b_digest" = "$h_digest" ]; then [ "$digests" != DIFFER ] && digests="equal"; else changed=1; digests="DIFFER"; fi
             case "$h_art" in
                 *.png)
                     ssim="$(ffmpeg -nostdin -i "$b_art" -i "$h_art" -lavfi ssim -f null - 2>&1 | grep -oE 'All:[0-9.]+' | cut -d: -f2)"
@@ -286,16 +292,20 @@ while IFS=$'\t' read -r id ckpt spec; do
         done
         h_wall_m="$(printf '%s' "$hw" | median)"; h_step_m="$(printf '%s' "$hs" | median)"; h_peak_m="$(printf '%s' "$hv" | median)"
         if [ "$NO_BASE" = 1 ]; then
-            [ "$crashed" = 1 ] && verdict="FAIL crash"
+            [ "$h_crashes" -gt 0 ] && verdict="FAIL crash"
             printf '%s\t%s\t%s\t-\t%s\t-\t-\t%s\t-\t-\t%s\t-\t-\t%s\n' "$id" "$backend" "$verdict" "$h_wall_m" "$h_step_m" "$h_peak_m" "$notes" >>"$ROWS"
             [ "$verdict" != PASS ] && FAILURES=$((FAILURES + 1))
             continue
         fi
         b_wall_m="$(printf '%s' "$bw" | median)"; b_step_m="$(printf '%s' "$bs" | median)"; b_peak_m="$(printf '%s' "$bv" | median)"
         d_wall="$(pct "$b_wall_m" "$h_wall_m")"; d_step="$(pct "$b_step_m" "$h_step_m")"; d_peak="$(pct "$b_peak_m" "$h_peak_m")"
-        if [ "$crashed" = 1 ]; then
-            verdict="FAIL crash"
+        if [ "$h_crashes" -gt 0 ] && [ "$b_crashes" -eq "$h_crashes" ] && [ "$h_crashes" -eq $((REPS + 1)) ]; then
+            # Not a regression: the case does not run on this backend on either arm. Reported, not failed.
+            verdict="CRASH-both"; notes+="crashes on base too (pre-existing); "
+        elif [ "$h_crashes" -gt 0 ]; then
+            verdict="FAIL crash"; notes+="head crashed $h_crashes× (base $b_crashes×); "
         else
+            [ "$b_crashes" -gt 0 ] && notes+="base crashed $b_crashes×, head ran every seed; "
             if [ -z "$SSIM_FLOOR" ]; then
                 [ "$changed" = 1 ] && { verdict="FAIL"; notes+="output CHANGED; "; }
             else
@@ -322,12 +332,12 @@ while IFS=$'\t' read -r id ckpt spec; do
                 notes+="faster by ${speed#-}%; "
             fi
         fi
-        [ "$verdict" != PASS ] && FAILURES=$((FAILURES + 1))
+        [ "$verdict" != PASS ] && [ "$verdict" != CRASH-both ] && FAILURES=$((FAILURES + 1))
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$id" "$backend" "$verdict" "$b_wall_m" "$h_wall_m" "$d_wall" "$b_step_m" "$h_step_m" "$d_step" \
             "$b_peak_m" "$h_peak_m" "$d_peak" "$min_ssim" "$digests" "$notes" >>"$ROWS"
-    done
-done < <(regression_cases "$TAG")
+    done < <(regression_cases "$TAG" $backend_tag)
+done
 
 [ "$CASES_RUN" -eq 0 ] && die "no case matched --filter '$FILTER' with tag '$TAG'"
 

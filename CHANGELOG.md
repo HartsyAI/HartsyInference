@@ -21,6 +21,9 @@ stable release will require. Dates are UTC.
   to it submits that recording if it is still open and waits for the tick before the reset. The set is also
   allocated before the command buffer is touched, so that submit cannot split a dispatch across two buffers.
 - `DtypeSuffix` throws for any dtype other than F16/F32 instead of silently choosing the F32 shader.
+- `tests/regression-ab.sh` runs a backend other than CUDA only over the cases tagged with its name (Vulkan takes
+  `sd15` and `krea2`), and a case that crashes on both arms every seed is reported as pre-existing rather than
+  failed; a head crash with a running base still fails.
 
 ## alpha.163
 
