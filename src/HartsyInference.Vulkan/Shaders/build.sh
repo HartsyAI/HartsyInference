@@ -125,7 +125,6 @@ SINGLE_KERNELS=(
     cast_f32_bf16
     matmul_coopmat
     matmul_coopmat_partial_m
-    matmul_coopmat_blocked
     matmul_coopmat2
     matmul_int8
     dequant_q4_0
