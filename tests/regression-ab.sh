@@ -352,7 +352,7 @@ done
     printf '| case | backend | verdict | wall s (base→head) | Δ | step ms (base→head) | Δ | peak VRAM MiB (base→head) | Δ | min SSIM | digests | notes |\n'
     printf '|---|---|---|---|---|---|---|---|---|---|---|---|\n'
     while IFS=$'\t' read -r id backend verdict bw hw dw bs hs ds bv hv dv ssim digests notes; do
-        [ "$verdict" = untested ] && { printf '| %s | - | untested | | | | | | | | | checkpoint missing |\n' "$id"; continue; }
+        [ "$verdict" = untested ] && { printf '| %s | %s | untested | | | | | | | | | checkpoint missing |\n' "$id" "$backend"; continue; }
         printf '| %s | %s | %s | %s → %s | %s | %s → %s | %s | %s → %s | %s | %s | %s | %s |\n' \
             "$id" "$backend" "$verdict" "$bw" "$hw" "$dw" "$bs" "$hs" "$ds" "$bv" "$hv" "$dv" "$ssim" "$digests" "$notes"
     done <"$ROWS"
