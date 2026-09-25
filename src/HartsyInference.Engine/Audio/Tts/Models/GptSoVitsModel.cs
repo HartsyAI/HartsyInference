@@ -32,7 +32,7 @@ internal static class GptSoVitsModel
             string s1Path = await AudioModelCache.GetAsync(Repo, S1File, category: "tts", ct: cancel).ConfigureAwait(false);
             string hubertPath = await AudioModelCache.GetAsync(Repo, HubertFile, category: "tts", ct: cancel).ConfigureAwait(false);
 
-            PytorchPickleLoader s2Loader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader s2Loader = new AnyFormatCheckpointLoader();
             s2Loader.Load(s2Path);
             IReadOnlyDictionary<string, Tensor> s2Weights = s2Loader.GetAllTensors();
             SoVitsSynthesizer s2 = new SoVitsSynthesizer(V2Config(), sslDim: 768, sslLayers: 3, textLayers: 6,
@@ -41,7 +41,7 @@ internal static class GptSoVitsModel
             SoVitsRefEnc referenceEncoder = new SoVitsRefEnc();
             referenceEncoder.LoadWeights(s2Weights, "ref_enc");
 
-            PytorchPickleLoader s1Loader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader s1Loader = new AnyFormatCheckpointLoader();
             s1Loader.Load(s1Path);
             Text2Semantic s1 = new Text2Semantic(new Text2SemanticConfig());
             s1.LoadWeights(s1Loader.GetAllTensors(), "model");
