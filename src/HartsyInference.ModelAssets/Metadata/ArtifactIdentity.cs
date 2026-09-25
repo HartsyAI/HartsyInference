@@ -40,4 +40,25 @@ public sealed record ArtifactIdentity
 
     /// <summary>Tags for <c>modelspec.tags</c>; the first is the category (<c>audio</c>/<c>image</c>/<c>video</c>).</summary>
     public IReadOnlyList<string> Tags { get; init; } = [];
+
+    /// <summary>Per-variant class ids, keyed case-insensitively by variant, for a family whose variants register
+    /// as different SwarmUI classes (Qwen3-TTS base/custom/design). Absent variants use <see cref="SwarmClassId"/>.</summary>
+    public IReadOnlyDictionary<string, string> VariantClassIds { get; init; } = new Dictionary<string, string>();
+
+    /// <summary>This identity with <see cref="SwarmClassId"/> resolved for <paramref name="variant"/>.</summary>
+    public ArtifactIdentity ForVariant(string? variant)
+    {
+        if (string.IsNullOrWhiteSpace(variant))
+        {
+            return this;
+        }
+        foreach (KeyValuePair<string, string> entry in VariantClassIds)
+        {
+            if (string.Equals(entry.Key, variant, StringComparison.OrdinalIgnoreCase))
+            {
+                return this with { SwarmClassId = entry.Value };
+            }
+        }
+        return this;
+    }
 }

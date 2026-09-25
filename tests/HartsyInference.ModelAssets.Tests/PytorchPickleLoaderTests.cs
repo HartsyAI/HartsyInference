@@ -73,6 +73,27 @@ public sealed unsafe class PytorchPickleLoaderTests
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 
+    [Fact]
+    public void NonRecursiveLoad_ReportsTensorsUnderOtherWrappers()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"hi_pttest_nested_{Guid.NewGuid():N}.pt");
+        try
+        {
+            WriteTorchZip(path, BuildNestedPickle(), storageKey: "0", FloatsToBytes([1f, 2f, 3f, 4f]));
+            using PytorchPickleLoader partial = new();
+            partial.Load(path);
+            Assert.Single(partial.GetAllTensors());
+            Assert.Equal(1, partial.SkippedTensorCount);
+            Assert.Equal(new Dictionary<string, int> { ["a"] = 1, ["b"] = 1 }, partial.WrapperTensorCounts);
+
+            using PytorchPickleLoader full = new();
+            full.Load(path, recursiveFlatten: true);
+            Assert.Equal(["a.w", "b.w"], full.GetAllTensors().Keys.Order());
+            Assert.Equal(0, full.SkippedTensorCount);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     /// <summary>Stream 1: PROTO2 + LONG1(0x1950a86a20f9469cfc6c, 10 bytes LE) + STOP.</summary>
     private static byte[] MagicStream() =>
     [
@@ -99,6 +120,15 @@ public sealed unsafe class PytorchPickleLoaderTests
         b.Add(0x29); b.Add((byte)'R');                  // EMPTY_TUPLE, REDUCE -> OrderedDict
         b.Add((byte)'(');                               // MARK (dict items)
         Str(b, key);                                    // key
+        EmitTensor(b, storageKey, numel, size, stride);
+        b.Add((byte)'u');                               // SETITEMS -> dict[key]=tensor
+        b.Add((byte)'.');                               // STOP
+        return [.. b];
+    }
+
+    /// <summary>Emits <c>_rebuild_tensor_v2(storage, 0, size, stride, False, OrderedDict())</c>, leaving the tensor on the stack.</summary>
+    private static void EmitTensor(List<byte> b, string storageKey, long numel, int[] size, int[] stride)
+    {
         // value = _rebuild_tensor_v2(args)
         Global(b, "torch._utils", "_rebuild_tensor_v2");
         b.Add((byte)'(');                               // MARK (args)
@@ -118,8 +148,22 @@ public sealed unsafe class PytorchPickleLoaderTests
         Global(b, "collections", "OrderedDict"); b.Add(0x29); b.Add((byte)'R'); // backward_hooks = OrderedDict()
         b.Add((byte)'t');                               // TUPLE (args)
         b.Add((byte)'R');                               // REDUCE -> tensor
-        b.Add((byte)'u');                               // SETITEMS -> dict[key]=tensor
-        b.Add((byte)'.');                               // STOP
+    }
+
+    /// <summary>A root dict of two wrappers, <c>{"a": {"w": t}, "b": {"w": t}}</c>, both over storage "0".</summary>
+    private static byte[] BuildNestedPickle()
+    {
+        List<byte> b = [0x80, 0x02, (byte)'}', (byte)'('];
+        foreach (string wrapper in new[] { "a", "b" })
+        {
+            Str(b, wrapper);
+            b.Add((byte)'}');
+            Str(b, "w");
+            EmitTensor(b, "0", 4, [2, 2], [2, 1]);
+            b.Add((byte)'s');                           // SETITEM -> inner["w"]=tensor
+        }
+        b.Add((byte)'u');                               // SETITEMS -> root
+        b.Add((byte)'.');
         return [.. b];
     }
 

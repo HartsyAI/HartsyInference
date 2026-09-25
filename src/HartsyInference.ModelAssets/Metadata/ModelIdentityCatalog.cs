@@ -99,9 +99,9 @@ public static class ModelIdentityCatalog
             Video("lance-video", "lance-t2v", "Lance (Video)", "Lance", "other", "640x640"),
 
             // ── Music — these three classes are registered by SwarmUI core, not by AudioLab ──────────────
-            Audio("acestep", "ace-step-1_5", "ACE-Step 1.5", "ACE Studio", "apache-2.0", "music"),
+            Audio("acestep", "ace-step-1_5", "ACE-Step 1.5", "ACE Studio", "mit", "music", "ACE-Step/Ace-Step1.5"),
             Audio("minimaxmusic3", "minimax-music-3", "MiniMax Music 3", "MiniMax", "other", "music"),
-            Audio("yue2", "yue-2", "YuE2", "m-a-p", "apache-2.0", "music"),
+            Audio("yue2", "yue-2", "YuE2", "m-a-p", "cc-by-nc-4.0", "music", "m-a-p/YuE2-3B"),
             Audio("yue", "yue_music", "YuE", "m-a-p", "apache-2.0", "music"),
             Audio("heartmula", "heartlib_music", "HeartMuLa oss-3B", "HeartMuLa", "apache-2.0", "music"),
             Audio("musicgen", "musicgen_music", "MusicGen", "Meta", "cc-by-nc-4.0", "music"),
@@ -132,12 +132,20 @@ public static class ModelIdentityCatalog
             Audio("styletts2", "styletts2_tts", "StyleTTS2", "yl4579", "mit", "tts"),
             Audio("zonos", "zonos_tts", "Zonos v0.1", "Zyphra", "apache-2.0", "tts"),
             Audio("gptsovits", "gptsovits_clone", "GPT-SoVITS v2", "RVC-Boss", "mit", "tts"),
-            Audio("qwen3tts", "qwen3_tts", "Qwen3-TTS", "Alibaba Qwen", "apache-2.0", "tts"),
+            Audio("qwen3tts", "qwen3_tts", "Qwen3-TTS", "Alibaba Qwen", "apache-2.0", "tts") with
+            {
+                VariantClassIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["0.6B-Base"] = "qwen3_tts_clone", ["1.7B-Base"] = "qwen3_tts_clone",
+                    ["0.6B-CustomVoice"] = "qwen3_tts_custom", ["1.7B-CustomVoice"] = "qwen3_tts_custom",
+                    ["1.7B-VoiceDesign"] = "qwen3_tts_design",
+                },
+            },
             Audio("zipvoice", "zipvoice_tts", "ZipVoice", "k2-fsa", "apache-2.0", "tts"),
             Audio("f5", "f5_tts", "F5-TTS", "SWivid", "cc-by-nc-4.0", "tts"),
             Audio("sparktts", "sparktts_tts", "Spark-TTS", "SparkAudio", "cc-by-nc-sa-4.0", "tts"),
-            Audio("fishspeech", "fishspeech_tts", "Fish-Speech 1.5", "Fish Audio", "other", "tts"),
-            Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "other", "tts"),
+            Audio("fishspeech", "fishspeech_tts", "Fish-Speech 1.5", "Fish Audio", "cc-by-nc-sa-4.0", "tts", "fishaudio/fish-speech-1.5"),
+            Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "apache-2.0", "tts", "neuphonic/neutts-air"),
 
             // ── Voice conversion and effects ────────────────────────────────────────────────────────────
             Audio("rvc", "rvc_clone", "RVC v2", "RVC-Project", "mit", "clone"),

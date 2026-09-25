@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.SafeTensors;
@@ -76,10 +77,98 @@ public static class SafeTensorsWriter
 
         foreach ((string _, Tensor tensor, long _, long _) in entries)
         {
-            long byteSize = Tensor.ComputeByteSize(tensor.Shape, tensor.DType);
-            ReadOnlySpan<byte> data = new ReadOnlySpan<byte>(tensor.DataPointer, (int)byteSize);
-            fs.Write(data);
+            // A single span is capped at int.MaxValue bytes; a large embedding table exceeds it.
+            byte* data = (byte*)tensor.DataPointer;
+            long remaining = Tensor.ComputeByteSize(tensor.Shape, tensor.DType);
+            while (remaining > 0)
+            {
+                int chunk = (int)Math.Min(remaining, int.MaxValue);
+                fs.Write(new ReadOnlySpan<byte>(data, chunk));
+                data += chunk;
+                remaining -= chunk;
+            }
         }
+    }
+
+    /// <summary>Copies an existing safetensors file to <paramref name="outputPath"/> with its <c>__metadata__</c>
+    /// replaced by the existing entries overlaid with <paramref name="metadata"/>, streaming the payload untouched.
+    /// An empty <c>modelspec.hash_sha256</c> value is filled with <c>0x</c> + the payload SHA-256.</summary>
+    /// <returns>Lowercase hex SHA-256 of the tensor payload (the bytes after the header).</returns>
+    public static string RewriteMetadata(string sourcePath, string outputPath, IReadOnlyDictionary<string, string> metadata)
+    {
+        ArgumentNullException.ThrowIfNull(metadata);
+        const string HashKey = "modelspec.hash_sha256";
+        using FileStream source = new(sourcePath, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20);
+        Span<byte> lengthBytes = stackalloc byte[8];
+        source.ReadExactly(lengthBytes);
+        long headerLength = BitConverter.ToInt64(lengthBytes);
+        if (headerLength <= 0 || headerLength > source.Length - 8)
+            throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"'{sourcePath}' is not a safetensors file (header length {headerLength}).");
+        byte[] header = new byte[headerLength];
+        source.ReadExactly(header);
+        JsonObject root = JsonNode.Parse(header) as JsonObject
+            ?? throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"'{sourcePath}' has a header that is not a JSON object.");
+        Dictionary<string, string> merged = new(StringComparer.Ordinal);
+        if (root["__metadata__"] is JsonObject existing)
+        {
+            foreach (KeyValuePair<string, JsonNode?> entry in existing)
+                merged[entry.Key] = entry.Value?.GetValue<string>() ?? "";
+        }
+        foreach (KeyValuePair<string, string> entry in metadata)
+            merged[entry.Key] = entry.Value;
+        // A fixed-width placeholder keeps the header length stable, so the digest can be patched in after the copy.
+        bool fillHash = merged.TryGetValue(HashKey, out string? slot) && string.IsNullOrEmpty(slot);
+        if (fillHash)
+            merged[HashKey] = "0x" + new string('0', 64);
+        byte[] newHeader = BuildHeader(root, merged);
+        string? outputDir = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrEmpty(outputDir))
+            Directory.CreateDirectory(outputDir);
+        string tempPath = outputPath + ".tmp";
+        string payloadHash;
+        try
+        {
+            using (FileStream output = new(tempPath, FileMode.Create, FileAccess.ReadWrite, FileShare.None, 1 << 20))
+            {
+                output.Write(BitConverter.GetBytes((long)newHeader.Length));
+                output.Write(newHeader);
+                using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                byte[] buffer = new byte[1 << 22];
+                int read;
+                while ((read = source.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    hash.AppendData(buffer, 0, read);
+                    output.Write(buffer, 0, read);
+                }
+                payloadHash = Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+                if (fillHash)
+                {
+                    merged[HashKey] = "0x" + payloadHash;
+                    byte[] patched = BuildHeader(root, merged);
+                    output.Seek(8, SeekOrigin.Begin);
+                    output.Write(patched);
+                }
+            }
+            File.Move(tempPath, outputPath, overwrite: true);
+        }
+        catch
+        {
+            File.Delete(tempPath);
+            throw;
+        }
+        return payloadHash;
+    }
+
+    private static byte[] BuildHeader(JsonObject root, IReadOnlyDictionary<string, string> metadata)
+    {
+        JsonObject header = new() { ["__metadata__"] = new JsonObject(metadata.Select(entry =>
+            new KeyValuePair<string, JsonNode?>(entry.Key, JsonValue.Create(entry.Value)))) };
+        foreach (KeyValuePair<string, JsonNode?> entry in root)
+        {
+            if (entry.Key != "__metadata__")
+                header[entry.Key] = entry.Value?.DeepClone();
+        }
+        return Encoding.UTF8.GetBytes(header.ToJsonString());
     }
 
     /// <summary>SHA-256 over the tensor bytes exactly as <see cref="Save"/> lays them out (enumeration order, back-to-back), i.e. the file's payload after the header. Matches SwarmUI's tensor-data <c>modelspec.hash_sha256</c> convention; callers prefix <c>0x</c>. Compute this BEFORE <see cref="Save"/> so the result can be embedded in the header without a second file pass.</summary>

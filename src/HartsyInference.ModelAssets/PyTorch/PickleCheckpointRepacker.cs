@@ -26,6 +26,17 @@ public static class PickleCheckpointRepacker
     {
         using PytorchPickleLoader loader = new();
         loader.Load(sourcePath, recursiveFlatten);
+        return Repack(loader, outputPath, keyMap, metadata);
+    }
+
+    /// <summary>Writes the tensors of an already-loaded checkpoint, so a caller can inspect what the load kept
+    /// (<see cref="PytorchPickleLoader.SkippedTensorCount"/>) before committing to an output file.</summary>
+    /// <returns>The number of tensors written.</returns>
+    public static int Repack(PytorchPickleLoader loader, string outputPath, Func<string, string?>? keyMap = null,
+        IReadOnlyDictionary<string, string>? metadata = null)
+    {
+        ArgumentNullException.ThrowIfNull(loader);
+        string sourcePath = loader.FilePath;
         Dictionary<string, Tensor> keep = new(StringComparer.Ordinal);
         foreach ((string key, Tensor tensor) in loader.GetAllTensors())
         {
