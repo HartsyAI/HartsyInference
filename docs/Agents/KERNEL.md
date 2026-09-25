@@ -7,7 +7,7 @@ Read relevant backend research and known failures on demand. Profile before choo
 - Follow [kernel source/build policy](../../src/HartsyInference.Cuda/Kernels/README.md). CUDA sources produce checked-in PTX; legacy handwritten PTX exists. Load artifacts from disk. Match PTX ISA to the deployment driver; do not impose a universal .version 9.0 header.
 - Launch arguments point to stable locals; cache function handles in nint fields. Check native status results.
 - Use wide indexing where tensor products can overflow 32 bits. Test multi-row gated activation splits along the last dimension.
-- Respect stream ordering, deferred frees, graph buffer lifetime and in-place callback ownership in [core](AGENTS.md). Never bypass GPU residency by directly reading disposed host weights.
+- Respect stream ordering, deferred frees, graph buffer lifetime and in-place callback ownership in [engine patterns](ENGINE_PATTERNS.md). Never bypass GPU residency by directly reading disposed host weights.
 
 ## SIMD and Vulkan
 

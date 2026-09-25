@@ -22,8 +22,9 @@
 
 ## Comments and errors
 
-- Comments explain why, not what. XML documentation on public and internal APIs, concise single-line
-  summary tags. Add param/returns tags only for non-obvious contracts.
+- Comments explain why, not what: at most one short line, and only for a constraint the code cannot state.
+  No narrative, measured numbers or history — those belong in the changelog and status docs. XML documentation
+  on public and internal APIs, concise single-line summary tags; param/returns tags only for non-obvious contracts.
 - Validate shape, dtype, sizes, and arguments at boundaries; fail fast with meaningful exceptions.
   Never continue with corrupted state.
 - Catch ordinary failures at pipeline/API boundaries, log with Logs.Error, and return/throw meaningful errors.
@@ -52,9 +53,8 @@
 - CUDA library identifier is cuda, resolved by CudaLibraryResolver; Vulkan uses VulkanLibraryResolver.
   Register through NativeLibrary.SetDllImportResolver.
 - SuppressGCTransition only on short nonblocking calls; never a blocking native operation.
-- Load PTX/SPIR-V from disk, not embedded resources. CUDA baseline sm_80; target-specific kernels may require more.
-- Kernel handles are nint fields, not Dictionary<string,nint>.
-- Marshal launch args with stackalloc void*[] pointing to local variables with stable addresses, never field refs.
+- Load PTX/SPIR-V from disk, not embedded resources; kernel handles, launch-argument marshalling and the sm_80
+  baseline follow [engine patterns](Agents/ENGINE_PATTERNS.md).
 - CUDA kernels and optional vendor libraries are backend implementation details, not model dependencies.
 
 ## Async and package contracts
