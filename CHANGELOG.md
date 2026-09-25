@@ -6,6 +6,26 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.176
+
+- **Converting a checkpoint could silently ship a broken model.** `tools/CheckpointRepacker` kept only the first
+  state dict of a nested checkpoint (Kokoro converted as 25 of its 548 tensors, exit 0), ignored mistyped options,
+  and wrote no identity unless it was hand-typed. It now refuses a conversion that would drop tensors and lists what
+  it would lose, rejects unknown options with a suggestion, fills identity from `ModelIdentityCatalog`
+  (`--model/--variant/--component`), restamps an existing safetensors with its tensors byte-for-byte unchanged, names
+  an output folder's file the way Hartsy stores it (`<model>[-<variant>][-<part>]_<precision>`, precision read from
+  the tensors, no dots), and explains every failure instead of printing a stack trace.
+- **Every audio loader reads a converted checkpoint.** `AnyFormatCheckpointLoader` recognizes safetensors by content
+  and returns owned tensors, so it replaces `PytorchPickleLoader` wherever an audio family opened its pickle directly,
+  and in the engine's own one-time repacks and Kokoro voice fetch. Checked by real generation: 63 audio models produce
+  bit-identical output (or identical transcripts) from their converted files as from the originals.
+- **AudioLab can admit a converted file.** Artifacts now carry `hartsy.provider_id` and `hartsy.model_id`, the keys
+  `AudioArtifactIndex` requires; Qwen3-TTS and ACE-Step turbo variants stamp their own class; SheetSage2 has an
+  identity; licenses corrected from the model cards (ACE-Step `mit`, YuE2 `cc-by-nc-4.0`, Fish-Speech
+  `cc-by-nc-sa-4.0`, NeuTTS `apache-2.0`).
+- `SafeTensorsWriter.Save` writes a tensor over 2 GiB instead of throwing; `hartsy transcribe --help` shows the
+  `whisper:tiny` form the registry accepts.
+
 ## alpha.175
 
 - **The Blackwell kernel never compiled, and it took the whole CUDA backend down with it.** `block_quant.sm120.ptx`,
