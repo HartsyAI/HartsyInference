@@ -178,10 +178,10 @@ if (!flags.Contains("--no-metadata"))
         Console.Error.WriteLine($"Unknown model id '{modelId}'.{(near is null ? "" : $" Did you mean '{near}'?")} Run --list-models for the full list.");
         return 1;
     }
-    if (identity.VariantClassIds.Count > 0 && component == ArtifactProvenance.MainComponent
-        && (variant is null || !identity.VariantClassIds.Keys.Contains(variant, StringComparer.OrdinalIgnoreCase)))
+    if (identity.VariantClassIds.Count > 0 && component == ArtifactProvenance.MainComponent && variant is null)
     {
-        Console.Error.WriteLine($"'{modelId}' variants register as different classes; pass --variant with one of: {string.Join(", ", identity.VariantClassIds.Keys)}");
+        Console.Error.WriteLine($"Some '{modelId}' variants register as their own class ({string.Join(", ", identity.VariantClassIds.Keys)});");
+        Console.Error.WriteLine("pass --variant so the right one is stamped. Other variants use the family class.");
         return 1;
     }
     resolvedIdentity = identity.ForVariant(variant);
