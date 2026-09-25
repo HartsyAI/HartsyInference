@@ -17,7 +17,9 @@ there is no dedicated CPU/GPU CI workflow. Run real-weight/GPU checks deliberate
 Keep Engine as the load/generate authority, preserve package/API boundaries, and validate silent numerical,
 format, ownership, and concurrency behavior. Do not add a second orchestration layer in a consumer.
 
-For PRs, describe the problem, resulting behavior, and verification. For bugs, include a minimal
+PRs follow [Shipping a change](docs/Agents/AGENTS.md#shipping-a-change): open a draft, finish the work and its
+testing, bump the version and changelog for code changes, mark ready, resolve every review comment, then merge.
+Describe the problem, resulting behavior, and verification in the PR body. For bugs, include a minimal
 reproduction plus OS, .NET, GPU/driver, checkpoint, and settings. Benchmark changes against a matched
 external baseline; record measurements in [scoreboards](benchmarks/scoreboards/).
 Kernel source changes must include rebuilt artifacts; see [KERNEL.md](docs/Agents/KERNEL.md).

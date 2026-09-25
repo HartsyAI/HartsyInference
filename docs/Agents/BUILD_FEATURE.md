@@ -8,4 +8,5 @@ HartsyInference.Engine owns model lifecycle and load/generate dispatch. CLI, HTT
 - Use source-generated JSON metadata at serialization boundaries. Backend-specific math belongs behind IBackend.
 - Keep CLI compiling as a consumer example; verify relevant API/engine behavior and partial-failure cleanup. Ordinary request failures must not terminate the host.
 
-Video features must follow the planning and exact-checkpoint identity rules in [shared architecture](AGENTS.md).
+Video features must follow the planning and exact-checkpoint identity rules in
+[engine patterns](ENGINE_PATTERNS.md#video-planning-contract).
