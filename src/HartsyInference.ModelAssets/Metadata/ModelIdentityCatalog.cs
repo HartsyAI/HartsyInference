@@ -124,6 +124,8 @@ public static class ModelIdentityCatalog
             Audio("moonshine", "moonshine_stt", "Moonshine", "Useful Sensors", "mit", "stt"),
             Audio("moonshinestreaming", "moonshinestreaming_stt", "Moonshine Streaming", "Useful Sensors", "mit", "stt"),
             Audio("kyutaistt", "kyutaistt_stt", "Kyutai STT", "Kyutai", "cc-by-4.0", "stt"),
+            // Ships inside the YuE2 release, under its license.
+            Audio("sheetsage2", "sheetsage2", "SheetSage2", "m-a-p", "cc-by-nc-4.0", "stt", "Comfy-Org/YuE2") with { ProviderId = "sheetsage2_transcribe" },
 
             // ── Text-to-speech ──────────────────────────────────────────────────────────────────────────
             Audio("kokoro", "kokoro_tts", "Kokoro-82M", "hexgrad", "apache-2.0", "tts", "hexgrad/Kokoro-82M"),

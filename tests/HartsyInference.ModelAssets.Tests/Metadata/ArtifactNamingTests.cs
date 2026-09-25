@@ -17,13 +17,13 @@ public sealed class ArtifactNamingTests
         Assert.Equal(expected, ArtifactNaming.FileName(engineId, variant, precision, extension));
     }
 
-    /// <summary>A version number is part of the id, so its dot survives while separators do not.</summary>
+    /// <summary>A version number survives as <c>_</c>, the character HartsyWeb would rewrite the dot to on upload.</summary>
     [Fact]
-    public void FileName_KeepsVersionDotsAndCollapsesSeparators()
+    public void FileName_WritesVersionDotsAsHartsyWebStoresThem()
     {
-        Assert.Equal("qwen-image-2.1_bf16.safetensors",
+        Assert.Equal("qwen-image-2_1_bf16.safetensors",
             ArtifactNaming.FileName("qwen-image-2.1", null, "bf16", ".safetensors"));
-        Assert.Equal("ltx-2.5-distilled_fp8-scaled.safetensors",
+        Assert.Equal("ltx-2_5-distilled_fp8-scaled.safetensors",
             ArtifactNaming.FileName("LTX 2.5", "Distilled", "fp8_scaled", ".safetensors"));
     }
 
@@ -59,7 +59,7 @@ public sealed class ArtifactNamingTests
     [Fact]
     public void FileName_PutsAComponentAfterTheVariant()
     {
-        Assert.Equal("dia-1.6b-codec_fp32.safetensors", ArtifactNaming.FileName("dia", "1.6b", "fp32", ".safetensors", "codec"));
+        Assert.Equal("dia-1_6b-codec_fp32.safetensors", ArtifactNaming.FileName("dia", "1.6b", "fp32", ".safetensors", "codec"));
         Assert.Equal("kokoro-voice-af-heart_fp32.safetensors", ArtifactNaming.FileName("kokoro", null, "fp32", ".safetensors", "voice-af_heart"));
     }
 }

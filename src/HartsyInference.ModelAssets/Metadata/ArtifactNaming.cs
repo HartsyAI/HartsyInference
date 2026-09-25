@@ -43,6 +43,9 @@ public static class ArtifactNaming
             name.Append('-').Append(Slug(component));
         }
         name.Append('_').Append(PrecisionToken(precision));
+        // HartsyWeb stores a model's file name as [A-Za-z0-9_-] (SwarmModelNaming.NormalizeFileName); a dot left in the
+        // stem would be rewritten on upload and the stored name would stop matching the file.
+        name.Replace('.', '_');
         name.Append(extension.StartsWith('.') ? extension : "." + extension);
         return name.ToString();
     }

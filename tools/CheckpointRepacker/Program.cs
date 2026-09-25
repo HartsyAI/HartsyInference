@@ -274,7 +274,7 @@ string? PartName()
 {
     string stem = ShardPattern().Replace(Path.GetFileNameWithoutExtension(input), "");
     string[] generic = ["model", "weights", "pytorch_model", "diffusion_pytorch_model", "checkpoint", "state_dict"];
-    return generic.Contains(stem, StringComparer.OrdinalIgnoreCase) ? null : stem;
+    return generic.Contains(stem, StringComparer.OrdinalIgnoreCase) || stem.Equals(component, StringComparison.OrdinalIgnoreCase) ? null : stem;
 }
 
 // Names the output once the tensors' dtypes are known; null means "stop, already reported".
@@ -290,7 +290,8 @@ string? ResolveOutput(IEnumerable<(DType DType, long Elements)> tensors)
         return null;
     }
     string precision = Precision(tensors);
-    string? variantSlot = variant is null || variant.Equals("default", StringComparison.OrdinalIgnoreCase) ? null : variant;
+    string? variantSlot = variant is null || variant.Equals("default", StringComparison.OrdinalIgnoreCase)
+        || variant.Equals(precision, StringComparison.OrdinalIgnoreCase) ? null : variant;
     // Continuation shards share the first shard's stem so the set reads as one file split N ways.
     string? partSlot = component is ArtifactProvenance.MainComponent or "shard" ? null
         : PartName() is string part ? $"{component}-{part}" : component;
