@@ -64,6 +64,19 @@ compile_one() {
         # #include "x.cuh" only through the paths it is given.
         LD_LIBRARY_PATH="$CUDA_LIB" "$NVRTC" "$src" "$ptx" "compute_${arch}" "$CUDA_INC" "${THIS_DIR}"
     fi
+    # Assemble what we just emitted. nvrtc and nvcc -ptx both stop at PTX, so an instruction whose operands are
+    # wrong for the target survives to the card and takes the whole backend down at module load — which is exactly
+    # how a malformed e2m1 cvt shipped in the sm_120a variant and made every Blackwell GPU unusable. ptxas only
+    # comes with a full toolkit, so this is a check where one exists rather than a hard requirement.
+    if command -v ptxas >/dev/null 2>&1; then
+        if ! ptxas -arch="sm_${arch}" "$ptx" -o /dev/null 2>"${ptx}.ptxas.log"; then
+            echo "ERROR: ${kernel}${suffix}.ptx does not assemble for sm_${arch}:" >&2
+            head -5 "${ptx}.ptxas.log" >&2
+            rm -f "${ptx}.ptxas.log"
+            exit 1
+        fi
+        rm -f "${ptx}.ptxas.log"
+    fi
     if ! head -20 "$ptx" | grep -q '^\.version 9\.0$'; then
         echo "ERROR: ${kernel}${suffix}.ptx is not PTX ISA 9.0 (driver JIT ceiling) — check toolchain pin." >&2
         exit 1
