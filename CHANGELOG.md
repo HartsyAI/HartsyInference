@@ -6,6 +6,26 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.175
+
+- **The Blackwell kernel never compiled, and it took the whole CUDA backend down with it.** `block_quant.sm120.ptx`,
+  shipped since alpha.166, contained `cvt.rn.satfinite.e2m1x2.f32` with a 16-bit destination; that instruction packs
+  two nibbles into one byte and takes a `.b8`, so ptxas refused the module. `CudaKernels` loads it on any
+  compute-capability 12.0 card, so construction threw and **every** CUDA operation failed on an RTX 5090 or RTX PRO
+  6000 — not just the FP4 path. Measured on a PRO 6000: 165 of 178 GPU tests failed as shipped, 178 of 178 pass with
+  the corrected kernel. The inline asm now routes through an explicit `.b8` temporary, the shape NVIDIA's own
+  `cuda_fp4` header uses.
+- **The build now assembles what it emits.** nvrtc and `nvcc -ptx` both stop at PTX, so an instruction whose operands
+  are wrong for the target survives to the card and fails at module load. `build_common.sh` runs `ptxas` against each
+  emitted file wherever a toolkit is present. That is the check that would have caught this at the commit that
+  introduced it.
+- **The native block-scaled GEMM is correct, and the bring-up gate was measuring the wrong thing.** Its NVFP4 case
+  compared a 4-bit-activation product against a 16-bit-activation one, so its error was dominated by quantization
+  loss — 10.2% on hardware, against a budget of 8% written without a card. `Nvfp4GemmReferenceTests` feeds the
+  reference the same activation the native path quantized and bounds the kernel itself at 0.36%; the older test keeps
+  its end-to-end comparison with a budget set from that measurement. First hardware numbers, RTX PRO 6000, DiT shape
+  4096×3072×3072: native 0.184 ms/Linear against 0.404 for the unpack path, 2.19× faster.
+
 ## alpha.174
 
 - **Vulkan's INT8 Linear runs on the device.** With `numerics.vkInt8=true` the weight is quantized per row by
