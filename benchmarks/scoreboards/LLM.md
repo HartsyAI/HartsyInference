@@ -61,6 +61,12 @@ HartsyInference counterpart) are in `LLM_THROUGHPUT_BENCHMARK.md`'s Phase 0 base
 
 Row count: 16, sorted by Ratio descending.
 
+## Blackwell — first hardware run (2026-09-25)
+
+Llama-3.2-1B q8_0, graph decode on, one rented RTX PRO 6000 Blackwell (CC 12.0, driver 595, CUDA 13), the
+in-stock substitute for a 5090: **591 tok/s** against **486 tok/s** on the 4090, 1.22×. No llama.cpp build was
+put on the pod, so this is a cross-GPU HartsyInference number and not a ratio against the reference.
+
 ## Excluded / not comparable (no reliable head-to-head number)
 
 - **olmoe-1b-7b-0924 (MoE, Q4_K_M)** and **granite-3.0-1b-a400m (MoE, Q4_K_M)** — measured 0.086× and

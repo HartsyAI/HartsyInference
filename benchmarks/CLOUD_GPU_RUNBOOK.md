@@ -15,4 +15,27 @@ collect, stage-resumable, `--budget-minutes` hard stop, `--auto-stop` for RunPod
 local card before renting: if it completes there, the pod run differs only in hardware. Its preflight refuses a driver
 below 580, because every nvcc-built PTX shipped here is ISA 9.0.
 
+## Renting, in practice
+
+- **Pick a lean image.** `nvidia/cuda:<ver>-devel-ubuntu24.04` with a start command that installs and runs `sshd`
+  is usable about two minutes in; a provider's own PyTorch image pulled for 25 minutes without finishing, billed
+  the whole time, and was thrown away. Set a minimum download bandwidth on the pod if the provider offers one.
+- **Ask for graphics capability if Vulkan is in scope.** Without `NVIDIA_DRIVER_CAPABILITIES=all` the container
+  gets no Vulkan ICD, `vulkaninfo` reports no device, and every cross-backend parity row fails for a reason that
+  has nothing to do with the code.
+- **Network volumes are region-locked.** Create the pod in the volume's data center or it starts with no storage.
+- **Availability is a separate query from pricing.** On RunPod the REST API covers pods and volumes, but GPU
+  availability per data center is GraphQL only (`gpuTypes`, `dataCenters.gpuAvailability`). Check it before
+  reserving anything, and accept a substitute by compute capability rather than model name — an RTX PRO 6000 and
+  an RTX 5090 are both CC 12.0 and load the same `sm_120a` PTX.
+- **cuDNN is not in the CUDA devel images.** Convolution-heavy work takes the fallback path there, so say so
+  beside any number measured that way.
+
+Three things the 2026-09-25 run did not measure on Blackwell, each cheap to fold into a later one: the
+`numerics.fp4Native` off/on comparison at one seed on an nvfp4 checkpoint (Klein 4B), which is the on-card quality
+evidence that knob's default is waiting for (SSIM >= 0.90 between the two); the Vulkan stage, which needs the
+driver-capability flag above; and one generation driven through the SwarmUI API, whose headless first-run setup is
+worth working out on a local card beforehand rather than on rented time. **Delete each line once it is measured** —
+this is the current coverage gap, not a log of past ones.
+
 PTX load failures require checking the actual emitted ISA, target and installed driver. Do not “fix” the header manually or assume an old toolkit version supports every shipped artifact.
