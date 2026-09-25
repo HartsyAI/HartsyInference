@@ -171,6 +171,13 @@ E4M3 (the `e4m3fn` finite variant) is the inference format for weights and activ
 | H100 / H200 | Hopper | Yes (full + TE) | adds per-row/per-block in cuBLAS 12.9 |
 | B200 / RTX 5090 | Blackwell | Yes (5th-gen + MXFP8 1x32 E8M0) | TN restriction lifted |
 
+Measured here on a Blackwell card (RTX PRO 6000, CC 12.0, 2026-09-25), NVFP4 through cuBLASLt with blocked
+scales against the same weights unpacked to F16: **2.0-2.19x** at 4096x3072x3072. Correctness on that card
+separates cleanly into two numbers, which is worth keeping in mind when reading any W4A4 error budget: the GEMM
+itself lands within **0.36%** of the unpack path when both are fed the same quantized activation, while
+quantizing the activation to e2m1 at all costs **10.2%**. A gate that compares W4A4 against W4A16 measures the
+second number, not the kernel.
+
 Speedup: cuBLAS reports ~4.8x FP8 on H100 over BF16 on A100; same-gen FP8-over-BF16 on Hopper ~1.7x. Community diffusion: FP8 ~1.5-2x BF16 on native-FP8 GPUs, mostly at higher resolution/batch.
 
 ---
