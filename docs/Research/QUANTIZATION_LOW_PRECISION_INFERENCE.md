@@ -172,7 +172,8 @@ E4M3 (the `e4m3fn` finite variant) is the inference format for weights and activ
 | B200 / RTX 5090 | Blackwell | Yes (5th-gen + MXFP8 1x32 E8M0) | TN restriction lifted |
 
 Measured here on a Blackwell card (RTX PRO 6000, CC 12.0, 2026-09-25), NVFP4 through cuBLASLt with blocked
-scales against the same weights unpacked to F16: **2.0-2.19x** at 4096x3072x3072. Correctness on that card
+scales against the same weights unpacked to F16: **2.19x** at 4096x3072x3072 (0.184 ms against 0.404 ms per
+Linear), which is the one shape that was timed. Correctness on that card
 separates cleanly into two numbers, which is worth keeping in mind when reading any W4A4 error budget: the GEMM
 itself lands within **0.36%** of the unpack path when both are fed the same quantized activation, while
 quantizing the activation to e2m1 at all costs **10.2%**. A gate that compares W4A4 against W4A16 measures the

@@ -31,10 +31,11 @@ below 580, because every nvcc-built PTX shipped here is ISA 9.0.
 - **cuDNN is not in the CUDA devel images.** Convolution-heavy work takes the fallback path there, so say so
   beside any number measured that way.
 
-Left over from the 2026-09-25 run and cheap to fold into the next one: `numerics.fp4Native` off then on at the
-same seed on an nvfp4 checkpoint (Klein 4B), which is the on-card quality evidence the knob's default is waiting
-for (SSIM >= 0.90 between the two); the Vulkan stage, which needs the driver-capability flag above; and one
-generation driven through the SwarmUI API, whose headless first-run setup is worth working out on a local card
-beforehand rather than on rented time.
+Three things the 2026-09-25 run did not measure on Blackwell, each cheap to fold into a later one: the
+`numerics.fp4Native` off/on comparison at one seed on an nvfp4 checkpoint (Klein 4B), which is the on-card quality
+evidence that knob's default is waiting for (SSIM >= 0.90 between the two); the Vulkan stage, which needs the
+driver-capability flag above; and one generation driven through the SwarmUI API, whose headless first-run setup is
+worth working out on a local card beforehand rather than on rented time. **Delete each line once it is measured** —
+this is the current coverage gap, not a log of past ones.
 
 PTX load failures require checking the actual emitted ISA, target and installed driver. Do not “fix” the header manually or assume an old toolkit version supports every shipped artifact.
