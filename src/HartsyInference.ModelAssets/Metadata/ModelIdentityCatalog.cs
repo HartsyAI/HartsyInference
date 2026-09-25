@@ -50,7 +50,7 @@ public static class ModelIdentityCatalog
         new()
         {
             EngineId = engineId, SwarmClassId = classId, DisplayName = name, Author = author, License = license,
-            UpstreamRepo = repo, Tags = [category, engineId],
+            UpstreamRepo = repo, Tags = [category, engineId], ProviderId = classId,
         };
 
     private static Dictionary<string, ArtifactIdentity> Build()
@@ -99,9 +99,18 @@ public static class ModelIdentityCatalog
             Video("lance-video", "lance-t2v", "Lance (Video)", "Lance", "other", "640x640"),
 
             // ── Music — these three classes are registered by SwarmUI core, not by AudioLab ──────────────
-            Audio("acestep", "ace-step-1_5", "ACE-Step 1.5", "ACE Studio", "mit", "music", "ACE-Step/Ace-Step1.5"),
-            Audio("minimaxmusic3", "minimax-music-3", "MiniMax Music 3", "MiniMax", "other", "music"),
-            Audio("yue2", "yue-2", "YuE2", "m-a-p", "cc-by-nc-4.0", "music", "m-a-p/YuE2-3B"),
+            Audio("acestep", "ace-step-1_5", "ACE-Step 1.5", "ACE Studio", "mit", "music", "ACE-Step/Ace-Step1.5") with
+            {
+                ProviderId = "acestep_music",
+                VariantClassIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["turbo"] = "acestep_music_turbo", ["turbo-shift1"] = "acestep_music_turbo",
+                    ["turbo-shift3"] = "acestep_music_turbo", ["turbo-continuous"] = "acestep_music_turbo",
+                    ["xl-turbo"] = "acestep_music_turbo",
+                },
+            },
+            Audio("minimaxmusic3", "minimax-music-3", "MiniMax Music 3", "MiniMax", "other", "music") with { ProviderId = "minimax_music3" },
+            Audio("yue2", "yue-2", "YuE2", "m-a-p", "cc-by-nc-4.0", "music", "m-a-p/YuE2-3B") with { ProviderId = "yue2_music" },
             Audio("yue", "yue_music", "YuE", "m-a-p", "apache-2.0", "music"),
             Audio("heartmula", "heartlib_music", "HeartMuLa oss-3B", "HeartMuLa", "apache-2.0", "music"),
             Audio("musicgen", "musicgen_music", "MusicGen", "Meta", "cc-by-nc-4.0", "music"),
@@ -134,6 +143,7 @@ public static class ModelIdentityCatalog
             Audio("gptsovits", "gptsovits_clone", "GPT-SoVITS v2", "RVC-Boss", "mit", "tts"),
             Audio("qwen3tts", "qwen3_tts", "Qwen3-TTS", "Alibaba Qwen", "apache-2.0", "tts") with
             {
+                ProviderId = "qwen3_tts",
                 VariantClassIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 {
                     ["0.6B-Base"] = "qwen3_tts_clone", ["1.7B-Base"] = "qwen3_tts_clone",

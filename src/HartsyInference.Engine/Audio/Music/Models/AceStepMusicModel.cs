@@ -629,7 +629,7 @@ internal static class AceStepMusicModel
             {
                 return;
             }
-            using PytorchPickleLoader loader = new PytorchPickleLoader();
+            using AnyFormatCheckpointLoader loader = new AnyFormatCheckpointLoader();
             loader.Load(path);
             Tensor raw = loader.GetAllTensors().Values.FirstOrDefault()
                 ?? throw new InvalidDataException("silence_latent.pt contained no tensor.");

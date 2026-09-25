@@ -102,6 +102,8 @@ public static class ArtifactMetadata
                 metadata["modelspec.tags"] = string.Join(",", identity.Tags);
             }
         }
+        Put(metadata, "hartsy.provider_id", identity.ProviderId);
+        Put(metadata, "hartsy.model_id", provenance.ModelId);
         Put(metadata, "modelspec.description", provenance.Description);
         Put(metadata, "hartsy.source_repo", provenance.SourceRepo ?? identity.UpstreamRepo);
         Put(metadata, "hartsy.source_file", provenance.SourceFile);

@@ -1,6 +1,8 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text.RegularExpressions;
+using HartsyInference.Core.Tensors;
 using System.Text.Json;
 using HartsyInference.Core.Logging;
 using HartsyInference.ModelAssets.Metadata;
@@ -15,13 +17,16 @@ CheckpointRepacker - turn a model checkpoint into a self-describing .safetensors
   architecture, title, author and license SwarmUI and Hartsy read, plus a .manifest.json with hashes.
 
 USAGE
-  CheckpointRepacker <input> <output.safetensors> --model <id> [options]
+  CheckpointRepacker <input> <output.safetensors | output-folder/> --model <id> [options]
   CheckpointRepacker --list-models
+
+  Give a folder as the output and the file is named for you, the way Hartsy names models:
+  <model>[-<variant>][-<part>]_<precision>.safetensors, e.g. whisper-large-v3_fp16.safetensors.
 
 IDENTITY
   --model <id>          Engine model id, e.g. kokoro, whisper, dia. See --list-models. Required.
-  --variant <name>      Variant, e.g. large-v3 or 1.7B-Base. Goes in the title; picks the class where
-                        variants register differently (Qwen3-TTS).
+  --variant <name>      The AudioLab model id, e.g. large-v3, 1.7B-Base, default. AudioLab only lists a
+                        file whose header names it. Also goes in the title and file name.
   --component <name>    main (default) for the weights a user selects. For a companion file name its
                         part instead (codec, vocoder, voice, tokenizer...): companions get no
                         architecture, so they never show up as a model of their own.
@@ -108,6 +113,7 @@ if (positionals.Count != 2)
 
 string input = Path.GetFullPath(positionals[0]);
 string output = Path.GetFullPath(positionals[1]);
+bool autoName = positionals[1].EndsWith('/') || positionals[1].EndsWith('\\') || Directory.Exists(output);
 if (Directory.Exists(input))
 {
     string[] candidates = Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories)
@@ -139,11 +145,11 @@ if (!isSafeTensors && !pickleExtensions.Contains(inputExtension))
         : "");
     return 1;
 }
-if (!output.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+if (!autoName && !output.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
 {
     return Usage($"The output must end in .safetensors: {positionals[1]}");
 }
-if (File.Exists(output) && !flags.Contains("--force"))
+if (!autoName && File.Exists(output) && !flags.Contains("--force"))
 {
     Console.Error.WriteLine($"Output already exists: {output}");
     Console.Error.WriteLine("Add --force to replace it.");
@@ -237,11 +243,14 @@ Dictionary<string, string>? BuildMetadata()
         Console.WriteLine($"Hashing source {Path.GetFileName(input)} for provenance...");
         string converter = isSafeTensors ? "upstream-safetensors" : "HartsyInference.PickleCheckpointRepacker";
         ArtifactProvenance provenance = ArtifactProvenance.FromSourceFile(converter, component, input,
-            values.GetValueOrDefault("--source-repo")?.Last());
+            values.GetValueOrDefault("--source-repo")?.Last()) with { ModelId = variant };
         built = ArtifactMetadata.ForRepack(resolvedIdentity, provenance);
+        if (component != ArtifactProvenance.MainComponent && PartName() is string part)
+        {
+            built["modelspec.title"] = $"{resolvedIdentity.DisplayName} ({component}: {part})";
+        }
         if (variant is not null)
         {
-            built["hartsy.variant"] = variant;
             if (component == ArtifactProvenance.MainComponent
                 && !Alnum(resolvedIdentity.DisplayName).Contains(Alnum(variant), StringComparison.Ordinal))
             {
@@ -260,6 +269,53 @@ Dictionary<string, string>? BuildMetadata()
     return built;
 }
 
+// A companion's own file stem, when it says more than "model": af_heart, t5-large. Generic stems name nothing.
+string? PartName()
+{
+    string stem = ShardPattern().Replace(Path.GetFileNameWithoutExtension(input), "");
+    string[] generic = ["model", "weights", "pytorch_model", "diffusion_pytorch_model", "checkpoint", "state_dict"];
+    return generic.Contains(stem, StringComparer.OrdinalIgnoreCase) ? null : stem;
+}
+
+// Names the output once the tensors' dtypes are known; null means "stop, already reported".
+string? ResolveOutput(IEnumerable<(DType DType, long Elements)> tensors)
+{
+    if (!autoName)
+    {
+        return output;
+    }
+    if (resolvedIdentity is null)
+    {
+        Console.Error.WriteLine("Naming the file for you needs --model; give an explicit output file name with --no-metadata.");
+        return null;
+    }
+    string precision = Precision(tensors);
+    string? variantSlot = variant is null || variant.Equals("default", StringComparison.OrdinalIgnoreCase) ? null : variant;
+    // Continuation shards share the first shard's stem so the set reads as one file split N ways.
+    string? partSlot = component is ArtifactProvenance.MainComponent or "shard" ? null
+        : PartName() is string part ? $"{component}-{part}" : component;
+    string name = ArtifactNaming.FileName(resolvedIdentity.EngineId, variantSlot, precision, ".safetensors", partSlot);
+    Match shard = ShardPattern().Match(Path.GetFileNameWithoutExtension(input));
+    if (shard.Success)
+    {
+        name = name[..^".safetensors".Length] + shard.Value + ".safetensors";
+    }
+    string resolved = Path.Combine(output, name);
+    if (File.Exists(resolved) && !flags.Contains("--force"))
+    {
+        Console.Error.WriteLine($"Output already exists: {resolved}");
+        Console.Error.WriteLine("Add --force to replace it.");
+        return null;
+    }
+    return resolved;
+}
+
+if (resolvedIdentity?.ProviderId is not null && component == ArtifactProvenance.MainComponent && variant is null)
+{
+    Console.WriteLine("Note: no --variant given. AudioLab lists a file only when its header names the model id");
+    Console.WriteLine("      (e.g. --variant default, --variant large-v3); this one will be classified but not selectable.");
+}
+
 Stopwatch clock = Stopwatch.StartNew();
 int tensorCount;
 string payloadSha;
@@ -267,6 +323,15 @@ try
 {
     if (isSafeTensors)
     {
+        using (SafeTensorsLoader header = new())
+        {
+            header.Load(input);
+            if (ResolveOutput(header.Descriptors.Values.Select(d => (d.DType, d.Shape.ElementCount))) is not string named)
+            {
+                return 1;
+            }
+            output = named;
+        }
         metadata = BuildMetadata();
         Console.WriteLine($"Rewriting metadata; {Size(new FileInfo(input).Length)} of tensors copied unchanged...");
         payloadSha = SafeTensorsWriter.RewriteMetadata(input, output, metadata ?? []);
@@ -300,6 +365,11 @@ try
             }
             return mapped;
         };
+        if (ResolveOutput(loader.Descriptors.Values.Select(d => (d.DType, d.Shape.ElementCount))) is not string named)
+        {
+            return 1;
+        }
+        output = named;
         metadata = BuildMetadata();
         Console.WriteLine($"Writing {loader.Descriptors.Count} tensors to {Path.GetFileName(output)}...");
         tensorCount = PickleCheckpointRepacker.Repack(loader, output, keyMap, metadata);
@@ -362,6 +432,26 @@ static int Usage(string problem)
     Console.Error.WriteLine("Run with --help for usage and examples.");
     return 2;
 }
+
+// The dtype holding the most bytes names the file's precision, in HartsyWeb's ModelPrecision vocabulary.
+static string Precision(IEnumerable<(DType DType, long Elements)> tensors)
+{
+    string? top = tensors.GroupBy(t => t.DType.Name).OrderByDescending(g => g.Sum(t => t.Elements * t.DType.SizeInBytes))
+        .Select(g => g.Key).FirstOrDefault();
+    return top?.ToUpperInvariant() switch
+    {
+        "F32" => "fp32",
+        "BF16" => "bf16",
+        "F16" => "fp16",
+        "F8_E4M3" or "F8_E5M2" => "fp8",
+        "I8" => "int8",
+        "F64" => "fp64",
+        null => "fp32",
+        string other => other.ToLowerInvariant(),
+    };
+}
+
+static Regex ShardPattern() => new(@"-\d{5}-of-\d{5}$");
 
 static string Alnum(string text) => new(text.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 

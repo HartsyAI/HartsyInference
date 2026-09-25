@@ -94,6 +94,42 @@ public sealed unsafe class PytorchPickleLoaderTests
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 
+    [Fact]
+    public void AnyFormatLoader_ReadsAConvertedSafetensorsAtThePicklePath()
+    {
+        string pickle = Path.Combine(Path.GetTempPath(), $"hi_pttest_any_{Guid.NewGuid():N}.pt");
+        string converted = Path.Combine(Path.GetTempPath(), $"hi_pttest_any_{Guid.NewGuid():N}.pth");
+        try
+        {
+            WriteTorchZip(pickle, BuildNestedPickle(), storageKey: "0", FloatsToBytes([1f, 2f, 3f, 4f]));
+            PickleCheckpointRepacker.Repack(pickle, converted, recursiveFlatten: true);
+
+            using AnyFormatCheckpointLoader fromPickle = new();
+            fromPickle.Load(pickle, recursiveFlatten: true);
+            Dictionary<string, Tensor> expected = fromPickle.GetAllTensors();
+            Dictionary<string, Tensor> got;
+            using (AnyFormatCheckpointLoader fromSafeTensors = new())
+            {
+                fromSafeTensors.Load(converted);
+                Assert.True(fromSafeTensors.WasSafeTensors);
+                Assert.False(fromPickle.WasSafeTensors);
+                got = fromSafeTensors.GetAllTensors();
+                Assert.Equal(expected.Keys.Order(), got.Keys.Order());
+                foreach ((string key, Tensor tensor) in expected)
+                {
+                    float* a = (float*)tensor.DataPointer;
+                    float* b = (float*)got[key].DataPointer;
+                    for (int i = 0; i < 4; i++) Assert.Equal(a[i], b[i]);
+                }
+            }
+        }
+        finally
+        {
+            if (File.Exists(pickle)) File.Delete(pickle);
+            if (File.Exists(converted)) File.Delete(converted);
+        }
+    }
+
     /// <summary>Stream 1: PROTO2 + LONG1(0x1950a86a20f9469cfc6c, 10 bytes LE) + STOP.</summary>
     private static byte[] MagicStream() =>
     [

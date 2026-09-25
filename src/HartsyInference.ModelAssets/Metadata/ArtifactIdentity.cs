@@ -41,6 +41,11 @@ public sealed record ArtifactIdentity
     /// <summary>Tags for <c>modelspec.tags</c>; the first is the category (<c>audio</c>/<c>image</c>/<c>video</c>).</summary>
     public IReadOnlyList<string> Tags { get; init; } = [];
 
+    /// <summary>AudioLab's provider id (<c>hartsy.provider_id</c>). AudioLab admits a placed file only when this
+    /// names one of its providers, and several differ from the class id (<c>qwen3_tts</c>, <c>acestep_music</c>).
+    /// Null for families AudioLab does not serve.</summary>
+    public string? ProviderId { get; init; }
+
     /// <summary>Per-variant class ids, keyed case-insensitively by variant, for a family whose variants register
     /// as different SwarmUI classes (Qwen3-TTS base/custom/design). Absent variants use <see cref="SwarmClassId"/>.</summary>
     public IReadOnlyDictionary<string, string> VariantClassIds { get; init; } = new Dictionary<string, string>();

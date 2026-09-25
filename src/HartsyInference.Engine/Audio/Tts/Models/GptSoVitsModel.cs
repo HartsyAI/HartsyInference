@@ -46,7 +46,7 @@ internal static class GptSoVitsModel
             Text2Semantic s1 = new Text2Semantic(new Text2SemanticConfig());
             s1.LoadWeights(s1Loader.GetAllTensors(), "model");
 
-            PytorchPickleLoader hubertLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader hubertLoader = new AnyFormatCheckpointLoader();
             hubertLoader.Load(hubertPath);
             Hubert hubert = new Hubert(new HubertConfig());
             hubert.LoadWeights(hubertLoader.GetAllTensors());

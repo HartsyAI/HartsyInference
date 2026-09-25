@@ -55,4 +55,11 @@ public sealed class ArtifactNamingTests
         Assert.Equal("krea-2", ArtifactNaming.Slug("  Krea 2 "));
         Assert.Equal("f-lite", ArtifactNaming.Slug("F-Lite"));
     }
+
+    [Fact]
+    public void FileName_PutsAComponentAfterTheVariant()
+    {
+        Assert.Equal("dia-1.6b-codec_fp32.safetensors", ArtifactNaming.FileName("dia", "1.6b", "fp32", ".safetensors", "codec"));
+        Assert.Equal("kokoro-voice-af-heart_fp32.safetensors", ArtifactNaming.FileName("kokoro", null, "fp32", ".safetensors", "voice-af_heart"));
+    }
 }
