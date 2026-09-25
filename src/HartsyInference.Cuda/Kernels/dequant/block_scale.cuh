@@ -119,8 +119,12 @@ __device__ __forceinline__ unsigned int e2m1x2_pack(float even, float odd)
 {
 #if defined(__CUDA_ARCH_FEAT_SM100_ALL) || defined(__CUDA_ARCH_FEAT_SM103_ALL) \
     || defined(__CUDA_ARCH_FEAT_SM120_ALL) || defined(__CUDA_ARCH_FEAT_SM121_ALL)
-    unsigned short packed;   // cvt writes the first operand to the upper nibble
-    asm("cvt.rn.satfinite.e2m1x2.f32 %0, %1, %2;" : "=h"(packed) : "f"(even), "f"(odd));
+    // The instruction packs two nibbles into ONE byte, so its destination is a .b8; a 16-bit constraint is an
+    // operand mismatch ptxas refuses, and there is no byte constraint for inline asm — hence the explicit .b8
+    // temporary, the same shape NVIDIA's own cuda_fp4 header uses. cvt writes the first source to the upper nibble.
+    unsigned short packed;
+    asm("{\n\t.reg .b8 t;\n\tcvt.rn.satfinite.e2m1x2.f32 t, %1, %2;\n\tcvt.u16.u8 %0, t;\n\t}"
+        : "=h"(packed) : "f"(even), "f"(odd));
     return (unsigned int)(packed & 0xFFu);
 #else
     return (f32_to_e2m1(even) << 4) | f32_to_e2m1(odd);
