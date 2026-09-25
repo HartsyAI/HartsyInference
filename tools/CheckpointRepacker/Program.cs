@@ -242,7 +242,8 @@ Dictionary<string, string>? BuildMetadata()
         if (variant is not null)
         {
             built["hartsy.variant"] = variant;
-            if (component == ArtifactProvenance.MainComponent)
+            if (component == ArtifactProvenance.MainComponent
+                && !Alnum(resolvedIdentity.DisplayName).Contains(Alnum(variant), StringComparison.Ordinal))
             {
                 built["modelspec.title"] = $"{resolvedIdentity.DisplayName} {variant}";
             }
@@ -361,6 +362,8 @@ static int Usage(string problem)
     Console.Error.WriteLine("Run with --help for usage and examples.");
     return 2;
 }
+
+static string Alnum(string text) => new(text.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
 static string Size(long bytes) => bytes >= 1L << 30
     ? (bytes / (double)(1L << 30)).ToString("0.00", CultureInfo.InvariantCulture) + " GB"
