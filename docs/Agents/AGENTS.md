@@ -43,9 +43,9 @@ commit message or PR body, and none in the changelog.
    `@claude review pr` on the PR and wait for `claude[bot]`.
 6. Resolve every comment. Reviews and comments are different API objects, so check all three surfaces:
    ```bash
-   gh api repos/HartsyAI/HartsyInference/issues/<N>/comments --jq '.[]|"\(.user.login) \(.created_at)"'
-   gh api repos/HartsyAI/HartsyInference/pulls/<N>/reviews  --jq '.[]|"\(.user.login) \(.state)"'
-   gh api repos/HartsyAI/HartsyInference/pulls/<N>/comments --jq '.[]|"\(.path):\(.line)"'
+   gh api --paginate repos/HartsyAI/HartsyInference/issues/<N>/comments --jq '.[]|"\(.user.login) \(.created_at)"'
+   gh api --paginate repos/HartsyAI/HartsyInference/pulls/<N>/reviews  --jq '.[]|"\(.user.login) \(.state)"'
+   gh api --paginate repos/HartsyAI/HartsyInference/pulls/<N>/comments --jq '.[]|"\(.path):\(.line)"'
    ```
    Reply per thread, then resolve it with the GraphQL `resolveReviewThread` mutation — `gh pr` has no resolve verb.
 7. Merge once CI is green and every thread is resolved, one PR at a time: each merge stale-dates the
