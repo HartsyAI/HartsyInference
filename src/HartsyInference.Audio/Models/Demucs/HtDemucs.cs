@@ -72,8 +72,7 @@ public sealed unsafe class HtDemucs : IDisposable
         }
         _xf.LoadWeights(w, "crosstransformer");
         _freqEmb = _casts.Optional(w, "freq_emb.embedding.weight");
-        // The channel (up/down)samplers are top-level modules in HTDemucs, NOT inside the crosstransformer, and
-        // only exist when the bottleneck is projected (htdemucs_6s has none).
+        // The channel (up/down)samplers only exist when the bottleneck is projected (htdemucs_6s has none).
         if (_cfg.BottomChannels <= 0)
             return;
         _upW = _casts.F32(w, "channel_upsampler.weight");
