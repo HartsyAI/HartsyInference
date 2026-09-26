@@ -122,11 +122,12 @@ internal static class AceStepMusicModel
         AceStepPipeline15 pipeline = new AceStepPipeline15(context.Backend, dit, conditionEncoder, vae, config);
         // Beside the checkpoint first; a checkpoint selected by path elsewhere uses the catalog's shared copy.
         string latentDirectory = Path.GetDirectoryName(mainPath)!;
+        // The latent is optional (absent = VAE recompute), so only a copy already on disk is used; nothing is fetched.
         if (!File.Exists(Path.Combine(latentDirectory, "acestep-v15-silence_latent.pt"))
-            && AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).FirstOrDefault(a => a.Role == "silence-latent") is { } latentAsset)
+            && AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).FirstOrDefault(a => a.Role == "silence-latent") is { } latentAsset
+            && File.Exists(ModelDownloader.TargetPath(latentAsset)))
         {
-            latentDirectory = Path.GetDirectoryName(await ModelDownloader.EnsureSideModelAsync(latentAsset, downloadIfMissing: true, null, cancel)
-                .ConfigureAwait(false))!;
+            latentDirectory = Path.GetDirectoryName(ModelDownloader.TargetPath(latentAsset))!;
         }
         LoadSilenceLatent(pipeline, latentDirectory);
         // 5 Hz code detokenizer (LM-planner hints → 25 Hz latents); its weights ride in the same checkpoint.

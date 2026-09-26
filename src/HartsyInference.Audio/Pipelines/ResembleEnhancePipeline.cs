@@ -100,6 +100,10 @@ public sealed unsafe class ResembleEnhancePipeline : IDisposable
         {
             throw new ArgumentException("noisyPcm44k must be non-empty.", nameof(noisyPcm44k));
         }
+        if (_melFb is null)
+        {
+            throw new InvalidOperationException("LoadWeights must run before Denoise.");
+        }
         int length = noisyPcm44k.Length;
         float absMax = 1e-7f;
         for (int i = 0; i < length; i++)
