@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.HuggingFace;
 
 namespace HartsyInference.Engine;
@@ -58,11 +59,13 @@ public static class ModelDownloader
     }
 
     /// <summary>Ensures a single side model is on disk (downloading + verifying under its lock) and returns its local
-    /// path. The default behavior is strict: if the file is not present, this throws before any network call.
-    /// Extension or caller flows that explicitly opt in can pass <c>downloadIfMissing: true</c>.</summary>
+    /// path. A missing asset is fetched from its catalog entry, because a generation that stops to tell the operator to
+    /// go and download a VAE by hand is a generation that failed — this is what SwarmUI's own ComfyUI backend does.
+    /// <c>paths.sideModelAutofetch=false</c> restores the strict behavior for an air-gapped install; a caller that must
+    /// never reach the network regardless passes <c>downloadIfMissing: false</c> explicitly.</summary>
     public static async Task<string> EnsureSideModelAsync(ModelAsset asset, Action<ModelAsset, double>? onProgress, CancellationToken ct)
     {
-        return await EnsureSideModelAsync(asset, downloadIfMissing: false, onProgress, ct).ConfigureAwait(false);
+        return await EnsureSideModelAsync(asset, EngineKnobs.SideModelAutofetch.Value, onProgress, ct).ConfigureAwait(false);
     }
 
     /// <summary>Ensures a single side model is on disk and returns its local path.
@@ -89,8 +92,8 @@ public static class ModelDownloader
             if (!allowDownload)
             {
                 throw new FileNotFoundException(
-                    $"Model asset '{asset.Role}' is missing locally: {target}. Download it first with the catalog pull workflow "
-                    + $"for '{asset.Repo}'.");
+                    $"Model asset '{asset.Role}' is missing locally: {target}, and fetching it is disabled "
+                    + $"(paths.sideModelAutofetch). Download it from '{asset.Repo}' ({asset.RepoPath}) or turn the setting back on.");
             }
 
             IProgress<double> progress = new Progress<double>(fraction => onProgress?.Invoke(asset, fraction));
