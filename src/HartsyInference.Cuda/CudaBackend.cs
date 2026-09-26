@@ -434,6 +434,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// on anything before Blackwell, and constructing it there allocates nothing, so callers can ask unconditionally.</summary>
     /// <remarks>Reached from <c>LinearCore</c> when <see cref="EnableNativeFp4Gemm"/> is on and the card is Blackwell;
     /// everywhere else a resident <see cref="DType.F4E2M1"/> weight unpacks through <c>LaunchNvfp4Dequant</c> per GEMM.</remarks>
+    /// <summary>Whether a checkpoint may stay block-scaled: the dispatch gate's own conditions, executor included,
+    /// since cuBLASLt can refuse a handle on a Blackwell card and a weight nothing can consume is worse than one
+    /// that arrived wide. Short-circuits, so the executor is never built where it cannot be used.</summary>
+    private bool NativeBlockScaledGemmUsable()
+        => EnableNativeFp4Gemm && _context.Sm >= CudaArch.Blackwell
+        && _kernels is { HasBlockQuantKernels: true } && BlockScaledExecutor.IsSupported;
+
     public BlockScaledGemmExecutor BlockScaledExecutor
     {
         get
@@ -796,7 +803,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     private long _blockScaledNativeCalls, _blockScaledUnpackCalls;
     private string? _blockScaledFirstRefusal;
 
-    /// <summary>Records one block-scaled Linear's dispatch, and logs the first one so a run that never engages the native GEMM says which condition refused it.</summary>
+    /// <summary>Records one block-scaled Linear's dispatch, and logs the first one so a run that never engages the
+    /// native GEMM says which condition refused it.</summary>
     /// <remarks>Only reached for a weight that already carries block scales, so an ordinary Linear pays nothing. The
     /// reason string is built inside the one-shot, never per call.</remarks>
     private void NoteBlockScaledDispatch(bool native, Tensor input, Tensor output, int n, int k, bool rowRange,
@@ -838,11 +846,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         if ((n * output.DType.SizeInBytes) % 16 != 0) return $"the output row ({n} × {output.DType.Name}) is not 16-byte aligned";
         if (_kernels is not { HasBlockQuantKernels: true }) return "block_quant.ptx is not loaded";
         if (!BlockScaledExecutor.IsSupported)
-            return $"cuBLASLt block-scaled matmul needs Blackwell (this card is SM {_context.ComputeCapabilityMajor}.{_context.ComputeCapabilityMinor})";
+            return "cuBLASLt block-scaled matmul needs Blackwell (this card is SM "
+                + $"{_context.ComputeCapabilityMajor}.{_context.ComputeCapabilityMinor})";
         return "no gate condition refused — the dispatch and this explanation have drifted";
     }
 
-    /// <summary>Warns once when a block-scaled weight cannot even be unpacked on the device and falls back to a HOST dequant per GEMM, which is orders of magnitude slower than either device path.</summary>
+    /// <summary>Warns once when a block-scaled weight cannot even be unpacked on the device and falls back to a HOST
+    /// dequant per GEMM, which is orders of magnitude slower than either device path.</summary>
     private void NoteBlockScaledHostUnpack(Tensor weight, QuantWeightInfo info, int weightRowOffset, int weightRowCount)
     {
         if (Volatile.Read(ref _blockScaledHostUnpackLogged) != 0
@@ -1234,7 +1244,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         _audioConvCudnn = CudnnRuntime.Available && EngineKnobs.AudioConvCudnn.Value;
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} NativeFp4Gemm={EnableNativeFp4Gemm} MempoolKeep={mempoolKeep} " +
+            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} "
+            + $"NativeFp4Gemm={EnableNativeFp4Gemm} MempoolKeep={mempoolKeep} " +
             $"EpilogueFusion={EnableEpilogueFusion} Dp4aGemv={EnableDp4aGemv} TensorCoreGemm={EnableTensorCoreGemm} " +
             $"HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
             $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32}.");
@@ -1308,7 +1319,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             SupportsF16 = true,
             SupportsBF16 = _context.Sm >= CudaArch.Ampere,
             SupportsQuantized = true,
-            NativeBlockScaledGemm = EnableNativeFp4Gemm && _context.Sm >= CudaArch.Blackwell && _kernels is { HasBlockQuantKernels: true },
+            NativeBlockScaledGemm = NativeBlockScaledGemmUsable(),
             SupportsConv2D = true,
             BandsIm2Col = true,
             Im2ColWorkspaceCapBytes = Im2ColBandCapBytes,
@@ -1320,7 +1331,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         Volatile.Write(ref _constructorCompleted, 1);
     }
 
-    /// <summary>Says once, at construction, whether the native block-scaled (nvfp4/mxfp8) GEMM can run here, and when it cannot, EVERY static condition that refuses it.</summary>
+    /// <summary>Says once, at construction, whether the native block-scaled (nvfp4/mxfp8) GEMM can run here, and when
+    /// it cannot, EVERY static condition that refuses it.</summary>
     /// <remarks>Silent when the knob is off, since the <c>[Cuda] perf flags:</c> line above already reports that and
     /// the path is off by default. The conditions are listed together rather than short-circuited: a card that is
     /// both pre-Blackwell and missing the PTX would otherwise be fixed twice.</remarks>

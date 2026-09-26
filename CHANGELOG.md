@@ -20,7 +20,6 @@ stable release will require. Dates are UTC.
   checkpoint open counts nvfp4 groups by outcome (resident / companion / fp8 / F16), the backend constructor
   lists every static condition refusing the native GEMM rather than the first, and the first block-scaled Linear
   latches whether it engaged or the specific gate condition that refused it. No per-layer logging.
->>>>>>> 937b69e1 (Ask for resident nvfp4, and say what the native FP4 path did)
 
 ## alpha.178
 
