@@ -1,0 +1,18 @@
+{
+  // SheetSage2 as a standalone model. The official release ships attention adapters over MERT-v2-FullSong;
+  // SheetSage2Model.from_pretrained merges them in float32 as W += (B @ A) * lora_alpha / lora_rank, which the
+  // lora step repeats. alpha and rank live in its config.json (128 and 64), not in the weights.
+  "name": "sheetsage2", "model": "sheetsage2", "variant": "bf16",
+  "source_repo": "m-a-p/SheetSage2",
+  "dtype": "bf16",
+  "components": [
+    { "source_file": "m-a-p--MERT-v2-FullSong/model.safetensors", "prefix": "encoder." },
+    { "source_file": "m-a-p--SheetSage2/model.safetensors" }
+  ],
+  "lora": [ { "from": "adapter.{p}", "into": "encoder.{p}", "alpha": 128 } ],
+  // The output head is tied to the token embedding; the engine reads it under its own name.
+  "copy": [ { "from": "token_embedding.weight", "to": "output_projection.weight" } ],
+  // The mel front end stays in F32, as in every other release of this encoder.
+  "keep_dtype": [ "encoder.feature_extractor.*" ],
+  "metadata": { "base_model": "m-a-p/MERT-v2-FullSong", "base_model_revision": "d8ba1c745e733b3908ce6ad16ebeb17ac7600a42" }
+}

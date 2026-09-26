@@ -1,0 +1,7 @@
+{
+  // The seconds-total conditioner from the same official checkpoint, prefix removed.
+  "name": "stableaudio-conditioner", "model": "stableaudio", "variant": "open-small", "component": "conditioner",
+  "source_repo": "stabilityai/stable-audio-open-small",
+  "components": [ { "source_file": "stabilityai--stable-audio-open-small/model.safetensors", "renames": [ ["^conditioner\\.", ""] ] } ],
+  "drop": [ "model.model.*", "pretransform.*" ]
+}

@@ -5,9 +5,12 @@ using System.Text.RegularExpressions;
 using HartsyInference.Core.Tensors;
 using System.Text.Json;
 using HartsyInference.Core.Logging;
+using HartsyInference.Cpu;
+using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
+using HartsyInference.ModelAssets.Tokenizers;
 
 const string HelpText = """
 CheckpointRepacker - turn a model checkpoint into a self-describing .safetensors file.
@@ -18,6 +21,7 @@ CheckpointRepacker - turn a model checkpoint into a self-describing .safetensors
 
 USAGE
   CheckpointRepacker <input> <output.safetensors | output-folder/> --model <id> [options]
+  CheckpointRepacker <input> [<input> ...] <output> --model <id> [--dtype bf16] [options]
   CheckpointRepacker --list-models
 
   Give a folder as the output and the file is named for you, the way Hartsy names models:
@@ -35,11 +39,43 @@ IDENTITY
   --meta-json <file>    Add or override entries from a JSON object of strings.
   --no-metadata         Write no identity. SwarmUI then cannot classify the file; not for publishing.
 
+MERGE AND CAST (safetensors)
+  Several inputs, a *.safetensors.index.json, or a folder of shards are merged into one file, streaming
+  tensor by tensor. Keys must not collide across inputs.
+  --dtype <bf16|fp16|fp32>  Cast float tensors (F32/BF16/F16), rounding to nearest even exactly as PyTorch
+                        does, so the result matches a torch-made repack bit for bit. Integer tensors pass.
+  --prefix <p>          Prepend <p> to every key, e.g. model.diffusion_model. when bundling components.
+  --drop <pattern>      Leave out tensors whose key matches (* and ? wildcards). Repeatable. e.g. lm_head.weight
+                        for a head tied to the embeddings.
+  --keep-dtype <pattern>  Keep matching tensors in their stored dtype through --dtype. Repeatable.
+                        e.g. --keep-dtype '*norm*' keeps norms in F32 under a bf16 cast.
+
+LORA BAKING (safetensors)
+  --lora <file>[:<strength>]  Merge an adapter into the weights it modifies and write a standalone model.
+                        Repeatable; applied in order. Reads PEFT, kohya, diffusers and LyCORIS (LoHa, LoKr,
+                        DoRA, full-weight diffs) naming, and matches each module to a weight by name. A PEFT
+                        adapter_config.json beside the file supplies alpha and rsLoRA. The merge is the float32
+                        arithmetic single-threaded PyTorch does, so it matches such a merge bit for bit.
+  --lora-alpha <a>      Alpha for every module when neither the file nor an adapter_config.json has one.
+
 KEY LAYOUT (pickles only)
   --recursive           Keep every nested state dict, prefixing keys with the dict name (bert.x ...).
   --allow-partial       Keep only the first nested state dict even though others hold tensors.
   --strip-prefix <p>    Remove a leading <p> from every key.
   --rename FROM=TO      Replace FROM with TO anywhere in a key. Repeatable. e.g. --rename .module.=.
+
+RECIPES
+  --recipe <file.json>  Build the output from a checked-in recipe: components (with prefixes and regex renames),
+                        fused tensors, copies, drops and embedded files or tokenizers. Recipe fields supply
+                        --model/--variant/--component/--source-repo/--dtype unless given here. Takes only the output path.
+  --source-root <dir>   Where a recipe's source_file paths resolve. Default: the recipe's folder.
+
+TOKENIZER
+  --tokenizer-from-tiktoken <file.tiktoken> <tokenizer.json>
+                        Convert a tiktoken rank file to a HuggingFace tokenizers JSON (byte-level BPE with
+                        merges recovered from the ranks), identical to what transformers' converter writes.
+  --pattern <regex>     Pre-tokenizer split pattern. Defaults to the Qwen2 pattern.
+  --normalizer <NFC|none>  Unicode normalizer. Default NFC.
 
 OUTPUT
   --force               Replace the output if it already exists.
@@ -49,13 +85,15 @@ EXAMPLES
   CheckpointRepacker kokoro-v1_0.pth kokoro-82m.safetensors --model kokoro --recursive --rename .module.=.
   CheckpointRepacker model.safetensors out/model.safetensors --model whisper --variant large-v3
   CheckpointRepacker dac.pth dac.safetensors --model dia --component codec
+  CheckpointRepacker xl-turbo/model.safetensors.index.json out/ --model acestep --variant xl-turbo --dtype bf16
+  CheckpointRepacker base.safetensors out/ --model orpheus --lora adapter_model.safetensors:0.8 --dtype bf16
 """;
 
 // The tool prints its own progress; the engine's info lines would repeat it.
 Logs.MinLevel = LogLevel.Warning;
 string[] pickleExtensions = [".pt", ".pth", ".bin", ".th", ".ckpt"];
-string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename"];
-string[] flagOptions = ["--recursive", "--allow-partial", "--no-metadata", "--force", "--help", "-h", "--list-models"];
+string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root", "--lora", "--lora-alpha"];
+string[] flagOptions = ["--recursive", "--allow-partial", "--no-metadata", "--force", "--help", "-h", "--list-models", "--tokenizer-from-tiktoken"];
 
 List<string> positionals = [];
 Dictionary<string, List<string>> values = new(StringComparer.Ordinal);
@@ -106,15 +144,131 @@ if (flags.Contains("--list-models"))
     }
     return 0;
 }
-if (positionals.Count != 2)
+if (flags.Contains("--tokenizer-from-tiktoken"))
 {
-    return Usage(positionals.Count < 2 ? "Give an input checkpoint and an output .safetensors path." : $"Too many paths: {string.Join(" ", positionals)}");
+    if (positionals.Count != 2)
+    {
+        return Usage("--tokenizer-from-tiktoken takes a .tiktoken file and an output .json path.");
+    }
+    const string Qwen2Pattern = @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+    string? norm = values.GetValueOrDefault("--normalizer")?.Last();
+    byte[] tokenizerJson = TiktokenConverter.ToHuggingFaceJson(positionals[0], values.GetValueOrDefault("--pattern")?.Last() ?? Qwen2Pattern,
+        norm is null ? "NFC" : norm.Equals("none", StringComparison.OrdinalIgnoreCase) ? null : norm);
+    if (File.Exists(positionals[1]) && !flags.Contains("--force"))
+    {
+        Console.Error.WriteLine($"Output already exists: {positionals[1]}. Add --force to replace it.");
+        return 1;
+    }
+    File.WriteAllBytes(positionals[1], tokenizerJson);
+    Console.WriteLine($"Wrote {positionals[1]} ({Size(tokenizerJson.Length)}), sha256 {System.Convert.ToHexString(SHA256.HashData(tokenizerJson)).ToLowerInvariant()}");
+    return 0;
+}
+Recipe? recipe = null;
+string recipeRoot = "";
+string recipeDir = "";
+if (values.GetValueOrDefault("--recipe")?.Last() is string recipePath)
+{
+    if (positionals.Count != 1)
+    {
+        return Usage("--recipe takes only the output path; the recipe names its own sources.");
+    }
+    try
+    {
+        recipe = Recipe.Load(recipePath);
+    }
+    catch (Exception ex) when (ex is IOException or JsonException or InvalidDataException)
+    {
+        Console.Error.WriteLine($"Could not read recipe {recipePath}: {ex.Message}");
+        return 1;
+    }
+    recipeDir = Path.GetDirectoryName(Path.GetFullPath(recipePath))!;
+    recipeRoot = values.GetValueOrDefault("--source-root")?.Last() ?? recipeDir;
+    void Default(string option, string? value)
+    {
+        if (value is not null && !values.ContainsKey(option))
+            values[option] = [value];
+    }
+    Default("--model", recipe.Model);
+    Default("--variant", recipe.Variant);
+    Default("--component", recipe.Component);
+    Default("--source-repo", recipe.SourceRepo);
+    Default("--dtype", recipe.Dtype);
+    if (recipe.KeepDtype.Count > 0 && !values.ContainsKey("--keep-dtype"))
+        values["--keep-dtype"] = [.. recipe.KeepDtype];
+}
+else if (positionals.Count < 2)
+{
+    return Usage("Give an input checkpoint and an output .safetensors path.");
 }
 
-string input = Path.GetFullPath(positionals[0]);
-string output = Path.GetFullPath(positionals[1]);
-bool autoName = positionals[1].EndsWith('/') || positionals[1].EndsWith('\\') || Directory.Exists(output);
-if (Directory.Exists(input))
+List<string> inputs = [.. positionals.Take(positionals.Count - 1).Select(Path.GetFullPath)];
+string input = recipe is null ? inputs[0] : Path.GetFullPath(Path.Combine(recipeRoot, recipe.Components.FirstOrDefault()?.SourceFile ?? ""));
+string outputArg = positionals[^1];
+string output = Path.GetFullPath(outputArg);
+bool autoName = outputArg.EndsWith('/') || outputArg.EndsWith('\\') || Directory.Exists(output);
+string? dtypeName = values.GetValueOrDefault("--dtype")?.Last()?.ToLowerInvariant();
+DType? castTo = dtypeName switch
+{
+    null => null,
+    "bf16" => DType.BF16,
+    "fp16" or "f16" => DType.F16,
+    "fp32" or "f32" => DType.F32,
+    _ => null,
+};
+if (dtypeName is not null && castTo is null)
+{
+    return Usage($"--dtype '{dtypeName}' is not supported; use bf16, fp16 or fp32.");
+}
+bool IsShardSet(string p) => p.EndsWith(".index.json", StringComparison.OrdinalIgnoreCase)
+    || (Directory.Exists(p) && Directory.EnumerateFiles(p, "*.safetensors").Any());
+List<(string Path, float Strength, float? Alpha, bool RsLora)> loras = [];
+float? loraAlpha = null;
+if (values.GetValueOrDefault("--lora-alpha")?.Last() is string alphaText)
+{
+    if (!float.TryParse(alphaText, NumberStyles.Float, CultureInfo.InvariantCulture, out float a) || !(a > 0))
+        return Usage($"--lora-alpha '{alphaText}' is not a positive number.");
+    loraAlpha = a;
+}
+foreach (string spec in values.GetValueOrDefault("--lora") ?? [])
+{
+    int colon = spec.LastIndexOf(':');
+    float strength = 1.0f;
+    string file = spec;
+    if (colon > 1 && float.TryParse(spec[(colon + 1)..], NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed))
+    {
+        strength = parsed;
+        file = spec[..colon];
+    }
+    file = Path.GetFullPath(file);
+    if (!File.Exists(file) || !file.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine(File.Exists(file) ? $"--lora takes a .safetensors adapter; convert '{Path.GetFileName(file)}' first." : $"LoRA not found: {file}");
+        return 1;
+    }
+    (float? alpha, bool rs, string? problem) = ReadPeftConfig(Path.Combine(Path.GetDirectoryName(file)!, "adapter_config.json"));
+    if (problem is not null)
+    {
+        Console.Error.WriteLine(problem);
+        return 1;
+    }
+    loras.Add((file, strength, loraAlpha ?? alpha, rs));
+}
+bool mergeMode = recipe is not null || inputs.Count > 1 || castTo is not null || values.ContainsKey("--prefix") || values.ContainsKey("--drop")
+    || loras.Count > 0 || inputs.Any(IsShardSet);
+if (mergeMode)
+{
+    foreach (string p in inputs)
+    {
+        if (!IsShardSet(p) && !(File.Exists(p) && p.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase)))
+        {
+            Console.Error.WriteLine(File.Exists(p) || Directory.Exists(p)
+                ? $"'{Path.GetFileName(p)}' can't be merged: merging takes .safetensors files, a *.safetensors.index.json or a folder of shards. Convert a pickle first."
+                : $"Input not found: {p}");
+            return 1;
+        }
+    }
+}
+if (!mergeMode && Directory.Exists(input))
 {
     string[] candidates = Directory.EnumerateFiles(input, "*", SearchOption.AllDirectories)
         .Where(f => pickleExtensions.Contains(Path.GetExtension(f).ToLowerInvariant()) || f.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
@@ -130,14 +284,14 @@ if (Directory.Exists(input))
     }
     return 1;
 }
-if (!File.Exists(input))
+if (!mergeMode && !File.Exists(input))
 {
     Console.Error.WriteLine($"Input not found: {input}");
     return 1;
 }
 string inputExtension = Path.GetExtension(input).ToLowerInvariant();
-// By content, not name: a converted file often keeps its original .pt/.pth path.
-bool isSafeTensors = AnyFormatCheckpointLoader.IsSafeTensors(input);
+// By content, not name: a converted file often keeps its original .pt/.pth path. Merge inputs may be folders.
+bool isSafeTensors = mergeMode || AnyFormatCheckpointLoader.IsSafeTensors(input);
 if (!isSafeTensors && !pickleExtensions.Contains(inputExtension))
 {
     Console.Error.WriteLine($"'{Path.GetFileName(input)}' is not a supported checkpoint. Expected .safetensors or one of {string.Join(" ", pickleExtensions)}.");
@@ -148,7 +302,7 @@ if (!isSafeTensors && !pickleExtensions.Contains(inputExtension))
 }
 if (!autoName && !output.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
 {
-    return Usage($"The output must end in .safetensors: {positionals[1]}");
+    return Usage($"The output must end in .safetensors: {outputArg}");
 }
 if (!autoName && File.Exists(output) && !flags.Contains("--force"))
 {
@@ -156,9 +310,11 @@ if (!autoName && File.Exists(output) && !flags.Contains("--force"))
     Console.Error.WriteLine("Add --force to replace it.");
     return 1;
 }
-if (isSafeTensors && (flags.Contains("--recursive") || flags.Contains("--allow-partial") || values.ContainsKey("--strip-prefix") || values.ContainsKey("--rename")))
+if (isSafeTensors && (flags.Contains("--recursive") || flags.Contains("--allow-partial")
+    || (!mergeMode && (values.ContainsKey("--strip-prefix") || values.ContainsKey("--rename")))))
 {
-    return Usage("Key layout options only apply to pickle checkpoints; a .safetensors input keeps its tensors as they are.");
+    return Usage(mergeMode ? "--recursive and --allow-partial apply to pickles; merged safetensors keep their keys (use --rename or --strip-prefix)."
+        : "Key layout options only apply to pickle checkpoints; a .safetensors input keeps its tensors as they are. Add --dtype or --prefix to rewrite it.");
 }
 
 Dictionary<string, string>? metadata = null;
@@ -235,16 +391,38 @@ if (!isSafeTensors && !layoutGiven && modelId == "kokoro" && component == Artifa
     renames.Add((".module.", "."));
 }
 
+List<string> mergeSources = [];
+
 // Built after the load succeeds: hashing a multi-gigabyte source for provenance is wasted on a file that won't convert.
 Dictionary<string, string>? BuildMetadata()
 {
     Dictionary<string, string>? built = null;
     if (resolvedIdentity is not null)
     {
-        Console.WriteLine($"Hashing source {Path.GetFileName(input)} for provenance...");
-        string converter = isSafeTensors ? "upstream-safetensors" : "HartsyInference.PickleCheckpointRepacker";
-        ArtifactProvenance provenance = ArtifactProvenance.FromSourceFile(converter, component, input,
-            values.GetValueOrDefault("--source-repo")?.Last()) with { ModelId = variant };
+        ArtifactProvenance provenance;
+        if (mergeMode)
+        {
+            Console.WriteLine($"Hashing {mergeSources.Count} source file(s) for provenance...");
+            string combined = string.Join('\n', mergeSources.Select(f => $"{Path.GetFileName(f)}:{ArtifactProvenance.HashFile(f)}"));
+            provenance = new ArtifactProvenance
+            {
+                Converter = "HartsyInference.SafeTensorsMerger",
+                Component = component,
+                SourceRepo = values.GetValueOrDefault("--source-repo")?.Last(),
+                SourceFile = string.Join(",", mergeSources.Select(SourceName)),
+                SourceSha256 = mergeSources.Count == 1 ? ArtifactProvenance.HashFile(mergeSources[0])
+                    : System.Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(combined))).ToLowerInvariant(),
+                Precision = dtypeName,
+                ModelId = variant,
+            };
+        }
+        else
+        {
+            Console.WriteLine($"Hashing source {Path.GetFileName(input)} for provenance...");
+            string converter = isSafeTensors ? "upstream-safetensors" : "HartsyInference.PickleCheckpointRepacker";
+            provenance = ArtifactProvenance.FromSourceFile(converter, component, input,
+                values.GetValueOrDefault("--source-repo")?.Last()) with { ModelId = variant };
+        }
         built = ArtifactMetadata.ForRepack(resolvedIdentity, provenance);
         if (component != ArtifactProvenance.MainComponent && PartName() is string part)
         {
@@ -323,7 +501,99 @@ int tensorCount;
 string payloadSha;
 try
 {
-    if (isSafeTensors)
+    if (mergeMode)
+    {
+        List<SafeTensorsLoader> loaders = [];
+        List<Tensor> ownedTensors = [];
+        using CpuBackend cpu = new();
+        try
+        {
+            List<KeyValuePair<string, Tensor>> all = [];
+            string prefix = values.GetValueOrDefault("--prefix")?.Last() ?? "";
+            List<Regex> drops = [.. (values.GetValueOrDefault("--drop") ?? []).Select(Glob)];
+            List<Regex> keeps = [.. (values.GetValueOrDefault("--keep-dtype") ?? []).Select(Glob)];
+            int dropped = 0;
+            List<Tensor> owned = [];
+            if (recipe is not null)
+            {
+                Console.WriteLine($"Building '{recipe.Name}' from its recipe:");
+                all.AddRange(recipe.Build(recipeDir, recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line), cpu));
+                foreach ((string key, string value) in recipe.Metadata)
+                    overrides.TryAdd(key, value);
+            }
+            ownedTensors = owned;
+            foreach (string p in inputs)
+            {
+                (List<KeyValuePair<string, Tensor>> tensors, List<SafeTensorsLoader> opened) = SafeTensorsMerger.Open(p);
+                loaders.AddRange(opened);
+                foreach ((string key, Tensor tensor) in tensors)
+                {
+                    string mapped = stripPrefix is not null && key.StartsWith(stripPrefix, StringComparison.Ordinal) ? key[stripPrefix.Length..] : key;
+                    foreach ((string from, string to) in renames)
+                        mapped = mapped.Replace(from, to, StringComparison.Ordinal);
+                    if (drops.Any(d => d.IsMatch(mapped)))
+                    {
+                        dropped++;
+                        continue;
+                    }
+                    all.Add(new(prefix + mapped, tensor));
+                }
+            }
+            if (recipe is null)
+                mergeSources.AddRange(loaders.Select(l => l.FilePath));
+            foreach ((string file, float strength, float? alpha, bool rs) in loras)
+            {
+                (List<KeyValuePair<string, Tensor>> adapter, List<SafeTensorsLoader> opened) = SafeTensorsMerger.Open(file);
+                loaders.AddRange(opened);
+                mergeSources.Add(file);
+                List<string> stray = [];
+                List<LoraBaker.Patch> patches = LoraBaker.Group(adapter, stray);
+                if (patches.Count == 0)
+                {
+                    Console.Error.WriteLine($"{Path.GetFileName(file)} has no LoRA tensors (keys like {string.Join(", ", stray.Take(3))}).");
+                    return 1;
+                }
+                if (stray.Count > 0)
+                    Console.WriteLine($"  {Path.GetFileName(file)}: ignoring {stray.Count} key(s) that are not adapter weights, e.g. {stray[0]}");
+                Dictionary<string, Tensor> byKey = new(all, StringComparer.Ordinal);
+                int changed = LoraBaker.Apply(byKey, patches, LoraBaker.AutoTargets(byKey.Keys, patches.Select(p => p.Root)),
+                    new LoraBaker.Options { Strength = strength, Alpha = alpha, RsLora = rs, Backend = cpu }, owned);
+                all = [.. all.Select(kv => new KeyValuePair<string, Tensor>(kv.Key, byKey[kv.Key]))];
+                Console.WriteLine($"Baked {Path.GetFileName(file)} ({patches.Count} module(s), strength {strength.ToString(CultureInfo.InvariantCulture)}"
+                    + (alpha is { } a ? $", alpha {a.ToString(CultureInfo.InvariantCulture)}" : "") + (rs ? ", rsLoRA" : "") + $") into {changed} weight(s).");
+            }
+            if (drops.Count > 0)
+            {
+                Console.WriteLine($"Dropping {dropped} tensor(s) matching {string.Join(", ", values["--drop"])}.");
+                if (dropped == 0)
+                {
+                    Console.Error.WriteLine("No tensor matched --drop; check the pattern against the source keys.");
+                    return 1;
+                }
+            }
+            bool Keep(string key) => keeps.Any(k => k.IsMatch(key));
+            if (ResolveOutput(all.Select(kv => (castTo is { } c && SafeTensorsMerger.IsCastable(kv.Value.DType) && !Keep(kv.Key) ? c : kv.Value.DType,
+                kv.Value.Shape.ElementCount))) is not string named)
+            {
+                return 1;
+            }
+            output = named;
+            metadata = BuildMetadata();
+            long inBytes = mergeSources.Sum(f => new FileInfo(f).Length);
+            Console.WriteLine($"Writing {all.Count} tensors from {loaders.Count} file(s) ({Size(inBytes)})"
+                + (castTo is { } t ? $", cast to {t.Name}" : "") + $" to {Path.GetFileName(output)}...");
+            payloadSha = SafeTensorsMerger.Write(output, all, castTo, metadata, keeps.Count > 0 ? Keep : null);
+            tensorCount = all.Count;
+        }
+        finally
+        {
+            foreach (SafeTensorsLoader loader in loaders)
+                loader.Dispose();
+            foreach (Tensor tensor in ownedTensors)
+                tensor.Dispose();
+        }
+    }
+    else if (isSafeTensors)
     {
         using (SafeTensorsLoader header = new())
         {
@@ -390,23 +660,27 @@ catch (Exception ex) when (ex is InvalidOperationException or NotSupportedExcept
     return 1;
 }
 
-FileInfo sourceInfo = new(input);
+FileInfo sourceInfo = new(mergeMode ? mergeSources[0] : input);
 FileInfo outputInfo = new(output);
 string outputSha = Sha256(output);
 var manifest = new
 {
     schema = 1,
-    conversion = isSafeTensors ? "safetensors-metadata-rewrite" : "pytorch-pickle-to-safetensors",
-    converter = isSafeTensors ? "HartsyInference.SafeTensorsWriter.RewriteMetadata" : "HartsyInference.ModelAssets.PickleCheckpointRepacker",
+    conversion = mergeMode ? "safetensors-merge" : isSafeTensors ? "safetensors-metadata-rewrite" : "pytorch-pickle-to-safetensors",
+    converter = mergeMode ? "HartsyInference.SafeTensorsMerger" : isSafeTensors ? "HartsyInference.SafeTensorsWriter.RewriteMetadata"
+        : "HartsyInference.ModelAssets.PickleCheckpointRepacker",
     model = modelId,
     variant,
     component,
-    source = new { file = sourceInfo.Name, bytes = sourceInfo.Length, sha256 = metadata?.GetValueOrDefault("hartsy.source_sha256") ?? Sha256(input) },
+    source = new { file = mergeMode ? string.Join(",", mergeSources.Select(Path.GetFileName)) : sourceInfo.Name,
+        bytes = mergeMode ? mergeSources.Sum(f => new FileInfo(f).Length) : sourceInfo.Length,
+        sha256 = metadata?.GetValueOrDefault("hartsy.source_sha256") ?? (mergeMode ? "" : Sha256(input)) },
+    sources = mergeMode ? mergeSources.Select(f => new { file = Path.GetFileName(f), bytes = new FileInfo(f).Length }).ToArray() : null,
     output = new { file = outputInfo.Name, bytes = outputInfo.Length, sha256 = outputSha, payload_sha256 = payloadSha, tensor_count = tensorCount },
     recursive_flatten = flags.Contains("--recursive"),
     stripped_prefix = stripPrefix,
     renames = renames.Select(r => $"{r.From}={r.To}").ToArray(),
-    dtype_cast = (string?)null,
+    dtype_cast = castTo?.Name,
     embedded_metadata = ReadMetadata(output),
 };
 string manifestPath = Path.ChangeExtension(output, ".manifest.json");
@@ -427,6 +701,30 @@ else
 Console.WriteLine($"  sha256    {outputSha}");
 Console.WriteLine($"  manifest  {manifestPath}");
 return 0;
+
+// A recipe's sources are often all model.safetensors, so they are named by their path under the source root.
+string SourceName(string file)
+{
+    string relative = recipe is null ? "" : Path.GetRelativePath(recipeRoot, file);
+    return relative.Length == 0 || relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative) ? Path.GetFileName(file) : relative.Replace('\\', '/');
+}
+
+// PEFT keeps alpha out of the weights file; a pattern of per-module ranks or alphas is refused rather than flattened.
+static (float? Alpha, bool RsLora, string? Problem) ReadPeftConfig(string path)
+{
+    if (!File.Exists(path))
+        return (null, false, null);
+    using JsonDocument doc = JsonDocument.Parse(File.ReadAllBytes(path));
+    JsonElement root = doc.RootElement;
+    foreach (string pattern in new[] { "rank_pattern", "alpha_pattern" })
+    {
+        if (root.TryGetProperty(pattern, out JsonElement p) && p.ValueKind == JsonValueKind.Object && p.EnumerateObject().Any())
+            return (null, false, $"{path} sets {pattern}; per-module ranks or alphas are not supported. Give --lora-alpha only if every module shares one.");
+    }
+    float? alpha = root.TryGetProperty("lora_alpha", out JsonElement a) && a.ValueKind == JsonValueKind.Number ? a.GetSingle() : null;
+    bool rs = root.TryGetProperty("use_rslora", out JsonElement r) && r.ValueKind == JsonValueKind.True;
+    return (alpha, rs, null);
+}
 
 static int Usage(string problem)
 {
@@ -452,6 +750,9 @@ static string Precision(IEnumerable<(DType DType, long Elements)> tensors)
         string other => other.ToLowerInvariant(),
     };
 }
+
+static Regex Glob(string pattern) =>
+    new("^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$", RegexOptions.CultureInvariant);
 
 static Regex ShardPattern() => new(@"-\d{5}-of-\d{5}$");
 
