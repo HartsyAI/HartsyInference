@@ -6,6 +6,26 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.178
+
+- **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
+  encoder, VAE and CLIP through `ModelDownloader.EnsureSideModelAsync`, whose three-argument overload was strict:
+  an absent file threw before any network call and told the operator to fetch it by hand. Found on a rented
+  Blackwell card, where Z-Image Turbo refused to generate through SwarmUI because `VAE/Flux/ae.safetensors` was
+  not on disk — with the repo, the path and the hash all sitting in the catalog entry. The overload now follows
+  `paths.sideModelAutofetch`, new and **on by default**, which is what SwarmUI's own ComfyUI backend does; LTX-2.5
+  already opted in per-call and can stop special-casing it. Turning the setting off restores the old behavior for
+  an air-gapped install, and the error then names the setting and the repo rather than a bare path. A caller that
+  must never reach the network still passes `downloadIfMissing: false` explicitly.
+- **Z-Image Turbo LoRAs load.** `hartsy image -m zimage --lora …` failed with "Could not detect LoRA format":
+  the format detector has arms for Flux, Wan, SDXL and SD1.5 prefixes and none for Z-Image's
+  `diffusion_model.{layers,context_refiner,noise_refiner}.`, so every Z-Image adapter was rejected outright.
+  Comfy-Org's own `z_image_turbo_distill_patch_lora_bf16` is one. A new `ZImageLoraMapper` plus a detector arm
+  covers them; the `.lora_A.default.weight` suffix vocabulary already worked, so nothing there changed. Q/K/V
+  arrive split and the checkpoint stores them fused, which the existing `FusedProjectionLayouts` row resolves at
+  merge time — all 238 of that file's mapped targets hit the real checkpoint, 136 directly and 102 as fused
+  slices, none missing.
+
 ## alpha.177
 
 - **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
