@@ -6,6 +6,21 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.179
+
+- **Native FP4 never ran on a real checkpoint, and nothing said so.** `numerics.fp4Native` on or off produced a
+  byte-identical image from Z-Image Turbo's nvfp4 DiT on a Blackwell card, because `ZImageRecipe` opened its
+  checkpoint with no options: all 180 nvfp4 groups unpacked to F16 at load, so the dispatch gate never saw a
+  block scale whatever the knob said. `CheckpointOpenOptions.ForNativeNvfp4Gemm` asks the backend first and
+  returns plain defaults when it cannot run the native GEMM, so nothing below Blackwell changes.
+- `numerics.fp4Native` is now `Construction` scope. It was declared `Runtime`, but the capability it feeds decides
+  **at checkpoint open** whether weights stay packed, so a per-request value could never reach the path. Nothing
+  in this repo, SwarmUI or the API client sends it per request.
+- **Three one-shot diagnostics**, because the question "did the native path run" had no answer in any log: the
+  checkpoint open counts nvfp4 groups by outcome (resident / companion / fp8 / F16), the backend constructor
+  lists every static condition refusing the native GEMM rather than the first, and the first block-scaled Linear
+  latches whether it engaged or the specific gate condition that refused it. No per-layer logging.
+
 ## alpha.175
 
 - **The Blackwell kernel never compiled, and it took the whole CUDA backend down with it.** `block_quant.sm120.ptx`,
