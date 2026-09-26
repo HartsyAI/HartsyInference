@@ -54,6 +54,53 @@ public sealed class AudioStandInsTests : IDisposable
         Assert.False(File.Exists(linked));
     }
 
+    [Fact]
+    public void Sync_RelinksWhenTheArtifactIsReplacedByANewerCopy()
+    {
+        string artifact = WriteArtifact("tts/Dia/dia_fp32.safetensors", "tts/x/weights.pth");
+        AudioStandIns.Sync(_root);
+        string linked = Path.Combine(_root, "tts/x/weights.pth");
+
+        // An atomic replace gives the artifact a new inode; the old hard link would keep the old bytes.
+        string replacement = WriteArtifact("tts/Dia/dia_fp32.new.safetensors", "tts/x/weights.pth", length: 8);
+        File.Move(replacement, artifact, overwrite: true);
+        File.SetLastWriteTimeUtc(artifact, DateTime.UtcNow.AddMinutes(1));
+        AudioStandIns.Sync(_root);
+
+        Assert.Equal(File.ReadAllBytes(artifact), File.ReadAllBytes(linked));
+    }
+
+    [Fact]
+    public void Sync_LeavesARealFileThatReplacedALink()
+    {
+        string artifact = WriteArtifact("fx/Demucs/demucs_fp16.safetensors", "fx/demucs/htdemucs.th");
+        AudioStandIns.Sync(_root);
+        string linked = Path.Combine(_root, "fx/demucs/htdemucs.th");
+        File.Delete(linked);
+        File.WriteAllText(linked, "a genuine upstream checkpoint");
+
+        File.Delete(artifact);
+        AudioStandIns.Sync(_root);
+
+        Assert.Equal("a genuine upstream checkpoint", File.ReadAllText(linked));
+    }
+
+    [Fact]
+    public void Sync_ReadsAManifestThatRecordedOnlyTargets()
+    {
+        string artifact = WriteArtifact("stt/Whisper/w_fp32.safetensors", "stt/openai--whisper-base/model.safetensors");
+        AudioStandIns.Sync(_root);
+        string manifest = Path.Combine(_root, ".hartsy-standins.json");
+        File.WriteAllText(manifest, "{ \"stt/openai--whisper-base/model.safetensors\": \"stt/Whisper/w_fp32.safetensors\" }");
+        AudioStandIns.Sync(_root);   // adopts the old entry while the artifact still matches
+        Assert.Contains("writeTicks", File.ReadAllText(manifest));
+
+        File.Delete(artifact);
+        AudioStandIns.Sync(_root);
+
+        Assert.False(File.Exists(Path.Combine(_root, "stt/openai--whisper-base/model.safetensors")));
+    }
+
     [Theory]
     [InlineData("../escape.bin")]
     [InlineData("/etc/passwd")]
@@ -65,10 +112,10 @@ public sealed class AudioStandInsTests : IDisposable
         Assert.Equal(0, AudioStandIns.Sync(_root));
     }
 
-    private string WriteArtifact(string relative, string standsInFor)
+    private string WriteArtifact(string relative, string standsInFor, int length = 4)
     {
         string path = Path.Combine(_root, relative);
-        using Tensor t = new(new TensorShape(4), DType.F32);
+        using Tensor t = new(new TensorShape(length), DType.F32);
         SafeTensorsMerger.Write(path, [new("w", t)], metadata: new Dictionary<string, string> { [AudioStandIns.MetadataKey] = standsInFor });
         return path;
     }
