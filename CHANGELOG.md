@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.182
+
+- **Vulkan can run an fp8 Linear on fp8 cooperative matrices, opt in.** Where the driver offers `VK_EXT_shader_float8`
+  with an E4M3 × E4M3 → F32 cooperative-matrix shape, `numerics.vkFp8=true` runs CUDA's native fp8 scheme: the weight
+  stays packed with its per-tensor scale in alpha, and the activation is quantized per tensor to E4M3 — the checkpoint's
+  `.input_scale` under `numerics.fp8StaticInputScale`, else absmax/448 on the device. The quantizer writes the same
+  bytes as CUDA's `fp8_quant`; GLSL's `/` is not correctly rounded, so the scale and its reciprocal take one FMA
+  correction to match `div.rn`. **Off by default:** the GEMM has not yet run on a card. NVIDIA's 580 driver lacks the
+  extension; 595 has it.
+- A Vulkan backend logs once per device whether fp8 Linear runs and why not (the driver lacks the extension, the card
+  has no fp8 tensor cores, or the knob), and warns when `numerics.vkFp8=true` cannot be honored.
+
 ## alpha.181
 
 - **All 27 ComfyUI k-samplers.** The 18 that were listed as not implemented now run: `ipndm`, `ipndm_v`, `deis`,
