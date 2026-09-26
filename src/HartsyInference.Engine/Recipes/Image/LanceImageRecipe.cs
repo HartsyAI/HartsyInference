@@ -39,7 +39,7 @@ public sealed class LanceImageRecipe : IArchitectureRecipe
         // input.Get(T2IParamTypes.VAE)); this always takes the canonical Wan2.2 VAE.
         string checkpointFolder = ResolveLanceFolder(context.CheckpointPath)
             ?? throw new DirectoryNotFoundException($"Lance checkpoint folder not found: {context.CheckpointPath}");
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan22Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan22Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         // 1. Transformer (sharded-folder aware converter). The ViT keys are dropped — the understanding path is unused.
         (LanceCheckpointConverter.ConvertedWeights conv, CheckpointSource lanceSource) = LanceCheckpointConverter.LoadVariant(checkpointFolder);

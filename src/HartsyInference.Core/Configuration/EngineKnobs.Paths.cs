@@ -8,6 +8,10 @@ public static partial class EngineKnobs
     public static readonly Knob<string?> CudaLibDir =
         Str("paths.cudaLibDir", null, KnobScope.Construction, KnobDomain.Paths, "Directory prepended to the CUDA userspace library probe list (cuBLAS/cuBLASLt/cuDNN/cudart).");
 
+    /// <summary>Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry; off makes a missing one an error naming the repo.</summary>
+    public static readonly Knob<bool> SideModelAutofetch =
+        Bool("paths.sideModelAutofetch", true, KnobScope.Runtime, KnobDomain.Paths, "Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry; off makes a missing one an error.");
+
     /// <summary>Lets the cuDNN probe download the NVIDIA cuDNN 9 redist into the per-user cache when none is found locally.</summary>
     public static readonly Knob<bool> CudnnAutofetch =
         Bool("paths.cudnnAutofetch", false, KnobScope.Construction, KnobDomain.Paths, "Lets the cuDNN probe download the NVIDIA cuDNN 9 redist into the per-user cache when none is found locally.");
