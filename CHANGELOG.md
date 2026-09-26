@@ -6,6 +6,48 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.183
+
+- **A converted audio checkpoint loads under its Hartsy name.** A converted file names, in `hartsy.stands_in_for`,
+  the upstream paths it replaces. `AudioStandIns` hard-links it into each missing one on first use, so every loader
+  finds it where it already looks: the HF cache, `ModelDownloader` assets and fixed-path loaders alike. An existing
+  file is never replaced. Links are recorded in `.hartsy-standins.json`: one whose artifact is replaced is relinked,
+  one whose artifact is removed is deleted, and a link replaced by a real file is left alone. Checked end to end in
+  SwarmUI with all 253 upstream weight files deleted: 154 generations, 142 pass, 10 with quality notes.
+- **Converting a checkpoint could silently ship a broken model.** `tools/CheckpointRepacker`:
+  - It kept only the first state dict of a nested checkpoint (Kokoro converted as 25 of its 548 tensors, exit 0). It
+    now refuses a conversion that would drop tensors, and lists what it would lose.
+  - It ignored mistyped options; they are now rejected with a suggestion.
+  - It wrote no identity unless it was hand-typed. Identity now comes from `ModelIdentityCatalog`
+    (`--model/--variant/--component`).
+  - Restamping a safetensors keeps its tensors byte for byte, recognizes the file by content (even under a `.pt`
+    name) and drops identity keys the new stamp omits.
+  - A folder output is named the way Hartsy stores files: `<model>[-<variant>][-<part>]_<precision>`.
+- **The repacker reproduces third-party repacks from official releases:**
+  - it merges shards and casts with PyTorch's round-to-nearest-even (`SafeTensorsMerger`);
+  - recipes (`--recipe`) cover key maps, fusing, copies, drops, squeezes and embedded tokenizers
+    (`TiktokenConverter`);
+  - LoRA baking (`LoraBaker`, `--lora`, the recipe `lora` step) matches single-threaded torch bit for bit;
+  - `--stands-in-for` stamps the paths a file replaces.
+
+  ACE-Step XL, Orpheus, CSM, YuE2, the ACE-Step VAE, Stable Audio Open Small and SheetSage2 are all rebuilt from
+  official releases, tensor-identical to the repacks they replace.
+- **Every audio loader reads a converted checkpoint.** `AnyFormatCheckpointLoader` recognizes safetensors by content,
+  replacing `PytorchPickleLoader` wherever an audio family opened a pickle directly.
+- **AudioLab can admit a converted file.** Artifacts carry `hartsy.provider_id` and `hartsy.model_id`, and variants
+  stamp their own class. Licenses were corrected from the model cards: ACE-Step `mit`, YuE2 `cc-by-nc-4.0`,
+  Fish-Speech `cc-by-nc-sa-4.0`, NeuTTS `apache-2.0`.
+- **Demucs htdemucs_6s never loaded.** It has no channel projection around its transformer (`bottom_channels=0`),
+  and the engine required one.
+- **ACE-Step selected by path used the wrong config.** This covers SwarmUI's core list and any renamed file: XL
+  failed to load, and base and sft silently ran as turbo. It also missed its silence latent. The variant now comes
+  from the checkpoint's `hartsy.model_id` when the given one is unknown, and the config and latent from the catalog.
+- **SheetSage2 no longer discards a whole score over one chord shorter than a subbeat.**
+- **Resemble-Enhance has a denoise-only mode** (`FxEnhanceRequest.DenoiseOnly`, upstream's `denoise()`). On a real
+  recording it takes about 2 s, against 4.5 min for the enhancer.
+- `SafeTensorsWriter.Save` writes a tensor over 2 GiB; the PocketTTS revision pin is applied (it was passed as the
+  cache category).
+
 ## alpha.182
 
 - **Vulkan can run an fp8 Linear on fp8 cooperative matrices, opt in.** Where the driver offers `VK_EXT_shader_float8`
