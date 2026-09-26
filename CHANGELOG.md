@@ -6,6 +6,17 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.177
+
+- **Z-Image Turbo LoRAs load.** `hartsy image -m zimage --lora …` failed with "Could not detect LoRA format":
+  the format detector has arms for Flux, Wan, SDXL and SD1.5 prefixes and none for Z-Image's
+  `diffusion_model.{layers,context_refiner,noise_refiner}.`, so every Z-Image adapter was rejected outright.
+  Comfy-Org's own `z_image_turbo_distill_patch_lora_bf16` is one. A new `ZImageLoraMapper` plus a detector arm
+  covers them; the `.lora_A.default.weight` suffix vocabulary already worked, so nothing there changed. Q/K/V
+  arrive split and the checkpoint stores them fused, which the existing `FusedProjectionLayouts` row resolves at
+  merge time — all 238 of that file's mapped targets hit the real checkpoint, 136 directly and 102 as fused
+  slices, none missing.
+
 ## alpha.175
 
 - **The Blackwell kernel never compiled, and it took the whole CUDA backend down with it.** `block_quant.sm120.ptx`,
