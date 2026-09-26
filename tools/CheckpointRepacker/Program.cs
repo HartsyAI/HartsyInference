@@ -54,8 +54,8 @@ LORA BAKING (safetensors)
   --lora <file>[:<strength>]  Merge an adapter into the weights it modifies and write a standalone model.
                         Repeatable; applied in order. Reads PEFT, kohya, diffusers and LyCORIS (LoHa, LoKr,
                         DoRA, full-weight diffs) naming, and matches each module to a weight by name. A PEFT
-                        adapter_config.json beside the file supplies alpha and rsLoRA. The merge is the same
-                        float32 arithmetic PyTorch does, so the result matches a torch-made merge bit for bit.
+                        adapter_config.json beside the file supplies alpha and rsLoRA. The merge is the float32
+                        arithmetic single-threaded PyTorch does, so it matches such a merge bit for bit.
   --lora-alpha <a>      Alpha for every module when neither the file nor an adapter_config.json has one.
 
 KEY LAYOUT (pickles only)

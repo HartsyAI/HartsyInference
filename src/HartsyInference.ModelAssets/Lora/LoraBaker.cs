@@ -10,8 +10,9 @@ namespace HartsyInference.ModelAssets.Lora;
 /// <see cref="LoraStack"/>. Adapter keys are grouped through <see cref="LoraRoleSuffix"/>, so every decomposition the
 /// engine reads (LoRA, DoRA, LoHa, LoKr, full-weight diffs) bakes the same way, whatever the file's naming.
 /// <para>A low-rank pair is multiplied on the host in float32 with <c>k</c> ascending and fused multiply-add, the order
-/// PyTorch's CPU matmul accumulates in, then scaled once and added once. The merged weight therefore matches torch's
-/// <c>W + (B @ A) * scale</c> bit for bit, which is how upstream releases merge their own adapters.</para></summary>
+/// single-threaded PyTorch CPU matmul accumulates in, then scaled once and added once. The merged weight therefore
+/// matches torch's <c>W + (B @ A) * scale</c> bit for bit when torch runs on one thread; threaded torch splits the sum
+/// and differs in the last bit of about 1% of values.</para></summary>
 public static class LoraBaker
 {
     /// <summary>One adapter module: its key root, what it adds, and the file keys it was built from.</summary>
@@ -276,7 +277,7 @@ public static class LoraBaker
         }
     }
 
-    /// <summary><c>up @ down</c> in F32, <c>k</c> ascending with fused multiply-add per element — PyTorch's CPU order.
+    /// <summary><c>up @ down</c> in F32, <c>k</c> ascending with fused multiply-add per element — single-threaded PyTorch's CPU order.
     /// Conv adapters fold their trailing axes into the columns first.</summary>
     public static unsafe Tensor MatMulFma(Tensor up, Tensor down)
     {

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
@@ -75,6 +76,27 @@ public sealed unsafe class LoraBakerTests
 
         Assert.Equal([0.5f, 1, -0.5f, -1], Values(weights["unet.conv_in.weight"]));
         Assert.Equal([4f, 5], Values(weights["unet.conv_in.bias"]));
+        Dispose(owned);
+    }
+
+    [Fact]
+    public void Apply_RoutesALoHaThroughTheBackend()
+    {
+        using CpuBackend backend = new();
+        using Tensor w = Filled([2, 2], 1, 1, 1, 1);
+        using Tensor w1a = Filled([2, 1], 1, 2);
+        using Tensor w1b = Filled([1, 2], 3, 4);
+        using Tensor w2a = Filled([2, 1], 1, 1);
+        using Tensor w2b = Filled([1, 2], 1, -1);
+        Dictionary<string, Tensor> weights = new() { ["m.weight"] = w };
+        List<LoraBaker.Patch> patches = LoraBaker.Group([new("m.hada_w1_a", w1a), new("m.hada_w1_b", w1b), new("m.hada_w2_a", w2a), new("m.hada_w2_b", w2b)]);
+        List<Tensor> owned = [];
+
+        Assert.Throws<NotSupportedException>(() => LoraBaker.Apply(new Dictionary<string, Tensor>(weights), patches, r => r, new LoraBaker.Options(), []));
+        LoraBaker.Apply(weights, patches, r => r, new LoraBaker.Options { Backend = backend }, owned);
+
+        // (W1a @ W1b) ⊙ (W2a @ W2b) = [[3,4],[6,8]] ⊙ [[1,-1],[1,-1]], alpha defaults to rank so the scale is 1.
+        Assert.Equal([4f, -3, 7, -7], Values(weights["m.weight"]));
         Dispose(owned);
     }
 
