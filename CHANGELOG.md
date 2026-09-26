@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.181
+
+- **All 27 ComfyUI k-samplers.** The 18 that were listed as not implemented now run: `ipndm`, `ipndm_v`, `deis`,
+  `res_multistep`, `gradient_estimation`, `ddpm`, `heunpp2`, `dpmpp_sde`, `dpmpp_3m_sde`, `er_sde`, `seeds_2`,
+  `seeds_3`, `sa_solver`, `uni_pc`, `uni_pc_bh2`, `euler_cfg_pp`, `dpm_fast` and `dpm_adaptive`. Each matches ComfyUI
+  0.37's `sample_*` per step within 5e-5 on eps, v-prediction and flow models, including img2img from a truncated
+  schedule (`SamplerParityTests`, fixtures from `tests/python-reference/dump_k_samplers.py`). The `_gpu` names resolve
+  as aliases. `euler_cfg_pp` refuses a model whose pipeline does not produce a separate unconditional prediction.
+- **Flow models get ComfyUI's flow math.** `euler_ancestral`, `dpm_2_ancestral` and `dpmpp_2s_ancestral` use the
+  rectified-flow ancestral step, `dpmpp_2m_sde` is CONST-aware, and the SDE samplers draw Brownian-bridge noise so
+  their overlapping draws have the right statistics. `lms` no longer indexes past its history in img2img.
+- **SDXL and SD1.5 fed timestep 0 to any sampler that evaluates between schedule points.** `SigmaToTimestep` searched
+  the ascending training sigmas as if they descended, so every off-schedule sigma mapped to timestep 0: `heun`,
+  `dpm_2`, `dpmpp_2s_ancestral` and the new multi-stage samplers produced noise. It now interpolates in log sigma.
+  Karras schedules also took their endpoints from the wrong ends of the table.
+- The SDXL CFG-parallel loop used to replace any non-default sampler or schedule with Euler without saying so. It now
+  uses the sequential loop for them.
+
 ## alpha.180
 
 - **The Vulkan suite runs against a non-NVIDIA driver.** Mesa's software ICD reports subgroup size 8 and no

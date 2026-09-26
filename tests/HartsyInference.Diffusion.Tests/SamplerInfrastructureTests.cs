@@ -32,6 +32,28 @@ public sealed class SamplerInfrastructureTests
         }
     }
 
+    /// <summary>Consecutive-interval draws down a real SDXL schedule, the pattern the multistep SDE samplers use, are
+    /// each unit-variance and mutually uncorrelated.</summary>
+    [Fact]
+    public void BrownianIncrements_DownASchedule_AreIndependentUnitNormals()
+    {
+        EulerDiscreteScheduler scheduler = new();
+        scheduler.SetTimesteps(20);
+        float[] sigmas = scheduler.Sigmas();
+        using BrownianNoiseSource source = BrownianNoiseSource.ForSchedule(Shape, 42, sigmas);
+        float[]? previous = null;
+        for (int i = 0; i < sigmas.Length - 2; i++)
+        {
+            float[] draw = Read(source.Sample(i, 0, sigmas[i], sigmas[i + 1]));
+            Assert.InRange(Variance(draw), 0.9, 1.1);
+            if (previous is not null)
+            {
+                Assert.InRange(Math.Abs(Correlation(previous, draw)), 0.0, 0.05);
+            }
+            previous = draw;
+        }
+    }
+
     /// <summary>The same seed and query order reproduce the path; a different seed does not.</summary>
     [Fact]
     public void BrownianSource_IsDeterministicPerSeed()
