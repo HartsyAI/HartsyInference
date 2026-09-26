@@ -267,8 +267,24 @@ public sealed class VulkanCommandStream : IDisposable
             pSemaphores = (nint)(&sem),
             pValues = (nint)(&t),
         };
+        long start = WaitStats is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
         VulkanApi.vkWaitSemaphores(_device, in wi, timeoutNs).ThrowOnError("vkWaitSemaphores");
+        if (WaitStats is not null)
+        {
+            RecordWait(System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+        }
         ReclaimUpTo(GetTimelineNow());
+    }
+
+    /// <summary>Blocking host waits by calling chain, collected when set (<c>diagnostics.vkProfileGpu</c>).</summary>
+    internal Dictionary<string, (long Count, double Ms)>? WaitStats { get; set; }
+
+    private void RecordWait(double ms)
+    {
+        System.Diagnostics.StackFrame[] frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+        string key = string.Join(" <- ", frames.Take(5).Select(f => f.GetMethod()?.Name ?? "?"));
+        (long count, double total) = WaitStats!.TryGetValue(key, out (long, double) v) ? v : (0L, 0.0);
+        WaitStats[key] = (count + 1, total + ms);
     }
 
     /// <summary>Submits any pending recording, then blocks until the GPU is fully idle on this stream's timeline.</summary>
@@ -291,6 +307,43 @@ public sealed class VulkanCommandStream : IDisposable
         if (!_deferredFrees.TryGetValue(tick, out List<VulkanBuffer>? list))
         { list = new(); _deferredFrees[tick] = list; }
         list.Add(buffer);
+        _pendingFreeBytes[buffer.Allocation.MemoryTypeIndex] += buffer.Size;
+    }
+
+    // Indexed by memory type; VK_MAX_MEMORY_TYPES is 32.
+    private readonly ulong[] _pendingFreeBytes = new ulong[32];
+
+    /// <summary>Bytes of <paramref name="memoryType"/> whose free is still waiting on the timeline.</summary>
+    public ulong PendingFreeBytes(uint memoryType) => _pendingFreeBytes[memoryType];
+
+    /// <summary>Returns whatever the GPU has already finished with, without waiting; true when anything of
+    /// <paramref name="memoryType"/> was freed.</summary>
+    public bool ReclaimCompleted(uint memoryType)
+    {
+        ulong before = _pendingFreeBytes[memoryType];
+        ReclaimUpTo(GetTimelineNow());
+        return _pendingFreeBytes[memoryType] < before;
+    }
+
+    /// <summary>Waits for the oldest tick holding a deferred free of <paramref name="memoryType"/>, submitting it first if
+    /// it is still being recorded, then reclaims. Returns whether anything was pending and whether a submit was made.</summary>
+    public (bool Reclaimed, bool Submitted) ReclaimOldestPending(uint memoryType)
+    {
+        foreach ((ulong tick, List<VulkanBuffer> bufs) in _deferredFrees)
+        {
+            foreach (VulkanBuffer b in bufs)
+            {
+                if (b.Allocation.MemoryTypeIndex != memoryType) continue;
+                ulong before = _lastSubmitted;
+                if (tick > _lastSubmitted) SubmitAndAdvance();
+                // A free tagged while nothing was recording carries a tick no submit will signal; everything that
+                // could reference it is already submitted, so wait for that and release it.
+                WaitTimeline(Math.Min(tick, _lastSubmitted));
+                if (tick > _lastSubmitted) ReclaimUpTo(tick);
+                return (true, _lastSubmitted != before);
+            }
+        }
+        return (false, false);
     }
 
     /// <summary>Releases all deferred-free buffers whose tick has been reached. Also recycles command buffers.</summary>
@@ -300,7 +353,7 @@ public sealed class VulkanCommandStream : IDisposable
         foreach ((ulong tick, List<VulkanBuffer> bufs) in _deferredFrees)
         {
             if (tick > completedTick) break;
-            foreach (VulkanBuffer b in bufs) b.Dispose();
+            foreach (VulkanBuffer b in bufs) { _pendingFreeBytes[b.Allocation.MemoryTypeIndex] -= b.Size; b.Dispose(); }
             done.Add(tick);
         }
         foreach (ulong t in done) _deferredFrees.Remove(t);
@@ -339,6 +392,7 @@ public sealed class VulkanCommandStream : IDisposable
         foreach ((_, List<VulkanBuffer> bufs) in _deferredFrees)
             foreach (VulkanBuffer b in bufs) b.Dispose();
         _deferredFrees.Clear();
+        Array.Clear(_pendingFreeBytes);
         _cmdRecycle.Clear();
 
         if (_allocatedCmds.Count > 0)

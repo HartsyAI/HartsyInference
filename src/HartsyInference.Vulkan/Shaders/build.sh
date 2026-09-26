@@ -129,6 +129,7 @@ SINGLE_KERNELS=(
     matmul_coopmat
     matmul_coopmat_partial_m
     matmul_coopmat2
+    sdpa_flash_cm2
     matmul_int8
     matmul_fp8_coopmat
     dequant_q4_0
@@ -155,6 +156,9 @@ done
 for k in "${SINGLE_KERNELS[@]}"; do
     compile_one "$k" -- ""
 done
+
+# sdpa_flash_cm2 with an F32 [Sq,Skv] additive mask; HAS_MASK adds a binding, so it is its own module.
+compile_one "sdpa_flash_cm2" -DHAS_MASK=1 -- "_mask"
 
 # snake-beta (BigVGAN-v2): USE_BETA gates a #if-compiled binding, not a spec constant, so it
 # needs its own SPIR-V module distinct from the vanilla-snake build above.
