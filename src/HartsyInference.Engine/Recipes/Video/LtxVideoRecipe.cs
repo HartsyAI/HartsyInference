@@ -77,7 +77,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     {
         // TODO(E-IMG-4/5): LoRA, image-to-video conditioning, and a VideoRequest.Components T5 override are deferred —
         // this is the vanilla single-file text-to-video path with the canonical T5-XXL side model.
-        string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, context.Cancel).GetAwaiter().GetResult();
         // One container for either format, folding fp8/int8 companions before the converter sees them.
         // IDisposable rather than SafeTensorsLoader because the container owns the mapping whatever the format.
         CheckpointSource ckptSource = CheckpointSource.Open(context.CheckpointPath);

@@ -419,15 +419,6 @@ no bug, any more than one bad seed was proof there was one.
   PTX ISA 9.3; driver 580.x JIT caps at 9.0 → `CUDA error 222: Unsupported .version 9.3`. Fix: pin
   `nvidia-cuda-nvcc==13.0.88` **and** `nvidia-nvvm==13.0.*` (nvvm is the ISA-determining piece, not nvcc)
   into an isolated `pip --target` dir; **verify every emitted PTX starts `.version 9.0` before shipping.**
-- **An arch-variant PTX that `ptxas` refuses takes the whole backend down, on that architecture only.**
-  `CudaKernels` loads every module at construction, so one unassemblable `<kernel>.sm<CC>.ptx` fails the backend
-  for every card at that exact compute capability and for no other: the symptom is `CUDA error 218` out of *every*
-  operation, image and text alike, not just the kernel that is broken. Neither nvrtc nor `nvcc -ptx` runs the
-  assembler, so a wrong operand shape survives into the shipped package — `cvt.rn.satfinite.e2m1x2.f32` packs two
-  nibbles into one byte and takes a `.b8`, and a 16-bit destination on it compiles and then refuses to assemble.
-  `build_common.sh` runs `ptxas -arch=sm_<arch>` over each emitted file **where a CUDA toolkit is present**; a box
-  with only the nvrtc helper skips it silently, so an arch-variant kernel is unvalidated until it is assembled
-  somewhere. Tests on another card never cover this — the variant resolver means they load a different file.
 - **Which PTX loaded?** `CudaKernels.PtxPath` prefers `<kernel>.sm<CC>.ptx` for the device's exact compute
   capability and falls back to `<kernel>.ptx`; the backend logs `[Cuda] SM x.y PTX variants: …` at startup when
   it picked any. A variant built for another SM is never chosen (family-specific PTX does not JIT elsewhere), so
@@ -790,6 +781,15 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   constructor) matching `CudaBackend.EnableW8A8`'s existing pattern — tests flip it directly
   (`backend.EnableInt8Linear = true`) with no env var or fresh process needed. Prefer this pattern for any
   new opt-in switch that correctness tests need to exercise both on and off.
+- **Run the whole Vulkan suite against a non-NVIDIA ICD before believing it is vendor-neutral.** Mesa ships a
+  software Vulkan driver, so this costs nothing and needs no AMD or Intel card:
+  `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json HARTSY_REQUIRE_BACKENDS=1 HARTSY_ALLOW_SOFTWARE_GPU=1
+  dotnet test tests/HartsyInference.Vulkan.Tests --filter Category=GpuIntegration`. Two things make it worth the
+  wall-clock: llvmpipe reports **subgroup size 8**, so any reduction that assumes a 32- or 64-wide wave is wrong
+  there and only there (this is how the cross-subgroup fold bug in `VulkanCrossVendorTests` was found), and it
+  advertises no cooperative matrix, so every coopmat path takes its fallback — the branch NVIDIA hardware never
+  exercises. `HARTSY_ALLOW_SOFTWARE_GPU=1` is required or `BackendGate` refuses the device and the tests that use
+  it fail for that reason rather than a real one. It is a correctness oracle only; never read a timing off it.
 - **The Wan-video-scale smoke test (`Backend_FlashAttention_WanVideoScale_CompletesWithoutOom`) takes
   hours on llvmpipe** (measured: killed after 2.85 CPU-hours, still running) — software-rasterized
   scalar execution of 16384×24 = 393,216 workgroups × ~512 serial KV-tile iterations each has no

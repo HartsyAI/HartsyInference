@@ -78,14 +78,14 @@ public sealed class Kandinsky5VideoRecipe : IVideoRecipe
             HunyuanVideoVaeDecoder vae = new HunyuanVideoVaeDecoder();
             vae.LoadWeights(vaeWeights);
 
-            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_7B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_7B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
             qwenLoader.Load(qwenPath);
             loaders.Add(qwenLoader);
             LlamaStyleEncoder qwen = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
             qwen.LoadWeights(qwenLoader.GetAllTensors());
 
-            string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader clipLoader = new SafeTensorsLoader();
             clipLoader.Load(clipPath);
             loaders.Add(clipLoader);

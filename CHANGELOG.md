@@ -6,25 +6,77 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.176
+## alpha.182
 
-- **Converting a checkpoint could silently ship a broken model.** `tools/CheckpointRepacker` kept only the first
-  state dict of a nested checkpoint (Kokoro converted as 25 of its 548 tensors, exit 0), ignored mistyped options,
-  and wrote no identity unless it was hand-typed. It now refuses a conversion that would drop tensors and lists what
-  it would lose, rejects unknown options with a suggestion, fills identity from `ModelIdentityCatalog`
-  (`--model/--variant/--component`), restamps an existing safetensors with its tensors byte-for-byte unchanged, names
-  an output folder's file the way Hartsy stores it (`<model>[-<variant>][-<part>]_<precision>`, precision read from
-  the tensors, no dots), and explains every failure instead of printing a stack trace.
-- **Every audio loader reads a converted checkpoint.** `AnyFormatCheckpointLoader` recognizes safetensors by content
-  and returns owned tensors, so it replaces `PytorchPickleLoader` wherever an audio family opened its pickle directly,
-  and in the engine's own one-time repacks and Kokoro voice fetch. Checked by real generation: 63 audio models produce
-  bit-identical output (or identical transcripts) from their converted files as from the originals.
-- **AudioLab can admit a converted file.** Artifacts now carry `hartsy.provider_id` and `hartsy.model_id`, the keys
-  `AudioArtifactIndex` requires; Qwen3-TTS and ACE-Step turbo variants stamp their own class; SheetSage2 has an
-  identity; licenses corrected from the model cards (ACE-Step `mit`, YuE2 `cc-by-nc-4.0`, Fish-Speech
-  `cc-by-nc-sa-4.0`, NeuTTS `apache-2.0`).
-- `SafeTensorsWriter.Save` writes a tensor over 2 GiB instead of throwing; `hartsy transcribe --help` shows the
-  `whisper:tiny` form the registry accepts.
+- **Vulkan can run an fp8 Linear on fp8 cooperative matrices, opt in.** Where the driver offers `VK_EXT_shader_float8`
+  with an E4M3 × E4M3 → F32 cooperative-matrix shape, `numerics.vkFp8=true` runs CUDA's native fp8 scheme: the weight
+  stays packed with its per-tensor scale in alpha, and the activation is quantized per tensor to E4M3 — the checkpoint's
+  `.input_scale` under `numerics.fp8StaticInputScale`, else absmax/448 on the device. The quantizer writes the same
+  bytes as CUDA's `fp8_quant`; GLSL's `/` is not correctly rounded, so the scale and its reciprocal take one FMA
+  correction to match `div.rn`. **Off by default:** the GEMM has not yet run on a card. NVIDIA's 580 driver lacks the
+  extension; 595 has it.
+- A Vulkan backend logs once per device whether fp8 Linear runs and why not (the driver lacks the extension, the card
+  has no fp8 tensor cores, or the knob), and warns when `numerics.vkFp8=true` cannot be honored.
+
+## alpha.181
+
+- **All 27 ComfyUI k-samplers.** The 18 that were listed as not implemented now run: `ipndm`, `ipndm_v`, `deis`,
+  `res_multistep`, `gradient_estimation`, `ddpm`, `heunpp2`, `dpmpp_sde`, `dpmpp_3m_sde`, `er_sde`, `seeds_2`,
+  `seeds_3`, `sa_solver`, `uni_pc`, `uni_pc_bh2`, `euler_cfg_pp`, `dpm_fast` and `dpm_adaptive`. Each matches ComfyUI
+  0.37's `sample_*` per step within 5e-5 on eps, v-prediction and flow models, including img2img from a truncated
+  schedule (`SamplerParityTests`, fixtures from `tests/python-reference/dump_k_samplers.py`). The `_gpu` names resolve
+  as aliases. `euler_cfg_pp` refuses a model whose pipeline does not produce a separate unconditional prediction.
+- **Flow models get ComfyUI's flow math.** `euler_ancestral`, `dpm_2_ancestral` and `dpmpp_2s_ancestral` use the
+  rectified-flow ancestral step, `dpmpp_2m_sde` is CONST-aware, and the SDE samplers draw Brownian-bridge noise so
+  their overlapping draws have the right statistics. `lms` no longer indexes past its history in img2img.
+- **SDXL and SD1.5 fed timestep 0 to any sampler that evaluates between schedule points.** `SigmaToTimestep` searched
+  the ascending training sigmas as if they descended, so every off-schedule sigma mapped to timestep 0: `heun`,
+  `dpm_2`, `dpmpp_2s_ancestral` and the new multi-stage samplers produced noise. It now interpolates in log sigma.
+  Karras schedules also took their endpoints from the wrong ends of the table.
+- The SDXL CFG-parallel loop used to replace any non-default sampler or schedule with Euler without saying so. It now
+  uses the sequential loop for them.
+
+## alpha.180
+
+- **The Vulkan suite runs against a non-NVIDIA driver.** Mesa's software ICD reports subgroup size 8 and no
+  cooperative matrix — the two regimes NVIDIA hardware never reaches — and 220 of 221 GPU-integration tests pass
+  there. `VulkanPipelineCache` now reports `InitialDataBytes`, the on-disk bytes it was handed at construction,
+  because the pipeline-cache test asserted the reload from the file the *second* backend wrote: a driver that
+  persists no pipelines writes a fresh 32-byte header either way, so that assertion was green without any reload.
+- The rental script gains an opt-in `swarm` stage: SwarmUI loads the extension in its own load context against
+  the pinned NuGet engine, so the engine generating from the command line never proved the extension does.
+
+## alpha.178
+
+- **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
+  encoder, VAE and CLIP through `ModelDownloader.EnsureSideModelAsync`, whose three-argument overload was strict:
+  an absent file threw before any network call and told the operator to fetch it by hand. Found on a rented
+  Blackwell card, where Z-Image Turbo refused to generate through SwarmUI because `VAE/Flux/ae.safetensors` was
+  not on disk — with the repo, the path and the hash all sitting in the catalog entry. The overload now follows
+  `paths.sideModelAutofetch`, new and **on by default**, which is what SwarmUI's own ComfyUI backend does; LTX-2.5
+  already opted in per-call and can stop special-casing it. Turning the setting off restores the old behavior for
+  an air-gapped install, and the error then names the setting and the repo rather than a bare path. A caller that
+  must never reach the network still passes `downloadIfMissing: false` explicitly.
+- **Z-Image Turbo LoRAs load.** `hartsy image -m zimage --lora …` failed with "Could not detect LoRA format":
+  the format detector has arms for Flux, Wan, SDXL and SD1.5 prefixes and none for Z-Image's
+  `diffusion_model.{layers,context_refiner,noise_refiner}.`, so every Z-Image adapter was rejected outright.
+  Comfy-Org's own `z_image_turbo_distill_patch_lora_bf16` is one. A new `ZImageLoraMapper` plus a detector arm
+  covers them; the `.lora_A.default.weight` suffix vocabulary already worked, so nothing there changed. Q/K/V
+  arrive split and the checkpoint stores them fused, which the existing `FusedProjectionLayouts` row resolves at
+  merge time — all 238 of that file's mapped targets hit the real checkpoint, 136 directly and 102 as fused
+  slices, none missing.
+
+## alpha.177
+
+- **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
+  encoder, VAE and CLIP through `ModelDownloader.EnsureSideModelAsync`, whose three-argument overload was strict:
+  an absent file threw before any network call and told the operator to fetch it by hand. Found on a rented
+  Blackwell card, where Z-Image Turbo refused to generate through SwarmUI because `VAE/Flux/ae.safetensors` was
+  not on disk — with the repo, the path and the hash all sitting in the catalog entry. The overload now follows
+  `paths.sideModelAutofetch`, new and **on by default**, which is what SwarmUI's own ComfyUI backend does; LTX-2.5
+  already opted in per-call and can stop special-casing it. Turning the setting off restores the old behavior for
+  an air-gapped install, and the error then names the setting and the repo rather than a bare path. A caller that
+  must never reach the network still passes `downloadIfMissing: false` explicitly.
 
 ## alpha.175
 

@@ -37,7 +37,7 @@ public sealed class LanceVideoRecipe : IVideoRecipe
         // input.Get(T2IParamTypes.VAE)) is deferred; this always takes the canonical Wan2.2 VAE.
         string checkpointFolder = ResolveLanceFolder(context.CheckpointPath)
             ?? throw new DirectoryNotFoundException($"Lance checkpoint folder not found: {context.CheckpointPath}");
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan22Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan22Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         (LanceCheckpointConverter.ConvertedWeights conv, CheckpointSource lanceSource) = LanceCheckpointConverter.LoadVariant(checkpointFolder);
         List<IDisposable> owned = new List<IDisposable> { lanceSource };

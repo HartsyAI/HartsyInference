@@ -290,7 +290,8 @@ if (!mergeMode && !File.Exists(input))
     return 1;
 }
 string inputExtension = Path.GetExtension(input).ToLowerInvariant();
-bool isSafeTensors = mergeMode || inputExtension == ".safetensors";
+// By content, not name: a converted file often keeps its original .pt/.pth path. Merge inputs may be folders.
+bool isSafeTensors = mergeMode || AnyFormatCheckpointLoader.IsSafeTensors(input);
 if (!isSafeTensors && !pickleExtensions.Contains(inputExtension))
 {
     Console.Error.WriteLine($"'{Path.GetFileName(input)}' is not a supported checkpoint. Expected .safetensors or one of {string.Join(" ", pickleExtensions)}.");

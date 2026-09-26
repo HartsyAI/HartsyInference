@@ -48,8 +48,8 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         ArgumentNullException.ThrowIfNull(context);
-        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         // Side-model loaders and the checkpoint share one bag: the container is format-agnostic, so what it hands
         // back is an IDisposable rather than a SafeTensorsLoader.
@@ -105,7 +105,7 @@ public sealed class WanAnimate2Recipe : IVideoRecipe
 
             (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21: true, loaders);
 
-            string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipVisionH14, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipVisionH14, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader clipLoader = new SafeTensorsLoader();
             clipLoader.Load(clipPath);
             loaders.Add(clipLoader);
