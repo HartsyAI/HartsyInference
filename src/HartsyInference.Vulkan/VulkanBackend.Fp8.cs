@@ -30,14 +30,16 @@ public sealed partial class VulkanBackend
     {
         const string fallback = "fp8 weights are widened to F16 for each Linear instead";
         if (knob == false) return (false, "fp8 Linear off (numerics.vkFp8=false).");
-        if (available) return (false, $"fp8 Linear on (E4M3 {m}x{n}x{k} cooperative matrices).");
-        return knob == true
-            ? (true, $"numerics.vkFp8 is on, but {reason}; {fallback}.")
+        if (knob == true)
+            return available ? (false, $"fp8 Linear on (E4M3 {m}x{n}x{k} cooperative matrices).")
+                : (true, $"numerics.vkFp8 is on, but {reason}; {fallback}.");
+        return available
+            ? (false, $"fp8 Linear off until validated on hardware; the device offers E4M3 {m}x{n}x{k} cooperative matrices, opt in with numerics.vkFp8=true.")
             : (false, $"fp8 Linear off: {reason}; {fallback}.");
     }
 
     /// <summary>Whether <see cref="Linear"/> runs an E4M3 weight on fp8 cooperative matrices (see <see cref="TryDispatchFp8Linear"/>).
-    /// Follows <c>numerics.vkFp8</c>, unset meaning on wherever the device offers them; settable for tests.</summary>
+    /// Follows <c>numerics.vkFp8</c>, unset meaning off until the path is validated on a card; settable for tests.</summary>
     public bool EnableFp8Linear { get; set; }
 
     /// <summary>Quantizes the activation with the weight's checkpoint <c>.input_scale</c> when it carries one, skipping the absmax

@@ -25,10 +25,10 @@ public static partial class EngineKnobs
         Bool("numerics.vkInt8", false, KnobScope.Construction, KnobDomain.Numerics,
             "Opts into the INT8 dot-product GEMM path for Linear; also requires device INT8 dot-product support.");
 
-    /// <summary>Forces Vulkan's fp8 Linear (E4M3 weight × per-tensor E4M3 activation on fp8 cooperative matrices) on or off; unset follows the device.</summary>
+    /// <summary>Vulkan's fp8 Linear (E4M3 weight × per-tensor E4M3 activation on fp8 cooperative matrices); unset is off until the path is validated on a card, after which it follows the device like <see cref="Fp8Native"/>.</summary>
     public static readonly Knob<bool?> VkFp8 =
         BoolOverride("numerics.vkFp8", KnobScope.Construction, KnobDomain.Numerics,
-            "Forces Vulkan's fp8 cooperative-matrix Linear on or off; unset follows the device (on where VK_EXT_shader_float8 offers E4M3 matrices).");
+            "Vulkan's fp8 cooperative-matrix Linear (needs VK_EXT_shader_float8); unset is off until validated on a card.");
 
     /// <summary>A GEMM with a 16-bit-float, fp8 or GGUF operand computes in F16 even when the other operand and the output are F32 — the CUDA policy, which puts such a Linear on the cooperative-matrix kernels with a transient F16 cast of the activation. Off, the output's dtype decides for every operand.</summary>
     public static readonly Knob<bool> VkF16Gemm =
