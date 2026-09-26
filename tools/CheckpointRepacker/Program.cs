@@ -136,7 +136,8 @@ if (!File.Exists(input))
     return 1;
 }
 string inputExtension = Path.GetExtension(input).ToLowerInvariant();
-bool isSafeTensors = inputExtension == ".safetensors";
+// By content, not name: a converted file often keeps its original .pt/.pth path.
+bool isSafeTensors = AnyFormatCheckpointLoader.IsSafeTensors(input);
 if (!isSafeTensors && !pickleExtensions.Contains(inputExtension))
 {
     Console.Error.WriteLine($"'{Path.GetFileName(input)}' is not a supported checkpoint. Expected .safetensors or one of {string.Join(" ", pickleExtensions)}.");
