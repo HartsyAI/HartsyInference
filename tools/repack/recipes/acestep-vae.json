@@ -1,0 +1,8 @@
+{
+  // The ACE-Step 1.5 VAE from the official diffusers release, renamed to the stable-audio-tools layout the engine loads
+  // (key map generated from the Oobleck block structure and verified tensor by tensor) with the Snake parameters'
+  // (1, C, 1) shape squeezed to (C). Identical, tensor for tensor, to Comfy-Org's ace_1.5_vae.safetensors.
+  "name": "acestep-vae", "model": "acestep", "component": "vae", "source_repo": "ACE-Step/Ace-Step1.5",
+  "components": [ { "source_file": "ACE-Step--Ace-Step1.5/vae/diffusion_pytorch_model.safetensors", "key_map": "acestep-vae.keymap.json" } ],
+  "squeeze": [ "*.alpha", "*.beta" ]
+}

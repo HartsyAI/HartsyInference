@@ -128,7 +128,7 @@ internal sealed class LoraGroupBuffer
     }
 
     /// <summary>Builds this group's delta, or null when no decomposition's mandatory slots are complete.</summary>
-    private LoraDelta? BuildDelta()
+    internal LoraDelta? BuildDelta()
     {
         if (HasAnyHada)
         {

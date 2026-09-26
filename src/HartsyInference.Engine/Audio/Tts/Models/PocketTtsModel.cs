@@ -19,8 +19,8 @@ internal static class PocketTtsModel
         ResolveRepo = _ => Repo,
         LoadAsync = async (_, _, cancel) =>
         {
-            string weights = await AudioModelCache.GetAsync(Repo, WeightsFile, Revision, ct: cancel).ConfigureAwait(false);
-            string spm = await AudioModelCache.GetAsync(Repo, SpmFile, Revision, ct: cancel).ConfigureAwait(false);
+            string weights = await AudioModelCache.GetAsync(Repo, WeightsFile, category: "tts", revision: Revision, ct: cancel).ConfigureAwait(false);
+            string spm = await AudioModelCache.GetAsync(Repo, SpmFile, category: "tts", revision: Revision, ct: cancel).ConfigureAwait(false);
             PocketTtsPipeline pipeline = PocketTtsPipeline.LoadFromCheckpoint(weights, spm);
             await EnsureVoiceAsync(pipeline, DefaultVoice, cancel).ConfigureAwait(false);
             Logs.Info("[Audio][Pocket-TTS] Loaded kyutai/pocket-tts (continuous-latent flow-LM, 24 kHz, English).");
@@ -51,7 +51,7 @@ internal static class PocketTtsModel
         {
             return;
         }
-        string path = await AudioModelCache.GetAsync(Repo, $"languages/{Language}/embeddings/{voiceName}.safetensors", Revision, ct: cancel).ConfigureAwait(false);
+        string path = await AudioModelCache.GetAsync(Repo, $"languages/{Language}/embeddings/{voiceName}.safetensors", category: "tts", revision: Revision, ct: cancel).ConfigureAwait(false);
         pipeline.RegisterVoiceFromFile(voiceName, path);
     }
 }

@@ -1,0 +1,38 @@
+{
+  // YuE2 3B as the engine loads it: the official model split into its two stacks, the official VAE, and the tokenizer
+  // generated from the official qwen.tiktoken. Reproduces Comfy-Org/YuE2's single file tensor for tensor.
+  "name": "yue2",
+  "model": "yue2",
+  "variant": "bf16",
+  "source_repo": "m-a-p/YuE2-3B",
+  "components": [
+    {
+      "source_file": "m-a-p--YuE2-3B/model.safetensors",
+      "renames": [
+        ["^model\\.layers\\.(\\d+)\\.nar_input_layernorm\\.", "model.diffusion_model.model.layers.$1.input_layernorm."],
+        ["^model\\.layers\\.(\\d+)\\.nar_pre_mlp_layernorm\\.", "model.diffusion_model.model.layers.$1.post_attention_layernorm."],
+        ["^model\\.layers\\.(\\d+)\\.nar_self_attn\\.", "model.diffusion_model.model.layers.$1.self_attn."],
+        ["^model\\.layers\\.(\\d+)\\.nar_mlp\\.", "model.diffusion_model.model.layers.$1.mlp."],
+        ["^lm_head\\.", "text_encoders.model.lm_head."],
+        ["^model\\.", "text_encoders.model."],
+        ["^(latent_pos_embed|llm2vae|vae2llm|time_embedder)\\.", "model.diffusion_model.$1."]
+      ]
+    },
+    { "source_file": "m-a-p--YuE2-Vae/model.safetensors", "prefix": "vae." }
+  ],
+  "fuse": [
+    { "into": "{p}.self_attn.qkv_proj.weight", "from": ["{p}.self_attn.q_proj.weight", "{p}.self_attn.k_proj.weight", "{p}.self_attn.v_proj.weight"] },
+    { "into": "{p}.mlp.gate_up_proj.weight", "from": ["{p}.mlp.gate_proj.weight", "{p}.mlp.up_proj.weight"] }
+  ],
+  // The official checkpoint has one final norm shared by both stacks; each stack reads its own copy.
+  "copy": [ { "from": "text_encoders.model.norm.weight", "to": "model.diffusion_model.model.norm.weight" } ],
+  "embed": [
+    {
+      "key": "text_encoders.yue2_tokenizer_json",
+      "tokenizer_from_tiktoken": "m-a-p--YuE2-3B/qwen.tiktoken",
+      "pattern": "(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\\r\\n\\p{L}\\p{N}]?\\p{L}+|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+",
+      "normalizer": "NFC"
+    }
+  ],
+  "metadata": { "vae_source": "m-a-p/YuE2-Vae", "yue2_format": "1" }
+}
