@@ -2027,6 +2027,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         // fallback gate above, so reaching here with a packed weight means the kernel can serve it.
         ResidentBlockScales blockScales = weight.QuantInfo is { BlockScale: not null } residentInfo
             && BlockScaleFormats.FromQuantFormat(residentInfo.Format) is not null ? EnsureBlockScales(weight) : default;
+        // An nvfp4 weight IS its block scales; without them nothing here decodes it, and the generic cast below would
+        // blame the GGUF dequant table for a weight some host-side view or copy stripped Tensor.QuantInfo from.
+        if (weight.DType == DType.F4E2M1 && blockScales.BlockScaleDevice == 0)
+            throw new NotSupportedException(
+                $"A resident nvfp4 weight {weight.Shape} reached Linear with no block scales on Tensor.QuantInfo. "
+                + "Whatever produced it from the packed bytes must narrow the companions too "
+                + "(QuantWeightInfo.SliceRows).");
 
         // Native block-scaled GEMM (Blackwell): the packed weight and its scale tensor are the operands as stored, so
         // the checkpoint's scale layout must be the one cuBLASLt derives from [N, K] — block columns padded to 4 —
