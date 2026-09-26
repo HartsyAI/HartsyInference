@@ -153,6 +153,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // matching this constructor's push-descriptor switch above — an experimental switch, not a proven
         // default-on profile feature (see EnvSwitch's remarks on that distinction).
         EnableInt8Linear = EngineKnobs.VkInt8.Value;
+        EnableFp8Linear = EngineKnobs.VkFp8.Value ?? false;
+        LogFp8Status(EngineKnobs.VkFp8.Value);
+        EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
         EnableF16Gemm = EngineKnobs.VkF16Gemm.Value;
 
         // OOM retry path: when an allocation fails, force the stream to submit and wait for the
@@ -873,7 +876,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     {
         using (OpScope _ = EnterOp())
         {
-            if (!TryDispatchInt8Linear(output, input, weight, bias))
+            if (!TryDispatchFp8Linear(output, input, weight, bias) && !TryDispatchInt8Linear(output, input, weight, bias))
             {
                 // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
                 DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);

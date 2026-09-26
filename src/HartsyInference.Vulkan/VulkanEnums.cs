@@ -95,6 +95,7 @@ public enum VkStructureType
     CooperativeMatrixPropertiesKHR = 1000506001,
 
     PhysicalDeviceCooperativeMatrix2FeaturesNV = 1000593000,
+    PhysicalDeviceShaderFloat8FeaturesEXT = 1000567000,
     CooperativeMatrixFlexibleDimensionsPropertiesNV = 1000593001,
 }
 
@@ -291,6 +292,8 @@ public enum VkComponentTypeKHR
     Uint16 = 8,
     Uint32 = 9,
     Uint64 = 10,
+    Float8E4M3 = 1000491002,
+    Float8E5M2 = 1000491003,
 }
 
 /// <summary>VkScopeKHR — execution scope a cooperative matrix spans. coopmat1 uses subgroup scope.</summary>
