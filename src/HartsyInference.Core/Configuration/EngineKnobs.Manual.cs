@@ -21,8 +21,11 @@ public static partial class EngineKnobs
             "Forces native FP8 tensor-core GEMMs on or off; unset follows the card (on for Ada SM 8.9+, off below).");
 
     /// <summary>Native block-scaled (NVFP4/MXFP4/MXFP8) tensor-core GEMMs on Blackwell; unset is off until the path is validated on a card, after which it follows the card like <see cref="Fp8Native"/>.</summary>
+    /// <remarks>Construction, not Runtime: the backend capability it feeds is what decides at OPEN whether a
+    /// checkpoint's nvfp4 groups stay packed, so a value arriving after the model loaded cannot reach the path at
+    /// all. Declaring it here is what makes a per-request override say so instead of reporting success.</remarks>
     public static readonly Knob<bool?> Fp4Native =
-        BoolOverride("numerics.fp4Native", KnobScope.Runtime, KnobDomain.Numerics,
+        BoolOverride("numerics.fp4Native", KnobScope.Construction, KnobDomain.Numerics,
             "Native block-scaled (NVFP4/MXFP4/MXFP8) tensor-core GEMMs on Blackwell; unset is off until validated on a card.");
 
     /// <summary>Forces LTX-2 two-stage (base + refine) sampling on or off; unset follows the checkpoint's config.</summary>

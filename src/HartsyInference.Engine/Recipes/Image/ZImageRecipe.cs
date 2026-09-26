@@ -78,7 +78,10 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         {
             // 1. Load + convert the Z-Image transformer (checkpoint carries only these weights). One container for
             // either format: the FP8Mix repack, a BF16 file and a GGUF all reach the converter as one dict.
-            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            // An nvfp4 build's groups stay packed only where the native block-scaled GEMM can consume them; anywhere
+            // else they unpack to F16 at open exactly as before, which is why the Blackwell knob alone moved nothing.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath,
+                CheckpointOpenOptions.ForNativeNvfp4Gemm(context.Backend));
             checkpoint = source;
             ZImageCheckpointConverter.ConvertedWeights zConv = ZImageCheckpointConverter.Convert(
                 source.Weights, ZImageCheckpointConverter.DetectVariantFromFileName(context.CheckpointPath));

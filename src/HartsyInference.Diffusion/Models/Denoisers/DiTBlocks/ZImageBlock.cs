@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
@@ -281,19 +282,34 @@ public sealed unsafe class ZImageBlock
 
     /// <summary>Splits the fused <c>attention.qkv.weight</c> <c>[3*hidden, hidden]</c> into separate contiguous Q/K/V
     /// weights <c>[hidden, hidden]</c> at load. Rows [0,H)=Q, [H,2H)=K, [2H,3H)=V (matches the old feature-dim split).
-    /// The per-tensor scalar <see cref="Tensor.Fp8ScaleFactor"/> is shared by all three splits (mirrors
-    /// <c>CheckpointConvertUtils.SplitInProjWeight</c>). Dtype-agnostic byte copy — works for fp8/F16/F32.</summary>
+    /// The per-tensor scalar <see cref="Tensor.Fp8ScaleFactor"/> is shared by all three splits, and the per-row
+    /// <see cref="Tensor.QuantInfo"/> companions are narrowed to the rows each split holds (mirrors
+    /// <c>CheckpointConvertUtils.SplitQkvWeight</c>) — a resident nvfp4 or int8 weight whose companions were dropped
+    /// here reaches <c>IBackend.Linear</c> as packed bytes nothing can decode. Dtype-agnostic byte copy, sized through
+    /// <see cref="CheckpointConvertUtils.SliceByteCount"/> because a sub-byte dtype has no whole-byte element
+    /// size.</summary>
     internal static (Tensor q, Tensor k, Tensor v) SplitQkv(Tensor qkv, int h)
     {
         if (qkv.Shape[0] != 3L * h || qkv.Shape[1] != h)
             throw new ArgumentException($"Expected fused QKV weight [{3 * h}, {h}], got [{qkv.Shape[0]}, {qkv.Shape[1]}].");
 
-        long chunkBytes = (long)h * h * qkv.DType.SizeInBytes;
+        long chunkBytes = CheckpointConvertUtils.SliceByteCount(qkv, (long)h * h);
         TensorShape splitShape = new TensorShape(h, h);
+        // Narrowed before anything is allocated: SliceRows can refuse, and a refusal afterwards strands all three.
+        QuantWeightInfo? qInfo = qkv.QuantInfo?.SliceRows(0, h, "attention.qkv.weight");
+        QuantWeightInfo? kInfo = qkv.QuantInfo?.SliceRows(h, h, "attention.qkv.weight");
+        QuantWeightInfo? vInfo = qkv.QuantInfo?.SliceRows(2L * h, h, "attention.qkv.weight");
+        // A packed base takes its LoRA as a runtime adjunct rather than merged bytes, so it splits with the rows too.
+        LowRankAdjunct? qAdj = qkv.LowRankAdjunct?.SliceRows(0, h);
+        LowRankAdjunct? kAdj = qkv.LowRankAdjunct?.SliceRows(h, h);
+        LowRankAdjunct? vAdj = qkv.LowRankAdjunct?.SliceRows(2L * h, h);
 
-        Tensor q = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-        Tensor k = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
-        Tensor v = new Tensor(splitShape, qkv.DType) { Fp8ScaleFactor = qkv.Fp8ScaleFactor };
+        Tensor q = new Tensor(splitShape, qkv.DType)
+            { Fp8ScaleFactor = qkv.Fp8ScaleFactor, QuantInfo = qInfo, LowRankAdjunct = qAdj };
+        Tensor k = new Tensor(splitShape, qkv.DType)
+            { Fp8ScaleFactor = qkv.Fp8ScaleFactor, QuantInfo = kInfo, LowRankAdjunct = kAdj };
+        Tensor v = new Tensor(splitShape, qkv.DType)
+            { Fp8ScaleFactor = qkv.Fp8ScaleFactor, QuantInfo = vInfo, LowRankAdjunct = vAdj };
 
         byte* src = (byte*)qkv.DataPointer;
         Buffer.MemoryCopy(src, (void*)q.DataPointer, chunkBytes, chunkBytes);
