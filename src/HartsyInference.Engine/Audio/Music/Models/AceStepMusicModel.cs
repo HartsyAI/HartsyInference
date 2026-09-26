@@ -122,7 +122,15 @@ internal static class AceStepMusicModel
         Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
 
         AceStepPipeline15 pipeline = new AceStepPipeline15(context.Backend, dit, conditionEncoder, vae, config);
-        LoadSilenceLatent(pipeline, Path.GetDirectoryName(mainPath));
+        // Beside the checkpoint first; a checkpoint selected by path elsewhere uses the catalog's shared copy.
+        string latentDirectory = Path.GetDirectoryName(mainPath)!;
+        if (!File.Exists(Path.Combine(latentDirectory, "acestep-v15-silence_latent.pt"))
+            && AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).FirstOrDefault(a => a.Role == "silence-latent") is { } latentAsset)
+        {
+            latentDirectory = Path.GetDirectoryName(await ModelDownloader.EnsureSideModelAsync(latentAsset, downloadIfMissing: true, null, cancel)
+                .ConfigureAwait(false))!;
+        }
+        LoadSilenceLatent(pipeline, latentDirectory);
         // 5 Hz code detokenizer (LM-planner hints → 25 Hz latents); its weights ride in the same checkpoint.
         AceStep15AudioDetokenizer detokenizer = new AceStep15AudioDetokenizer(config);
         detokenizer.LoadWeights(weights);
