@@ -19,6 +19,8 @@ internal sealed class Recipe
     [JsonPropertyName("fuse")] public List<RecipeFuse> Fuse { get; init; } = [];
     [JsonPropertyName("copy")] public List<RecipeCopy> Copy { get; init; } = [];
     [JsonPropertyName("drop")] public List<string> Drop { get; init; } = [];
+    /// <summary>Key patterns whose size-1 dimensions are removed; the bytes are untouched, only the shape changes.</summary>
+    [JsonPropertyName("squeeze")] public List<string> Squeeze { get; init; } = [];
     /// <summary>Key patterns that keep their stored dtype through <see cref="Dtype"/>.</summary>
     [JsonPropertyName("keep_dtype")] public List<string> KeepDtype { get; init; } = [];
     [JsonPropertyName("embed")] public List<RecipeEmbed> Embed { get; init; } = [];
@@ -30,7 +32,8 @@ internal sealed class Recipe
 
     /// <summary>Opens every component and applies the recipe. Returned tensors are mmap views or owned tensors; keep the
     /// loaders and the owned list alive until the write finishes.</summary>
-    public List<KeyValuePair<string, Tensor>> Build(string sourceRoot, List<SafeTensorsLoader> loaders, List<Tensor> owned, List<string> sources,
+    /// <param name="recipeDir">Where the recipe file lives; a component's <c>key_map</c> resolves against it.</param>
+    public List<KeyValuePair<string, Tensor>> Build(string recipeDir, string sourceRoot, List<SafeTensorsLoader> loaders, List<Tensor> owned, List<string> sources,
         Action<string> log)
     {
         List<KeyValuePair<string, Tensor>> tensors = [];
@@ -41,9 +44,16 @@ internal sealed class Recipe
             loaders.AddRange(ls);
             sources.AddRange(ls.Select(l => l.FilePath));
             List<(Regex From, string To)> renames = [.. component.Renames.Select(r => (new Regex(r[0], RegexOptions.CultureInvariant), r[1]))];
+            Dictionary<string, string>? keyMap = component.KeyMap is null ? null
+                : JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(Path.GetFullPath(Path.Combine(recipeDir, component.KeyMap))));
             foreach ((string key, Tensor tensor) in opened)
             {
                 string mapped = key;
+                if (keyMap is not null)
+                {
+                    mapped = keyMap.TryGetValue(key, out string? target) ? target
+                        : throw new InvalidDataException($"'{key}' is not in {component.KeyMap}; a key map must name every tensor.");
+                }
                 foreach ((Regex from, string to) in renames)
                 {
                     if (from.IsMatch(mapped))
@@ -84,6 +94,29 @@ internal sealed class Recipe
             if (removed == 0)
                 throw new InvalidDataException($"Drop '{pattern}' matched nothing.");
             log($"  dropped {removed} x {pattern}");
+        }
+        foreach (string pattern in Squeeze)
+        {
+            Regex squeeze = new("^" + Regex.Escape(pattern).Replace("\\*", ".*").Replace("\\?", ".") + "$");
+            int squeezed = 0;
+            foreach (string key in byKey.Keys.Where(k => squeeze.IsMatch(k)).ToList())
+            {
+                Tensor t = byKey[key];
+                long[] dims = [.. Enumerable.Range(0, t.Shape.Rank).Select(d => (long)t.Shape[d]).Where(d => d != 1)];
+                if (dims.Length == t.Shape.Rank)
+                    continue;
+                Tensor view;
+                unsafe
+                {
+                    view = new Tensor((void*)t.DataPointer, new TensorShape(dims.Length == 0 ? [1] : dims), t.DType);
+                }
+                owned.Add(view);
+                byKey[key] = view;
+                squeezed++;
+            }
+            if (squeezed == 0)
+                throw new InvalidDataException($"Squeeze '{pattern}' matched no tensor with a size-1 dimension.");
+            log($"  squeezed {squeezed} x {pattern}");
         }
         foreach (RecipeEmbed embed in Embed)
         {
@@ -158,6 +191,9 @@ internal sealed class RecipeComponent
 {
     [JsonPropertyName("source_file")] public string SourceFile { get; init; } = "";
     [JsonPropertyName("prefix")] public string Prefix { get; init; } = "";
+    /// <summary>A JSON file of {source key: new key} for renames regexes can't express (index arithmetic). Every source
+    /// key must appear. Applied before <see cref="Renames"/>.</summary>
+    [JsonPropertyName("key_map")] public string? KeyMap { get; init; }
     /// <summary>[regex, replacement] pairs; the first that matches a key rewrites it, the rest are skipped.</summary>
     [JsonPropertyName("renames")] public List<string[]> Renames { get; init; } = [];
 }

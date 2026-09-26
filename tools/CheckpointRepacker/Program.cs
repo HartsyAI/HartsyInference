@@ -154,6 +154,7 @@ if (flags.Contains("--tokenizer-from-tiktoken"))
 }
 Recipe? recipe = null;
 string recipeRoot = "";
+string recipeDir = "";
 if (values.GetValueOrDefault("--recipe")?.Last() is string recipePath)
 {
     if (positionals.Count != 1)
@@ -169,7 +170,8 @@ if (values.GetValueOrDefault("--recipe")?.Last() is string recipePath)
         Console.Error.WriteLine($"Could not read recipe {recipePath}: {ex.Message}");
         return 1;
     }
-    recipeRoot = values.GetValueOrDefault("--source-root")?.Last() ?? Path.GetDirectoryName(Path.GetFullPath(recipePath))!;
+    recipeDir = Path.GetDirectoryName(Path.GetFullPath(recipePath))!;
+    recipeRoot = values.GetValueOrDefault("--source-root")?.Last() ?? recipeDir;
     void Default(string option, string? value)
     {
         if (value is not null && !values.ContainsKey(option))
@@ -470,7 +472,7 @@ try
             if (recipe is not null)
             {
                 Console.WriteLine($"Building '{recipe.Name}' from its recipe:");
-                all.AddRange(recipe.Build(recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line)));
+                all.AddRange(recipe.Build(recipeDir, recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line)));
                 foreach ((string key, string value) in recipe.Metadata)
                     overrides.TryAdd(key, value);
             }
