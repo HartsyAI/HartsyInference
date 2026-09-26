@@ -132,6 +132,31 @@ public sealed class VulkanLeakTests
         Assert.True(grown <= 2, $"{grown} driver allocations over 200 Linears; the pending-free reuse path is not engaging.");
     }
 
+    /// <summary>A buffer freed while nothing is recording is tagged with a tick no submit will signal. Reusing it for the
+    /// next request of the same size must not wait on that tick; this hung Boogu mid-denoise.</summary>
+    [Fact]
+    public async Task Vulkan_ReuseOfAFreeMadeWhileIdle_DoesNotHang()
+    {
+        if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        Task run = Task.Run(() =>
+        {
+            using VulkanBackend backend = new();
+            const int Rows = 1280, Cols = 4096;   // 20 MB, the dedicated tier
+            using Tensor x = new(new TensorShape(Rows, Cols), DType.F32);
+            backend.PreloadWeights([x]);
+            for (int i = 0; i < 3; i++)
+            {
+                Tensor y = new(new TensorShape(Rows, Cols), DType.F32);
+                backend.Silu(y, x);
+                backend.Sync();
+                y.Dispose();
+            }
+        });
+        Task finished = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(60)));
+        Assert.True(finished == run, "Reusing a free made while the stream was idle hung.");
+        await run;
+    }
+
     private static void RunOneSiluIter(VulkanBackend backend, int rows, int cols, int iter)
     {
         Tensor x = new(new TensorShape(rows, cols), DType.F32);

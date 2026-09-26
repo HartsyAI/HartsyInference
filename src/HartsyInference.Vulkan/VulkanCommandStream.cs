@@ -334,10 +334,13 @@ public sealed class VulkanCommandStream : IDisposable
             foreach (VulkanBuffer b in bufs)
             {
                 if (b.Allocation.MemoryTypeIndex != memoryType) continue;
-                bool submit = tick > _lastSubmitted;
-                if (submit) SubmitAndAdvance();
-                WaitTimeline(tick);
-                return (true, submit);
+                ulong before = _lastSubmitted;
+                if (tick > _lastSubmitted) SubmitAndAdvance();
+                // A free tagged while nothing was recording carries a tick no submit will signal; everything that
+                // could reference it is already submitted, so wait for that and release it.
+                WaitTimeline(Math.Min(tick, _lastSubmitted));
+                if (tick > _lastSubmitted) ReclaimUpTo(tick);
+                return (true, _lastSubmitted != before);
             }
         }
         return (false, false);
