@@ -14,6 +14,9 @@ internal sealed class EnhanceRunner(ResembleEnhancePipeline pipeline, IDisposabl
         int? nfe = null, string? solver = null) =>
         pipeline.Enhance(backend, mono44k, lambd, tau, seed, nfe, solver);
 
+    /// <summary>Runs only the denoiser on a mono 44.1 kHz clip.</summary>
+    internal float[] Denoise(IBackend backend, float[] mono44k) => pipeline.Denoise(backend, mono44k);
+
     /// <inheritdoc/>
     public void Dispose()
     {

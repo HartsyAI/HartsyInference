@@ -20,4 +20,8 @@ public sealed record FxEnhanceRequest
 
     /// <summary>Sampling seed.</summary>
     public int Seed { get; init; }
+
+    /// <summary>Run only the denoiser: remove noise without resynthesizing the voice. The enhancement settings are
+    /// ignored.</summary>
+    public bool DenoiseOnly { get; init; }
 }

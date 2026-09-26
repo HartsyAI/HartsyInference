@@ -72,6 +72,12 @@ internal static class AceStepMusicModel
             {
                 sniff.Load(mainPath);
                 isV1 = AceStepCheckpointConverter.IsV1AllInOne(sniff.Descriptors);
+                // A path-selected checkpoint may carry no variant (or the family id in its place); fall back to the stamped model id.
+                if (AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).Count == 0
+                    && sniff.Metadata?.GetValueOrDefault("hartsy.model_id") is { Length: > 0 } stamped)
+                {
+                    variant = stamped;
+                }
             }
             if (isV1)
             {
@@ -84,6 +90,12 @@ internal static class AceStepMusicModel
 
         // The sidecar config.json (downloaded with the variant) drives dims + is_turbo; absent = 2B turbo defaults.
         string sidecarConfig = Path.ChangeExtension(mainPath, null) + ".config.json";
+        if (!File.Exists(sidecarConfig)
+            && AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).FirstOrDefault(a => a.Role == "config") is { } configAsset)
+        {
+            // Not beside the checkpoint (a renamed or converted file): fall back to the variant's own config.
+            sidecarConfig = await ModelDownloader.EnsureSideModelAsync(configAsset, downloadIfMissing: true, null, cancel).ConfigureAwait(false);
+        }
         AceStep15Config config = File.Exists(sidecarConfig)
             ? AceStep15Config.FromJson(await File.ReadAllTextAsync(sidecarConfig, cancel).ConfigureAwait(false))
             : new AceStep15Config();
@@ -108,7 +120,16 @@ internal static class AceStepMusicModel
         Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
 
         AceStepPipeline15 pipeline = new AceStepPipeline15(context.Backend, dit, conditionEncoder, vae, config);
-        LoadSilenceLatent(pipeline, Path.GetDirectoryName(mainPath));
+        // Beside the checkpoint first; a checkpoint selected by path elsewhere uses the catalog's shared copy.
+        string latentDirectory = Path.GetDirectoryName(mainPath)!;
+        // The latent is optional (absent = VAE recompute), so only a copy already on disk is used; nothing is fetched.
+        if (!File.Exists(Path.Combine(latentDirectory, "acestep-v15-silence_latent.pt"))
+            && AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).FirstOrDefault(a => a.Role == "silence-latent") is { } latentAsset
+            && File.Exists(ModelDownloader.TargetPath(latentAsset)))
+        {
+            latentDirectory = Path.GetDirectoryName(ModelDownloader.TargetPath(latentAsset))!;
+        }
+        LoadSilenceLatent(pipeline, latentDirectory);
         // 5 Hz code detokenizer (LM-planner hints → 25 Hz latents); its weights ride in the same checkpoint.
         AceStep15AudioDetokenizer detokenizer = new AceStep15AudioDetokenizer(config);
         detokenizer.LoadWeights(weights);
