@@ -3,5 +3,6 @@
   // Stable Audio Open 1.0 (the small release's fp16 tensors are exactly these rounded), which is what FastVideo ships.
   "name": "stableaudio-vae", "model": "stableaudio", "variant": "open-small", "component": "vae",
   "source_repo": "stabilityai/stable-audio-open-1.0",
+  "stands_in_for": [ "music/FastVideo--stable-audio-open-small-Diffusers/vae/diffusion_pytorch_model.safetensors" ],
   "components": [ { "source_file": "stabilityai--stable-audio-open-1.0/vae/diffusion_pytorch_model.safetensors" } ]
 }

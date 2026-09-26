@@ -2,6 +2,7 @@
   // Stable Audio Open Small's DiT from the official stable-audio-tools checkpoint, in the diffusers layout the engine loads:
   // the model.model. prefix removed and the norms' gamma/beta named weight/bias. Identical to FastVideo's repack.
   "name": "stableaudio-transformer", "model": "stableaudio", "variant": "open-small", "source_repo": "stabilityai/stable-audio-open-small",
+  "name": "stableaudio-transformer", "model": "stableaudio", "variant": "open-small", "stands_in_for": [ "music/FastVideo--stable-audio-open-small-Diffusers/transformer/diffusion_pytorch_model.safetensors" ],
   "components": [ { "source_file": "stabilityai--stable-audio-open-small/model.safetensors", "renames": [
     ["^model\\.model\\.(.*)\\.gamma$", "$1.weight"], ["^model\\.model\\.(.*)\\.beta$", "$1.bias"], ["^model\\.model\\.", ""] ] } ],
   "drop": [ "conditioner.*", "pretransform.*" ]

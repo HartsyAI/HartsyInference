@@ -29,6 +29,8 @@ internal sealed class Recipe
     [JsonPropertyName("keep_dtype")] public List<string> KeepDtype { get; init; } = [];
     [JsonPropertyName("embed")] public List<RecipeEmbed> Embed { get; init; } = [];
     [JsonPropertyName("metadata")] public Dictionary<string, string> Metadata { get; init; } = [];
+    /// <summary>Upstream files the output replaces, as paths under the audio models root (<c>--stands-in-for</c>).</summary>
+    [JsonPropertyName("stands_in_for")] public List<string> StandsInFor { get; init; } = [];
 
     public static Recipe Load(string path) =>
         JsonSerializer.Deserialize<Recipe>(File.ReadAllText(path), new JsonSerializerOptions { ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true })

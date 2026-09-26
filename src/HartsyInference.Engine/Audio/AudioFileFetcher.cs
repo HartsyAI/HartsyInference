@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Cache;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
@@ -8,6 +9,11 @@ internal static class AudioFileFetcher
     /// <summary>Downloads <paramref name="url"/> to <paramref name="targetPath"/> unless it is already present.</summary>
     internal static async Task EnsureAsync(string url, string targetPath, CancellationToken cancel)
     {
+        if (File.Exists(targetPath))
+        {
+            return;
+        }
+        AudioStandIns.Resync(AudioModelRoot.Root());
         if (File.Exists(targetPath))
         {
             return;

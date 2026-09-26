@@ -85,6 +85,14 @@ public static class ModelDownloader
             // Re-check under the lock: a concurrent request may have finished the download while we waited.
             if (File.Exists(target))
                 return;
+            string audioRoot = Path.Combine(RepoPaths.ModelsRoot(), "audio");
+            if (target.StartsWith(audioRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            {
+                // A converted checkpoint may stand in for this asset; linking it beats downloading the original.
+                HartsyInference.Audio.Cache.AudioStandIns.Resync(audioRoot);
+                if (File.Exists(target))
+                    return;
+            }
 
             if (!allowDownload)
             {
