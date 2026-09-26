@@ -772,6 +772,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Frees every resident-nvfp4 device block-scale buffer (mirrors FreeW8A8Cache's scope/callers).</summary>
     private void FreeBlockScaleCache(GpuTransferHelper.State? explicitState = null)
     {
+        FlushBlockScaledDispatchCounts();
         List<Exception>? failures = null;
         lock (_blockScaleLock)
         {
@@ -787,6 +788,91 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             }
         }
         if (failures is not null) throw new AggregateException("One or more resident-nvfp4 weight scales failed to release.", failures);
+    }
+
+    // Native-vs-unpack accounting for the resident block-scaled weights, reported once per model rather than per
+    // layer: FreeBlockScaleCache flushes it, and the first dispatch names the condition that refused.
+    private int _blockScaledDispatchLogged, _blockScaledHostUnpackLogged;
+    private long _blockScaledNativeCalls, _blockScaledUnpackCalls;
+    private string? _blockScaledFirstRefusal;
+
+    /// <summary>Records one block-scaled Linear's dispatch, and logs the first one so a run that never engages the native GEMM says which condition refused it.</summary>
+    /// <remarks>Only reached for a weight that already carries block scales, so an ordinary Linear pays nothing. The
+    /// reason string is built inside the one-shot, never per call.</remarks>
+    private void NoteBlockScaledDispatch(bool native, Tensor input, Tensor output, int n, int k, bool rowRange,
+        in ResidentBlockScales scales)
+    {
+        if (native) Interlocked.Increment(ref _blockScaledNativeCalls);
+        else Interlocked.Increment(ref _blockScaledUnpackCalls);
+        if (Volatile.Read(ref _blockScaledDispatchLogged) != 0
+            || Interlocked.Exchange(ref _blockScaledDispatchLogged, 1) != 0)
+        {
+            return;
+        }
+        if (native)
+        {
+            HartsyInference.Core.Logging.Logs.Info(
+                $"[Cuda] native block-scaled GEMM engaged ({scales.Format}, n={n} k={k}). Activations are quantized "
+                + "per call, so output will not match the unpack path bit for bit.");
+            return;
+        }
+        string reason = NativeBlockScaledRefusal(input, output, n, k, rowRange, scales);
+        _blockScaledFirstRefusal = reason;
+        HartsyInference.Core.Logging.Logs.Info(
+            $"[Cuda] native block-scaled GEMM not taken for a resident {scales.Format} weight (n={n} k={k}): {reason}. "
+            + "The weight unpacks per GEMM instead; further layers are counted, not logged.");
+    }
+
+    /// <summary>The first condition in the <c>LinearCore</c> dispatch gate that this call fails. Mirrors that gate's order.</summary>
+    private string NativeBlockScaledRefusal(Tensor input, Tensor output, int n, int k, bool rowRange,
+        in ResidentBlockScales scales)
+    {
+        if (rowRange) return "a row range cannot address the packed layout";
+        if (!EnableNativeFp4Gemm) return "numerics.fp4Native is off";
+        int paddedCols = (k / scales.Format.GroupSize() + 3) / 4 * 4;
+        if (scales.PaddedCols != paddedCols)
+            return $"the scale tensor's stored block columns ({scales.PaddedCols}) are not the {paddedCols} cuBLASLt derives from k={k}";
+        if (input.DType != DType.F32 && input.DType != DType.F16) return $"the activation is {input.DType.Name}, not F32/F16";
+        if (output.DType != DType.F16 && output.DType != DType.F32) return $"the output is {output.DType.Name}, not F16/F32";
+        if (k % 32 != 0) return $"k={k} is not a multiple of 32";
+        if ((n * output.DType.SizeInBytes) % 16 != 0) return $"the output row ({n} × {output.DType.Name}) is not 16-byte aligned";
+        if (_kernels is not { HasBlockQuantKernels: true }) return "block_quant.ptx is not loaded";
+        if (!BlockScaledExecutor.IsSupported)
+            return $"cuBLASLt block-scaled matmul needs Blackwell (this card is SM {_context.ComputeCapabilityMajor}.{_context.ComputeCapabilityMinor})";
+        return "no gate condition refused — the dispatch and this explanation have drifted";
+    }
+
+    /// <summary>Warns once when a block-scaled weight cannot even be unpacked on the device and falls back to a HOST dequant per GEMM, which is orders of magnitude slower than either device path.</summary>
+    private void NoteBlockScaledHostUnpack(Tensor weight, QuantWeightInfo info, int weightRowOffset, int weightRowCount)
+    {
+        if (Volatile.Read(ref _blockScaledHostUnpackLogged) != 0
+            || Interlocked.Exchange(ref _blockScaledHostUnpackLogged, 1) != 0)
+        {
+            return;
+        }
+        string reason = weightRowOffset != 0 || weightRowCount >= 0 ? "a row range cannot address the packed layout"
+            : _kernels is null ? "no kernels are loaded"
+            : weight.Shape.Rank != 2 ? $"the weight is rank-{weight.Shape.Rank}, not a matrix"
+            : info.BlockScale is not { Shape.Rank: 2 } ? "the block-scale companion is not rank-2"
+            : "the companion's dtype or shape does not describe this weight (see CanRunResidentBlockScaled)";
+        HartsyInference.Core.Logging.Logs.Warning(
+            $"[Cuda] resident {info.Format} weight {weight.Shape} unpacks on the HOST every GEMM: {reason}. "
+            + "Further layers are not logged.");
+    }
+
+    /// <summary>Logs how the model's block-scaled Linears were dispatched and resets the counters, at the unload that frees their scales.</summary>
+    private void FlushBlockScaledDispatchCounts()
+    {
+        long native = Interlocked.Exchange(ref _blockScaledNativeCalls, 0);
+        long unpacked = Interlocked.Exchange(ref _blockScaledUnpackCalls, 0);
+        string? refusal = _blockScaledFirstRefusal;
+        _blockScaledFirstRefusal = null;
+        Volatile.Write(ref _blockScaledDispatchLogged, 0);
+        Volatile.Write(ref _blockScaledHostUnpackLogged, 0);
+        if (native == 0 && unpacked == 0) return;
+        HartsyInference.Core.Logging.Logs.Info(
+            $"[Cuda] block-scaled Linears this model: {native} native, {unpacked} unpacked"
+            + (refusal is null ? "." : $" (first refusal: {refusal})."));
     }
 
     /// <summary>Uploads (once) a block-scaled weight's swizzled scale tensor for the kernels that index it, and reads its host scalars (nvfp4 carries two; the MX formats none).</summary>
@@ -1148,7 +1234,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         _audioConvCudnn = CudnnRuntime.Available && EngineKnobs.AudioConvCudnn.Value;
         // Each result dir self-documents the config it ran under: log the resolved flag set once.
         HartsyInference.Core.Logging.Logs.Info(
-            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} MempoolKeep={mempoolKeep} " +
+            $"[Cuda] perf flags: SdpaCudnn={_sdpaCudnn} ConvCudnn={_convCudnn} NativeFp8Gemm={EnableNativeFp8Gemm} NativeFp4Gemm={EnableNativeFp4Gemm} MempoolKeep={mempoolKeep} " +
             $"EpilogueFusion={EnableEpilogueFusion} Dp4aGemv={EnableDp4aGemv} TensorCoreGemm={EnableTensorCoreGemm} " +
             $"HighPrecisionGemm={HighPrecisionGemm} CacheWeightCasts={CacheWeightCasts} " +
             $"AutoPromoteWeights={GpuTransferHelper.AutoPromoteWeights} Tf32Gemm={_allowTf32}.");
@@ -1230,7 +1316,27 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             SupportsFft = false,
             MaxRank = 6,
         };
+        LogNativeBlockScaledStatus();
         Volatile.Write(ref _constructorCompleted, 1);
+    }
+
+    /// <summary>Says once, at construction, whether the native block-scaled (nvfp4/mxfp8) GEMM can run here, and when it cannot, EVERY static condition that refuses it.</summary>
+    /// <remarks>Silent when the knob is off, since the <c>[Cuda] perf flags:</c> line above already reports that and
+    /// the path is off by default. The conditions are listed together rather than short-circuited: a card that is
+    /// both pre-Blackwell and missing the PTX would otherwise be fixed twice.</remarks>
+    private void LogNativeBlockScaledStatus()
+    {
+        if (!EnableNativeFp4Gemm) return;
+        List<string> refusals = [];
+        if (_context.Sm < CudaArch.Blackwell)
+            refusals.Add($"SM {_context.ComputeCapabilityMajor}.{_context.ComputeCapabilityMinor} is below Blackwell (SM 10.0)");
+        if (_kernels is not { HasBlockQuantKernels: true })
+            refusals.Add("block_quant.ptx is not loaded (Kernels/dequant/build.sh)");
+        HartsyInference.Core.Logging.Logs.Info(refusals.Count == 0
+            ? "[Cuda] native block-scaled GEMM (numerics.fp4Native): available. A checkpoint opened with "
+                + "ResidentNvfp4 reaches it; one unpacked at open cannot."
+            : $"[Cuda] native block-scaled GEMM (numerics.fp4Native): unavailable — {string.Join("; ", refusals)}. "
+                + "Resident nvfp4/mxfp8 weights unpack per GEMM instead.");
     }
 
     /// <summary>This backend's transfer state, for the multi-backend isolation tests.</summary>
@@ -1840,6 +1946,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             && BlockScaleFormats.FromQuantFormat(packedInfo.Format) is { } packedFormat
             && !CanRunResidentBlockScaled(weight, packedInfo, weightRowOffset, weightRowCount))
         {
+            NoteBlockScaledHostUnpack(weight, packedInfo, weightRowOffset, weightRowCount);
             using Tensor dequantized = packedFormat == BlockScaleFormat.Mxfp8
                 ? Mxfp8ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale)
                 : Nvfp4ResidentCodec.DequantToBf16(weight, packedInfo.BlockScale, packedInfo.GlobalScale!);
@@ -1922,6 +2029,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         {
             blockScaled = blockScales.Format;
         }
+        if (blockScales.BlockScaleDevice != 0)
+            NoteBlockScaledDispatch(blockScaled is not null, input, output, n, k, rowRange, blockScales);
 
         ulong pInput = 0, pWeight = 0, pBias = 0, pOutput = 0, pInputCast = 0, pWeightCast = 0, pBiasCast = 0;
         ulong pInputFp8 = 0, pFp8Scratch = 0, pInputPacked = 0, pInputScale = 0, pBlockScratch = 0;
