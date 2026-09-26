@@ -16,7 +16,9 @@ public static class ArtifactNaming
     /// <param name="variant">Sub-build such as <c>"turbo"</c> or <c>"dev"</c>; null or empty for a family's only build.</param>
     /// <param name="precision">Token such as <c>"bf16"</c>, <c>"fp8-scaled"</c> or <c>"Q4_K_M"</c>. GGUF preset
     /// names keep their upstream casing, since that is how every published GGUF spells them.</param>
-    public static string FileName(string engineId, string? variant, string precision, string extension)
+    /// <param name="component">Part of a multi-file model (<c>"codec"</c>, <c>"voice-af-heart"</c>); null for the
+    /// primary weights. Keeps every file of a family distinguishable by its leaf name alone.</param>
+    public static string FileName(string engineId, string? variant, string precision, string extension, string? component = null)
     {
         if (string.IsNullOrWhiteSpace(engineId))
         {
@@ -36,7 +38,14 @@ public static class ArtifactNaming
         {
             name.Append('-').Append(Slug(variant));
         }
+        if (!string.IsNullOrWhiteSpace(component))
+        {
+            name.Append('-').Append(Slug(component));
+        }
         name.Append('_').Append(PrecisionToken(precision));
+        // HartsyWeb stores a model's file name as [A-Za-z0-9_-] (SwarmModelNaming.NormalizeFileName); a dot left in the
+        // stem would be rewritten on upload and the stored name would stop matching the file.
+        name.Replace('.', '_');
         name.Append(extension.StartsWith('.') ? extension : "." + extension);
         return name.ToString();
     }

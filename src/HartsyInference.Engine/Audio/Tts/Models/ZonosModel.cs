@@ -29,11 +29,11 @@ internal static class ZonosModel
 
             SafeTensorsLoader modelLoader = new SafeTensorsLoader();
             modelLoader.Load(modelPath);
-            PytorchPickleLoader dacLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader dacLoader = new AnyFormatCheckpointLoader();
             dacLoader.Load(dacPath);
-            PytorchPickleLoader speakerLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader speakerLoader = new AnyFormatCheckpointLoader();
             speakerLoader.Load(speakerPath);
-            PytorchPickleLoader ldaLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader ldaLoader = new AnyFormatCheckpointLoader();
             ldaLoader.Load(ldaPath);
 
             EspeakPhonemizer phonemizer = EspeakPhonemizer.FromCache(EspeakLanguage);

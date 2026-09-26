@@ -28,7 +28,7 @@ public static class DeepSpeedCheckpointConverter
     /// <summary>Loads the DeepSpeed <c>.pt</c> and returns the flat, <c>module.</c>-stripped tensor dict plus the loader to keep alive (the returned tensors reference its backing storage until disposed).</summary>
     public static (Dictionary<string, Tensor> Weights, IDisposable Loader) Load(string path)
     {
-        PytorchPickleLoader loader = new();
+        AnyFormatCheckpointLoader loader = new();
         loader.Load(path);
         return (StripModulePrefix(loader.GetAllTensors()), loader);
     }

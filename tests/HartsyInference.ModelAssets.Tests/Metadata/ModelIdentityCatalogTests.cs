@@ -92,4 +92,15 @@ public sealed class ModelIdentityCatalogTests
         Assert.Null(ModelIdentityCatalog.Find("no-such-model"));
         Assert.Null(ModelIdentityCatalog.Find(""));
     }
+
+    [Theory]
+    [InlineData("1.7B-Base", "qwen3_tts_clone")]
+    [InlineData("0.6b-customvoice", "qwen3_tts_custom")]
+    [InlineData("1.7B-VoiceDesign", "qwen3_tts_design")]
+    [InlineData("not-a-variant", "qwen3_tts")]
+    [InlineData(null, "qwen3_tts")]
+    public void ForVariant_ResolvesPerVariantClasses(string? variant, string expected)
+    {
+        Assert.Equal(expected, ModelIdentityCatalog.Find("qwen3tts")!.ForVariant(variant).SwarmClassId);
+    }
 }

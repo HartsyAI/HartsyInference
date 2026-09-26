@@ -32,6 +32,10 @@ public sealed record ArtifactProvenance
     /// the conversion changed the container only.</summary>
     public string? Precision { get; init; }
 
+    /// <summary>The provider's model/variant id (<c>hartsy.model_id</c>), e.g. <c>"large-v3"</c> or <c>"1.7B-Base"</c>:
+    /// which catalog row a primary file backs.</summary>
+    public string? ModelId { get; init; }
+
     /// <summary>Optional one-line description for the model card.</summary>
     public string? Description { get; init; }
 

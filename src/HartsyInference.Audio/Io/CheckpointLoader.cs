@@ -20,7 +20,7 @@ internal static class CheckpointLoader
             retain.Add(loader);
             return loader.GetAllTensors();
         }
-        PytorchPickleLoader pickle = new();
+        AnyFormatCheckpointLoader pickle = new();
         pickle.Load(path, recursiveFlatten: recursiveFlatten);
         retain.Add(pickle);
         return pickle.GetAllTensors();

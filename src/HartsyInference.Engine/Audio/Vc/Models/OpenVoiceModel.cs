@@ -31,7 +31,7 @@ internal static class OpenVoiceModel
         LoadAsync = async (_, cancel) =>
         {
             string checkpoint = await AudioModelCache.GetAsync(Repo, CheckpointFile, category: "clone", ct: cancel).ConfigureAwait(false);
-            PytorchPickleLoader loader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader loader = new AnyFormatCheckpointLoader();
             loader.Load(checkpoint);
 
             VitsConfig config = VitsConfig.PiperHigh with { GinChannels = 256 };

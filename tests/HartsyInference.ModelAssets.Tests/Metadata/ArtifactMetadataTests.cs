@@ -172,4 +172,15 @@ public sealed class ArtifactMetadataTests
         Assert.Throws<ArgumentException>(
             () => ArtifactMetadata.WithoutHash(ModelIdentityCatalog.All["kokoro"], nameless));
     }
+
+    [Fact]
+    public void Build_AudioCarriesTheIdsAudioLabAdmitsOn()
+    {
+        ArtifactIdentity identity = ModelIdentityCatalog.All["qwen3tts"].ForVariant("1.7B-Base");
+        Dictionary<string, string> metadata = ArtifactMetadata.WithoutHash(identity, Repack with { ModelId = "1.7B-Base" });
+        Assert.Equal("qwen3_tts", metadata["hartsy.provider_id"]);
+        Assert.Equal("1.7B-Base", metadata["hartsy.model_id"]);
+        Assert.Equal("qwen3_tts_clone", metadata["modelspec.architecture"]);
+        Assert.False(ArtifactMetadata.WithoutHash(ModelIdentityCatalog.All["krea2"], Repack).ContainsKey("hartsy.provider_id"));
+    }
 }

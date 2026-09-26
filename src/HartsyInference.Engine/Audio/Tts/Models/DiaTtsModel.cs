@@ -41,9 +41,9 @@ internal static class DiaTtsModel
             // The canonical descript .pth has the layout the engine expects (the HF safetensors mirrors are reshaped).
             string dacPath = await AudioModelCache.GetAsync(DacRepo, "weights.pth", category: "tts", ct: cancel).ConfigureAwait(false);
             // 0626 is a flat pickle state_dict; non-recursive flatten keeps the encoder./decoder. prefixes intact.
-            PytorchPickleLoader modelLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader modelLoader = new AnyFormatCheckpointLoader();
             modelLoader.Load(modelPath, recursiveFlatten: false);
-            PytorchPickleLoader dacLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader dacLoader = new AnyFormatCheckpointLoader();
             dacLoader.Load(dacPath);
 
             DiaPipeline pipeline = new DiaPipeline(DiaConfig.Dia1_6B);

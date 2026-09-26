@@ -87,7 +87,7 @@ internal static class BarkTtsModel
         {
             Logs.Debug($"[Audio][Bark] No model.safetensors ({ex.Message}); loading pytorch_model.bin.");
             string path = await AudioModelCache.GetAsync(Repo, "pytorch_model.bin", category: "tts", ct: cancel).ConfigureAwait(false);
-            PytorchPickleLoader loader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader loader = new AnyFormatCheckpointLoader();
             loader.Load(path);
             return (loader.GetAllTensors(), loader);
         }

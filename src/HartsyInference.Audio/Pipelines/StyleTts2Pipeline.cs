@@ -59,7 +59,7 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
         StyleTts2Config cfg = new();
         KokoroConfig bb = cfg.Backbone;
 
-        PytorchPickleLoader loader = new();
+        AnyFormatCheckpointLoader loader = new();
         loader.Load(pthPath, recursiveFlatten: true);
         Dictionary<string, Tensor> w = StyleTts2Weights.Adapt(loader.GetAllTensors());
 

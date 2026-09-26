@@ -31,6 +31,14 @@ public static class ByteLevelCodec
         return sb.ToString();
     }
 
+    /// <summary>Maps raw bytes (which need not be valid UTF-8, as in a BPE vocab) into the byte-level space.</summary>
+    public static string EncodeBytes(ReadOnlySpan<byte> bytes)
+    {
+        StringBuilder sb = new(bytes.Length);
+        foreach (byte b in bytes) sb.Append(ByteToChar[b]);
+        return sb.ToString();
+    }
+
     private static char[] BuildByteToUnicode()
     {
         // Identical to GPT-2's bytes_to_unicode(): [33..126] ∪ [161..172] ∪ [174..255] map to themselves;

@@ -24,10 +24,33 @@ public static class PickleCheckpointRepacker
     public static int Repack(string sourcePath, string outputPath, Func<string, string?>? keyMap = null, bool recursiveFlatten = false,
         IReadOnlyDictionary<string, string>? metadata = null)
     {
+        if (AnyFormatCheckpointLoader.IsSafeTensors(sourcePath))
+        {
+            // Already converted: the keys it carries are the ones this repack would have produced, so write it through.
+            using SafeTensorsLoader converted = new();
+            converted.Load(sourcePath);
+            return Write(sourcePath, converted.GetAllTensors(), outputPath, keyMap, metadata);
+        }
         using PytorchPickleLoader loader = new();
         loader.Load(sourcePath, recursiveFlatten);
+        return Repack(loader, outputPath, keyMap, metadata);
+    }
+
+    /// <summary>Writes the tensors of an already-loaded checkpoint, so a caller can inspect what the load kept
+    /// (<see cref="PytorchPickleLoader.SkippedTensorCount"/>) before committing to an output file.</summary>
+    /// <returns>The number of tensors written.</returns>
+    public static int Repack(PytorchPickleLoader loader, string outputPath, Func<string, string?>? keyMap = null,
+        IReadOnlyDictionary<string, string>? metadata = null)
+    {
+        ArgumentNullException.ThrowIfNull(loader);
+        return Write(loader.FilePath, loader.GetAllTensors(), outputPath, keyMap, metadata);
+    }
+
+    private static int Write(string sourcePath, Dictionary<string, Tensor> tensors, string outputPath,
+        Func<string, string?>? keyMap, IReadOnlyDictionary<string, string>? metadata)
+    {
         Dictionary<string, Tensor> keep = new(StringComparer.Ordinal);
-        foreach ((string key, Tensor tensor) in loader.GetAllTensors())
+        foreach ((string key, Tensor tensor) in tensors)
         {
             string? mapped = keyMap is null ? key : keyMap(key);
             if (mapped is not null)

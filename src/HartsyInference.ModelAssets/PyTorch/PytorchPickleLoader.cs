@@ -18,6 +18,14 @@ public sealed class PytorchPickleLoader : IDisposable
     /// <summary>Path of the loaded checkpoint.</summary>
     public string FilePath { get; private set; } = string.Empty;
 
+    /// <summary>Tensors present in the checkpoint that a non-recursive <see cref="Load"/> did not load, because they
+    /// sit under a second wrapper or deeper than the one envelope it descends. Zero after a recursive load.</summary>
+    public int SkippedTensorCount { get; private set; }
+
+    /// <summary>Tensor count under each top-level dict-valued entry of the checkpoint root, so a caller can tell the
+    /// user what a partial load left out.</summary>
+    public IReadOnlyDictionary<string, int> WrapperTensorCounts { get; private set; } = new Dictionary<string, int>();
+
     /// <summary>Opens the <c>.pt</c> ZIP, parses <c>data.pkl</c>, and materializes every tensor into owned memory.
     /// <para>When <paramref name="recursiveFlatten"/> is true, a multi-module checkpoint — a dict whose values are themselves state-dicts (e.g. Kokoro's <c>{bert:{…}, predictor:{…}, decoder:{…}}</c>) — is flattened into fully-qualified dotted keys (<c>bert.embeddings.weight</c>, …) covering EVERY module. The default (false) keeps the legacy behavior: load top-level tensors, else descend one wrapper envelope.</para></summary>
     public void Load(string filePath, bool recursiveFlatten = false)
@@ -56,6 +64,8 @@ public sealed class PytorchPickleLoader : IDisposable
         else
         {
             FlattenStateDict(root, metas);
+            SkippedTensorCount = CountTensors(root) - metas.Count;
+            WrapperTensorCounts = CountWrappers(root);
         }
 
         Dictionary<string, PytorchTensorDescriptor> descriptors = new(metas.Count);
@@ -120,6 +130,8 @@ public sealed class PytorchPickleLoader : IDisposable
         else
         {
             FlattenStateDict(root, metas);
+            SkippedTensorCount = CountTensors(root) - metas.Count;
+            WrapperTensorCounts = CountWrappers(root);
         }
 
         if (keysObj is not List<object?> keyList)
@@ -271,6 +283,29 @@ public sealed class PytorchPickleLoader : IDisposable
     }
 
     /// <summary>Recursively flattens nested dicts into fully-qualified dotted keys, visiting every module (unlike <see cref="FlattenStateDict"/>, which descends only one wrapper and drops the prefix). Non-tensor, non-dict leaves (version ints, metadata) are ignored.</summary>
+    private static Dictionary<string, int> CountWrappers(object? root)
+    {
+        Dictionary<string, int> counts = new(StringComparer.Ordinal);
+        if (root is Dictionary<string, object?> dict)
+        {
+            foreach ((string key, object? value) in dict)
+            {
+                if (value is Dictionary<string, object?>)
+                {
+                    counts[key] = CountTensors(value);
+                }
+            }
+        }
+        return counts;
+    }
+
+    private static int CountTensors(object? node) => node switch
+    {
+        PickleTensor => 1,
+        Dictionary<string, object?> dict => dict.Values.Sum(CountTensors),
+        _ => 0,
+    };
+
     private static void FlattenStateDictRecursive(object? node, string prefix, Dictionary<string, PickleTensor> outMap)
     {
         if (node is PickleTensor t)

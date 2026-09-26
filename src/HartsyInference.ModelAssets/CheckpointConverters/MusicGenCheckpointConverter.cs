@@ -125,7 +125,7 @@ public sealed unsafe class MusicGenCheckpointConverter
             st.Load(path);
             return (st.GetAllTensors(), st);
         }
-        PytorchPickleLoader pt = new();
+        AnyFormatCheckpointLoader pt = new();
         pt.Load(path);
         return (pt.GetAllTensors(), pt);
     }
