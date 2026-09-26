@@ -51,6 +51,8 @@ public sealed class UniPcSampler : SamplerBase
             Push(backend, Denoise(backend, predictor, z, Sigma(0), stepIndex), Sigma(0));
             if (_order <= 0)
             {
+                // ComfyUI leaves x untouched on a one-step schedule and returns noise; land on the prediction instead.
+                backend.Scale(z, _models[_count - 1]!, 1.0f);
                 return;
             }
         }
@@ -152,11 +154,19 @@ public sealed class UniPcSampler : SamplerBase
             SolveSquare(rMatrix, order, order, bVec, rhosC);
         }
         Tensor modelT = Denoise(backend, predictor, z, sigmaT, stepIndex);
-        backend.Scale(z, baseState, 1.0f);
-        AddHistoryDifferences(backend, z, model0, rhosC, historyTerms, -bH, rks);
-        double last = -bH * rhosC[order - 1];
-        SamplerOps.MixInto(backend, z, modelT, model0, 1.0f, (float)last, (float)-last);
-        return modelT;
+        try
+        {
+            backend.Scale(z, baseState, 1.0f);
+            AddHistoryDifferences(backend, z, model0, rhosC, historyTerms, -bH, rks);
+            double last = -bH * rhosC[order - 1];
+            SamplerOps.MixInto(backend, z, modelT, model0, 1.0f, (float)last, (float)-last);
+            return modelT;
+        }
+        catch
+        {
+            modelT.Dispose();
+            throw;
+        }
     }
 
     /// <summary><c>target += scale·Σ rho_k·(m_{-(k+1)} − m0)/r_k</c>.</summary>

@@ -102,10 +102,12 @@ public static class SamplerRegistry
 
     /// <summary>The sigmas <paramref name="sampler"/> integrates: <paramref name="schedule"/> applied to the family's
     /// <paramref name="baseSigmas"/>, with ComfyUI's discard-penultimate rule for the samplers that use it.</summary>
-    /// <remarks>The rule needs a <c>steps + 1</c> family grid; it is interpolated piecewise-linearly in step fraction from
+    /// <remarks>The rule needs a <c>steps + 1</c> family grid: <paramref name="familyGrid"/> rebuilds it the way ComfyUI
+    /// does when it starts at the same sigma, and otherwise it is interpolated piecewise-linearly in step fraction from
     /// the family's own grid, keeping both endpoints. It is skipped when the latent was already noised at the family's
     /// <c>sigma[startStep]</c> (img2img), since moving interior sigmas would desynchronise the two.</remarks>
-    public static float[] BuildSigmas(string? sampler, string? schedule, float[] baseSigmas, bool startsFromNoisedInit = false)
+    public static float[] BuildSigmas(string? sampler, string? schedule, float[] baseSigmas, bool startsFromNoisedInit = false,
+        Func<int, float[]>? familyGrid = null)
     {
         ArgumentNullException.ThrowIfNull(baseSigmas);
         int steps = baseSigmas.Length - 1;
@@ -115,6 +117,20 @@ public static class SamplerRegistry
         {
             return SigmaSchedule.Apply(schedule, baseSigmas);
         }
+        float[]? rebuilt = familyGrid?.Invoke(steps + 1);
+        // The latent is noised at baseSigmas[0]; a rebuilt grid starting elsewhere (diffusers "leading" spacing moves
+        // the first timestep with the step count) would leave the sampler out of step with it.
+        float[] dense = rebuilt?.Length == steps + 2 && rebuilt[0] == baseSigmas[0] ? rebuilt : Interpolated(baseSigmas, steps);
+        float[] applied = SigmaSchedule.Apply(schedule, dense);
+        float[] result = new float[steps + 1];
+        Array.Copy(applied, result, steps);
+        result[steps] = 0f;
+        return result;
+    }
+
+    /// <summary>A <c>steps + 1</c> grid interpolated from a <c>steps</c> one, keeping both endpoints.</summary>
+    private static float[] Interpolated(float[] baseSigmas, int steps)
+    {
         float[] dense = new float[steps + 2];
         for (int j = 0; j <= steps + 1; j++)
         {
@@ -125,11 +141,7 @@ public static class SamplerRegistry
         }
         dense[0] = baseSigmas[0];
         dense[^1] = 0f;
-        float[] applied = SigmaSchedule.Apply(schedule, dense);
-        float[] result = new float[steps + 1];
-        Array.Copy(applied, result, steps);
-        result[steps] = 0f;
-        return result;
+        return dense;
     }
 
     /// <summary>Builds the refusal message, separating a name this engine has simply not built from one it has never

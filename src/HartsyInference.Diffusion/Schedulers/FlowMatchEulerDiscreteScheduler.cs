@@ -46,17 +46,26 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     public void SetTimesteps(int numInferenceSteps)
     {
         _numInferenceSteps = numInferenceSteps;
+        _sigmas = SigmasFor(numInferenceSteps);
+        _timesteps = new float[numInferenceSteps];
+        for (int i = 0; i < numInferenceSteps; i++)
+        {
+            _timesteps[i] = _sigmas[i] * 1000.0f;
+        }
+    }
 
+    /// <summary>The sigma array <see cref="SetTimesteps"/> would build for <paramref name="numInferenceSteps"/>, without
+    /// changing this scheduler.</summary>
+    public float[] SigmasFor(int numInferenceSteps)
+    {
         // Compute sigma schedule: linearly spaced from 1.0 to 0.0 (N+1 points, includes terminal 0)
         // Then apply shift: sigma = shift * t / (1 + (shift - 1) * t)
-        _sigmas = new float[numInferenceSteps + 1];
-        _timesteps = new float[numInferenceSteps];
-
+        float[] sigmas = new float[numInferenceSteps + 1];
         for (int i = 0; i <= numInferenceSteps; i++)
         {
             float t = 1.0f - (float)i / numInferenceSteps;
             float sigma = _shift * t / (1.0f + (_shift - 1.0f) * t);
-            _sigmas[i] = sigma;
+            sigmas[i] = sigma;
         }
 
         // Optional terminal stretch (diffusers stretch_shift_to_terminal): rescale the non-zero sigmas so the
@@ -64,18 +73,14 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         // one_minus_z = 1 - sigma; scale = one_minus_z[last] / (1 - shiftTerminal); sigma = 1 - one_minus_z/scale.
         if (_shiftTerminal is float terminal && numInferenceSteps > 0)
         {
-            float oneMinusLast = 1.0f - _sigmas[numInferenceSteps - 1];
+            float oneMinusLast = 1.0f - sigmas[numInferenceSteps - 1];
             float scale = oneMinusLast / (1.0f - terminal);
             for (int i = 0; i < numInferenceSteps; i++)
             {
-                _sigmas[i] = 1.0f - (1.0f - _sigmas[i]) / scale;
+                sigmas[i] = 1.0f - (1.0f - sigmas[i]) / scale;
             }
         }
-
-        for (int i = 0; i < numInferenceSteps; i++)
-        {
-            _timesteps[i] = _sigmas[i] * 1000.0f;
-        }
+        return sigmas;
     }
 
     /// <summary>The flow-match Euler step size for a step: <c>dt = sigma_next - sigma</c> (negative). Lets callers run

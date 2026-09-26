@@ -83,14 +83,22 @@ public sealed class ErSdeSampler : SamplerBase
                     s *= step;
                     su *= step;
                     Tensor denoisedD = new Tensor(z.Shape, DType.F32);
-                    double spanD = erS - _erLambdas[i - 1];
-                    SamplerOps.SetMix(backend, denoisedD, denoised, _oldDenoised!, (float)(1.0 / spanD), (float)(-1.0 / spanD));
-                    SamplerOps.MixInto(backend, z, denoisedD, 1.0f, (float)(alphaT * (dt + (s * NoiseScaler(erT)))));
-                    if (stage >= 3 && _oldDenoisedD is not null)
+                    try
                     {
-                        double spanU = (erS - _erLambdas[i - 2]) / 2.0;
-                        double coeffU = alphaT * ((dt * dt / 2.0) + (su * NoiseScaler(erT))) / spanU;
-                        SamplerOps.MixInto(backend, z, denoisedD, _oldDenoisedD, 1.0f, (float)coeffU, (float)-coeffU);
+                        double spanD = erS - _erLambdas[i - 1];
+                        SamplerOps.SetMix(backend, denoisedD, denoised, _oldDenoised!, (float)(1.0 / spanD), (float)(-1.0 / spanD));
+                        SamplerOps.MixInto(backend, z, denoisedD, 1.0f, (float)(alphaT * (dt + (s * NoiseScaler(erT)))));
+                        if (stage >= 3 && _oldDenoisedD is not null)
+                        {
+                            double spanU = (erS - _erLambdas[i - 2]) / 2.0;
+                            double coeffU = alphaT * ((dt * dt / 2.0) + (su * NoiseScaler(erT))) / spanU;
+                            SamplerOps.MixInto(backend, z, denoisedD, _oldDenoisedD, 1.0f, (float)coeffU, (float)-coeffU);
+                        }
+                    }
+                    catch
+                    {
+                        denoisedD.Dispose();
+                        throw;
                     }
                     Keep(backend, ref _oldDenoisedD, denoisedD);
                 }

@@ -76,6 +76,48 @@ public sealed class SamplerInfrastructureTests
         Assert.NotEqual(SamplerOps.StepSeed(11, 3, 1), SamplerOps.StepSeed(11, 3, 2));
     }
 
+    /// <summary>With the family grid supplied, the discard rule is ComfyUI's exactly: the steps+1 grid with its penultimate
+    /// entry dropped. A grid that starts at another sigma (SDXL's "leading" spacing) is not used, since the latent was
+    /// noised at the steps grid's first sigma.</summary>
+    [Fact]
+    public void BuildSigmas_WithTheFamilyGrid_DropsThePenultimateOfTheRebuiltGrid()
+    {
+        FlowMatchEulerDiscreteScheduler flow = new(3.0f);
+        flow.SetTimesteps(10);
+        float[] rf = SamplerRegistry.BuildSigmas("uni_pc", null, flow.Sigmas(), familyGrid: flow.SigmasFor);
+        float[] rfDense = flow.SigmasFor(11);
+        Assert.Equal([.. rfDense[..^2], 0f], rf);
+
+        EulerDiscreteScheduler euler = new();
+        euler.SetTimesteps(20);
+        float[] baseSigmas = euler.Sigmas();
+        Assert.NotEqual(baseSigmas[0], euler.SigmasFor(21)[0]);
+        float[] eps = SamplerRegistry.BuildSigmas("dpm_2", null, baseSigmas, familyGrid: euler.SigmasFor);
+        Assert.Equal(baseSigmas[0], eps[0]);
+        Assert.Equal(SamplerRegistry.BuildSigmas("dpm_2", null, baseSigmas), eps);
+    }
+
+    /// <summary><c>SigmasFor</c> is what <c>SetTimesteps</c> builds, without moving the scheduler.</summary>
+    [Fact]
+    public void SigmasFor_MatchesSetTimestepsAndLeavesTheSchedulerAlone()
+    {
+        EulerDiscreteScheduler euler = new();
+        euler.SetTimesteps(20);
+        float[] before = euler.Sigmas();
+        float[] other = euler.SigmasFor(7);
+        Assert.Equal(before, euler.Sigmas());
+        euler.SetTimesteps(7);
+        Assert.Equal(other, euler.Sigmas());
+
+        FlowMatchEulerDiscreteScheduler flow = new(3.0f, shiftTerminal: 0.02f);
+        flow.SetTimesteps(20);
+        float[] flowBefore = flow.Sigmas();
+        float[] flowOther = flow.SigmasFor(7);
+        Assert.Equal(flowBefore, flow.Sigmas());
+        flow.SetTimesteps(7);
+        Assert.Equal(flowOther, flow.Sigmas());
+    }
+
     /// <summary>uni_pc/dpm_2 keep the step count and both endpoints but take ComfyUI's steps+1 grid minus its
     /// penultimate sigma; every other sampler gets the schedule untouched, and img2img opts out.</summary>
     [Fact]

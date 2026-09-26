@@ -165,7 +165,8 @@ public sealed class StableDiffusion15Pipeline : DiffusionPipelineBase
         latent = samplerLoop
             ? RunSamplerDenoiseLoop(latent, latentShape, textEmbeddings, (EulerDiscreteScheduler)scheduler, plan.StartStep, totalSteps: steps, cfgScale,
                 SamplerRegistry.Create(samplerName,
-                    SamplerRegistry.BuildSigmas(samplerName, scheduleName, ((EulerDiscreteScheduler)scheduler).Sigmas(), plan.StartStep > 0), seed,
+                    SamplerRegistry.BuildSigmas(samplerName, scheduleName, ((EulerDiscreteScheduler)scheduler).Sigmas(), plan.StartStep > 0,
+                        ((EulerDiscreteScheduler)scheduler).SigmasFor), seed,
                     new SamplerOptions { PercentToSigma = ((EulerDiscreteScheduler)scheduler).SigmaAtPercent }), onProgress)
             : RunDenoiseLoop(latent, latentShape, textEmbeddings, scheduler, plan.StartStep, totalSteps: steps, cfgScale, sourceLatent, latentMask, seed, controlNets, ipAdapters, onProgress, conditioningSchedule);
 

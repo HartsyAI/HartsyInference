@@ -58,5 +58,5 @@ public sealed class ResMultistepSampler : SamplerBase
         }
     }
 
-    private static double FiniteOrZero(double value) => double.IsNaN(value) ? 0.0 : value;
+    private static double FiniteOrZero(double value) => double.IsFinite(value) ? value : 0.0;
 }

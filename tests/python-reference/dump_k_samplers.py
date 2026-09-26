@@ -1,7 +1,8 @@
 """Dumps ComfyUI sampler trajectories on a synthetic denoiser for SamplerParityTests.
 
 Runs ComfyUI's own sample_* functions (the checkout passed as --comfy) against a deterministic nonlinear denoiser,
-records every model-query sigma and every noise draw, and writes one small JSON fixture the C# suite replays:
+records every model-query sigma and every noise draw, and writes one JSON fixture the C# suite replays. The committed
+fixture was generated against ComfyUI 0.37.0; regenerate it when a ComfyUI update changes a sampler.
 
     <comfy venv python> dump_k_samplers.py --comfy <ComfyUI dir> \
         --out ../HartsyInference.Diffusion.Tests/Fixtures/Samplers/k_sampler_parity.json

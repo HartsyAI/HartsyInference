@@ -10,7 +10,6 @@ public sealed class IpndmSampler : SamplerBase
     private const int MaxOrder = 4;
     private readonly bool _variableStep;
     private readonly Tensor?[] _history = new Tensor?[MaxOrder - 1];
-    private int _count;
 
     /// <summary>Creates the sampler; <paramref name="variableStep"/> selects <c>ipndm_v</c>.</summary>
     public IpndmSampler(float[] sigmas, bool variableStep, SamplerOptions? options = null)
@@ -26,7 +25,6 @@ public sealed class IpndmSampler : SamplerBase
         {
             Release(ref _history[k]);
         }
-        _count = 0;
     }
 
     /// <inheritdoc/>
@@ -73,7 +71,6 @@ public sealed class IpndmSampler : SamplerBase
         }
         _history[0] = null;
         Keep(backend, ref _history[0], d);
-        _count = Math.Min(_count + 1, _history.Length);
     }
 
     /// <summary>Weights on <c>d_cur, d_{-1}, d_{-2}, d_{-3}</c>, before multiplication by the step size.</summary>

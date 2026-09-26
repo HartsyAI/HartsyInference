@@ -364,7 +364,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         {
             EulerDiscreteScheduler euler = (EulerDiscreteScheduler)scheduler;
             sampler = SamplerRegistry.Create(samplerName,
-                SamplerRegistry.BuildSigmas(samplerName, scheduleName, euler.Sigmas(), startStep > 0), seed,
+                SamplerRegistry.BuildSigmas(samplerName, scheduleName, euler.Sigmas(), startStep > 0, euler.SigmasFor), seed,
                 new SamplerOptions { PercentToSigma = euler.SigmaAtPercent });
         }
 

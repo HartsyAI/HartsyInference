@@ -81,42 +81,53 @@ public sealed class EulerDiscreteScheduler : IScheduler
     public void SetTimesteps(int numInferenceSteps)
     {
         _numInferenceSteps = numInferenceSteps;
+        (_sigmas, _timesteps) = Compute(numInferenceSteps);
+    }
 
+    /// <summary>The sigma array <see cref="SetTimesteps"/> would build for <paramref name="numInferenceSteps"/>, without
+    /// changing this scheduler.</summary>
+    public float[] SigmasFor(int numInferenceSteps) => Compute(numInferenceSteps).Sigmas;
+
+    private (float[] Sigmas, float[] Timesteps) Compute(int numInferenceSteps)
+    {
+        float[] sigmas;
+        float[] timesteps;
         if (_useKarrasSigmas)
         {
             // Training sigmas ascend with the timestep.
             float sigmaMin = _trainSigmas[0];
             float sigmaMax = _trainSigmas[^1];
-            _sigmas = NoiseSchedule.ComputeKarrasSigmas(sigmaMin, sigmaMax, numInferenceSteps);
+            sigmas = NoiseSchedule.ComputeKarrasSigmas(sigmaMin, sigmaMax, numInferenceSteps);
 
-            _timesteps = new float[numInferenceSteps];
+            timesteps = new float[numInferenceSteps];
             for (int i = 0; i < numInferenceSteps; i++)
             {
-                _timesteps[i] = SigmaToTimestep(_sigmas[i]);
+                timesteps[i] = SigmaToTimestep(sigmas[i]);
             }
         }
         else
         {
-            _timesteps = NoiseSchedule.SelectTimesteps(_config.NumTrainTimesteps, numInferenceSteps, _config.TimestepSpacing);
+            timesteps = NoiseSchedule.SelectTimesteps(_config.NumTrainTimesteps, numInferenceSteps, _config.TimestepSpacing);
 
             // Build sigmas from timesteps by interpolating from training sigmas
-            _sigmas = new float[numInferenceSteps + 1];
+            sigmas = new float[numInferenceSteps + 1];
             for (int i = 0; i < numInferenceSteps; i++)
             {
-                int lowIdx = (int)_timesteps[i];
-                float frac = _timesteps[i] - lowIdx;
+                int lowIdx = (int)timesteps[i];
+                float frac = timesteps[i] - lowIdx;
 
                 if (lowIdx + 1 < _trainSigmas.Length)
                 {
-                    _sigmas[i] = _trainSigmas[lowIdx] * (1.0f - frac) + _trainSigmas[lowIdx + 1] * frac;
+                    sigmas[i] = _trainSigmas[lowIdx] * (1.0f - frac) + _trainSigmas[lowIdx + 1] * frac;
                 }
                 else
                 {
-                    _sigmas[i] = _trainSigmas[lowIdx];
+                    sigmas[i] = _trainSigmas[lowIdx];
                 }
             }
-            _sigmas[numInferenceSteps] = 0.0f;
+            sigmas[numInferenceSteps] = 0.0f;
         }
+        return (sigmas, timesteps);
     }
 
     /// <summary>Whether <see cref="Step"/> reduces to <c>sample + modelOutput·dt</c> (epsilon prediction), i.e. the denoise loop may replace the host Step loop with the in-place device <c>IBackend.CfgEulerStep</c>.</summary>

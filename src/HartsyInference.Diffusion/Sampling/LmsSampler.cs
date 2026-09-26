@@ -9,7 +9,6 @@ public sealed class LmsSampler : SamplerBase
 {
     private const int Order = 4;
     private readonly Tensor?[] _derivatives = new Tensor?[Order];
-    private int _count;
 
     /// <summary>Creates the sampler over a resolved sigma array.</summary>
     public LmsSampler(float[] sigmas, SamplerOptions? options = null)
@@ -27,7 +26,6 @@ public sealed class LmsSampler : SamplerBase
         {
             Release(ref _derivatives[k]);
         }
-        _count = 0;
     }
 
     /// <inheritdoc/>
@@ -45,7 +43,6 @@ public sealed class LmsSampler : SamplerBase
         }
         _derivatives[0] = null;
         Keep(backend, ref _derivatives[0], derivative);
-        _count = Math.Min(_count + 1, Order);
 
         if (Sigma(i + 1) == 0f)
         {

@@ -12,6 +12,7 @@ public abstract class SamplerBase : ISampler
     private readonly float[] _sigmas;
     private float[] _local = [];
     private int _firstStep = -1;
+    private bool _ready;
 
     /// <summary>Validates and stores the resolved schedule.</summary>
     protected SamplerBase(float[] sigmas, int seed, SamplerOptions? options)
@@ -21,6 +22,13 @@ public abstract class SamplerBase : ISampler
         {
             throw new ArgumentException($"Need at least 2 sigmas (one step plus the terminal zero); got {sigmas.Length}.",
                 nameof(sigmas));
+        }
+        foreach (float s in sigmas)
+        {
+            if (!float.IsFinite(s) || s < 0f)
+            {
+                throw new ArgumentException($"Sigmas must be finite and non-negative; got {s}.", nameof(sigmas));
+            }
         }
         _sigmas = sigmas;
         Seed = seed;
@@ -61,6 +69,7 @@ public abstract class SamplerBase : ISampler
     public void Reset(TensorShape latentShape)
     {
         Shape = latentShape;
+        _ready = true;
         _firstStep = -1;
         _local = [];
         NoiseSource?.Dispose();
@@ -74,6 +83,10 @@ public abstract class SamplerBase : ISampler
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(z);
         ArgumentNullException.ThrowIfNull(predictor);
+        if (!_ready)
+        {
+            throw new InvalidOperationException($"{Name}: call Reset with the latent shape before the first Step.");
+        }
         if (_firstStep < 0)
         {
             Begin(predictor, stepIndex);

@@ -265,6 +265,87 @@ public sealed class SamplerCoreTests
         }
     }
 
+    /// <summary>A one-step schedule still produces the prediction: uni_pc's order drops to zero there, and a sampler
+    /// that only records its first evaluation would return the input noise.</summary>
+    [Theory]
+    [InlineData("euler")]
+    [InlineData("heun")]
+    [InlineData("lms")]
+    [InlineData("dpmpp_2m")]
+    [InlineData("ipndm")]
+    [InlineData("deis")]
+    [InlineData("uni_pc")]
+    [InlineData("uni_pc_bh2")]
+    public void OneStepSchedule_LandsOnTheDenoisedConstant(string name)
+    {
+        IBackend backend = new CpuBackend();
+        float[] sigmas = [14.6f, 0f];
+        const float Constant = 0.25f;
+
+        using Tensor z = Filled(3.0f);
+        ConstantDenoiser denoiser = new ConstantDenoiser(backend, Constant);
+        ISampler sampler = SamplerRegistry.Create(name, sigmas, seed: 7);
+        sampler.Reset(Shape);
+        sampler.Step(backend, z, denoiser, 0);
+
+        foreach (float value in Read(z))
+        {
+            Assert.True(MathF.Abs(value - Constant) < 1e-3f, $"{name} landed on {value}, expected {Constant}.");
+        }
+    }
+
+    /// <summary>dpm_fast and dpm_adaptive stop at the last non-zero sigma, where the constant denoiser's exact solution
+    /// is <c>c + (σmin/σmax)(z − c)</c>; a second run after <see cref="ISampler.Reset"/> repeats the first.</summary>
+    [Theory]
+    [InlineData("dpm_fast", 2)]
+    [InlineData("dpm_fast", 12)]
+    [InlineData("dpm_adaptive", 2)]
+    [InlineData("dpm_adaptive", 12)]
+    public void DpmSolverSampler_SolvesTheConstantDenoiserToSigmaMin(string name, int steps)
+    {
+        IBackend backend = new CpuBackend();
+        float[] sigmas = Sigmas(steps);
+        const float Constant = 0.25f;
+        const float Start = 3.0f;
+        float expected = Constant + (sigmas[^2] / sigmas[0] * (Start - Constant));
+        ConstantDenoiser denoiser = new ConstantDenoiser(backend, Constant);
+        ISampler sampler = SamplerRegistry.Create(name, sigmas, seed: 7);
+
+        float[]? first = null;
+        for (int run = 0; run < 2; run++)
+        {
+            using Tensor z = Filled(Start);
+            sampler.Reset(Shape);
+            for (int i = 0; i < sigmas.Length - 1; i++)
+            {
+                sampler.Step(backend, z, denoiser, i);
+            }
+            float[] values = Read(z);
+            foreach (float value in values)
+            {
+                Assert.True(MathF.Abs(value - expected) < 1e-3f, $"{name} landed on {value}, expected {expected}.");
+            }
+            if (first is null)
+            {
+                first = values;
+            }
+            else
+            {
+                Assert.Equal(first, values);
+            }
+        }
+    }
+
+    /// <summary>Stepping before <see cref="ISampler.Reset"/> fails loudly instead of sampling a default shape.</summary>
+    [Fact]
+    public void Step_BeforeReset_Throws()
+    {
+        IBackend backend = new CpuBackend();
+        using Tensor z = Filled(1.0f);
+        ISampler sampler = SamplerRegistry.Create("uni_pc", Sigmas(4), seed: 7);
+        Assert.Throws<InvalidOperationException>(() => sampler.Step(backend, z, new ConstantDenoiser(backend, 0f), 0));
+    }
+
     /// <summary>Second-order samplers must actually evaluate the model twice per step. If one silently degraded to a
     /// single evaluation it would still pass the trajectory test above (the constant denoiser is exact at any order)
     /// while being a different, cheaper, lower-accuracy sampler on a real model.</summary>
