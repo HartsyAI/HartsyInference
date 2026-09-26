@@ -61,7 +61,9 @@ public static class FlowMatchSampling
         bool startsFromNoisedInit = false)
     {
         ArgumentNullException.ThrowIfNull(scheduler);
-        return Resolve(selection, scheduler.Sigmas(), seed, family, startsFromNoisedInit);
+        float shift = scheduler.Shift;
+        SamplerOptions options = new() { PercentToSigma = percent => SamplerOptions.FlowPercentToSigma(percent, shift) };
+        return Resolve(selection, scheduler.Sigmas(), seed, family, startsFromNoisedInit, options);
     }
 
     /// <summary>Same resolution over a RAW sigma array, for the families that build their schedule inline instead of
@@ -76,8 +78,9 @@ public static class FlowMatchSampling
     ///
     /// <para>The array must be descending with a terminal zero, the same contract
     /// <see cref="FlowMatchEulerDiscreteScheduler.Sigmas"/> satisfies.</para></summary>
+    /// <param name="options">Family facts for samplers that need them; null derives them from the sigma array.</param>
     public static ISampler Resolve(string? selection, float[] baseSigmas, int seed, string family,
-        bool startsFromNoisedInit = false)
+        bool startsFromNoisedInit = false, SamplerOptions? options = null)
     {
         ArgumentNullException.ThrowIfNull(baseSigmas);
         (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(selection);
@@ -100,8 +103,8 @@ public static class FlowMatchSampling
             throw new NotSupportedException(
                 $"Sigma schedule '{scheduleName}' is not available. Schedules: {string.Join(", ", SigmaSchedule.Names)}.");
         }
-        float[] sigmas = SigmaSchedule.Apply(scheduleName, baseSigmas);
-        ISampler sampler = SamplerRegistry.Create(samplerName, sigmas, seed);
+        float[] sigmas = SamplerRegistry.BuildSigmas(samplerName, scheduleName, baseSigmas, startsFromNoisedInit);
+        ISampler sampler = SamplerRegistry.Create(samplerName, sigmas, seed, options);
         if (IsNonDefault(selection))
         {
             Logs.Info($"[Sampling] {family}: sampler={sampler.Name}, schedule={scheduleName ?? "normal"}.");

@@ -58,6 +58,25 @@ public sealed class EulerDiscreteScheduler : IScheduler
         _trainSigmas = NoiseSchedule.ComputeSigmas(alphasCumprod);
     }
 
+    /// <summary>ComfyUI's discrete <c>percent_to_sigma</c>: the training sigma at timestep <c>(1 − percent)·(T − 1)</c>,
+    /// interpolated in log sigma.</summary>
+    public double SigmaAtPercent(double percent)
+    {
+        if (percent <= 0.0)
+        {
+            return 999999999.9;
+        }
+        if (percent >= 1.0)
+        {
+            return 0.0;
+        }
+        double t = Math.Clamp((1.0 - percent) * (_trainSigmas.Length - 1), 0.0, _trainSigmas.Length - 1);
+        int lo = (int)Math.Floor(t);
+        int hi = (int)Math.Ceiling(t);
+        double w = t - lo;
+        return Math.Exp(((1.0 - w) * Math.Log(_trainSigmas[lo])) + (w * Math.Log(_trainSigmas[hi])));
+    }
+
     /// <summary>Configures the scheduler for the given number of inference steps.</summary>
     public void SetTimesteps(int numInferenceSteps)
     {

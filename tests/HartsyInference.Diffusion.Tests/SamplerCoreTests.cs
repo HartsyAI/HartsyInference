@@ -235,6 +235,14 @@ public sealed class SamplerCoreTests
     [InlineData("dpm_2")]
     [InlineData("lms")]
     [InlineData("dpmpp_2m")]
+    [InlineData("heunpp2")]
+    [InlineData("ipndm")]
+    [InlineData("ipndm_v")]
+    [InlineData("deis")]
+    [InlineData("res_multistep")]
+    [InlineData("gradient_estimation")]
+    [InlineData("uni_pc")]
+    [InlineData("uni_pc_bh2")]
     public void DeterministicSampler_SolvesTheConstantDenoiserExactly(string name)
     {
         IBackend backend = new CpuBackend();
@@ -266,6 +274,14 @@ public sealed class SamplerCoreTests
     [InlineData("dpmpp_2s_ancestral", 2)]
     [InlineData("euler", 1)]
     [InlineData("dpmpp_2m", 1)]
+    [InlineData("dpmpp_sde", 2)]
+    [InlineData("seeds_2", 2)]
+    [InlineData("seeds_3", 3)]
+    [InlineData("ipndm", 1)]
+    [InlineData("deis", 1)]
+    [InlineData("er_sde", 1)]
+    [InlineData("sa_solver", 1)]
+    [InlineData("dpmpp_3m_sde", 1)]
     public void SamplerEvaluatesTheModelTheExpectedNumberOfTimesPerStep(string name, int perStep)
     {
         IBackend backend = new CpuBackend();
@@ -292,6 +308,13 @@ public sealed class SamplerCoreTests
     [InlineData("dpm_2_ancestral")]
     [InlineData("dpmpp_2s_ancestral")]
     [InlineData("dpmpp_2m_sde")]
+    [InlineData("dpmpp_sde")]
+    [InlineData("dpmpp_3m_sde")]
+    [InlineData("ddpm")]
+    [InlineData("er_sde")]
+    [InlineData("seeds_2")]
+    [InlineData("seeds_3")]
+    [InlineData("sa_solver")]
     public void StochasticSampler_StaysFiniteAndConvergesNear(string name)
     {
         IBackend backend = new CpuBackend();
@@ -326,6 +349,11 @@ public sealed class SamplerCoreTests
     [InlineData("heun")]
     [InlineData("dpm_2")]
     [InlineData("dpmpp_2m")]
+    [InlineData("heunpp2")]
+    [InlineData("ipndm_v")]
+    [InlineData("deis")]
+    [InlineData("res_multistep")]
+    [InlineData("gradient_estimation")]
     public void DeterministicSampler_SolvesTheFlowMatchingFormExactly(string name)
     {
         IBackend backend = new CpuBackend();
@@ -374,8 +402,16 @@ public sealed class SamplerCoreTests
 
     /// <summary>Same seed, same trajectory. A stochastic sampler that drew from a shared or time-based source would
     /// make generations unreproducible, which is worse than a slightly different image.</summary>
-    [Fact]
-    public void StochasticSampler_IsReproducibleForAGivenSeed()
+    [Theory]
+    [InlineData("euler_ancestral")]
+    [InlineData("dpmpp_sde")]
+    [InlineData("dpmpp_2m_sde")]
+    [InlineData("dpmpp_3m_sde")]
+    [InlineData("seeds_3")]
+    [InlineData("sa_solver")]
+    [InlineData("er_sde")]
+    [InlineData("ddpm")]
+    public void StochasticSampler_IsReproducibleForAGivenSeed(string name)
     {
         IBackend backend = new CpuBackend();
         float[] sigmas = Sigmas(8);
@@ -384,7 +420,7 @@ public sealed class SamplerCoreTests
         {
             using Tensor z = Filled(3.0f);
             ConstantDenoiser denoiser = new ConstantDenoiser(backend, 0.25f);
-            ISampler sampler = SamplerRegistry.Create("euler_ancestral", sigmas, seed);
+            ISampler sampler = SamplerRegistry.Create(name, sigmas, seed);
             sampler.Reset(Shape);
             for (int i = 0; i < sigmas.Length - 1; i++)
             {
@@ -400,12 +436,20 @@ public sealed class SamplerCoreTests
     /// from the previous step's denoised estimate; if <see cref="ISampler.Reset"/> failed to clear it, the first step
     /// of the SECOND image would extrapolate from the FIRST image's latent — a cross-generation contamination that no
     /// single-run test can see.</summary>
-    [Fact]
-    public void MultistepSampler_ResetClearsHistoryBetweenRuns()
+    [Theory]
+    [InlineData("dpmpp_2m")]
+    [InlineData("lms")]
+    [InlineData("ipndm")]
+    [InlineData("deis")]
+    [InlineData("uni_pc")]
+    [InlineData("sa_solver")]
+    [InlineData("er_sde")]
+    [InlineData("dpmpp_3m_sde")]
+    public void MultistepSampler_ResetClearsHistoryBetweenRuns(string name)
     {
         IBackend backend = new CpuBackend();
         float[] sigmas = Sigmas(10);
-        ISampler sampler = SamplerRegistry.Create("dpmpp_2m", sigmas, seed: 0);
+        ISampler sampler = SamplerRegistry.Create(name, sigmas, seed: 0);
 
         float[] Run()
         {

@@ -24,6 +24,9 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     /// <summary>Returns the initial noise scale factor (sigma[0] for flow matching).</summary>
     public float InitialNoiseSigma => _sigmas.Length > 0 ? _sigmas[0] : 1.0f;
 
+    /// <summary>The schedule shift <c>s</c> in <c>σ = s·t/(1 + (s − 1)·t)</c>.</summary>
+    public float Shift => _shift;
+
     /// <summary>Flow-match schedulers do not scale model input. Always returns 1.0.</summary>
     public float ScaleModelInput(int stepIndex) => 1.0f;
 
