@@ -72,6 +72,12 @@ internal static class AceStepMusicModel
             {
                 sniff.Load(mainPath);
                 isV1 = AceStepCheckpointConverter.IsV1AllInOne(sniff.Descriptors);
+                // A checkpoint selected by path (SwarmUI's core model list) arrives without a variant; a Hartsy
+                // artifact names its own, and the variant decides the config, CFG and step defaults.
+                if (variant.Length == 0 && sniff.Metadata?.GetValueOrDefault("hartsy.model_id") is { Length: > 0 } stamped)
+                {
+                    variant = stamped;
+                }
             }
             if (isV1)
             {
@@ -84,6 +90,13 @@ internal static class AceStepMusicModel
 
         // The sidecar config.json (downloaded with the variant) drives dims + is_turbo; absent = 2B turbo defaults.
         string sidecarConfig = Path.ChangeExtension(mainPath, null) + ".config.json";
+        if (!File.Exists(sidecarConfig)
+            && AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).FirstOrDefault(a => a.Role == "config") is { } configAsset)
+        {
+            // Not beside the checkpoint (a renamed or converted file): use the variant's own config. Without it an
+            // XL checkpoint was built at 2B width and a base/sft one ran as turbo.
+            sidecarConfig = await ModelDownloader.EnsureSideModelAsync(configAsset, downloadIfMissing: true, null, cancel).ConfigureAwait(false);
+        }
         AceStep15Config config = File.Exists(sidecarConfig)
             ? AceStep15Config.FromJson(await File.ReadAllTextAsync(sidecarConfig, cancel).ConfigureAwait(false))
             : new AceStep15Config();
