@@ -17,6 +17,9 @@ public sealed class VulkanPipelineCacheTests
     private readonly ITestOutputHelper _output;
     public VulkanPipelineCacheTests(ITestOutputHelper output) => _output = output;
 
+    /// <summary>VkPipelineCacheHeaderVersionOne: 16 bytes of header plus the 16-byte pipeline cache UUID.</summary>
+    private const long HeaderOnlyBytes = 32;
+
     private static bool VulkanAvailable()
     {
         try { using VulkanInstance instance = new(); return instance.EnumeratePhysicalDevices().Length > 0; }
@@ -56,6 +59,16 @@ public sealed class VulkanPipelineCacheTests
 
         long secondSize = new FileInfo(cachePath).Length;
         _output.WriteLine($"Cache size after second backend: {secondSize} bytes");
+        // A pipeline cache that holds no pipelines is still a valid one: the blob is a 32-byte header and the
+        // spec never obliges a driver to persist compiled pipelines. llvmpipe is such a driver. Whether the
+        // driver fills the cache is read from the FIRST backend's file, so this stays a real assertion on ours.
+        if (firstSize <= HeaderOnlyBytes)
+        {
+            _output.WriteLine($"Driver does not persist pipeline binaries (first cache was {firstSize} bytes, "
+                + "header only) — asserting the round-trip, not the contents.");
+            Assert.True(secondSize > 0, $"Cache vanished across backends: {secondSize} bytes");
+            return;
+        }
         // Drivers are allowed to drop pipeline-cache entries that don't match the current state
         // (a flush of stale entries on reload is normal — the spec doesn't require monotonic
         // growth). Just assert the second backend produced a non-trivially-sized cache, i.e.
