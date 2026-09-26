@@ -790,6 +790,15 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   constructor) matching `CudaBackend.EnableW8A8`'s existing pattern — tests flip it directly
   (`backend.EnableInt8Linear = true`) with no env var or fresh process needed. Prefer this pattern for any
   new opt-in switch that correctness tests need to exercise both on and off.
+- **Run the whole Vulkan suite against a non-NVIDIA ICD before believing it is vendor-neutral.** Mesa ships a
+  software Vulkan driver, so this costs nothing and needs no AMD or Intel card:
+  `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json HARTSY_REQUIRE_BACKENDS=1 HARTSY_ALLOW_SOFTWARE_GPU=1
+  dotnet test tests/HartsyInference.Vulkan.Tests --filter Category=GpuIntegration`. Two things make it worth the
+  wall-clock: llvmpipe reports **subgroup size 8**, so any reduction that assumes a 32- or 64-wide wave is wrong
+  there and only there (this is how the cross-subgroup fold bug in `VulkanCrossVendorTests` was found), and it
+  advertises no cooperative matrix, so every coopmat path takes its fallback — the branch NVIDIA hardware never
+  exercises. `HARTSY_ALLOW_SOFTWARE_GPU=1` is required or `BackendGate` refuses the device and the tests that use
+  it fail for that reason rather than a real one. It is a correctness oracle only; never read a timing off it.
 - **The Wan-video-scale smoke test (`Backend_FlashAttention_WanVideoScale_CompletesWithoutOom`) takes
   hours on llvmpipe** (measured: killed after 2.85 CPU-hours, still running) — software-rasterized
   scalar execution of 16384×24 = 393,216 workgroups × ~512 serial KV-tile iterations each has no
