@@ -29,6 +29,9 @@ public sealed class SideModelAutofetchTests : IDisposable
             Directory.Delete(_tempModelsRoot, recursive: true);
     }
 
+    /// <summary>Set to <c>1</c> to let the one test here that must reach HuggingFace actually run.</summary>
+    private const string RequireNetworkEnvVar = "HARTSY_ALLOW_NETWORK_TESTS";
+
     private static ModelAsset Missing() => new()
     {
         Repo = "hartsy-tests/does-not-exist",
@@ -54,11 +57,17 @@ public sealed class SideModelAutofetchTests : IDisposable
         Assert.Contains(asset.Repo, ex.Message);
     }
 
-    // Reaching the download is the assertion, and reaching it means a real request, so this stays out of the unit lane.
-    [Fact(Skip = "Network test — run manually with: dotnet test --filter Network=Real")]
+    // Reaching the download is the assertion, and reaching it means a real request, so this stays out of the unit
+    // lane by trait and gates on an env var at runtime — an unconditional Skip would make it unrunnable even under
+    // the filter that is supposed to select it.
+    [Fact]
     [Trait("Network", "Real")]
     public async Task AutofetchOn_TriesToDownload_RatherThanTellingTheOperatorToDoIt()
     {
+        if (Environment.GetEnvironmentVariable(RequireNetworkEnvVar) != "1")
+        {
+            return;   // dotnet test --filter Network=Real with HARTSY_ALLOW_NETWORK_TESTS=1
+        }
         KnobStore.Set(EngineKnobs.SideModelAutofetch, true);
         Exception? ex = await Record.ExceptionAsync(
             () => ModelDownloader.EnsureSideModelAsync(Missing(), onProgress: null, CancellationToken.None));
