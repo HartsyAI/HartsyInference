@@ -1,5 +1,6 @@
 {
   // ACE-Step 1.5 XL turbo from the official fp32 shards, merged and cast to bf16 — the single file the engine loads.
   "name": "acestep-xl-turbo", "model": "acestep", "variant": "xl-turbo", "source_repo": "ACE-Step/acestep-v15-xl-turbo", "dtype": "bf16",
+  "name": "acestep-xl-turbo", "model": "acestep", "variant": "xl-turbo", "stands_in_for": [ "music/acestep/acestep-v15-xl-turbo.safetensors" ],
   "components": [ { "source_file": "official-xl-turbo/model.safetensors.index.json" } ]
 }

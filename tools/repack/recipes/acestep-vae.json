@@ -3,6 +3,7 @@
   // (key map generated from the Oobleck block structure and verified tensor by tensor) with the Snake parameters'
   // (1, C, 1) shape squeezed to (C). Identical, tensor for tensor, to Comfy-Org's ace_1.5_vae.safetensors.
   "name": "acestep-vae", "model": "acestep", "component": "vae", "source_repo": "ACE-Step/Ace-Step1.5",
+  "name": "acestep-vae", "model": "acestep", "component": "vae", "stands_in_for": [ "music/Comfy-Org--ace_step_1.5_ComfyUI_files/split_files/vae/ace_1.5_vae.safetensors" ],
   "components": [ { "source_file": "ACE-Step--Ace-Step1.5/vae/diffusion_pytorch_model.safetensors", "key_map": "acestep-vae.keymap.json" } ],
   "squeeze": [ "*.alpha", "*.beta" ]
 }

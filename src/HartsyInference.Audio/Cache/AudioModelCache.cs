@@ -52,6 +52,7 @@ public static class AudioModelCache
         // into ours without renaming. Only the org/name separator becomes `--`; existing
         // dashes in repo names stay single.
         string safe = hfRepoId.Replace("/", "--", StringComparison.Ordinal);
+        AudioStandIns.EnsureSynced(CacheRoot);
         string dir = Path.Combine(CacheRoot, category, safe);
         Directory.CreateDirectory(dir);
         return dir;
@@ -76,6 +77,9 @@ public static class AudioModelCache
     {
         string repoDir = GetRepoDirectory(hfRepoId, category);
         string localPath = Path.Combine(repoDir, filename);
+        if (IsUsableFile(localPath)) return localPath;
+        // A converted checkpoint installed since the last scan may stand in for this file.
+        AudioStandIns.Resync(CacheRoot);
         if (IsUsableFile(localPath)) return localPath;
 
         // Coalesce concurrent requests for the same file so we don't double-download.
@@ -175,6 +179,7 @@ public static class AudioModelCache
         CancellationToken ct = default)
     {
         string localPath = Path.Combine(GetRepoDirectory(hfRepoId, category), filename);
+        AudioStandIns.Resync(CacheRoot);
         if (IsUsableFile(localPath))
         {
             return true;

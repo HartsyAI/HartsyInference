@@ -2,6 +2,7 @@
   // The seconds-total conditioner from the same official checkpoint, prefix removed.
   "name": "stableaudio-conditioner", "model": "stableaudio", "variant": "open-small", "component": "conditioner",
   "source_repo": "stabilityai/stable-audio-open-small",
+  "stands_in_for": [ "music/FastVideo--stable-audio-open-small-Diffusers/conditioner/diffusion_pytorch_model.safetensors" ],
   "components": [ { "source_file": "stabilityai--stable-audio-open-small/model.safetensors", "renames": [ ["^conditioner\\.", ""] ] } ],
   "drop": [ "model.model.*", "pretransform.*" ]
 }

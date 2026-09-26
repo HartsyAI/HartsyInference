@@ -4,6 +4,7 @@
   // lora step repeats. alpha and rank live in its config.json (128 and 64), not in the weights.
   "name": "sheetsage2", "model": "sheetsage2", "variant": "bf16",
   "source_repo": "m-a-p/SheetSage2",
+  "stands_in_for": [ "music/Comfy-Org--YuE2/audio_encoders/sheetsage2_bf16.safetensors" ],
   "dtype": "bf16",
   "components": [
     { "source_file": "m-a-p--MERT-v2-FullSong/model.safetensors", "prefix": "encoder." },

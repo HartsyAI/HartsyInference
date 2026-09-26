@@ -3,6 +3,7 @@
   // the embeddings the depth decoder reads kept in fp32; the unused audio-token embedding dropped. Identical, tensor for
   // tensor, to unsloth/csm-1b.
   "name": "csm", "model": "csm", "variant": "1b", "source_repo": "sesame/csm-1b", "dtype": "fp16",
+  "name": "csm", "model": "csm", "variant": "1b", "stands_in_for": [ "tts/unsloth--csm-1b/model.safetensors" ],
   "components": [ { "source_file": "sesame--csm-1b/transformers.safetensors.index.json" } ],
   "drop": [ "backbone_model.embed_tokens.embed_audio_tokens.weight" ],
   "keep_dtype": [ "*norm*", "*layer_scale*", "*.bias", "*conv*", "depth_decoder.model.embed_tokens.*",

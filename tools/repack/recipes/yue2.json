@@ -5,6 +5,7 @@
   "model": "yue2",
   "variant": "bf16",
   "source_repo": "m-a-p/YuE2-3B",
+  "stands_in_for": [ "music/Comfy-Org--YuE2/checkpoints/yue2_3b_bf16.safetensors" ],
   "components": [
     {
       "source_file": "m-a-p--YuE2-3B/model.safetensors",
