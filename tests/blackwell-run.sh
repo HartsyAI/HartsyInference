@@ -285,8 +285,10 @@ if [ "$WITH_SWARM" = 1 ] && stage_wanted swarm; then
         # names no pairing. Pin both, and write the SHAs into the bundle so the result says what was tested.
         # fetch <ref> + FETCH_HEAD, not origin/<ref>: a directory left by an earlier run may be a shallow clone
         # with no remote-tracking branch, and this form works for both.
-        ( cd "$SWARM_DIR" && git fetch -q origin "$SWARM_REF" && git checkout -q --detach FETCH_HEAD ) >>"$LOG" 2>&1 || { swarm_fail=1; log "swarm: could not check out SwarmUI $SWARM_REF"; }
-        ( cd "$EXT_DIR" && git fetch -q origin "$SWARM_EXT_REF" && git checkout -q --detach FETCH_HEAD ) >>"$LOG" 2>&1 || { swarm_fail=1; log "swarm: could not check out the extension $SWARM_EXT_REF"; }
+        # -f and clean, not a plain checkout: a reused tree with local edits would build code the recorded SHA
+        # does not describe, which is the failure this pinning exists to prevent.
+        ( cd "$SWARM_DIR" && git fetch -q origin "$SWARM_REF" && git checkout -qf --detach FETCH_HEAD && git clean -qfdx -e '/Data*' -e '/Output' ) >>"$LOG" 2>&1 || { swarm_fail=1; log "swarm: could not check out SwarmUI $SWARM_REF"; }
+        ( cd "$EXT_DIR" && git fetch -q origin "$SWARM_EXT_REF" && git checkout -qf --detach FETCH_HEAD && git clean -qfdx ) >>"$LOG" 2>&1 || { swarm_fail=1; log "swarm: could not check out the extension $SWARM_EXT_REF"; }
         printf 'swarmui=%s\nextension=%s\nengine_pin=%s\n' \
             "$(git -C "$SWARM_DIR" rev-parse --short HEAD 2>/dev/null)" \
             "$(git -C "$EXT_DIR" rev-parse --short HEAD 2>/dev/null)" \
@@ -309,6 +311,11 @@ if [ "$WITH_SWARM" = 1 ] && stage_wanted swarm; then
     if [ "$swarm_fail" = 0 ]; then
         # The launcher is a native host, NOT `dotnet SwarmUI.dll` — dotnet reads that path as a subcommand and
         # reports the file missing, which is a confusing way to lose twenty minutes on a rented card.
+        # A server already on this port would answer the probe below while the one just launched died on bind,
+        # and the stage would then report a pass for code it never loaded.
+        if (exec 3<>"/dev/tcp/127.0.0.1/$SWARM_PORT") 2>/dev/null; then
+            exec 3<&-; swarm_fail=1; log "swarm: port $SWARM_PORT is already in use; refusing to test against another server"
+        fi
         ( cd "$SWARM_DIR" && ./src/bin/live_release/SwarmUI --data_dir "$SWARM_DATA" --settings_file "$SWARM_DATA/Settings.fds" ) >"$OUT/logs/swarm-server.log" 2>&1 &
         SWARM_PID=$!
         # The server is a background process: a budget timeout that kills the foreground would otherwise leave it
@@ -321,6 +328,7 @@ if [ "$WITH_SWARM" = 1 ] && stage_wanted swarm; then
             curl -s -m 4 -X POST "http://127.0.0.1:$SWARM_PORT/API/GetNewSession" -H 'Content-Type: application/json' -d '{}' 2>/dev/null | grep -q session_id && { swarm_up=1; break; }
             sleep 2
         done
+        kill -0 "$SWARM_PID" 2>/dev/null || { swarm_up=0; swarm_fail=1; log "swarm: the server we launched is gone — see $OUT/logs/swarm-server.log"; }
         if [ "$swarm_up" = 1 ]; then
             SID=$(curl -s -m 10 -X POST "http://127.0.0.1:$SWARM_PORT/API/GetNewSession" -H 'Content-Type: application/json' -d '{}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["session_id"])')
             REL=$(within_budget curl -s -m 900 -X POST "http://127.0.0.1:$SWARM_PORT/API/GenerateText2Image" -H 'Content-Type: application/json' \
