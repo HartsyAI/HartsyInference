@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine.HuggingFace;
 
 namespace HartsyInference.Engine;
@@ -58,11 +59,11 @@ public static class ModelDownloader
     }
 
     /// <summary>Ensures a single side model is on disk (downloading + verifying under its lock) and returns its local
-    /// path. The default behavior is strict: if the file is not present, this throws before any network call.
-    /// Extension or caller flows that explicitly opt in can pass <c>downloadIfMissing: true</c>.</summary>
+    /// path. A missing asset is fetched unless <c>paths.sideModelAutofetch</c> is off; a caller that must never reach
+    /// the network regardless passes <c>downloadIfMissing: false</c> explicitly.</summary>
     public static async Task<string> EnsureSideModelAsync(ModelAsset asset, Action<ModelAsset, double>? onProgress, CancellationToken ct)
     {
-        return await EnsureSideModelAsync(asset, downloadIfMissing: false, onProgress, ct).ConfigureAwait(false);
+        return await EnsureSideModelAsync(asset, EngineKnobs.SideModelAutofetch.Value, onProgress, ct).ConfigureAwait(false);
     }
 
     /// <summary>Ensures a single side model is on disk and returns its local path.
@@ -88,9 +89,14 @@ public static class ModelDownloader
 
             if (!allowDownload)
             {
+                // allowDownload false can come from the setting or from a caller that must not reach the network;
+                // saying the wrong one sends the operator to flip a setting that would change nothing.
+                string why = EngineKnobs.SideModelAutofetch.Value
+                    ? "this caller does not download"
+                    : "paths.sideModelAutofetch is off";
                 throw new FileNotFoundException(
-                    $"Model asset '{asset.Role}' is missing locally: {target}. Download it first with the catalog pull workflow "
-                    + $"for '{asset.Repo}'.");
+                    $"Model asset '{asset.Role}' is missing locally: {target}, and fetching it is disabled ({why}). "
+                    + $"Download it from '{asset.Repo}' ({asset.RepoPath}).");
             }
 
             IProgress<double> progress = new Progress<double>(fraction => onProgress?.Invoke(asset, fraction));

@@ -49,8 +49,8 @@ public sealed class WanS2VRecipe : IVideoRecipe
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): LoRA and VideoRequest.Components overrides for the umT5 / VAE picks are deferred.
-        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         // Side-model loaders and the checkpoint share one bag: the container is format-agnostic, so what it hands
         // back is an IDisposable rather than a SafeTensorsLoader.
@@ -92,7 +92,7 @@ public sealed class WanS2VRecipe : IVideoRecipe
 
             Wav2Vec2EncoderConfig w2vConfig = audioDim >= 1024 ? Wav2Vec2EncoderConfig.Large : Wav2Vec2EncoderConfig.Base;
             ModelAsset w2vAsset = audioDim >= 1024 ? SideModels.Wav2Vec2Large : SideModels.Wav2Vec2Base;
-            string w2vPath = ModelDownloader.EnsureSideModelAsync(w2vAsset, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string w2vPath = ModelDownloader.EnsureSideModelAsync(w2vAsset, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader w2vLoader = new SafeTensorsLoader();
             w2vLoader.Load(w2vPath);
             loaders.Add(w2vLoader);

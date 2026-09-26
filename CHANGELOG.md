@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.177
+
+- **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
+  encoder, VAE and CLIP through `ModelDownloader.EnsureSideModelAsync`, whose three-argument overload was strict:
+  an absent file threw before any network call and told the operator to fetch it by hand. Found on a rented
+  Blackwell card, where Z-Image Turbo refused to generate through SwarmUI because `VAE/Flux/ae.safetensors` was
+  not on disk — with the repo, the path and the hash all sitting in the catalog entry. The overload now follows
+  `paths.sideModelAutofetch`, new and **on by default**, which is what SwarmUI's own ComfyUI backend does; LTX-2.5
+  already opted in per-call and can stop special-casing it. Turning the setting off restores the old behavior for
+  an air-gapped install, and the error then names the setting and the repo rather than a bare path. A caller that
+  must never reach the network still passes `downloadIfMissing: false` explicitly.
+
 ## alpha.175
 
 - **The Blackwell kernel never compiled, and it took the whole CUDA backend down with it.** `block_quant.sm120.ptx`,
