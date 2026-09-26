@@ -55,6 +55,11 @@ public static partial class EngineKnobs
         Bool("diagnostics.vkProfile", false, KnobScope.Construction, KnobDomain.Diagnostics,
             "Enables per-op host-side Vulkan timing and buffer create/destroy accounting.");
 
+    /// <summary>Times every Vulkan dispatch on the GPU with timestamp queries and reports GPU time per op.</summary>
+    public static readonly Knob<bool> VkProfileGpu =
+        Bool("diagnostics.vkProfileGpu", false, KnobScope.Construction, KnobDomain.Diagnostics,
+            "Times every Vulkan dispatch on the GPU with timestamp queries and reports GPU time per op.");
+
     /// <summary>Logs every enumerated coopmat2 flexible-dimension config during Vulkan device setup.</summary>
     public static readonly Knob<bool> VkDumpCoopmat2 =
         Bool("diagnostics.vkDumpCoopmat2", false, KnobScope.Construction, KnobDomain.Diagnostics,

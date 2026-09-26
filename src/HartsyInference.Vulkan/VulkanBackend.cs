@@ -22,6 +22,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     private readonly VulkanKernelRegistry _kernels;
     private readonly VulkanGpuTransferHelper _xfer;
     private readonly VulkanProfiler _profiler = new();
+    private readonly VulkanGpuOpTimer? _gpuOpTimer;
+    private string _currentOp = "";
     private readonly string _spvDir;
     private bool _disposed;
 
@@ -142,6 +144,10 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // when measuring on AMD/Intel — outcome there may differ.
         bool enablePushDescriptor = Vk.HasPushDescriptor && EngineKnobs.VkPushDescriptors.Value;
         _descriptors = new VulkanDescriptorManager(_vkDevice.Handle, _stream, enablePushDescriptor: enablePushDescriptor);
+        if (EngineKnobs.VkProfileGpu.Value)
+        {
+            _gpuOpTimer = new VulkanGpuOpTimer(_vkDevice.Handle, Vk.TimestampPeriod);
+        }
         _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
         _xfer = new VulkanGpuTransferHelper(_vkDevice.Handle, _allocator, in memProps, Vk, _stream);
@@ -337,6 +343,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             return;
         }
 
+        if (_gpuOpTimer is { Full: true })
+        {
+            DrainStream();
+            _gpuOpTimer.Resolve();
+        }
+
         // A pool set is taken before the command buffer is touched: allocating can flip pools, and a flip may
         // submit the open recording to retire the other pool, which must not split this dispatch across buffers.
         ulong dstSet = 0;
@@ -347,6 +359,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
 
         nint cb = _stream.AcquireRecording();
+        _gpuOpTimer?.Begin(cb, _currentOp);
         VulkanApi.vkCmdBindPipeline(cb, VkPipelineBindPoint.Compute, kernel.Pipeline);
 
         ulong layout = kernel.PipelineLayout;
@@ -369,6 +382,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
 
         VulkanApi.vkCmdDispatch(cb, groupX, groupY, groupZ);
+        _gpuOpTimer?.End(cb);
 
         // Conservative: emit a global compute->compute barrier so the next dispatch sees this output.
         _stream.RecordGlobalComputeBarrier();
@@ -500,7 +514,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <inheritdoc/>
     /// <remarks>Nothing to do on entry: Vulkan has no current-context notion, and the drain and sweep the base
     /// performs are the whole of what this backend needed here.</remarks>
-    protected override void OnOpBegin(string opName) { }
+    protected override void OnOpBegin(string opName) => _currentOp = opName;
 
     /// <inheritdoc/>
     /// <remarks>Waits first. A slab is only empty once the deferred frees standing against the timeline have been
@@ -4405,6 +4419,28 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // we lose the device just to be tidy).
         try { _profiler.Dump(); }
         catch (Exception ex) { Logs.Warning($"Vulkan Dispose: profiler dump failed: {ex}"); }
+        if (_gpuOpTimer is not null)
+        {
+            try
+            {
+                _gpuOpTimer.Resolve();
+                string? file = EngineKnobs.VkProfileFile.Value;
+                if (string.IsNullOrEmpty(file))
+                {
+                    _gpuOpTimer.Dump(Console.Error);
+                }
+                else
+                {
+                    using StreamWriter writer = new(file + ".gpu.txt");
+                    _gpuOpTimer.Dump(writer);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                Logs.Warning($"Vulkan Dispose: GPU op profile failed: {ex.Message}");
+            }
+            _gpuOpTimer.Dispose();
+        }
         if (_profiler.IsEnabled && (_coopmatGemmCount + _coopmat2GemmCount + _tiledGemmCount) > 0)
         {
             long total = _coopmatGemmCount + _coopmat2GemmCount + _tiledGemmCount;
