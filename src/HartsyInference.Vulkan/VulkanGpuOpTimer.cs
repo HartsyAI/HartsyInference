@@ -10,6 +10,8 @@ internal sealed class VulkanGpuOpTimer : IDisposable
     private readonly ulong _queryPool;
     private readonly double _periodNs;
     private readonly string[] _ops = new string[Capacity];
+    private readonly string[] _kernels = new string[Capacity];
+    private readonly Dictionary<string, (double Ms, long Dispatches)> _kernelTotals = new(StringComparer.Ordinal);
     private readonly Dictionary<string, (double Ms, long Dispatches)> _totals = new(StringComparer.Ordinal);
     private int _used;
     private bool _needsReset = true;
@@ -32,7 +34,7 @@ internal sealed class VulkanGpuOpTimer : IDisposable
     internal bool Full => _used >= Capacity;
 
     /// <summary>Records the start timestamp for a dispatch belonging to <paramref name="opName"/>.</summary>
-    internal void Begin(nint cb, string opName)
+    internal void Begin(nint cb, string opName, string kernelName)
     {
         if (_needsReset)
         {
@@ -40,6 +42,7 @@ internal sealed class VulkanGpuOpTimer : IDisposable
             _needsReset = false;
         }
         _ops[_used] = opName;
+        _kernels[_used] = kernelName;
         VulkanApi.vkCmdWriteTimestamp2(cb, VkPipelineStageFlags2.AllCommands, _queryPool, (uint)(_used * 2));
     }
 
@@ -68,21 +71,33 @@ internal sealed class VulkanGpuOpTimer : IDisposable
         for (int k = 0; k < _used; k++)
         {
             double ms = (results[(2 * k) + 1] - results[2 * k]) * _periodNs / 1_000_000.0;
-            (double total, long count) = _totals.TryGetValue(_ops[k], out (double, long) v) ? v : (0.0, 0L);
-            _totals[_ops[k]] = (total + ms, count + 1);
+            Accumulate(_totals, _ops[k], ms);
+            Accumulate(_kernelTotals, _kernels[k], ms);
         }
         _used = 0;
         _needsReset = true;
     }
 
-    /// <summary>Writes the per-op GPU time table, largest first.</summary>
+    private static void Accumulate(Dictionary<string, (double Ms, long Dispatches)> totals, string key, double ms)
+    {
+        (double total, long count) = totals.TryGetValue(key, out (double, long) v) ? v : (0.0, 0L);
+        totals[key] = (total + ms, count + 1);
+    }
+
+    /// <summary>Writes the per-op and per-kernel GPU time tables, largest first.</summary>
     internal void Dump(TextWriter writer)
+    {
+        DumpTable(writer, "op", _totals);
+        DumpTable(writer, "kernel", _kernelTotals);
+    }
+
+    private static void DumpTable(TextWriter writer, string what, Dictionary<string, (double Ms, long Dispatches)> _totals)
     {
         double all = _totals.Values.Sum(v => v.Ms);
         writer.WriteLine();
-        writer.WriteLine("=== VulkanBackend GPU time per op (timestamp queries) ===");
+        writer.WriteLine($"=== VulkanBackend GPU time per {what} (timestamp queries) ===");
         writer.WriteLine($"  Total GPU: {all:F1}ms over {_totals.Values.Sum(v => v.Dispatches):N0} dispatches");
-        writer.WriteLine($"{"Op",-36} {"Dispatches",11} {"GPU(ms)",11} {"Avg(ms)",9} {"%",6}");
+        writer.WriteLine($"{what,-36} {"Dispatches",11} {"GPU(ms)",11} {"Avg(ms)",9} {"%",6}");
         writer.WriteLine(new string('-', 78));
         foreach (KeyValuePair<string, (double Ms, long Dispatches)> kvp in _totals.OrderByDescending(p => p.Value.Ms).Take(30))
         {

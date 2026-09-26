@@ -109,11 +109,20 @@ public sealed partial class VulkanBackend
         BinaryWriteUInt(pc, o, g.COffset);
     }
 
+    /// <summary>Output tile for a coopmat2 GEMM: the largest of 128×256 / 128×128 / 64×64 the problem fills, rounded to the
+    /// device granularity. The granularity alone (32×32 on Ada) leaves the tensor cores waiting on loads.</summary>
+    private (uint BM, uint BN) CoopMat2Tile(long m, long n)
+    {
+        (uint bm, uint bn) = m >= 128 && n >= 256 ? (128u, 256u) : m >= 128 && n >= 128 ? (128u, 128u) : (64u, 64u);
+        uint mg = Vk.CoopMat2MGranularity;
+        uint ng = Vk.CoopMat2NGranularity;
+        return (Math.Max(mg, bm / mg * mg), Math.Max(ng, bn / ng * ng));
+    }
+
     /// <summary>VK_NV_cooperative_matrix2: no alignment requirement (the hardware clamp drops out-of-bounds accesses); the [M,K] × [N,K]ᵀ pair only.</summary>
     private void DispatchCoopMat2(in GemmOperands g)
     {
-        uint BM = Vk.CoopMat2MGranularity;
-        uint BN = Vk.CoopMat2NGranularity;
+        (uint BM, uint BN) = CoopMat2Tile(g.M, g.N);
         const uint BK = 64u;
         bool outputIsF32 = g.OutputDtype == DType.F32;
         ReadOnlySpan<SpecConstant> spec = new SpecConstant[]

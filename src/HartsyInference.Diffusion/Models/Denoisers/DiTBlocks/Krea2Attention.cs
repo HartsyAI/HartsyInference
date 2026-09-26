@@ -128,6 +128,45 @@ public sealed unsafe class Krea2Attention
             rope!.ApplyGpuGqa(backend, qNorm, kNorm, _numHeads, _numKvHeads);
         }
 
+        float scale = 1.0f / MathF.Sqrt(_headDim);
+        Tensor attnFlat;
+        if (batch == 1 && (rope is null || gpuRope) && backend.SupportsTokenMajorGqaAttention)
+        {
+            // The rotated [B, S, H, D] tensors are already token-major, so a backend reading GQA K/V in place skips
+            // all four permutes and both head repeats.
+            attnFlat = new Tensor(flatShape, act);
+            backend.ScaledDotProductAttentionTokenMajor(attnFlat, qNorm, kNorm, v, attnBias, _numHeads, _numKvHeads, _headDim,
+                scale, allowF16: true);
+            qNorm.Dispose();
+            kNorm.Dispose();
+            v.Dispose();
+        }
+        else
+        {
+            attnFlat = AttendHeadMajor(backend, qNorm, kNorm, v, rope, gpuRope, attnBias, batch, seqLen, qMhShape, kvMhShape,
+                flatShape, act, scale);
+        }
+
+        // out = attn · sigmoid(gate)
+        Tensor sig = new Tensor(flatShape, act);
+        backend.Sigmoid(sig, gate);
+        gate.Dispose();
+        Tensor gated = new Tensor(flatShape, act);
+        backend.Mul(gated, attnFlat, sig);
+        attnFlat.Dispose();
+        sig.Dispose();
+
+        Tensor outp = new Tensor(flatShape, act);
+        backend.Linear(outp, gated, _toOut!, null);
+        gated.Dispose();
+        return outp;
+    }
+
+    /// <summary>Permutes to head-major, repeats GQA K/V heads, runs SDPA and permutes back to <c>[B, S, hidden]</c>.</summary>
+    private Tensor AttendHeadMajor(IBackend backend, Tensor qNorm, Tensor kNorm, Tensor v, FluxRope? rope, bool gpuRope,
+        Tensor? attnBias, int batch, int seqLen, TensorShape qMhShape, TensorShape kvMhShape, TensorShape flatShape, DType act,
+        float scale)
+    {
         // Permute [B, S, H, D] → [B, H, S, D] for SDPA.
         Tensor qMh = new Tensor(qMhShape, act);
         backend.Permute0213(qMh, qNorm, seqLen, _numHeads, _headDim);
@@ -162,7 +201,6 @@ public sealed unsafe class Krea2Attention
             vMh.Dispose();
         }
 
-        float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnMh = new Tensor(qMhShape, act);
         // allowF16: Krea2 applies zero-centered RMSNorm to Q and K (per-head, over headDim) before attention, so
         // pre-softmax scores are bounded and the F16 SDPA path (half the score-matrix HBM traffic + F16 tensor
@@ -176,20 +214,7 @@ public sealed unsafe class Krea2Attention
         Tensor attnFlat = new Tensor(flatShape, act);
         backend.Permute0213(attnFlat, attnMh, _numHeads, seqLen, _headDim);
         attnMh.Dispose();
-
-        // out = attn · sigmoid(gate)
-        Tensor sig = new Tensor(flatShape, act);
-        backend.Sigmoid(sig, gate);
-        gate.Dispose();
-        Tensor gated = new Tensor(flatShape, act);
-        backend.Mul(gated, attnFlat, sig);
-        attnFlat.Dispose();
-        sig.Dispose();
-
-        Tensor outp = new Tensor(flatShape, act);
-        backend.Linear(outp, gated, _toOut!, null);
-        gated.Dispose();
-        return outp;
+        return attnFlat;
     }
 }
 

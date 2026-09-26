@@ -359,7 +359,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
 
         nint cb = _stream.AcquireRecording();
-        _gpuOpTimer?.Begin(cb, _currentOp);
+        _gpuOpTimer?.Begin(cb, _currentOp, kernel.Name);
         VulkanApi.vkCmdBindPipeline(cb, VkPipelineBindPoint.Compute, kernel.Pipeline);
 
         ulong layout = kernel.PipelineLayout;
@@ -2305,6 +2305,16 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         mask = expandedMask ?? mask;
 
         int hq = (int)query.Shape[1], hkv = (int)key.Shape[1], headDim = (int)query.Shape[3];
+        int batch = (int)query.Shape[0], sq = (int)sqRows, skv = (int)skvRows;
+        bool f16Inputs = query.DType == DType.F16 && key.DType == DType.F16 && value.DType == DType.F16;
+        if ((allowF16 || f16Inputs) && CanUseFlashCm2(headDim, hq, hkv, sq, skv, mask))
+        {
+            uint qHead = (uint)(sq * headDim), kvHead = (uint)(skv * headDim);
+            DispatchFlashCm2(output, query, key, value, mask, scale, batch, hq, hkv, sq, skv, headDim,
+                new AttnStrides((uint)headDim, qHead, qHead * (uint)hq), new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv),
+                new AttnStrides((uint)headDim, kvHead, kvHead * (uint)hkv), new AttnStrides((uint)headDim, qHead, qHead * (uint)hq));
+            return;
+        }
         if (headDim <= FlashMaxHeadDim && hkv > 0 && hq % hkv == 0)
         {
             DispatchFlashAttention(output, query, key, value, mask, scale,
