@@ -52,10 +52,16 @@ public sealed class VulkanPipelineCacheTests
 
         // Second backend: load the cache, build the same kernels, dispose. Cache size should
         // be ≥ firstSize (driver may add new entries; never shrinks if all entries are still valid).
+        int reloadedBytes;
         using (VulkanBackend backend = new())
         {
+            reloadedBytes = backend.PipelineCacheInitialDataBytes;
             BuildAFewKernels(backend);
         }
+        // The round trip, asserted on the read rather than on the file the second backend then writes: on a driver
+        // that persists nothing both files are a 32-byte header, so a size check alone would pass without a reload.
+        _output.WriteLine($"Second backend loaded {reloadedBytes} bytes of cache data");
+        Assert.Equal(firstSize, reloadedBytes);
 
         long secondSize = new FileInfo(cachePath).Length;
         _output.WriteLine($"Cache size after second backend: {secondSize} bytes");
@@ -67,7 +73,7 @@ public sealed class VulkanPipelineCacheTests
             _output.WriteLine($"Driver does not persist pipeline binaries (first cache was {firstSize} bytes, "
                 + "header only) — asserting the round-trip, not the contents.");
             Assert.True(secondSize > 0, $"Cache vanished across backends: {secondSize} bytes");
-            return;
+            return;   // the reload itself is already asserted above, on the byte count the driver was handed
         }
         // Drivers are allowed to drop pipeline-cache entries that don't match the current state
         // (a flush of stale entries on reload is normal — the spec doesn't require monotonic
