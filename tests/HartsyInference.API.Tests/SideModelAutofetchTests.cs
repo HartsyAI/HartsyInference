@@ -6,9 +6,9 @@ namespace HartsyInference.API.Tests;
 
 /// <summary>A generation that stops to tell the operator to go and download a VAE by hand is a generation that
 /// failed, so the overload every recipe calls now fetches a missing side model. These pin that default and its
-/// escape hatch without touching the network: the asset names a repo that does not exist, so autofetch-off throws
-/// <see cref="FileNotFoundException"/> before any request and autofetch-on fails as a download instead — two
-/// outcomes the exception type tells apart. Points the models root at a hermetic fixture, so nothing here can
+/// escape hatch. The asset names a repo that does not exist, so autofetch-off throws <see cref="FileNotFoundException"/>
+/// before any request; the autofetch-on case has to reach the download to prove anything, so it carries
+/// <c>Network=Real</c> and is skipped by default. Points the models root at a hermetic fixture, so nothing here can
 /// resolve to a real file on the machine running it.</summary>
 [Collection("ModelsRootKnob")]
 public sealed class SideModelAutofetchTests : IDisposable
@@ -54,7 +54,9 @@ public sealed class SideModelAutofetchTests : IDisposable
         Assert.Contains(asset.Repo, ex.Message);
     }
 
-    [Fact]
+    // Reaching the download is the assertion, and reaching it means a real request, so this stays out of the unit lane.
+    [Fact(Skip = "Network test — run manually with: dotnet test --filter Network=Real")]
+    [Trait("Network", "Real")]
     public async Task AutofetchOn_TriesToDownload_RatherThanTellingTheOperatorToDoIt()
     {
         KnobStore.Set(EngineKnobs.SideModelAutofetch, true);

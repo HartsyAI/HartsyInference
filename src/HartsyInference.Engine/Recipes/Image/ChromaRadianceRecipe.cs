@@ -46,7 +46,7 @@ public sealed class ChromaRadianceRecipe : IArchitectureRecipe
     {
         // TODO(E-IMG-4): honor a user-picked T5 override from ImageRequest.Components (the SwarmUI loader read
         // input.Get(T2IParamTypes.T5XXLModel)); this always takes the canonical SideModels entry.
-        string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;

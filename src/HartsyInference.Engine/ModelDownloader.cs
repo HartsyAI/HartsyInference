@@ -59,10 +59,8 @@ public static class ModelDownloader
     }
 
     /// <summary>Ensures a single side model is on disk (downloading + verifying under its lock) and returns its local
-    /// path. A missing asset is fetched from its catalog entry, because a generation that stops to tell the operator to
-    /// go and download a VAE by hand is a generation that failed — this is what SwarmUI's own ComfyUI backend does.
-    /// <c>paths.sideModelAutofetch=false</c> restores the strict behavior for an air-gapped install; a caller that must
-    /// never reach the network regardless passes <c>downloadIfMissing: false</c> explicitly.</summary>
+    /// path. A missing asset is fetched unless <c>paths.sideModelAutofetch</c> is off; a caller that must never reach
+    /// the network regardless passes <c>downloadIfMissing: false</c> explicitly.</summary>
     public static async Task<string> EnsureSideModelAsync(ModelAsset asset, Action<ModelAsset, double>? onProgress, CancellationToken ct)
     {
         return await EnsureSideModelAsync(asset, EngineKnobs.SideModelAutofetch.Value, onProgress, ct).ConfigureAwait(false);
@@ -91,9 +89,14 @@ public static class ModelDownloader
 
             if (!allowDownload)
             {
+                // allowDownload false can come from the setting or from a caller that must not reach the network;
+                // saying the wrong one sends the operator to flip a setting that would change nothing.
+                string why = EngineKnobs.SideModelAutofetch.Value
+                    ? "this caller does not download"
+                    : "paths.sideModelAutofetch is off";
                 throw new FileNotFoundException(
-                    $"Model asset '{asset.Role}' is missing locally: {target}, and fetching it is disabled "
-                    + $"(paths.sideModelAutofetch). Download it from '{asset.Repo}' ({asset.RepoPath}) or turn the setting back on.");
+                    $"Model asset '{asset.Role}' is missing locally: {target}, and fetching it is disabled ({why}). "
+                    + $"Download it from '{asset.Repo}' ({asset.RepoPath}).");
             }
 
             IProgress<double> progress = new Progress<double>(fraction => onProgress?.Invoke(asset, fraction));

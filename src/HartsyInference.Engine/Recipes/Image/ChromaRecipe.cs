@@ -49,8 +49,8 @@ public sealed class ChromaRecipe : IArchitectureRecipe
         // Resolve the two side models synchronously (Construct is a sync seam): T5-XXL (encoder-only fp8) + Flux VAE.
         // TODO(E-IMG-4): honor a user-picked T5/VAE override from ImageRequest.Components/Extra instead of always
         // taking the canonical SideModels entry (the SwarmUI loader read input.Get(T2IParamTypes.T5XXLModel/VAE)).
-        string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;

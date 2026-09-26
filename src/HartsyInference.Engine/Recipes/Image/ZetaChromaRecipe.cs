@@ -44,7 +44,7 @@ public sealed class ZetaChromaRecipe : IArchitectureRecipe
     {
         // TODO(E-IMG-4): honor a user-picked Qwen override from ImageRequest.Components (the SwarmUI loader read
         // input.Get(T2IParamTypes.QwenModel)); this always takes the canonical SideModels entry.
-        string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3_4B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;

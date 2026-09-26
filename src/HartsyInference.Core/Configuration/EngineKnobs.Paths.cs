@@ -8,9 +8,7 @@ public static partial class EngineKnobs
     public static readonly Knob<string?> CudaLibDir =
         Str("paths.cudaLibDir", null, KnobScope.Construction, KnobDomain.Paths, "Directory prepended to the CUDA userspace library probe list (cuBLAS/cuBLASLt/cuDNN/cudart).");
 
-    /// <summary>Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry. On by
-    /// default, which is what SwarmUI's own ComfyUI backend does; turn it off for an air-gapped install and a missing
-    /// asset becomes an error naming the repo instead.</summary>
+    /// <summary>Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry; off makes a missing one an error naming the repo.</summary>
     public static readonly Knob<bool> SideModelAutofetch =
         Bool("paths.sideModelAutofetch", true, KnobScope.Runtime, KnobDomain.Paths, "Lets a model load fetch a missing side model (text encoder, VAE, CLIP) from its catalog entry; off makes a missing one an error.");
 
