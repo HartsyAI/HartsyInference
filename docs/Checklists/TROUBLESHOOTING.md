@@ -419,15 +419,6 @@ no bug, any more than one bad seed was proof there was one.
   PTX ISA 9.3; driver 580.x JIT caps at 9.0 → `CUDA error 222: Unsupported .version 9.3`. Fix: pin
   `nvidia-cuda-nvcc==13.0.88` **and** `nvidia-nvvm==13.0.*` (nvvm is the ISA-determining piece, not nvcc)
   into an isolated `pip --target` dir; **verify every emitted PTX starts `.version 9.0` before shipping.**
-- **An arch-variant PTX that `ptxas` refuses takes the whole backend down, on that architecture only.**
-  `CudaKernels` loads every module at construction, so one unassemblable `<kernel>.sm<CC>.ptx` fails the backend
-  for every card at that exact compute capability and for no other: the symptom is `CUDA error 218` out of *every*
-  operation, image and text alike, not just the kernel that is broken. Neither nvrtc nor `nvcc -ptx` runs the
-  assembler, so a wrong operand shape survives into the shipped package — `cvt.rn.satfinite.e2m1x2.f32` packs two
-  nibbles into one byte and takes a `.b8`, and a 16-bit destination on it compiles and then refuses to assemble.
-  `build_common.sh` runs `ptxas -arch=sm_<arch>` over each emitted file **where a CUDA toolkit is present**; a box
-  with only the nvrtc helper skips it silently, so an arch-variant kernel is unvalidated until it is assembled
-  somewhere. Tests on another card never cover this — the variant resolver means they load a different file.
 - **Which PTX loaded?** `CudaKernels.PtxPath` prefers `<kernel>.sm<CC>.ptx` for the device's exact compute
   capability and falls back to `<kernel>.ptx`; the backend logs `[Cuda] SM x.y PTX variants: …` at startup when
   it picked any. A variant built for another SM is never chosen (family-specific PTX does not JIT elsewhere), so
