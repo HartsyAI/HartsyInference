@@ -103,6 +103,35 @@ public sealed class VulkanLeakTests
             "large blocks are being re-allocated instead of pooled/reused (the exact regression this test guards against).");
     }
 
+    /// <summary>Per-call fp8→F16 weight casts (<c>CacheWeightCasts=false</c>, as Krea2 runs) recorded back to back without a
+    /// sync: each cast's free is still pending on the timeline when the next Linear asks for the same size. The pool must
+    /// reuse those frees rather than going to the driver for every cast; that pattern used to run VRAM out and drain the
+    /// queue to idle on every retry.</summary>
+    [Fact]
+    public unsafe void Vulkan_UncachedFp8Casts_ReachSteadyStateWithoutDriverAllocations()
+    {
+        if (!VulkanAvailable()) { _output.WriteLine("SKIPPED: no Vulkan device"); return; }
+        using VulkanBackend backend = new() { CacheWeightCasts = false };
+        const int Rows = 256, Dim = 4096;   // the F16 cast of a 4096² weight is 32 MB, in the dedicated tier
+        using Tensor weightF32 = new(new TensorShape(Dim, Dim), DType.F32);
+        float* wp = (float*)weightF32.DataPointer;
+        for (long i = 0; i < (long)Dim * Dim; i++) wp[i] = ((i % 13) - 6) * 0.01f;
+        using Tensor weight = weightF32.CastTo(DType.F8E4M3);
+        weight.Fp8ScaleFactor = 1.0f;
+        using Tensor input = new(new TensorShape(Rows, Dim), DType.F16);
+        using Tensor output = new(new TensorShape(Rows, Dim), DType.F16);
+        backend.PreloadWeights([weight, input]);
+
+        for (int i = 0; i < 20; i++) backend.Linear(output, input, weight, null);
+        backend.Sync();
+        long warm = backend.VkAllocateMemoryStats.CallCount;
+        for (int i = 0; i < 200; i++) backend.Linear(output, input, weight, null);
+        backend.Sync();
+        long grown = backend.VkAllocateMemoryStats.CallCount - warm;
+        _output.WriteLine($"vkAllocateMemory calls over 200 uncached fp8 Linears after warmup: {grown}");
+        Assert.True(grown <= 2, $"{grown} driver allocations over 200 Linears; the pending-free reuse path is not engaging.");
+    }
+
     private static void RunOneSiluIter(VulkanBackend backend, int rows, int cols, int iter)
     {
         Tensor x = new(new TensorShape(rows, cols), DType.F32);

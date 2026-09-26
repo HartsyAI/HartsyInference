@@ -168,12 +168,13 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // for at a phase boundary, so it is spelled once.
         // Reuse frees still pending on the timeline before growing the pool: wait for the oldest only while the
         // pending bytes could cover the request, so the host stays ahead of the GPU otherwise.
-        _allocator.OnNeedSpace = size =>
+        _allocator.OnNeedSpace = (size, memoryType) =>
         {
-            if (_stream.ReclaimCompleted()) return true;
-            if (_stream.PendingFreeBytes < size || !_stream.ReclaimOldestPending()) return false;
-            _dispatchesSinceSubmit = 0;
-            return true;
+            if (_stream.ReclaimCompleted(memoryType)) return true;
+            if (_stream.PendingFreeBytes(memoryType) < size) return false;
+            (bool reclaimed, bool submitted) = _stream.ReclaimOldestPending(memoryType);
+            if (submitted) _dispatchesSinceSubmit = 0;
+            return reclaimed;
         };
         _allocator.OnOutOfMemory = () =>
         {

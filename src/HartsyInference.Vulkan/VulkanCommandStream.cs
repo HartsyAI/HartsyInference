@@ -307,32 +307,40 @@ public sealed class VulkanCommandStream : IDisposable
         if (!_deferredFrees.TryGetValue(tick, out List<VulkanBuffer>? list))
         { list = new(); _deferredFrees[tick] = list; }
         list.Add(buffer);
-        _pendingFreeBytes += buffer.Size;
+        _pendingFreeBytes[buffer.Allocation.MemoryTypeIndex] += buffer.Size;
     }
 
-    private ulong _pendingFreeBytes;
+    // Indexed by memory type; VK_MAX_MEMORY_TYPES is 32.
+    private readonly ulong[] _pendingFreeBytes = new ulong[32];
 
-    /// <summary>Bytes whose free is still waiting on the timeline.</summary>
-    public ulong PendingFreeBytes => _pendingFreeBytes;
+    /// <summary>Bytes of <paramref name="memoryType"/> whose free is still waiting on the timeline.</summary>
+    public ulong PendingFreeBytes(uint memoryType) => _pendingFreeBytes[memoryType];
 
-    /// <summary>Returns whatever the GPU has already finished with, without waiting; true when anything was freed.</summary>
-    public bool ReclaimCompleted()
+    /// <summary>Returns whatever the GPU has already finished with, without waiting; true when anything of
+    /// <paramref name="memoryType"/> was freed.</summary>
+    public bool ReclaimCompleted(uint memoryType)
     {
-        ulong before = _pendingFreeBytes;
+        ulong before = _pendingFreeBytes[memoryType];
         ReclaimUpTo(GetTimelineNow());
-        return _pendingFreeBytes < before;
+        return _pendingFreeBytes[memoryType] < before;
     }
 
-    /// <summary>Waits for the oldest tick that still holds deferred frees, submitting it first if it is still being
-    /// recorded, then reclaims; false when nothing is pending.</summary>
-    public bool ReclaimOldestPending()
+    /// <summary>Waits for the oldest tick holding a deferred free of <paramref name="memoryType"/>, submitting it first if
+    /// it is still being recorded, then reclaims. Returns whether anything was pending and whether a submit was made.</summary>
+    public (bool Reclaimed, bool Submitted) ReclaimOldestPending(uint memoryType)
     {
-        if (_deferredFrees.Count == 0) return false;
-        ulong oldest = 0;
-        foreach (ulong tick in _deferredFrees.Keys) { oldest = tick; break; }
-        if (oldest > _lastSubmitted) SubmitAndAdvance();
-        WaitTimeline(oldest);
-        return true;
+        foreach ((ulong tick, List<VulkanBuffer> bufs) in _deferredFrees)
+        {
+            foreach (VulkanBuffer b in bufs)
+            {
+                if (b.Allocation.MemoryTypeIndex != memoryType) continue;
+                bool submit = tick > _lastSubmitted;
+                if (submit) SubmitAndAdvance();
+                WaitTimeline(tick);
+                return (true, submit);
+            }
+        }
+        return (false, false);
     }
 
     /// <summary>Releases all deferred-free buffers whose tick has been reached. Also recycles command buffers.</summary>
@@ -342,7 +350,7 @@ public sealed class VulkanCommandStream : IDisposable
         foreach ((ulong tick, List<VulkanBuffer> bufs) in _deferredFrees)
         {
             if (tick > completedTick) break;
-            foreach (VulkanBuffer b in bufs) { _pendingFreeBytes -= b.Size; b.Dispose(); }
+            foreach (VulkanBuffer b in bufs) { _pendingFreeBytes[b.Allocation.MemoryTypeIndex] -= b.Size; b.Dispose(); }
             done.Add(tick);
         }
         foreach (ulong t in done) _deferredFrees.Remove(t);
@@ -381,7 +389,7 @@ public sealed class VulkanCommandStream : IDisposable
         foreach ((_, List<VulkanBuffer> bufs) in _deferredFrees)
             foreach (VulkanBuffer b in bufs) b.Dispose();
         _deferredFrees.Clear();
-        _pendingFreeBytes = 0;
+        Array.Clear(_pendingFreeBytes);
         _cmdRecycle.Clear();
 
         if (_allocatedCmds.Count > 0)

@@ -191,9 +191,10 @@ public sealed class VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemory
         return snapshot;
     }
 
-    /// <summary>Asked for room before a new block is allocated; returns true when it returned memory to the pool, so the
-    /// pool is scanned again. Lets frees still pending on the GPU timeline be reused instead of growing the pool.</summary>
-    public Func<ulong, bool>? OnNeedSpace { get; set; }
+    /// <summary>Asked for room of a memory type before a new block is allocated; returns true when it returned memory of
+    /// that type to the pool, so the pool is scanned again. Lets frees still pending on the GPU timeline be reused
+    /// instead of growing the pool.</summary>
+    public Func<ulong, uint, bool>? OnNeedSpace { get; set; }
 
     /// <summary>Optional callback fired on OOM allocation — used by VulkanBackend to flush the command stream and drain the deferred-free list before retrying. Set after the stream is constructed (chicken-and-egg: allocator created before stream).</summary>
     public Action? OnOutOfMemory { get; set; }
@@ -215,7 +216,7 @@ public sealed class VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemory
 
         // Pooled blocks first, then whatever the stream can hand back, before the driver is asked for a new block.
         VulkanAllocation pooled = TryAllocatePooled(size, alignment, typeIdx);
-        while (pooled.IsEmpty && OnNeedSpace is not null && OnNeedSpace(size))
+        while (pooled.IsEmpty && OnNeedSpace is not null && OnNeedSpace(size, typeIdx))
             pooled = TryAllocatePooled(size, alignment, typeIdx);
         if (!pooled.IsEmpty) return pooled;
 
