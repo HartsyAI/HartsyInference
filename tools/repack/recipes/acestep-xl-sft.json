@@ -1,0 +1,5 @@
+{
+  // ACE-Step 1.5 XL sft from the official fp32 shards, merged and cast to bf16 — the single file the engine loads.
+  "name": "acestep-xl-sft", "model": "acestep", "variant": "xl-sft", "source_repo": "ACE-Step/acestep-v15-xl-sft", "dtype": "bf16",
+  "components": [ { "source_file": "official-xl-sft/model.safetensors.index.json" } ]
+}

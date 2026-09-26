@@ -180,6 +180,8 @@ if (values.GetValueOrDefault("--recipe")?.Last() is string recipePath)
     Default("--component", recipe.Component);
     Default("--source-repo", recipe.SourceRepo);
     Default("--dtype", recipe.Dtype);
+    if (recipe.KeepDtype.Count > 0 && !values.ContainsKey("--keep-dtype"))
+        values["--keep-dtype"] = [.. recipe.KeepDtype];
 }
 else if (positionals.Count < 2)
 {

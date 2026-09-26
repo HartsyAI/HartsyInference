@@ -19,6 +19,8 @@ internal sealed class Recipe
     [JsonPropertyName("fuse")] public List<RecipeFuse> Fuse { get; init; } = [];
     [JsonPropertyName("copy")] public List<RecipeCopy> Copy { get; init; } = [];
     [JsonPropertyName("drop")] public List<string> Drop { get; init; } = [];
+    /// <summary>Key patterns that keep their stored dtype through <see cref="Dtype"/>.</summary>
+    [JsonPropertyName("keep_dtype")] public List<string> KeepDtype { get; init; } = [];
     [JsonPropertyName("embed")] public List<RecipeEmbed> Embed { get; init; } = [];
     [JsonPropertyName("metadata")] public Dictionary<string, string> Metadata { get; init; } = [];
 

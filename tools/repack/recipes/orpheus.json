@@ -1,0 +1,7 @@
+{
+  // Orpheus 3B from Canopy Labs' fp32 release: four shards merged, cast to bf16, and the LM head dropped because it is
+  // tied to the embeddings. Identical, tensor for tensor, to unsloth/orpheus-3b-0.1-ft.
+  "name": "orpheus", "model": "orpheus", "variant": "3b", "source_repo": "canopylabs/orpheus-3b-0.1-ft", "dtype": "bf16",
+  "components": [ { "source_file": "canopylabs--orpheus-3b-0.1-ft/model.safetensors.index.json" } ],
+  "drop": [ "lm_head.weight" ]
+}

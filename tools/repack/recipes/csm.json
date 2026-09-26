@@ -1,0 +1,10 @@
+{
+  // Sesame CSM 1B from its official transformers export: fp16 weights with norms, biases, convolutions, layer scales and
+  // the embeddings the depth decoder reads kept in fp32; the unused audio-token embedding dropped. Identical, tensor for
+  // tensor, to unsloth/csm-1b.
+  "name": "csm", "model": "csm", "variant": "1b", "source_repo": "sesame/csm-1b", "dtype": "fp16",
+  "components": [ { "source_file": "sesame--csm-1b/transformers.safetensors.index.json" } ],
+  "drop": [ "backbone_model.embed_tokens.embed_audio_tokens.weight" ],
+  "keep_dtype": [ "*norm*", "*layer_scale*", "*.bias", "*conv*", "depth_decoder.model.embed_tokens.*",
+                  "depth_decoder.model.inputs_embeds_projector.*", "embed_text_tokens.*" ]
+}
