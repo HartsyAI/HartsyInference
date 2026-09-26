@@ -137,6 +137,23 @@ public sealed unsafe class LoraBakerTests
     }
 
     [Fact]
+    public void Group_RefusesAPeftDoraAdapter()
+    {
+        using Tensor a = Filled([1, 2], 1, 1);
+        using Tensor m = Filled([2], 1, 1);
+        Assert.Throws<NotSupportedException>(() => LoraBaker.Group([new("x.lora_A.weight", a), new("x.lora_magnitude_vector.default.weight", m)]));
+    }
+
+    [Fact]
+    public void Apply_RefusesADiffOfTheSameSizeButAnotherShape()
+    {
+        using Tensor w = Filled([2, 3], 0, 0, 0, 0, 0, 0);
+        using Tensor diff = Filled([3, 2], 1, 1, 1, 1, 1, 1);
+        Assert.Throws<InvalidDataException>(() => LoraBaker.Apply(new Dictionary<string, Tensor> { ["m.weight"] = w },
+            LoraBaker.Group([new("m.diff", diff)]), r => r, new LoraBaker.Options(), []));
+    }
+
+    [Fact]
     public void Apply_RefusesAQuantizedWeight()
     {
         using Tensor w = new(new TensorShape(1, 1), DType.I8);

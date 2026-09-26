@@ -63,8 +63,20 @@ public static class SafeTensorsMerger
                 output.Write(header);
                 using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
                 byte[] buffer = new byte[ChunkElements * 4];
-                foreach ((string _, Tensor source, DType outType, long _) in plan)
+                foreach ((string _, Tensor source, DType outType, long outBytes) in plan)
                 {
+                    if (outType == source.DType)
+                    {
+                        // Copied by byte count: a block-packed dtype (F4_E2M1, …) has no per-element size.
+                        byte* raw = (byte*)source.DataPointer;
+                        for (long offset = 0; offset < outBytes; offset += buffer.Length)
+                        {
+                            ReadOnlySpan<byte> part = new(raw + offset, (int)Math.Min(buffer.Length, outBytes - offset));
+                            hash.AppendData(part);
+                            output.Write(part);
+                        }
+                        continue;
+                    }
                     long count = source.Shape.ElementCount;
                     byte* src = (byte*)source.DataPointer;
                     int inSize = source.DType.SizeInBytes;
@@ -72,19 +84,11 @@ public static class SafeTensorsMerger
                     for (long done = 0; done < count; done += ChunkElements)
                     {
                         int n = (int)Math.Min(ChunkElements, count - done);
-                        ReadOnlySpan<byte> chunk;
-                        if (outType == source.DType)
+                        fixed (byte* dst = buffer)
                         {
-                            chunk = new ReadOnlySpan<byte>(src + done * inSize, n * inSize);
+                            Convert(src + done * inSize, source.DType, dst, outType, n);
                         }
-                        else
-                        {
-                            fixed (byte* dst = buffer)
-                            {
-                                Convert(src + done * inSize, source.DType, dst, outType, n);
-                            }
-                            chunk = new ReadOnlySpan<byte>(buffer, 0, n * outSize);
-                        }
+                        ReadOnlySpan<byte> chunk = new(buffer, 0, n * outSize);
                         hash.AppendData(chunk);
                         output.Write(chunk);
                     }
