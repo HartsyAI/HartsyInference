@@ -314,8 +314,11 @@ if [ "$WITH_SWARM" = 1 ] && stage_wanted swarm; then
         # A server already on this port would answer the probe below while the one just launched died on bind,
         # and the stage would then report a pass for code it never loaded.
         if (exec 3<>"/dev/tcp/127.0.0.1/$SWARM_PORT") 2>/dev/null; then
-            exec 3<&-; swarm_fail=1; log "swarm: port $SWARM_PORT is already in use; refusing to test against another server"
+            exec 3<&-; swarm_fail=1
+            log "swarm: port $SWARM_PORT is already in use; refusing to test against another server"
         fi
+    fi
+    if [ "$swarm_fail" = 0 ]; then
         ( cd "$SWARM_DIR" && ./src/bin/live_release/SwarmUI --data_dir "$SWARM_DATA" --settings_file "$SWARM_DATA/Settings.fds" ) >"$OUT/logs/swarm-server.log" 2>&1 &
         SWARM_PID=$!
         # The server is a background process: a budget timeout that kills the foreground would otherwise leave it

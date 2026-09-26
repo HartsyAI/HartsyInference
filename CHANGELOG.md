@@ -15,7 +15,6 @@ stable release will require. Dates are UTC.
   persists no pipelines writes a fresh 32-byte header either way, so that assertion was green without any reload.
 - The rental script gains an opt-in `swarm` stage: SwarmUI loads the extension in its own load context against
   the pinned NuGet engine, so the engine generating from the command line never proved the extension does.
->>>>>>> 5a7dfe24 (Review: keep auto_stop in the swarm trap, and reserve alpha.180)
 
 ## alpha.178
 
