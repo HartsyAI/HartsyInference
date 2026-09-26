@@ -72,6 +72,13 @@ internal static class AceStepMusicModel
             {
                 sniff.Load(mainPath);
                 isV1 = AceStepCheckpointConverter.IsV1AllInOne(sniff.Descriptors);
+                // A checkpoint selected by path (SwarmUI's core model list) arrives with no variant, or the family id
+                // in its place; a Hartsy artifact names its own, and the variant decides the config, CFG and steps.
+                if (AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).Count == 0
+                    && sniff.Metadata?.GetValueOrDefault("hartsy.model_id") is { Length: > 0 } stamped)
+                {
+                    variant = stamped;
+                }
             }
             if (isV1)
             {
@@ -84,6 +91,13 @@ internal static class AceStepMusicModel
 
         // The sidecar config.json (downloaded with the variant) drives dims + is_turbo; absent = 2B turbo defaults.
         string sidecarConfig = Path.ChangeExtension(mainPath, null) + ".config.json";
+        if (!File.Exists(sidecarConfig)
+            && AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).FirstOrDefault(a => a.Role == "config") is { } configAsset)
+        {
+            // Not beside the checkpoint (a renamed or converted file): use the variant's own config. Without it an
+            // XL checkpoint was built at 2B width and a base/sft one ran as turbo.
+            sidecarConfig = await ModelDownloader.EnsureSideModelAsync(configAsset, downloadIfMissing: true, null, cancel).ConfigureAwait(false);
+        }
         AceStep15Config config = File.Exists(sidecarConfig)
             ? AceStep15Config.FromJson(await File.ReadAllTextAsync(sidecarConfig, cancel).ConfigureAwait(false))
             : new AceStep15Config();
@@ -108,7 +122,15 @@ internal static class AceStepMusicModel
         Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
 
         AceStepPipeline15 pipeline = new AceStepPipeline15(context.Backend, dit, conditionEncoder, vae, config);
-        LoadSilenceLatent(pipeline, Path.GetDirectoryName(mainPath));
+        // Beside the checkpoint first; a checkpoint selected by path elsewhere uses the catalog's shared copy.
+        string latentDirectory = Path.GetDirectoryName(mainPath)!;
+        if (!File.Exists(Path.Combine(latentDirectory, "acestep-v15-silence_latent.pt"))
+            && AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).FirstOrDefault(a => a.Role == "silence-latent") is { } latentAsset)
+        {
+            latentDirectory = Path.GetDirectoryName(await ModelDownloader.EnsureSideModelAsync(latentAsset, downloadIfMissing: true, null, cancel)
+                .ConfigureAwait(false))!;
+        }
+        LoadSilenceLatent(pipeline, latentDirectory);
         // 5 Hz code detokenizer (LM-planner hints → 25 Hz latents); its weights ride in the same checkpoint.
         AceStep15AudioDetokenizer detokenizer = new AceStep15AudioDetokenizer(config);
         detokenizer.LoadWeights(weights);

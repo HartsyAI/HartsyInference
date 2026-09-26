@@ -86,6 +86,40 @@ public sealed unsafe class ResembleEnhancePipeline : IDisposable
         }
     }
 
+    /// <summary>The denoiser alone (upstream <c>denoise()</c>): removes noise without resynthesizing the voice, and
+    /// much faster than <see cref="Enhance(IBackend, float[], float, float, int)"/>. Peak-normalizes, pads, denoises
+    /// and restores the input level, as upstream's <c>inference_chunk</c> does.</summary>
+    public float[] Denoise(IBackend backend, float[] noisyPcm44k)
+    {
+        ThrowIfDisposed();
+        if (_denoiser is null)
+        {
+            throw new InvalidOperationException("Construct the pipeline with withDenoiserAndVocoder: true to call Denoise.");
+        }
+        if (noisyPcm44k is null || noisyPcm44k.Length == 0)
+        {
+            throw new ArgumentException("noisyPcm44k must be non-empty.", nameof(noisyPcm44k));
+        }
+        int length = noisyPcm44k.Length;
+        float absMax = 1e-7f;
+        for (int i = 0; i < length; i++)
+        {
+            absMax = MathF.Max(absMax, MathF.Abs(noisyPcm44k[i]));
+        }
+        float[] x = new float[length + InferencePadSamples];
+        for (int i = 0; i < length; i++)
+        {
+            x[i] = noisyPcm44k[i] / absMax;
+        }
+        float[] denoised = _denoiser.Denoise(backend, x);
+        float[] result = new float[length];
+        for (int i = 0; i < length && i < denoised.Length; i++)
+        {
+            result[i] = denoised[i] * absMax;
+        }
+        return result;
+    }
+
     /// <summary>Full enhancement of a mono 44.1 kHz clip; <paramref name="lambd"/> blends the denoised mel into
     /// the conditioning, <paramref name="tau"/> is the CFM prior temperature. Requires
     /// <c>withDenoiserAndVocoder: true</c>.</summary>

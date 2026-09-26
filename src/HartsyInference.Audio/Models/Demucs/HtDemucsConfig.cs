@@ -15,7 +15,9 @@ public sealed record HtDemucsConfig
     public int HopLength { get; init; } = 1_024;
     public int KernelSize { get; init; } = 8;
     public int Stride { get; init; } = 4;
-    public int BottomChannels { get; init; } = 512;   // transformer width
+    /// <summary>Width the bottleneck is projected to for the transformer (htdemucs: 512). 0 means no projection: the
+    /// transformer runs at the deepest encoder's width, as htdemucs_6s does.</summary>
+    public int BottomChannels { get; init; } = 512;
     /// <summary>Training segment length in seconds (htdemucs = 7.8 s). <c>apply_model</c> chunks the input into
     /// segments of this length, and the model pads shorter inputs up to it (<c>use_train_segment</c>).</summary>
     public double Segment { get; init; } = 7.8;
@@ -74,8 +76,12 @@ public sealed record HtDemucsConfig
     public bool TGelu { get; init; } = true;
 
     public int NumSources => Sources.Count;
-    public int TransformerFfn => (int)(BottomChannels * HiddenScale);
-    public int TransformerHeadDim => BottomChannels / THeads;
+    /// <summary>Channels of the deepest encoder level (48 · 2³ = 384 for htdemucs).</summary>
+    public int EncoderChannels => Channels * (int)Math.Pow(Growth, Depth - 1);
+    /// <summary>Width the cross-domain transformer runs at.</summary>
+    public int TransformerWidth => BottomChannels > 0 ? BottomChannels : EncoderChannels;
+    public int TransformerFfn => (int)(TransformerWidth * HiddenScale);
+    public int TransformerHeadDim => TransformerWidth / THeads;
 
     /// <summary>Spectrogram-branch input channels = 2 (real+imag) × audio channels.</summary>
     public int SpecInChannels => 2 * AudioChannels;
@@ -89,5 +95,6 @@ public sealed record HtDemucsConfig
     public static HtDemucsConfig Htdemucs6s => new()
     {
         Sources = ["drums", "bass", "other", "vocals", "guitar", "piano"],
+        BottomChannels = 0,
     };
 }

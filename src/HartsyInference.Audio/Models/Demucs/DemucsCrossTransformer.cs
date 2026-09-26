@@ -32,7 +32,7 @@ public sealed unsafe class DemucsCrossTransformer : IDisposable
     public DemucsCrossTransformer(HtDemucsConfig cfg)
     {
         _cfg = cfg;
-        _dim = cfg.BottomChannels; _heads = cfg.THeads; _hd = cfg.TransformerHeadDim; _ffn = cfg.TransformerFfn;
+        _dim = cfg.TransformerWidth; _heads = cfg.THeads; _hd = cfg.TransformerHeadDim; _ffn = cfg.TransformerFfn;
         _layers = cfg.TLayers;
         _spec = new Layer[_layers];
         _time = new Layer[_layers];
@@ -174,7 +174,7 @@ public sealed unsafe class DemucsCrossTransformer : IDisposable
 
         public Layer(HtDemucsConfig cfg, bool cross)
         {
-            _cfg = cfg; _cross = cross; _dim = cfg.BottomChannels; _heads = cfg.THeads; _hd = cfg.TransformerHeadDim; _ffn = cfg.TransformerFfn;
+            _cfg = cfg; _cross = cross; _dim = cfg.TransformerWidth; _heads = cfg.THeads; _hd = cfg.TransformerHeadDim; _ffn = cfg.TransformerFfn;
         }
 
         public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string p, DemucsCastOwner casts)
