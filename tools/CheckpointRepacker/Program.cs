@@ -5,6 +5,8 @@ using System.Text.RegularExpressions;
 using HartsyInference.Core.Tensors;
 using System.Text.Json;
 using HartsyInference.Core.Logging;
+using HartsyInference.Cpu;
+using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -48,6 +50,14 @@ MERGE AND CAST (safetensors)
   --keep-dtype <pattern>  Keep matching tensors in their stored dtype through --dtype. Repeatable.
                         e.g. --keep-dtype '*norm*' keeps norms in F32 under a bf16 cast.
 
+LORA BAKING (safetensors)
+  --lora <file>[:<strength>]  Merge an adapter into the weights it modifies and write a standalone model.
+                        Repeatable; applied in order. Reads PEFT, kohya, diffusers and LyCORIS (LoHa, LoKr,
+                        DoRA, full-weight diffs) naming, and matches each module to a weight by name. A PEFT
+                        adapter_config.json beside the file supplies alpha and rsLoRA. The merge is the same
+                        float32 arithmetic PyTorch does, so the result matches a torch-made merge bit for bit.
+  --lora-alpha <a>      Alpha for every module when neither the file nor an adapter_config.json has one.
+
 KEY LAYOUT (pickles only)
   --recursive           Keep every nested state dict, prefixing keys with the dict name (bert.x ...).
   --allow-partial       Keep only the first nested state dict even though others hold tensors.
@@ -76,12 +86,13 @@ EXAMPLES
   CheckpointRepacker model.safetensors out/model.safetensors --model whisper --variant large-v3
   CheckpointRepacker dac.pth dac.safetensors --model dia --component codec
   CheckpointRepacker xl-turbo/model.safetensors.index.json out/ --model acestep --variant xl-turbo --dtype bf16
+  CheckpointRepacker base.safetensors out/ --model orpheus --lora adapter_model.safetensors:0.8 --dtype bf16
 """;
 
 // The tool prints its own progress; the engine's info lines would repeat it.
 Logs.MinLevel = LogLevel.Warning;
 string[] pickleExtensions = [".pt", ".pth", ".bin", ".th", ".ckpt"];
-string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root"];
+string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root", "--lora", "--lora-alpha"];
 string[] flagOptions = ["--recursive", "--allow-partial", "--no-metadata", "--force", "--help", "-h", "--list-models", "--tokenizer-from-tiktoken"];
 
 List<string> positionals = [];
@@ -210,8 +221,40 @@ if (dtypeName is not null && castTo is null)
 }
 bool IsShardSet(string p) => p.EndsWith(".index.json", StringComparison.OrdinalIgnoreCase)
     || (Directory.Exists(p) && Directory.EnumerateFiles(p, "*.safetensors").Any());
+List<(string Path, float Strength, float? Alpha, bool RsLora)> loras = [];
+float? loraAlpha = null;
+if (values.GetValueOrDefault("--lora-alpha")?.Last() is string alphaText)
+{
+    if (!float.TryParse(alphaText, NumberStyles.Float, CultureInfo.InvariantCulture, out float a) || !(a > 0))
+        return Usage($"--lora-alpha '{alphaText}' is not a positive number.");
+    loraAlpha = a;
+}
+foreach (string spec in values.GetValueOrDefault("--lora") ?? [])
+{
+    int colon = spec.LastIndexOf(':');
+    float strength = 1.0f;
+    string file = spec;
+    if (colon > 1 && float.TryParse(spec[(colon + 1)..], NumberStyles.Float, CultureInfo.InvariantCulture, out float parsed))
+    {
+        strength = parsed;
+        file = spec[..colon];
+    }
+    file = Path.GetFullPath(file);
+    if (!File.Exists(file) || !file.EndsWith(".safetensors", StringComparison.OrdinalIgnoreCase))
+    {
+        Console.Error.WriteLine(File.Exists(file) ? $"--lora takes a .safetensors adapter; convert '{Path.GetFileName(file)}' first." : $"LoRA not found: {file}");
+        return 1;
+    }
+    (float? alpha, bool rs, string? problem) = ReadPeftConfig(Path.Combine(Path.GetDirectoryName(file)!, "adapter_config.json"));
+    if (problem is not null)
+    {
+        Console.Error.WriteLine(problem);
+        return 1;
+    }
+    loras.Add((file, strength, loraAlpha ?? alpha, rs));
+}
 bool mergeMode = recipe is not null || inputs.Count > 1 || castTo is not null || values.ContainsKey("--prefix") || values.ContainsKey("--drop")
-    || inputs.Any(IsShardSet);
+    || loras.Count > 0 || inputs.Any(IsShardSet);
 if (mergeMode)
 {
     foreach (string p in inputs)
@@ -365,7 +408,7 @@ Dictionary<string, string>? BuildMetadata()
                 Converter = "HartsyInference.SafeTensorsMerger",
                 Component = component,
                 SourceRepo = values.GetValueOrDefault("--source-repo")?.Last(),
-                SourceFile = mergeSources.Count == 1 ? Path.GetFileName(mergeSources[0]) : string.Join(",", mergeSources.Select(Path.GetFileName)),
+                SourceFile = string.Join(",", mergeSources.Select(SourceName)),
                 SourceSha256 = mergeSources.Count == 1 ? ArtifactProvenance.HashFile(mergeSources[0])
                     : System.Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(combined))).ToLowerInvariant(),
                 Precision = dtypeName,
@@ -461,6 +504,7 @@ try
     {
         List<SafeTensorsLoader> loaders = [];
         List<Tensor> ownedTensors = [];
+        using CpuBackend cpu = new();
         try
         {
             List<KeyValuePair<string, Tensor>> all = [];
@@ -472,7 +516,7 @@ try
             if (recipe is not null)
             {
                 Console.WriteLine($"Building '{recipe.Name}' from its recipe:");
-                all.AddRange(recipe.Build(recipeDir, recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line)));
+                all.AddRange(recipe.Build(recipeDir, recipeRoot, loaders, owned, mergeSources, line => Console.WriteLine(line), cpu));
                 foreach ((string key, string value) in recipe.Metadata)
                     overrides.TryAdd(key, value);
             }
@@ -496,6 +540,27 @@ try
             }
             if (recipe is null)
                 mergeSources.AddRange(loaders.Select(l => l.FilePath));
+            foreach ((string file, float strength, float? alpha, bool rs) in loras)
+            {
+                (List<KeyValuePair<string, Tensor>> adapter, List<SafeTensorsLoader> opened) = SafeTensorsMerger.Open(file);
+                loaders.AddRange(opened);
+                mergeSources.Add(file);
+                List<string> stray = [];
+                List<LoraBaker.Patch> patches = LoraBaker.Group(adapter, stray);
+                if (patches.Count == 0)
+                {
+                    Console.Error.WriteLine($"{Path.GetFileName(file)} has no LoRA tensors (keys like {string.Join(", ", stray.Take(3))}).");
+                    return 1;
+                }
+                if (stray.Count > 0)
+                    Console.WriteLine($"  {Path.GetFileName(file)}: ignoring {stray.Count} key(s) that are not adapter weights, e.g. {stray[0]}");
+                Dictionary<string, Tensor> byKey = new(all, StringComparer.Ordinal);
+                int changed = LoraBaker.Apply(byKey, patches, LoraBaker.AutoTargets(byKey.Keys, patches.Select(p => p.Root)),
+                    new LoraBaker.Options { Strength = strength, Alpha = alpha, RsLora = rs, Backend = cpu }, owned);
+                all = [.. all.Select(kv => new KeyValuePair<string, Tensor>(kv.Key, byKey[kv.Key]))];
+                Console.WriteLine($"Baked {Path.GetFileName(file)} ({patches.Count} module(s), strength {strength.ToString(CultureInfo.InvariantCulture)}"
+                    + (alpha is { } a ? $", alpha {a.ToString(CultureInfo.InvariantCulture)}" : "") + (rs ? ", rsLoRA" : "") + $") into {changed} weight(s).");
+            }
             if (drops.Count > 0)
             {
                 Console.WriteLine($"Dropping {dropped} tensor(s) matching {string.Join(", ", values["--drop"])}.");
@@ -635,6 +700,30 @@ else
 Console.WriteLine($"  sha256    {outputSha}");
 Console.WriteLine($"  manifest  {manifestPath}");
 return 0;
+
+// A recipe's sources are often all model.safetensors, so they are named by their path under the source root.
+string SourceName(string file)
+{
+    string relative = recipe is null ? "" : Path.GetRelativePath(recipeRoot, file);
+    return relative.Length == 0 || relative.StartsWith("..", StringComparison.Ordinal) || Path.IsPathRooted(relative) ? Path.GetFileName(file) : relative.Replace('\\', '/');
+}
+
+// PEFT keeps alpha out of the weights file; a pattern of per-module ranks or alphas is refused rather than flattened.
+static (float? Alpha, bool RsLora, string? Problem) ReadPeftConfig(string path)
+{
+    if (!File.Exists(path))
+        return (null, false, null);
+    using JsonDocument doc = JsonDocument.Parse(File.ReadAllBytes(path));
+    JsonElement root = doc.RootElement;
+    foreach (string pattern in new[] { "rank_pattern", "alpha_pattern" })
+    {
+        if (root.TryGetProperty(pattern, out JsonElement p) && p.ValueKind == JsonValueKind.Object && p.EnumerateObject().Any())
+            return (null, false, $"{path} sets {pattern}; per-module ranks or alphas are not supported. Give --lora-alpha only if every module shares one.");
+    }
+    float? alpha = root.TryGetProperty("lora_alpha", out JsonElement a) && a.ValueKind == JsonValueKind.Number ? a.GetSingle() : null;
+    bool rs = root.TryGetProperty("use_rslora", out JsonElement r) && r.ValueKind == JsonValueKind.True;
+    return (alpha, rs, null);
+}
 
 static int Usage(string problem)
 {

@@ -6,5 +6,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/HartsyInference.ModelAssets/HartsyInference.ModelAssets.csproj" />
+    <ProjectReference Include="../../src/HartsyInference.Cpu/HartsyInference.Cpu.csproj" />
   </ItemGroup>
 </Project>

@@ -1,7 +1,9 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.ModelAssets.Lora;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -16,6 +18,8 @@ internal sealed class Recipe
     [JsonPropertyName("source_repo")] public string? SourceRepo { get; init; }
     [JsonPropertyName("dtype")] public string? Dtype { get; init; }
     [JsonPropertyName("components")] public List<RecipeComponent> Components { get; init; } = [];
+    /// <summary>Adapters baked into the weights they modify, before any fuse; their own tensors leave the output.</summary>
+    [JsonPropertyName("lora")] public List<RecipeLora> Lora { get; init; } = [];
     [JsonPropertyName("fuse")] public List<RecipeFuse> Fuse { get; init; } = [];
     [JsonPropertyName("copy")] public List<RecipeCopy> Copy { get; init; } = [];
     [JsonPropertyName("drop")] public List<string> Drop { get; init; } = [];
@@ -34,7 +38,7 @@ internal sealed class Recipe
     /// loaders and the owned list alive until the write finishes.</summary>
     /// <param name="recipeDir">Where the recipe file lives; a component's <c>key_map</c> resolves against it.</param>
     public List<KeyValuePair<string, Tensor>> Build(string recipeDir, string sourceRoot, List<SafeTensorsLoader> loaders, List<Tensor> owned, List<string> sources,
-        Action<string> log)
+        Action<string> log, IBackend? backend = null)
     {
         List<KeyValuePair<string, Tensor>> tensors = [];
         foreach (RecipeComponent component in Components)
@@ -72,6 +76,8 @@ internal sealed class Recipe
             if (!byKey.TryAdd(key, tensor))
                 throw new InvalidDataException($"Two components produce '{key}'; add a prefix or a rename.");
         }
+        foreach (RecipeLora lora in Lora)
+            ApplyLora(lora, byKey, owned, backend, log);
         foreach (RecipeFuse fuse in Fuse)
         {
             int fused = ApplyFuse(fuse, byKey, owned);
@@ -142,6 +148,24 @@ internal sealed class Recipe
         return [.. byKey];
     }
 
+    // "{p}" in 'from' matches an adapter module root; 'into' names the module it modifies with the same "{p}".
+    private static void ApplyLora(RecipeLora lora, Dictionary<string, Tensor> byKey, List<Tensor> owned, IBackend? backend, Action<string> log)
+    {
+        Regex from = new("^" + Regex.Escape(lora.From).Replace("\\{p}", "(?<p>.+)") + "$");
+        List<KeyValuePair<string, Tensor>> adapter = [.. byKey.Where(kv => LoraRoleSuffix.TryStrip(kv.Key, out string root, out _) && from.IsMatch(root))];
+        if (adapter.Count == 0)
+            throw new InvalidDataException($"LoRA from '{lora.From}' matched no adapter keys.");
+        List<LoraBaker.Patch> patches = LoraBaker.Group(adapter);
+        Func<string, string?> target = lora.Into is null ? LoraBaker.AutoTargets(byKey.Keys, patches.Select(p => p.Root))
+            : root => lora.Into.Replace("{p}", from.Match(root).Groups["p"].Value);
+        LoraBaker.Options options = new() { Strength = lora.Strength, Alpha = lora.Alpha, RsLora = lora.RsLora, Backend = backend };
+        int changed = LoraBaker.Apply(byKey, patches, target, options, owned);
+        foreach ((string key, Tensor _) in adapter)
+            byKey.Remove(key);
+        log($"  baked {patches.Count} adapter module(s) from {lora.From} into {changed} weight(s)"
+            + (lora.Alpha is { } a ? $", alpha {a}" : "") + (lora.Strength != 1 ? $", strength {lora.Strength}" : ""));
+    }
+
     // "{p}" in a pattern is the shared part of the key; each distinct value of it yields one fused tensor, concatenated
     // along the first axis in the order 'from' lists the parts.
     private static unsafe int ApplyFuse(RecipeFuse fuse, Dictionary<string, Tensor> byKey, List<Tensor> owned)
@@ -196,6 +220,19 @@ internal sealed class RecipeComponent
     [JsonPropertyName("key_map")] public string? KeyMap { get; init; }
     /// <summary>[regex, replacement] pairs; the first that matches a key rewrites it, the rest are skipped.</summary>
     [JsonPropertyName("renames")] public List<string[]> Renames { get; init; } = [];
+}
+
+internal sealed class RecipeLora
+{
+    /// <summary>Adapter module roots to bake, with "{p}" for the varying part, e.g. <c>adapter.{p}</c>.</summary>
+    [JsonPropertyName("from")] public string From { get; init; } = "";
+    /// <summary>The module each root modifies, e.g. <c>encoder.{p}</c>; <c>.weight</c> and <c>.bias</c> are appended.
+    /// Omitted, each root is matched to a weight by name.</summary>
+    [JsonPropertyName("into")] public string? Into { get; init; }
+    /// <summary>Alpha for every module when the weights file carries none (PEFT keeps it in adapter_config.json).</summary>
+    [JsonPropertyName("alpha")] public float? Alpha { get; init; }
+    [JsonPropertyName("strength")] public float Strength { get; init; } = 1.0f;
+    [JsonPropertyName("rslora")] public bool RsLora { get; init; }
 }
 
 internal sealed class RecipeFuse
