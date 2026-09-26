@@ -147,6 +147,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         if (EngineKnobs.VkProfileGpu.Value)
         {
             _gpuOpTimer = new VulkanGpuOpTimer(_vkDevice.Handle, Vk.TimestampPeriod);
+            _stream.WaitStats = new Dictionary<string, (long Count, double Ms)>(StringComparer.Ordinal);
         }
         _pipelineCache = new VulkanPipelineCache(_vkDevice.Handle, Vk);
         _kernels = new VulkanKernelRegistry(_vkDevice.Handle, Vk, _pipelineCache, _descriptors, _spvDir);
@@ -499,6 +500,21 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             sawDeviceLocal = true;
         }
         return sawDeviceLocal;
+    }
+
+    private void DumpHostWaits(TextWriter writer)
+    {
+        if (_stream.WaitStats is null)
+        {
+            return;
+        }
+        (long allocCalls, double allocMs) = _allocator.VkAllocateMemoryStats;
+        writer.WriteLine($"=== Host waits on the GPU timeline (vkAllocateMemory: {allocCalls} calls, {allocMs:F1}ms) ===");
+        foreach (KeyValuePair<string, (long Count, double Ms)> kvp in _stream.WaitStats.OrderByDescending(p => p.Value.Ms).Take(15))
+        {
+            writer.WriteLine($"{kvp.Value.Ms,10:F1}ms {kvp.Value.Count,7:N0}x  {kvp.Key}");
+        }
+        writer.WriteLine();
     }
 
     /// <inheritdoc/>
@@ -4438,11 +4454,13 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
                 if (string.IsNullOrEmpty(file))
                 {
                     _gpuOpTimer.Dump(Console.Error);
+                    DumpHostWaits(Console.Error);
                 }
                 else
                 {
                     using StreamWriter writer = new(file + ".gpu.txt");
                     _gpuOpTimer.Dump(writer);
+                    DumpHostWaits(writer);
                 }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)

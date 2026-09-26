@@ -267,8 +267,24 @@ public sealed class VulkanCommandStream : IDisposable
             pSemaphores = (nint)(&sem),
             pValues = (nint)(&t),
         };
+        long start = WaitStats is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
         VulkanApi.vkWaitSemaphores(_device, in wi, timeoutNs).ThrowOnError("vkWaitSemaphores");
+        if (WaitStats is not null)
+        {
+            RecordWait(System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+        }
         ReclaimUpTo(GetTimelineNow());
+    }
+
+    /// <summary>Blocking host waits by calling chain, collected when set (<c>diagnostics.vkProfileGpu</c>).</summary>
+    internal Dictionary<string, (long Count, double Ms)>? WaitStats { get; set; }
+
+    private void RecordWait(double ms)
+    {
+        System.Diagnostics.StackFrame[] frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+        string key = string.Join(" <- ", frames.Take(5).Select(f => f.GetMethod()?.Name ?? "?"));
+        (long count, double total) = WaitStats!.TryGetValue(key, out (long, double) v) ? v : (0L, 0.0);
+        WaitStats[key] = (count + 1, total + ms);
     }
 
     /// <summary>Submits any pending recording, then blocks until the GPU is fully idle on this stream's timeline.</summary>
