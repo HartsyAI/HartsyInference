@@ -24,6 +24,7 @@ public static class LoraFormatDetector
         bool hasTe2 = false;
         bool hasBareDit = false;
         bool hasComfyBfl = false;
+        bool hasZImage = false;
         bool hasDiffusersMiniMaxH3 = false;
 
         foreach (string key in descriptors.Keys)
@@ -76,6 +77,17 @@ public static class LoraFormatDetector
             {
                 hasDiffusersWan = true;
             }
+            // Z-Image / Lumina2 NextDiT under a Comfy wrapper: its three block roots plus the Tongyi
+            // attention/FFN vocabulary. Ideogram 4 shares `layers.{i}.feed_forward.w*`, but its own spellings
+            // (`attention.o`, `attention.norm_q`) pass through the mapper untouched, so an overlap is inert.
+            else if ((key.StartsWith("diffusion_model.layers.", StringComparison.Ordinal)
+                    || key.StartsWith("diffusion_model.context_refiner.", StringComparison.Ordinal)
+                    || key.StartsWith("diffusion_model.noise_refiner.", StringComparison.Ordinal))
+                && (key.Contains(".attention.to_", StringComparison.Ordinal)
+                    || key.Contains(".feed_forward.w", StringComparison.Ordinal)))
+            {
+                hasZImage = true;
+            }
             // Bare original-Wan naming (no wrapper prefix): the osantinello Wan-Animate relight conversion.
             // self_attn/cross_attn segments distinguish it from the generic bare-DiT fallback, whose
             // roots-are-canonical rule would derive keys the converted (diffusers-named) dict never has.
@@ -122,6 +134,7 @@ public static class LoraFormatDetector
 
         if (hasDiffusersFlux) return LoraFormat.DiffusersFlux;
         if (hasComfyBfl) return LoraFormat.ComfyBflDit;
+        if (hasZImage) return LoraFormat.ComfyZImageDit;
         if (hasDiffusersWan) return LoraFormat.DiffusersWan;
         if (hasKohyaWan) return LoraFormat.KohyaWan;
         if (hasAiToolkitFlux) return LoraFormat.AiToolkitFlux;

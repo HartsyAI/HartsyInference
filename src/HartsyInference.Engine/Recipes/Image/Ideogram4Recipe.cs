@@ -97,9 +97,9 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
 
         // TODO(E-IMG-4): honor user-picked Qwen3-VL / VAE overrides from ImageRequest.Components (the SwarmUI loader
         // read T2IParamTypes.QwenModel/VAE and header-probed the pick, falling back to the canonical component).
-        string uncondPath = ModelDownloader.EnsureSideModelAsync(SideModels.Ideogram4Unconditional, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string uncondPath = ModelDownloader.EnsureSideModelAsync(SideModels.Ideogram4Unconditional, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         try

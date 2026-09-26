@@ -53,8 +53,8 @@ public sealed class AnimaRecipe : IArchitectureRecipe
         // TODO(E-IMG-4): honor a user-picked Qwen/VAE override from ImageRequest.Components instead of always taking
         // the canonical SideModels entry (the SwarmUI loader read input.Get(T2IParamTypes.QwenModel/VAE) and
         // header-probed the pick for the Qwen-Image `conv2.weight` / `decoder.conv1.weight` signature keys).
-        string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3_0_6B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.QwenImageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3_0_6B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.QwenImageVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;

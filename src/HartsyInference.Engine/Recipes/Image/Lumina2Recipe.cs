@@ -62,8 +62,8 @@ public sealed class Lumina2Recipe : IArchitectureRecipe
     {
         // TODO(E-IMG-4/5): user overrides from ImageRequest.Components (SwarmUI read GemmaModel / VAE) + img2img/
         // inpaint are deferred — this ports the text-to-image core with canonical side models.
-        string tevPath = ModelDownloader.EnsureSideModelAsync(SideModels.Gemma2_2B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string tevPath = ModelDownloader.EnsureSideModelAsync(SideModels.Gemma2_2B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;

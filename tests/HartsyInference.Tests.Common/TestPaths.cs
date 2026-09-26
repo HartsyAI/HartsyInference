@@ -43,6 +43,9 @@ public static class TestPaths
         public static string BaseBf16     => Resolve("ZIMAGE_BASE_BF16_PATH",  Path.Combine(ModelsDir, "Stable-Diffusion", "ZImage", "z_image_base-bf16.safetensors"));
         public static string BaseFp8      => Resolve("ZIMAGE_BASE_FP8_PATH",   Path.Combine(ModelsDir, "Stable-Diffusion", "ZImage", "z_image_base-nvfp8-mixed.safetensors"));
 
+        /// <summary>Comfy-Org's published Z-Image-Turbo step-distillation patch LoRA — the only real-world Z-Image LoRA. Override with ZIMAGE_TURBO_LORA_PATH.</summary>
+        public static string TurboDistillLora => Resolve("ZIMAGE_TURBO_LORA_PATH", Path.Combine(ModelsDir, "Lora", "ZImage", "z_image_turbo_distill_patch_lora_bf16.safetensors"));
+
         /// <summary>Resolves to the first existing Z-Image-Base checkpoint (FP8 → BF16). Override with ZIMAGE_BASE_PATH.</summary>
         public static string Base
         {

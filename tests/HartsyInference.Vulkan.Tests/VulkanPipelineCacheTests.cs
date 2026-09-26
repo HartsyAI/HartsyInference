@@ -17,6 +17,9 @@ public sealed class VulkanPipelineCacheTests
     private readonly ITestOutputHelper _output;
     public VulkanPipelineCacheTests(ITestOutputHelper output) => _output = output;
 
+    /// <summary>VkPipelineCacheHeaderVersionOne: 16 bytes of header plus the 16-byte pipeline cache UUID.</summary>
+    private const long HeaderOnlyBytes = 32;
+
     private static bool VulkanAvailable()
     {
         try { using VulkanInstance instance = new(); return instance.EnumeratePhysicalDevices().Length > 0; }
@@ -49,13 +52,29 @@ public sealed class VulkanPipelineCacheTests
 
         // Second backend: load the cache, build the same kernels, dispose. Cache size should
         // be ≥ firstSize (driver may add new entries; never shrinks if all entries are still valid).
+        int reloadedBytes;
         using (VulkanBackend backend = new())
         {
+            reloadedBytes = backend.PipelineCacheInitialDataBytes;
             BuildAFewKernels(backend);
         }
+        // The round trip, asserted on the read rather than on the file the second backend then writes: on a driver
+        // that persists nothing both files are a 32-byte header, so a size check alone would pass without a reload.
+        _output.WriteLine($"Second backend loaded {reloadedBytes} bytes of cache data");
+        Assert.Equal(firstSize, reloadedBytes);
 
         long secondSize = new FileInfo(cachePath).Length;
         _output.WriteLine($"Cache size after second backend: {secondSize} bytes");
+        // A pipeline cache that holds no pipelines is still a valid one: the blob is a 32-byte header and the
+        // spec never obliges a driver to persist compiled pipelines. llvmpipe is such a driver. Whether the
+        // driver fills the cache is read from the FIRST backend's file, so this stays a real assertion on ours.
+        if (firstSize <= HeaderOnlyBytes)
+        {
+            _output.WriteLine($"Driver does not persist pipeline binaries (first cache was {firstSize} bytes, "
+                + "header only) — asserting the round-trip, not the contents.");
+            Assert.True(secondSize > 0, $"Cache vanished across backends: {secondSize} bytes");
+            return;   // the reload itself is already asserted above, on the byte count the driver was handed
+        }
         // Drivers are allowed to drop pipeline-cache entries that don't match the current state
         // (a flush of stale entries on reload is normal — the spec doesn't require monotonic
         // growth). Just assert the second backend produced a non-trivially-sized cache, i.e.

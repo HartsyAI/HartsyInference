@@ -40,16 +40,8 @@ public static class SamplerOps
         backend.AffineMix(target, a, b, aScale, bScale);
     }
 
-    /// <summary>Adds <c>scale·N(0,1)</c> to <paramref name="target"/> in place, drawing the noise from a seed derived
-    /// from <paramref name="baseSeed"/> and <paramref name="stepIndex"/>.
-    ///
-    /// <para>The draw is host-side (<see cref="SeedGenerator.CreateNoise"/>) and uploaded once per noised step. At a
-    /// 1024² SDXL latent that is ~4 MB against a multi-second forward, so it does not register — but it IS a per-step
-    /// H2D transfer that deterministic samplers never pay, which is the honest cost of the ancestral/SDE family.</para>
-    ///
-    /// <para><b>Reproducibility bound.</b> This is a seeded Gaussian, not ComfyUI's torchsde BrownianTree. Same seed
-    /// reproduces exactly on this engine; it does NOT reproduce a ComfyUI image at the same seed. Swapping the noise
-    /// source is a self-contained follow-up that leaves every integrator below untouched.</para></summary>
+    /// <summary>Adds <c>scale·N(0,1)</c> to <paramref name="target"/> in place, drawn from a seed derived from
+    /// <paramref name="baseSeed"/> and <paramref name="stepIndex"/>.</summary>
     public static void AddNoise(IBackend backend, Tensor target, TensorShape shape, int baseSeed, int stepIndex, float scale)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -69,16 +61,60 @@ public static class SamplerOps
         }
     }
 
-    /// <summary>Per-step noise seed. Mixed through the two SplitMix64 odd constants rather than incremented, so
-    /// neighbouring steps do not draw correlated streams and a repeated run reproduces step for step.
-    ///
-    /// <para><b>Open for the next sampler author:</b> this is keyed on <paramref name="stepIndex"/> alone, so two draws
-    /// inside ONE step return the same noise. No shipped sampler does that today — <see cref="EulerAncestralSampler"/>,
-    /// <see cref="Dpm2Sampler"/> and <see cref="DpmPlusPlus2MSdeSampler"/> each draw at most once per
-    /// <see cref="ISampler.Step"/> — but the <c>dpmpp_sde</c> / <c>seeds_2</c> / <c>seeds_3</c> family draws twice, and
-    /// would silently get correlated injections. Add a sub-draw ordinal to the mix before implementing those.</para></summary>
+    /// <summary>In-place <c>target ← target + scale·noise</c> for noise drawn from <paramref name="source"/>.</summary>
+    public static void AddNoise(IBackend backend, Tensor target, INoiseSource source, int stepIndex, int subDraw,
+        float sigma, float sigmaNext, float scale)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(source);
+        if (scale == 0f)
+        {
+            return;
+        }
+        using Tensor noise = source.Sample(stepIndex, subDraw, sigma, sigmaNext);
+        MixInto(backend, target, noise, 1.0f, scale);
+    }
+
+    /// <summary>In-place <c>target ← scale·target</c>.</summary>
+    public static void ScaleInPlace(IBackend backend, Tensor target, float scale)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(target);
+        if (scale == 1.0f)
+        {
+            return;
+        }
+        using Tensor scratch = new Tensor(target.Shape, DType.F32);
+        backend.Scale(scratch, target, scale);
+        backend.Scale(target, scratch, 1.0f);
+    }
+
+    /// <summary>In-place <c>target ← a·target + b·x + c·y</c>.</summary>
+    public static void MixInto(IBackend backend, Tensor target, Tensor x, Tensor y, float targetScale, float xScale, float yScale)
+    {
+        MixInto(backend, target, x, targetScale, xScale);
+        MixInto(backend, target, y, 1.0f, yScale);
+    }
+
+    /// <summary><c>output ← a·x + b·y + c·z</c>; <paramref name="output"/> must not alias an input.</summary>
+    public static void SetMix(IBackend backend, Tensor output, Tensor x, Tensor y, Tensor z, float xScale, float yScale, float zScale)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        backend.AffineMix(output, x, y, xScale, yScale);
+        MixInto(backend, output, z, 1.0f, zScale);
+    }
+
+    /// <summary>Per-step noise seed, mixed through the SplitMix64 odd constants so neighbouring steps draw
+    /// uncorrelated streams.</summary>
     public static int StepSeed(int baseSeed, int stepIndex) =>
         unchecked((baseSeed * 6364136223846793005L) + (stepIndex * 1442695040888963407L)).GetHashCode();
+
+    /// <summary>Seed for draw <paramref name="subDraw"/> inside a step; draw 0 equals <see cref="StepSeed(int,int)"/>.</summary>
+    public static int StepSeed(int baseSeed, int stepIndex, int subDraw) => subDraw == 0
+        ? StepSeed(baseSeed, stepIndex)
+        : unchecked((baseSeed * 6364136223846793005L) + (stepIndex * 1442695040888963407L)
+            + (subDraw * -7046029254386353131L)).GetHashCode();
 
     /// <summary>Log-sigma, the domain the DPM-Solver family integrates in. Clamped away from zero so the terminal
     /// sigma cannot produce −∞ and poison an otherwise finite step.</summary>

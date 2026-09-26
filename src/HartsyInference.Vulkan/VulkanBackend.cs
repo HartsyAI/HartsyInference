@@ -93,6 +93,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Filesystem path of the on-disk SPIR-V pipeline cache; exposed for persist/reload tests.</summary>
     public string PipelineCachePath => _pipelineCache.CachePath;
 
+    /// <summary>Bytes of on-disk cache handed to the driver when this backend started; 0 when there was none.</summary>
+    public int PipelineCacheInitialDataBytes => _pipelineCache.InitialDataBytes;
+
     /// <summary>Diagnostic snapshot of device-memory usage, aggregated across all DEVICE_LOCAL heaps.</summary>
     // Used by the leak-validation tests to assert that VRAM returns to baseline after a generation loop.
     // Values are stable across slab boundaries (slab-internal free regions are subtracted from UsedDeviceBytes).

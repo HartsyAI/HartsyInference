@@ -59,16 +59,16 @@ public static class CudaMemory
         // Reporting free bytes is a nicety; raising the TYPED exception is load-bearing (it is what the
         // service layer's reclaim and the VRAM planner's re-plan key off). A poisoned context makes further
         // driver calls fail, so a failed query must degrade to 0 rather than throw over the real error.
-        long freeBytes = 0;
+        long freeBytes = 0, totalBytes = 0;
         try
         {
-            (freeBytes, _) = GetMemInfo();
+            (freeBytes, totalBytes) = GetMemInfo();
         }
         catch
         {
             // Deliberately swallowed: see above — losing the number is survivable, losing the type is not.
         }
-        throw new OutOfVramException((long)requested, freeBytes);
+        throw new OutOfVramException((long)requested, freeBytes, totalBytes);
     }
 
     /// <summary>Emits a one-line diagnostic showing requested bytes alongside the driver's view of free / total VRAM. Best-effort: a failure here is swallowed so it can never mask the real allocation failure that triggered the call.</summary>
