@@ -38,6 +38,10 @@ IDENTITY
   --meta KEY=VALUE      Add or override one metadata entry. Repeatable.
   --meta-json <file>    Add or override entries from a JSON object of strings.
   --no-metadata         Write no identity. SwarmUI then cannot classify the file; not for publishing.
+  --stands-in-for <path>  An upstream file this one replaces, as a path under the audio models root (the
+                        engine's own cache layout). Repeatable. The engine links the file into each such path
+                        that is missing, so its loaders find it without knowing its Hartsy name.
+                        e.g. --stands-in-for tts/nari-labs--Dia-1.6B-0626/pytorch_model.bin
 
 MERGE AND CAST (safetensors)
   Several inputs, a *.safetensors.index.json, or a folder of shards are merged into one file, streaming
@@ -92,7 +96,7 @@ EXAMPLES
 // The tool prints its own progress; the engine's info lines would repeat it.
 Logs.MinLevel = LogLevel.Warning;
 string[] pickleExtensions = [".pt", ".pth", ".bin", ".th", ".ckpt"];
-string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root", "--lora", "--lora-alpha"];
+string[] valueOptions = ["--model", "--variant", "--component", "--source-repo", "--meta", "--meta-json", "--strip-prefix", "--rename", "--dtype", "--prefix", "--drop", "--keep-dtype", "--pattern", "--normalizer", "--recipe", "--source-root", "--lora", "--lora-alpha", "--stands-in-for"];
 string[] flagOptions = ["--recursive", "--allow-partial", "--no-metadata", "--force", "--help", "-h", "--list-models", "--tokenizer-from-tiktoken"];
 
 List<string> positionals = [];
@@ -369,6 +373,15 @@ foreach (string pair in values.GetValueOrDefault("--meta") ?? [])
     }
     overrides[pair[..split]] = pair[(split + 1)..];
 }
+
+List<string> standsInFor = [.. values.GetValueOrDefault("--stands-in-for") ?? recipe?.StandsInFor ?? []];
+foreach (string path in standsInFor)
+{
+    if (Path.IsPathRooted(path) || path.Replace('\\', '/').Split('/').Any(s => s is ".." or "." or ""))
+        return Usage($"--stands-in-for '{path}' must be a path under the audio models root, e.g. tts/nari-labs--Dia-1.6B-0626/pytorch_model.bin.");
+}
+if (standsInFor.Count > 0)
+    overrides["hartsy.stands_in_for"] = string.Join(";", standsInFor.Select(p => p.Replace('\\', '/')));
 
 List<(string From, string To)> renames = [];
 foreach (string pair in values.GetValueOrDefault("--rename") ?? [])
