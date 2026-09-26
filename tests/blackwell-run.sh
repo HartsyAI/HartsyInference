@@ -312,8 +312,9 @@ if [ "$WITH_SWARM" = 1 ] && stage_wanted swarm; then
         ( cd "$SWARM_DIR" && ./src/bin/live_release/SwarmUI --data_dir "$SWARM_DATA" --settings_file "$SWARM_DATA/Settings.fds" ) >"$OUT/logs/swarm-server.log" 2>&1 &
         SWARM_PID=$!
         # The server is a background process: a budget timeout that kills the foreground would otherwise leave it
-        # holding the card, so the trap reaps it however this stage ends.
-        trap 'kill "${SWARM_PID:-}" 2>/dev/null' EXIT
+        # holding the card. Reap it AND keep auto_stop — replacing the EXIT trap outright would leave the rented
+        # pod running forever, which is the opposite of what this script is for.
+        trap 'kill "${SWARM_PID:-}" 2>/dev/null; auto_stop' EXIT
         swarm_up=0
         for _ in $(seq 1 90); do
             [ "$BUDGET_MINUTES" -gt 0 ] && [ $(( BUDGET_MINUTES * 60 - ($(date +%s) - START) )) -lt 1 ] && { log "swarm: out of budget while waiting for the API"; break; }
@@ -346,7 +347,7 @@ except Exception: print("ERR")')
             swarm_fail=1; log "swarm: API never answered — see $OUT/logs/swarm-server.log"
         fi
         kill "$SWARM_PID" 2>/dev/null; wait "$SWARM_PID" 2>/dev/null
-        trap - EXIT
+        trap auto_stop EXIT
     fi
     [ "$swarm_fail" = 0 ] && finish_stage swarm || { FAILURES=$((FAILURES + 1)); log "swarm: failures; not marking done"; }
 fi

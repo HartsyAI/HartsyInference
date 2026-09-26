@@ -6,6 +6,17 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.180
+
+- **The Vulkan suite runs against a non-NVIDIA driver.** Mesa's software ICD reports subgroup size 8 and no
+  cooperative matrix — the two regimes NVIDIA hardware never reaches — and 220 of 221 GPU-integration tests pass
+  there. `VulkanPipelineCache` now reports `InitialDataBytes`, the on-disk bytes it was handed at construction,
+  because the pipeline-cache test asserted the reload from the file the *second* backend wrote: a driver that
+  persists no pipelines writes a fresh 32-byte header either way, so that assertion was green without any reload.
+- The rental script gains an opt-in `swarm` stage: SwarmUI loads the extension in its own load context against
+  the pinned NuGet engine, so the engine generating from the command line never proved the extension does.
+>>>>>>> 5a7dfe24 (Review: keep auto_stop in the swarm trap, and reserve alpha.180)
+
 ## alpha.178
 
 - **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
