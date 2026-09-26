@@ -146,6 +146,19 @@ public sealed class VulkanCapabilities
     /// <summary>Exact workgroup invocation count (local_size_x * y * z) the driver expects for this coopmat2 configuration's <c>gl_ScopeWorkgroup</c> matrices. 0 if unsupported.</summary>
     public required uint CoopMat2WorkgroupInvocations { get; init; }
 
+    /// <summary>Whether <c>VK_EXT_shader_float8</c> offers fp8 cooperative matrices with an E4M3 × E4M3 → F32 subgroup
+    /// configuration, the one <c>matmul_fp8_coopmat</c> runs; its shape is <see cref="Fp8CoopMatM"/>/<c>N</c>/<c>K</c>.</summary>
+    public required bool HasFloat8CooperativeMatrix { get; init; }
+
+    /// <summary>Fragment rows of the E4M3 cooperative-matrix configuration; 0 without one.</summary>
+    public required uint Fp8CoopMatM { get; init; }
+
+    /// <summary>Fragment columns of the E4M3 cooperative-matrix configuration; 0 without one.</summary>
+    public required uint Fp8CoopMatN { get; init; }
+
+    /// <summary>Fragment depth of the E4M3 cooperative-matrix configuration; 0 without one.</summary>
+    public required uint Fp8CoopMatK { get; init; }
+
     /// <summary>True if any memory type advertises both DEVICE_LOCAL and HOST_VISIBLE — the ReBAR / Smart Access Memory fast path that skips staging copies.</summary>
     public required bool HasReBar { get; init; }
 
@@ -188,5 +201,5 @@ public sealed class VulkanCapabilities
         => $"Vulkan({DeviceName}, {VendorString}, {DeviceType}, " +
            $"VRAM={TotalVramBytes / (1L << 30)} GB, subgroup={SubgroupSize} " +
            $"[{MinSubgroupSize}-{MaxSubgroupSize}], FP16={SupportsFp16}, " +
-           $"ReBAR={HasReBar}, CoopMat={HasCooperativeMatrix}, CoopMat2={HasCooperativeMatrix2})";
+           $"ReBAR={HasReBar}, CoopMat={HasCooperativeMatrix}, CoopMat2={HasCooperativeMatrix2}, Fp8CoopMat={HasFloat8CooperativeMatrix})";
 }

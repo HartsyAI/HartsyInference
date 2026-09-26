@@ -10,6 +10,7 @@ public sealed class VulkanShaderFeatureLintTests
     [
         ("GL_EXT_shader_explicit_arithmetic_types_int64", "shaderInt64"),
         ("GL_EXT_shader_explicit_arithmetic_types_int16", "shaderInt16"),
+        ("GL_EXT_float_e4m3", "shaderFloat8CooperativeMatrix"),
     ];
 
     [Fact]
@@ -39,6 +40,8 @@ public sealed class VulkanShaderFeatureLintTests
     [InlineData("im2col_f16", "shaderInt64")]
     [InlineData("cast_bf16_f32", "shaderInt16")]
     [InlineData("matmul_tiled_f16", null)]
+    [InlineData("matmul_fp8_coopmat", "shaderFloat8CooperativeMatrix")]
+    [InlineData("quant_e4m3_f16", null)]
     public void DispatchNamesResolveThroughTheirBaseShader(string dispatchName, string? feature)
     {
         Assert.Equal(feature, VulkanKernelRegistry.RequiredFeature(dispatchName));
