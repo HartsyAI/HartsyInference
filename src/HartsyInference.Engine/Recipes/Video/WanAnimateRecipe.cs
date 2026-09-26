@@ -45,8 +45,8 @@ public sealed class WanAnimateRecipe : IVideoRecipe
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
-        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         // Side-model loaders and the checkpoint share one bag: the container is format-agnostic, so what it hands
         // back is an IDisposable rather than a SafeTensorsLoader.
@@ -89,7 +89,7 @@ public sealed class WanAnimateRecipe : IVideoRecipe
             ClipVisionEncoder? clipVision = null;
             if (hasClipEmbedder)
             {
-                string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipVisionH14, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipVisionH14, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                 SafeTensorsLoader clipLoader = new SafeTensorsLoader();
                 clipLoader.Load(clipPath);
                 loaders.Add(clipLoader);

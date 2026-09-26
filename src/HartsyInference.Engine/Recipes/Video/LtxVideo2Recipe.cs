@@ -148,16 +148,16 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 {
                     Logs.Info("[LtxVideo2Recipe] Split LTX-2.5 model (no bundled VAE) — auto-downloading side files: "
                         + "video VAE, audio VAE (mcmonkey/swarm-vaes ungated repack).");
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25VideoVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25AudioVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25VideoVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25AudioVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
                 }
                 else
                 {
                     Logs.Info("[LtxVideo2Recipe] Split LTX-2.3 model (no bundled VAE) — auto-downloading side files: "
                         + "video VAE, audio VAE, text projection.");
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23VideoVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23AudioVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23TextProjection, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23VideoVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23AudioVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23TextProjection, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
                 }
                 conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
             }
@@ -173,7 +173,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 // discriminate with, so the DiT-variant signal (isV25) picks the side model here instead.
                 Logs.Info("[LtxVideo2Recipe] Split LTX-2.5 model (no bundled Gemma-4 text tower) — auto-downloading "
                     + "side file (mcmonkey/swarm-models ungated repack, avoids the gated Lightricks/LTX-2.5 repo).");
-                AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Gemma4Ltx25, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Gemma4Ltx25, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
                 conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
             }
 
@@ -319,7 +319,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 else
                 {
                     Logs.Info("[LtxVideo2Recipe] No bundled Gemma-3 text tower — auto-downloading side file (Comfy-Org/ltx-2).");
-                    gemmaSidePath = ModelDownloader.EnsureSideModelAsync(SideModels.GemmaLtx2, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                    gemmaSidePath = ModelDownloader.EnsureSideModelAsync(SideModels.GemmaLtx2, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                     SafeTensorsLoader gemmaLoader = new SafeTensorsLoader();
                     gemmaLoader.Load(gemmaSidePath);
                     loaders.Add(gemmaLoader);
@@ -330,7 +330,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 tokenizer = new GemmaTokenizer(LocateGemmaTokenizer(context.CheckpointPath, gemmaSidePath), maxLength: TokenLength);
             }
 
-            LtxLatentUpsampler? latentUpsampler = LoadLatentUpsampler(config, loaders);
+            LtxLatentUpsampler? latentUpsampler = LoadLatentUpsampler(config, loaders, context.Cancel);
 
             LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(context.Backend, transformer, connectors, vae, gemma, config,
                 audioVae, vocoder, audioMean, audioStd, diffusionVae, videoMean, videoStd)
@@ -373,7 +373,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// and, if missing, auto-downloaded with no confirmation prompt — same "starts, then fetches the refiner"
     /// behavior as SwarmUI's ComfyUI backend. (These knobs are NOT environment variables — the engine stopped
     /// reading its config from the process environment; see <c>KnobStore</c>/<c>KnobFile</c>.)</summary>
-    private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<IDisposable> loaders)
+    private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<IDisposable> loaders, CancellationToken cancel)
     {
         if (!(EngineKnobs.Ltx2TwoStage.Value ?? config.TwoStage))
         {
@@ -402,7 +402,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         {
             Logs.Info("[LtxVideo2Recipe] Two-stage enabled, latent upsampler not found locally — auto-downloading "
                 + $"{SideModels.Ltx25LatentUpsampler.Repo}/{SideModels.Ltx25LatentUpsampler.RepoPath}.");
-            path = ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25LatentUpsampler, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            path = ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25LatentUpsampler, downloadIfMissing: true, onProgress: null, cancel).GetAwaiter().GetResult();
         }
 
         SafeTensorsLoader loader = new SafeTensorsLoader();

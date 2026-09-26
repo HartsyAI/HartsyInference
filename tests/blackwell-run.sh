@@ -8,7 +8,7 @@
 #   tests/blackwell-run.sh --budget-minutes 60 --auto-stop     # on the pod
 #   tests/blackwell-run.sh --stage gpu-tests                   # rerun one stage
 #
-# Stages: preflight → bootstrap → probe → gpu-tests → models → vulkan (opt-in) → collect. `preflight` is the only
+# Stages: preflight → bootstrap → probe → gpu-tests → models → vulkan (opt-in) → swarm (opt-in) → collect. `preflight` is the only
 # stage that may fail cheaply: the driver must be 580+ (every nvcc-built PTX here is ISA 9.0, which a 570/12.8
 # driver refuses to JIT), the card must be the one the session is paying for, and cuBLAS must resolve.
 #
@@ -26,6 +26,7 @@ REHEARSAL=0
 AUTO_STOP=0
 WITH_VULKAN=0
 WITH_BENCH=0
+WITH_SWARM=0
 BASE_RUNS=""
 BASE_SHA=""
 GPU_INDEX="${GPU_INDEX:-0}"
@@ -40,6 +41,7 @@ while [ $# -gt 0 ]; do
         --rehearsal)      REHEARSAL=1; shift ;;
         --auto-stop)      AUTO_STOP=1; shift ;;
         --with-vulkan)    WITH_VULKAN=1; shift ;;
+        --with-swarm)     WITH_SWARM=1; shift ;;
         --with-bench)     WITH_BENCH=1; shift ;;
         --base-runs)      BASE_RUNS="$2"; shift 2 ;;   # a tar of the 4090's regression-ab runs, for cross-card SSIM
         --base-sha)       BASE_SHA="$2"; shift 2 ;;    # the commit those runs were made from
@@ -249,6 +251,7 @@ fi
 # ── vulkan (opt-in, capped) ──────────────────────────────────────────────────────────────────────────────────
 if [ "$WITH_VULKAN" = 1 ] && stage_wanted vulkan; then
     (command -v vulkaninfo >/dev/null || (sudo -n true 2>/dev/null && sudo apt-get install -y -q libvulkan1 vulkan-tools || apt-get install -y -q libvulkan1 vulkan-tools)) >>"$LOG" 2>&1
+    vulkaninfo --summary >"$OUT/logs/vulkaninfo.txt" 2>&1 || true
     if vulkaninfo --summary 2>/dev/null | grep -qi nvidia; then
         dotnet build "$REPO/tests/HartsyInference.Vulkan.Tests" -c Release --nologo -v q >>"$LOG" 2>&1
         vk_fail=0
@@ -257,8 +260,107 @@ if [ "$WITH_VULKAN" = 1 ] && stage_wanted vulkan; then
         timeout 300 "$REPO/tests/vulkan-smoke-matrix.sh" --filter sd15 >"$OUT/logs/vulkan-smoke.tsv" 2>"$OUT/logs/vulkan-smoke.log" || { vk_fail=1; log "vulkan smoke hit the cap or failed"; }
         [ "$vk_fail" = 0 ] && finish_stage vulkan || { FAILURES=$((FAILURES + 1)); log "vulkan: failures; not marking done"; }
     else
-        log "vulkan: no NVIDIA ICD visible to vulkaninfo; skipped"
+        # Not a code problem and not worth a retry: the container was started without graphics capability, so
+        # the loader sees no NVIDIA ICD at all. Recreate the pod with NVIDIA_DRIVER_CAPABILITIES=all.
+        log "vulkan: no NVIDIA ICD (see $OUT/logs/vulkaninfo.txt). The pod needs NVIDIA_DRIVER_CAPABILITIES=all; skipped"
     fi
+fi
+
+# ── swarm (opt-in, capped): the extension driving this engine through the SwarmUI API ────────────────────────
+# The engine generating from the CLI does not prove the extension does: Swarm loads it in its own AssemblyLoadContext
+# against the PINNED NuGet engine, not this checkout. This stage is the only thing that exercises that pairing.
+if [ "$WITH_SWARM" = 1 ] && stage_wanted swarm; then
+    SWARM_DIR="${SWARM_DIR:-$HOME/swarm-test}"
+    SWARM_DATA="$SWARM_DIR/TestData"
+    SWARM_PORT="${SWARM_PORT:-7899}"
+    SWARM_HOST="${SWARM_HOST:-127.0.0.1}"   # a pod sets 0.0.0.0 so the provider's proxy can reach it
+    swarm_fail=0
+    # HEAD, not a branch name: the two repositories do not agree on what their default branch is called.
+    SWARM_REF="${SWARM_REF:-HEAD}"; SWARM_EXT_REF="${SWARM_EXT_REF:-HEAD}"
+    [ -d "$SWARM_DIR/.git" ] || git clone -q https://github.com/mcmonkeyprojects/SwarmUI "$SWARM_DIR" >>"$LOG" 2>&1 || { swarm_fail=1; log "swarm: clone failed"; }
+    if [ "$swarm_fail" = 0 ]; then
+        EXT_DIR="$SWARM_DIR/src/Extensions/SwarmUI-HartsyInference-Backend"
+        [ -d "$EXT_DIR/.git" ] || git clone -q https://github.com/HartsyAI/SwarmUI-HartsyInference-Backend "$EXT_DIR" >>"$LOG" 2>&1
+        # A reused directory would otherwise rebuild whatever revision it happened to hold, and report a pass that
+        # names no pairing. Pin both, and write the SHAs into the bundle so the result says what was tested.
+        # fetch <ref> + FETCH_HEAD, not origin/<ref>: a directory left by an earlier run may be a shallow clone
+        # with no remote-tracking branch, and this form works for both.
+        # -f and clean, not a plain checkout: a reused tree with local edits would build code the recorded SHA
+        # does not describe, which is the failure this pinning exists to prevent.
+        ( cd "$SWARM_DIR" && git fetch -q origin "$SWARM_REF" && git checkout -qf --detach FETCH_HEAD && git clean -qfdx -e '/Data*' -e '/Output' ) >>"$LOG" 2>&1 || { swarm_fail=1; log "swarm: could not check out SwarmUI $SWARM_REF"; }
+        ( cd "$EXT_DIR" && git fetch -q origin "$SWARM_EXT_REF" && git checkout -qf --detach FETCH_HEAD && git clean -qfdx ) >>"$LOG" 2>&1 || { swarm_fail=1; log "swarm: could not check out the extension $SWARM_EXT_REF"; }
+        printf 'swarmui=%s\nextension=%s\nengine_pin=%s\n' \
+            "$(git -C "$SWARM_DIR" rev-parse --short HEAD 2>/dev/null)" \
+            "$(git -C "$EXT_DIR" rev-parse --short HEAD 2>/dev/null)" \
+            "$(grep -oE 'Include="HartsyInference" Version="[^"]+"' "$EXT_DIR/SwarmUI-HartsyInference.csproj" 2>/dev/null | grep -oE '[0-9][^"]*')" \
+            >"$OUT/swarm-revisions.txt"
+        log "swarm: $(tr '\n' ' ' <"$OUT/swarm-revisions.txt")"
+        mkdir -p "$SWARM_DATA"
+        # IsInstalled is the whole trick: without it every request lands on the installer page and the API never
+        # answers. LaunchMode none keeps it from trying to open a browser on a headless box.
+        # printf, not a heredoc: FDS indents with real tabs and a heredoc would write a literal backslash-t.
+        printf 'IsInstalled: true\nInstallDate: %s\nInstallVersion: 0.9.8.0\nLaunchMode: none\nPaths:\n\tModelRoot: %s\nNetwork:\n\tHost: %s\n\tPort: %s\n\tPortCanChange: false\n' \
+            "$(date -u +%Y-%m-%d)" "$MODELS" "$SWARM_HOST" "$SWARM_PORT" >"$SWARM_DATA/Settings.fds"
+        # GPU_ID is a CUDA ordinal, and this script exports CUDA_DEVICE_ORDER=PCI_BUS_ID, which the server
+        # inherits — so the ordinal is the nvidia-smi index, not the fastest-first default. Getting this wrong
+        # silently generates on the other card: same seed, same parameters, different pixels.
+        printf '0:\n\ttype: hartsyinference\n\ttitle: HartsyInference\n\tenabled: true\n\tsettings:\n\t\tComputeBackend: cuda\n\t\tGPU_ID: %s\n' "$GPU_INDEX" >"$SWARM_DATA/Backends.fds"
+        within_budget env -C "$SWARM_DIR" dotnet build src/SwarmUI.csproj -c Release -o src/bin/live_release --nologo -v q >>"$LOG" 2>&1 \
+            || { swarm_fail=1; log "swarm: build failed or ran out of budget"; }
+    fi
+    if [ "$swarm_fail" = 0 ]; then
+        # The launcher is a native host, NOT `dotnet SwarmUI.dll` — dotnet reads that path as a subcommand and
+        # reports the file missing, which is a confusing way to lose twenty minutes on a rented card.
+        # A server already on this port would answer the probe below while the one just launched died on bind,
+        # and the stage would then report a pass for code it never loaded.
+        if (exec 3<>"/dev/tcp/127.0.0.1/$SWARM_PORT") 2>/dev/null; then
+            exec 3<&-; swarm_fail=1
+            log "swarm: port $SWARM_PORT is already in use; refusing to test against another server"
+        fi
+    fi
+    if [ "$swarm_fail" = 0 ]; then
+        ( cd "$SWARM_DIR" && ./src/bin/live_release/SwarmUI --data_dir "$SWARM_DATA" --settings_file "$SWARM_DATA/Settings.fds" ) >"$OUT/logs/swarm-server.log" 2>&1 &
+        SWARM_PID=$!
+        # The server is a background process: a budget timeout that kills the foreground would otherwise leave it
+        # holding the card. Reap it AND keep auto_stop — replacing the EXIT trap outright would leave the rented
+        # pod running forever, which is the opposite of what this script is for.
+        trap 'kill "${SWARM_PID:-}" 2>/dev/null; auto_stop' EXIT
+        swarm_up=0
+        for _ in $(seq 1 90); do
+            [ "$BUDGET_MINUTES" -gt 0 ] && [ $(( BUDGET_MINUTES * 60 - ($(date +%s) - START) )) -lt 1 ] && { log "swarm: out of budget while waiting for the API"; break; }
+            curl -s -m 4 -X POST "http://127.0.0.1:$SWARM_PORT/API/GetNewSession" -H 'Content-Type: application/json' -d '{}' 2>/dev/null | grep -q session_id && { swarm_up=1; break; }
+            sleep 2
+        done
+        kill -0 "$SWARM_PID" 2>/dev/null || { swarm_up=0; swarm_fail=1; log "swarm: the server we launched is gone — see $OUT/logs/swarm-server.log"; }
+        if [ "$swarm_up" = 1 ]; then
+            SID=$(curl -s -m 10 -X POST "http://127.0.0.1:$SWARM_PORT/API/GetNewSession" -H 'Content-Type: application/json' -d '{}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["session_id"])')
+            REL=$(within_budget curl -s -m 900 -X POST "http://127.0.0.1:$SWARM_PORT/API/GenerateText2Image" -H 'Content-Type: application/json' \
+                  -d "{\"session_id\":\"$SID\",\"images\":1,\"prompt\":\"a red fox sitting in a snowy forest, sharp detail\",\"model\":\"SD15/v1-5-pruned-emaonly.safetensors\",\"width\":512,\"height\":512,\"steps\":8,\"cfgscale\":7,\"seed\":42}" \
+                  | python3 -c 'import sys,json
+try:
+    d=json.load(sys.stdin); print(d["images"][0] if d.get("images") else "ERR")
+except Exception: print("ERR")')
+            if [ "$REL" = "ERR" ]; then
+                swarm_fail=1; log "swarm: the API refused the generation — see $OUT/logs/swarm-server.log"
+            else
+                # GenerateText2Image answers before the file is flushed.
+                F="$SWARM_DIR/Output/${REL#View/}"
+                for _ in $(seq 1 60); do [ -s "$F" ] && break; sleep 0.5; done
+                if [ -s "$F" ]; then
+                    cp "$F" "$OUT/swarm-sd15-s42.png"
+                    log "swarm: generated $(du -h "$OUT/swarm-sd15-s42.png" | cut -f1) through the API"
+                    grep -oE "Step [0-9]+/[0-9]+ .*done in [0-9]+ms" "$OUT/logs/swarm-server.log" | tail -8 >"$OUT/logs/swarm-steps.txt"
+                else
+                    swarm_fail=1; log "swarm: no output file at $F"
+                fi
+            fi
+        else
+            swarm_fail=1; log "swarm: API never answered — see $OUT/logs/swarm-server.log"
+        fi
+        kill "$SWARM_PID" 2>/dev/null; wait "$SWARM_PID" 2>/dev/null
+        trap auto_stop EXIT
+    fi
+    [ "$swarm_fail" = 0 ] && finish_stage swarm || { FAILURES=$((FAILURES + 1)); log "swarm: failures; not marking done"; }
 fi
 
 # ── collect ──────────────────────────────────────────────────────────────────────────────────────────────────
@@ -273,7 +375,7 @@ if stage_wanted collect; then
     {
         echo "# Blackwell run — $(date -u +%Y-%m-%dT%H:%MZ), $(elapsed_min) min"
         echo; cat "$OUT/env.json" 2>/dev/null; echo
-        echo "## Stages"; for s in preflight bootstrap probe gpu-tests models vulkan; do printf -- '- %s: %s\n' "$s" "$([ -f "$(done_marker "$s")" ] && echo done || echo 'not done')"; done
+        echo "## Stages"; for s in preflight bootstrap probe gpu-tests models vulkan swarm; do printf -- '- %s: %s\n' "$s" "$([ -f "$(done_marker "$s")" ] && echo done || echo 'not done')"; done
         echo; echo "## Blackwell-named tests"; grep -h "TIMING\|rel_err\|corr=\|SKIPPED\|FAILED" "$OUT"/logs/blackwell-named.log 2>/dev/null | sed 's/^\s*/- /'
         echo; echo "## fp4Native off → on"; grep -E "^\| " "$OUT/logs/ab-fp4native.log" 2>/dev/null
         echo; echo "## Head-only core set"; grep -E "^\| " "$OUT/logs/ab-head-only.log" 2>/dev/null

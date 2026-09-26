@@ -3,112 +3,86 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Sampling;
 
-/// <summary>k-diffusion's <c>lms</c> — linear multistep (Adams–Bashforth) over the sigma domain. One model evaluation
-/// per step; the order comes from a weighted combination of the last <c>order</c> derivatives rather than from extra
-/// forwards. This was the original Stable Diffusion default sampler and still appears throughout older workflows.
-///
-/// <para>The coefficients are not constants: Adams–Bashforth assumes evenly-spaced abscissae, and a diffusion sigma
-/// schedule is anything but. They are therefore integrated per step from the Lagrange basis polynomial over the actual
-/// sigma values — <c>∫ Π_{j≠i} (τ − σ_j)/(σ_i − σ_j) dτ</c> across the current step — which is exactly what
-/// k-diffusion's <c>linear_multistep_coeff</c> does, and why an LMS run cannot reuse a coefficient table.</para></summary>
-public sealed class LmsSampler : ISampler
+/// <summary>k-diffusion's <c>lms</c>: a linear multistep method weighting up to four past derivatives by integrated
+/// Lagrange bases over sigma.</summary>
+public sealed class LmsSampler : SamplerBase
 {
     private const int Order = 4;
-
-    private readonly float[] _sigmas;
-    private readonly List<Tensor> _derivatives = [];
-
-    /// <inheritdoc/>
-    public string Name => "lms";
-
-    /// <inheritdoc/>
-    public int StepCount => _sigmas.Length - 1;
+    private readonly Tensor?[] _derivatives = new Tensor?[Order];
 
     /// <summary>Creates the sampler over a resolved sigma array.</summary>
-    public LmsSampler(float[] sigmas)
+    public LmsSampler(float[] sigmas, SamplerOptions? options = null)
+        : base(sigmas, 0, options)
     {
-        ArgumentNullException.ThrowIfNull(sigmas);
-        if (sigmas.Length < 2)
-        {
-            throw new ArgumentException($"Need at least 2 sigmas; got {sigmas.Length}.", nameof(sigmas));
-        }
-        _sigmas = sigmas;
     }
 
     /// <inheritdoc/>
-    public void Reset(TensorShape latentShape)
+    public override string Name => "lms";
+
+    /// <inheritdoc/>
+    protected override void OnReset()
     {
-        foreach (Tensor derivative in _derivatives)
+        for (int k = 0; k < Order; k++)
         {
-            derivative.Dispose();
+            Release(ref _derivatives[k]);
         }
-        _derivatives.Clear();
     }
 
     /// <inheritdoc/>
-    public void Step(IBackend backend, Tensor z, IDenoisePredictor predictor, int stepIndex)
+    protected override void StepLocal(IBackend backend, Tensor z, IDenoisePredictor predictor, int i, int stepIndex)
     {
-        ArgumentNullException.ThrowIfNull(backend);
-        ArgumentNullException.ThrowIfNull(z);
-        ArgumentNullException.ThrowIfNull(predictor);
-        float sigma = _sigmas[stepIndex];
-
-        using Tensor denoised = SamplerMath.PredictDenoised(backend, predictor, z, sigma, stepIndex);
+        float sigma = Sigma(i);
+        using Tensor denoised = Denoise(backend, predictor, z, sigma, stepIndex);
         Tensor derivative = new Tensor(z.Shape, DType.F32);
         SamplerOps.SetMix(backend, derivative, z, denoised, 1.0f / sigma, -1.0f / sigma);
-
-        // Pinned: LMS carries up to `Order` derivatives across steps, and a pipeline's mid-loop FreeActivations
-        // frees unpinned activations without syncing them back — the history would come back as stale bytes.
-        backend.PinActivation(derivative);
-        _derivatives.Add(derivative);
-        if (_derivatives.Count > Order)
+        // Newest first; the oldest falls off once the window is full.
+        Release(ref _derivatives[Order - 1]);
+        for (int k = Order - 1; k > 0; k--)
         {
-            _derivatives[0].Dispose();
-            _derivatives.RemoveAt(0);
+            _derivatives[k] = _derivatives[k - 1];
         }
+        _derivatives[0] = null;
+        Keep(backend, ref _derivatives[0], derivative);
 
-        int order = Math.Min(stepIndex + 1, Order);
-        for (int i = 0; i < order; i++)
+        if (Sigma(i + 1) == 0f)
         {
-            float coefficient = LinearMultistepCoefficient(order, stepIndex, i);
-            // _derivatives is oldest-first; coefficient i counts back from the newest.
-            SamplerOps.MixInto(backend, z, _derivatives[_derivatives.Count - 1 - i], 1.0f, coefficient);
+            backend.Scale(z, denoised, 1.0f);
+            return;
+        }
+        int order = Math.Min(i + 1, Order);
+        for (int j = 0; j < order; j++)
+        {
+            SamplerOps.MixInto(backend, z, _derivatives[j]!, 1.0f, LinearMultistepCoefficient(order, i, j));
         }
     }
 
-    /// <summary>Integrates the <paramref name="i"/>-th Lagrange basis polynomial over the current step, giving that
-    /// derivative's weight. Simpson's rule on 200 subintervals — the integrand is a smooth low-order polynomial, so
-    /// this is far more accuracy than F32 tensors can carry, and it runs once per (step, i) rather than per element.</summary>
-    private float LinearMultistepCoefficient(int order, int stepIndex, int i)
+    /// <summary>Integrates the <paramref name="j"/>-th Lagrange basis over the step with Simpson's rule.</summary>
+    private float LinearMultistepCoefficient(int order, int i, int j)
     {
         const int Subintervals = 200;
-        double lo = _sigmas[stepIndex];
-        double hi = _sigmas[stepIndex + 1];
-        double width = hi - lo;
+        double lo = Sigma(i);
+        double width = Sigma(i + 1) - lo;
         double step = width / Subintervals;
         double total = 0.0;
         for (int k = 0; k <= Subintervals; k++)
         {
             double tau = lo + (k * step);
             double weight = k == 0 || k == Subintervals ? 1.0 : (k % 2 == 1 ? 4.0 : 2.0);
-            total += weight * Basis(tau, order, stepIndex, i);
+            total += weight * Basis(tau, order, i, j);
         }
         return (float)(total * step / 3.0);
     }
 
-    /// <summary>The Lagrange basis <c>Π_{j≠i} (τ − σ_{t−j}) / (σ_{t−i} − σ_{t−j})</c>.</summary>
-    private double Basis(double tau, int order, int stepIndex, int i)
+    private double Basis(double tau, int order, int i, int j)
     {
         double product = 1.0;
-        for (int j = 0; j < order; j++)
+        for (int k = 0; k < order; k++)
         {
-            if (j == i)
+            if (k == j)
             {
                 continue;
             }
-            double sigmaI = _sigmas[stepIndex - i];
-            double sigmaJ = _sigmas[stepIndex - j];
-            product *= (tau - sigmaJ) / (sigmaI - sigmaJ);
+            product *= (tau - Sigma(i - k)) / (Sigma(i - j) - Sigma(i - k));
         }
         return product;
     }

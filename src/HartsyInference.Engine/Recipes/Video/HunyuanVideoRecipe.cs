@@ -95,18 +95,18 @@ public sealed class HunyuanVideoRecipe : IVideoRecipe
                 "HunyuanVideoRecipe");
             dit.LoadWeights(ditWeights);
 
-            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanVideoVae3D, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanVideoVae3D, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             HunyuanVideoVaeDecoder vae = new HunyuanVideoVaeDecoder();
             vae.LoadWeights(VaePrecisionHelper.CastWeights(HunyuanVideoCheckpointConverter.ConvertVaeDecoder(LoadStandalone(loaders, vaePath)), [DType.BF16], DType.F16));
 
             // bf16-resident, block-streamed DiT — caching F16 casts would roughly double VRAM and OOM a 24 GB card.
             RecipeBackendFlags.DisableCacheWeightCasts(context, "HunyuanVideoRecipe");
 
-            string llavaPath = ModelDownloader.EnsureSideModelAsync(SideModels.LlavaLlama3, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string llavaPath = ModelDownloader.EnsureSideModelAsync(SideModels.LlavaLlama3, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             LlamaStyleEncoder llava = new LlamaStyleEncoder(LlamaStyleEncoderConfig.LlavaLlama3_8B);
             llava.LoadWeights(TextEncoderQuantNormalizer.Normalize(LoadStandalone(loaders, llavaPath)));
 
-            string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
             clipL.LoadWeights(LoadStandalone(loaders, clipPath), "text_model");
 

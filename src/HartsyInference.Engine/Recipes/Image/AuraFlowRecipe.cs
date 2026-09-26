@@ -87,7 +87,7 @@ public sealed class AuraFlowRecipe : IArchitectureRecipe
             // Pile-T5-XL needs its OWN SentencePiece (same 32128 vocab size as Google T5 v1.1 but different
             // token-ID assignments) — the embedded Google-T5 spiece denoises into a coherent image but not the
             // prompted one, since every token id maps to the wrong piece.
-            string spiecePath = ModelDownloader.EnsureSideModelAsync(SideModels.PileT5XlSpiece, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string spiecePath = ModelDownloader.EnsureSideModelAsync(SideModels.PileT5XlSpiece, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             // TODO: Pile-T5's special ids likely differ from the ones this tokenizer hardcodes. ComfyUI's
             // `aura_t5.py:9/:14` declares `special_tokens={"end": 2, "pad": 1}` and `pad_token=1`, while
             // `T5Tokenizer` fixes EOS=1/PAD=0 for every family it serves — so AuraFlow may be terminating and

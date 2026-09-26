@@ -131,7 +131,7 @@ public sealed class SigmaScheduleTests
         float[] sigmas = SigmaSchedule.Apply("normal", BaseSigmas(10));
 
         NotSupportedException known = Assert.Throws<NotSupportedException>(
-            () => SamplerRegistry.Create("uni_pc", sigmas, 0));
+            () => SamplerRegistry.Create("sa_solver_pece", sigmas, 0));
         Assert.Contains("not implemented yet", known.Message, StringComparison.Ordinal);
 
         NotSupportedException typo = Assert.Throws<NotSupportedException>(

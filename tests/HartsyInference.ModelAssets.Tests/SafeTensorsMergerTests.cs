@@ -52,6 +52,30 @@ public sealed unsafe class SafeTensorsMergerTests
     }
 
     [Fact]
+    public void Write_CopiesABlockPackedTensorByItsByteCount()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"packed-{Guid.NewGuid():N}.safetensors");
+        using Tensor packed = new(new TensorShape(4, 32), DType.F4E2M1);
+        long bytes = Tensor.ComputeByteSize(packed.Shape, packed.DType);
+        for (long i = 0; i < bytes; i++)
+            ((byte*)packed.DataPointer)[i] = (byte)(i * 7 + 1);
+        try
+        {
+            SafeTensorsMerger.Write(path, [new("w", packed)], DType.BF16);
+            using SafeTensorsLoader loader = new();
+            loader.Load(path);
+            Tensor read = loader.GetTensor("w");
+            Assert.Equal(DType.F4E2M1, read.DType);
+            Assert.Equal(new ReadOnlySpan<byte>((void*)packed.DataPointer, (int)bytes).ToArray(),
+                new ReadOnlySpan<byte>((void*)read.DataPointer, (int)bytes).ToArray());
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
     public void Write_RefusesADuplicateKey()
     {
         using Tensor a = new(new TensorShape(1), DType.F32);

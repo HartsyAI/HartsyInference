@@ -111,8 +111,14 @@ public static class SafeTensorsWriter
         Dictionary<string, string> merged = new(StringComparer.Ordinal);
         if (root["__metadata__"] is JsonObject existing)
         {
+            // Identity keys not in the new set are dropped, so restamping a model as a companion (or with no identity)
+            // does not leave its old architecture behind; unrelated keys such as "format" are kept.
             foreach (KeyValuePair<string, JsonNode?> entry in existing)
-                merged[entry.Key] = entry.Value?.GetValue<string>() ?? "";
+            {
+                bool identity = entry.Key.StartsWith("modelspec.", StringComparison.Ordinal) || entry.Key.StartsWith("hartsy.", StringComparison.Ordinal);
+                if (!identity || metadata.ContainsKey(entry.Key))
+                    merged[entry.Key] = entry.Value?.GetValue<string>() ?? "";
+            }
         }
         foreach (KeyValuePair<string, string> entry in metadata)
             merged[entry.Key] = entry.Value;
@@ -149,6 +155,8 @@ public static class SafeTensorsWriter
                     output.Write(patched);
                 }
             }
+            // Closed first: restamping in place replaces the file this stream holds open, which Windows refuses.
+            source.Dispose();
             File.Move(tempPath, outputPath, overwrite: true);
         }
         catch

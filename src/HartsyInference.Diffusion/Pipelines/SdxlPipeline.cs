@@ -306,6 +306,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // generation using them always falls back to whichever loop it would have taken anyway. Decided AFTER
         // fusedLoop so eligibility can only fire on generations that already qualify for the batched fast path.
         bool useCfg = CfgHelper.IsGuidanceActive(cfgScale);
+        bool nonDefaultSelection = !string.IsNullOrEmpty(scheduleName)
+            || (samplerName.Length > 0 && !string.Equals(SamplerRegistry.Resolve(samplerName), "euler", StringComparison.Ordinal));
         bool cfgParallelEligible = false;
         LastCfgParallelDecision = null;
         if (CfgParallelBackend is not null)
@@ -317,6 +319,11 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             else if (!fusedLoop)
             {
                 RecordCfgParallelDecision("fell-back(eager-path-features)");
+            }
+            else if (nonDefaultSelection)
+            {
+                // The split loop is a fixed Euler step; a chosen sampler or schedule must run on the fused loop.
+                RecordCfgParallelDecision("fell-back(sampler)");
             }
             else
             {
@@ -352,9 +359,14 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
                 + "cfg-rescale and tcfg each force that fallback. Drop the sampler/schedule selection, or drop the "
                 + "feature that forced the fallback.");
         }
-        ISampler? sampler = fusedLoop
-            ? SamplerRegistry.Create(samplerName, SigmaSchedule.Apply(scheduleName, ((EulerDiscreteScheduler)scheduler).Sigmas()), seed)
-            : null;
+        ISampler? sampler = null;
+        if (fusedLoop)
+        {
+            EulerDiscreteScheduler euler = (EulerDiscreteScheduler)scheduler;
+            sampler = SamplerRegistry.Create(samplerName,
+                SamplerRegistry.BuildSigmas(samplerName, scheduleName, euler.Sigmas(), startStep > 0, euler.SigmasFor), seed,
+                new SamplerOptions { PercentToSigma = euler.SigmaAtPercent });
+        }
 
         Stopwatch denoiseSw = Stopwatch.StartNew();
         latent = cfgParallelEligible

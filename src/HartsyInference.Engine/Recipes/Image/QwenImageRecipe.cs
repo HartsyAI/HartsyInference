@@ -191,7 +191,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             }
             else
             {
-                string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_7B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_7B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                 SafeTensorsLoader encoderLoader = new SafeTensorsLoader();
                 encoderLoader.Load(encoderPath);
                 loaders.Add(encoderLoader);
@@ -223,7 +223,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             }
             else
             {
-                string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.QwenImageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.QwenImageVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                 SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
                 vaeLoader.Load(vaePath);
                 loaders.Add(vaeLoader);

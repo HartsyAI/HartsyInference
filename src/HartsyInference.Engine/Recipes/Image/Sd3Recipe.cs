@@ -74,25 +74,25 @@ public sealed class Sd3Recipe : IArchitectureRecipe
 
             if (clipLWeights.Count == 0)
             {
-                string path = ResolveComponent(SideModels.ClipL, "CLIP-L");
+                string path = ResolveComponent(SideModels.ClipL, "CLIP-L", context.Cancel);
                 clipLWeights = RequireWeights(LoaderClipUtils.StripClipPrefix(OpenSide(loaders, path).GetAllTensors(), "clip_l", 0), "CLIP-L", path);
                 Logs.Info($"[Sd3Recipe] CLIP-L resolved as a separate file: {path}.");
             }
             if (clipGWeights.Count == 0)
             {
-                string path = ResolveComponent(SideModels.ClipG, "CLIP-G");
+                string path = ResolveComponent(SideModels.ClipG, "CLIP-G", context.Cancel);
                 clipGWeights = RequireWeights(LoaderClipUtils.StripClipPrefix(OpenSide(loaders, path).GetAllTensors(), "clip_g", 1), "CLIP-G", path);
                 Logs.Info($"[Sd3Recipe] CLIP-G resolved as a separate file: {path}.");
             }
             if (t5Weights.Count == 0)
             {
-                string path = ResolveComponent(SideModels.T5XxlEnconly, "T5-XXL");
+                string path = ResolveComponent(SideModels.T5XxlEnconly, "T5-XXL", context.Cancel);
                 t5Weights = RequireWeights(LoaderPrefixUtils.StripT5XxlPrefix(OpenSide(loaders, path).GetAllTensors()), "T5-XXL", path);
                 Logs.Info($"[Sd3Recipe] T5-XXL resolved as a separate file: {path}.");
             }
             if (vaeWeights.Count == 0)
             {
-                string path = ResolveComponent(SideModels.Sd35Vae, "VAE");
+                string path = ResolveComponent(SideModels.Sd35Vae, "VAE", context.Cancel);
                 (Dictionary<string, Tensor> staged, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(path);
                 loaders.Add(vaeLoader);
                 vaeWeights = RequireWeights(staged, "VAE", path);
@@ -173,12 +173,12 @@ public sealed class Sd3Recipe : IArchitectureRecipe
     }
 
     /// <summary>Resolves a component the checkpoint didn't bundle to a file on disk, downloading it once when absent. Failure names the component, the exact path that was searched, and the HuggingFace source that was tried — a generic "missing components" message costs hours to diagnose.</summary>
-    private static string ResolveComponent(ModelAsset asset, string component)
+    private static string ResolveComponent(ModelAsset asset, string component, CancellationToken cancel)
     {
         string target = ModelDownloader.TargetPath(asset);
         try
         {
-            return ModelDownloader.EnsureSideModelAsync(asset, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            return ModelDownloader.EnsureSideModelAsync(asset, onProgress: null, cancel).GetAwaiter().GetResult();
         }
         catch (Exception ex)
         {

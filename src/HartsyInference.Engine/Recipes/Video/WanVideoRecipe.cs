@@ -244,7 +244,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
     /// <summary>Builds the plain T2V / I2V / TI2V pipeline. <paramref name="familyId"/> selects the config preset when it is one of the three Wan compat classes; otherwise the config is derived from the converted weights.</summary>
     internal IVideoRecipePipeline ConstructBase(RecipeContext context, string? familyId)
     {
-        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, context.Cancel).GetAwaiter().GetResult();
         // Side-model loaders and the checkpoint share one bag: the container is format-agnostic, so what it hands
         // back is an IDisposable rather than a SafeTensorsLoader.
         List<IDisposable> loaders = new List<IDisposable>();
@@ -331,13 +331,13 @@ public sealed class WanVideoRecipe : IVideoRecipe
                 transformer2.LoadWeights(convLow.Transformer);
             }
 
-            string vaePath = ModelDownloader.EnsureSideModelAsync(isWan21 ? SideModels.Wan21Vae : SideModels.Wan22Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(isWan21 ? SideModels.Wan21Vae : SideModels.Wan22Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21, loaders);
 
             ClipVisionEncoder? clipVision = null;
             if (isClipI2V)
             {
-                string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipVisionH14, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipVisionH14, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                 SafeTensorsLoader clipLoader = new SafeTensorsLoader();
                 clipLoader.Load(clipPath);
                 loaders.Add(clipLoader);

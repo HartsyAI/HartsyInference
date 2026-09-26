@@ -75,27 +75,6 @@ family, not the standard harness params (20 st / cfg 4.0) used for the older Chr
 ⁷ Debug build; resolution/step-matched to the family default but not built the same way as the ComfyUI
 Release number beside it — no ratio is reported. Retires the `OOM²` cell from the 2026-07-26 sweep.
 
-## Blackwell — first hardware run (2026-09-25)
-
-One rented **RTX PRO 6000 Blackwell** (compute capability 12.0, driver 595, CUDA 13), the substitute for an
-RTX 5090 that was out of stock everywhere; both are CC 12.0 and load the same kernels. These are
-HartsyInference-to-HartsyInference across GPUs, **not** head-to-head against ComfyUI, so they do not belong in
-the table above.
-
-| Workload | 4090 | PRO 6000 | |
-|---|---:|---:|---|
-| sd15 512², 8 steps | 70 ms/step | 47 ms/step | 1.49× |
-| Native NVFP4 vs the unpack path, 4096×3072×3072 | not runnable | 0.184 vs 0.404 ms | 2.19× |
-
-Two caveats travel with these numbers. The image is a CUDA devel image with **no cuDNN**, so convolutions took
-the fallback path — sd15 is convolution-heavy, and 47 ms/step is therefore a floor, not this card's best. And the
-card is a PRO 6000, not the 5090 the plan named.
-
-Verified end-to-end on that card: sd15 fp16 and Llama-3.2-1B q8_0, plus the full CUDA GPU-integration suite
-(178 of 178). **Not** exercised there: any nvfp4 or fp8-scaled checkpoint, any GGUF image model, Vulkan, and a
-generation driven through the SwarmUI API. `numerics.fp4Native` stays default-off until an on-card off/on
-quality run exists.
-
 ## Notes
 
 - **Z-Image-Turbo regression flag.** The 2026-07-26 sweep's headline Hartsy number (4.2 s) is used above

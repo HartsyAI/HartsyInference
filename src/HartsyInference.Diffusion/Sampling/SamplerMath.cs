@@ -95,6 +95,83 @@ public static class SamplerMath
         }
     }
 
+    /// <summary>Evaluates the model and returns both the CFG-combined and the unconditional denoised estimates, for
+    /// CFG++ samplers. Returns false, with <paramref name="uncondDenoised"/> null, when the pair carries no separate
+    /// unconditional branch.</summary>
+    public static bool TryPredictDenoisedPair(IBackend backend, IDenoisePredictor predictor, Tensor x, float sigma,
+        int stepIndex, out Tensor denoised, out Tensor? uncondDenoised)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(predictor);
+        ArgumentNullException.ThrowIfNull(x);
+        Tensor combined = new Tensor(x.Shape, DType.F32);
+        denoised = new Tensor(x.Shape, DType.F32);
+        uncondDenoised = null;
+        try
+        {
+            using DenoisePrediction prediction = predictor.Predict(x, sigma, stepIndex);
+            CombineCfg(backend, combined, prediction);
+            ToDenoised(backend, denoised, x, combined, sigma, predictor.Prediction);
+            if (ReferenceEquals(prediction.Cond, prediction.Uncond))
+            {
+                return false;
+            }
+            uncondDenoised = new Tensor(x.Shape, DType.F32);
+            ToDenoised(backend, uncondDenoised, x, prediction.Uncond, sigma, predictor.Prediction);
+            return true;
+        }
+        catch
+        {
+            denoised.Dispose();
+            uncondDenoised?.Dispose();
+            throw;
+        }
+        finally
+        {
+            combined.Dispose();
+        }
+    }
+
+    /// <summary>Whether <paramref name="type"/> is a flow (ComfyUI <c>CONST</c>) model, whose half-log-SNR is the logit form.</summary>
+    public static bool IsFlow(PredictionType type) => type is PredictionType.FlowVelocity or PredictionType.NegatedFlowVelocity;
+
+    /// <summary>ComfyUI's <c>sigma_to_half_log_snr</c>: <c>log((1−σ)/σ)</c> for flow models, <c>−log σ</c> otherwise.</summary>
+    public static double HalfLogSnr(double sigma, bool flow) => flow ? Math.Log((1.0 - sigma) / sigma) : -Math.Log(sigma);
+
+    /// <summary>ComfyUI's <c>half_log_snr_to_sigma</c>, the inverse of <see cref="HalfLogSnr"/>.</summary>
+    public static double HalfLogSnrToSigma(double lambda, bool flow) => flow ? 1.0 / (1.0 + Math.Exp(lambda)) : Math.Exp(-lambda);
+
+    /// <summary><c>e^x − 1</c>, accurate near zero.</summary>
+    public static double Expm1(double x) => Math.Abs(x) < 1e-5 ? x + (x * x * 0.5) + (x * x * x / 6.0) : Math.Exp(x) - 1.0;
+
+    /// <summary><c>h·φ₁(h) = e^h − 1</c>.</summary>
+    public static double PhiOne(double h) => Expm1(h);
+
+    /// <summary><c>h·φ₂(h) = (e^h − 1 − h)/h</c>.</summary>
+    public static double PhiTwo(double h) => (PhiOne(h) - h) / h;
+
+    /// <summary>Double-precision ComfyUI <c>get_ancestral_step</c>; <paramref name="eta"/> 0 returns <c>(to, 0)</c>.</summary>
+    public static (double SigmaDown, double SigmaUp) AncestralStep(double sigmaFrom, double sigmaTo, double eta)
+    {
+        if (eta == 0.0)
+        {
+            return (sigmaTo, 0.0);
+        }
+        double up = Math.Min(sigmaTo, eta * Math.Sqrt(sigmaTo * sigmaTo * ((sigmaFrom * sigmaFrom) - (sigmaTo * sigmaTo)) / (sigmaFrom * sigmaFrom)));
+        return (Math.Sqrt((sigmaTo * sigmaTo) - (up * up)), up);
+    }
+
+    /// <summary>ComfyUI's rectified-flow ancestral split (<c>*_RF</c> samplers): the down-step sigma, the rescale
+    /// <c>alpha_next/alpha_down</c> and the renoise coefficient.</summary>
+    public static (double SigmaDown, double Rescale, double Renoise) FlowAncestralStep(double sigma, double sigmaNext, double eta)
+    {
+        double sigmaDown = sigmaNext * (1.0 + (((sigmaNext / sigma) - 1.0) * eta));
+        double alphaNext = 1.0 - sigmaNext;
+        double alphaDown = 1.0 - sigmaDown;
+        double renoise = Math.Sqrt(Math.Max(0.0, (sigmaNext * sigmaNext) - (sigmaDown * sigmaDown * alphaNext * alphaNext / (alphaDown * alphaDown))));
+        return (sigmaDown, alphaNext / alphaDown, renoise);
+    }
+
     /// <summary>The ancestral split of a step: how much of the jump is deterministic (<c>sigmaDown</c>) versus resampled
     /// noise (<c>sigmaUp</c>), for a given <paramref name="eta"/>. k-diffusion's <c>get_ancestral_step</c>.</summary>
     public static (float SigmaDown, float SigmaUp) AncestralStep(float sigma, float sigmaNext, float eta = 1.0f)

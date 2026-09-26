@@ -106,6 +106,8 @@ DTYPE_KERNELS=(
     repeat_kv_heads
     gated_residual_last_dim
     slice_rows
+    fp8_absmax
+    quant_e4m3
 )
 
 SINGLE_KERNELS=(
@@ -128,6 +130,7 @@ SINGLE_KERNELS=(
     matmul_coopmat_partial_m
     matmul_coopmat2
     matmul_int8
+    matmul_fp8_coopmat
     dequant_q4_0
     dequant_q5_0
     dequant_q8_0

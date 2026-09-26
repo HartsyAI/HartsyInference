@@ -49,8 +49,8 @@ public sealed class LensRecipe : IArchitectureRecipe
     {
         // TODO(E-IMG-4): honor a user-picked VAE override from ImageRequest.Components (the SwarmUI loader read
         // input.Get(T2IParamTypes.VAE)); this always takes the canonical Flux.2 VAE.
-        string textEncoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.LensGptOss20b, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string textEncoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.LensGptOss20b, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
         (string vocabPath, string mergesPath) = EnsureGptOssVocabMerges();
 
         LensConfig config = Path.GetFileName(context.CheckpointPath).Contains("turbo", StringComparison.OrdinalIgnoreCase)

@@ -59,6 +59,7 @@ public sealed class VulkanKernelRegistry : IDisposable
     {
         if (shaderName.StartsWith("im2col", StringComparison.Ordinal)) return "shaderInt64";
         if (shaderName is "cast_bf16_f32" or "cast_f32_bf16") return "shaderInt16";
+        if (shaderName == "matmul_fp8_coopmat") return "shaderFloat8CooperativeMatrix";
         return null;
     }
 
@@ -82,6 +83,7 @@ public sealed class VulkanKernelRegistry : IDisposable
             null => true,
             "shaderInt64" => _caps.ShaderInt64,
             "shaderInt16" => _caps.ShaderInt16,
+            "shaderFloat8CooperativeMatrix" => _caps.HasFloat8CooperativeMatrix,
             _ => false,
         };
         if (!offered)

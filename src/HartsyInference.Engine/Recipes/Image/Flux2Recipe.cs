@@ -113,7 +113,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             // GEMM path does not already give). The container also OWNS what it allocates, which the raw loader route
             // did not: LlamaStyleEncoder.Dispose never frees projection tensors, so every dequantized weight leaked.
             (LlamaStyleEncoderConfig encoderConfig, ModelAsset encoderAsset, string encoderLabel) = ResolveTextEncoderForVariant(config);
-            string encoderPath = ModelDownloader.EnsureSideModelAsync(encoderAsset, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string encoderPath = ModelDownloader.EnsureSideModelAsync(encoderAsset, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             CheckpointSource encoderSource = CheckpointSource.Open(
                 encoderPath, CheckpointOpenOptions.ForNvfp4Consumer(context.Backend));
             loaders.Add(encoderSource);
@@ -125,7 +125,7 @@ public sealed class Flux2Recipe : IArchitectureRecipe
             encoder.LoadWeights(qwenRaw);
 
             // Flux.2 VAE (distinct from Flux.1's ae): 32-channel latent + BatchNorm running stats stored alongside.
-            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
             vaeLoader.Load(vaePath);
             loaders.Add(vaeLoader);
