@@ -8,6 +8,34 @@ public sealed partial class VulkanBackend
     /// <summary>Upper bound on the first absmax pass's workgroups; each strides over the tensor, the finalize folds them.</summary>
     private const uint Fp8AbsMaxMaxBlocks = 1024;
 
+    /// <summary>Devices whose fp8 status line has been logged; a backend is rebuilt per test and per auto-select probe.</summary>
+    private static readonly HashSet<string> _fp8StatusLogged = new();
+
+    /// <summary>Logs once per device whether fp8 Linears run on fp8 cooperative matrices, and why not. Only a constructed Vulkan
+    /// backend reaches this, so a CUDA host stays quiet. A forced <c>numerics.vkFp8=true</c> the device cannot honor warns.</summary>
+    private void LogFp8Status(bool? knob)
+    {
+        lock (_fp8StatusLogged)
+        {
+            if (!_fp8StatusLogged.Add($"{Vk.DeviceUuid}|{Vk.DeviceName}")) return;
+        }
+        (bool warn, string message) = Fp8StatusLine(knob, Vk.HasFloat8CooperativeMatrix, Vk.Fp8CoopMatUnavailableReason,
+            Vk.Fp8CoopMatM, Vk.Fp8CoopMatN, Vk.Fp8CoopMatK);
+        if (warn) Logs.Warning($"[Vulkan] {Vk.DeviceName}: {message}");
+        else Logs.Info($"[Vulkan] {Vk.DeviceName}: {message}");
+    }
+
+    /// <summary>The fp8 status line and whether it is a warning; split out so every branch is testable without the device.</summary>
+    internal static (bool Warn, string Message) Fp8StatusLine(bool? knob, bool available, string? reason, uint m, uint n, uint k)
+    {
+        const string fallback = "fp8 weights are widened to F16 for each Linear instead";
+        if (knob == false) return (false, "fp8 Linear off (numerics.vkFp8=false).");
+        if (available) return (false, $"fp8 Linear on (E4M3 {m}x{n}x{k} cooperative matrices).");
+        return knob == true
+            ? (true, $"numerics.vkFp8 is on, but {reason}; {fallback}.")
+            : (false, $"fp8 Linear off: {reason}; {fallback}.");
+    }
+
     /// <summary>Whether <see cref="Linear"/> runs an E4M3 weight on fp8 cooperative matrices (see <see cref="TryDispatchFp8Linear"/>).
     /// Follows <c>numerics.vkFp8</c>, unset meaning on wherever the device offers them; settable for tests.</summary>
     public bool EnableFp8Linear { get; set; }

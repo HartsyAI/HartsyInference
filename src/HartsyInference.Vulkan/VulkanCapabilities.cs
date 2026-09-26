@@ -150,6 +150,9 @@ public sealed class VulkanCapabilities
     /// configuration, the one <c>matmul_fp8_coopmat</c> runs; its shape is <see cref="Fp8CoopMatM"/>/<c>N</c>/<c>K</c>.</summary>
     public required bool HasFloat8CooperativeMatrix { get; init; }
 
+    /// <summary>Why <see cref="HasFloat8CooperativeMatrix"/> is false, in words a user can act on; null when it is true.</summary>
+    public string? Fp8CoopMatUnavailableReason { get; init; }
+
     /// <summary>Fragment rows of the E4M3 cooperative-matrix configuration; 0 without one.</summary>
     public required uint Fp8CoopMatM { get; init; }
 

@@ -227,8 +227,15 @@ public sealed class VulkanDevice : IDisposable
         // fp8 cooperative matrices need the extension, both of its features, and an enumerated E4M3 configuration;
         // an Ampere card can offer fp8 types without the tensor-core math, so the features alone are not the answer.
         uint fp8M = 0, fp8N = 0, fp8K = 0;
-        bool hasFp8CoopMat = hasCoopMatrix && hasFloat8Ext && Float8FeaturesOffered(pd)
-            && Fp8CoopMatShape(instance, pd, out fp8M, out fp8N, out fp8K);
+        string? fp8Reason =
+            !hasCoopMatrix ? "the device has no cooperative matrices"
+            : !hasFloat8Ext ? (props2.properties.vendorID == 0x10DE
+                ? "the driver does not offer VK_EXT_shader_float8 (NVIDIA 595 or newer does)"
+                : "the driver does not offer VK_EXT_shader_float8")
+            : !Float8FeaturesOffered(pd) ? "the driver offers VK_EXT_shader_float8 without fp8 cooperative matrices"
+            : !Fp8CoopMatShape(instance, pd, out fp8M, out fp8N, out fp8K) ? "the device lists no E4M3 cooperative-matrix shape (no fp8 tensor cores)"
+            : null;
+        bool hasFp8CoopMat = fp8Reason is null;
 
         // The query is the answer. It used to come back all zeros, and this block used to work around that with
         // apiVersion and a vendor-ID allowlist, on the belief that "older NVIDIA Linux blobs" misreport promoted
@@ -297,6 +304,7 @@ public sealed class VulkanDevice : IDisposable
             CoopMat2KGranularity = coopMat2KGran,
             CoopMat2WorkgroupInvocations = coopMat2WgInvocations,
             HasFloat8CooperativeMatrix = hasFp8CoopMat,
+            Fp8CoopMatUnavailableReason = fp8Reason,
             Fp8CoopMatM = fp8M,
             Fp8CoopMatN = fp8N,
             Fp8CoopMatK = fp8K,

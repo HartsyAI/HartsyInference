@@ -151,6 +151,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // default-on profile feature (see EnvSwitch's remarks on that distinction).
         EnableInt8Linear = EngineKnobs.VkInt8.Value;
         EnableFp8Linear = EngineKnobs.VkFp8.Value ?? Vk.HasFloat8CooperativeMatrix;
+        LogFp8Status(EngineKnobs.VkFp8.Value);
         EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
         EnableF16Gemm = EngineKnobs.VkF16Gemm.Value;
 
