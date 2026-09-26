@@ -5,7 +5,8 @@
 // Both operands are bound as uint words (four E4M3 per word), so offsets and strides are in words: K % 4 == 0.
 //
 // Each subgroup owns WM × WN fragments of FM × FN; SG_ROWS × SG_COLS subgroups tile the workgroup. The fragment shape is
-// the device's enumerated E4M3 configuration. The host takes M % FM == 0, N % FN == 0 and K % FK == 0 only.
+// the device's enumerated E4M3 configuration. N % FN == 0 and K % FK == 0; a ragged M reads A zero-padded to the next FM
+// rows (quant_e4m3 writes the pad) and stores its last row block through shared memory, dropping the rows past M.
 //
 // Bindings: 0=A, 1=B, 2=C (F16), 3=bias (F32; placeholder when !HAS_BIAS), 4=C (F32), 5=scale (placeholder when static).
 #version 460
@@ -28,6 +29,7 @@ layout(constant_id = 15) const uint SG_COLS = 2;
 layout(constant_id = 16) const bool OUTPUT_F32 = false;
 layout(constant_id = 17) const bool HAS_BIAS = false;
 layout(constant_id = 18) const bool USE_DEVICE_SCALE = true;
+layout(constant_id = 19) const uint SG_ROWS = 2;
 
 layout(set = 0, binding = 0) readonly buffer A_     { uint A[]; };
 layout(set = 0, binding = 1) readonly buffer B_     { uint B[]; };
@@ -35,6 +37,8 @@ layout(set = 0, binding = 2)          buffer C_     { float16_t C[]; };
 layout(set = 0, binding = 3) readonly buffer Bias_  { float bias[]; };
 layout(set = 0, binding = 4)          buffer Cf32_  { float Cf32[]; };
 layout(set = 0, binding = 5) readonly buffer Scale_ { float scale[]; };
+
+shared float edge[SG_ROWS * SG_COLS * FM * FN];   // one fragment per subgroup, for the ragged last row block
 
 layout(push_constant) uniform Push {
     uint M;
@@ -47,11 +51,10 @@ layout(push_constant) uniform Push {
 void main() {
     uint sgRow = gl_SubgroupID / SG_COLS;
     uint sgCol = gl_SubgroupID % SG_COLS;
-    uint sgRows = gl_NumSubgroups / SG_COLS;
-    uint row0 = (gl_WorkGroupID.y * sgRows + sgRow) * WM * FM;
+    uint row0 = (gl_WorkGroupID.y * SG_ROWS + sgRow) * WM * FM;
     uint col0 = (gl_WorkGroupID.x * SG_COLS + sgCol) * WN * FN;
     if (row0 >= pc.M || col0 >= pc.N) return;
-    uint wm = min(WM, (pc.M - row0) / FM);
+    uint wm = min(WM, (pc.M - row0 + FM - 1) / FM);
     uint wn = min(WN, (pc.N - col0) / FN);
 
     coopmat<float, gl_ScopeSubgroup, FM, FN, gl_MatrixUseAccumulator> acc[WM * WN];
@@ -80,7 +83,20 @@ void main() {
                 coopMatLoad(bf, bias, c, 0, gl_CooperativeMatrixLayoutRowMajor);
                 d = d + bf;
             }
-            if (OUTPUT_F32) {
+            if (r + FM > pc.M) {
+                uint base = gl_SubgroupID * FM * FN;
+                coopMatStore(d, edge, base, FN, gl_CooperativeMatrixLayoutRowMajor);
+                subgroupMemoryBarrierShared();
+                subgroupBarrier();
+                for (uint e = gl_SubgroupInvocationID; e < FM * FN; e += gl_SubgroupSize) {
+                    uint rr = r + e / FN;
+                    if (rr >= pc.M) continue;
+                    uint o = rr * pc.N + c + e % FN;
+                    if (OUTPUT_F32) Cf32[o] = edge[base + e];
+                    else C[o] = float16_t(edge[base + e]);
+                }
+                subgroupBarrier();
+            } else if (OUTPUT_F32) {
                 coopMatStore(d, Cf32, r * pc.N + c, pc.N, gl_CooperativeMatrixLayoutRowMajor);
             } else {
                 coopmat<float16_t, gl_ScopeSubgroup, FM, FN, gl_MatrixUseAccumulator> h =

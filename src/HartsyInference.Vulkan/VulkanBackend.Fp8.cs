@@ -47,7 +47,7 @@ public sealed partial class VulkanBackend
     /// <summary>The fp8 Linear, CUDA's native fp8 scheme: the weight stays packed E4M3 with its per-tensor scale folded into alpha,
     /// the activation is quantized to E4M3 per tensor each call (a static checkpoint scale, or absmax/448 computed and read on the
     /// device), and the product accumulates in F32 on <c>matmul_fp8_coopmat</c>. Refuses what the kernel cannot take — an E5M2
-    /// or block-scaled weight, a pre-quantized input, or M, N, K off the device's fragment shape — and the caller falls through
+    /// or block-scaled weight, a pre-quantized input, or N, K off the device's fragment shape (a ragged M is padded) — and the caller falls through
     /// to the F16-cast path.</summary>
     private bool TryDispatchFp8Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
@@ -58,15 +58,16 @@ public sealed partial class VulkanBackend
         if (input.Shape[input.Shape.Rank - 1] != k) return false;
         long m = input.ElementCount / k;
         if (output.ElementCount != m * n || (bias is not null && bias.ElementCount != n)) return false;
-        if (m % Vk.Fp8CoopMatM != 0 || n % Vk.Fp8CoopMatN != 0 || k % Vk.Fp8CoopMatK != 0) return false;
-        // The shader indexes elements in uint.
-        if (m * k > uint.MaxValue || n * k > uint.MaxValue || m * n > uint.MaxValue) return false;
+        if (n % Vk.Fp8CoopMatN != 0 || k % Vk.Fp8CoopMatK != 0) return false;
+        // A ragged M is quantized into rows padded to the fragment height; the shader indexes elements in uint.
+        long mPad = (m + Vk.Fp8CoopMatM - 1) / Vk.Fp8CoopMatM * Vk.Fp8CoopMatM;
+        if (mPad * k > uint.MaxValue || n * k > uint.MaxValue || m * n > uint.MaxValue) return false;
 
         float staticScale = EnableStaticFp8InputScale && weight.Fp8InputScaleFactor > 0f ? weight.Fp8InputScaleFactor : 0f;
         long count = m * k;
         string suffix = DtypeSuffix(input.DType);
         VulkanBuffer xBuf = GetBuffer(input);
-        VulkanBuffer xQ = _xfer.AllocateDevice((ulong)count);
+        VulkanBuffer xQ = _xfer.AllocateDevice((ulong)(mPad * k));
         VulkanBuffer? scratch = null, biasOwned = null;
         VulkanBuffer outBuf = _xfer.AllocateDevice((ulong)(output.ElementCount * output.DType.SizeInBytes));
         try
@@ -77,7 +78,7 @@ public sealed partial class VulkanBackend
                 scratch = _xfer.AllocateDevice((ulong)((blocks + 1) * sizeof(float)));
                 DispatchFp8AbsMax(xBuf.Handle, scratch.Handle, suffix, (uint)count, blocks);
             }
-            DispatchQuantE4M3(xBuf.Handle, xQ.Handle, scratch?.Handle ?? xQ.Handle, suffix, (uint)(count / 4), staticScale);
+            DispatchQuantE4M3(xBuf.Handle, xQ.Handle, scratch?.Handle ?? xQ.Handle, suffix, (uint)(count / 4), (uint)(mPad * k / 4), staticScale);
 
             ulong biasF32 = 0;
             if (bias is not null)
@@ -118,7 +119,7 @@ public sealed partial class VulkanBackend
         string suffix = DtypeSuffix(x.DType);
         if (staticScale == 0f)
             DispatchFp8AbsMax(GetBuffer(x).Handle, scratch.Handle, suffix, (uint)count, (uint)Math.Min(GroupCount(count, LocalX1D), Fp8AbsMaxMaxBlocks));
-        DispatchQuantE4M3(GetBuffer(x).Handle, qBuf.Handle, scratch.Handle, suffix, (uint)(count / 4), staticScale);
+        DispatchQuantE4M3(GetBuffer(x).Handle, qBuf.Handle, scratch.Handle, suffix, (uint)(count / 4), (uint)(count / 4), staticScale);
         CacheOutput(q, qBuf);
         CacheOutput(scratchT, scratch);
         Sync();
@@ -139,15 +140,16 @@ public sealed partial class VulkanBackend
             new[] { SpecConstant.UInt(0, LocalX1D), SpecConstant.Bool(10, true) }), bufs, pc, 1, 1, 1);
     }
 
-    /// <summary>quant_e4m3: four E4M3 bytes per word at x / scale, the scale static or read from <c>scale[0]</c>.</summary>
-    private void DispatchQuantE4M3(ulong x, ulong q, ulong scale, string suffix, uint words, float staticScale)
+    /// <summary>quant_e4m3: four E4M3 bytes per word at x / scale, the scale static or read from <c>scale[0]</c>, zero words up to <paramref name="paddedWords"/>.</summary>
+    private void DispatchQuantE4M3(ulong x, ulong q, ulong scale, string suffix, uint words, uint paddedWords, float staticScale)
     {
-        Span<byte> pc = stackalloc byte[3 * 4];
+        Span<byte> pc = stackalloc byte[4 * 4];
         BinaryWriteUInt(pc, 0, words);
         BinaryWriteFloat(pc, 4, staticScale);
         BinaryWriteUInt(pc, 8, 0u);
+        BinaryWriteUInt(pc, 12, paddedWords);
         Span<ulong> bufs = stackalloc ulong[] { x, q, scale };
-        Dispatch(GetKernel("quant_e4m3" + suffix, storageBufferCount: 3, _default1DSpec), bufs, pc, GroupCount(words, LocalX1D));
+        Dispatch(GetKernel("quant_e4m3" + suffix, storageBufferCount: 3, _default1DSpec), bufs, pc, GroupCount(paddedWords, LocalX1D));
     }
 
     /// <summary>matmul_fp8_coopmat on packed E4M3 operands: 2×2 subgroups, each owning 2×2 fragments of the device's shape.</summary>
@@ -167,6 +169,7 @@ public sealed partial class VulkanBackend
             SpecConstant.Bool(16, outputF32),
             SpecConstant.Bool(17, biasF32 != 0),
             SpecConstant.Bool(18, scale != 0),
+            SpecConstant.UInt(19, SgRows),
         };
         Span<byte> pc = stackalloc byte[5 * 4];
         BinaryWriteUInt(pc, 0, m);

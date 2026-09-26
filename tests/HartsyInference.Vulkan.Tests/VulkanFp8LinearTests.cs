@@ -8,7 +8,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// <summary>The fp8 Linear: the activation quantizes to exactly the bytes CUDA's <c>fp8_quant</c> writes (on any device — the
 /// conversion is integer math), and on a device with fp8 cooperative matrices the product equals the dequantized operands'
 /// product to F32 accumulation error, stays within E4M3's activation error of the F16-cast path, and falls back unchanged on a
-/// shape off the fragment grid.</summary>
+/// N or K off the fragment grid.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
 {
@@ -116,14 +116,15 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
     }
 
     [Theory]
-    [InlineData(false, false)]
-    [InlineData(true, true)]
-    public void Fp8Linear_MatchesTheDequantizedProduct(bool f16Output, bool withBias)
+    [InlineData(false, false, 128)]
+    [InlineData(true, true, 128)]
+    [InlineData(false, true, 77)]   // a CLIP prompt's rows: the ragged last block goes through shared memory
+    public void Fp8Linear_MatchesTheDequantizedProduct(bool f16Output, bool withBias, int M)
     {
         if (!VulkanAvailable()) return;
         using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasFloat8CooperativeMatrix) { _out.WriteLine("SKIPPED: no fp8 cooperative matrices on this device"); return; }
-        const int M = 128, K = 512, N = 192;
+        const int K = 512, N = 192;
         float[] xv = RandomValues(M * K, 1, 2f);
         using Tensor x = F32(new TensorShape(M, K), xv);
         (Tensor w, float[] wDq) = Fp8Weight(N, K, 2, scale: 0.01f);
@@ -199,7 +200,7 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
     {
         if (!VulkanAvailable()) return;
         using VulkanBackend backend = VulkanTestDevice.Create();
-        const int M = 17, K = 256, N = 64;   // M off every fragment shape
+        const int M = 32, K = 256, N = 40;   // N off every fragment shape
         using Tensor x = F32(new TensorShape(M, K), RandomValues(M * K, 6, 1f));
         (Tensor w, _) = Fp8Weight(N, K, 7, scale: 0.01f);
         using Tensor _w = w;
