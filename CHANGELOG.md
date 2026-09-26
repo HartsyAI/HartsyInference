@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.177
+## alpha.178
 
 - **Z-Image Turbo LoRAs load.** `hartsy image -m zimage --lora …` failed with "Could not detect LoRA format":
   the format detector has arms for Flux, Wan, SDXL and SD1.5 prefixes and none for Z-Image's
