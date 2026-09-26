@@ -84,8 +84,9 @@ public sealed class EulerDiscreteScheduler : IScheduler
 
         if (_useKarrasSigmas)
         {
-            float sigmaMin = _trainSigmas[^1] > 0 ? _trainSigmas[^1] : _trainSigmas[^2];
-            float sigmaMax = _trainSigmas[0];
+            // Training sigmas ascend with the timestep.
+            float sigmaMin = _trainSigmas[0];
+            float sigmaMax = _trainSigmas[^1];
             _sigmas = NoiseSchedule.ComputeKarrasSigmas(sigmaMin, sigmaMax, numInferenceSteps);
 
             _timesteps = new float[numInferenceSteps];
@@ -216,23 +217,32 @@ public sealed class EulerDiscreteScheduler : IScheduler
     /// <summary>Converts a sigma value to a continuous timestep by log-linear interpolation in the training sigma schedule.</summary>
     private float SigmaToTimestep(float sigma)
     {
-        float logSigma = MathF.Log(sigma);
-
-        // Find where logSigma falls in the training log-sigma schedule (descending: sigmas[0] is largest)
-        for (int i = 0; i < _trainSigmas.Length - 1; i++)
+        // Training sigmas ascend with the timestep; interpolate the timestep in log sigma.
+        if (sigma <= _trainSigmas[0])
         {
-            float logCurrent = MathF.Log(_trainSigmas[i]);
-            float logNext = MathF.Log(_trainSigmas[i + 1]);
-
-            if (logSigma >= logNext && logSigma <= logCurrent)
+            return 0.0f;
+        }
+        if (sigma >= _trainSigmas[^1])
+        {
+            return _trainSigmas.Length - 1;
+        }
+        float logSigma = MathF.Log(sigma);
+        int lo = 0;
+        int hi = _trainSigmas.Length - 1;
+        while (hi - lo > 1)
+        {
+            int mid = (lo + hi) / 2;
+            if (_trainSigmas[mid] <= sigma)
             {
-                float w = (logSigma - logNext) / (logCurrent - logNext);
-                return (1.0f - w) * (i + 1) + w * i;
+                lo = mid;
+            }
+            else
+            {
+                hi = mid;
             }
         }
-
-        // Clamp to boundaries
-        if (sigma >= _trainSigmas[0]) return 0.0f;
-        return (float)(_trainSigmas.Length - 1);
+        float logLo = MathF.Log(_trainSigmas[lo]);
+        float logHi = MathF.Log(_trainSigmas[hi]);
+        return lo + ((logSigma - logLo) / (logHi - logLo));
     }
 }

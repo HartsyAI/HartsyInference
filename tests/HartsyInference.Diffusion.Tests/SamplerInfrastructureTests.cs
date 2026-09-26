@@ -86,6 +86,39 @@ public sealed class SamplerInfrastructureTests
         Assert.InRange(late, 0.1, 0.6);
     }
 
+    /// <summary>Off-schedule sigmas (every second-order and predictor–corrector evaluation) map back to the timestep the
+    /// schedule would give; they used to all map to timestep 0 because the lookup assumed descending training sigmas.</summary>
+    [Fact]
+    public void EulerDiscreteScheduler_OffScheduleSigmaMapsToItsTimestep()
+    {
+        EulerDiscreteScheduler scheduler = new();
+        scheduler.SetTimesteps(20);
+        ReadOnlySpan<float> timesteps = scheduler.Timesteps;
+        for (int i = 0; i < 20; i++)
+        {
+            float t = scheduler.TimestepForSigma(scheduler.Sigma(i), -1);
+            Assert.True(MathF.Abs(t - timesteps[i]) < 0.5f, $"sigma[{i}] mapped to t={t}, schedule says {timesteps[i]}.");
+        }
+        float mid = MathF.Sqrt(scheduler.Sigma(5) * scheduler.Sigma(6));
+        float tMid = scheduler.TimestepForSigma(mid, 5);
+        Assert.InRange(tMid, timesteps[6], timesteps[5]);
+    }
+
+    /// <summary>The Karras variant runs from the largest training sigma down, not up.</summary>
+    [Fact]
+    public void EulerDiscreteScheduler_KarrasScheduleDescends()
+    {
+        EulerDiscreteScheduler scheduler = new(useKarrasSigmas: true);
+        scheduler.SetTimesteps(10);
+        float[] sigmas = scheduler.Sigmas();
+        Assert.True(sigmas[0] > 14f, $"first Karras sigma {sigmas[0]} should be the training maximum.");
+        for (int k = 1; k < sigmas.Length; k++)
+        {
+            Assert.True(sigmas[k] < sigmas[k - 1]);
+        }
+        Assert.True(scheduler.Timesteps[0] > 990f);
+    }
+
     /// <summary>The flow-shift estimate recovers the shift of a shifted-linear schedule.</summary>
     [Fact]
     public void EstimateFlowShift_RecoversTheScheduleShift()
