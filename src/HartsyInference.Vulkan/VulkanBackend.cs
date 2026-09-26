@@ -166,6 +166,15 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // GPU, drain the deferred-free list, then release any fully-empty slab blocks back to the
         // device. Mirrors CudaMemory.Allocate's retry path — and is the same work TrimMemoryPool asks
         // for at a phase boundary, so it is spelled once.
+        // Reuse frees still pending on the timeline before growing the pool: wait for the oldest only while the
+        // pending bytes could cover the request, so the host stays ahead of the GPU otherwise.
+        _allocator.OnNeedSpace = size =>
+        {
+            if (_stream.ReclaimCompleted()) return true;
+            if (_stream.PendingFreeBytes < size || !_stream.ReclaimOldestPending()) return false;
+            _dispatchesSinceSubmit = 0;
+            return true;
+        };
         _allocator.OnOutOfMemory = () =>
         {
             try

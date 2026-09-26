@@ -191,6 +191,10 @@ public sealed class VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemory
         return snapshot;
     }
 
+    /// <summary>Asked for room before a new block is allocated; returns true when it returned memory to the pool, so the
+    /// pool is scanned again. Lets frees still pending on the GPU timeline be reused instead of growing the pool.</summary>
+    public Func<ulong, bool>? OnNeedSpace { get; set; }
+
     /// <summary>Optional callback fired on OOM allocation — used by VulkanBackend to flush the command stream and drain the deferred-free list before retrying. Set after the stream is constructed (chicken-and-egg: allocator created before stream).</summary>
     public Action? OnOutOfMemory { get; set; }
 
@@ -209,21 +213,11 @@ public sealed class VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemory
 
         uint typeIdx = VulkanMemoryHelpers.FindMemoryType(in _memProps, memoryTypeBitsMask, required, preferred);
 
-        // Try existing blocks of same type — includes pooled dedicated blocks (any request that fits
-        // their free-list is served from them, not just an exact-size match), so a large activation
-        // freed on one iteration is reused on the next instead of re-allocating from the driver.
-        for (int i = 0; i < _blocks.Count; i++)
-        {
-            VulkanMemoryBlock b = _blocks[i];
-            if (b.MemoryTypeIndex != typeIdx) continue;
-            ulong off = b.TryAllocate(size, alignment);
-            if (off != ulong.MaxValue)
-            {
-                return new VulkanAllocation(b.DeviceMemory, off, size,
-                    b.MappedPointer == 0 ? 0 : b.MappedPointer + (nint)off,
-                    typeIdx, b.BlockId);
-            }
-        }
+        // Pooled blocks first, then whatever the stream can hand back, before the driver is asked for a new block.
+        VulkanAllocation pooled = TryAllocatePooled(size, alignment, typeIdx);
+        while (pooled.IsEmpty && OnNeedSpace is not null && OnNeedSpace(size))
+            pooled = TryAllocatePooled(size, alignment, typeIdx);
+        if (!pooled.IsEmpty) return pooled;
 
         // No existing block has room. Large (>= DedicatedThreshold) requests get a new block sized
         // exactly to fit; smaller ones share a slab.
@@ -238,6 +232,24 @@ public sealed class VulkanMemoryAllocator(nint device, in VkPhysicalDeviceMemory
         return new VulkanAllocation(newBlock.DeviceMemory, newOff, size,
             newBlock.MappedPointer == 0 ? 0 : newBlock.MappedPointer + (nint)newOff,
             typeIdx, newBlock.BlockId);
+    }
+
+    /// <summary>Serves the request from an existing block of the type, or returns an empty allocation.</summary>
+    private VulkanAllocation TryAllocatePooled(ulong size, ulong alignment, uint typeIdx)
+    {
+        for (int i = 0; i < _blocks.Count; i++)
+        {
+            VulkanMemoryBlock b = _blocks[i];
+            if (b.MemoryTypeIndex != typeIdx) continue;
+            ulong off = b.TryAllocate(size, alignment);
+            if (off != ulong.MaxValue)
+            {
+                return new VulkanAllocation(b.DeviceMemory, off, size,
+                    b.MappedPointer == 0 ? 0 : b.MappedPointer + (nint)off,
+                    typeIdx, b.BlockId);
+            }
+        }
+        return default;
     }
 
     private VulkanAllocation AllocateDedicated(ulong size, uint typeIdx, VkMemoryPropertyFlags required)

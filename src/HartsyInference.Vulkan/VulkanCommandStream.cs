@@ -307,6 +307,32 @@ public sealed class VulkanCommandStream : IDisposable
         if (!_deferredFrees.TryGetValue(tick, out List<VulkanBuffer>? list))
         { list = new(); _deferredFrees[tick] = list; }
         list.Add(buffer);
+        _pendingFreeBytes += buffer.Size;
+    }
+
+    private ulong _pendingFreeBytes;
+
+    /// <summary>Bytes whose free is still waiting on the timeline.</summary>
+    public ulong PendingFreeBytes => _pendingFreeBytes;
+
+    /// <summary>Returns whatever the GPU has already finished with, without waiting; true when anything was freed.</summary>
+    public bool ReclaimCompleted()
+    {
+        ulong before = _pendingFreeBytes;
+        ReclaimUpTo(GetTimelineNow());
+        return _pendingFreeBytes < before;
+    }
+
+    /// <summary>Waits for the oldest tick that still holds deferred frees, submitting it first if it is still being
+    /// recorded, then reclaims; false when nothing is pending.</summary>
+    public bool ReclaimOldestPending()
+    {
+        if (_deferredFrees.Count == 0) return false;
+        ulong oldest = 0;
+        foreach (ulong tick in _deferredFrees.Keys) { oldest = tick; break; }
+        if (oldest > _lastSubmitted) SubmitAndAdvance();
+        WaitTimeline(oldest);
+        return true;
     }
 
     /// <summary>Releases all deferred-free buffers whose tick has been reached. Also recycles command buffers.</summary>
@@ -316,7 +342,7 @@ public sealed class VulkanCommandStream : IDisposable
         foreach ((ulong tick, List<VulkanBuffer> bufs) in _deferredFrees)
         {
             if (tick > completedTick) break;
-            foreach (VulkanBuffer b in bufs) b.Dispose();
+            foreach (VulkanBuffer b in bufs) { _pendingFreeBytes -= b.Size; b.Dispose(); }
             done.Add(tick);
         }
         foreach (ulong t in done) _deferredFrees.Remove(t);
@@ -355,6 +381,7 @@ public sealed class VulkanCommandStream : IDisposable
         foreach ((_, List<VulkanBuffer> bufs) in _deferredFrees)
             foreach (VulkanBuffer b in bufs) b.Dispose();
         _deferredFrees.Clear();
+        _pendingFreeBytes = 0;
         _cmdRecycle.Clear();
 
         if (_allocatedCmds.Count > 0)
