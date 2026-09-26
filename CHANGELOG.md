@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.176
+## alpha.177
 
 - **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
   encoder, VAE and CLIP through `ModelDownloader.EnsureSideModelAsync`, whose three-argument overload was strict:
