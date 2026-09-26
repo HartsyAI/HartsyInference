@@ -105,6 +105,8 @@ public static partial class KnobProfiles
         .With(EngineKnobs.VkDisableCoopmat, true)
         // Opts Vulkan Linear into an INT8 dot-product GEMM path.
         .With(EngineKnobs.VkInt8, false)
+        // Quantizes the activation to E4M3 per tensor; the fallback widens the fp8 weight to F16 exactly.
+        .With(EngineKnobs.VkFp8, false)
         // Computes a 16-bit-weight GEMM in F16 on the cooperative-matrix kernels with the F32 activation cast down; the reference keeps the output-dtype rule.
         .With(EngineKnobs.VkF16Gemm, false)
         // Runs large-M float Linears as per-channel-int8 weight x per-row-int8 activation IMMA; the declaration itself calls it lossy.

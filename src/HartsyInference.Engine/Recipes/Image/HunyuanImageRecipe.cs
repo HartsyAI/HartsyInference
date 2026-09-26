@@ -113,7 +113,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
                     + $"primary backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }
 
-            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
             qwenLoader.Load(qwenPath);
             loaders.Add(qwenLoader);
@@ -121,7 +121,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             llama.LoadWeights(qwenLoader.GetAllTensors());
             HunyuanImageQwenTextEncoder qwenEncoder = new HunyuanImageQwenTextEncoder(llama);
 
-            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanImageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanImageVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
             vaeLoader.Load(vaePath);
             loaders.Add(vaeLoader);

@@ -612,6 +612,16 @@ public struct VkPhysicalDeviceCooperativeMatrixFeaturesKHR
     public uint cooperativeMatrixRobustBufferAccess;
 }
 
+/// <summary>VK_EXT_shader_float8 features: fp8 types in shaders, and as cooperative-matrix components.</summary>
+[StructLayout(LayoutKind.Sequential)]
+public struct VkPhysicalDeviceShaderFloat8FeaturesEXT
+{
+    public VkStructureType sType;
+    public nint pNext;
+    public uint shaderFloat8;
+    public uint shaderFloat8CooperativeMatrix;
+}
+
 /// <summary>One supported cooperative-matrix configuration, enumerated via <c>vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR</c>.</summary>
 // The backend must confirm the shader's exact shape (16x16x16, F16 A/B, F32 accumulate, subgroup scope) is in
 // this list before using coopmat — NVIDIA always reports it, but AMD RDNA3 / Intel Arc report different sets,

@@ -53,8 +53,8 @@ public sealed partial class ErnieImageRecipe : IArchitectureRecipe
     {
         // TODO(E-IMG-4): honor a user-picked VAE override from ImageRequest.Components (the SwarmUI loader read
         // T2IParamTypes.VAE); the text encoder was already pinned to the canonical Ministral-3-3B there.
-        string tePath = ModelDownloader.EnsureSideModelAsync(SideModels.Ministral_3_3B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string tePath = ModelDownloader.EnsureSideModelAsync(SideModels.Ministral_3_3B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         try

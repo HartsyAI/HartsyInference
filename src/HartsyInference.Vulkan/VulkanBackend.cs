@@ -93,6 +93,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     /// <summary>Filesystem path of the on-disk SPIR-V pipeline cache; exposed for persist/reload tests.</summary>
     public string PipelineCachePath => _pipelineCache.CachePath;
 
+    /// <summary>Bytes of on-disk cache handed to the driver when this backend started; 0 when there was none.</summary>
+    public int PipelineCacheInitialDataBytes => _pipelineCache.InitialDataBytes;
+
     /// <summary>Diagnostic snapshot of device-memory usage, aggregated across all DEVICE_LOCAL heaps.</summary>
     // Used by the leak-validation tests to assert that VRAM returns to baseline after a generation loop.
     // Values are stable across slab boundaries (slab-internal free regions are subtracted from UsedDeviceBytes).
@@ -150,6 +153,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // matching this constructor's push-descriptor switch above — an experimental switch, not a proven
         // default-on profile feature (see EnvSwitch's remarks on that distinction).
         EnableInt8Linear = EngineKnobs.VkInt8.Value;
+        EnableFp8Linear = EngineKnobs.VkFp8.Value ?? false;
+        LogFp8Status(EngineKnobs.VkFp8.Value);
+        EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
         EnableF16Gemm = EngineKnobs.VkF16Gemm.Value;
 
         // OOM retry path: when an allocation fails, force the stream to submit and wait for the
@@ -870,7 +876,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
     {
         using (OpScope _ = EnterOp())
         {
-            if (!TryDispatchInt8Linear(output, input, weight, bias))
+            if (!TryDispatchFp8Linear(output, input, weight, bias) && !TryDispatchInt8Linear(output, input, weight, bias))
             {
                 // input [M, K], weight [N, K] → output [M, N]   ⇒  C = A @ B^T  with A=input, B=weight
                 DispatchMatmul(output, input, weight, transposeA: false, transposeB: true, bias: bias);

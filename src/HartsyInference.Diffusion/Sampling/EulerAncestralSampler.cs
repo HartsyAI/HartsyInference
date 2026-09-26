@@ -3,59 +3,51 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Sampling;
 
-/// <summary>k-diffusion's <c>euler_ancestral</c> — after each deterministic move it re-injects fresh noise, so the
-/// trajectory is stochastic rather than an ODE solve. With <c>dpmpp_2m</c>, one of the two most-used samplers in the
-/// SD/SDXL community.
-///
-/// <para>Per step: denoise, split the jump into a deterministic part (<c>sigmaDown</c>) and a resampled part
-/// (<c>sigmaUp</c>) via <see cref="SamplerMath.AncestralStep"/>, take the Euler move to <c>sigmaDown</c>, then add
-/// <c>sigmaUp</c>-scaled Gaussian noise. On the final step <c>sigmaNext</c> is 0, <c>sigmaUp</c> is 0, and the method
-/// degenerates to plain Euler — adding noise there would re-noise the finished image.</para></summary>
-public sealed class EulerAncestralSampler : ISampler
+/// <summary>k-diffusion's <c>euler_ancestral</c>: an Euler move to <c>sigmaDown</c> followed by fresh noise, with
+/// ComfyUI's rectified-flow form on flow models.</summary>
+public sealed class EulerAncestralSampler : SamplerBase
 {
-    private readonly float[] _sigmas;
-    private readonly int _seed;
     private readonly float _eta;
-    private TensorShape _shape;
+
+    /// <summary>Creates the sampler; <paramref name="eta"/> 1.0 is ComfyUI's default.</summary>
+    public EulerAncestralSampler(float[] sigmas, int seed, float eta = 1.0f, SamplerOptions? options = null)
+        : base(sigmas, seed, options) => _eta = eta;
 
     /// <inheritdoc/>
-    public string Name => "euler_ancestral";
+    public override string Name => "euler_ancestral";
 
     /// <inheritdoc/>
-    public int StepCount => _sigmas.Length - 1;
+    protected override NoiseKind Noise => NoiseKind.Gaussian;
 
-    /// <summary>Creates the sampler. <paramref name="eta"/> scales how much of each step is resampled; 1.0 is the
-    /// k-diffusion default and what ComfyUI's <c>euler_ancestral</c> uses.</summary>
-    public EulerAncestralSampler(float[] sigmas, int seed, float eta = 1.0f)
+    /// <inheritdoc/>
+    protected override void StepLocal(IBackend backend, Tensor z, IDenoisePredictor predictor, int i, int stepIndex)
     {
-        ArgumentNullException.ThrowIfNull(sigmas);
-        if (sigmas.Length < 2)
+        float sigma = Sigma(i);
+        float sigmaNext = Sigma(i + 1);
+        using Tensor denoised = Denoise(backend, predictor, z, sigma, stepIndex);
+        if (IsFlow)
         {
-            throw new ArgumentException($"Need at least 2 sigmas (one step plus the terminal zero); got {sigmas.Length}.",
-                nameof(sigmas));
+            if (sigmaNext == 0f)
+            {
+                backend.Scale(z, denoised, 1.0f);
+                return;
+            }
+            (double down, double rescale, double renoise) = SamplerMath.FlowAncestralStep(sigma, sigmaNext, _eta);
+            double ratio = down / sigma;
+            SamplerOps.MixInto(backend, z, denoised, (float)ratio, (float)(1.0 - ratio));
+            if (_eta > 0f)
+            {
+                SamplerOps.ScaleInPlace(backend, z, (float)rescale);
+                AddNoise(backend, z, stepIndex, 0, sigma, sigmaNext, (float)renoise);
+            }
+            return;
         }
-        _sigmas = sigmas;
-        _seed = seed;
-        _eta = eta;
-    }
-
-    /// <inheritdoc/>
-    public void Reset(TensorShape latentShape) => _shape = latentShape;
-
-    /// <inheritdoc/>
-    public void Step(IBackend backend, Tensor z, IDenoisePredictor predictor, int stepIndex)
-    {
-        ArgumentNullException.ThrowIfNull(backend);
-        ArgumentNullException.ThrowIfNull(z);
-        ArgumentNullException.ThrowIfNull(predictor);
-        float sigma = _sigmas[stepIndex];
-        float sigmaNext = _sigmas[stepIndex + 1];
         (float sigmaDown, float sigmaUp) = SamplerMath.AncestralStep(sigma, sigmaNext, _eta);
-
-        using Tensor denoised = SamplerMath.PredictDenoised(backend, predictor, z, sigma, stepIndex);
-        // d = (z − denoised)/sigma; z ← z + d·(sigmaDown − sigma), folded into one affine mix.
         float dt = (sigmaDown - sigma) / sigma;
         SamplerOps.MixInto(backend, z, denoised, 1.0f + dt, -dt);
-        SamplerOps.AddNoise(backend, z, _shape, _seed, stepIndex, sigmaUp);
+        if (sigmaUp > 0f)
+        {
+            AddNoise(backend, z, stepIndex, 0, sigma, sigmaNext, sigmaUp);
+        }
     }
 }

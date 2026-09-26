@@ -82,7 +82,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             transformer.LoadWeights(ditWeights);
 
             // ── Text encoder: Qwen3-VL-4B (fp8_scaled), vision tower dropped. ──
-            string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_4B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> teWeights, CheckpointSource teSource) = ComponentLoader.Load(encoderPath, "MageFlowRecipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             loaders.Add(teSource);
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_4B);
@@ -90,7 +90,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
 
             // ── MageVAE: split the file into decoder (`pipeline.*`) and encoder (`student.dconv_encoder.*`). Encoder is
             // only needed for edit; a decode-only VAE file simply has no encoder keys. ──
-            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MageVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> allVae, CheckpointSource vaeSource) = ComponentLoader.Load(vaePath, "MageFlowRecipe", keyTransform: null, applyFp8Dequant: false);
             loaders.Add(vaeSource);
             (Dictionary<string, Tensor> decW, Dictionary<string, Tensor> encW) = SplitMageVae(allVae);

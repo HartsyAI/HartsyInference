@@ -102,7 +102,7 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
             // hidden_states[-1]; 5.x norms that tap and Qwen's results are not tuned to it. The vision tower is
             // dropped here because text-to-image never reaches it.
             string encoderPath = ModelDownloader.EnsureSideModelAsync(
-                SideModels.Qwen3VL_8B_QwenImage21, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                SideModels.Qwen3VL_8B_QwenImage21, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader encoderLoader = new SafeTensorsLoader();
             encoderLoader.Load(encoderPath);
             loaders.Add(encoderLoader);
@@ -114,7 +114,7 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
             // [1,2,4,8,8] ladder are read back from the file rather than assumed, so a differently-sized repack
             // fails on a shape mismatch at load instead of halfway through a decode. ──
             string vaePath = ModelDownloader.EnsureSideModelAsync(
-                SideModels.QwenImage21Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                SideModels.QwenImage21Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
             vaeLoader.Load(vaePath);
             loaders.Add(vaeLoader);
