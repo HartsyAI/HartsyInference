@@ -48,6 +48,8 @@ public sealed class VulkanFlashCm2Tests(ITestOutputHelper output)
     [InlineData(48, 12, 300, 128, true)]
     [InlineData(24, 24, 200, 128, false)]
     [InlineData(10, 5, 97, 64, false)]
+    [InlineData(8, 4, 90, 80, true)]
+    [InlineData(4, 2, 70, 96, false)]
     public void TokenMajorGqa_MatchesReference(int hq, int hkv, int s, int d, bool masked)
     {
         if (!VulkanAvailable()) return;

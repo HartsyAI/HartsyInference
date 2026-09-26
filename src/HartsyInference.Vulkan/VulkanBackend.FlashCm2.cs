@@ -41,18 +41,34 @@ public sealed partial class VulkanBackend
         int skv = (int)(key.ElementCount / kvWidth);
         using Tensor? expandedMask = mask is not null && mask.DType == DType.F32 && mask.ElementCount == skv && sq > 1
             ? ExpandKeyOnlyMask(mask, sq, skv) : null;
-        mask = expandedMask ?? mask;
-        if (!CanUseFlashCm2(headDim, heads, kvHeads, sq, skv, mask))
+        if (!CanUseFlashCm2(headDim, heads, kvHeads, sq, skv, expandedMask ?? mask))
         {
-            throw new NotSupportedException(
-                $"Vulkan token-major attention needs cooperative-matrix-2, head dim 64 or 128, an integer GQA ratio and an "
-                + $"optional F32 [Sq,Skv] mask; got head dim {headDim}, {heads}/{kvHeads} heads, mask {mask?.Shape}.");
+            AttendTokenMajorViaHeadMajor(output, query, key, value, mask, heads, kvHeads, headDim, sq, skv, scale, allowF16);
+            return;
         }
+        mask = expandedMask ?? mask;
         uint qRow = (uint)qWidth;
         uint kvRow = (uint)kvWidth;
         DispatchFlashCm2(output, query, key, value, mask, scale, batch: 1, heads, kvHeads, sq, skv, headDim,
             new AttnStrides(qRow, (uint)headDim, 0), new AttnStrides(kvRow, (uint)headDim, 0),
             new AttnStrides(kvRow, (uint)headDim, 0), new AttnStrides(qRow, (uint)headDim, 0));
+    }
+
+    /// <summary>Shapes the cooperative-matrix-2 kernel does not serve: permute to [1,H,S,D], attend, permute back.</summary>
+    private void AttendTokenMajorViaHeadMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        int heads, int kvHeads, int headDim, int sq, int skv, float scale, bool allowF16)
+    {
+        TensorShape qShape = new TensorShape(1, heads, sq, headDim);
+        TensorShape kvShape = new TensorShape(1, kvHeads, skv, headDim);
+        using Tensor qMh = new Tensor(qShape, query.DType);
+        using Tensor kMh = new Tensor(kvShape, key.DType);
+        using Tensor vMh = new Tensor(kvShape, value.DType);
+        using Tensor attnMh = new Tensor(qShape, output.DType);
+        Permute0213(qMh, query, sq, heads, headDim);
+        Permute0213(kMh, key, skv, kvHeads, headDim);
+        Permute0213(vMh, value, skv, kvHeads, headDim);
+        ScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask, scale, allowF16);
+        Permute0213(output, attnMh, heads, sq, headDim);
     }
 
     /// <summary>Whether the cooperative-matrix-2 kernel serves this shape.</summary>

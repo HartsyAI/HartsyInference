@@ -91,15 +91,15 @@ internal sealed class VulkanGpuOpTimer : IDisposable
         DumpTable(writer, "kernel", _kernelTotals);
     }
 
-    private static void DumpTable(TextWriter writer, string what, Dictionary<string, (double Ms, long Dispatches)> _totals)
+    private static void DumpTable(TextWriter writer, string what, Dictionary<string, (double Ms, long Dispatches)> totals)
     {
-        double all = _totals.Values.Sum(v => v.Ms);
+        double all = totals.Values.Sum(v => v.Ms);
         writer.WriteLine();
         writer.WriteLine($"=== VulkanBackend GPU time per {what} (timestamp queries) ===");
-        writer.WriteLine($"  Total GPU: {all:F1}ms over {_totals.Values.Sum(v => v.Dispatches):N0} dispatches");
+        writer.WriteLine($"  Total GPU: {all:F1}ms over {totals.Values.Sum(v => v.Dispatches):N0} dispatches");
         writer.WriteLine($"{what,-36} {"Dispatches",11} {"GPU(ms)",11} {"Avg(ms)",9} {"%",6}");
         writer.WriteLine(new string('-', 78));
-        foreach (KeyValuePair<string, (double Ms, long Dispatches)> kvp in _totals.OrderByDescending(p => p.Value.Ms).Take(30))
+        foreach (KeyValuePair<string, (double Ms, long Dispatches)> kvp in totals.OrderByDescending(p => p.Value.Ms).Take(30))
         {
             double pct = all > 0 ? 100.0 * kvp.Value.Ms / all : 0.0;
             writer.WriteLine($"{kvp.Key,-36} {kvp.Value.Dispatches,11:N0} {kvp.Value.Ms,11:F1} {kvp.Value.Ms / kvp.Value.Dispatches,9:F3} {pct,5:F1}%");
