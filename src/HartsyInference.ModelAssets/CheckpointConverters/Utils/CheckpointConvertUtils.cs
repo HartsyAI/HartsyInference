@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Nvfp4;
@@ -812,6 +813,10 @@ public static unsafe class CheckpointConvertUtils
         HashSet<string>? keptNvfp4 = keepNvfp4Companions
             ? CollectNvfp4Groups(source, weightScales, weightScale2s) : null;
 
+        // Which way each nvfp4 group went, reported once below: the native block-scaled GEMM can only ever see a
+        // group that stayed resident, so "the knob was on and nothing engaged" is usually answered right here.
+        int nvfp4Resident = 0, nvfp4Fp8 = 0, nvfp4F16 = 0, nvfp4Kept = 0;
+
         Dictionary<string, Tensor> result = new(source.Count);
         foreach (KeyValuePair<string, Tensor> kvp in source)
         {
@@ -885,6 +890,7 @@ public static unsafe class CheckpointConvertUtils
                 if (keptNvfp4 is not null && keptNvfp4.Contains(baseKey))
                 {
                     result[key] = kvp.Value;
+                    nvfp4Kept++;
                     continue;
                 }
                 if (weightScales.TryGetValue(baseKey, out Tensor? blockScales) && blockScales.DType == DType.F8E4M3
@@ -897,17 +903,28 @@ public static unsafe class CheckpointConvertUtils
                             source.ContainsKey($"{baseKey}.pre_quant_scale"), out Tensor residentWeight))
                     {
                         result[key] = residentWeight;
+                        nvfp4Resident++;
                         continue;
                     }
 
                     float globalScale = ((float*)scale2T.DataPointer)[0];
                     result[key] = nvfp4ToFp8 ? DequantNvfp4ToFp8(kvp.Value, blockScales, globalScale)
                         : DequantNvfp4ToF16(kvp.Value, blockScales, globalScale);
+                    if (nvfp4ToFp8) nvfp4Fp8++; else nvfp4F16++;
                     continue;
                 }
             }
 
             result[key] = kvp.Value;
+        }
+        int nvfp4Total = nvfp4Resident + nvfp4Fp8 + nvfp4F16 + nvfp4Kept;
+        if (nvfp4Total > 0)
+        {
+            Logs.Info($"Nvfp4 groups: {nvfp4Total} — resident {nvfp4Resident}, companions kept {nvfp4Kept}, "
+                + $"unpacked to fp8 {nvfp4Fp8}, unpacked to F16 {nvfp4F16}."
+                + (nvfp4Resident > 0 || nvfp4Kept > 0 ? string.Empty
+                    : " Every group was unpacked at open, so a backend's native block-scaled GEMM cannot see this "
+                      + "checkpoint at all — CheckpointOpenOptions.ResidentNvfp4 is what leaves them packed."));
         }
         return result;
     }
