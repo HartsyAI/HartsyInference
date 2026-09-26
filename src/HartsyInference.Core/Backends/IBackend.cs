@@ -2400,6 +2400,17 @@ public interface IBackend : IDisposable
         int heads, int headDim, float scale, bool allowF16 = false)
         => throw new NotSupportedException($"{GetType().Name} does not serve token-major attention; check SupportsTokenMajorAttention first.");
 
+    /// <summary>Whether the grouped-query overload of <see cref="ScaledDotProductAttentionTokenMajor(Tensor, Tensor, Tensor, Tensor, Tensor?, int, int, int, float, bool)"/>
+    /// is served, reading K/V with fewer heads than Q without repeating them.</summary>
+    bool SupportsTokenMajorGqaAttention => false;
+
+    /// <summary>Token-major SDPA with <paramref name="kvHeads"/> K/V heads shared across <paramref name="heads"/> query
+    /// heads: Q/output are <c>[S, heads*headDim]</c>, K/V are <c>[Skv, kvHeads*headDim]</c>, and query head h reads
+    /// kv head <c>h / (heads/kvHeads)</c>.</summary>
+    void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
+        => throw new NotSupportedException($"{GetType().Name} does not serve grouped-query token-major attention; check SupportsTokenMajorGqaAttention first.");
+
     /// <summary>LTX-2 attention QK path in one pass: full-row RMS norm over <c>heads*headDim</c>, then optional
     /// SPLIT RoPE, then a head-major emit — <c>input [seq, heads*headDim]</c> to <c>output [1, heads, seq, headDim]</c>.
     /// Pass <paramref name="cos"/>/<paramref name="sin"/> null to skip the rotation (text cross-attention).

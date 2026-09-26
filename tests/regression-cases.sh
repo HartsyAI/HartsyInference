@@ -22,9 +22,9 @@ regression_cases() {
         [ "$keep" = 1 ] && printf '%s\t%s\t%s\n' "$id" "$ckpt" "$spec"
     done <<'MATRIX'
 sd15	baseline,core,vulkan	bench-cache/e9476a13728cd75d8279f6ec8bad753a66a1957ca375a1464dc63b37db6e3916/v1-5-pruned-emaonly-fp16.safetensors	image|a red apple on a table|--steps 8 --width 512 --height 512
-krea2	baseline,core,vulkan	Stable-Diffusion/Krea2/Turbo/krea2_turbo_fp8_scaled.safetensors	image|a red apple on a wooden table|-m krea2 --steps 8 --width 1024 --height 1024
-zimage	core	Stable-Diffusion/z-image-turbo.safetensors	image|a lighthouse on a rocky coast at dusk, photograph|-m zimage --steps 8 --width 1024 --height 1024
-qwenimage-q4k	core	Stable-Diffusion/QwenImage/Qwen_Image-Q4_K_M.gguf	image|a bowl of ramen on a wooden counter, photograph|-m qwen-image --steps 20 --width 1024 --height 1024
+krea2	baseline,core,vulkan,vulkanbar	Stable-Diffusion/Krea2/Turbo/krea2_turbo_fp8_scaled.safetensors	image|a red apple on a wooden table|-m krea2 --steps 8 --width 1024 --height 1024
+zimage	core,vulkanbar	Stable-Diffusion/z-image-turbo.safetensors	image|a lighthouse on a rocky coast at dusk, photograph|-m zimage --steps 8 --width 1024 --height 1024
+qwenimage-q4k	core,vulkanbar	Stable-Diffusion/QwenImage/Qwen_Image-Q4_K_M.gguf	image|a bowl of ramen on a wooden counter, photograph|-m qwen-image --steps 20 --width 1024 --height 1024
 llama32-1b	baseline,core	llm/llama32-1b/llama-3.2-1b-instruct-q8_0.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 llama32-1b-iq4xs	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-IQ4_XS.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 llama32-1b-q3km	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-Q3_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
@@ -32,6 +32,14 @@ llama32-1b-q2k	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-Q2_K.gguf	text|Write a
 llama32-1b-iq3m	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-IQ3_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 qwen25-1.5b-iq3xs	quant	llm/qwen25-1.5b/Qwen2.5-1.5B-Instruct-IQ3_XS.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 qwen25-1.5b-iq2m	quant	llm/qwen25-1.5b/Qwen2.5-1.5B-Instruct-IQ2_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
-lens-mxfp8	mxfp8	Stable-Diffusion/Lens/lens_turbo_mxfp8.safetensors	image|a red bicycle leaning on a brick wall, photograph|-m lens --steps 4 --width 1024 --height 1024
+lens-mxfp8	mxfp8,vulkanbar	Stable-Diffusion/Lens/lens_turbo_mxfp8.safetensors	image|a red bicycle leaning on a brick wall, photograph|-m lens --steps 4 --width 1024 --height 1024
+sdxl	vulkanbar	Stable-Diffusion/SDXL/sd_xl_base_1.0.safetensors	image|a red apple on a wooden table|--steps 20 --width 1024 --height 1024
+flux1-dev	vulkanbar	Stable-Diffusion/BFL/Flux1/flux1-dev-fp8.safetensors	image|a red apple on a wooden table|-m flux1 --steps 20 --width 1024 --height 1024
+flux2-dev-q4ks	vulkanbar	Stable-Diffusion/Flux2/flux2-dev-Q4_K_S.gguf	image|a red apple on a wooden table|-m flux2 --steps 20 --width 1024 --height 1024
+boogu-turbo	vulkanbar	Stable-Diffusion/Boogu/boogu_image_turbo_fp8_scaled.safetensors	image|a red apple on a wooden table|-m boogu --steps 4 --width 1024 --height 1024
+qwenimage21	vulkanbar	diffusion_models/qwen_image_2.1_bf16.safetensors	image|a red apple on a wooden table|-m qwen-image-2.1 --steps 25 --width 1024 --height 1024
+ideogram4	vulkanbar	Stable-Diffusion/Ideogram4/ideogram4_fp8_scaled.safetensors	image|a red apple on a wooden table|-m ideogram4 --steps 20 --width 1024 --height 1024
+chroma-hd	vulkanbar	Stable-Diffusion/Chroma/Chroma1-HD-fp8mixed-final.safetensors	image|a red apple on a wooden table|-m chroma --steps 30 --width 1024 --height 1024
+ernie-turbo	vulkanbar	Stable-Diffusion/Ernie/ernie-image-turbo-fp8.safetensors	image|a red apple on a wooden table|-m ernie-image --steps 8 --width 1024 --height 1024
 MATRIX
 }

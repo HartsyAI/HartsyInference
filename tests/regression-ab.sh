@@ -34,6 +34,8 @@ FILTER=""
 TAG="core"
 EXPECT="identical"
 REPS=3
+# A case checkpoint is relative to the models root unless it is already absolute.
+ckpt_path() { case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$MODELS" "$1" ;; esac; }
 GPU_NAME="RTX 4090"
 GPU_INDEX=""
 HEAD_SET=()
@@ -181,7 +183,7 @@ run_one() {
     local sampler=$!
     local t0 t1; t0="$(date +%s.%N)"
     # shellcheck disable=SC2086
-    timeout "$TIMEOUT" dotnet "$build/HartsyInference.Cli.dll" "$cmd" "$positional" --model-path "$MODELS/$ckpt" \
+    timeout "$TIMEOUT" dotnet "$build/HartsyInference.Cli.dll" "$cmd" "$positional" --model-path "$(ckpt_path "$ckpt")" \
         -b "$sel" -o "$dir/out" --seed "$seed" $args "${sets[@]}" >"$dir/run.log" 2>&1 </dev/null
     local rc=$?
     t1="$(date +%s.%N)"
@@ -244,7 +246,7 @@ for backend in ${BACKENDS//,/ }; do
         [ -z "$id" ] && continue
         if [ -n "$FILTER" ] && [[ ",$FILTER," != *",$id,"* ]]; then continue; fi
         IFS='|' read -r cmd positional args <<<"$spec"
-        if [ ! -e "$MODELS/$ckpt" ]; then
+        if [ ! -e "$(ckpt_path "$ckpt")" ]; then
             log "untested: $id — $MODELS/$ckpt is missing"
             printf '%s\t%s\tuntested\n' "$id" "$backend" >>"$ROWS"
             FAILURES=$((FAILURES + 1))

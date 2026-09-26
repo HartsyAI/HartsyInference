@@ -49,8 +49,18 @@ layout(push_constant) uniform Push {
 } pc;
 
 void main() {
-    uint wgRow = gl_WorkGroupID.y * BM;   // M-tile origin
-    uint wgCol = gl_WorkGroupID.x * BN;   // N-tile origin
+    // Grouped tile order: consecutive workgroups walk GROUP_M tile rows down one column band before moving right, so a
+    // band of B stays in L2 while those rows reuse it instead of every row streaming all of B.
+    const uint GROUP_M = 8;
+    uint tilesN = gl_NumWorkGroups.x;
+    uint tilesM = gl_NumWorkGroups.y;
+    uint linear = gl_WorkGroupID.y * tilesN + gl_WorkGroupID.x;
+    uint perGroup = GROUP_M * tilesN;
+    uint firstM = (linear / perGroup) * GROUP_M;
+    uint groupRows = min(tilesM - firstM, GROUP_M);
+    uint inGroup = linear % perGroup;
+    uint wgRow = (firstM + (inGroup % groupRows)) * BM;   // M-tile origin
+    uint wgCol = (inGroup / groupRows) * BN;              // N-tile origin
 
     // Clamped layouts: reads/writes past the tensor's declared (M,K)/(N,K)/(M,N) dimensions are silently
     // zeroed (loads) or dropped (stores) by the driver — no manual bounds checking needed for M/N/K that
@@ -81,11 +91,38 @@ void main() {
     coopmat<float, gl_ScopeWorkgroup, BM, BN, gl_MatrixUseAccumulator> sum =
         coopmat<float, gl_ScopeWorkgroup, BM, BN, gl_MatrixUseAccumulator>(0.0);
 
-    uint kIters = (pc.K + BK - 1) / BK;
-    [[dont_unroll]]
-    for (uint i = 0; i < kIters; i++) {
-        uint kStart = i * BK;
+    // Interior tiles with 8-element-aligned strides and offsets load unclamped, unrolled eight BK blocks deep; the
+    // masked strides tell the compiler the rows are 16-byte aligned so it can issue vector loads (ggml's mul_mm_cm2
+    // fast path). Everything else, and the K tail, takes the clamped loop below.
+    uint kStart = 0;
+    const uint UNROLL = 8;
+    if (wgRow + BM <= pc.M && wgCol + BN <= pc.N && (pc.lda % 8) == 0 && (pc.ldb % 8) == 0
+        && (pc.aOffset % 8) == 0 && (pc.bOffset % 8) == 0) {
+        uint lda = pc.lda & ~7u;
+        uint ldb = pc.ldb & ~7u;
+        tensorLayoutNV<2> fastA = createTensorLayoutNV(2);
+        tensorLayoutNV<2> fastB = createTensorLayoutNV(2);
+        fastA = setTensorLayoutDimensionNV(fastA, pc.M, pc.K);
+        fastA = setTensorLayoutStrideNV(fastA, lda, 1);
+        fastB = setTensorLayoutDimensionNV(fastB, pc.N, pc.K);
+        fastB = setTensorLayoutStrideNV(fastB, ldb, 1);
+        uint aOff = pc.aOffset & ~7u;
+        uint bOff = pc.bOffset & ~7u;
+        uint unrolled = pc.K / (BK * UNROLL);
+        for (uint i = 0; i < unrolled; i++) {
+            [[unroll]] for (uint j = 0; j < UNROLL; j++) {
+                coopmat<float16_t, gl_ScopeWorkgroup, BM, BK, gl_MatrixUseA> matA;
+                coopmat<float16_t, gl_ScopeWorkgroup, BK, BN, gl_MatrixUseB> matB;
+                coopMatLoadTensorNV(matA, A, aOff, sliceTensorLayoutNV(fastA, wgRow, BM, kStart, BK));
+                coopMatLoadTensorNV(matB, B, bOff, sliceTensorLayoutNV(fastB, wgCol, BN, kStart, BK), viewTranspose);
+                sum = coopMatMulAdd(matA, matB, sum);
+                kStart += BK;
+            }
+        }
+    }
 
+    [[dont_unroll]]
+    for (; kStart < pc.K; kStart += BK) {
         coopmat<float16_t, gl_ScopeWorkgroup, BM, BK, gl_MatrixUseA> matA;
         coopmat<float16_t, gl_ScopeWorkgroup, BK, BN, gl_MatrixUseB> matB;
 

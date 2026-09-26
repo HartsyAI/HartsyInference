@@ -49,6 +49,8 @@ public sealed class VulkanCoopMat2LinearTests
     [InlineData(257, 512, 512, true)]      // M not 16-aligned — coopmat1's exact-multiple-of-16 gate blocks this
     [InlineData(13, 512, 512, false)]      // tiny M (mirrors the real txtSeq-alone shape), no bias
     [InlineData(512, 512, 512, true)]      // 16-aligned control — coopmat2 must ALSO handle the case coopmat1 could
+    [InlineData(300, 768, 1000, true)]     // full tiles take the unrolled fast path (K 512), then a clamped K tail
+    [InlineData(260, 1003, 512, false)]    // K not a multiple of 8: rows unaligned, every tile takes the clamped loop
     public void Backend_Linear_CoopMat2OptIn_EngagesAndMatchesF32Reference(int M, int K, int N, bool hasBias)
     {
         if (!VulkanAvailable()) { _out.WriteLine("SKIPPED: no Vulkan device"); return; }
