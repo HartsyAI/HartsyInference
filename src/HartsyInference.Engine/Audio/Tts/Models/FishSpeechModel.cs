@@ -37,9 +37,9 @@ internal static class FishSpeechModel
             string tokenizerPath = await AudioModelCache.GetAsync(Repo, TokenizerFile, category: "tts", ct: cancel).ConfigureAwait(false);
             await AudioModelCache.GetAsync(Repo, SpecialTokensFile, category: "tts", ct: cancel).ConfigureAwait(false);
 
-            PytorchPickleLoader modelLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader modelLoader = new AnyFormatCheckpointLoader();
             modelLoader.Load(modelPath);
-            PytorchPickleLoader codecLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader codecLoader = new AnyFormatCheckpointLoader();
             codecLoader.Load(codecPath);
 
             FishSpeechTokenizer tokenizer = new FishSpeechTokenizer();

@@ -185,7 +185,7 @@ public sealed class KokoroPipeline : IDisposable
         }
         return ArtifactMetadata.ForRepack(identity, ArtifactProvenance.FromSourceFile(
             "HartsyInference.PickleCheckpointRepacker", ArtifactProvenance.MainComponent, sourcePath,
-            sourceRepo: "hexgrad/Kokoro-82M"));
+            sourceRepo: "hexgrad/Kokoro-82M") with { ModelId = "default" });
     }
 
     /// <summary>Synthesizes audio from an IPA phoneme string. <paramref name="voiceName"/>

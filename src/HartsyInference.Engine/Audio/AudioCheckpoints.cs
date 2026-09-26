@@ -50,7 +50,7 @@ internal static class AudioCheckpoints
         }
 
         string binPath = await AudioModelCache.GetAsync(repo, "pytorch_model.bin", category, ct: cancel).ConfigureAwait(false);
-        PytorchPickleLoader pickle = new PytorchPickleLoader();
+        AnyFormatCheckpointLoader pickle = new AnyFormatCheckpointLoader();
         pickle.Load(binPath);
         return (pickle.GetAllTensors(), [pickle]);
     }
@@ -145,7 +145,7 @@ internal static class AudioCheckpoints
             safeTensors.Load(path);
             return (safeTensors.GetAllTensors(), safeTensors);
         }
-        PytorchPickleLoader pickle = new PytorchPickleLoader();
+        AnyFormatCheckpointLoader pickle = new AnyFormatCheckpointLoader();
         pickle.Load(path);
         return (pickle.GetAllTensors(), pickle);
     }
