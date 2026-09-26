@@ -72,7 +72,10 @@ public sealed unsafe class HtDemucs : IDisposable
         }
         _xf.LoadWeights(w, "crosstransformer");
         _freqEmb = _casts.Optional(w, "freq_emb.embedding.weight");
-        // The channel (up/down)samplers are top-level modules in HTDemucs, NOT inside the crosstransformer.
+        // The channel (up/down)samplers are top-level modules in HTDemucs, NOT inside the crosstransformer, and
+        // only exist when the bottleneck is projected (htdemucs_6s has none).
+        if (_cfg.BottomChannels <= 0)
+            return;
         _upW = _casts.F32(w, "channel_upsampler.weight");
         _upB = _casts.Optional(w, "channel_upsampler.bias");
         _downW = _casts.F32(w, "channel_downsampler.weight");
@@ -94,7 +97,7 @@ public sealed unsafe class HtDemucs : IDisposable
         int channels = _cfg.AudioChannels;
         int srcs = _cfg.NumSources;
         int encCh = _encChannels[_depth - 1];     // 384
-        int bottom = _cfg.BottomChannels;          // 512
+        int bottom = _cfg.TransformerWidth;        // 512, or 384 when unprojected
 
         // ── Spec from the RAW mix (cac), then normalize by the spec mean/std over all (1,2,3). ──
         Tensor spec = DemucsSpec.Spec(backend, wav, channels, length, _cfg.NFft, _cfg.HopLength, out int freq, out int time);
@@ -136,16 +139,19 @@ public sealed unsafe class HtDemucs : IDisposable
         }
 
         // ── Channel up-project (1x1) both streams to bottom_channels, cross-transform, down-project. ──
-        Tensor sUp = ChannelProj(backend, x, _upW!, _upB, encCh, bottom, f * t1, f, t1, true); x.Dispose();
-        Tensor tUp = ChannelProj(backend, xt, _upWt!, _upBt, encCh, bottom, tt, 1, tt, false); xt.Dispose();
+        bool project = _cfg.BottomChannels > 0;
+        Tensor sUp = project ? ChannelProj(backend, x, _upW!, _upB, encCh, bottom, f * t1, f, t1, true) : x;
+        Tensor tUp = project ? ChannelProj(backend, xt, _upWt!, _upBt, encCh, bottom, tt, 1, tt, false) : xt;
+        if (project) { x.Dispose(); xt.Dispose(); }
         DebugHook?.Invoke("ct_in_x", sUp); DebugHook?.Invoke("ct_in_xt", tUp);
         if (DebugHook is not null) { DemucsCrossTransformer.Probe = (k, v) => DebugHook(k, v); DemucsCrossTransformer.AttnProbe = v => DebugHook("ct_l0_attn", v); DemucsCrossTransformer.AfterAttnProbe = v => DebugHook("ct_l0_afterattn", v); DemucsCrossTransformer.PreNormOutProbe = v => DebugHook("ct_l0_out", v); }
         (Tensor sMix, Tensor tMix) = _xf.Forward(backend, sUp, bottom, f, t1, tUp, tt);
         DemucsCrossTransformer.Probe = null;
         sUp.Dispose(); tUp.Dispose();
         DebugHook?.Invoke("ct_out_x", sMix); DebugHook?.Invoke("ct_out_xt", tMix);
-        Tensor xs = ChannelProj(backend, sMix, _downW!, _downB, bottom, encCh, f * t1, f, t1, true); sMix.Dispose();
-        Tensor xtd = ChannelProj(backend, tMix, _downWt!, _downBt, bottom, encCh, tt, 1, tt, false); tMix.Dispose();
+        Tensor xs = project ? ChannelProj(backend, sMix, _downW!, _downB, bottom, encCh, f * t1, f, t1, true) : sMix;
+        Tensor xtd = project ? ChannelProj(backend, tMix, _downWt!, _downBt, bottom, encCh, tt, 1, tt, false) : tMix;
+        if (project) { sMix.Dispose(); tMix.Dispose(); }
 
         // ── Decoder: freq + time branches each add the same-level encoder skip, then up-convolve. ──
         for (int i = 0; i < _depth; i++)
