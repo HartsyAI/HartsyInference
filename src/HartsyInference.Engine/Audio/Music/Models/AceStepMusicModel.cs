@@ -72,9 +72,10 @@ internal static class AceStepMusicModel
             {
                 sniff.Load(mainPath);
                 isV1 = AceStepCheckpointConverter.IsV1AllInOne(sniff.Descriptors);
-                // A checkpoint selected by path (SwarmUI's core model list) arrives without a variant; a Hartsy
-                // artifact names its own, and the variant decides the config, CFG and step defaults.
-                if (variant.Length == 0 && sniff.Metadata?.GetValueOrDefault("hartsy.model_id") is { Length: > 0 } stamped)
+                // A checkpoint selected by path (SwarmUI's core model list) arrives with no variant, or the family id
+                // in its place; a Hartsy artifact names its own, and the variant decides the config, CFG and steps.
+                if (AudioWeightsCatalog.AssetsFor(AudioWeightsCatalog.AceStepId, variant).Count == 0
+                    && sniff.Metadata?.GetValueOrDefault("hartsy.model_id") is { Length: > 0 } stamped)
                 {
                     variant = stamped;
                 }
