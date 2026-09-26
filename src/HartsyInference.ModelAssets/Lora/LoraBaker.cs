@@ -290,7 +290,6 @@ public static class LoraBaker
         using Tensor a = ToF32("down", down);
         Tensor result = new(new TensorShape(rows, columns), DType.F32);
         float* bp = (float*)b.DataPointer, ap = (float*)a.DataPointer, cp = (float*)result.DataPointer;
-        int width = Vector<float>.Count;
         Parallel.For(0, rows, row =>
         {
             float* c = cp + row * columns;
@@ -299,13 +298,17 @@ public static class LoraBaker
             {
                 float bk = bp[row * rank + k];
                 float* ak = ap + (long)k * columns;
-                Vector<float> bv = new(bk);
                 long i = 0;
+#if NET9_0_OR_GREATER
+                // net8 has no vector FMA; the scalar loop below is the same arithmetic.
+                int width = Vector<float>.Count;
+                Vector<float> bv = new(bk);
                 for (; i + width <= columns; i += width)
                 {
                     Vector<float> acc = Vector.Load(c + i);
                     Vector.Store(Vector.FusedMultiplyAdd(bv, Vector.Load(ak + i), acc), c + i);
                 }
+#endif
                 for (; i < columns; i++)
                     c[i] = MathF.FusedMultiplyAdd(bk, ak[i], c[i]);
             }
