@@ -740,6 +740,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return output;
     }
 
+    /// <summary>Whether caching a weight cast of <paramref name="bytes"/> still leaves a fifth of the device-local heap
+    /// free. Past that the cast is made per call and freed, so a checkpoint whose casts do not fit next to its own
+    /// weights (fp8, GGUF, bf16 on a 24 GB card) runs slower instead of running out of memory mid-denoise.</summary>
+    private bool CastFitsCache(long bytes)
+    {
+        (uint heap, long total) = LargestDeviceLocalHeap();
+        (long free, _) = GetVramInfo();
+        long pooledIdle = (long)(_allocator.ReservedBytes(heap) - _allocator.UsedBytes(heap));
+        return free + pooledIdle - bytes >= total / 5;
+    }
+
     /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
     {
@@ -747,9 +758,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
         // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
         if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
-        bool cacheThis = _xfer.ShouldCacheCast(src);
-
         long elements = src.ElementCount;
+        bool cacheThis = _xfer.ShouldCacheCast(src) && CastFitsCache(elements * want.SizeInBytes);
+
         ulong outBytes = (ulong)(elements * want.SizeInBytes);
         VulkanBuffer dst = _xfer.AllocateDevice(outBytes);
 
@@ -958,10 +969,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             if (bias is not null)
             {
                 VulkanKernel add = GetKernel("broadcast_add_f32", storageBufferCount: 2, _default1DSpec);
-                Span<byte> pc = stackalloc byte[3 * 4];
+                Span<byte> pc = stackalloc byte[4 * 4];
                 BinaryWriteUInt(pc, 0, (uint)N);
                 BinaryWriteUInt(pc, 4, 1u);
                 BinaryWriteUInt(pc, 8, (uint)((long)M * N));
+                BinaryWriteUInt(pc, 12, 0u);
                 Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, GetBuffer(bias).Handle };
                 Dispatch(add, bufs, pc, GroupCount((long)M * N, LocalX1D));
             }
@@ -993,7 +1005,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         VulkanBuffer q = _xfer.AllocateDevice(Int8RowsBytes(n, k));
         try { QuantizeInt8Rows(GetBuffer(weight), q, n, k); }
         catch { q.Dispose(); throw; }
-        return FinishCast(weight, DType.I8, q, _xfer.ShouldCacheCast(weight));
+        return FinishCast(weight, DType.I8, q, _xfer.ShouldCacheCast(weight) && CastFitsCache((long)Int8RowsBytes(n, k)));
     }
 
     /// <summary>quant_int8_rowwise: one workgroup per row, the packed int8 at the front of <paramref name="dst"/> and the scales after them.</summary>
@@ -3297,10 +3309,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         {
             string shader = "broadcast_add" + DtypeSuffix(hidden.DType);
             VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
-            Span<byte> pc = stackalloc byte[3 * 4];
+            // bias is [B, C] per the contract; a [C] bias is shared by every batch item.
+            Span<byte> pc = stackalloc byte[4 * 4];
             BinaryWriteUInt(pc, 0, (uint)channels);
             BinaryWriteUInt(pc, 4, (uint)spatial);
             BinaryWriteUInt(pc, 8, (uint)hidden.ElementCount);
+            BinaryWriteUInt(pc, 12, bias.ElementCount > channels ? 1u : 0u);
             Span<ulong> bufs = stackalloc ulong[] { hBuf.Handle, bEff.Handle };
             Dispatch(k, bufs, pc, GroupCount(hidden.ElementCount, LocalX1D));
             // hidden's GPU contents just changed — re-cache so CPU readback (lazy-sync callback)

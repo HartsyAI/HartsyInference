@@ -196,7 +196,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
         _qwenTokenizer?.Dispose();
         _mistralTokenizer?.Dispose();
         _encoder.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
+        foreach (IDisposable loader in _loaders)
         {
             loader.Dispose();
         }
