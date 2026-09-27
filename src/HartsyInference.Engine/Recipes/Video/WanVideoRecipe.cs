@@ -414,8 +414,19 @@ public sealed class WanVideoRecipe : IVideoRecipe
         {
             return false;
         }
+        CheckpointHeader header;
+        try
+        {
+            header = CheckpointHeader.Read(checkpointPath);
+        }
+        catch (Exception ex)
+        {
+            // A capability query must not throw on a damaged or unmappable file; unknown means no end frame.
+            Logs.Warning($"[WanVideoRecipe] Could not read '{checkpointPath}' to size it; not claiming an end frame. {ex.Message}");
+            return false;
+        }
         int latentChannels = WanVideoConfig.Ti2V5B.InChannels;
-        foreach (KeyValuePair<string, SafeTensorDescriptor> entry in CheckpointHeader.Read(checkpointPath).Descriptors)
+        foreach (KeyValuePair<string, SafeTensorDescriptor> entry in header.Descriptors)
         {
             // The plain embedding only: VACE and Animate carry their own patch embeddings with other channel counts.
             string key = entry.Key;

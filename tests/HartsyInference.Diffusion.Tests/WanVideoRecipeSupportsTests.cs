@@ -94,6 +94,23 @@ public sealed class WanVideoRecipeSupportsTests
         Assert.False(WanVideoRecipe.IsTi2V5BCheckpoint(Path.GetTempPath()));
     }
 
+    /// <summary>A damaged file answers "not a 5B" instead of throwing out of a capability query.</summary>
+    [Fact]
+    public void IsTi2V5BCheckpoint_GarbageFile_IsFalse()
+    {
+        string path = Path.Combine(Path.GetTempPath(), $"wan-garbage-{Guid.NewGuid():N}.safetensors");
+        File.WriteAllBytes(path, [0x10, 0, 0, 0, 0, 0, 0, 0, (byte)'{', (byte)'"']);
+        try
+        {
+            Assert.False(WanVideoRecipe.IsTi2V5BCheckpoint(path));
+            Assert.Equal(VideoFeatures.None, new WanVideoRecipe("wan").SupportsFor(path) & VideoFeatures.EndFrame);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     /// <summary>A header-only stand-in for a plain Wan backbone: the patch embedding at the given latent width plus one
     /// block key, which is all the variant sniff and the size check read.</summary>
     private static string WriteBackbone(int latentChannels)
