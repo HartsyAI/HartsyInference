@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.186
+
+- **Wan claims an end frame only where one has been checked.** `WanVideoRecipe.Supports` declared
+  `VideoFeatures.EndFrame` for the `wan-21-14b` compat class and the generic `wan` slug, though only the Wan2.2
+  TI2V-5B has been run with one (`WanEndFrameRealWeightTests`). Both now declare the init image only. Because that
+  real-weight run goes through the generic slug, `SupportsFor` adds the end frame back when the file's plain
+  `patch_embedding.weight` takes 48 latent channels — the Wan2.2 VAE width only the 5B uses — read from the header
+  with no weight I/O. A folder or an unrecognized layout stays init-image only.
+
 ## alpha.184
 
 - **Native FP4 never ran on a real checkpoint, and nothing said so.** `numerics.fp4Native` on or off produced a

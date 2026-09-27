@@ -28,6 +28,17 @@ public sealed class WanEndFrameRealWeightTests
     private readonly ITestOutputHelper _output;
     public WanEndFrameRealWeightTests(ITestOutputHelper output) => _output = output;
 
+    /// <summary>The generic slug this test drives through claims the end frame only because the file's header reads as a
+    /// TI2V-5B, so pin that the real checkpoint does. Header-only: no GPU, no weight I/O.</summary>
+    [Fact]
+    public void GenericSlug_RealTi2V5BCheckpoint_ClaimsEndFrame()
+    {
+        if (!RealWeightGate.Require(_output.WriteLine, TestPaths.WanVideo.Ti2V5B)) return;
+
+        Assert.True(WanVideoRecipe.IsTi2V5BCheckpoint(TestPaths.WanVideo.Ti2V5B));
+        Assert.True(new WanVideoRecipe("wan").SupportsFor(TestPaths.WanVideo.Ti2V5B).HasFlag(VideoFeatures.EndFrame));
+    }
+
     [Fact]
     public async Task WanVideoRecipe_WithEndFrame_LastFrameLeansTowardSuppliedEndColor()
     {

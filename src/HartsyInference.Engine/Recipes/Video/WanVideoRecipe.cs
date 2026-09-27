@@ -44,25 +44,25 @@ public sealed class WanVideoRecipe : IVideoRecipe
 
 
     /// <inheritdoc/>
-    /// <remarks><b>Updated 2026-08-11 (Tier 3.3 — real end-frame wiring):</b> <see cref="WanVideoRecipePipeline"/>'s
-    /// non-concat path now VAE-encodes <see cref="VideoRequest.VideoEndFrame"/> into a <c>lastFrameLatent</c>
-    /// exactly like <see cref="VideoRequest.InitImage"/>'s <c>firstFrameLatent</c> (see
-    /// <see cref="WanVideoPipeline.RunDenoise"/>'s symmetric per-frame-timestep-pin mechanism), so
-    /// <see cref="VideoFeatures.EndFrame"/> is no longer a lie for <c>wan-22-5b</c> — real-weight verified against
-    /// the locally-available TI2V-5B checkpoint (see the extension backlog memory / plan for the verification
-    /// artifact). <c>wan-21_1_3b</c> shares the identical non-concat code path (same <see cref="ResolveConfig"/>
-    /// branch shape as Ti2V5B) so the mechanism should cover it too, but is left narrowed here deliberately — no
-    /// local 1.3B checkpoint exists to actually run and look at, and this backlog's hard rule is real-checkpoint
-    /// verification, not "should work by symmetry." Revisit once a 1.3B checkpoint is available to test.
-    /// <c>wan-21-14b</c> stays ambiguous at the family level (T2V vs. concat-I2V is a checkpoint property — see
-    /// <see cref="SupportsFor"/>) and keeps claiming both; the generic "wan" catalog slug (weight-derived config,
-    /// no compat class) does too, for the same reason.</remarks>
+    /// <remarks>End-frame conditioning is claimed only where it has been checked against real weights: the Wan2.2
+    /// TI2V-5B checkpoint (<c>wan-22-5b</c>), whose non-concat path VAE-encodes
+    /// <see cref="VideoRequest.VideoEndFrame"/> into a <c>lastFrameLatent</c> exactly like the init image's
+    /// <c>firstFrameLatent</c> (<c>WanEndFrameRealWeightTests</c>).
+    /// <para><c>wan-21-1_3b</c> shares that code path but no 1.3B checkpoint has been run with it. <c>wan-21-14b</c>
+    /// covers T2V and concat-I2V checkpoints alike; the concat path forwards the end frame to
+    /// <c>GenerateImageToVideoConcat</c> but nobody has looked at the output, so it is not claimed either. The
+    /// generic <c>"wan"</c> catalog slug carries no size at all, so its family-level answer is init image only and
+    /// <see cref="SupportsFor"/> adds the end frame back when the file is a TI2V-5B — which is the route the
+    /// real-weight test takes.</para></remarks>
     public VideoFeatures Supports =>
-        (_familyId is Wan21_1_3BCompatClassId ? VideoFeatures.InitImage
-            : VideoFeatures.InitImage | VideoFeatures.EndFrame) | VideoFeatures.Lora;
+        (_familyId is Wan22_5BCompatClassId ? VideoFeatures.InitImage | VideoFeatures.EndFrame : VideoFeatures.InitImage)
+        | VideoFeatures.Lora;
 
     /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.) a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when the file cannot be peeked.</summary>
-    /// <remarks>Does NOT yet narrow the <c>wan-21-14b</c> T2V-vs-concat-I2V ambiguity — that needs the in-channels of <c>patch_embedding.weight</c>, which <see cref="ConstructBase"/> reads off the CONVERTED weight dict (post <see cref="WanVideoCheckpointConverter.Convert"/>), not the raw checkpoint's own key names. Wan ships both single-file and diffusers-shard layouts with different raw prefixes, so a cheap raw-header peek here (mirroring <see cref="VideoRecipeUtils.PeekCheckpointKeys"/>) risks silently misclassifying a checkpoint whose prefix the peek doesn't recognize — worse than the current over-claim, which at least fails loudly as a silent no-op the caller can be told about rather than a wrong refusal. Left for the real end-frame wiring (tracked in the extension's TODO backlog), which needs the converted weights loaded anyway.</remarks>
+    /// <remarks>Under the generic <c>"wan"</c> slug a plain backbone gains <see cref="VideoFeatures.EndFrame"/> when
+    /// <see cref="IsTi2V5BCheckpoint"/> recognizes the file; anything it cannot recognize stays init-image only.
+    /// <para>Does not tell a <c>wan-21-14b</c> T2V checkpoint from a concat-I2V one, so a T2V-14B still claims the
+    /// init image; the concat pipeline refuses a missing init image itself, and the T2V side is unverified.</para></remarks>
     /// <inheritdoc/>
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: Wan's tokenizer chain reaches
     /// <c>UMT5XXlTokenizer</c>, which sets no <c>disable_weights</c>, so the weights survive tokenization and
@@ -86,6 +86,8 @@ public sealed class WanVideoRecipe : IVideoRecipe
                 WanVariant.Animate => new WanAnimateRecipe().Supports,
                 WanVariant.Animate2 => new WanAnimate2Recipe().Supports,
                 WanVariant.S2V => new WanS2VRecipe().Supports,
+                _ when _familyId is not (Wan22_5BCompatClassId or Wan21_1_3BCompatClassId or Wan21_14BCompatClassId)
+                    && IsTi2V5BCheckpoint(checkpointPath) => Supports | VideoFeatures.EndFrame,
                 _ => Supports,
             };
         }
@@ -400,6 +402,32 @@ public sealed class WanVideoRecipe : IVideoRecipe
         WanVideoConfig detected = WanConfigDetector.Detect(weights);
         Logs.Info($"[WanVideoRecipe] Weight-derived config: {WanConfigDetector.Describe(detected)}");
         return detected;
+    }
+
+    /// <summary>True when <paramref name="checkpointPath"/> is a Wan2.2 TI2V-5B transformer: its patch embedding takes the
+    /// z=48 latents of the Wan2.2 VAE, which no other Wan size uses (1.3B and 14B read 16, concat-I2V 36). Read from the
+    /// header's shapes only, so it costs no weight I/O; a folder or an unrecognized layout answers false, which keeps the
+    /// end frame refused rather than guessed.</summary>
+    internal static bool IsTi2V5BCheckpoint(string checkpointPath)
+    {
+        if (!File.Exists(checkpointPath))
+        {
+            return false;
+        }
+        int latentChannels = WanVideoConfig.Ti2V5B.InChannels;
+        foreach (KeyValuePair<string, SafeTensorDescriptor> entry in CheckpointHeader.Read(checkpointPath).Descriptors)
+        {
+            // The plain embedding only: VACE and Animate carry their own patch embeddings with other channel counts.
+            string key = entry.Key;
+            if (key.EndsWith("patch_embedding.weight", StringComparison.Ordinal)
+                && !key.Contains("vace_", StringComparison.Ordinal)
+                && !key.Contains("pose_", StringComparison.Ordinal)
+                && entry.Value.Shape.Rank == 5)
+            {
+                return entry.Value.Shape[1] == latentChannels;
+            }
+        }
+        return false;
     }
 
     /// <summary>The Wan conditioning variants that share a compat class.</summary>

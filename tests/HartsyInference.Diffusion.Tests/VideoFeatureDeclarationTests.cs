@@ -26,10 +26,13 @@ public sealed class VideoFeatureDeclarationTests
     /// <para><c>wan-21-1_3b</c> is absent deliberately. It shares the identical non-concat code path with
     /// <c>wan-22-5b</c>, so the symmetric per-frame-timestep-pin mechanism should cover it — but no local 1.3B
     /// checkpoint exists to run and look at, and this backlog's rule is real-checkpoint verification, not "works by
-    /// symmetry". <c>WanVideoRecipe.Supports</c> narrows it explicitly; see the remarks there.</para></summary>
+    /// symmetry". <c>WanVideoRecipe.Supports</c> narrows it explicitly; see the remarks there.</para>
+    /// <para><c>wan-21-14b</c> is absent because neither its T2V nor its concat-I2V checkpoints have been run with an
+    /// end frame, and the generic <c>wan</c> slug because it carries no size: <c>WanVideoRecipe.SupportsFor</c> adds the
+    /// bit back for a TI2V-5B file under it.</para></summary>
     private static readonly string[] ExpectedEndFrame =
     [
-        "wan", "wan-22-5b", "wan-21-14b",
+        "wan-22-5b",
         "minimax-h3",
     ];
 
