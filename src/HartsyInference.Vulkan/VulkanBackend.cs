@@ -1005,7 +1005,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         VulkanBuffer q = _xfer.AllocateDevice(Int8RowsBytes(n, k));
         try { QuantizeInt8Rows(GetBuffer(weight), q, n, k); }
         catch { q.Dispose(); throw; }
-        return FinishCast(weight, DType.I8, q, _xfer.ShouldCacheCast(weight));
+        return FinishCast(weight, DType.I8, q, _xfer.ShouldCacheCast(weight) && CastFitsCache((long)Int8RowsBytes(n, k)));
     }
 
     /// <summary>quant_int8_rowwise: one workgroup per row, the packed int8 at the front of <paramref name="dst"/> and the scales after them.</summary>
