@@ -43,8 +43,22 @@ public sealed class ImageInputLimitsTests
     public void QwenImage_TakesTheEditTemplatesSlots_WithoutNeedingAnInit()
     {
         ImageInputLimits limits = LimitsOf("qwen-image");
-        Assert.Equal(QwenImageEditConditioning.MaxReferences, limits.MaxImages);
+        Assert.Equal(QwenImageEditTemplate.EditPlus.MaxReferences, limits.MaxImages);
         Assert.False(limits.ReferencesRequireInitImage);
+    }
+
+    /// <summary>The family ceiling is the Plus template's; each variant narrows it to what its template addresses, and
+    /// the text-to-image base reads its init image only.</summary>
+    [Theory]
+    [InlineData("qwen-image-edit-plus", 3)]
+    [InlineData("qwen-image-edit", 1)]
+    [InlineData("qwen-image", 1)]
+    public void QwenImage_LimitsFollowTheResolvedVariant(string swarmClass, int maxImages)
+    {
+        ModelSpec spec = new ModelSpec { Requested = "qwen-image", Modality = Modality.Image, Variant = swarmClass };
+        ImageInputLimits limits = ModelCapabilities.ImageInputLimitsFor(spec);
+        Assert.Equal(maxImages, limits.MaxImages);
+        Assert.Equal(swarmClass == "qwen-image", limits.ReferencesRequireInitImage);
     }
 
     [Theory]

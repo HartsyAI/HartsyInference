@@ -49,7 +49,6 @@ public sealed unsafe class MageFlowRecipePipeline : IRecipePipeline
         _vae = vae; _vaeEncoder = vaeEncoder; _isTurbo = isTurbo; _componentSources = componentSources; _ggufHandle = ggufHandle;
     }
 
-    public ImageDefaults? VariantDefaults => _isTurbo ? MageFlowRecipe.TurboDefaults : MageFlowRecipe.FamilyDefaults;
 
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {

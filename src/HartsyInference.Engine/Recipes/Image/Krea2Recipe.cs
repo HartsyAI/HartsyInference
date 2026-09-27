@@ -17,6 +17,8 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
 
+using HartsyInference.Engine.Variants;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Krea 2 recipe (Krea, 12.9B single-stream MMDiT flow-match T2I). The checkpoint is the transformer in Krea's raw key naming (<c>blocks.N.*</c>, <c>txtfusion.*</c>, <c>tmlp</c>, <c>tproj</c>, <c>last.*</c>), remapped by <see cref="Krea2CheckpointConverter.RemapTransformerKey"/>; the Qwen3-VL-4B text encoder (<see cref="SideModels.Qwen3VL_4B"/>) and the Qwen-Image VAE (<see cref="SideModels.QwenImageVae"/>) resolve as side models. Base vs Turbo is auto-detected from the checkpoint filename. Lifted from the SwarmUI backend's <c>Krea2Loader</c>; drives through <see cref="Krea2RecipePipeline"/>.</summary>
@@ -58,7 +60,7 @@ public sealed class Krea2Recipe : IArchitectureRecipe
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "krea2", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Krea 2 Base's official sampling settings: 28 steps at CFG 4.5, 1024x1024 (<c>Krea2Config.Base</c>); a Turbo/TDM checkpoint narrows this to 8 guidance-free steps via <see cref="Krea2RecipePipeline.VariantDefaults"/>.</summary>
+    /// <summary>Krea 2 Base's official sampling settings: 28 steps at CFG 4.5, 1024x1024 (<c>Krea2Config.Base</c>); a Turbo/TDM checkpoint narrows this to 8 guidance-free steps via <see cref="DefaultsFor"/>.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 28, CfgScale = 4.5f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
@@ -68,13 +70,20 @@ public sealed class Krea2Recipe : IArchitectureRecipe
     public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 8, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
     /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => Krea2Variants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(Krea2Variants.Turbo) ? TurboDefaults : FamilyDefaults;
+
+    /// <inheritdoc/>
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.BlockStreaming | MemoryCapabilities.DitSharding;
 
     public IRecipePipeline Construct(RecipeContext context)
     {
         string fileName = Path.GetFileName(context.CheckpointPath);
-        bool isTurbo = IsTurbo(fileName);
+        bool isTurbo = context.ResolveVariant(Krea2Variants.Catalog).Is(Krea2Variants.Turbo);
         Krea2Config config = isTurbo ? Krea2Config.Turbo : Krea2Config.Base;
         Logs.Info($"[Krea2Recipe] Loading Krea 2 ({(isTurbo ? "Turbo/TDM" : "Base")}): {fileName}.");
 
@@ -160,17 +169,6 @@ public sealed class Krea2Recipe : IArchitectureRecipe
             }
             throw;
         }
-    }
-
-    /// <summary>Whether the checkpoint filename marks a distilled (Turbo/TDM) variant — those pin the flow-match shift and run guidance-free.</summary>
-    private static bool IsTurbo(string name)
-    {
-        if (string.IsNullOrEmpty(name))
-        {
-            return false;
-        }
-        string lower = name.ToLowerInvariant();
-        return lower.Contains("turbo") || lower.Contains("tdm") || lower.Contains("distill");
     }
 
     /// <summary>Uses an override when supplied; otherwise ensures the Comfy-compatible side model exists. The

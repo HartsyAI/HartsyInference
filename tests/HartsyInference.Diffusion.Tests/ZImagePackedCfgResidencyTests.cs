@@ -11,7 +11,8 @@ using HartsyInference.Diffusion.Requests;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Diffusion.Utilities;
 using HartsyInference.Engine.Recipes.Image;
-using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Tests.Common;
 using Xunit;
 using Xunit.Abstractions;
@@ -188,30 +189,31 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
     }
 
     [Theory]
-    [InlineData("z_image_base-bf16.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
-    [InlineData("z_image_base-nvfp8-mixed.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
-    [InlineData("SwarmUI_Z-Image-Turbo-FP8Mix.safetensors", ZImageCheckpointConverter.CheckpointVariant.Turbo, 3.0f)]
+    [InlineData("z_image_base-bf16.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
+    [InlineData("z_image_base-nvfp8-mixed.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
+    [InlineData("SwarmUI_Z-Image-Turbo-FP8Mix.safetensors", "turbo", ModelVariantSource.Filename, 3.0f)]
     // The official Base release ships under the bare family name with no variant token — it must positively
     // resolve to Base, not fall through to a policy that produces Inf on Base weights.
-    [InlineData("Z-Image.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
-    [InlineData("z_image_bf16.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
-    [InlineData("SwarmUI_Z-Image-FP8Mix.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
-    [InlineData("ZImage.safetensors", ZImageCheckpointConverter.CheckpointVariant.Base, 6.0f)]
-    // Genuinely ambiguous names stay Unknown; the recipe maps Unknown to the numerically safe Base policy.
-    [InlineData("renamed.safetensors", ZImageCheckpointConverter.CheckpointVariant.Unknown, 6.0f)]
-    [InlineData("base/Z-Image-Turbo.safetensors", ZImageCheckpointConverter.CheckpointVariant.Turbo, 3.0f)]
-    [InlineData("Z-Image-base-turbo.safetensors", ZImageCheckpointConverter.CheckpointVariant.Unknown, 6.0f)]
-    public void CheckpointVariant_SelectsCorrectSchedulerShift(string path,
-        ZImageCheckpointConverter.CheckpointVariant expectedVariant, float expectedShift)
+    [InlineData("Z-Image.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
+    [InlineData("z_image_bf16.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
+    [InlineData("SwarmUI_Z-Image-FP8Mix.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
+    [InlineData("ZImage.safetensors", "base", ModelVariantSource.Filename, 6.0f)]
+    // Genuinely ambiguous names match nothing and take the numerically safe Base default.
+    [InlineData("renamed.safetensors", "base", ModelVariantSource.Default, 6.0f)]
+    [InlineData("base/Z-Image-Turbo.safetensors", "turbo", ModelVariantSource.Filename, 3.0f)]
+    [InlineData("Z-Image-base-turbo.safetensors", "base", ModelVariantSource.Default, 6.0f)]
+    public void CheckpointVariant_SelectsCorrectSchedulerShift(string path, string expectedVariant,
+        ModelVariantSource expectedSource, float expectedShift)
     {
-        ZImageCheckpointConverter.CheckpointVariant variant =
-            ZImageCheckpointConverter.DetectVariantFromFileName(path);
-        Assert.Equal(expectedVariant, variant);
+        CheckpointProbe probe = CheckpointProbe.Empty with { FileNames = [Path.GetFileNameWithoutExtension(path)] };
+        ResolvedModelVariant variant = ModelVariantResolver.Classify(ZImageVariants.Catalog, probe, []);
+        Assert.Equal(expectedVariant, variant.Id);
+        Assert.Equal(expectedSource, variant.Source);
         // Mirrors ZImageRecipe.Construct: everything except a positively-identified Turbo runs the Base policy.
-        ZImageConfig config = ZImageConfig.FromWeights(
-            new Dictionary<string, Tensor>(), variant != ZImageCheckpointConverter.CheckpointVariant.Turbo);
+        bool isBase = !variant.Is(ZImageVariants.Turbo);
+        ZImageConfig config = ZImageConfig.FromWeights(new Dictionary<string, Tensor>(), isBase);
         Assert.Equal(expectedShift, config.SchedulerShift);
-        Assert.Equal(variant != ZImageCheckpointConverter.CheckpointVariant.Turbo, config.IsBase);
+        Assert.Equal(isBase, config.IsBase);
 
         GenerationDefaults diffusionDefaults = config.IsBase
             ? GenerationDefaults.ZImageBase

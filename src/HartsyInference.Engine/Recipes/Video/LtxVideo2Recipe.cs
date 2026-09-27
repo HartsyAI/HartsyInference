@@ -14,6 +14,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -37,6 +38,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <summary>Models-root-relative folder the shipped workflows keep the latent upsampler in.</summary>
     private const string UpsamplerSubdir = "latent_upscale_models";
     private const string DefaultLatentUpsamplerFile = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors";
+
+    private static readonly string[] DevFamilyIds = ["ltx-video-2", "ltx-video2", "lightricks-ltx-video-2", "ltx-2", "ltx-2.3", "ltx-2.5"];
 
     private readonly bool _distilled;
 
@@ -65,12 +68,17 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     }
 
     /// <inheritdoc/>
-    public string Name => _distilled ? LtxVideo2DistilledRouting.DistilledFamilyId : "ltx-video-2";
+    public string Name => _distilled ? LtxVideo2Variants.DistilledFamilyId : "ltx-video-2";
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => _distilled
-        ? string.Equals(familyId, LtxVideo2DistilledRouting.DistilledFamilyId, StringComparison.OrdinalIgnoreCase)
-        : LtxVideo2DistilledRouting.IsDevFamilyId(familyId);
+        ? string.Equals(familyId, LtxVideo2Variants.DistilledFamilyId, StringComparison.OrdinalIgnoreCase)
+        : DevFamilyIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);
+
+    /// <inheritdoc/>
+    /// <remarks>Declared by the dev instance only: a distilled checkpoint under a dev id resolves to the distilled
+    /// variant, which routes to the distilled instance.</remarks>
+    public ModelVariantCatalog? Variants => _distilled ? null : LtxVideo2Variants.Catalog;
 
     /// <summary>Dev-family defaults: 20 steps at cfg 4.0, 1280x736, 121 frames @ 24 fps — the geometry Lightricks ships (their template's 0.9 MP ResolutionSelector output and 5 s clip), at the measured recommended profile from MODEL_STATUS_VIDEO.md's LTX-2.5 row (quality parity vs ComfyUI at 1280x736 / 20 steps / cfg 4.0). The distilled 2.5 variant carries the same geometry with its baked 8-step unguided contract (ctor above).</summary>
     public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 20, CfgScale = 4.0f, Width = 1280, Height = 736, Frames = 121, Fps = 24 };

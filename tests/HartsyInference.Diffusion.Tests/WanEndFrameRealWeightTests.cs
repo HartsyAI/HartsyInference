@@ -7,6 +7,7 @@ using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Variants;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -35,8 +36,10 @@ public sealed class WanEndFrameRealWeightTests
     {
         if (!RealWeightGate.Require(_output.WriteLine, TestPaths.WanVideo.Ti2V5B)) return;
 
-        Assert.True(WanVideoRecipe.IsTi2V5BCheckpoint(TestPaths.WanVideo.Ti2V5B));
-        Assert.True(new WanVideoRecipe("wan").SupportsFor(TestPaths.WanVideo.Ti2V5B).HasFlag(VideoFeatures.EndFrame));
+        ResolvedModelVariant variant = ModelVariantResolver.Resolve(WanVideoVariants.Catalog,
+            new ModelVariantEvidence(TestPaths.WanVideo.Ti2V5B, []));
+        Assert.True(variant.Is(WanVideoVariants.Ti2V5B));
+        Assert.True(new WanVideoRecipe("wan").SupportsFor(variant).HasFlag(VideoFeatures.EndFrame));
     }
 
     [Fact]

@@ -1,6 +1,7 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 
@@ -59,8 +60,8 @@ public sealed class WanVideoRecipeSupportsTests
         string path = WriteBackbone(latentChannels);
         try
         {
-            Assert.Equal(expectEndFrame, WanVideoRecipe.IsTi2V5BCheckpoint(path));
-            VideoFeatures supports = new WanVideoRecipe("wan").SupportsFor(path);
+            Assert.Equal(expectEndFrame, Resolve(path).Is(WanVideoVariants.Ti2V5B));
+            VideoFeatures supports = new WanVideoRecipe("wan").SupportsFor(Resolve(path));
             Assert.Equal(expectEndFrame ? VideoFeatures.EndFrame : VideoFeatures.None, supports & VideoFeatures.EndFrame);
             Assert.Equal(VideoFeatures.InitImage, supports & VideoFeatures.InitImage);
         }
@@ -78,7 +79,7 @@ public sealed class WanVideoRecipeSupportsTests
         string path = WriteBackbone(48);
         try
         {
-            VideoFeatures supports = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId).SupportsFor(path);
+            VideoFeatures supports = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId).SupportsFor(Resolve(path));
             Assert.Equal(VideoFeatures.None, supports & VideoFeatures.EndFrame);
         }
         finally
@@ -88,28 +89,30 @@ public sealed class WanVideoRecipeSupportsTests
     }
 
     [Fact]
-    public void IsTi2V5BCheckpoint_MissingFileOrFolder_IsFalse()
+    public void Ti2V5B_MissingFile_IsNotClaimed()
     {
-        Assert.False(WanVideoRecipe.IsTi2V5BCheckpoint(Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}.safetensors")));
-        Assert.False(WanVideoRecipe.IsTi2V5BCheckpoint(Path.GetTempPath()));
+        Assert.False(Resolve(Path.Combine(Path.GetTempPath(), $"missing-{Guid.NewGuid():N}.safetensors")).Is(WanVideoVariants.Ti2V5B));
     }
 
     /// <summary>A damaged file answers "not a 5B" instead of throwing out of a capability query.</summary>
     [Fact]
-    public void IsTi2V5BCheckpoint_GarbageFile_IsFalse()
+    public void Ti2V5B_GarbageFile_IsNotClaimed()
     {
         string path = Path.Combine(Path.GetTempPath(), $"wan-garbage-{Guid.NewGuid():N}.safetensors");
         File.WriteAllBytes(path, [0x10, 0, 0, 0, 0, 0, 0, 0, (byte)'{', (byte)'"']);
         try
         {
-            Assert.False(WanVideoRecipe.IsTi2V5BCheckpoint(path));
-            Assert.Equal(VideoFeatures.None, new WanVideoRecipe("wan").SupportsFor(path) & VideoFeatures.EndFrame);
+            Assert.False(Resolve(path).Is(WanVideoVariants.Ti2V5B));
+            Assert.Equal(VideoFeatures.None, new WanVideoRecipe("wan").SupportsFor(Resolve(path)) & VideoFeatures.EndFrame);
         }
         finally
         {
             File.Delete(path);
         }
     }
+
+    private static ResolvedModelVariant Resolve(string path) =>
+        ModelVariantResolver.Resolve(WanVideoVariants.Catalog, new ModelVariantEvidence(path, []));
 
     /// <summary>A header-only stand-in for a plain Wan backbone: the patch embedding at the given latent width plus one
     /// block key, which is all the variant sniff and the size check read.</summary>

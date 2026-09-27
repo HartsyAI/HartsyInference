@@ -10,7 +10,7 @@ internal readonly record struct AudioModelSelector(string Id, string Variant, st
     {
         ArgumentNullException.ThrowIfNull(spec);
         string token = (spec.Catalog?.Id ?? spec.Requested ?? string.Empty).Trim();
-        int separator = token.IndexOf(':', StringComparison.Ordinal);
-        return separator < 0 ? new AudioModelSelector(token.ToLowerInvariant(), token, spec.LocalPath) : new AudioModelSelector(token[..separator].Trim().ToLowerInvariant(), token[(separator + 1)..].Trim(), spec.LocalPath);
+        ModelSelector selector = ModelSelector.Parse(token);
+        return new AudioModelSelector(selector.Id, selector.Variant ?? token, spec.LocalPath);
     }
 }

@@ -2,6 +2,7 @@ using System.Buffers.Binary;
 using System.Text;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Variants;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -25,7 +26,7 @@ public sealed class WanAnimate2RoutingTests
         try
         {
             WanVideoRecipe family = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId);
-            VideoDefaults resolved = family.DefaultsFor(path);
+            VideoDefaults resolved = family.DefaultsFor(Resolve(path));
             VideoDefaults expected = new WanAnimate2Recipe().Defaults;
 
             Assert.Equal(expected.Steps, resolved.Steps);
@@ -58,7 +59,7 @@ public sealed class WanAnimate2RoutingTests
         string path = WriteHeaderOnlySafeTensors(Animate2ConfigJson);
         try
         {
-            VideoFeatures supports = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId).SupportsFor(path);
+            VideoFeatures supports = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId).SupportsFor(Resolve(path));
 
             Assert.Equal(VideoFeatures.DrivingVideo, supports & VideoFeatures.DrivingVideo);
             Assert.Equal(VideoFeatures.InitImage, supports & VideoFeatures.InitImage);
@@ -86,12 +87,12 @@ public sealed class WanAnimate2RoutingTests
         try
         {
             WanVideoRecipe family = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId);
-            SamplingCapabilities.SamplingSupport resolved = family.SamplingSupportFor(path);
+            SamplingCapabilities.SamplingSupport resolved = family.SamplingSupportFor(family.Name, Resolve(path));
 
             Assert.Equal(SamplingCapabilities.ForVideo("wan-animate-2").Samplers, resolved.Samplers);
             // The trap, stated positively: this must NOT be the family's own (solver-owned, no sampler) answer.
             Assert.NotEmpty(resolved.Samplers);
-            Assert.Empty(family.SamplingSupportFor(null).Samplers);
+            Assert.Empty(family.SamplingSupportFor(family.Name, null).Samplers);
         }
         finally
         {
@@ -108,11 +109,11 @@ public sealed class WanAnimate2RoutingTests
         try
         {
             WanVideoRecipe family = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId);
-            SamplingCapabilities.SamplingSupport resolved = family.SamplingSupportFor(path);
+            SamplingCapabilities.SamplingSupport resolved = family.SamplingSupportFor(family.Name, Resolve(path));
 
             Assert.Equal(SamplingCapabilities.ForVideo("wan-animate").Samplers, resolved.Samplers);
             Assert.NotEmpty(resolved.Samplers);
-            Assert.Empty(family.SamplingSupportFor(null).Samplers);
+            Assert.Empty(family.SamplingSupportFor(family.Name, null).Samplers);
         }
         finally
         {
@@ -121,16 +122,16 @@ public sealed class WanAnimate2RoutingTests
     }
 
     [Fact]
-    public void DetectVariant_PlainI2vHeaderWithNoMetadata_IsNotMistakenForAnimate2()
+    public void Resolve_PlainI2vHeaderWithNoMetadata_IsNotMistakenForAnimate2()
     {
         // The negative case matters as much as the positive: Animate-2 shares its entire key set with plain I2V-14B,
         // so a detector that guessed from keys would claim every Wan i2v checkpoint.
         string path = WriteHeaderOnlySafeTensors(configJson: null);
         try
         {
-            Assert.Equal(WanVideoRecipe.WanVariant.Base, WanVideoRecipe.DetectVariant(path));
+            Assert.True(Resolve(path).Is(WanVideoVariants.Base));
             WanVideoRecipe family = new WanVideoRecipe(WanVideoRecipe.Wan21_14BCompatClassId);
-            Assert.Equal(family.Defaults.Steps, family.DefaultsFor(path).Steps);
+            Assert.Equal(family.Defaults.Steps, family.DefaultsFor(Resolve(path)).Steps);
         }
         finally
         {
@@ -139,12 +140,12 @@ public sealed class WanAnimate2RoutingTests
     }
 
     [Fact]
-    public void DetectVariant_Animate2Metadata_WinsOverTheKeySniff()
+    public void Resolve_Animate2Metadata_WinsOverTheKeySniff()
     {
         string path = WriteHeaderOnlySafeTensors(Animate2ConfigJson);
         try
         {
-            Assert.Equal(WanVideoRecipe.WanVariant.Animate2, WanVideoRecipe.DetectVariant(path));
+            Assert.True(Resolve(path).Is(WanVideoVariants.Animate2));
         }
         finally
         {
@@ -161,7 +162,7 @@ public sealed class WanAnimate2RoutingTests
         {
             header.Append($"\"__metadata__\":{{\"config\":{JsonEscape(configJson)}}},");
         }
-        // A couple of real I2V-14B key names, so the key-based arms of DetectVariant have something to reject.
+        // A couple of real I2V-14B key names, so the key-based rules of WanVideoVariants have something to reject.
         header.Append("\"patch_embedding.weight\":{\"dtype\":\"F32\",\"shape\":[5120,36,1,2,2],\"data_offsets\":[0,0]},");
         header.Append("\"blocks.0.self_attn.q.weight\":{\"dtype\":\"F32\",\"shape\":[5120,5120],\"data_offsets\":[0,0]}}");
         byte[] json = Encoding.UTF8.GetBytes(header.ToString());
@@ -178,7 +179,7 @@ public sealed class WanAnimate2RoutingTests
 
     /// <summary>Writes a header-only safetensors file carrying one variant-signature key (e.g. Animate V1's
     /// <c>pose_patch_embedding</c>) alongside the same I2V-14B keys <see cref="WriteHeaderOnlySafeTensors"/> uses,
-    /// for variants <see cref="WanVideoRecipe.DetectVariant"/> classifies by key sniff rather than metadata.</summary>
+    /// for variants <see cref="WanVideoVariants"/> classifies by key sniff rather than metadata.</summary>
     private static string WriteHeaderOnlySafeTensorsWithKey(string variantKeyName)
     {
         StringBuilder header = new StringBuilder("{");
@@ -196,6 +197,9 @@ public sealed class WanAnimate2RoutingTests
         }
         return path;
     }
+
+    private static ResolvedModelVariant Resolve(string path) =>
+        ModelVariantResolver.Resolve(WanVideoVariants.Catalog, new ModelVariantEvidence(path, []));
 
     private static string JsonEscape(string value) => System.Text.Json.JsonSerializer.Serialize(value);
 }

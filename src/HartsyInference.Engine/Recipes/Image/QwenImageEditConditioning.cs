@@ -9,23 +9,19 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
-/// <summary>Builds the Qwen-Image-Edit(-Plus) reference conditioning: the per-reference rescales the recipe needs and
-/// the <c>Picture N:</c> instruction template the Qwen2.5-VL tower is conditioned on. Mirrors ComfyUI's
-/// <c>TextEncodeQwenImageEditPlus</c> (<c>comfy_extras/nodes_qwen.py</c>) — each reference is presented twice, once to
-/// the vision tower at ~384² area and once to the VAE at ~1 MP area, and the prompt is prefixed with one
-/// <c>Picture i: &lt;|vision_start|&gt;&lt;|image_pad|&gt;…&lt;|vision_end|&gt;</c> block per reference.</summary>
+/// <summary>Builds the Qwen-Image-Edit reference conditioning: the per-reference rescales the recipe needs and the
+/// instruction template the Qwen2.5-VL tower is conditioned on. Mirrors ComfyUI's <c>TextEncodeQwenImageEdit</c> and
+/// <c>TextEncodeQwenImageEditPlus</c> (<c>comfy_extras/nodes_qwen.py</c>), selected by a
+/// <see cref="QwenImageEditTemplate"/> — each reference is presented twice, once to the vision tower at the template's
+/// area and once to the VAE at ~1 MP, and the prompt is prefixed with one
+/// <c>&lt;|vision_start|&gt;&lt;|image_pad|&gt;…&lt;|vision_end|&gt;</c> block per reference (labelled <c>Picture i:</c>
+/// for Plus).</summary>
 public static class QwenImageEditConditioning
 {
-    /// <summary>Reference slots the edit-plus template was trained with (ComfyUI exposes exactly image1..image3).</summary>
-    public const int MaxReferences = 3;
-
-    /// <summary>Pixel budget for the copy fed to the Qwen2.5-VL vision tower.</summary>
-    public const int VisionTargetArea = 384 * 384;
-
     /// <summary>Pixel budget for the copy fed to the VAE as an in-context reference latent.</summary>
     public const int LatentTargetArea = 1024 * 1024;
 
-    /// <summary>The edit-plus system block, verbatim from ComfyUI's <c>llama_template</c>; it replaces the plain
+    /// <summary>The edit system block, verbatim from ComfyUI's <c>llama_template_images</c> (shared by both nodes); it replaces the plain
     /// text-to-image "Describe the image…" block and is what makes the model read the prompt as an instruction.</summary>
     public const string SystemPrompt =
         "system\nDescribe the key features of the input image (color, shape, size, texture, objects, background), "
@@ -56,11 +52,12 @@ public static class QwenImageEditConditioning
     }
 
     /// <summary>Resolves the reference set in presentation order — <paramref name="initImage"/> is Picture 1 when
-    /// present, then <paramref name="extraReferences"/> — capped at <see cref="MaxReferences"/>. Returns null when
-    /// there is nothing to condition on. Caller disposes.</summary>
-    public static References? Resolve(ImageData? initImage, IReadOnlyList<ImageData>? extraReferences)
+    /// present, then <paramref name="extraReferences"/> — capped at <paramref name="template"/>'s reference count.
+    /// Returns null when there is nothing to condition on. Caller disposes.</summary>
+    public static References? Resolve(QwenImageEditTemplate template, ImageData? initImage, IReadOnlyList<ImageData>? extraReferences)
     {
-        List<ImageData> ordered = new List<ImageData>(MaxReferences);
+        ArgumentNullException.ThrowIfNull(template);
+        List<ImageData> ordered = new List<ImageData>(template.MaxReferences);
         if (initImage is not null)
         {
             ordered.Add(initImage);
@@ -71,7 +68,7 @@ public static class QwenImageEditConditioning
             offered += extraReferences.Count;
             foreach (ImageData reference in extraReferences)
             {
-                if (reference is not null && ordered.Count < MaxReferences)
+                if (reference is not null && ordered.Count < template.MaxReferences)
                 {
                     ordered.Add(reference);
                 }
@@ -80,7 +77,7 @@ public static class QwenImageEditConditioning
         if (offered > ordered.Count)
         {
             Logs.Warning($"[QwenImageEdit] {offered} reference images supplied; the edit template addresses "
-                + $"{MaxReferences}, so the last {offered - ordered.Count} were dropped.");
+                + $"{template.MaxReferences}, so the last {offered - ordered.Count} were dropped.");
         }
         if (ordered.Count == 0)
         {
@@ -96,7 +93,7 @@ public static class QwenImageEditConditioning
                 (int latentW, int latentH) = ScaleToArea(reference.Width, reference.Height, LatentTargetArea, multiple: 16);
                 latent.Add(FeatureImaging.RgbToTensorMinusOneOne(
                     FeatureImaging.ResizeRgb24(reference, latentW, latentH), latentW, latentH));
-                (int visionW, int visionH) = ScaleToArea(reference.Width, reference.Height, VisionTargetArea, multiple: 1);
+                (int visionW, int visionH) = ScaleToArea(reference.Width, reference.Height, template.VisionTargetArea, multiple: 1);
                 vision.Add(FeatureImaging.RgbToTensorZeroOne(
                     FeatureImaging.ResizeRgb24(reference, visionW, visionH), visionW, visionH));
             }
@@ -117,14 +114,20 @@ public static class QwenImageEditConditioning
     }
 
     /// <summary>Builds the templated edit-instruction token ids plus the prefix-drop index (the count of leading
-    /// system-block and user-header tokens whose hidden states the pipeline discards). One <c>Picture i:</c> block is
-    /// emitted per entry of <paramref name="visionTokenCounts"/>, each carrying that many <c>&lt;|image_pad|&gt;</c>
-    /// placeholders for the tower's merged tokens.</summary>
+    /// system-block and user-header tokens whose hidden states the pipeline discards). One vision block (labelled
+    /// <c>Picture i:</c> when the template says so) is emitted per entry of <paramref name="visionTokenCounts"/>, each
+    /// carrying that many <c>&lt;|image_pad|&gt;</c> placeholders for the tower's merged tokens.</summary>
     public static (WeightedTokenSequence Tokens, int DropIndex) BuildTokens(Qwen3Tokenizer tokenizer, string prompt,
-        IReadOnlyList<int> visionTokenCounts)
+        IReadOnlyList<int> visionTokenCounts, QwenImageEditTemplate template)
     {
         ArgumentNullException.ThrowIfNull(tokenizer);
         ArgumentNullException.ThrowIfNull(visionTokenCounts);
+        ArgumentNullException.ThrowIfNull(template);
+        if (visionTokenCounts.Count > template.MaxReferences)
+        {
+            throw new ArgumentOutOfRangeException(nameof(visionTokenCounts),
+                $"{visionTokenCounts.Count} references exceed the template's {template.MaxReferences}.");
+        }
         List<int> prefix = new List<int>(1024);
         prefix.Add(Qwen3Tokenizer.ImStartId);
         prefix.AddRange(tokenizer.EncodeRaw(SystemPrompt));
@@ -133,7 +136,7 @@ public static class QwenImageEditConditioning
         prefix.Add(Qwen3Tokenizer.ImStartId);
         prefix.AddRange(tokenizer.EncodeRaw("user\n"));
         int dropIndex = prefix.Count;
-        // The Picture blocks sit AFTER the drop index, so they reach the conditioning — but they are template, not
+        // The vision blocks sit AFTER the drop index, so they reach the conditioning — but they are template, not
         // prompt, and carry no emphasis of their own.
         for (int i = 0; i < visionTokenCounts.Count; i++)
         {
@@ -143,7 +146,10 @@ public static class QwenImageEditConditioning
                 throw new ArgumentOutOfRangeException(nameof(visionTokenCounts),
                     $"Reference {i + 1} reported {count} merged vision tokens; the template cannot address an empty image.");
             }
-            prefix.AddRange(tokenizer.EncodeRaw($"Picture {i + 1}: "));
+            if (template.LabelPictures)
+            {
+                prefix.AddRange(tokenizer.EncodeRaw($"Picture {i + 1}: "));
+            }
             prefix.Add(Qwen25VlMultimodalEncoder.VisionStartId);
             for (int pad = 0; pad < count; pad++)
             {

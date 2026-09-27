@@ -21,9 +21,6 @@ public sealed class LensRecipePipeline(LensPipelineBundle bundle, LensConfig con
     private readonly GptOssTokenizer _tokenizer = tokenizer;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
-    /// <summary>The loaded <see cref="LensConfig"/> already carries the variant's official step count and CFG (Turbo 4/1.0, standard 20/5.0), so the defaults are read straight off it.</summary>
-    public ImageDefaults? VariantDefaults => new ImageDefaults { Steps = _config.DefaultSteps, CfgScale = _config.DefaultCfgScale, Width = 1024, Height = 1024 };
-
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
     {

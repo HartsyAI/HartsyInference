@@ -94,6 +94,11 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] F16 input/output Sage attention and loadable few-step accelerators, subject to quality gates.
 - [ ] LoRA extraction/checkpoint-diff utility.
 - [ ] PAG/SAG attention hooks and per-pipeline regional-tag handling.
+- [ ] Declare variant catalogs (`ENGINE_PATTERNS.md#model-variants`) for the families still ignoring theirs: HiDream
+  Full/Dev/Fast, Boogu Turbo, SD3.5 Large-Turbo and Flux.2 Klein base get their own defaults. Flux.1
+  Kontext/Fill/Depth/Canny and HiDream-Edit get an explicit refusal until those paths exist. LTX-Video 0.9.5/13B
+  still mixes its key probe with a filename check.
+- [ ] Real-weight check of Qwen-Image-Edit v1 through its own template, and of the Auto-mode edit path.
 - [ ] Pixel-space tiled VAE encode: reproduce the documented BF16 CUDA crash at 1536² SDXL img2img.
   VaeTiledEncoder exists but production wiring was reverted; a source-only dtype fix is not a working feature.
 

@@ -133,7 +133,7 @@ internal sealed class CheckpointMemoryProfile
     private static CheckpointMemoryProfile Build(ModelSpec spec)
     {
         bool video = spec.Modality == Modality.Video;
-        string familyId = video ? InferenceEngine.ResolveVideoFamilyId(spec) : InferenceEngine.ResolveFamilyId(spec);
+        string familyId = video ? ModelCapabilities.VideoFamilyIdFor(spec) : InferenceEngine.ResolveFamilyId(spec);
         ModelLayout layout = ModelLayoutResolver.Resolve(spec.LocalPath!);
         CheckpointHeader representative = CheckpointHeader.Read(layout.RepresentativeFile);
         CheckpointWeightInventory checkpoint = CheckpointWeightInventory.FromFiles(layout.SafeTensorsFiles.Select(file =>
@@ -147,7 +147,7 @@ internal sealed class CheckpointMemoryProfile
             IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(familyId);
             capabilities = recipe?.MemorySupports ?? MemoryCapabilities.None;
             model = recipe?.DescribeMemory(representative);
-            defaultFrames = InferenceEngine.VideoDefaultsFor(spec).Frames ?? VideoDefaults.Standard.Frames ?? 1;
+            defaultFrames = ModelCapabilities.VideoDefaultsFor(spec).Frames ?? VideoDefaults.Standard.Frames ?? 1;
         }
         else
         {

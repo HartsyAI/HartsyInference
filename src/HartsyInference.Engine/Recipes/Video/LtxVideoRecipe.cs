@@ -41,7 +41,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
-    /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width per stage until the post-downsample resnet). 0.9.5/13B use a different config (timestep-conditioned VAE, different block widths) the encoder has never been constructed against — declaring <c>InitImage</c> there would be exactly the "advertises conditioning it silently drops or crashes on" class of bug 0.2 fixed for Wan's <c>EndFrame</c> over-claim. Cheap header-only peek (<see cref="VideoRecipeUtils.PeekCheckpointKeys"/>) mirrors the SAME detection <see cref="Construct"/> runs against the real converted weights, so this stays in sync without a full weight load on every capability check.</summary>
+    /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width per stage until the post-downsample resnet). 0.9.5/13B use a different config (timestep-conditioned VAE, different block widths) the encoder has never been constructed against — declaring <c>InitImage</c> there would be exactly the "advertises conditioning it silently drops or crashes on" class of bug 0.2 fixed for Wan's <c>EndFrame</c> over-claim. Cheap header-only peek (<see cref="CheckpointProbe"/>) mirrors the SAME detection <see cref="Construct"/> runs against the real converted weights, so this stays in sync without a full weight load on every capability check.</summary>
     public VideoFeatures SupportsFor(string? checkpointPath)
     {
         if (string.IsNullOrWhiteSpace(checkpointPath))
@@ -50,7 +50,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
         }
         try
         {
-            IReadOnlySet<string> keys = VideoRecipeUtils.PeekCheckpointKeys(checkpointPath);
+            IReadOnlySet<string> keys = CheckpointProbe.Read(checkpointPath).Keys;
             if (keys.Count == 0)
             {
                 return Supports;

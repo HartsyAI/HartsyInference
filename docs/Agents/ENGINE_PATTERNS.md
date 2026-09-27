@@ -79,6 +79,27 @@ CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args,
   Z-Image CFG, Lumina timestep inversion, F-Lite integrator, Anima Cosmos normalization, SDXL refiner step-swap).
   Shared parts already live in the utilities above; see `DiffusionPipelineBase` class docs.
 
+## Model Variants
+
+A family whose builds share one architecture but need different contracts (Qwen-Image base/Edit/Edit-Plus, Z-Image
+Base/Turbo, LTX-2.5 dev/distilled, Wan VACE/Animate/S2V) declares them once as a `ModelVariantCatalog`
+(`Engine/Variants`) and returns it from `IArchitectureRecipe.Variants` / `IVideoRecipe.Variants`. Never sniff a
+filename or metadata in a recipe. `ModelVariantResolver` weighs the evidence in a fixed order:
+
+1. **Structure**: `StructuralMarkers` / `StructuralMatch` on the header. This is definitive, and it overrides a
+   contradicting hint with a warning. A variant with `StructureRequired` is selectable only this way.
+2. **Caller hint**: `ModelSpec.Variant` (the backend sends SwarmUI's model-class id), then a `family:variant` selector
+   suffix, then the requested id. A hint that names no variant is ignored.
+3. **Metadata**: `modelspec.architecture` against `MetadataClassIds`, `hartsy.model_id` against the id, then `MetadataMatch`.
+4. **Filename**: whole-token `FilenameTokenSets` (`!token` excludes), logged as a guess. It is a last resort for families
+   that genuinely have nothing else.
+5. **Default**.
+
+The engine resolves once per construction and passes the result as `RecipeContext.Variant`. The result is part of the
+pipeline cache key and feeds `SupportsFor` / `DefaultsFor`. Hosts query the same answer through `ModelCapabilities`.
+A recipe reached by delegation calls `context.ResolveVariant(itsCatalog)`. A variant with its own registered contract
+sets `RoutesToFamily`. `ResolvedModelVariant.IsDefinitive` guards anything a file-name guess must not impose.
+
 ## GPU Activation Cache Rules
 - Every `CudaBackend` op calls `CacheActivation(output)` to keep results on GPU. No per-op
   `cuStreamSynchronize` — stream ordering guarantees correctness on a single blocking stream.

@@ -16,6 +16,7 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -26,10 +27,9 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
     public string Name => "qwen-image";
 
     /// <inheritdoc/>
-    /// <remarks>The only family offering both init-image modes: classic strength-based img2img/inpaint through the
-    /// packed-latent masked path, and Qwen-Image-Edit reference conditioning over up to
-    /// <see cref="QwenImageEditConditioning.MaxReferences"/> images. <c>Img2Img.Mode</c> selects; Auto prefers classic
-    /// unless <c>ImageRequest.ReferenceImages</c> is set, which only edit conditioning can consume.</remarks>
+    /// <remarks>The family-level union. The base offers classic strength-based img2img/inpaint only; the Edit variants
+    /// add reference conditioning (<see cref="SupportsFor"/>), which is what makes them the only builds offering both
+    /// init-image modes.</remarks>
     public ImageFeatures Supports => ImageFeatures.Img2Img | ImageFeatures.Inpaint | ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora | ImageFeatures.ControlNet
         // Declared only because QwenImageRecipePipeline builds a ScheduledPrompt and QwenImagePipeline selects per
         // step. The bit is what keeps <alternate:>/<fromto[N]:> in the prompt at all, so declaring it without
@@ -37,15 +37,32 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
         | ImageFeatures.PromptScheduling;
 
     /// <inheritdoc/>
-    /// <remarks>The init image, when present, is Picture 1; references work without it. Base and Edit checkpoints
-    /// look alike, so this is the family ceiling and hosts gate base Qwen-Image themselves.</remarks>
-    public ImageInputLimits InputLimits => new ImageInputLimits(QwenImageEditConditioning.MaxReferences, ReferencesRequireInitImage: false);
+    /// <remarks>The init image, when present, is Picture 1; references work without it. This is the family ceiling;
+    /// <see cref="InputLimitsFor"/> narrows it to the resolved variant.</remarks>
+    public ImageInputLimits InputLimits => new ImageInputLimits(QwenImageEditTemplate.EditPlus.MaxReferences, ReferencesRequireInitImage: false);
+
+    /// <inheritdoc/>
+    /// <remarks>Each Edit build reads as many images as its template addresses; the base reads its init image only.</remarks>
+    public ImageInputLimits InputLimitsFor(ResolvedModelVariant? variant) =>
+        variant is null ? InputLimits
+        : QwenImageVariants.TemplateFor(variant) is QwenImageEditTemplate template
+            ? new ImageInputLimits(template.MaxReferences, ReferencesRequireInitImage: false)
+            : ImageInputLimits.SingleInitImage;
 
     /// <inheritdoc/>
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>. The Qwen tokenizer discards weights, so the
     /// prompt is encoded at weight 1 and each token's cond row is scaled afterwards — which on this family means after
     /// the template prefix drop, the case SwarmUI's negative right-alignment offset exists for.</remarks>
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => QwenImageVariants.Catalog;
+
+    /// <inheritdoc/>
+    /// <remarks>Reference conditioning on the base would feed a text-to-image model an edit template it never saw,
+    /// producing a plausible image that answers the wrong question, so the base does not declare it.</remarks>
+    public ImageFeatures SupportsFor(ResolvedModelVariant? variant) =>
+        variant is not null && QwenImageVariants.TemplateFor(variant) is null ? Supports & ~ImageFeatures.RefEdit : Supports;
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "qwen-image", StringComparison.OrdinalIgnoreCase);
@@ -64,6 +81,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
     {
         // TODO(E-IMG-4): honor user VAE / Qwen text-encoder overrides from ImageRequest.Components (the loader read
         // T2IParamTypes.QwenModel / T2IParamTypes.VAE) instead of always taking the canonical SideModels entry.
+        ResolvedModelVariant variant = context.ResolveVariant(QwenImageVariants.Catalog);
         List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
         IDisposable? checkpoint = null;
         try
@@ -205,11 +223,11 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             }
             textEncoder.LoadWeights(encoderWeights);
 
-            // Edit conditioning routes the instruction through the text encoder's own vision tower. Built whenever the
-            // file carries one, because nothing in a Qwen-Image checkpoint distinguishes an edit model from the base.
+            // Edit conditioning routes the instruction through the text encoder's own vision tower; the base never
+            // reads it, so it is only built for an Edit variant.
             Qwen25VlVisionEncoder? visionEncoder = null;
             Qwen25VlMultimodalEncoder? multimodalEncoder = null;
-            if (encoderWeights.ContainsKey("visual.patch_embed.proj.weight"))
+            if (QwenImageVariants.TemplateFor(variant) is not null && encoderWeights.ContainsKey("visual.patch_embed.proj.weight"))
             {
                 Qwen25VlVisionConfig visionConfig = Qwen25VlVisionConfig.Qwen2_5_VL_7B;
                 visionEncoder = new Qwen25VlVisionEncoder(visionConfig);
@@ -248,10 +266,10 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
             };
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 512);
             // 2511's ref method (ComfyUI model_detection: the bare `__index_timestep_zero__` marker tensor).
-            bool refTimestepZero = converted.Transformer.ContainsKey("__index_timestep_zero__");
-            Logs.Info("[QwenImageRecipe] Qwen-Image ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");
+            bool refTimestepZero = converted.Transformer.ContainsKey(QwenImageVariants.TimestepZeroMarker);
+            Logs.Info($"[QwenImageRecipe] {variant.Variant.DisplayName} ready (Qwen2.5-VL-7B encoder; flow-match Euler, dynamic shift).");
             return new QwenImageRecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, vaeEncoder,
-                multimodalEncoder, visionEncoder, refTimestepZero, loaders, checkpoint, loraStack);
+                multimodalEncoder, visionEncoder, variant, refTimestepZero, loaders, checkpoint, loraStack);
         }
         catch (Exception ex)
         {

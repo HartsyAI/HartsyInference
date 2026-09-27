@@ -1722,7 +1722,7 @@ public static class ModelCatalog
             },
             // Separate id because the distilled and dev checkpoints are byte-indistinguishable — same model_version,
             // same architecture config, same tensor keys. This id asks for the distilled contract explicitly; a
-            // "distilled"-named checkpoint under the dev id routes here too (LtxVideo2DistilledRouting).
+            // "distilled"-named checkpoint under the dev id routes here too (LtxVideo2Variants).
             new CatalogEntry
             {
                 Id = "ltx-2.5-distilled", Modality = vid,
