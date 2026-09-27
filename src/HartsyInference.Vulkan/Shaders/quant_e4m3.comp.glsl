@@ -4,6 +4,7 @@
 // The conversion is block_scale.cuh's f32_to_e4m3 bit for bit: round to nearest even, |v| >= 464 saturates to 448, NaN
 // stays NaN, below 2^-10 flushes to signed zero. It needs no float8 feature, so it runs on any device.
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 #ifndef USE_FP16
 #define USE_FP16 0
@@ -30,12 +31,7 @@ layout(push_constant) uniform Push {
     uint paddedWords;    // >= words
 } pc;
 
-// Correctly rounded a / b, CUDA's div.rn: the driver's quotient may be an ulp off, and one exact-FMA residual step settles it.
-float divRn(float a, float b) {
-    precise float q = a / b;
-    precise float r = fma(-q, b, a);
-    return fma(r, 1.0 / b, q);
-}
+#include "div_rn.glsl"
 
 uint toE4M3(float f) {
     uint sign = (floatBitsToUint(f) >> 24) & 0x80u;
@@ -57,11 +53,16 @@ uint toE4M3(float f) {
     return sign | uint(qs);
 }
 
+shared float gRs;
+
 void main() {
+    // The exact reciprocal is computed once per workgroup, not per word.
+    if (gl_LocalInvocationIndex == 0u) gRs = divRn(1.0, pc.staticScale != 0.0 ? pc.staticScale : scale[pc.scaleIndex]);
+    barrier();
     uint w = gl_GlobalInvocationID.x;
     if (w >= pc.paddedWords) return;
     if (w >= pc.words) { q[w] = 0u; return; }
-    float rs = divRn(1.0, pc.staticScale != 0.0 ? pc.staticScale : scale[pc.scaleIndex]);
+    float rs = gRs;
     uint e = w * 4u;
     q[w] = toE4M3(float(x[e]) * rs) | (toE4M3(float(x[e + 1u]) * rs) << 8)
          | (toE4M3(float(x[e + 2u]) * rs) << 16) | (toE4M3(float(x[e + 3u]) * rs) << 24);

@@ -1,5 +1,5 @@
-// broadcast_add: hidden[B, C, ...spatial] += bias[C]   (in-place over hidden)
-// Bindings: 0=hidden (in/out), 1=bias (broadcast over channel dim)
+// broadcast_add: hidden[B, C, ...spatial] += bias[B, C], or bias[C] shared by every batch item (in-place over hidden)
+// Bindings: 0=hidden (in/out), 1=bias
 #version 460
 
 #ifndef USE_FP16
@@ -27,13 +27,15 @@ layout(push_constant) uniform Push {
     uint channels;     // C
     uint spatial;      // product of dims past C (1 for [B, C])
     uint total;        // B * C * spatial
+    uint batched;      // 1 when bias holds one row per batch item
 } pc;
 
 void main() {
     uint i = gl_GlobalInvocationID.x;
     if (i >= pc.total) return;
     uint c = (i / pc.spatial) % pc.channels;
+    uint row = pc.batched != 0u ? i / (pc.spatial * pc.channels) : 0u;
     float h = TO_F32(hidden[i]);
-    float b = TO_F32(bias[c]);
+    float b = TO_F32(bias[row * pc.channels + c]);
     hidden[i] = FROM_F32(h + b);
 }

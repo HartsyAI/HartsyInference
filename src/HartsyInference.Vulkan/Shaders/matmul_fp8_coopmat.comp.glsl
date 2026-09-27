@@ -4,6 +4,10 @@
 // from scale[scaleIndex] when USE_DEVICE_SCALE (dynamic absmax, no host sync) or already folded into pc.alpha (static).
 // Both operands are bound as uint words (four E4M3 per word), so offsets and strides are in words: K % 4 == 0.
 //
+// The fp8 tensor cores accumulate below F32 precision (Ada, K=512: 7.6e-4 of the output's range), so each PROMOTE
+// fragment-K steps land in a partial added into a true F32 accumulator. PROMOTE=4 (K=128) reproduces cuBLASLt's
+// native fp8 error on the same operands to the digit.
+//
 // Each subgroup owns WM × WN fragments of FM × FN; SG_ROWS × SG_COLS subgroups tile the workgroup. The fragment shape is
 // the device's enumerated E4M3 configuration. N % FN == 0 and K % FK == 0; a ragged M reads A zero-padded to the next FM
 // rows (quant_e4m3 writes the pad) and stores its last row block through shared memory, dropping the rows past M.
@@ -30,6 +34,7 @@ layout(constant_id = 16) const bool OUTPUT_F32 = false;
 layout(constant_id = 17) const bool HAS_BIAS = false;
 layout(constant_id = 18) const bool USE_DEVICE_SCALE = true;
 layout(constant_id = 19) const uint SG_ROWS = 2;
+layout(constant_id = 20) const uint PROMOTE = 4;
 
 layout(set = 0, binding = 0) readonly buffer A_     { uint A[]; };
 layout(set = 0, binding = 1) readonly buffer B_     { uint B[]; };
@@ -58,18 +63,24 @@ void main() {
     uint wn = min(WN, (pc.N - col0) / FN);
 
     coopmat<float, gl_ScopeSubgroup, FM, FN, gl_MatrixUseAccumulator> acc[WM * WN];
+    coopmat<float, gl_ScopeSubgroup, FM, FN, gl_MatrixUseAccumulator> part[WM * WN];
     for (uint i = 0; i < WM * WN; ++i) acc[i] = coopmat<float, gl_ScopeSubgroup, FM, FN, gl_MatrixUseAccumulator>(0.0);
 
     uint kw = pc.K / 4u;
-    for (uint k = 0; k < pc.K; k += FK) {
-        coopmat<floate4m3_t, gl_ScopeSubgroup, FK, FN, gl_MatrixUseB> b[WN];
-        for (uint j = 0; j < wn; ++j)
-            coopMatLoad(b[j], B, ((col0 + j * FN) * pc.K + k) / 4u, kw, gl_CooperativeMatrixLayoutColumnMajor);
-        for (uint i = 0; i < wm; ++i) {
-            coopmat<floate4m3_t, gl_ScopeSubgroup, FM, FK, gl_MatrixUseA> a;
-            coopMatLoad(a, A, ((row0 + i * FM) * pc.K + k) / 4u, kw, gl_CooperativeMatrixLayoutRowMajor);
-            for (uint j = 0; j < wn; ++j) acc[i * WN + j] = coopMatMulAdd(a, b[j], acc[i * WN + j]);
+    for (uint k0 = 0; k0 < pc.K; k0 += FK * PROMOTE) {
+        for (uint i = 0; i < WM * WN; ++i) part[i] = coopmat<float, gl_ScopeSubgroup, FM, FN, gl_MatrixUseAccumulator>(0.0);
+        uint kEnd = min(k0 + FK * PROMOTE, pc.K);
+        for (uint k = k0; k < kEnd; k += FK) {
+            coopmat<floate4m3_t, gl_ScopeSubgroup, FK, FN, gl_MatrixUseB> b[WN];
+            for (uint j = 0; j < wn; ++j)
+                coopMatLoad(b[j], B, ((col0 + j * FN) * pc.K + k) / 4u, kw, gl_CooperativeMatrixLayoutColumnMajor);
+            for (uint i = 0; i < wm; ++i) {
+                coopmat<floate4m3_t, gl_ScopeSubgroup, FM, FK, gl_MatrixUseA> a;
+                coopMatLoad(a, A, ((row0 + i * FM) * pc.K + k) / 4u, kw, gl_CooperativeMatrixLayoutRowMajor);
+                for (uint j = 0; j < wn; ++j) part[i * WN + j] = coopMatMulAdd(a, b[j], part[i * WN + j]);
+            }
         }
+        for (uint i = 0; i < WM * WN; ++i) acc[i] = acc[i] + part[i];
     }
 
     float alpha = USE_DEVICE_SCALE ? pc.alpha * scale[pc.scaleIndex] : pc.alpha;

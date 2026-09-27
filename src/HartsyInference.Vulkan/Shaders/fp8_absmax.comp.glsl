@@ -3,6 +3,7 @@
 //   FINALIZE=false: grid-strided |max| of x -> scratch[1 + workgroup].
 //   FINALIZE=true:  one workgroup folds scratch[1 .. 1+numBlocks) -> scratch[0]; x is not read.
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_KHR_shader_subgroup_basic      : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
@@ -31,12 +32,7 @@ layout(push_constant) uniform Push {
 
 shared float warp_max[64];
 
-// Correctly rounded a / b, CUDA's div.rn: the driver's quotient may be an ulp off, and one exact-FMA residual step settles it.
-float divRn(float a, float b) {
-    precise float q = a / b;
-    precise float r = fma(-q, b, a);
-    return fma(r, 1.0 / b, q);
-}
+#include "div_rn.glsl"
 
 float workgroupMax(float v) {
     v = subgroupMax(v);

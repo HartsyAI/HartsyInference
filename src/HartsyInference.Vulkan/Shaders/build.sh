@@ -132,6 +132,7 @@ SINGLE_KERNELS=(
     sdpa_flash_cm2
     matmul_int8
     matmul_fp8_coopmat
+    matmul_fp8_coopmat2
     dequant_q4_0
     dequant_q5_0
     dequant_q8_0
