@@ -156,9 +156,7 @@ public sealed class ImagesService : IImagesService
         return features;
     }
 
-    /// <summary>Throws naming the family and the exact features it cannot apply, then throws if the request carries more
-    /// input images than the family reads (or references a reference-only family cannot use without an init image);
-    /// anything the recipe declares passes through.</summary>
+    /// <summary>Throws for features the family cannot apply, then for input images past its declared limits.</summary>
     private void RejectUnsupported(ModelSpec spec, ImageRequest request)
     {
         ImageFeatures supported = _engine.SupportedFeatures(spec);
@@ -173,8 +171,7 @@ public sealed class ImagesService : IImagesService
             throw new NotSupportedException(
                 $"Model family '{InferenceEngine.FamilyIdFor(spec)}' does not support: {missing}.");
         }
-        // After the feature check, so a family with no reference path at all still gets the "does not support"
-        // message naming the bit rather than a count it never had.
+        // After the feature check, so a family with no reference path gets the "does not support" message instead.
         string? violation = _engine.ImageInputLimitsFor(spec).Violation(InferenceEngine.FamilyIdFor(spec), request);
         if (violation is not null)
         {

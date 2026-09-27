@@ -29,9 +29,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
 
     /// <inheritdoc/>
-    /// <remarks>Mage-Flow edits the init image alone: <c>MageFlowRecipePipeline</c> reads only <c>Img2Img.InitImage</c>. Any reference image beyond the init image, or a reference with no init image, used to
-    /// be discarded without a word and the result came back as plain text-to-image; declaring the limit here is what
-    /// lets the feature gate refuse it instead.</remarks>
+    /// <remarks>The pipeline reads only <c>Img2Img.InitImage</c>.</remarks>
     public ImageInputLimits InputLimits => ImageInputLimits.SingleInitImage;
 
     /// <summary>Mage-Flow-Edit-Turbo rides this recipe: the init image is the edit reference (VAE-encoded to in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>

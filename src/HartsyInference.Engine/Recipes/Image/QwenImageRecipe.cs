@@ -37,11 +37,8 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
         | ImageFeatures.PromptScheduling;
 
     /// <inheritdoc/>
-    /// <remarks>The edit-plus template addresses <see cref="QwenImageEditConditioning.MaxReferences"/> pictures, with
-    /// the init image (when present) as Picture 1. References work without an init image — the first reference becomes
-    /// Picture 1 — so they do not require one. Nothing in a Qwen-Image checkpoint says whether it is the base model or
-    /// an Edit build, so this is the family ceiling; a host that knows the checkpoint is base Qwen-Image should refuse
-    /// reference editing itself.</remarks>
+    /// <remarks>The init image, when present, is Picture 1; references work without it. Base and Edit checkpoints
+    /// look alike, so this is the family ceiling and hosts gate base Qwen-Image themselves.</remarks>
     public ImageInputLimits InputLimits => new ImageInputLimits(QwenImageEditConditioning.MaxReferences, ReferencesRequireInitImage: false);
 
     /// <inheritdoc/>

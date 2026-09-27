@@ -21,10 +21,8 @@ public interface IArchitectureRecipe
     /// been wired rejects every composition object with a precise error instead of silently ignoring it.</summary>
     ImageFeatures Supports => ImageFeatures.None;
 
-    /// <summary>How many input images (init + <see cref="Requests.ImageRequest.ReferenceImages"/>) this family reads,
-    /// and whether its references need an init image. The default is derived from <see cref="Supports"/>: one image for
-    /// any init-image feature, none otherwise. A family that reads more, or reads references without an init image,
-    /// must declare it, because the feature gate refuses anything past these limits rather than dropping it.</summary>
+    /// <summary>How many input images (init plus references) this family reads.</summary>
+    /// <remarks>Also whether references need an init image. Defaults from <see cref="Supports"/>.</remarks>
     ImageInputLimits InputLimits => ImageInputLimits.DerivedFrom(Supports);
 
     /// <summary>Memory and multi-device behaviours this recipe actually wires; the default declares none, so a family
