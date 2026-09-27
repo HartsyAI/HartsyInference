@@ -11,6 +11,11 @@ stable release will require. Dates are UTC.
 - **Vulkan's fp8 Linear is on wherever the device offers fp8 cooperative matrices**, validated on an RTX 4090 under
   driver 595 (E4M3 16x16x32). Unset `numerics.vkFp8` now follows the device, like `fp8Native`; the `reference` profile
   still pins it off. Cards without the extension (Ampere and older, or a pre-595 NVIDIA driver) keep the F16-cast path.
+- **A cooperative-matrix-2 fp8 GEMM.** Where `VK_NV_cooperative_matrix2` lists an E4M3 configuration (RTX 4090 under
+  595), the fp8 Linear runs `matmul_fp8_coopmat2`: `matmul_coopmat2`'s structure with E4M3 operands read from 8-bit
+  storage and an aligned fast path. Including the activation quantization, it beats the F16 GEMM at every DiT shape
+  measured on the 4090 (4096×3072×12288: 1.91 ms vs 2.69; 4096×12288×3072: 1.97 vs 2.46). The coopmat1 fp8 kernel,
+  about 20 TFLOPS, remains the fallback for devices without it.
 - **The fp8 GEMM now matches CUDA's accuracy.** Ada's fp8 tensor cores accumulate below F32 — 7.6e-4 of the output
   range at K=512 — so `matmul_fp8_coopmat` adds a partial into a true F32 accumulator every 128 of K. On the same
   operands that gives 1.731e-4, cuBLASLt's native fp8 error to the digit.
