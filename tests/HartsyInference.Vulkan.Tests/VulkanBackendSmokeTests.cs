@@ -1590,6 +1590,34 @@ public sealed class VulkanBackendSmokeTests
         finally { hidden.Dispose(); bias.Dispose(); }
     }
 
+    /// <summary>A <c>[B, C]</c> bias adds each batch item's own row: SDXL's ADM-conditioned time embedding differs between
+    /// the unconditional and conditional halves, and reading row 0 for both bent every SDXL image on Vulkan.</summary>
+    [Fact]
+    public void Backend_BroadcastAdd_PerBatchBias_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int B = 3, C = 4, Spatial = 16;
+        using Tensor hidden = new(new TensorShape(B, C, Spatial), DType.F32);
+        using Tensor bias = new(new TensorShape(B, C), DType.F32);
+        Span<float> hS = hidden.AsSpan<float>();
+        Span<float> bS = bias.AsSpan<float>();
+        for (int i = 0; i < B * C * Spatial; i++) hS[i] = MathF.Sin(i * 0.13f);
+        for (int i = 0; i < B * C; i++) bS[i] = (i + 1) * 0.5f;
+        float[] expected = new float[B * C * Spatial];
+        for (int b = 0; b < B; b++)
+            for (int c = 0; c < C; c++)
+                for (int s = 0; s < Spatial; s++)
+                    expected[b * C * Spatial + c * Spatial + s] = hS[b * C * Spatial + c * Spatial + s] + bS[b * C + c];
+
+        backend.BroadcastAdd(hidden, bias, C, Spatial);
+
+        ReadOnlySpan<float> hOut = hidden.AsReadOnlySpan<float>();
+        for (int i = 0; i < B * C * Spatial; i++)
+            Assert.InRange(hOut[i] - expected[i], -1e-5f, 1e-5f);
+    }
+
     /// <summary>GroupNorm at SD1.5 U-Net shapes (32 groups, C=320, spatial=64×64) — the dominant U-Net norm.</summary>
     [Fact]
     public void Backend_GroupNorm_Matches_Cpu_Sd15Shape()
