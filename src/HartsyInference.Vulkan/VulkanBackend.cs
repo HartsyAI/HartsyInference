@@ -160,7 +160,7 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // matching this constructor's push-descriptor switch above — an experimental switch, not a proven
         // default-on profile feature (see EnvSwitch's remarks on that distinction).
         EnableInt8Linear = EngineKnobs.VkInt8.Value;
-        EnableFp8Linear = EngineKnobs.VkFp8.Value ?? false;
+        EnableFp8Linear = EngineKnobs.VkFp8.Value ?? Vk.HasFloat8CooperativeMatrix;
         LogFp8Status(EngineKnobs.VkFp8.Value);
         EnableStaticFp8InputScale = EngineKnobs.Fp8StaticInputScale.Value;
         EnableF16Gemm = EngineKnobs.VkF16Gemm.Value;
