@@ -188,7 +188,7 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
         backend.Sync();
         Assert.Equal(dynamic.AsReadOnlySpan<float>().ToArray(), same.AsReadOnlySpan<float>().ToArray());
 
-        w.Fp8InputScaleFactor *= 4f;
+        w.Fp8InputScaleFactor *= 3f; // not a power of two: that only shifts E4M3 exponents, and the output would not move
         using Tensor coarser = new(new TensorShape(M, N), DType.F32);
         backend.Linear(coarser, x, w, null);
         backend.Sync();
