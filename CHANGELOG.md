@@ -30,6 +30,10 @@ stable release will require. Dates are UTC.
 - **Flux.2 generations no longer fail after the image is made.** `Flux2RecipePipeline.Dispose` iterated its
   `IDisposable` loaders as `SafeTensorsLoader`, which threw `InvalidCastException` at teardown once the text encoder
   opened through `CheckpointSource`.
+- **Vulkan caches a weight cast only while a fifth of the heap stays free**; past that the cast is made per call and
+  freed. fp8, GGUF and bf16 checkpoints whose F16 casts did not fit beside their own weights ran out of memory
+  mid-denoise on a 24 GB card. Flux.2 Q4_K_S (SSIM 0.998 against CUDA F16), ERNIE-Image Turbo (0.95), Boogu, Chroma
+  and Lens now run; Chroma, Lens and Boogu produce wrong images on Vulkan, which the out-of-memory failure hid.
 - `diagnostics.vkProfileGpu` times every dispatch with timestamp queries and prints GPU time per op and per kernel,
   plus blocking host waits by call chain. The host-wall profile charged a queue stall to whichever op was waiting.
 - Krea2 Turbo at 1024², 8 steps, RTX 4090: 1.06 s/step on Vulkan, against 0.83 s on CUDA with

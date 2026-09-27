@@ -740,6 +740,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         return output;
     }
 
+    /// <summary>Whether caching a weight cast of <paramref name="bytes"/> still leaves a fifth of the device-local heap
+    /// free. Past that the cast is made per call and freed, so a checkpoint whose casts do not fit next to its own
+    /// weights (fp8, GGUF, bf16 on a 24 GB card) runs slower instead of running out of memory mid-denoise.</summary>
+    private bool CastFitsCache(long bytes)
+    {
+        (uint heap, long total) = LargestDeviceLocalHeap();
+        (long free, _) = GetVramInfo();
+        long pooledIdle = (long)(_allocator.ReservedBytes(heap) - _allocator.UsedBytes(heap));
+        return free + pooledIdle - bytes >= total / 5;
+    }
+
     /// <summary>Casts <paramref name="srcBuf"/> to <paramref name="want"/> if needed; caller must free the returned ownedTemp.</summary>
     private (VulkanBuffer buf, VulkanBuffer? owned) CastIfNeeded(Tensor src, VulkanBuffer srcBuf, DType want)
     {
@@ -747,9 +758,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
 
         // Preloaded weights are cast once and reused — skip the per-call cast dispatch + temp alloc.
         if (_xfer.TryGetWeightCast(src, want, out VulkanBuffer? cachedCast)) return (cachedCast!, null);
-        bool cacheThis = _xfer.ShouldCacheCast(src);
-
         long elements = src.ElementCount;
+        bool cacheThis = _xfer.ShouldCacheCast(src) && CastFitsCache(elements * want.SizeInBytes);
+
         ulong outBytes = (ulong)(elements * want.SizeInBytes);
         VulkanBuffer dst = _xfer.AllocateDevice(outBytes);
 
