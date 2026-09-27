@@ -172,6 +172,7 @@ public sealed partial class VulkanBackend
             SpecConstant.Bool(17, biasF32 != 0),
             SpecConstant.Bool(18, scale != 0),
             SpecConstant.UInt(19, SgRows),
+            SpecConstant.UInt(20, 4),
         };
         Span<byte> pc = stackalloc byte[5 * 4];
         BinaryWriteUInt(pc, 0, m);

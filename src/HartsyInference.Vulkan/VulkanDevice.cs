@@ -229,9 +229,10 @@ public sealed class VulkanDevice : IDisposable
         uint fp8M = 0, fp8N = 0, fp8K = 0;
         string? fp8Reason =
             !hasCoopMatrix ? "the device has no cooperative matrices"
-            : !hasFloat8Ext ? (props2.properties.vendorID == 0x10DE
-                ? "the driver does not offer VK_EXT_shader_float8 (NVIDIA 595 or newer does)"
-                : "the driver does not offer VK_EXT_shader_float8")
+            : !hasFloat8Ext ? (props2.properties.vendorID != 0x10DE ? "the driver does not offer VK_EXT_shader_float8"
+                // NVIDIA packs the major version in the top 10 bits; from 595 a missing extension is the card, not the driver.
+                : (props2.properties.driverVersion >> 22) >= 595 ? "the card does not offer VK_EXT_shader_float8 (no fp8 tensor cores; Ada or newer has them)"
+                : "the driver does not offer VK_EXT_shader_float8 (NVIDIA 595 or newer does)")
             : !Float8FeaturesOffered(pd) ? "the driver offers VK_EXT_shader_float8 without fp8 cooperative matrices"
             : !Fp8CoopMatShape(instance, pd, out fp8M, out fp8N, out fp8K) ? "the device lists no E4M3 cooperative-matrix shape (no fp8 tensor cores)"
             : null;

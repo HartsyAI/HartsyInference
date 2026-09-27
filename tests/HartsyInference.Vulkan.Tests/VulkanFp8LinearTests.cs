@@ -7,7 +7,7 @@ namespace HartsyInference.Vulkan.Tests;
 
 /// <summary>The fp8 Linear: the activation quantizes to exactly the bytes CUDA's <c>fp8_quant</c> writes (on any device — the
 /// conversion is integer math), and on a device with fp8 cooperative matrices the product equals the dequantized operands'
-/// product to F32 accumulation error, stays within E4M3's activation error of the F16-cast path, and falls back unchanged on a
+/// product to the fp8 tensor cores' accumulation error (CUDA's), stays within E4M3's activation error of the F16-cast path, and falls back unchanged on a
 /// N or K off the fragment grid.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
@@ -166,7 +166,8 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
                 want[i * N + j] = (float)acc + (bias is null ? 0f : b[j]);
             }
         float[] gotF = f16Output ? got.AsReadOnlySpan<Half>().ToArray().Select(h => (float)h).ToArray() : got.AsReadOnlySpan<float>().ToArray();
-        Assert.True(MaxRelError(gotF, want) < (f16Output ? 2e-3f : 1e-5f), "the fp8 product differs from the dequantized operands' product");
+        // The fp8 tensor cores accumulate below F32; cuBLASLt's native fp8 GEMM measures 1.73e-4 here on the same operands.
+        Assert.True(MaxRelError(gotF, want) < (f16Output ? 2e-3f : 2.5e-4f), "the fp8 product differs from the dequantized operands' product");
 
         // Against the F16-cast path, the gap is the activation's E4M3 rounding alone.
         backend.EnableFp8Linear = false;
