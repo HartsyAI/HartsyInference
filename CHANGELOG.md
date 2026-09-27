@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.185
+## alpha.186
 
 - **Vulkan attention on cooperative-matrix-2.** `sdpa_flash_cm2` is a query-tiled flash attention on
   `VK_NV_cooperative_matrix2` (64 query rows × 64 keys, head dim 64 or 128, optional additive mask). It addresses
@@ -38,6 +38,13 @@ stable release will require. Dates are UTC.
   plus blocking host waits by call chain. The host-wall profile charged a queue stall to whichever op was waiting.
 - Krea2 Turbo at 1024², 8 steps, RTX 4090: 1.06 s/step on Vulkan, against 0.83 s on CUDA with
   `numerics.fp8Native=false` and 0.53 s on CUDA's fp8 tensor cores. The Vulkan image matches CUDA F16 at SSIM 0.998.
+
+## alpha.185
+
+- **Vulkan fp8 activation scale was an ulp off on NVIDIA.** `divRn` corrected the quotient with `fma()`, which
+  Vulkan may run as a separate multiply and add, so the residual was not exact and the scale (and every E4M3 byte
+  scaled by it) could differ from CUDA's `div.rn`. The residual is now Dekker's exact product from correctly rounded
+  multiplies and adds, and the nearest of the quotient's neighbours is kept, rounded once even when the scale is subnormal.
 
 ## alpha.184
 

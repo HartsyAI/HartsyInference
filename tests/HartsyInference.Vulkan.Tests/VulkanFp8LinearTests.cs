@@ -116,6 +116,21 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
     }
 
     [Theory]
+    [InlineData(0x7F7FFFFFu)]   // float.MaxValue: Dekker's splitter would overflow on the raw quotient
+    [InlineData(0x04185FAFu)]   // the scale is subnormal and must be rounded once, on the subnormal grid
+    [InlineData(0x00800000u)]   // smallest normal absmax
+    [InlineData(0x40400000u)]   // 3.0
+    public void Quantize_ScaleIsCorrectlyRoundedAcrossTheRange(uint amaxBits)
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = VulkanTestDevice.Create();
+        float amax = BitConverter.UInt32BitsToSingle(amaxBits);
+        using Tensor x = F32(new TensorShape(8), [amax, -amax / 2, 0f, 0f, 0f, 0f, 0f, 0f]);
+        (_, float scale) = backend.QuantizeE4M3ForTest(x, staticScale: 0f);
+        Assert.Equal(BitConverter.SingleToUInt32Bits(amax / 448f), BitConverter.SingleToUInt32Bits(scale));
+    }
+
+    [Theory]
     [InlineData(false, false, 128)]
     [InlineData(true, true, 128)]
     [InlineData(false, true, 77)]   // a CLIP prompt's rows: the ragged last block goes through shared memory
@@ -188,7 +203,7 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
         backend.Sync();
         Assert.Equal(dynamic.AsReadOnlySpan<float>().ToArray(), same.AsReadOnlySpan<float>().ToArray());
 
-        w.Fp8InputScaleFactor *= 4f;
+        w.Fp8InputScaleFactor *= 3f; // not a power of two: that only shifts E4M3 exponents, and the output would not move
         using Tensor coarser = new(new TensorShape(M, N), DType.F32);
         backend.Linear(coarser, x, w, null);
         backend.Sync();
