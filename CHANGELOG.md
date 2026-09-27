@@ -6,6 +6,29 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.185
+
+- **Vulkan attention on cooperative-matrix-2.** `sdpa_flash_cm2` is a query-tiled flash attention on
+  `VK_NV_cooperative_matrix2` (64 query rows × 64 keys, head dim 64 or 128, optional additive mask). It addresses
+  Q/K/V by stride, so token-major layouts need no permute and grouped-query K/V need no head repeat. `IBackend`
+  gains a grouped-query token-major overload, which Krea2 uses when the backend serves it. A shape the kernel does
+  not serve falls back to the existing head-major path. On Krea2 at 1024² attention went from 167.6 s to 1.3 s of
+  GPU time per generation.
+- **The Vulkan memory pool reuses frees still pending on the GPU timeline.** A request that misses the pool first
+  takes back what the GPU has finished with, then waits for the oldest pending free of the same memory type when
+  those could cover it, and only then asks the driver. Before, per-Linear weight casts were never reclaimed between
+  submits, so every cast became a new `vkAllocateMemory` until VRAM ran out. Each out-of-memory retry then drained
+  the queue to idle and destroyed the pooled blocks. On Krea2 that was 2,423 driver allocations (17.7 s) and 28 full
+  drains per generation; now it is 236, almost all of them weight loading. A free made while nothing is recording
+  is released without waiting on a tick no submit will signal (that hung Boogu mid-denoise).
+- **coopmat2 GEMM tiles.** Large products run on 128×256 tiles. Interior tiles with 8-element-aligned strides load
+  unclamped, unrolled eight blocks deep, and workgroups walk eight tile rows per column band so B stays in L2. On
+  Krea2 shapes that is 125–140 TFLOPS, against cuBLAS's 155–167 with F32 accumulation.
+- `diagnostics.vkProfileGpu` times every dispatch with timestamp queries and prints GPU time per op and per kernel,
+  plus blocking host waits by call chain. The host-wall profile charged a queue stall to whichever op was waiting.
+- Krea2 Turbo at 1024², 8 steps, RTX 4090: 1.06 s/step on Vulkan, against 0.83 s on CUDA with
+  `numerics.fp8Native=false` and 0.53 s on CUDA's fp8 tensor cores. The Vulkan image matches CUDA F16 at SSIM 0.998.
+
 ## alpha.184
 
 - **Native FP4 never ran on a real checkpoint, and nothing said so.** `numerics.fp4Native` on or off produced a
