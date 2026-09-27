@@ -3,6 +3,7 @@
 //   FINALIZE=false: grid-strided |max| of x -> scratch[1 + workgroup].
 //   FINALIZE=true:  one workgroup folds scratch[1 .. 1+numBlocks) -> scratch[0]; x is not read.
 #version 460
+#extension GL_GOOGLE_include_directive : require
 #extension GL_KHR_shader_subgroup_basic      : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
@@ -31,30 +32,7 @@ layout(push_constant) uniform Push {
 
 shared float warp_max[64];
 
-// a - q*b to within one rounding. Vulkan need not fuse fma(), but OpFMul/OpFAdd are correctly rounded: Dekker's exact product.
-float divResidual(float a, float b, float q) {
-    precise float cq = 4097.0 * q, qh = cq - (cq - q), ql = q - qh;
-    precise float cb = 4097.0 * b, bh = cb - (cb - b), bl = b - bh;
-    precise float p = q * b;
-    precise float e = ((qh * bh - p) + qh * bl + ql * bh) + ql * bl;
-    precise float r = (a - p) - e;
-    return r;
-}
-
-// Correctly rounded a / b, CUDA's div.rn: Vulkan's a / b may be 2.5 ulp off, so refine once and keep the nearest neighbour.
-float divRn(float a, float b) {
-    precise float q = a / b;
-    precise float step = divResidual(a, b, q) * (1.0 / b);
-    q = q + step;
-    uint bits = floatBitsToUint(q);
-    float best = q, bestR = abs(divResidual(a, b, q));
-    for (int d = -1; d <= 1; d += 2) {
-        float c = uintBitsToFloat(uint(int(bits) + d));
-        float cr = abs(divResidual(a, b, c));
-        if (cr < bestR) { best = c; bestR = cr; }
-    }
-    return best;
-}
+#include "div_rn.glsl"
 
 float workgroupMax(float v) {
     v = subgroupMax(v);

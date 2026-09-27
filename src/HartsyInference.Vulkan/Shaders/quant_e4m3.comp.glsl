@@ -4,6 +4,7 @@
 // The conversion is block_scale.cuh's f32_to_e4m3 bit for bit: round to nearest even, |v| >= 464 saturates to 448, NaN
 // stays NaN, below 2^-10 flushes to signed zero. It needs no float8 feature, so it runs on any device.
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 #ifndef USE_FP16
 #define USE_FP16 0
@@ -30,30 +31,7 @@ layout(push_constant) uniform Push {
     uint paddedWords;    // >= words
 } pc;
 
-// a - q*b to within one rounding. Vulkan need not fuse fma(), but OpFMul/OpFAdd are correctly rounded: Dekker's exact product.
-float divResidual(float a, float b, float q) {
-    precise float cq = 4097.0 * q, qh = cq - (cq - q), ql = q - qh;
-    precise float cb = 4097.0 * b, bh = cb - (cb - b), bl = b - bh;
-    precise float p = q * b;
-    precise float e = ((qh * bh - p) + qh * bl + ql * bh) + ql * bl;
-    precise float r = (a - p) - e;
-    return r;
-}
-
-// Correctly rounded a / b, CUDA's div.rn: Vulkan's a / b may be 2.5 ulp off, so refine once and keep the nearest neighbour.
-float divRn(float a, float b) {
-    precise float q = a / b;
-    precise float step = divResidual(a, b, q) * (1.0 / b);
-    q = q + step;
-    uint bits = floatBitsToUint(q);
-    float best = q, bestR = abs(divResidual(a, b, q));
-    for (int d = -1; d <= 1; d += 2) {
-        float c = uintBitsToFloat(uint(int(bits) + d));
-        float cr = abs(divResidual(a, b, c));
-        if (cr < bestR) { best = c; bestR = cr; }
-    }
-    return best;
-}
+#include "div_rn.glsl"
 
 uint toE4M3(float f) {
     uint sign = (floatBitsToUint(f) >> 24) & 0x80u;
