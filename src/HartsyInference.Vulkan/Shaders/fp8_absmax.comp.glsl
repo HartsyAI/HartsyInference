@@ -31,11 +31,29 @@ layout(push_constant) uniform Push {
 
 shared float warp_max[64];
 
-// Correctly rounded a / b, CUDA's div.rn: the driver's quotient may be an ulp off, and one exact-FMA residual step settles it.
+// a - q*b to within one rounding. Vulkan need not fuse fma(), but OpFMul/OpFAdd are correctly rounded: Dekker's exact product.
+float divResidual(float a, float b, float q) {
+    precise float cq = 4097.0 * q, qh = cq - (cq - q), ql = q - qh;
+    precise float cb = 4097.0 * b, bh = cb - (cb - b), bl = b - bh;
+    precise float p = q * b;
+    precise float e = ((qh * bh - p) + qh * bl + ql * bh) + ql * bl;
+    precise float r = (a - p) - e;
+    return r;
+}
+
+// Correctly rounded a / b, CUDA's div.rn: Vulkan's a / b may be 2.5 ulp off, so refine once and keep the nearest neighbour.
 float divRn(float a, float b) {
     precise float q = a / b;
-    precise float r = fma(-q, b, a);
-    return fma(r, 1.0 / b, q);
+    precise float step = divResidual(a, b, q) * (1.0 / b);
+    q = q + step;
+    uint bits = floatBitsToUint(q);
+    float best = q, bestR = abs(divResidual(a, b, q));
+    for (int d = -1; d <= 1; d += 2) {
+        float c = uintBitsToFloat(uint(int(bits) + d));
+        float cr = abs(divResidual(a, b, c));
+        if (cr < bestR) { best = c; bestR = cr; }
+    }
+    return best;
 }
 
 float workgroupMax(float v) {
