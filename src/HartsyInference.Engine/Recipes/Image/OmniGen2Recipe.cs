@@ -31,6 +31,10 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
+    /// <inheritdoc/>
+    /// <remarks>The pipeline reads only <c>Img2Img.InitImage</c>.</remarks>
+    public ImageInputLimits InputLimits => ImageInputLimits.SingleInitImage;
+
     public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);

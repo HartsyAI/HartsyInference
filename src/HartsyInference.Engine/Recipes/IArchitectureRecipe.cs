@@ -21,6 +21,10 @@ public interface IArchitectureRecipe
     /// been wired rejects every composition object with a precise error instead of silently ignoring it.</summary>
     ImageFeatures Supports => ImageFeatures.None;
 
+    /// <summary>How many input images (init plus references) this family reads.</summary>
+    /// <remarks>Also whether references need an init image. Defaults from <see cref="Supports"/>.</remarks>
+    ImageInputLimits InputLimits => ImageInputLimits.DerivedFrom(Supports);
+
     /// <summary>Memory and multi-device behaviours this recipe actually wires; the default declares none, so a family
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;

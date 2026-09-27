@@ -37,6 +37,11 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
         | ImageFeatures.PromptScheduling;
 
     /// <inheritdoc/>
+    /// <remarks>The init image, when present, is Picture 1; references work without it. Base and Edit checkpoints
+    /// look alike, so this is the family ceiling and hosts gate base Qwen-Image themselves.</remarks>
+    public ImageInputLimits InputLimits => new ImageInputLimits(QwenImageEditConditioning.MaxReferences, ReferencesRequireInitImage: false);
+
+    /// <inheritdoc/>
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>. The Qwen tokenizer discards weights, so the
     /// prompt is encoded at weight 1 and each token's cond row is scaled afterwards — which on this family means after
     /// the template prefix drop, the case SwarmUI's negative right-alignment offset exists for.</remarks>

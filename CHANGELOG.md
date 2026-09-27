@@ -6,6 +6,17 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.189
+
+- **Image families declare how many input images they read, and the gate refuses past it.** A fourth reference on
+  Qwen-Image-Edit used to be dropped with a log warning, and a reference image on Boogu, OmniGen2 or Mage-Flow was
+  never read at all — with no init image the result was plain text-to-image. Each recipe now exposes
+  `IArchitectureRecipe.InputLimits` (`ImageInputLimits { MaxImages, ReferencesRequireInitImage }`): Qwen-Image 3
+  (`QwenImageEditConditioning.MaxReferences`, references usable without an init image), Boogu / OmniGen2 /
+  Mage-Flow 1 with the init image required, every other init-image family 1 by default. `ImagesService` throws
+  `NotSupportedException` after the feature check with `Model family '<id>' takes at most N input images; M were
+  supplied.` or `Model family '<id>' needs an init image to edit; reference images alone are not used.`
+
 ## alpha.188
 
 - **Wan claims an end frame only where one has been checked.** `WanVideoRecipe.Supports` declared
