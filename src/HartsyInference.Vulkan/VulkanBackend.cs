@@ -3297,10 +3297,12 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         {
             string shader = "broadcast_add" + DtypeSuffix(hidden.DType);
             VulkanKernel k = GetKernel(shader, 2, _default1DSpec);
-            Span<byte> pc = stackalloc byte[3 * 4];
+            // bias is [B, C] per the contract; a [C] bias is shared by every batch item.
+            Span<byte> pc = stackalloc byte[4 * 4];
             BinaryWriteUInt(pc, 0, (uint)channels);
             BinaryWriteUInt(pc, 4, (uint)spatial);
             BinaryWriteUInt(pc, 8, (uint)hidden.ElementCount);
+            BinaryWriteUInt(pc, 12, bias.ElementCount > channels ? 1u : 0u);
             Span<ulong> bufs = stackalloc ulong[] { hBuf.Handle, bEff.Handle };
             Dispatch(k, bufs, pc, GroupCount(hidden.ElementCount, LocalX1D));
             // hidden's GPU contents just changed — re-cache so CPU readback (lazy-sync callback)
