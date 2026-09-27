@@ -10,20 +10,34 @@ float divResidual(float a, float b, float q) {
     return r;
 }
 
-// Vulkan's a / b may be 2.5 ulp off: divide the mantissas (so the splitter cannot overflow), refine once, keep the nearest neighbour.
+// Vulkan's a / b may be 2.5 ulp off: divide the mantissas (so the splitter cannot overflow), refine once, then keep the
+// nearest candidate on the result's own grid, which below 2^-126 is whole multiples of 2^-149 (so a subnormal is rounded once).
 float divRn(float a, float b) {
     if (a == 0.0 || isinf(a) || isnan(a) || b == 0.0 || isinf(b) || isnan(b)) return a / b;
+    uint sign = (floatBitsToUint(a) ^ floatBitsToUint(b)) & 0x80000000u;
     int ea, eb;
-    float ma = frexp(a, ea), mb = frexp(b, eb);
+    float ma = frexp(abs(a), ea), mb = frexp(abs(b), eb);
+    int e = ea - eb;
     precise float q = ma / mb;
     precise float step = divResidual(ma, mb, q) * (1.0 / mb);
     q = q + step;
-    uint bits = floatBitsToUint(q);
-    float best = q, bestR = abs(divResidual(ma, mb, q));
-    for (int d = -1; d <= 1; d += 2) {
-        float c = uintBitsToFloat(uint(int(bits) + d));
-        float cr = abs(divResidual(ma, mb, c));
-        if (cr < bestR) { best = c; bestR = cr; }
+    if (e + 149 >= 24) {
+        uint bits = floatBitsToUint(q);
+        float best = q, bestR = abs(divResidual(ma, mb, q));
+        for (int d = -1; d <= 1; d += 2) {
+            float c = uintBitsToFloat(bits + uint(d));
+            float cr = abs(divResidual(ma, mb, c));
+            if (cr < bestR) { best = c; bestR = cr; }
+        }
+        return uintBitsToFloat(floatBitsToUint(ldexp(best, e)) | sign);
     }
-    return ldexp(best, ea - eb);
+    int s = e + 149;
+    float k = floor(ldexp(q, s) + 0.5), bestK = k, bestR = 1.0 / 0.0;
+    for (int d = -1; d <= 1; d++) {
+        float c = k + float(d);
+        if (c < 0.0) continue;
+        float cr = abs(divResidual(ma, mb, ldexp(c, -s)));
+        if (cr < bestR || (cr == bestR && (int(c) & 1) == 0)) { bestK = c; bestR = cr; }
+    }
+    return uintBitsToFloat(uint(bestK) | sign);
 }

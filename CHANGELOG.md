@@ -11,7 +11,7 @@ stable release will require. Dates are UTC.
 - **Vulkan fp8 activation scale was an ulp off on NVIDIA.** `divRn` corrected the quotient with `fma()`, which
   Vulkan may run as a separate multiply and add, so the residual was not exact and the scale (and every E4M3 byte
   scaled by it) could differ from CUDA's `div.rn`. The residual is now Dekker's exact product from correctly rounded
-  multiplies and adds, and the nearest of the quotient's neighbours is kept.
+  multiplies and adds, and the nearest of the quotient's neighbours is kept, rounded once even when the scale is subnormal.
 
 ## alpha.184
 
