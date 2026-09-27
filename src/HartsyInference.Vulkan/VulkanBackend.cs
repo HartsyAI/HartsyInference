@@ -958,10 +958,11 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
             if (bias is not null)
             {
                 VulkanKernel add = GetKernel("broadcast_add_f32", storageBufferCount: 2, _default1DSpec);
-                Span<byte> pc = stackalloc byte[3 * 4];
+                Span<byte> pc = stackalloc byte[4 * 4];
                 BinaryWriteUInt(pc, 0, (uint)N);
                 BinaryWriteUInt(pc, 4, 1u);
                 BinaryWriteUInt(pc, 8, (uint)((long)M * N));
+                BinaryWriteUInt(pc, 12, 0u);
                 Span<ulong> bufs = stackalloc ulong[] { outBuf.Handle, GetBuffer(bias).Handle };
                 Dispatch(add, bufs, pc, GroupCount((long)M * N, LocalX1D));
             }
