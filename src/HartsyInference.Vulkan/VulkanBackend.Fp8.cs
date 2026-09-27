@@ -40,15 +40,19 @@ public sealed partial class VulkanBackend
     /// Follows <c>numerics.vkFp8</c>, unset meaning on wherever the device offers them; settable for tests.</summary>
     public bool EnableFp8Linear { get; set; }
 
+    /// <summary>Test hook: false keeps the fp8 Linear on the coopmat1 kernel where the device also offers the coopmat2 one.</summary>
+    internal bool PreferFp8CoopMat2 { get; set; } = true;
+
     /// <summary>Quantizes the activation with the weight's checkpoint <c>.input_scale</c> when it carries one, skipping the absmax
     /// passes — <c>numerics.fp8StaticInputScale</c>, the same switch and default CUDA's fp8 Linear reads.</summary>
     public bool EnableStaticFp8InputScale { get; set; }
 
     /// <summary>The fp8 Linear, CUDA's native fp8 scheme: the weight stays packed E4M3 with its per-tensor scale folded into alpha,
     /// the activation is quantized to E4M3 per tensor each call (a static checkpoint scale, or absmax/448 computed and read on the
-    /// device), and the product accumulates in F32 on <c>matmul_fp8_coopmat</c>. Refuses what the kernel cannot take — an E5M2
-    /// or block-scaled weight, a pre-quantized input, or N, K off the device's fragment shape (a ragged M is padded) — and the caller falls through
-    /// to the F16-cast path.</summary>
+    /// device), and the product accumulates in F32 on <c>matmul_fp8_coopmat2</c> where the device lists an E4M3 coopmat2
+    /// configuration, else <c>matmul_fp8_coopmat</c>. Refuses what the kernel cannot take — an E5M2 or block-scaled weight, a
+    /// pre-quantized input, K not a multiple of 4 or, on coopmat1, N or K off the fragment shape (a ragged M is padded) — and
+    /// the caller falls through to the F16-cast path.</summary>
     private bool TryDispatchFp8Linear(Tensor output, Tensor input, Tensor weight, Tensor? bias)
     {
         if (!EnableFp8Linear || !Vk.HasFloat8CooperativeMatrix) return false;
@@ -58,9 +62,11 @@ public sealed partial class VulkanBackend
         if (input.Shape[input.Shape.Rank - 1] != k) return false;
         long m = input.ElementCount / k;
         if (output.ElementCount != m * n || (bias is not null && bias.ElementCount != n)) return false;
-        if (n % Vk.Fp8CoopMatN != 0 || k % Vk.Fp8CoopMatK != 0) return false;
-        // A ragged M is quantized into rows padded to the fragment height; the shader indexes elements in uint.
-        long mPad = (m + Vk.Fp8CoopMatM - 1) / Vk.Fp8CoopMatM * Vk.Fp8CoopMatM;
+        // coopmat2's clamped layouts take any shape; coopmat1 reads a ragged M from rows padded to the fragment height.
+        bool cm2 = Vk.HasFp8CoopMat2 && PreferFp8CoopMat2;
+        if ((k & 3) != 0 || (!cm2 && (n % Vk.Fp8CoopMatN != 0 || k % Vk.Fp8CoopMatK != 0))) return false;
+        long mPad = cm2 ? m : (m + Vk.Fp8CoopMatM - 1) / Vk.Fp8CoopMatM * Vk.Fp8CoopMatM;
+        // The shaders index elements in uint.
         if (mPad * k > uint.MaxValue || n * k > uint.MaxValue || m * n > uint.MaxValue) return false;
 
         float staticScale = EnableStaticFp8InputScale && weight.Fp8InputScaleFactor > 0f ? weight.Fp8InputScaleFactor : 0f;
@@ -87,8 +93,12 @@ public sealed partial class VulkanBackend
                 biasF32 = biasRes.Handle;
             }
             float alpha = weight.Fp8ScaleFactor * (staticScale == 0f ? 1f : staticScale);
-            DispatchFp8Gemm(xQ.Handle, GetBuffer(weight).Handle, outBuf.Handle, biasF32, scratch?.Handle ?? 0,
-                (uint)m, (uint)n, (uint)k, alpha, output.DType == DType.F32);
+            if (cm2)
+                DispatchFp8Gemm2(xQ.Handle, GetBuffer(weight).Handle, outBuf.Handle, biasF32, scratch?.Handle ?? 0,
+                    (uint)m, (uint)n, (uint)k, alpha, output.DType == DType.F32);
+            else
+                DispatchFp8Gemm(xQ.Handle, GetBuffer(weight).Handle, outBuf.Handle, biasF32, scratch?.Handle ?? 0,
+                    (uint)m, (uint)n, (uint)k, alpha, output.DType == DType.F32);
             CacheOutput(output, outBuf);
             return true;
         }
@@ -150,6 +160,38 @@ public sealed partial class VulkanBackend
         BinaryWriteUInt(pc, 12, paddedWords);
         Span<ulong> bufs = stackalloc ulong[] { x, q, scale };
         Dispatch(GetKernel("quant_e4m3" + suffix, storageBufferCount: 3, _default1DSpec), bufs, pc, GroupCount(paddedWords, LocalX1D));
+    }
+
+    /// <summary>matmul_fp8_coopmat2: the largest of 128×256 / 128×128 / 64×64 the problem fills at the device granularity (as
+    /// the F16 coopmat2 GEMM picks), BK 64, promoted into F32 every two BK steps (128 of K).</summary>
+    private void DispatchFp8Gemm2(ulong a, ulong b, ulong c, ulong biasF32, ulong scale, uint m, uint n, uint k, float alpha, bool outputF32)
+    {
+        const uint BK = 64, Promote = 2;
+        (uint bm, uint bn) = m >= 128 && n >= 256 ? (128u, 256u) : m >= 128 && n >= 128 ? (128u, 128u) : (64u, 64u);
+        uint mg = Vk.Fp8CoopMat2MGranularity, ng = Vk.Fp8CoopMat2NGranularity;
+        uint BM = Math.Max(mg, bm / mg * mg), BN = Math.Max(ng, bn / ng * ng);
+        ReadOnlySpan<SpecConstant> spec = new SpecConstant[]
+        {
+            SpecConstant.UInt(0, Vk.Fp8CoopMat2WorkgroupInvocations),
+            SpecConstant.UInt(1, 1),
+            SpecConstant.UInt(2, 1),
+            SpecConstant.UInt(10, BM),
+            SpecConstant.UInt(11, BN),
+            SpecConstant.UInt(12, BK),
+            SpecConstant.UInt(13, Promote),
+            SpecConstant.Bool(15, outputF32),
+            SpecConstant.Bool(16, biasF32 != 0),
+            SpecConstant.Bool(17, scale != 0),
+        };
+        Span<byte> pc = stackalloc byte[5 * 4];
+        BinaryWriteUInt(pc, 0, m);
+        BinaryWriteUInt(pc, 4, n);
+        BinaryWriteUInt(pc, 8, k);
+        BinaryWriteFloat(pc, 12, alpha);
+        BinaryWriteUInt(pc, 16, 0u);
+        // Unused bindings take A so the layout stays six buffers.
+        Span<ulong> bufs = stackalloc ulong[] { a, b, c, c, biasF32 != 0 ? biasF32 : a, scale != 0 ? scale : a };
+        Dispatch(GetKernel("matmul_fp8_coopmat2", storageBufferCount: 6, spec), bufs, pc, (n + BN - 1) / BN, (m + BM - 1) / BM, 1);
     }
 
     /// <summary>matmul_fp8_coopmat on packed E4M3 operands: 2×2 subgroups, each owning 2×2 fragments of the device's shape.</summary>

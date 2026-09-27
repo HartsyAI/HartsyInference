@@ -8,7 +8,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// <summary>The fp8 Linear: the activation quantizes to exactly the bytes CUDA's <c>fp8_quant</c> writes (on any device — the
 /// conversion is integer math), and on a device with fp8 cooperative matrices the product equals the dequantized operands'
 /// product to the fp8 tensor cores' accumulation error (CUDA's), stays within E4M3's activation error of the F16-cast path, and falls back unchanged on a
-/// N or K off the fragment grid.</summary>
+/// shape neither kernel takes.</summary>
 [Trait("Category", "GpuIntegration")]
 public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
 {
@@ -131,14 +131,19 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
     }
 
     [Theory]
-    [InlineData(false, false, 128)]
-    [InlineData(true, true, 128)]
-    [InlineData(false, true, 77)]   // a CLIP prompt's rows: the ragged last block goes through shared memory
-    public void Fp8Linear_MatchesTheDequantizedProduct(bool f16Output, bool withBias, int M)
+    [InlineData(false, false, 128, true)]
+    [InlineData(true, true, 128, true)]
+    [InlineData(false, true, 77, true)]    // a CLIP prompt's rows: clamped by the coopmat2 layouts
+    [InlineData(false, false, 128, false)]
+    [InlineData(true, true, 128, false)]
+    [InlineData(false, true, 77, false)]   // the ragged last block goes through shared memory on coopmat1
+    public void Fp8Linear_MatchesTheDequantizedProduct(bool f16Output, bool withBias, int M, bool coopMat2)
     {
         if (!VulkanAvailable()) return;
         using VulkanBackend backend = VulkanTestDevice.Create();
         if (!backend.Vk.HasFloat8CooperativeMatrix) { _out.WriteLine("SKIPPED: no fp8 cooperative matrices on this device"); return; }
+        if (coopMat2 && !backend.Vk.HasFp8CoopMat2) { _out.WriteLine("SKIPPED: no E4M3 coopmat2 configuration on this device"); return; }
+        backend.PreferFp8CoopMat2 = coopMat2;
         const int K = 512, N = 192;
         float[] xv = RandomValues(M * K, 1, 2f);
         using Tensor x = F32(new TensorShape(M, K), xv);
@@ -216,7 +221,7 @@ public sealed class VulkanFp8LinearTests(ITestOutputHelper output)
     {
         if (!VulkanAvailable()) return;
         using VulkanBackend backend = VulkanTestDevice.Create();
-        const int M = 32, K = 256, N = 40;   // N off every fragment shape
+        const int M = 32, K = 258, N = 64;   // K off the packed words both kernels read
         using Tensor x = F32(new TensorShape(M, K), RandomValues(M * K, 6, 1f));
         (Tensor w, _) = Fp8Weight(N, K, 7, scale: 0.01f);
         using Tensor _w = w;

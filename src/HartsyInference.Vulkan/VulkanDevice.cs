@@ -237,6 +237,9 @@ public sealed class VulkanDevice : IDisposable
             : !Fp8CoopMatShape(instance, pd, out fp8M, out fp8N, out fp8K) ? "the device lists no E4M3 cooperative-matrix shape (no fp8 tensor cores)"
             : null;
         bool hasFp8CoopMat = fp8Reason is null;
+        uint fp8Cm2M = 0, fp8Cm2N = 0, fp8Cm2K = 0, fp8Cm2Wg = 0;
+        bool hasFp8CoopMat2 = hasFp8CoopMat && hasCoopMatrix2 && f12.storageBuffer8BitAccess != 0
+            && CoopMat2Config(instance, pd, VkComponentTypeKHR.Float8E4M3, out fp8Cm2M, out fp8Cm2N, out fp8Cm2K, out fp8Cm2Wg);
 
         // The query is the answer. It used to come back all zeros, and this block used to work around that with
         // apiVersion and a vendor-ID allowlist, on the belief that "older NVIDIA Linux blobs" misreport promoted
@@ -306,6 +309,11 @@ public sealed class VulkanDevice : IDisposable
             CoopMat2WorkgroupInvocations = coopMat2WgInvocations,
             HasFloat8CooperativeMatrix = hasFp8CoopMat,
             Fp8CoopMatUnavailableReason = fp8Reason,
+            HasFp8CoopMat2 = hasFp8CoopMat2,
+            Fp8CoopMat2MGranularity = fp8Cm2M,
+            Fp8CoopMat2NGranularity = fp8Cm2N,
+            Fp8CoopMat2KGranularity = fp8Cm2K,
+            Fp8CoopMat2WorkgroupInvocations = fp8Cm2Wg,
             Fp8CoopMatM = fp8M,
             Fp8CoopMatN = fp8N,
             Fp8CoopMatK = fp8K,
@@ -424,7 +432,12 @@ public sealed class VulkanDevice : IDisposable
     }
 
     /// <summary>Confirms the device's enumerated <c>VK_NV_cooperative_matrix2</c> "flexible dimensions" configurations include a usable one: FP16 A and B, FP32 accumulate (C and Result), WORKGROUP scope (not subgroup — this is the architectural difference from coopmat1), non-saturating. Unlike coopmat1's fixed 16x16x16 shape, this reports granularities (M/N/K tile dims used by a kernel must be multiples of these) and the exact workgroup invocation count the driver expects for this configuration, both needed to size the <c>matmul_coopmat2</c> shader correctly.</summary>
-    private static unsafe bool CoopMat2Supported(nint instance, nint pd, out uint mGranularity, out uint nGranularity, out uint kGranularity, out uint workgroupInvocations)
+    private static bool CoopMat2Supported(nint instance, nint pd, out uint mGranularity, out uint nGranularity, out uint kGranularity, out uint workgroupInvocations)
+        => CoopMat2Config(instance, pd, VkComponentTypeKHR.Float16, out mGranularity, out nGranularity, out kGranularity, out workgroupInvocations);
+
+    /// <summary>The largest-workgroup <c>VK_NV_cooperative_matrix2</c> flexible-dimensions configuration with <paramref name="operand"/>
+    /// A and B, an F32 accumulator and result, workgroup scope and no saturation.</summary>
+    private static unsafe bool CoopMat2Config(nint instance, nint pd, VkComponentTypeKHR operand, out uint mGranularity, out uint nGranularity, out uint kGranularity, out uint workgroupInvocations)
     {
         mGranularity = nGranularity = kGranularity = workgroupInvocations = 0;
 
@@ -449,10 +462,10 @@ public sealed class VulkanDevice : IDisposable
                 {
                     Logs.Warning($"coopmat2[{i}]: M/N/Kgran={e.MGranularity}/{e.NGranularity}/{e.KGranularity} A={e.AType} B={e.BType} C={e.CType} R={e.ResultType} sat={e.saturatingAccumulation} scope={e.scope} wgInvocations={e.workgroupInvocations}");
                 }
-                // Prefer the config with the largest workgroupInvocations among FP16-in/FP32-out,
+                // Prefer the config with the largest workgroupInvocations among the operand-in/FP32-out,
                 // workgroup-scope, non-saturating matches — a bigger workgroup does more MACs per
                 // dispatch of the coopmat2 op, which is the whole point of workgroup (vs subgroup) scope.
-                if (e.AType == VkComponentTypeKHR.Float16 && e.BType == VkComponentTypeKHR.Float16
+                if (e.AType == operand && e.BType == operand
                     && e.CType == VkComponentTypeKHR.Float32 && e.ResultType == VkComponentTypeKHR.Float32
                     && e.scope == VkScopeKHR.Workgroup && e.saturatingAccumulation == 0
                     && (!found || e.workgroupInvocations > workgroupInvocations))
@@ -487,6 +500,7 @@ public sealed class VulkanDevice : IDisposable
             sType = VkStructureType.PhysicalDeviceVulkan12Features,
             pNext = (nint)(&f11),
             shaderFloat16 = caps.SupportsFp16 ? 1u : 0u,
+            storageBuffer8BitAccess = caps.HasFp8CoopMat2 ? 1u : 0u,
             timelineSemaphore = caps.TimelineSemaphore ? 1u : 0u,
             bufferDeviceAddress = 0u,
         };
