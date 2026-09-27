@@ -163,10 +163,13 @@ public sealed partial class VulkanBackend
     }
 
     /// <summary>matmul_fp8_coopmat2: the largest of 128×256 / 128×128 / 64×64 the problem fills at the device granularity (as
-    /// the F16 coopmat2 GEMM picks), BK 64, promoted into F32 every two BK steps (128 of K).</summary>
+    /// the F16 coopmat2 GEMM picks), BK 64 where the K granularity divides it (else the granularity), promoted into F32
+    /// every 128 of K.</summary>
     private void DispatchFp8Gemm2(ulong a, ulong b, ulong c, ulong biasF32, ulong scale, uint m, uint n, uint k, float alpha, bool outputF32)
     {
-        const uint BK = 64, Promote = 2;
+        uint kg = Vk.Fp8CoopMat2KGranularity;
+        uint BK = 64 % kg == 0 ? 64u : kg;
+        uint Promote = Math.Max(1u, 128u / BK);
         (uint bm, uint bn) = m >= 128 && n >= 256 ? (128u, 256u) : m >= 128 && n >= 128 ? (128u, 128u) : (64u, 64u);
         uint mg = Vk.Fp8CoopMat2MGranularity, ng = Vk.Fp8CoopMat2NGranularity;
         uint BM = Math.Max(mg, bm / mg * mg), BN = Math.Max(ng, bn / ng * ng);
