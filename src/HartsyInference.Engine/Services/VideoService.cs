@@ -41,9 +41,9 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
         VideoRequestExecutionBinding binding = VideoRequestExecutionBinding.Create(spec, request);
         ModelSpec plannedSpec = binding.Model;
         VideoRequest plannedRequest = binding.Request;
-        string familyId = InferenceEngine.ResolveVideoFamilyId(plannedSpec);
-        VideoDefaults defaults = InferenceEngine.VideoDefaultsFor(plannedSpec);
-        VideoFeatures features = InferenceEngine.SupportedVideoFeatures(plannedSpec);
+        string familyId = ModelCapabilities.VideoFamilyIdFor(plannedSpec);
+        VideoDefaults defaults = ModelCapabilities.VideoDefaultsFor(plannedSpec);
+        VideoFeatures features = ModelCapabilities.VideoFeaturesFor(plannedSpec);
         VideoPlan plan = await VideoProfileResolver.ResolveAsync(
                 plannedSpec, plannedRequest, familyId, defaults, features, cancel)
             .ConfigureAwait(false);
@@ -113,7 +113,7 @@ public sealed class VideoService : IVideoService, IVideoPlanningService
     }
 
     /// <summary>Rejects families that can be identified but have no video execution recipe. This uses the exact
-    /// checkpoint-aware family id selected by <see cref="InferenceEngine.ResolveVideoFamilyId"/> and only inspects
+    /// checkpoint-aware family id selected by <see cref="ModelCapabilities.VideoFamilyIdFor"/> and only inspects
     /// the recipe registry; it never constructs a pipeline, backend, or model weights.</summary>
     internal static VideoPlan ApplyRegisteredVideoFamilyCheck(VideoPlan plan, string familyId)
     {

@@ -41,8 +41,6 @@ public sealed class Krea2RecipePipeline(Krea2Pipeline pipeline, Qwen3Tokenizer t
     private readonly IReadOnlyList<IDisposable> _componentSources = componentSources;
     private readonly MergedLoraStack? _loraStack = loraStack;
 
-    /// <summary>A Turbo/TDM checkpoint samples in 8 guidance-free steps, so it resolves against <see cref="Krea2Recipe.TurboDefaults"/> rather than Base's 28 steps at CFG 4.5.</summary>
-    public ImageDefaults? VariantDefaults => _isTurbo ? Krea2Recipe.TurboDefaults : Krea2Recipe.FamilyDefaults;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)

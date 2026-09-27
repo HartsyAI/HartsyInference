@@ -1,11 +1,13 @@
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Video;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Covers the filename remap that routes distilled checkpoints under a dev family id to the distilled
-/// sampling contract. Every failure here is silent: a routing miss runs the dev contract on a distilled
+/// <summary>Covers how a distilled checkpoint under a dev family id reaches the distilled sampling contract, now through
+/// <see cref="LtxVideo2Variants"/>. Every failure here is silent: a routing miss runs the dev contract on a distilled
 /// checkpoint (or vice versa) and still produces plausible video, just the wrong one.</summary>
 public sealed class LtxVideo25DistilledRoutingTests : IDisposable
 {
@@ -19,46 +21,55 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
     [InlineData("ltx-2.3")]
     [InlineData("ltx-video-2")]
     [InlineData("lightricks-ltx-video-2")]
-    public void DistilledFilenameRemapsEveryDevFamilyId(string familyId)
+    public void DistilledFilenameRoutesEveryDevFamilyId(string familyId)
     {
-        string path = "/models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors";
-        Assert.Equal("ltx-2.5-distilled", LtxVideo2DistilledRouting.RemapFamilyId(familyId, path));
+        string path = Touch("ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors");
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, ModelCapabilities.VideoFamilyIdFor(Spec(familyId, path)));
     }
 
     [Fact]
-    public void NonDistilledFilenameDoesNotRemap()
+    public void NonDistilledFilenameDoesNotRoute()
     {
-        Assert.Equal("ltx-2.5", LtxVideo2DistilledRouting.RemapFamilyId(
-            "ltx-2.5", "/models/ltx-2.5-22b-dev-transformer-int8_lean_convrot.safetensors"));
-        Assert.Equal("ltx-2.5", LtxVideo2DistilledRouting.RemapFamilyId("ltx-2.5", null));
-        Assert.Equal("ltx-2.5", LtxVideo2DistilledRouting.RemapFamilyId("ltx-2.5", ""));
+        string path = Touch("ltx-2.5-22b-dev-transformer-int8_lean_convrot.safetensors");
+        Assert.Equal("ltx-2.5", ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5", path)));
+    }
+
+    /// <summary>A hint is the definitive signal the file name only guesses at: it routes a renamed distilled build.</summary>
+    [Fact]
+    public void AnExplicitVariantRoutesWithoutAFilenameToken()
+    {
+        string path = Touch("renamed.safetensors");
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5:distilled", path)));
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId,
+            ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5", path) with { Variant = "distilled" }));
     }
 
     [Fact]
-    public void RemapScansDirectoryContents()
+    public void RoutingScansDirectoryContents()
     {
         // Distilled runs stage a directory (transformer-only distilled file + sibling VAEs); the dir name says
         // nothing, so the scan must look at the contained safetensors names.
-        File.WriteAllText(Path.Combine(_dir, "foo-distilled-transformer.safetensors"), "");
-        File.WriteAllText(Path.Combine(_dir, "video-vae.safetensors"), "");
-        Assert.Equal("ltx-2.5-distilled", LtxVideo2DistilledRouting.RemapFamilyId("ltx-2.5", _dir));
+        Touch("foo-distilled-transformer.safetensors");
+        Touch("video-vae.safetensors");
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId, ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5", _dir)));
     }
 
     [Fact]
-    public void DevDirectoryDoesNotRemap()
+    public void DevDirectoryDoesNotRoute()
     {
-        File.WriteAllText(Path.Combine(_dir, "ltx-2.5-22b-dev-transformer.safetensors"), "");
-        Assert.Equal("ltx-2.5", LtxVideo2DistilledRouting.RemapFamilyId("ltx-2.5", _dir));
+        Touch("ltx-2.5-22b-dev-transformer.safetensors");
+        Assert.Equal("ltx-2.5", ModelCapabilities.VideoFamilyIdFor(Spec("ltx-2.5", _dir)));
     }
 
     [Fact]
-    public void RemapLeavesForeignFamiliesAlone()
+    public void RoutingLeavesForeignFamiliesAlone()
     {
-        string path = "/models/some-distilled-model.safetensors";
-        Assert.Equal("wan", LtxVideo2DistilledRouting.RemapFamilyId("wan", path));
-        Assert.Equal("hunyuan-video", LtxVideo2DistilledRouting.RemapFamilyId("hunyuan-video", path));
+        string path = Touch("some-distilled-model.safetensors");
+        Assert.Equal("wan", ModelCapabilities.VideoFamilyIdFor(Spec("wan", path)));
+        Assert.Equal("hunyuan-video", ModelCapabilities.VideoFamilyIdFor(Spec("hunyuan-video", path)));
         // The distilled id itself passes through untouched (already routed).
-        Assert.Equal("ltx-2.5-distilled", LtxVideo2DistilledRouting.RemapFamilyId("ltx-2.5-distilled", path));
+        Assert.Equal(LtxVideo2Variants.DistilledFamilyId,
+            ModelCapabilities.VideoFamilyIdFor(Spec(LtxVideo2Variants.DistilledFamilyId, path)));
     }
 
     [Fact]
@@ -78,15 +89,23 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
     }
 
     [Fact]
-    public void RegistryServesTheDistilledContractForARemappedId()
+    public void RoutedSpecResolvesTheDistilledDefaults()
     {
-        // The remap only matters if the registry resolves the remapped id to the distilled defaults — a rename
-        // of either registration breaks the chain silently.
-        string remapped = LtxVideo2DistilledRouting.RemapFamilyId(
-            "ltx-2.5", "/models/ltx-2.5-22b-distilled-transformer.safetensors");
-        VideoDefaults? defaults = VideoRecipeRegistry.Resolve(remapped)?.Defaults;
-        Assert.NotNull(defaults);
-        Assert.Equal(8, defaults!.Steps);
+        // Routing only matters if the capability query lands on the distilled registration's defaults — a rename of
+        // either registration breaks the chain silently.
+        string path = Touch("ltx-2.5-22b-distilled-transformer.safetensors");
+        VideoDefaults defaults = ModelCapabilities.VideoDefaultsFor(Spec("ltx-2.5", path));
+        Assert.Equal(8, defaults.Steps);
         Assert.Equal(1.0f, defaults.CfgScale);
+    }
+
+    private static ModelSpec Spec(string requested, string path) =>
+        new ModelSpec { Requested = requested, Modality = Modality.Video, LocalPath = path };
+
+    private string Touch(string fileName)
+    {
+        string path = Path.Combine(_dir, fileName);
+        File.WriteAllText(path, "");
+        return path;
     }
 }

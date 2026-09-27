@@ -65,7 +65,15 @@ public static class ModelIdentityCatalog
             Image("flux2", "flux.2-dev", "Flux.2 Dev", "Black Forest Labs", "other", "1024x1024"),
             Image("chroma", "chroma", "Chroma", "lodestones", "apache-2.0", "1024x1024"),
             Image("chroma-radiance", "chroma-radiance", "Chroma Radiance", "lodestones", "apache-2.0", "1024x1024"),
-            Image("qwen-image", "qwen-image", "Qwen-Image", "Alibaba Qwen", "apache-2.0", "1328x1328"),
+            // Base, Edit and Edit-2509 are key-for-key identical, so the stamped class is what tells SwarmUI (and the
+            // engine's variant resolver) which one a repack is; ids match QwenImageVariants in the engine.
+            Image("qwen-image", "qwen-image", "Qwen-Image", "Alibaba Qwen", "apache-2.0", "1328x1328") with
+            {
+                VariantClassIds = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                {
+                    ["edit"] = "qwen-image-edit", ["edit-plus"] = "qwen-image-edit-plus",
+                },
+            },
             // 1024, not Qwen-Image v1's 1328 — the 2.1 class declares its own standard and a stamped 1328 would
             // match the id but disagree on size, which is exactly the case that disables the matcher.
             Image("qwen-image-2.1", "qwen-image-2.1", "Qwen-Image 2.1", "Alibaba Qwen", "apache-2.0", "1024x1024"),

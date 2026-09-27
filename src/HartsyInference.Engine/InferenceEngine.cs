@@ -10,6 +10,7 @@ using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Registry;
 
 namespace HartsyInference.Engine;
@@ -241,8 +242,10 @@ public sealed class InferenceEngine : IInferenceEngine
             throw NoCheckpoint(spec);
         }
 
-        // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity.
-        string key = $"recipe:{spec.LocalPath}|{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        ResolvedModelVariant? variant = ModelCapabilities.ResolveVariant(recipe.Variants, spec);
+        // LoRA, component overrides and the variant are baked into the loaded pipeline, so they are cache identity.
+        string key = $"recipe:{spec.LocalPath}|{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
             return cached;
 
@@ -252,11 +255,12 @@ public sealed class InferenceEngine : IInferenceEngine
         // (benchmarks/results/2026-07-23_swarm_stepcache_verification.md §engine bugs).
         EvictOtherCheckpointPipelines(spec.LocalPath, alsoKeepPath);
 
-        IArchitectureRecipe recipe = ResolveRecipe(spec);
         IBackend backend = EnsureBackend();
         RecipeContext context = new RecipeContext
         {
             CheckpointPath = spec.LocalPath,
+            Variant = variant,
+            VariantHints = ModelCapabilities.HintsFor(spec),
             Backend = backend,
             TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
             VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
@@ -373,22 +377,15 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>The composition features the recipe for <paramref name="spec"/> declares it can apply. Resolved through
     /// the same family-id + registry lookup <see cref="GetOrConstructRecipe"/> uses, so the answer can never disagree
     /// with the pipeline that will actually run.</summary>
-    internal ImageFeatures SupportedFeatures(ModelSpec spec)
-    {
-        IArchitectureRecipe recipe = ResolveRecipe(spec);
-        return recipe.Supports
-            | (AppliesWeighting(recipe.PromptWeighting) ? ImageFeatures.PromptWeighting : ImageFeatures.None);
-    }
+    internal ImageFeatures SupportedFeatures(ModelSpec spec) => ModelCapabilities.ImageFeaturesFor(ResolveRecipe(spec), spec);
 
     /// <summary>The input-image limits of the recipe for <paramref name="spec"/>.</summary>
     /// <remarks>Resolved through the same lookup as <see cref="SupportedFeatures"/>.</remarks>
-    internal ImageInputLimits ImageInputLimitsFor(ModelSpec spec) => ResolveRecipe(spec).InputLimits;
-
-    /// <summary>Whether a declared mode means the emphasis grammar must survive prompt flattening. The feature bit is
-    /// derived from the mode here rather than declared per recipe so the two can never disagree — a recipe that set the
-    /// bit without a mode would keep the parens and hand its encoder the digits as prose.</summary>
-    private static bool AppliesWeighting(Diffusion.Prompting.PromptWeightingMode mode) =>
-        mode != Diffusion.Prompting.PromptWeightingMode.None;
+    internal ImageInputLimits ImageInputLimitsFor(ModelSpec spec)
+    {
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        return recipe.InputLimitsFor(ModelCapabilities.ResolveVariant(recipe.Variants, spec));
+    }
 
     /// <summary>The weighting mechanism the recipe for <paramref name="spec"/> applies, resolved through the same
     /// registry lookup the construction path uses.</summary>
@@ -397,7 +394,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The video counterpart of <see cref="PromptWeightingFor"/>; an unregistered family weights nothing.</summary>
     internal static Diffusion.Prompting.PromptWeightingMode VideoPromptWeightingFor(ModelSpec spec) =>
-        VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec))?.PromptWeighting
+        VideoRecipeRegistry.Resolve(ModelCapabilities.VideoFamilyIdFor(spec))?.PromptWeighting
         ?? Diffusion.Prompting.PromptWeightingMode.None;
 
     /// <summary>The officially recommended defaults for <paramref name="spec"/>: the constructed pipeline's
@@ -407,60 +404,8 @@ public sealed class InferenceEngine : IInferenceEngine
     internal ImageDefaults DefaultsFor(ModelSpec spec, IRecipePipeline pipeline)
     {
         ArgumentNullException.ThrowIfNull(pipeline);
-        return pipeline.VariantDefaults ?? ResolveRecipe(spec).Defaults;
-    }
-
-    /// <summary>The officially recommended video defaults for <paramref name="spec"/>, resolved through the same
-    /// family-id + registry lookup <see cref="GetOrConstructVideoRecipe"/> uses.</summary>
-    internal static VideoDefaults VideoDefaultsFor(ModelSpec spec)
-    {
-        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
-        return recipe switch
-        {
-            null => VideoDefaults.Standard,
-            // Checkpoint-aware for the same reason SupportsFor is — see WanVideoRecipe.DefaultsFor.
-            Recipes.Video.WanVideoRecipe wan => wan.DefaultsFor(spec.LocalPath),
-            _ => recipe.Defaults,
-        };
-    }
-
-    /// <summary>Video-path family id: <see cref="ResolveFamilyId"/> plus checkpoint-aware remaps (currently only
-    /// LTX-2.5 distilled-by-filename). Video-only — image recipes carry no per-checkpoint contracts by name.</summary>
-    internal static string ResolveVideoFamilyId(ModelSpec spec)
-        => Recipes.Video.LtxVideo2DistilledRouting.RemapFamilyId(ResolveFamilyId(spec), spec.LocalPath);
-
-    /// <summary>The conditioning the video recipe for <paramref name="spec"/> declares it can apply. Resolved through
-    /// the same registry lookup the construction path uses, so it cannot disagree with the pipeline that will run.
-    /// Wan is checkpoint-aware: its conditioning variants share the family's compat classes and are detected by
-    /// header sniff, exactly like the construction-time delegation.</summary>
-    internal static VideoFeatures SupportedVideoFeatures(ModelSpec spec)
-    {
-        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
-        VideoFeatures declared = recipe switch
-        {
-            null => VideoFeatures.None,
-            Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(spec.LocalPath),
-            Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(spec.LocalPath),
-            _ => recipe.Supports,
-        };
-        return recipe is not null && AppliesWeighting(recipe.PromptWeighting)
-            ? declared | VideoFeatures.PromptWeighting
-            : declared;
-    }
-
-    /// <summary>The sampler/schedule selection the video recipe for <paramref name="spec"/> accepts. Resolved through
-    /// the same registry lookup the construction path uses. Wan is checkpoint-aware for the same reason
-    /// <see cref="SupportedVideoFeatures"/> is: Animate and Animate-2 share the family's compat classes and are only
-    /// detected by header sniff, so a query keyed on the compat class id alone would under-report.</summary>
-    internal static SamplingCapabilities.SamplingSupport SamplingSupportForVideo(ModelSpec spec)
-    {
-        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
-        return recipe switch
-        {
-            null => SamplingCapabilities.Unknown,
-            Recipes.Video.WanVideoRecipe wan => wan.SamplingSupportFor(spec.LocalPath),
-            _ => SamplingCapabilities.ForVideo(ResolveVideoFamilyId(spec)),
-        };
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        return pipeline.VariantDefaults ?? recipe.DefaultsFor(ModelCapabilities.ResolveVariant(recipe.Variants, spec));
     }
 
     /// <summary>The family id (catalog slug) that <paramref name="spec"/> resolves to, for diagnostics.</summary>
@@ -488,19 +433,19 @@ public sealed class InferenceEngine : IInferenceEngine
 
         // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity —
         // the same rule the image path already follows. Without this a LoRA request reuses the un-merged pipeline.
+        string familyId = ModelCapabilities.VideoFamilyIdFor(spec);
+        (IVideoRecipe? resolvedRecipe, ResolvedModelVariant? variant) = ModelCapabilities.ResolveVideo(spec);
+        IVideoRecipe recipe = resolvedRecipe
+            ?? throw new NotSupportedException(
+                $"Video family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
+                $"Currently drivable: {string.Join(", ", VideoRecipeRegistry.RegisteredNames)}.");
         string planKey = plan is null ? "" : plan.CacheIdentity;
-        string key = $"video-recipe:{spec.LocalPath}|{planKey}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
+        string key = $"video-recipe:{spec.LocalPath}|{planKey}{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
         if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
             return cached;
 
         // Same switch-pressure eviction as the image path — video DiTs are the largest residents of all.
         EvictOtherCheckpointPipelines(spec.LocalPath);
-
-        string familyId = ResolveVideoFamilyId(spec);
-        IVideoRecipe recipe = VideoRecipeRegistry.Resolve(familyId)
-            ?? throw new NotSupportedException(
-                $"Video family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
-                $"Currently drivable: {string.Join(", ", VideoRecipeRegistry.RegisteredNames)}.");
 
         IBackend backend = EnsureBackend();
         RecipeContext context = new RecipeContext
@@ -515,6 +460,8 @@ public sealed class InferenceEngine : IInferenceEngine
             CpBackends = EnsureCpBackends(),
             Components = request?.Components,
             Loras = request?.Loras,
+            Variant = variant,
+            VariantHints = ModelCapabilities.HintsFor(spec),
             VideoPlan = plan,
             VideoSwapModelPath = string.IsNullOrWhiteSpace(request?.VideoSwapModel) ? null : request!.VideoSwapModel,
             VideoSwapPercent = request?.VideoSwapPercent,
@@ -541,7 +488,8 @@ public sealed class InferenceEngine : IInferenceEngine
         // A registered recipe name is a valid answer even with no catalog entry behind it. The video error text
         // lists those names as "currently drivable", and several (the Wan compat classes) exist only there — so
         // without this, -m wan-22-5b was advertised, accepted, and then reported as family 'unknown'.
-        string requested = (spec.Requested ?? "").Trim();
+        // A family:variant selector names its family by the part before the colon; the variant is resolved separately.
+        string requested = ModelSelector.Parse(spec.Requested).Id;
         if (requested.Length > 0
             && (VideoRecipeRegistry.Resolve(requested) is not null || RecipeRegistry.Resolve(requested) is not null))
         {

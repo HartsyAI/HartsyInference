@@ -14,6 +14,8 @@ using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Variants;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Microsoft Mage-Flow recipe (4B NR-MMDiT, arXiv 2607.19064). The transformer is a dual-stream MMDiT with diffusers-standard keys, so it reuses <see cref="QwenImageTransformer"/> with the <see cref="QwenImageConfig.MageFlow"/> preset (12 blocks, patch-1, 128-ch, image-only RoPE). The Qwen3-VL-4B text encoder (<see cref="SideModels.Qwen3VL_4B"/>, already fp8) and the bespoke one-step <see cref="MageVaeDecoder"/> (<see cref="SideModels.MageVae"/>) resolve as side models when not bundled. Base vs Edit-Turbo is auto-detected from the checkpoint filename. Drives through <see cref="MageFlowRecipePipeline"/>.</summary>
@@ -49,12 +51,17 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
     public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
     public ImageDefaults Defaults => FamilyDefaults;
 
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => MageFlowVariants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) => MageFlowVariants.IsTurbo(variant) ? TurboDefaults : FamilyDefaults;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         string fileName = Path.GetFileName(context.CheckpointPath);
-        string lower = fileName.ToLowerInvariant();
-        bool isTurbo = lower.Contains("turbo") || lower.Contains("tdm") || lower.Contains("distill");
-        bool isEdit = lower.Contains("edit");
+        ResolvedModelVariant variant = context.ResolveVariant(MageFlowVariants.Catalog);
+        bool isTurbo = MageFlowVariants.IsTurbo(variant);
 
         List<IDisposable> loaders = new();
         IDisposable? checkpoint = null;
@@ -66,7 +73,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> ditWeights = Remap(source.Weights, CheckpointConvertUtils.StripTransformerPrefix);
             if (ditWeights.Count == 0)
                 throw new InvalidOperationException($"Mage-Flow checkpoint '{fileName}' contains no transformer weights (looked for transformer_blocks.* / img_in.*).");
-            Logs.Info($"[MageFlowRecipe] Parsed DiT: {ditWeights.Count} tensors ({(isEdit ? "edit" : "t2i")}{(isTurbo ? ", turbo" : "")}).");
+            Logs.Info($"[MageFlowRecipe] Parsed DiT: {ditWeights.Count} tensors ({variant.Variant.DisplayName}).");
 
             QwenImageConfig config = QwenImageConfig.MageFlow;
             QwenImageTransformer transformer = new QwenImageTransformer(config);

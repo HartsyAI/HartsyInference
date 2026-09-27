@@ -2,6 +2,7 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Planning;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes;
 
@@ -153,6 +154,13 @@ public sealed record RecipeContext
         }
     }
 
+    /// <summary>The variant the checkpoint resolved to (see <see cref="ModelVariantResolver"/>); null for a family
+    /// that declares no variants. Part of the pipeline cache key, so a re-classed model never reuses a stale pipeline.</summary>
+    public ResolvedModelVariant? Variant { get; init; }
+
+    /// <summary>The caller's variant hints, strongest first, for recipes that resolve a nested catalog of their own.</summary>
+    public IReadOnlyList<string?> VariantHints { get; init; } = [];
+
     /// <summary>Optional swappable-component overrides; null keeps the recipe's defaults.</summary>
     public ComponentOverrides? Components { get; init; }
 
@@ -169,6 +177,16 @@ public sealed record RecipeContext
 
     /// <summary>Fraction (0..1) of steps run by the swap model; null uses the family's official boundary.</summary>
     public double? VideoSwapPercent { get; init; }
+
+    /// <summary><see cref="Variant"/> when it belongs to <paramref name="catalog"/>; otherwise resolves the checkpoint
+    /// against it, so a recipe delegated to by another family (Wan → Wan-Animate-2) still gets its own variant.</summary>
+    public ResolvedModelVariant ResolveVariant(ModelVariantCatalog catalog)
+    {
+        ArgumentNullException.ThrowIfNull(catalog);
+        return Variant is not null && string.Equals(Variant.FamilyId, catalog.FamilyId, StringComparison.Ordinal)
+            ? Variant
+            : ModelVariantResolver.Resolve(catalog, new ModelVariantEvidence(CheckpointPath, VariantHints));
+    }
 
     /// <summary>The VRAM policy this construction runs under — the backend's, already refined by the request's
     /// overrides. Recipes read this instead of resolving the environment themselves.</summary>

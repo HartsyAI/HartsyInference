@@ -1,3 +1,5 @@
+using HartsyInference.Engine.Variants;
+
 namespace HartsyInference.Engine.Recipes;
 
 /// <summary>One video architecture family's construction recipe — the video counterpart of
@@ -29,6 +31,19 @@ public interface IVideoRecipe
     /// <summary>This family's officially recommended sampling settings, used to fill the request tunables the caller
     /// left null; the generic fallback keeps a recipe that has not declared its own numbers working.</summary>
     VideoDefaults Defaults => VideoDefaults.Standard;
+
+    /// <summary>The variants this family ships whose weights alone may not tell them apart; null when it has one.</summary>
+    ModelVariantCatalog? Variants => null;
+
+    /// <summary>The conditioning <paramref name="variant"/> of this family applies; the default is the family-level <see cref="Supports"/>.</summary>
+    VideoFeatures SupportsFor(ResolvedModelVariant? variant) => Supports;
+
+    /// <summary>The official defaults for <paramref name="variant"/>; the default is the family-level <see cref="Defaults"/>.</summary>
+    VideoDefaults DefaultsFor(ResolvedModelVariant? variant) => Defaults;
+
+    /// <summary>The sampler/schedule selection <paramref name="variant"/> accepts; the default is the family table entry.</summary>
+    SamplingCapabilities.SamplingSupport SamplingSupportFor(string familyId, ResolvedModelVariant? variant) =>
+        SamplingCapabilities.ForVideo(familyId);
 
     /// <summary>What this family's activations cost at a given geometry, read from the checkpoint header without
     /// loading weights; the default describes nothing and the memory estimate falls back to a generic allowance.</summary>

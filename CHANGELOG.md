@@ -6,6 +6,31 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.190
+
+- **One resolver decides which variant a checkpoint is.** Some builds share an architecture but need different
+  contracts: Qwen-Image base/Edit/Edit-Plus, Z-Image Base/Turbo, LTX-2.5 dev/distilled, Mage-Flow, Krea 2 and Lens
+  Turbo, the Wan VACE/Animate/S2V/TI2V-5B task variants, and Wan-Animate-2's distillation build. Each family now
+  declares these once as a `ModelVariantCatalog` instead of sniffing file names by hand. `ModelVariantResolver`
+  checks, in order: the weights; the caller's hint; `modelspec.architecture` / `hartsy.model_id`; whole-token file
+  names (logged as a guess); and finally the default.
+  - The caller's hint is the new `ModelSpec.Variant` (SwarmUI's model class) or a `family:variant` selector such as
+    `-m qwen-image:edit`.
+  - The result feeds construction (`RecipeContext.Variant`), the pipeline cache key, `SupportsFor` / `DefaultsFor` /
+    `InputLimitsFor`, and the new public `ModelCapabilities` queries hosts call.
+  - `CheckpointProbe` replaces the video-only header peeks and adds tensor shapes.
+- **Qwen-Image knows base from Edit.** The base no longer declares `RefEdit`, refuses reference images by name, and
+  skips loading the vision tower. On an Edit build, Auto init-image mode edits rather than denoises. Edit v1 gets
+  ComfyUI's `TextEncodeQwenImageEdit` template (one unlabelled reference, ~1 MP vision copy) instead of the Plus
+  `Picture N:` form, and the input limits follow the variant (1 for v1, 3 for Plus). Repacks are stamped
+  `qwen-image-edit` / `qwen-image-edit-plus`.
+- File-name detection is whole-token now, so `credit` no longer reads as `edit`. Wan-Animate-2 distillation takes its
+  10-step / CFG 1.0 defaults when a hint or metadata, not only a file name, identifies it.
+- Removed: `LtxVideo2DistilledRouting`, `InferenceEngine.ResolveVideoFamilyId` / `VideoDefaultsFor` /
+  `SupportedVideoFeatures` / `SamplingSupportForVideo` (use `ModelCapabilities`), `WanVideoRecipe.SupportsFor(path)`
+  and its siblings (use the variant overloads), `WanAnimate2Transformer.ResolveLogScale`, and
+  `ZImageCheckpointConverter.DetectVariantFromFileName` / `CheckpointVariant`.
+
 ## alpha.189
 
 - **Image families declare how many input images they read, and the gate refuses past it.** A fourth reference on

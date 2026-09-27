@@ -12,6 +12,8 @@ using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 
 using HartsyInference.Engine.Features;
 
+using HartsyInference.Engine.Variants;
+
 namespace HartsyInference.Engine.Recipes.Video;
 
 /// <summary>Wan-Video recipe (Wan-AI, umT5-conditioned text/image-to-video) and the entry point for the whole Wan family: the SwarmUI compat classes <c>wan-22-5b</c> / <c>wan-21-1_3b</c> / <c>wan-21-14b</c> are shared by the plain T2V/I2V backbone and the VACE / Animate / S2V conditioning variants, so — exactly like the extension's <c>WanModelVariants.Detect</c> — this recipe sniffs the checkpoint header and hands off to <see cref="WanVaceRecipe"/>, <see cref="WanAnimateRecipe"/>, or <see cref="WanS2VRecipe"/> when it sees their signature weights. Lifted from the SwarmUI backend's <c>WanVideoLoader</c>: umT5-XXL (<see cref="SideModels.Umt5Xxl"/>), the z=48 Wan2.2 VAE (<see cref="SideModels.Wan22Vae"/>) or z=16 Wan2.1 VAE (<see cref="SideModels.Wan21Vae"/>), and CLIP-ViT-H (<see cref="SideModels.ClipVisionH14"/>) for Wan2.1 I2V.</summary>
@@ -58,11 +60,6 @@ public sealed class WanVideoRecipe : IVideoRecipe
         (_familyId is Wan22_5BCompatClassId ? VideoFeatures.InitImage | VideoFeatures.EndFrame : VideoFeatures.InitImage)
         | VideoFeatures.Lora;
 
-    /// <summary>The features for a CONCRETE checkpoint: VACE/Animate/S2V share Wan's compat classes and are only detected by sniffing the header, so the family-level <see cref="Supports"/> alone would wrongly refuse (e.g.) a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Falls back to the family answer when the file cannot be peeked.</summary>
-    /// <remarks>Under the generic <c>"wan"</c> slug a plain backbone gains <see cref="VideoFeatures.EndFrame"/> when
-    /// <see cref="IsTi2V5BCheckpoint"/> recognizes the file; anything it cannot recognize stays init-image only.
-    /// <para>Does not tell a <c>wan-21-14b</c> T2V checkpoint from a concat-I2V one, so a T2V-14B still claims the
-    /// init image; the concat pipeline refuses a missing init image itself, and the T2V side is unverified.</para></remarks>
     /// <inheritdoc/>
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>: Wan's tokenizer chain reaches
     /// <c>UMT5XXlTokenizer</c>, which sets no <c>disable_weights</c>, so the weights survive tokenization and
@@ -72,82 +69,46 @@ public sealed class WanVideoRecipe : IVideoRecipe
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
     /// <inheritdoc/>
-    public VideoFeatures SupportsFor(string? checkpointPath)
-    {
-        if (string.IsNullOrWhiteSpace(checkpointPath))
-        {
-            return Supports;
-        }
-        try
-        {
-            return DetectVariant(checkpointPath) switch
-            {
-                WanVariant.Vace => new WanVaceRecipe(_familyId).Supports,
-                WanVariant.Animate => new WanAnimateRecipe().Supports,
-                WanVariant.Animate2 => new WanAnimate2Recipe().Supports,
-                WanVariant.S2V => new WanS2VRecipe().Supports,
-                _ when _familyId is not (Wan22_5BCompatClassId or Wan21_1_3BCompatClassId or Wan21_14BCompatClassId)
-                    && IsTi2V5BCheckpoint(checkpointPath) => Supports | VideoFeatures.EndFrame,
-                _ => Supports,
-            };
-        }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
-        {
-            Logs.Warning($"[WanVideoRecipe] Could not peek '{checkpointPath}' for variant-aware features; using family defaults. {ex.Message}");
-            return Supports;
-        }
-    }
+    public ModelVariantCatalog? Variants => WanVideoVariants.Catalog;
 
-    /// <summary>The sampling defaults for a CONCRETE checkpoint. Same reason as <see cref="SupportsFor"/>: the variants share Wan's compat classes, so a VACE/Animate/S2V checkpoint resolves under <c>wan-21-14b</c> and would otherwise be handed the plain-Wan defaults — Animate's 20 steps at guidance 1.0 never applied, and the request fell through to <c>WanVideoConfig</c>'s 50/5.0 instead.</summary>
-    public VideoDefaults DefaultsFor(string? checkpointPath)
+    /// <inheritdoc/>
+    /// <remarks>The conditioning variants share Wan's compat classes, so the family-level <see cref="Supports"/> alone
+    /// would wrongly refuse (e.g.) a driving video on an Animate checkpoint loaded under <c>wan-21-14b</c>. Under the
+    /// generic <c>"wan"</c> slug a TI2V-5B backbone also gains <see cref="VideoFeatures.EndFrame"/>.
+    /// <para>Does not tell a <c>wan-21-14b</c> T2V checkpoint from a concat-I2V one, so a T2V-14B still claims the
+    /// init image; the concat pipeline refuses a missing init image itself, and the T2V side is unverified.</para></remarks>
+    public VideoFeatures SupportsFor(ResolvedModelVariant? variant) => variant?.Id switch
     {
-        if (string.IsNullOrWhiteSpace(checkpointPath))
-        {
-            return Defaults;
-        }
-        try
-        {
-            return DetectVariant(checkpointPath) switch
-            {
-                WanVariant.Vace => new WanVaceRecipe(_familyId).Defaults,
-                WanVariant.Animate => new WanAnimateRecipe().Defaults,
-                WanVariant.Animate2 => new WanAnimate2Recipe().Defaults,
-                WanVariant.S2V => new WanS2VRecipe().Defaults,
-                _ => Defaults,
-            };
-        }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
-        {
-            Logs.Warning($"[WanVideoRecipe] Could not peek '{checkpointPath}' for variant-aware defaults; using family defaults. {ex.Message}");
-            return Defaults;
-        }
-    }
-    /// <summary>The sampler/schedule selection a CONCRETE checkpoint accepts. Same reason as <see cref="SupportsFor"/>
-    /// and <see cref="DefaultsFor"/>: Animate and Animate-2 share <c>wan-21-14b</c> with the solver-owned plain
-    /// backbone, so a host querying capabilities under the compat class id alone would report no selectable
-    /// sampler for a checkpoint that, once constructed, accepts UniPC/DPM++2M. Vace and S2V do not narrow their own
-    /// sampling support (both stay solver-owned like the family), so only Animate and Animate2 are special-cased.</summary>
-    public SamplingCapabilities.SamplingSupport SamplingSupportFor(string? checkpointPath)
+        "vace" => new WanVaceRecipe(_familyId).Supports,
+        "animate" => new WanAnimateRecipe().Supports,
+        "animate2" => new WanAnimate2Recipe().Supports,
+        "s2v" => new WanS2VRecipe().Supports,
+        "ti2v-5b" when _familyId is not (Wan22_5BCompatClassId or Wan21_1_3BCompatClassId or Wan21_14BCompatClassId)
+            => Supports | VideoFeatures.EndFrame,
+        _ => Supports,
+    };
+
+    /// <inheritdoc/>
+    /// <remarks>Same reason as <see cref="SupportsFor"/>: a VACE/Animate/S2V checkpoint resolves under
+    /// <c>wan-21-14b</c> and would otherwise be handed the plain-Wan defaults.</remarks>
+    public VideoDefaults DefaultsFor(ResolvedModelVariant? variant) => variant?.Id switch
     {
-        if (string.IsNullOrWhiteSpace(checkpointPath))
-        {
-            return SamplingCapabilities.ForVideo(_familyId);
-        }
-        try
-        {
-            return DetectVariant(checkpointPath) switch
-            {
-                WanVariant.Animate => SamplingCapabilities.ForVideo("wan-animate"),
-                WanVariant.Animate2 => SamplingCapabilities.ForVideo("wan-animate-2"),
-                _ => SamplingCapabilities.ForVideo(_familyId),
-            };
-        }
-        catch (Exception ex) when (ex is IOException or InvalidDataException or UnauthorizedAccessException)
-        {
-            Logs.Warning($"[WanVideoRecipe] Could not peek '{checkpointPath}' for variant-aware sampling support; using family defaults. {ex.Message}");
-            return SamplingCapabilities.ForVideo(_familyId);
-        }
-    }
+        "vace" => new WanVaceRecipe(_familyId).Defaults,
+        "animate" => new WanAnimateRecipe().Defaults,
+        "animate2" => new WanAnimate2Recipe().Defaults,
+        "s2v" => new WanS2VRecipe().Defaults,
+        _ => Defaults,
+    };
+
+    /// <inheritdoc/>
+    /// <remarks>Animate and Animate-2 share <c>wan-21-14b</c> with the solver-owned plain backbone but accept
+    /// UniPC/DPM++2M once constructed; Vace and S2V stay solver-owned like the family.</remarks>
+    public SamplingCapabilities.SamplingSupport SamplingSupportFor(string familyId, ResolvedModelVariant? variant) => variant?.Id switch
+    {
+        "animate" => SamplingCapabilities.ForVideo("wan-animate"),
+        "animate2" => SamplingCapabilities.ForVideo("wan-animate-2"),
+        _ => SamplingCapabilities.ForVideo(_familyId),
+    };
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, _familyId, StringComparison.OrdinalIgnoreCase);
@@ -222,22 +183,22 @@ public sealed class WanVideoRecipe : IVideoRecipe
     public IVideoRecipePipeline Construct(RecipeContext context)
     {
         // TODO(E-IMG-4/5): VideoRequest.Components overrides for the umT5 / VAE / CLIP-Vision picks are deferred.
-        WanVariant variant = DetectVariant(context.CheckpointPath);
-        if (variant != WanVariant.Base)
+        ResolvedModelVariant variant = context.ResolveVariant(WanVideoVariants.Catalog);
+        if (!variant.Is(WanVideoVariants.Base) && !variant.Is(WanVideoVariants.Ti2V5B))
         {
             if (context.VideoSwapModelPath is not null)
             {
                 throw new NotSupportedException(
-                    $"Video Swap Model is only supported on plain Wan T2V/I2V checkpoints — the loaded checkpoint is a Wan '{variant}' variant.");
+                    $"Video Swap Model is only supported on plain Wan T2V/I2V checkpoints — the loaded checkpoint is a {variant.Variant.DisplayName} variant.");
             }
-            Logs.Info($"[WanVideoRecipe] Checkpoint is a Wan '{variant}' variant — delegating to its recipe.");
-            return variant switch
+            Logs.Info($"[WanVideoRecipe] Checkpoint is a {variant.Variant.DisplayName} variant — delegating to its recipe.");
+            return variant.Id switch
             {
-                WanVariant.Vace => new WanVaceRecipe(_familyId).Construct(context),
-                WanVariant.Animate => new WanAnimateRecipe().Construct(context),
-                WanVariant.Animate2 => new WanAnimate2Recipe().Construct(context),
-                WanVariant.S2V => new WanS2VRecipe().Construct(context),
-                _ => throw new InvalidOperationException($"Unhandled Wan variant '{variant}'."),
+                "vace" => new WanVaceRecipe(_familyId).Construct(context),
+                "animate" => new WanAnimateRecipe().Construct(context),
+                "animate2" => new WanAnimate2Recipe().Construct(context),
+                "s2v" => new WanS2VRecipe().Construct(context),
+                _ => throw new InvalidOperationException($"Unhandled Wan variant '{variant.Id}'."),
             };
         }
         return ConstructBase(context, _familyId);
@@ -301,11 +262,11 @@ public sealed class WanVideoRecipe : IVideoRecipe
             {
                 string swapPath = File.Exists(context.VideoSwapModelPath) ? context.VideoSwapModelPath
                     : ModelFileLocator.Require(context.VideoSwapModelPath, "Video swap model", "Stable-Diffusion", "diffusion_models", "unet");
-                WanVariant swapVariant = DetectVariant(swapPath);
-                if (swapVariant != WanVariant.Base)
+                ResolvedModelVariant swapVariant = ModelVariantResolver.Resolve(WanVideoVariants.Catalog, new ModelVariantEvidence(swapPath, []));
+                if (!swapVariant.Is(WanVideoVariants.Base))
                 {
                     throw new NotSupportedException(
-                        $"Wan low-noise expert '{swapPath}' is a Wan '{swapVariant}' variant — the Wan 2.2 expert pair needs plain T2V/I2V checkpoints.");
+                        $"Wan low-noise expert '{swapPath}' is a {swapVariant.Variant.DisplayName} variant — the Wan 2.2 expert pair needs plain T2V/I2V checkpoints.");
                 }
                 Logs.Info($"[WanVideoRecipe] Loading Wan low-noise expert: {swapPath} (boundary {config.BoundaryRatio:0.###}).");
                 CheckpointSource lowSource = CheckpointSource.Open(swapPath);
@@ -402,98 +363,5 @@ public sealed class WanVideoRecipe : IVideoRecipe
         WanVideoConfig detected = WanConfigDetector.Detect(weights);
         Logs.Info($"[WanVideoRecipe] Weight-derived config: {WanConfigDetector.Describe(detected)}");
         return detected;
-    }
-
-    /// <summary>True when <paramref name="checkpointPath"/> is a Wan2.2 TI2V-5B transformer: its patch embedding takes the
-    /// z=48 latents of the Wan2.2 VAE, which no other Wan size uses (1.3B and 14B read 16, concat-I2V 36). Read from the
-    /// header's shapes only, so it costs no weight I/O; a folder or an unrecognized layout answers false, which keeps the
-    /// end frame refused rather than guessed.</summary>
-    internal static bool IsTi2V5BCheckpoint(string checkpointPath)
-    {
-        if (!File.Exists(checkpointPath))
-        {
-            return false;
-        }
-        CheckpointHeader header;
-        try
-        {
-            header = CheckpointHeader.Read(checkpointPath);
-        }
-        catch (Exception ex)
-        {
-            // A capability query must not throw on a damaged or unmappable file; unknown means no end frame.
-            Logs.Warning($"[WanVideoRecipe] Could not read '{checkpointPath}' to size it; not claiming an end frame. {ex.Message}");
-            return false;
-        }
-        int latentChannels = WanVideoConfig.Ti2V5B.InChannels;
-        foreach (KeyValuePair<string, SafeTensorDescriptor> entry in header.Descriptors)
-        {
-            // The plain embedding only: VACE and Animate carry their own patch embeddings with other channel counts.
-            string key = entry.Key;
-            if (key.EndsWith("patch_embedding.weight", StringComparison.Ordinal)
-                && !key.Contains("vace_", StringComparison.Ordinal)
-                && !key.Contains("pose_", StringComparison.Ordinal)
-                && entry.Value.Shape.Rank == 5)
-            {
-                return entry.Value.Shape[1] == latentChannels;
-            }
-        }
-        return false;
-    }
-
-    /// <summary>The Wan conditioning variants that share a compat class.</summary>
-    internal enum WanVariant
-    {
-        /// <summary>Plain T2V / I2V / TI2V backbone.</summary>
-        Base,
-
-        /// <summary>VACE control branch (<c>vace_patch_embedding</c> / <c>vace_blocks.*</c>).</summary>
-        Vace,
-
-        /// <summary>Wan-Animate pose + face pathway.</summary>
-        Animate,
-
-        /// <summary>Wan-Animate-2 driving-video stream. Carries no module of its own, so it is detectable only from the file's <c>__metadata__</c>.</summary>
-        Animate2,
-
-        /// <summary>Wan2.2-S2V audio injector.</summary>
-        S2V,
-    }
-
-    /// <summary>Classifies a Wan checkpoint from its header keys (safetensors or GGUF). The extension took VACE from SwarmUI's model-class id; with no host classifier here the VACE branch sniffs its own signature weights, which are as unique to the variant as the Animate/S2V ones.</summary>
-    internal static WanVariant DetectVariant(string checkpointPath)
-    {
-        IReadOnlySet<string> keys = VideoRecipeUtils.PeekCheckpointKeys(checkpointPath);
-        // First, and by metadata: Animate-2's weights are indistinguishable from a plain I2V-14B's, so every
-        // key-based arm below would classify it as Base. A GGUF repack carries no __metadata__ at all, so an
-        // Animate-2 GGUF cannot be recognised and loads as the I2V-14B backbone it is key-for-key identical to.
-        if (WanVideoCheckpointConverter.IsAnimate2Metadata(VideoRecipeUtils.PeekCheckpointMetadata(checkpointPath)))
-        {
-            return WanVariant.Animate2;
-        }
-        foreach (string key in keys)
-        {
-            if (key.Contains("vace_patch_embedding", StringComparison.Ordinal) || key.Contains("vace_blocks", StringComparison.Ordinal))
-            {
-                return WanVariant.Vace;
-            }
-        }
-        foreach (string key in keys)
-        {
-            if (key.Contains("pose_patch_embedding", StringComparison.Ordinal)
-                || key.Contains("motion_encoder", StringComparison.Ordinal)
-                || key.Contains("face_adapter", StringComparison.Ordinal))
-            {
-                return WanVariant.Animate;
-            }
-        }
-        foreach (string key in keys)
-        {
-            if (key.Contains("audio_encoder", StringComparison.Ordinal) || key.Contains("audio_injector", StringComparison.Ordinal))
-            {
-                return WanVariant.S2V;
-            }
-        }
-        return WanVariant.Base;
     }
 }
