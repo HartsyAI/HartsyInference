@@ -133,14 +133,27 @@ public sealed class ImageInputLimitsTests
         Assert.Null(LimitsOf("mage-flow").Violation("mage-flow", Request(init: true, references: 0)));
     }
 
-    /// <summary>End to end through the service gate: the refusal is thrown before any weights are touched.</summary>
+    /// <summary>End to end through the service gate: the refusal is thrown before any weights are touched. The Plus
+    /// build is named explicitly, since the three-image ceiling is its template's.</summary>
     [Fact]
     public async Task ImagesService_RefusesExtraReferences_BeforeLoading()
     {
         using InferenceEngine engine = new InferenceEngine("cpu");
+        ModelSpec spec = Spec("qwen-image") with { Variant = "qwen-image-edit-plus" };
         NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
-            () => engine.Images.GenerateAsync(Spec("qwen-image"), Request(init: true, references: 3)));
+            () => engine.Images.GenerateAsync(spec, Request(init: true, references: 3)));
         Assert.Equal("Model family 'qwen-image' takes at most 3 input images; 4 were supplied.", error.Message);
+    }
+
+    /// <summary>A checkpoint nothing identifies as an Edit build is the text-to-image base, which has no reference
+    /// path: it is refused on the feature, before any weights load.</summary>
+    [Fact]
+    public async Task ImagesService_BaseQwenImageWithReferences_IsRefusedOnTheFeature()
+    {
+        using InferenceEngine engine = new InferenceEngine("cpu");
+        NotSupportedException error = await Assert.ThrowsAsync<NotSupportedException>(
+            () => engine.Images.GenerateAsync(Spec("qwen-image"), Request(init: true, references: 1)));
+        Assert.Equal("Model family 'qwen-image' does not support: RefEdit.", error.Message);
     }
 
     [Fact]
