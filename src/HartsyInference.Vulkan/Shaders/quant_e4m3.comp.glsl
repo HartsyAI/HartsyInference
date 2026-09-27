@@ -53,11 +53,16 @@ uint toE4M3(float f) {
     return sign | uint(qs);
 }
 
+shared float gRs;
+
 void main() {
+    // The exact reciprocal is computed once per workgroup, not per word.
+    if (gl_LocalInvocationIndex == 0u) gRs = divRn(1.0, pc.staticScale != 0.0 ? pc.staticScale : scale[pc.scaleIndex]);
+    barrier();
     uint w = gl_GlobalInvocationID.x;
     if (w >= pc.paddedWords) return;
     if (w >= pc.words) { q[w] = 0u; return; }
-    float rs = divRn(1.0, pc.staticScale != 0.0 ? pc.staticScale : scale[pc.scaleIndex]);
+    float rs = gRs;
     uint e = w * 4u;
     q[w] = toE4M3(float(x[e]) * rs) | (toE4M3(float(x[e + 1u]) * rs) << 8)
          | (toE4M3(float(x[e + 2u]) * rs) << 16) | (toE4M3(float(x[e + 3u]) * rs) << 24);

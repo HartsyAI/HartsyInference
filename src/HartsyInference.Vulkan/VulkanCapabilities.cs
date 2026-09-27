@@ -153,6 +153,22 @@ public sealed class VulkanCapabilities
     /// <summary>Why <see cref="HasFloat8CooperativeMatrix"/> is false, in words a user can act on; null when it is true.</summary>
     public string? Fp8CoopMatUnavailableReason { get; init; }
 
+    /// <summary>Whether <c>VK_NV_cooperative_matrix2</c> lists an E4M3 × E4M3 → F32 workgroup-scope configuration (and 8-bit
+    /// storage buffers are offered), which <c>matmul_fp8_coopmat2</c> runs; its sizes are the <c>Fp8CoopMat2*</c> fields.</summary>
+    public bool HasFp8CoopMat2 { get; init; }
+
+    /// <summary>M granularity of the E4M3 coopmat2 configuration; 0 without one.</summary>
+    public uint Fp8CoopMat2MGranularity { get; init; }
+
+    /// <summary>N granularity of the E4M3 coopmat2 configuration; 0 without one.</summary>
+    public uint Fp8CoopMat2NGranularity { get; init; }
+
+    /// <summary>K granularity of the E4M3 coopmat2 configuration; 0 without one.</summary>
+    public uint Fp8CoopMat2KGranularity { get; init; }
+
+    /// <summary>Workgroup invocations the E4M3 coopmat2 configuration requires; 0 without one.</summary>
+    public uint Fp8CoopMat2WorkgroupInvocations { get; init; }
+
     /// <summary>Fragment rows of the E4M3 cooperative-matrix configuration; 0 without one.</summary>
     public required uint Fp8CoopMatM { get; init; }
 

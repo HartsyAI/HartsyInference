@@ -884,6 +884,8 @@ public sealed class VulkanBackendSmokeTests
         if (!VulkanAvailable()) return;
         using VulkanBackend backend = new();
         if (!backend.Capabilities.SupportsF16) return;
+        // This checks the F16-cast path's scale folding per element; the fp8 Linear quantizes the activation, checked below.
+        backend.EnableFp8Linear = false;
 
         Tensor input = new(new TensorShape(M, K), DType.F16);
         Tensor weightF32 = new(new TensorShape(N, K), DType.F32);
@@ -924,6 +926,28 @@ public sealed class VulkanBackendSmokeTests
             }
         }
         Assert.True(maxRel < 0.05f, $"FP8 Linear (scale={scale}) maxRelErr {maxRel:P2} too high — suggests the scale factor isn't applied exactly once.");
+
+        // The fp8 Linear: an E4M3 activation is within a few percent of the output's range, not of each element; a scale
+        // applied twice or not at all would be off by 6.7x or 0.002x everywhere.
+        if (backend.Vk.HasFloat8CooperativeMatrix)
+        {
+            backend.EnableFp8Linear = true;
+            using Tensor fp8Out = new(new TensorShape(M, N), DType.F16);
+            backend.Linear(fp8Out, input, weightFp8, null);
+            ReadOnlySpan<Half> fS = fp8Out.AsReadOnlySpan<Half>();
+            float maxErr = 0f, maxAbs = 0f;
+            for (int m = 0; m < M; m++)
+            {
+                for (int n = 0; n < N; n++)
+                {
+                    float acc = 0;
+                    for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wRef[n * K + k];
+                    maxErr = MathF.Max(maxErr, MathF.Abs((float)fS[m * N + n] - acc));
+                    maxAbs = MathF.Max(maxAbs, MathF.Abs(acc));
+                }
+            }
+            Assert.True(maxErr / maxAbs < 0.05f, $"fp8 Linear (scale={scale}) error {maxErr / maxAbs:P2} of the output range.");
+        }
 
         input.Dispose(); weightF32.Dispose(); weightFp8.Dispose(); weightF16Ref.Dispose(); output.Dispose();
     }
@@ -1019,6 +1043,8 @@ public sealed class VulkanBackendSmokeTests
         using VulkanBackend backend = new();
         if (!backend.Capabilities.SupportsF16) return;
         backend.CacheWeightCasts = false;
+        // The per-element check below is the F16-cast path's; the fp8 Linear's activation error is checked against the range.
+        backend.EnableFp8Linear = false;
 
         const int M = 4108, K = 6144, N = 16384;
         const float scale = 0.00166f;   // Krea2's actual ff.gate scale magnitude
