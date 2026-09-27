@@ -24,6 +24,12 @@ stable release will require. Dates are UTC.
 - **coopmat2 GEMM tiles.** Large products run on 128×256 tiles. Interior tiles with 8-element-aligned strides load
   unclamped, unrolled eight blocks deep, and workgroups walk eight tile rows per column band so B stays in L2. On
   Krea2 shapes that is 125–140 TFLOPS, against cuBLAS's 155–167 with F32 accumulation.
+- **SDXL on Vulkan now matches CUDA** (SSIM 0.999 at 1024², was 0.57). Vulkan's `BroadcastAdd` read row 0 of a
+  `[B, C]` bias for every batch item, so the conditional half of each CFG batch got the unconditional half's
+  ADM-conditioned time embedding. It now reads each item's own row, and a `[C]` bias is still shared.
+- **Flux.2 generations no longer fail after the image is made.** `Flux2RecipePipeline.Dispose` iterated its
+  `IDisposable` loaders as `SafeTensorsLoader`, which threw `InvalidCastException` at teardown once the text encoder
+  opened through `CheckpointSource`.
 - `diagnostics.vkProfileGpu` times every dispatch with timestamp queries and prints GPU time per op and per kernel,
   plus blocking host waits by call chain. The host-wall profile charged a queue stall to whichever op was waiting.
 - Krea2 Turbo at 1024², 8 steps, RTX 4090: 1.06 s/step on Vulkan, against 0.83 s on CUDA with
