@@ -44,16 +44,19 @@ public readonly record struct ImageInputLimits(int MaxImages, bool ReferencesReq
 
     /// <summary>The refusal message for a request these limits cannot honour, or null when it fits. Kept short on
     /// purpose: hosts show it verbatim in chat cards.</summary>
+    /// <remarks>A missing init image is reported before an over-count. When both are true - references and no init
+    /// image on a family that needs one - "add an init image" is the fix, and "send fewer images" would only lead
+    /// the caller to drop references until they hit the same wall.</remarks>
     internal string? Violation(string familyId, ImageRequest request)
     {
+        if (ReferencesRequireInitImage && request.Img2Img?.InitImage is null && request.ReferenceImages is { Count: > 0 })
+        {
+            return $"Model family '{familyId}' needs an init image to edit; reference images alone are not used.";
+        }
         int images = CountImages(request);
         if (images > MaxImages)
         {
             return $"Model family '{familyId}' takes at most {MaxImages} input image{(MaxImages == 1 ? "" : "s")}; {images} were supplied.";
-        }
-        if (ReferencesRequireInitImage && request.Img2Img?.InitImage is null && request.ReferenceImages is { Count: > 0 })
-        {
-            return $"Model family '{familyId}' needs an init image to edit; reference images alone are not used.";
         }
         return null;
     }

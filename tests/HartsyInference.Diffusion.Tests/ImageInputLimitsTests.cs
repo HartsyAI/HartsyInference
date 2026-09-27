@@ -104,6 +104,15 @@ public sealed class ImageInputLimitsTests
         Assert.Equal("Model family 'omnigen2' needs an init image to edit; reference images alone are not used.", violation);
     }
 
+    /// <summary>Several references and no init image: the missing init image is the actionable problem, so it is the
+    /// one reported, not the count.</summary>
+    [Fact]
+    public void ReferenceOnly_SeveralReferencesWithoutInit_AsksForTheInitImage()
+    {
+        string? violation = LimitsOf("omnigen2").Violation("omnigen2", Request(init: false, references: 2));
+        Assert.Equal("Model family 'omnigen2' needs an init image to edit; reference images alone are not used.", violation);
+    }
+
     [Fact]
     public void ReferenceOnly_InitAlone_Passes()
     {
