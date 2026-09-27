@@ -31,6 +31,12 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
+    /// <inheritdoc/>
+    /// <remarks>OmniGen2 edits the init image alone: <c>OmniGen2RecipePipeline</c> reads only <c>Img2Img.InitImage</c> (multi-reference is still a TODO there). Any reference image beyond the init image, or a reference with no init image, used to
+    /// be discarded without a word and the result came back as plain text-to-image; declaring the limit here is what
+    /// lets the feature gate refuse it instead.</remarks>
+    public ImageInputLimits InputLimits => ImageInputLimits.SingleInitImage;
+
     public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);

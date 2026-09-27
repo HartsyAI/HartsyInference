@@ -25,6 +25,12 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
 
 
     /// <inheritdoc/>
+    /// <remarks>Boogu edits the init image alone: <c>BooguImageRecipePipeline</c> reads only <c>Img2Img.InitImage</c>. Any reference image beyond the init image, or a reference with no init image, used to
+    /// be discarded without a word and the result came back as plain text-to-image; declaring the limit here is what
+    /// lets the feature gate refuse it instead.</remarks>
+    public ImageInputLimits InputLimits => ImageInputLimits.SingleInitImage;
+
+    /// <inheritdoc/>
     /// <remarks>Reference editing at text-only guidance. Steerable image guidance needs the Qwen3-VL vision
     /// tower for the text-and-image-dropped embedding, which is still deferred.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.BooguImageTransformer"/> names its stacks <c>double_stream_layers.{i}</c>, <c>noise_refiner.{i}</c>, <c>context_refiner.{i}</c> and <c>ref_image_refiner.{i}</c> — none of which the bare-root LoRA detector recognized before the same change.</para></remarks>

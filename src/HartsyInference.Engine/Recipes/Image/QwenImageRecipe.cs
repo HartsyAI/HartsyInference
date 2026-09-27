@@ -37,6 +37,14 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
         | ImageFeatures.PromptScheduling;
 
     /// <inheritdoc/>
+    /// <remarks>The edit-plus template addresses <see cref="QwenImageEditConditioning.MaxReferences"/> pictures, with
+    /// the init image (when present) as Picture 1. References work without an init image — the first reference becomes
+    /// Picture 1 — so they do not require one. Nothing in a Qwen-Image checkpoint says whether it is the base model or
+    /// an Edit build, so this is the family ceiling; a host that knows the checkpoint is base Qwen-Image should refuse
+    /// reference editing itself.</remarks>
+    public ImageInputLimits InputLimits => new ImageInputLimits(QwenImageEditConditioning.MaxReferences, ReferencesRequireInitImage: false);
+
+    /// <inheritdoc/>
     /// <remarks>Ledger evidence in <c>PromptWeightingModeLedgerTests</c>. The Qwen tokenizer discards weights, so the
     /// prompt is encoded at weight 1 and each token's cond row is scaled afterwards — which on this family means after
     /// the template prefix drop, the case SwarmUI's negative right-alignment offset exists for.</remarks>

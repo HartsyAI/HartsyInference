@@ -380,6 +380,10 @@ public sealed class InferenceEngine : IInferenceEngine
             | (AppliesWeighting(recipe.PromptWeighting) ? ImageFeatures.PromptWeighting : ImageFeatures.None);
     }
 
+    /// <summary>The input-image limits the recipe for <paramref name="spec"/> declares, resolved through the same
+    /// registry lookup as <see cref="SupportedFeatures"/> so the two can never describe different recipes.</summary>
+    internal ImageInputLimits ImageInputLimitsFor(ModelSpec spec) => ResolveRecipe(spec).InputLimits;
+
     /// <summary>Whether a declared mode means the emphasis grammar must survive prompt flattening. The feature bit is
     /// derived from the mode here rather than declared per recipe so the two can never disagree — a recipe that set the
     /// bit without a mode would keep the parens and hand its encoder the digits as prose.</summary>
