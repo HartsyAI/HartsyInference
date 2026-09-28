@@ -2988,10 +2988,6 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         return padded;
     }
 
-    /// <summary>Attempts the cuDNN conv-forward route for <see cref="Conv2D"/>.</summary>
-    /// <remarks>Returns false (after disabling the route for the session) on any cuDNN failure so the caller falls
-    /// through to the im2col path — a rejection costs one warning, never a session kill. Bias is added by the same
-    /// per-channel kernel as the im2col path, so the two routes differ only by GEMM-class accumulation order.</remarks>
     /// <summary>Runs a cuDNN forward convolution channels-last, where its tensor-core engines run ~4× faster than over
     /// NCHW. The input <c>[xBatch, C, xSpatial]</c> and the weight <c>[K, C, kernelSpatial]</c> are transposed into
     /// stream-ordered scratch, the conv runs, and the result <c>[outBatch, outSpatial, K]</c> is transposed back into the
@@ -3105,6 +3101,10 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>Attempts the cuDNN conv-forward route for <see cref="Conv2D"/>.</summary>
+    /// <remarks>Returns false (after disabling the route for the session) on any cuDNN failure so the caller falls
+    /// through to the im2col path — a rejection costs one warning, never a session kill. Bias is added by the same
+    /// per-channel kernel as the im2col path, so the two routes differ only by GEMM-class accumulation order.</remarks>
     private unsafe bool TryCudnnConv(Tensor output, Tensor input, Tensor weight, Tensor? bias,
         int batch, int inCh, int inH, int inW, int outCh, int kH, int kW, int outH, int outW,
         int strideH, int strideW, int padH, int padW)
