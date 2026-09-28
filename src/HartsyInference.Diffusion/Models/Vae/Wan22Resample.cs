@@ -132,7 +132,7 @@ public sealed unsafe class Wan22Resample
             {
                 Tensor tc = _timeConv.Forward(backend, x, convCache);   // [B, 2C, T, H, W]
                 convCache?.Dispose();
-                spatialIn = InterleaveTemporal(tc, _dim);                // [B, C, 2T, H, W]
+                spatialIn = InterleaveTemporal(backend, tc, _dim);       // [B, C, 2T, H, W]
                 tc.Dispose();
                 ownsSpatialIn = true;
             }
@@ -194,10 +194,16 @@ public sealed unsafe class Wan22Resample
     }
 
     /// <summary>Reshapes the time_conv output <c>[B, 2C, T, H, W]</c> into <c>[B, C, 2T, H, W]</c> by interleaving the two channel halves into consecutive frames (upstream <c>reshape(b,2,c,t,h,w) → stack(...,3) → reshape(b,c,2t,h,w)</c>): even out-frame from channel-half 0, odd from half 1.</summary>
-    private static Tensor InterleaveTemporal(Tensor tc, int c)
+    /// <remarks>With one batch item this is <c>[2, C·T, H·W] → [C·T, 2, H·W]</c>, a device <see cref="IBackend.Permute0213"/>.</remarks>
+    private static Tensor InterleaveTemporal(IBackend backend, Tensor tc, int c)
     {
         int b = (int)tc.Shape[0], t = (int)tc.Shape[2], h = (int)tc.Shape[3], w = (int)tc.Shape[4];
-        Tensor outT = new Tensor(new TensorShape([(long)b, c, 2 * t, h, w]), DType.F32);
+        Tensor outT = new Tensor(new TensorShape([(long)b, c, 2 * t, h, w]), tc.DType);
+        if (b == 1)
+        {
+            backend.Permute0213(outT, tc, 2, c * t, h * w);
+            return outT;
+        }
         float* s = (float*)tc.DataPointer;   // channel layout: [half0 (c), half1 (c)]
         float* d = (float*)outT.DataPointer;
         long frame = (long)h * w;
