@@ -7606,7 +7606,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             Interlocked.Increment(ref _flashF16ExecutionCount);
             return true;
         }
-        catch (Exception error) when (error is not OutOfMemoryException)
+        catch (Exception error) when (error is not OutOfMemoryException and not OutOfVramException)
         {
             _flashF16Dead = true;
             HartsyInference.Core.Logging.Logs.Warning($"[Cuda] F16 flash attention failed at D={d} ({error.Message}); using cuDNN for the rest of the session.");
