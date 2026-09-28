@@ -153,9 +153,13 @@ public sealed class UpBlock
             int h = (int)hidden.Shape[2];
             int w = (int)hidden.Shape[3];
 
-            TensorShape upShape = new TensorShape(batch, ch, h * 2, w * 2);
+            // Upsample to the size of the skip the next block concatenates, as diffusers does with upsample_size: a
+            // stride-2 down path rounds an odd size up (90 latent rows → 45 → 23 at 1280×720), so doubling overshoots.
+            long upH = skips.Count > 0 ? skips[^1].Shape[2] : h * 2;
+            long upW = skips.Count > 0 ? skips[^1].Shape[3] : w * 2;
+            TensorShape upShape = new TensorShape(batch, ch, upH, upW);
             Tensor upsampled = new Tensor(upShape, hidden.DType);
-            backend.UpsampleNearest2D(upsampled, hidden, 2, 2);
+            backend.UpsampleNearest2DToSize(upsampled, hidden);
             hidden.Dispose();
 
             Tensor convUp = new Tensor(upShape, upsampled.DType);
@@ -176,6 +180,8 @@ public sealed class UpBlock
         int chB = (int)b.Shape[1];
         int height = (int)a.Shape[2];
         int width = (int)a.Shape[3];
+        if (b.Shape[0] != batch || b.Shape[2] != height || b.Shape[3] != width)
+            throw new InvalidOperationException($"UNet skip {b.Shape} does not match the up-path activation {a.Shape}.");
 
         TensorShape outShape = new TensorShape(batch, chA + chB, height, width);
         Tensor output = new Tensor(outShape, a.DType);

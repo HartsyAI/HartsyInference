@@ -144,6 +144,10 @@ no bug, any more than one bad seed was proof there was one.
   `cache.AdvanceLength()`. Concrete cases: Zonos (interleaved RoPE + MLP half-order + `1/√head_dim` +
   channels-first vs channels-last prefix → instant EOS); Dia (split-half RoPE + scale 1.0 + prefix +
   missing cache advance); Qwen3.5 Gated DeltaNet (missing `q *= 1/√head_dim` before the recurrence).
+- **Flat grey or garbage only at some resolutions (1280×720 but not 1024²) = UNet size bookkeeping.** A 3×3 stride-2,
+  pad-1 conv yields `ceil(n/2)` (45 latent rows → 23), and the up path must resize to the skip it concatenates
+  (`UpsampleNearest2DToSize`), not double (23 → 46 ≠ 45). Check any `h / 2` allocated for a stride-2 conv and any
+  `×2` feeding a skip concat; latents whose size is a multiple of 8 never exercise either.
 - **Un-normalized V + an F16 attention fast path = threshold NaN.** Microsoft Lens RMS-norms Q/K but not
   V; its residual stream is architecturally huge (`max|V|` 18940→71583 across forwards), crossing F16's
   65504 → solid black. SageAttention's INT8 path casts V to F16 and is **default-on regardless of

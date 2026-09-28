@@ -34,6 +34,7 @@ qwen25-1.5b-iq3xs	quant	llm/qwen25-1.5b/Qwen2.5-1.5B-Instruct-IQ3_XS.gguf	text|W
 qwen25-1.5b-iq2m	quant	llm/qwen25-1.5b/Qwen2.5-1.5B-Instruct-IQ2_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 lens-mxfp8	mxfp8,vulkanbar	Stable-Diffusion/Lens/lens_turbo_mxfp8.safetensors	image|a red bicycle leaning on a brick wall, photograph|-m lens --steps 4 --width 1024 --height 1024
 sdxl	vulkanbar	Stable-Diffusion/SDXL/sd_xl_base_1.0.safetensors	image|a red apple on a wooden table|--steps 20 --width 1024 --height 1024
+sdxl-wide	quality	Stable-Diffusion/SDXL/sd_xl_base_1.0.safetensors	image|a lighthouse on a rocky coast at dusk, dramatic sky, photograph|--steps 20 --width 1280 --height 720
 flux1-dev	vulkanbar	Stable-Diffusion/BFL/Flux1/flux1-dev-fp8.safetensors	image|a red apple on a wooden table|-m flux1 --steps 20 --width 1024 --height 1024
 flux2-dev-q4ks	vulkanbar	Stable-Diffusion/Flux2/flux2-dev-Q4_K_S.gguf	image|a red apple on a wooden table|-m flux2 --steps 20 --width 1024 --height 1024
 boogu-turbo	vulkanbar	Stable-Diffusion/Boogu/boogu_image_turbo_fp8_scaled.safetensors	image|a red apple on a wooden table|-m boogu --steps 4 --width 1024 --height 1024
