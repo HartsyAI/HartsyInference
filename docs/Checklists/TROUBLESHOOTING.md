@@ -362,6 +362,16 @@ no bug, any more than one bad seed was proof there was one.
 - **Pass-through helpers that MIGHT allocate are disposal traps.** `PadCaption`/`PadImage` returning the
   input unchanged when already aligned → caller disposes an aliased tensor → `ObjectDisposedException`.
   Guard `if (!ReferenceEquals(result,input)) input.Dispose();` or always allocate.
+- **A step-graph capture that fails with `CUDA_ERROR_STREAM_CAPTURE_INVALIDATED` (901) in a host running
+  several engines usually wasn't caused by the model.** The compute stream is blocking, and while it captures,
+  any use of the legacy stream in the same context invalidates the capture, whichever engine or thread makes
+  the call (SwarmUI loads the image, audio and LLM extensions as separate engine copies on one context per
+  GPU). Check the log for another backend's generation overlapping the failed step. The owner falls back to
+  eager and recaptures (`StepGraphFailureBudget`); the same failure on every attempt means a capture-illegal op
+  in the step itself.
+- **`step-graph capture recorded a FREE of external device ptr` outside a capture step** means a capture window
+  was left open. Look for the earlier failure that should have closed it: a `StepGraphReset` that threw, or a
+  capture whose owner never reached its end.
 - **DeepSeek/large-MoE memory:** expert split must be a zero-copy view over mmap (copying ~7GB → host
   OOM-kill); keep the untied embedding table host-only (not uploaded to GPU) to save ~0.8GB.
 - **`TextService.EnsureRamHeadroomFor` refuses to load a GGUF unless free RAM ≥ 2.5× file size** (dequant

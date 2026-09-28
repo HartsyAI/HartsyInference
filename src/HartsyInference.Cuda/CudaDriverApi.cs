@@ -275,6 +275,12 @@ internal static partial class CudaDriverApi
     internal const int CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1;
     internal const int CU_STREAM_CAPTURE_MODE_RELAXED = 2;
 
+    internal const int CU_STREAM_CAPTURE_STATUS_NONE = 0;
+    internal const int CU_STREAM_CAPTURE_STATUS_INVALIDATED = 2;
+
+    /// <summary>A stream's capture was invalidated by an operation not permitted while it captured.</summary>
+    internal const int CUDA_ERROR_STREAM_CAPTURE_INVALIDATED = 901;
+
     // ── Memory Info ─────────────────────────────────────────────────────
 
     /// <summary>Returns the free and total amount of memory available for allocation by the CUDA context. Reports the values for the calling context's device.</summary>

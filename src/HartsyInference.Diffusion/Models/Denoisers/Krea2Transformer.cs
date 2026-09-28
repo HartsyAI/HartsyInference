@@ -48,7 +48,8 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
     private long _graphSig = long.MinValue;   // rope signature ⊕ txt identity the captured graph is valid for
     private int _graphSigCalls;               // calls at the current sig (capture on the 3rd — caches/promotions warm)
     private int _graphSigFlips;               // sig alternation counter (CFG cond/uncond → graph unusable)
-    private bool _graphDead;                  // permanent per-session fallback to eager
+    private bool _graphDead;                  // eager for the rest of the session
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     private int _disposed;
@@ -436,7 +437,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
             // A capture-illegal op invalidated the recording (nothing executed). Abort the capture, disable
             // graph mode for the session, and re-run this step eagerly so the generation stays correct.
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             HartsyInference.Core.Logging.Logs.Warning($"[Krea2 graph] capture invalidated — falling back to eager: {ex}");
             Tensor projected = ForwardCore(backend, patchLatent, txt, _tembFixed, _tembModFixed, batch, imgSeq, txtSeq, hidden);
             backend.CopyInto(_graphVelocity, projected);
@@ -455,7 +456,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
                 // Instantiation failed (some op wasn't capturable): the recorded work never executed. Fall back
                 // permanently and re-run this step eagerly so the generation stays correct.
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[Krea2 graph] capture failed — falling back to eager: {ex.Message}");
                 Tensor projected = ForwardCore(backend, patchLatent, txt, _tembFixed, _tembModFixed, batch, imgSeq, txtSeq, hidden);
                 backend.CopyInto(_graphVelocity, projected);

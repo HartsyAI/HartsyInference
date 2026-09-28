@@ -53,6 +53,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
     private long _graphSig = long.MinValue;
     private int _graphSigCalls, _graphSigFlips;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     /// <summary>True once the CFG-pair step graph is being captured/replayed (from <see cref="GraphCaptureCall"/>
@@ -342,7 +343,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             HartsyInference.Core.Logging.Logs.Warning($"[Kandinsky5 graph] capture invalidated — falling back to eager: {ex.Message}");
             RunPairIntoFixed(backend, numPatches);
             return (SnapshotUnpatchify(backend, _graphProjCond!, gridT, gridH, gridW, latH, latW, outShape),
@@ -358,7 +359,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[Kandinsky5 graph] capture failed — falling back to eager: {ex.Message}");
                 RunPairIntoFixed(backend, numPatches);
             }

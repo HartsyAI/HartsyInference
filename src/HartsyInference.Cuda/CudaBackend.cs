@@ -4147,10 +4147,11 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             _transferState.CaptureFreeBytes = 0;
             _transferState.CaptureAllocCount = 0;
             _transferState.CaptureFreeCount = 0;
-            _transferState.TrackCaptureWindow = true;
         }
+        // Tracking starts only once capture is open: a failed begin must not leave every later free reported as captured.
         _stepGraph.BeginCapture();
         _stepGraphCapturing = true;
+        _transferState.TrackCaptureWindow = true;
     }
 
     public void StepGraphEndAndLaunch()
@@ -4170,7 +4171,16 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             $"[Cuda] step-graph capture window: allocs {_transferState.CaptureAllocCount} ({_transferState.CaptureAllocBytes >> 20} MB), " +
             $"frees {_transferState.CaptureFreeCount} ({_transferState.CaptureFreeBytes >> 20} MB), " +
             $"OUTSTANDING {outstandingCount} allocs / {outstanding >> 20} MB");
-        _stepGraph.EndCaptureAndInstantiate();
+        try
+        {
+            _stepGraph.EndCaptureAndInstantiate();
+        }
+        catch
+        {
+            // The capture ended without a graph to own its allocations, so they are dangling exactly as after an abort.
+            GpuTransferHelper.PurgeAbortedCaptureAllocs(_transferState, _stream.Handle);
+            throw;
+        }
         _stepGraph.Launch();
     }
 
@@ -4182,31 +4192,51 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         _stepGraph.Launch();
     }
 
+    /// <remarks>Capture state is cleared before any native call, and every step runs even when an earlier one fails:
+    /// a capture that ended badly must leave the backend able to capture again. Failures are rethrown together after.</remarks>
     public void StepGraphReset()
     {
-        if (_stepGraphCapturing)
+        List<Exception>? failures = null;
+        bool wasCapturing = _stepGraphCapturing;
+        _stepGraphCapturing = false;
+        _transferState.TrackCaptureWindow = false;
+        CudaGraph? graph = _stepGraph;
+        if (wasCapturing)
         {
-            _stepGraph?.AbortCapture();
-            _stepGraphCapturing = false;
-            _transferState.TrackCaptureWindow = false;
-            // A capture that never reached StepGraphEndAndLaunch leaves every activation cached mid-window
-            // pointing at a graph-private VA the driver just released along with the discarded (never
-            // instantiated) graph — purge them before anything tries to free one for real (see
-            // GpuTransferHelper.PurgeAbortedCaptureAllocs for the CUDA_ERROR_INVALID_VALUE this prevents).
-            GpuTransferHelper.PurgeAbortedCaptureAllocs(_transferState, _stream.Handle);
+            if (graph is not null)
+                AttemptCleanup("open graph capture abort", graph.AbortCapture, ref failures);
+            // A capture that never reached StepGraphEndAndLaunch leaves every activation cached mid-window pointing at a
+            // graph-private VA the driver released with the discarded graph (see PurgeAbortedCaptureAllocs).
+            AttemptCleanup("aborted graph-private cache purge",
+                () => GpuTransferHelper.PurgeAbortedCaptureAllocs(_transferState, _stream.Handle), ref failures);
         }
-        bool hadCapturedGraph = _stepGraph?.IsReady == true;
-        _stepGraph?.Reset();
+        bool hadCapturedGraph = graph?.IsReady == true;
+        if (graph is not null)
+            AttemptCleanup("step graph", graph.Reset, ref failures);
         if (hadCapturedGraph)
         {
-            // Best-effort graph-pool trim after destroying a captured graph. NOTE (measured): the bulk of a
-            // destroyed step graph's memory (~4.5 GB for the Chroma CFG pair) is a DRIVER-side lazily-
-            // reclaimable cache that neither this trim nor cuMemPoolTrimTo returns — cuMemGetInfo reports it
-            // used until a SYNCHRONOUS cuMemAlloc forces the reclaim (see CudaMemory.AllocateAsync's
-            // sync-probe retry, which is what actually protects the next model's load). Sync first:
-            // destroy/trim under a still-executing final replay is undefined.
-            _stream.Synchronize();
-            CudaDriverApi.cuDeviceGraphMemTrim(_context.DeviceHandle).ThrowOnError();
+            // Sync first: destroy/trim under a still-executing final replay is undefined. The trim is best effort; the
+            // bulk of a destroyed graph's memory is only reclaimed by CudaMemory.AllocateAsync's sync-probe retry.
+            AttemptCleanup("graph-pool trim", () =>
+            {
+                _stream.Synchronize();
+                CudaDriverApi.cuDeviceGraphMemTrim(_context.DeviceHandle).ThrowOnError();
+            }, ref failures);
+        }
+        if (failures is not null)
+            throw new AggregateException("Step-graph reset completed, but one or more of its steps failed.", failures);
+    }
+
+    /// <summary>Runs one step of a multi-step release, recording its failure instead of letting it skip the steps after it.</summary>
+    private static void AttemptCleanup(string resource, Action cleanup, ref List<Exception>? failures)
+    {
+        try
+        {
+            cleanup();
+        }
+        catch (Exception error)
+        {
+            (failures ??= []).Add(new InvalidOperationException($"CUDA cleanup failed for {resource}.", error));
         }
     }
 
@@ -11182,14 +11212,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         List<Exception>? failures = null;
         GpuTransferHelper.State? state = _transferState;
 
-        void Attempt(string resource, Action cleanup)
-        {
-            try { cleanup(); }
-            catch (Exception error)
-            {
-                (failures ??= []).Add(new InvalidOperationException($"CUDA cleanup failed for {resource}.", error));
-            }
-        }
+        void Attempt(string resource, Action cleanup) => AttemptCleanup(resource, cleanup, ref failures);
 
         try
         {

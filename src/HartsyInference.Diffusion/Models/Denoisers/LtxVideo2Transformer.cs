@@ -59,6 +59,7 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
     private long _graphSig = long.MinValue;
     private int _graphSigCalls, _graphSigFlips;
     private bool _graphDead, _graphPinned;
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     /// <summary>True once the CFG-pair step graph PATH is running (from its first call — <c>_graphSig</c> set — until
@@ -528,7 +529,7 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
         }
         catch (Exception ex) when (capture)
         {
-            backend.StepGraphReset(); _graphDead = true;
+            backend.StepGraphReset(); _graphDead = _captureFailures.RecordFailure();
             HartsyInference.Core.Logging.Logs.Warning($"[LTX-2 graph] capture invalidated — falling back to eager: {ex.Message}");
             RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a, grid);
             return ((_gVCondV!, _gVCondA!), (_gVUncondV!, _gVUncondA!));
@@ -542,7 +543,7 @@ public sealed unsafe class LtxVideo2Transformer : IStreamableDenoiser, IDisposab
             }
             catch (Exception ex)
             {
-                backend.StepGraphReset(); _graphDead = true;
+                backend.StepGraphReset(); _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[LTX-2 graph] capture failed — falling back to eager: {ex.Message}");
                 RunCfgPairIntoFixed(backend, videoTokens, audioTokens, ctxC, ctxU, sv, sa, v, a, grid);
             }

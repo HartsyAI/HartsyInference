@@ -38,7 +38,8 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     private long _graphSig = long.MinValue;   // grid ⊕ interp ⊕ cond/uncond encoder identity the capture is valid for
     private int _graphSigCalls;               // calls at the current sig (capture on the 3rd — caches/promotions warm)
     private int _graphSigFlips;               // sig alternation counter (safety: disable if it never converges)
-    private bool _graphDead;                  // permanent per-session fallback to eager
+    private bool _graphDead;                  // eager for the rest of the session
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     public LtxVideoTransformer(LtxVideoConfig config)
@@ -278,7 +279,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             Logs.Warning($"[LTX graph] capture invalidated — falling back to eager: {ex.Message}");
             RunPairIntoFixed(backend, uncondEncoder is not null, grid, interpScale, s);
             return (_graphVelCond!, uncondEncoder is not null ? _graphVelUncond : null, false);
@@ -293,7 +294,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 Logs.Warning($"[LTX graph] capture failed — falling back to eager: {ex.Message}");
                 RunPairIntoFixed(backend, uncondEncoder is not null, grid, interpScale, s);
             }

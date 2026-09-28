@@ -351,6 +351,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
     private int _graphSigCalls;
     private int _graphSigFlips;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
 
     /// <summary>Copies a fresh packed latent into the transformer-owned FIXED buffer the captured graph
     /// reads, and returns that buffer. A shape change resets the graph.</summary>
@@ -468,7 +469,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             Logs.Warning($"[Flux2 graph] capture invalidated — falling back to eager: {ex}");
             RunStepIntoFixed(backend, packedLatent, textEmbeddings, hPacked, wPacked);
             return (_graphVelocity!, false);
@@ -483,7 +484,7 @@ public sealed unsafe class Flux2Transformer : IDisposable
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 Logs.Warning($"[Flux2 graph] capture failed — falling back to eager: {ex.Message}");
                 RunStepIntoFixed(backend, packedLatent, textEmbeddings, hPacked, wPacked);
             }

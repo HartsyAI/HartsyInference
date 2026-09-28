@@ -17,6 +17,7 @@ public sealed unsafe class Hunyuan3DDit
     private long _graphSig = long.MinValue;
     private int _graphSigCalls;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
 
     private readonly Hunyuan3DConfig _cfg;
     private readonly Hunyuan3DDoubleBlock[] _double;
@@ -122,7 +123,7 @@ public sealed unsafe class Hunyuan3DDit
             }
             catch (Exception ex) when (capture)
             {
-                backend.StepGraphReset(); _graphDead = true;
+                backend.StepGraphReset(); _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[Hunyuan3D graph] capture invalidated — eager fallback: {ex.Message}");
                 RunBlocksIntoFixed(backend, n, scond);
                 return CopyOut(backend);
@@ -132,7 +133,7 @@ public sealed unsafe class Hunyuan3DDit
                 try { backend.StepGraphEndAndLaunch(); HartsyInference.Core.Logging.Logs.Info("[Hunyuan3D graph] DiT forward (48 blocks + final) captured; replaying via cuGraphLaunch."); }
                 catch (Exception ex)
                 {
-                    backend.StepGraphReset(); _graphDead = true;
+                    backend.StepGraphReset(); _graphDead = _captureFailures.RecordFailure();
                     HartsyInference.Core.Logging.Logs.Warning($"[Hunyuan3D graph] capture failed — eager fallback: {ex.Message}");
                     RunBlocksIntoFixed(backend, n, scond);
                 }

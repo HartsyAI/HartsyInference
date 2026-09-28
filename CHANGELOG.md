@@ -6,6 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.192
+
+- **A step-graph capture that ends badly costs one eager step, not the backend.** A capture on the blocking compute
+  stream is invalidated by any use of the legacy stream in the same context, including another engine's synchronous
+  copy on the same GPU. Before, aborting that capture threw, left the capture flags set, and every later reset,
+  generation and `FreeMemory` on that backend failed until the process restarted.
+  - `CudaGraph.AbortCapture` ends an invalidated capture as expected and does nothing for a stream that has already
+    left capture mode.
+  - `StepGraphReset` clears the capture state before any native call and runs every cleanup step (abort, purge of
+    graph-private allocations, graph reset, pool trim) even when one fails; the failures are rethrown together after.
+  - `StepGraphBegin` starts tracking only once capture is open; `StepGraphEndAndLaunch` purges graph-private
+    allocations when instantiation fails.
+  - An out-of-memory inside a capture fails straight away instead of synchronizing (which invalidates the capture),
+    so the owner falls back to an eager step where the usual recovery is legal.
+- A failed capture no longer disables a model's step graph for the rest of the session: owners recapture, and only
+  stop after `StepGraphFailureBudget.MaxFailures` (3) failures. A signature flip storm still disables it at once.
+
 ## alpha.191
 
 - **A pipeline that fails to dispose no longer wedges the engine.** Model-switch eviction, `FreeMemory` and teardown
