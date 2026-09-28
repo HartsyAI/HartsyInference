@@ -3085,6 +3085,10 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             cachedOutput = true;
             return true;
         }
+        catch (OutOfVramException)
+        {
+            return false;
+        }
         catch (Exception ex) when (ex is not OutOfMemoryException)
         {
             _cudnnConv3dDead = true;
