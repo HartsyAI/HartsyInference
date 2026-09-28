@@ -419,6 +419,11 @@ no bug, any more than one bad seed was proof there was one.
 - **`ConvTranspose2d` silently ran on CPU** (`CudaBackend` never overrode it) — 1549ms for a 32²→64²
   upsample → 3ms with a gather-form kernel. Shared by ClipSeg/YOLO/Demucs/RVC/ResembleEnhance. Grouped
   `ConvTranspose1d` (`groups=768`, BigVGAN) was likewise rejected — add `groups` to the kernel.
+- **Large convolutions: cuDNN's NCHW engines are the slow ones.** At VAE-decode sizes (BF16 3×3, 128-1024 channels,
+  ≥ ~100M-element inputs) cuDNN reached ~40 TFLOPS over NCHW and ~155-165 over channels-last on a 4090, and its 3-D
+  NCDHW engines were no better; below ~10M elements the two transposes cost more than they save. The CUDA backend
+  now runs cuDNN convs channels-last above `ChannelsLastMinElements` (`numerics.convChannelsLast`). When a conv-heavy
+  decode trails PyTorch, compare engines at the model's real shapes before touching the model.
 - **F16/CUDA-graph only help when host-launch-bound:** `numerics.gemmF16` moving DiT time 0% proves it's
   per-op-launch-bound, not GEMM-bound; graph capture is then the real lever.
 - **The lm_head dominates decode for large-vocab models.** Orpheus: the tied lm_head (3072→156,940 vocab)

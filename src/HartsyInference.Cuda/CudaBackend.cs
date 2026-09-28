@@ -86,6 +86,17 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
 
     private CudnnConv? _cudnnConv;
     private bool _cudnnConvDead;   // any cuDNN conv failure → session fallback to the im2col path
+    private static bool ConvChannelsLast => EngineKnobs.ConvChannelsLast.Value;
+
+    // Input size (elements) from which a cuDNN conv runs channels-last. Measured on a 4090, BF16 3×3: 2.0-2.6× faster
+    // at VAE-decode shapes (≥ ~130M elements), neutral near 33M, and 10-14% SLOWER at UNet shapes (≤ 5M), where the two
+    // layout transposes outweigh the engine gain.
+    internal const long ChannelsLastMinElements = 1L << 25;
+
+    /// <summary>Convolutions this backend ran channels-last (see <see cref="TryConvChannelsLast"/>).</summary>
+    internal long ChannelsLastConvCount => Interlocked.Read(ref _channelsLastConvCount);
+    private long _channelsLastConvCount;
+    private bool _cudnnConv3dDead; // a 3-D failure → causal 3-D convs go back to per-tap 2-D for the session
 
     private long _cudnnSdpaExecutionCount;
     private long _cudnnSdpaSessionGeneration;
@@ -2977,6 +2988,119 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         return padded;
     }
 
+    /// <summary>Runs a cuDNN forward convolution channels-last, where its tensor-core engines run ~4× faster than over
+    /// NCHW. The input <c>[xBatch, C, xSpatial]</c> and the weight <c>[K, C, kernelSpatial]</c> are transposed into
+    /// stream-ordered scratch, the conv runs, and the result <c>[outBatch, outSpatial, K]</c> is transposed back into the
+    /// NC… output. False (nothing launched) when the knob is off, the input is below <see cref="ChannelsLastMinElements"/>,
+    /// the transpose PTX is missing, or scratch cannot be had — the caller then runs its NCHW route.</summary>
+    private bool TryConvChannelsLast(ulong pInput, ulong pWeight, ulong pOutput, int xBatch, long c, long xSpatial,
+        long k, long kernelSpatial, long outBatch, long outSpatial, long[] xDim, long[] wDim, long[] yDim,
+        long[] strides, long[] pads, int dataType, int elementBytes)
+    {
+        if (!ConvChannelsLast || !_kernels!.HasTransposeTiled || xBatch * c * xSpatial < ChannelsLastMinElements) return false;
+        ulong xCl = 0, wCl = 0, yCl = 0;
+        try
+        {
+            try
+            {
+                xCl = CudaMemory.AllocateAsync((nuint)(xBatch * c * xSpatial * elementBytes), _stream.Handle);
+                wCl = CudaMemory.AllocateAsync((nuint)(k * c * kernelSpatial * elementBytes), _stream.Handle);
+                yCl = CudaMemory.AllocateAsync((nuint)(outBatch * outSpatial * k * elementBytes), _stream.Handle);
+            }
+            catch (Exception ex) when (ex is OutOfVramException or CudaException)
+            {
+                return false;   // no room for the layout copies: the NCHW route needs none
+            }
+            _kernels.LaunchTransposeTiled(xCl, pInput, xBatch, checked((int)c), checked((int)xSpatial), elementBytes, _stream.Handle);
+            _kernels.LaunchTransposeTiled(wCl, pWeight, checked((int)k), checked((int)c), checked((int)kernelSpatial), elementBytes, _stream.Handle);
+            _cudnnConv!.ExecuteChannelsLast(xCl, wCl, yCl, xDim, wDim, yDim, strides, pads, dataType);
+            _kernels.LaunchTransposeTiled(pOutput, yCl, checked((int)outBatch), checked((int)outSpatial), checked((int)k), elementBytes, _stream.Handle);
+            Interlocked.Increment(ref _channelsLastConvCount);
+            return true;
+        }
+        finally
+        {
+            if (xCl != 0) CudaMemory.FreeAsync(xCl, _stream.Handle);
+            if (wCl != 0) CudaMemory.FreeAsync(wCl, _stream.Handle);
+            if (yCl != 0) CudaMemory.FreeAsync(yCl, _stream.Handle);
+        }
+    }
+
+    /// <summary>3-D convolution through cuDNN, over the channels-last engines (<see cref="TryConvChannelsLast"/>).
+    /// False when cuDNN convolution is off or a 3-D call already failed this session; a failure here logs once and
+    /// returns false so the caller's per-tap path serves the call.</summary>
+    public unsafe bool TryConv3DFrameMajor(Tensor output, Tensor paddedFrames, Tensor weight, Tensor? bias,
+        int strideT, int strideH, int strideW, int padH, int padW)
+    {
+        if (!_convCudnn || _cudnnConvDead || _cudnnConv3dDead) return false;
+        using NvtxRange _nvtxProf = NvtxRange.Push("Conv3D");
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        if (paddedFrames.Shape.Rank != 4 || weight.Shape.Rank != 5 || output.Shape.Rank != 5
+            || paddedFrames.DType != weight.DType || output.DType != weight.DType)
+            throw new ArgumentException($"Conv3DFrameMajor needs [T,C,H,W] input, 5-D weight and output of one dtype; got {paddedFrames.Shape} {paddedFrames.DType}, {weight.Shape} {weight.DType}, {output.Shape} {output.DType}.");
+        long t = paddedFrames.Shape[0], c = paddedFrames.Shape[1], h = paddedFrames.Shape[2], w = paddedFrames.Shape[3];
+        long k = weight.Shape[0], kt = weight.Shape[2], r = weight.Shape[3], sw = weight.Shape[4];
+        long outT = output.Shape[2], outH = output.Shape[3], outW = output.Shape[4];
+        if (weight.Shape[1] != c || output.Shape[1] != k || outT != (t - kt) / strideT + 1)
+            throw new ArgumentException($"Conv3DFrameMajor shapes disagree: input {paddedFrames.Shape}, weight {weight.Shape}, output {output.Shape}.");
+        int dataType = weight.DType == DType.F16 ? CudnnApi.CUDNN_DATA_HALF
+            : weight.DType == DType.BF16 ? CudnnApi.CUDNN_DATA_BFLOAT16
+            : weight.DType == DType.F32 ? CudnnApi.CUDNN_DATA_FLOAT
+            : throw new NotSupportedException($"Conv3DFrameMajor supports F32/F16/BF16, not {weight.DType}.");
+
+        ulong pInput = 0, pWeight = 0, pBias = 0, pBiasCast = 0, pOutput = 0;
+        bool cachedOutput = false;
+        try
+        {
+            _cudnnConv ??= new CudnnConv(_stream.Handle);
+            pInput = GpuTransferHelper.CopyToDevice(paddedFrames);
+            pWeight = GpuTransferHelper.CopyToDevice(weight);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOutput = GpuTransferHelper.AllocateDevice(outBytes);
+            // Only the channels-last engines are worth a native 3-D call (NCDHW ran ~37 TFLOPS, below the per-tap path).
+            // The frame-major [T, C, H·W] input transposes per frame straight into NDHWC.
+            if (!TryConvChannelsLast(pInput, pWeight, pOutput, (int)t, c, h * w, k, kt * r * sw, 1, outT * outH * outW,
+                    [1, c, t, h, w], [k, c, kt, r, sw], [1, k, outT, outH, outW], [strideT, strideH, strideW], [0, padH, padW],
+                    dataType, (int)weight.DType.ComputeByteCount(1)))
+            {
+                return false;
+            }
+            if (bias is not null)
+            {
+                pBias = GpuTransferHelper.CopyToDevice(bias);
+                ulong biasPtr = pBias;
+                if (bias.DType != output.DType)
+                {
+                    pBiasCast = CudaMemory.Allocate((nuint)(bias.ElementCount * output.DType.SizeInBytes));
+                    CastOnGpu(pBiasCast, pBias, bias.DType, output.DType, (int)bias.ElementCount);
+                    biasPtr = pBiasCast;
+                }
+                int spatial = checked((int)(outT * outH * outW)), total = checked((int)(k * outT * outH * outW));
+                if (output.DType == DType.F16) _kernels!.LaunchBiasAddF16(pOutput, biasPtr, (int)k, spatial, total, _stream.Handle);
+                else if (output.DType == DType.BF16) _kernels!.LaunchBiasAddBf16(pOutput, biasPtr, (int)k, spatial, total, _stream.Handle);
+                else _kernels!.LaunchBiasAdd(pOutput, biasPtr, (int)k, spatial, total, _stream.Handle);
+            }
+            GpuTransferHelper.CacheActivation(output, pOutput, outBytes);
+            cachedOutput = true;
+            return true;
+        }
+        catch (Exception ex) when (ex is not OutOfMemoryException)
+        {
+            _cudnnConv3dDead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[cuDNN conv] 3-D convolution failed; causal 3-D convs use per-tap 2-D convolution for the rest of the session: {ex.Message}");
+            return false;
+        }
+        finally
+        {
+            GpuTransferHelper.FreeDevice(pInput);
+            GpuTransferHelper.FreeDevice(pWeight);
+            GpuTransferHelper.FreeDevice(pBias);
+            if (pBiasCast != 0) CudaMemory.FreeAsync(pBiasCast, _stream.Handle);
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOutput);
+        }
+    }
+
     /// <summary>Attempts the cuDNN conv-forward route for <see cref="Conv2D"/>.</summary>
     /// <remarks>Returns false (after disabling the route for the session) on any cuDNN failure so the caller falls
     /// through to the im2col path — a rejection costs one warning, never a session kill. Bias is added by the same
@@ -2997,8 +3121,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             pOutput = GpuTransferHelper.AllocateDevice(outBytes);
 
             int dataType = input.DType == DType.F16 ? CudnnApi.CUDNN_DATA_HALF : CudnnApi.CUDNN_DATA_BFLOAT16;
-            _cudnnConv.Execute(pInput, pWeight, pOutput,
-                batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW, padW, dataType);
+            if (!TryConvChannelsLast(pInput, pWeight, pOutput, batch, inCh, (long)inH * inW, outCh, kH * kW, batch,
+                    (long)outH * outW, [batch, inCh, inH, inW], [outCh, inCh, kH, kW], [batch, outCh, outH, outW],
+                    [strideH, strideW], [padH, padW], dataType, sizeof(ushort)))
+            {
+                _cudnnConv.Execute(pInput, pWeight, pOutput,
+                    batch, inCh, inH, inW, outCh, kH, kW, outH, outW, strideH, strideW, padH, padW, padW, dataType);
+            }
 
             if (bias is not null)
             {

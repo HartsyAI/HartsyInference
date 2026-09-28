@@ -195,6 +195,11 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _flashAttnF32SplitF16Kv;
     private readonly CudaModule _flashV2Module;
     private readonly nint _flashV2Tf32;
+    // Optional: tiled batched transpose (channels_last.ptx), the layout step around cuDNN's channels-last conv engines.
+    private readonly CudaModule? _channelsLastModule;
+    private readonly nint _transposeTiledB16;
+    private readonly nint _transposeTiledB32;
+
     // Optional: F16-I/O fused attention with F32 accumulation (flash_attn_f16.ptx), strided so it reads head-major,
     // token-major and fused-projection layouts alike. Absent PTX ⇒ HasFlashAttnF16 is false and callers keep cuDNN.
     private readonly CudaModule? _flashF16Module;
@@ -1078,6 +1083,14 @@ public sealed class CudaKernels : IDisposable
         // Opt the fused flash kernel into >48 KB dynamic shared memory (K/V/S/O tiles ≈ 72 KB for D=128).
         // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8. Ignore failure (kernel launch will surface it).
         CudaDriverApi.cuFuncSetAttribute(_flashV2Tf32, 8, 96 * 1024);
+        string channelsLastPath = Ptx("channels_last");
+        if (File.Exists(channelsLastPath))
+        {
+            _channelsLastModule = LoadOwnedModule(channelsLastPath);
+            _transposeTiledB16 = _channelsLastModule.GetFunction("transpose_tiled_b16");
+            _transposeTiledB32 = _channelsLastModule.GetFunction("transpose_tiled_b32");
+        }
+
         string flashF16Path = Ptx("flash_attn_f16");
         if (File.Exists(flashF16Path))
         {
@@ -4302,6 +4315,30 @@ public sealed class CudaKernels : IDisposable
         => LaunchSoftmaxImpl(_softmaxF16, data, rowLen, totalRows, stream);
 
     // ── Transpose/Permute Launches ──────────────────────────────────────
+
+    /// <summary>Whether channels_last.ptx is loaded.</summary>
+    public bool HasTransposeTiled => _channelsLastModule is not null;
+
+    /// <summary>Tiled batched transpose [batch, d1, d2] → [batch, d2, d1] of 2- or 4-byte elements, moved as raw bits.</summary>
+    public unsafe void LaunchTransposeTiled(ulong output, ulong input, int batch, int d1, int d2, int elementBytes, nint stream)
+    {
+        if (_channelsLastModule is null)
+            throw new InvalidOperationException("channels_last.ptx is not loaded; gate on HasTransposeTiled first.");
+        nint fn = elementBytes switch
+        {
+            2 => _transposeTiledB16,
+            4 => _transposeTiledB32,
+            _ => throw new ArgumentOutOfRangeException(nameof(elementBytes), $"Tiled transpose moves 2- or 4-byte elements, not {elementBytes}."),
+        };
+        if (batch <= 0 || batch > 65_535 || d1 <= 0 || d2 <= 0)
+            throw new ArgumentOutOfRangeException(nameof(batch), $"Tiled transpose dims out of range: batch={batch} d1={d1} d2={d2}.");
+        ulong o = output, i = input;
+        uint a = (uint)d1, c = (uint)d2;
+        void** args = stackalloc void*[4];
+        args[0] = &o; args[1] = &i; args[2] = &a; args[3] = &c;
+        CudaDriverApi.cuLaunchKernel(fn, (uint)((d2 + 31) / 32), (uint)((d1 + 31) / 32), (uint)batch, 32, 8, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
 
     /// <summary>Launches batched 2D transpose: [B, D1, D2] -> [B, D2, D1] (F32).</summary>
     public void LaunchTranspose2D(ulong output, ulong input, int d1, int d2, int totalElements, nint stream)

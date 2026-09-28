@@ -4,6 +4,7 @@ set -euo pipefail
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 KERNELS=(
+    "channels_last"
     "depthwise_conv2d"
     "im2col_banded"
     "maxpool2d"
