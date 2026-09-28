@@ -130,7 +130,8 @@ public sealed class DownBlock
             int h = (int)hidden.Shape[2];
             int w = (int)hidden.Shape[3];
 
-            TensorShape downShape = new TensorShape(batch, ch, h / 2, w / 2);
+            // Conv 3×3, stride 2, pad 1 rounds up: 45 rows → 23, not 22.
+            TensorShape downShape = new TensorShape(batch, ch, (h + 1) / 2, (w + 1) / 2);
             Tensor downsampled = new Tensor(downShape, hidden.DType);
             backend.Conv2D(downsampled, hidden, _downsampleWeight!, _downsampleBias, 2, 2, 1, 1);
             hidden.Dispose();

@@ -2883,6 +2883,33 @@ public interface IBackend : IDisposable
     /// <summary>Nearest-neighbor 2D upsample by the given scale factor.</summary>
     void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW);
 
+    /// <summary>Nearest-neighbour upsample of NCHW <paramref name="input"/> by <paramref name="scale"/> into
+    /// <paramref name="output"/>, whose height and width may each fall up to <c>scale − 1</c> short of the input's
+    /// times <paramref name="scale"/>. Output row <c>oh</c> reads input row <c>oh / scale</c>, which is exactly
+    /// <c>interpolate(size=…, mode="nearest")</c> for those sizes — what a UNet up path needs when its stride-2 down
+    /// path rounded an odd size up (diffusers passes the skip's size as <c>upsample_size</c>). Default: the full
+    /// upsample into scratch, then the leading rows and columns copied on the host.</summary>
+    unsafe void UpsampleNearest2DToSize(Tensor output, Tensor input, int scale)
+    {
+        (int outH, int outW) = UpsampleNearestExtent.Validate(output, input, scale);
+        int inH = (int)input.Shape[2], inW = (int)input.Shape[3];
+        if (outH == inH * scale && outW == inW * scale)
+        {
+            UpsampleNearest2D(output, input, scale, scale);
+            return;
+        }
+        using Tensor full = new(new TensorShape(input.Shape[0], input.Shape[1], (long)inH * scale, (long)inW * scale), input.DType);
+        UpsampleNearest2D(full, input, scale, scale);
+        int elem = (int)input.DType.ComputeByteCount(1);
+        int fullW = inW * scale;
+        long planes = input.Shape[0] * input.Shape[1];
+        byte* src = (byte*)full.DataPointer, dst = (byte*)output.DataPointer;
+        for (long plane = 0; plane < planes; plane++)
+            for (int y = 0; y < outH; y++)
+                Buffer.MemoryCopy(src + ((plane * inH * scale + y) * fullW) * elem, dst + ((plane * outH + y) * outW) * elem,
+                    (long)outW * elem, (long)outW * elem);
+    }
+
     /// <summary>Bilinear 2D upsample by the given scale factor.</summary>
     void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW);
 

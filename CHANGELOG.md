@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.198
+
+- **SDXL and SD1.5 render at sizes whose latent is not a multiple of 8** (1280×720, 720×1280, …) instead of returning a
+  flat grey image reported as a success. The UNet's stride-2 downsample allocated `n/2` where the conv produces
+  `ceil(n/2)`, and the up path doubled instead of resizing to the skip it concatenates. The concat now refuses a
+  mismatched skip rather than blending misaligned memory. New `IBackend.UpsampleNearest2DToSize` (native on CUDA)
+  gives nearest-neighbour upsampling to a size one short of the double, as diffusers' `upsample_size` does. The
+  ControlNet condition embedding's stride-2 sizes are corrected the same way.
+- The CPU `UpsampleNearest2D` kernel refuses non-F32 tensors instead of writing floats into a narrower buffer.
+
 ## alpha.195
 
 - **Wan 2.2 TI2V-5B: warm 17.4 s → 6.6 s** through SwarmUI (512×320, 25 frames, 20 steps, 4090).
