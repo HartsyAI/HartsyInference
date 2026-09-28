@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.197
+
+- **Ideogram 4 steps 12% faster (≈2.5 s per 1024² / 20-step generation on a 4090).** New `flash_attn_f16` kernel:
+  F16 attention with F32 accumulation on the tensor cores, reading strided operands so one kernel serves head-major,
+  token-major and fused-projection layouts. It serves head dim 256, where cuDNN offers a single engine at about half
+  FlashAttention-2's throughput: 2.93 ms per call vs cuDNN's 4.2 ms at Ideogram 4's shape. Kill switch:
+  `numerics.flashF16`.
+- Ideogram 4 attention runs token-major, dropping four permutes per block. The CUDA token-major attention entry now
+  also accepts the byte-identical `[1, S, heads, headDim]` layout.
+
 ## alpha.196
 
 - **Ideogram 4 no longer comes out hazy and washed out.** Its F16 blocks damp the attention-output and SwiGLU
