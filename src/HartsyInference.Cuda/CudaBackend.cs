@@ -7590,13 +7590,13 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         int batch, int heads, int sq, int skv, int d, CudaKernels.FlashStrides so, CudaKernels.FlashStrides sQ, CudaKernels.FlashStrides sk, CudaKernels.FlashStrides sv)
     {
         using OpScope _op = EnterOp();
-        ulong pOut = 0;
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
         bool cached = false;
         try
         {
-            ulong pQ = GpuTransferHelper.CopyToDevice(query);
-            ulong pK = GpuTransferHelper.CopyToDevice(key);
-            ulong pV = GpuTransferHelper.CopyToDevice(value);
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             _kernels!.LaunchFlashAttnF16(d, pOut, pQ, pK, pV, so, sQ, sk, sv, batch, heads, sq, skv,
@@ -7614,6 +7614,10 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         }
         finally
         {
+            // Releases the transient uploads of host-resident operands; a no-op for cached activations.
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
             if (!cached && pOut != 0) GpuTransferHelper.FreeDevice(pOut);
         }
     }
