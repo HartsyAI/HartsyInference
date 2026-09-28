@@ -58,7 +58,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
         // TODO(E-IMG-4): honor user VAE / Qwen text-encoder overrides from ImageRequest.Components (the SwarmUI
         // loader read T2IParamTypes.QwenModel / T2IParamTypes.VAE) instead of always taking the SideModels entry.
         // The optional ByT5 glyph branch is not wired here either (it is optional at forward time upstream too).
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;
         try
         {
@@ -149,7 +149,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[HunyuanImageRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

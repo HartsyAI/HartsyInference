@@ -1,6 +1,7 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -28,6 +29,7 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
     private readonly string _mistralSystemPrompt = mistralSystemPrompt;
     private readonly LlamaStyleEncoder _encoder = encoder;
     private readonly List<IDisposable> _loaders = loaders;
+    private int _disposed;
     private readonly IDisposable? _checkpoint = checkpoint;
 
     private readonly MergedLoraStack? _loraStack = loraStack;
@@ -192,16 +194,10 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
     /// <inheritdoc/>
     public void Dispose()
     {
-        _pipeline.Dispose();
-        _qwenTokenizer?.Dispose();
-        _mistralTokenizer?.Dispose();
-        _encoder.Dispose();
-        foreach (IDisposable loader in _loaders)
-        {
-            loader.Dispose();
-        }
-        _checkpoint?.Dispose();
-        // Last: the stack owns the merged weight tensors the transformer was serving.
-        _loraStack?.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        // Every handle is released even if one throws; the LoRA stack goes last, it owns the merged weights.
+        new CompositeDisposable([_pipeline, _qwenTokenizer, _mistralTokenizer, _encoder,
+            .. _loaders, _checkpoint, _loraStack]).Dispose();
     }
 }
