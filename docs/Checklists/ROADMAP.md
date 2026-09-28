@@ -29,6 +29,9 @@ Benchmark infrastructure already exists in [benchmarks](../../benchmarks/README.
 
 - [ ] Refresh matched baselines across consumer, Ada, A100, and Hopper hardware.
 - [ ] General/packed variable-length attention; audit existing attention paths before designing another kernel.
+- [ ] `flash_attn_f16` at head dim 256 runs 122 TFLOPS on a 4090 (2.93 ms at Ideogram 4's 18×4400² shape) against
+  FlashAttention-2's 143: every warp stalls through its softmax phase at once. Next rung is a warp ping-pong (FA3-style)
+  or FA2's own hdim-256 forward compiled to PTX. Measure d=128 against cuDNN before routing it there.
 - [ ] QKV/gate-up/norm/activation fusion where full-model profiling shows launch or bandwidth cost.
 - [ ] Extend memory reuse and graph capture only on measured eligible paths; both mechanisms already exist.
 - [ ] F16/BF16 coverage and Hopper FA3/WGMMA experiments with numerical gates.

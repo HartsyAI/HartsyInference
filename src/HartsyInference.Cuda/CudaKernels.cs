@@ -195,6 +195,12 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _flashAttnF32SplitF16Kv;
     private readonly CudaModule _flashV2Module;
     private readonly nint _flashV2Tf32;
+    // Optional: F16-I/O fused attention with F32 accumulation (flash_attn_f16.ptx), strided so it reads head-major,
+    // token-major and fused-projection layouts alike. Absent PTX ⇒ HasFlashAttnF16 is false and callers keep cuDNN.
+    private readonly CudaModule? _flashF16Module;
+    private readonly nint _flashF16D64;
+    private readonly nint _flashF16D128;
+    private readonly nint _flashF16D256;
     private readonly nint _flashAttnF32Combine;
 
     // ── Elementwise F32 function handles ─────────────────────────────────
@@ -1072,6 +1078,17 @@ public sealed class CudaKernels : IDisposable
         // Opt the fused flash kernel into >48 KB dynamic shared memory (K/V/S/O tiles ≈ 72 KB for D=128).
         // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8. Ignore failure (kernel launch will surface it).
         CudaDriverApi.cuFuncSetAttribute(_flashV2Tf32, 8, 96 * 1024);
+        string flashF16Path = Ptx("flash_attn_f16");
+        if (File.Exists(flashF16Path))
+        {
+            _flashF16Module = LoadOwnedModule(flashF16Path);
+            _flashF16D64 = _flashF16Module.GetFunction("flash_attn_f16_d64");
+            _flashF16D128 = _flashF16Module.GetFunction("flash_attn_f16_d128");
+            _flashF16D256 = _flashF16Module.GetFunction("flash_attn_f16_d256");
+            // The Q, K and V tiles exceed the 48 KB default at D=256 (CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8).
+            CudaDriverApi.cuFuncSetAttribute(_flashF16D128, 8, FlashAttnF16SharedBytes(128));
+            CudaDriverApi.cuFuncSetAttribute(_flashF16D256, 8, FlashAttnF16SharedBytes(256));
+        }
 
         // ── GGUF Dequant ─────────────────────────────────────────────────
         BindGgufDequant(DType.Q8_0, "dequant_q8_0_to_f16", threadsPerBlock: 32);
@@ -2939,6 +2956,50 @@ public sealed class CudaKernels : IDisposable
         uint smem = (uint)((BC * d + BC * d + BR * BC + BR * d) * sizeof(float));
         CudaDriverApi.cuLaunchKernel(_flashV2Tf32, grid, (uint)hq, (uint)b, 64, 1, 1,
             smem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether flash_attn_f16.ptx is loaded.</summary>
+    public bool HasFlashAttnF16 => _flashF16Module is not null;
+
+    // Must match flash_attn_f16.cu's FA_BR / FA_BC / FA_THREADS.
+    private const int FlashF16QueryRows = 128, FlashF16KeyRows = 32, FlashF16Threads = 256;
+
+    /// <summary>Dynamic shared memory the F16 flash kernel needs at head dim <paramref name="d"/>: the Q tile plus one
+    /// K and one V tile, in halves.</summary>
+    public static int FlashAttnF16SharedBytes(int d) => (FlashF16QueryRows + 2 * FlashF16KeyRows) * d * sizeof(ushort);
+
+    /// <summary>Element strides of one attention operand: consecutive batches, heads and rows.</summary>
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public readonly record struct FlashStrides(ulong Batch, ulong Head, ulong Row);
+
+    /// <summary>F16 fused attention over strided operands: grid <c>(ceil(sq/128), heads, batch)</c>, 256 threads.
+    /// <paramref name="scaleLog2"/> is the softmax scale times log2(e). Every row must start 16-byte aligned.</summary>
+    public unsafe void LaunchFlashAttnF16(int d, ulong o, ulong q, ulong k, ulong v,
+        FlashStrides so, FlashStrides sq, FlashStrides sk, FlashStrides sv,
+        int batch, int heads, int sqLen, int skvLen, float scaleLog2, nint stream)
+    {
+        if (_flashF16Module is null)
+            throw new InvalidOperationException("flash_attn_f16.ptx is not loaded; gate on HasFlashAttnF16 first.");
+        nint fn = d switch
+        {
+            64 => _flashF16D64,
+            128 => _flashF16D128,
+            256 => _flashF16D256,
+            _ => throw new ArgumentOutOfRangeException(nameof(d), $"F16 flash attention serves head dims 64/128/256, not {d}."),
+        };
+        if (batch <= 0 || batch > 65_535 || heads <= 0 || heads > 65_535 || sqLen <= 0 || skvLen <= 0)
+            throw new ArgumentOutOfRangeException(nameof(batch), $"F16 flash attention dims out of range: B={batch} H={heads} Sq={sqLen} Skv={skvLen}.");
+        ulong oA = o, qA = q, kA = k, vA = v;
+        FlashStrides soA = so, sqA = sq, skA = sk, svA = sv;
+        uint sqN = (uint)sqLen, skvN = (uint)skvLen;
+        float scA = scaleLog2;
+        void** args = stackalloc void*[11];
+        args[0] = &oA; args[1] = &qA; args[2] = &kA; args[3] = &vA;
+        args[4] = &soA; args[5] = &sqA; args[6] = &skA; args[7] = &svA;
+        args[8] = &sqN; args[9] = &skvN; args[10] = &scA;
+        CudaDriverApi.cuLaunchKernel(fn, (uint)((sqLen + FlashF16QueryRows - 1) / FlashF16QueryRows), (uint)heads, (uint)batch,
+            FlashF16Threads, 1, 1,
+            (uint)FlashAttnF16SharedBytes(d), stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Flash-decoding split phase (plain path: no sink/alibi/softcap/window). Launches <c>batch·hq·tq·splits</c> blocks; each computes the partial online-softmax state (m, l, Σp·V) for its key chunk into the scratch buffers. <paramref name="chunk"/> = ceil(kvLen / splits).</summary>

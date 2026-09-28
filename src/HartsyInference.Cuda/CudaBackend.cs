@@ -97,6 +97,10 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <summary>Number of successfully enqueued cuDNN fused-attention executions this session.</summary>
     public long CudnnSdpaExecutionCount => Interlocked.Read(ref _cudnnSdpaExecutionCount);
 
+    /// <summary>F16 flash-kernel launches this backend served (see <see cref="TryFlashF16"/>).</summary>
+    public long FlashF16ExecutionCount => Interlocked.Read(ref _flashF16ExecutionCount);
+    private long _flashF16ExecutionCount;
+
     /// <summary>Test diagnostic incremented whenever a new cuDNN SDPA handle/plan cache is constructed.</summary>
     internal long CudnnSdpaSessionGeneration => Interlocked.Read(ref _cudnnSdpaSessionGeneration);
 
@@ -1129,6 +1133,8 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     /// <remarks>~34× on the Krea2 self-attention shape. Standard-profile default ON; numerics.sdpaCudnn=false disables.
     /// Missing cuDNN or engine rejections fall back to the materialized paths automatically.</remarks>
     private readonly bool _sdpaCudnn;
+    private readonly bool _flashF16;        // numerics.flashF16: the engine's F16 flash kernel at head dim 256
+    private volatile bool _flashF16Dead;    // set on the first launch failure; the session keeps cuDNN after that
 
     /// <summary>Routes F16/BF16 NCHW convolutions through cuDNN conv-forward engines instead of the im2col→cuBLAS GEMM path.</summary>
     /// <remarks>Standard-profile default ON; numerics.convCudnn=false disables. Failures self-disable for the session and fall back to im2col.</remarks>
@@ -1233,6 +1239,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         // im2col+cuBLAS / custom-flash fallbacks instead of throwing per-op or hanging.
         CudnnRuntime.LogStatus();
         _sdpaCudnn = CudnnRuntime.SupportsSdpa && EngineKnobs.SdpaCudnn.Value;
+        _flashF16 = EngineKnobs.FlashF16.Value;
         // cuDNN convolution forward: default ON — replaces im2col→GEMM for F16/BF16 NCHW convs (the SDXL
         // UNet/VAE cost). Same self-disable-on-failure contract as the fused SDPA path.
         _convCudnn = CudnnRuntime.Available && EngineKnobs.ConvCudnn.Value;
@@ -7123,6 +7130,15 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             return;
         }
 
+        // The engine's own F16 flash kernel where cuDNN is the slow path (head dim 256: one engine config, about
+        // half FlashAttention-2's throughput on Ada). Same F16 I/O and F32 accumulation as the cuDNN branch below.
+        if (FlashF16Eligible(query, key, value, output, mask, d)
+            && TryFlashF16(output, query, key, value, scale, (int)b, (int)h, (int)sq, (int)skv, (int)d,
+                HeadMajorStrides(h, sq, d), HeadMajorStrides(h, sq, d), HeadMajorStrides(h, skv, d), HeadMajorStrides(h, skv, d)))
+        {
+            return;
+        }
+
         if (CudnnMaskCompatible(mask, b, sq, skv) && query.DType == DType.F16 && key.DType == DType.F16
             && value.DType == DType.F16 && output.DType == DType.F16
             && _sdpaCudnn && !_cudnnSdpaDead && CudnnSdpaDimEligible(d) && CudnnSdpa.ShapeSupported(d)
@@ -7496,10 +7512,19 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     public unsafe void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int headDim, float scale, bool allowF16 = false)
     {
-        using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
-            ? $"SDPA-TM {query.Shape[0]}x{key.Shape[0]}x{heads}x{headDim}" : "SDPA-TM");
         ValidateTokenMajorAttentionContract(output, query, key, value, mask, heads, headDim, scale);
-        long sq = query.Shape[0], skv = key.Shape[0], d = headDim;
+        long sq = TokenMajorRows(query), skv = TokenMajorRows(key), d = headDim;
+        using NvtxRange _nvtx = NvtxRange.Push(NvtxRange.ProfileShapes
+            ? $"SDPA-TM {sq}x{skv}x{heads}x{headDim}" : "SDPA-TM");
+        if (FlashF16Eligible(query, key, value, output, mask, d))
+        {
+            CudaKernels.FlashStrides tokenMajor = new(0, (ulong)headDim, (ulong)heads * (ulong)headDim);
+            if (TryFlashF16(output, query, key, value, scale, 1, heads, (int)sq, (int)skv, (int)d,
+                    tokenMajor, tokenMajor, tokenMajor, tokenMajor))
+            {
+                return;
+            }
+        }
         // SageAttention has no token-major kernel, so this entry point reaches cuDNN and a long-sequence DiT
         // (LTX-2.5 at 17480 video tokens) runs fp16 flash while the INT8 path it qualifies for sits unused.
         // Declining cuDNN here routes the call through the permute pair below into the head-major dispatch, which
@@ -7541,24 +7566,86 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         finally { qMh.Dispose(); kMh.Dispose(); vMh.Dispose(); oMh.Dispose(); }
     }
 
-    /// <summary>Validates the rank-2 <c>[S, heads*headDim]</c> contract of the token-major SDPA entry point.</summary>
+    /// <summary>Rows of a token-major operand: <c>[S, heads*headDim]</c> and <c>[1, S, heads, headDim]</c> share one layout.</summary>
+    private static long TokenMajorRows(Tensor t) => t.Shape.Rank == 4 ? t.Shape[1] : t.Shape[0];
+
+    /// <summary>Element strides of a contiguous head-major <c>[B, H, S, D]</c> operand.</summary>
+    private static CudaKernels.FlashStrides HeadMajorStrides(long heads, long rows, long d) =>
+        new((ulong)(heads * rows * d), (ulong)(rows * d), (ulong)d);
+
+    /// <summary>Whether the F16 flash kernel takes this call: all-F16 operands, no mask, a head dim cuDNN serves
+    /// slowly, the PTX loaded, the knob on and no earlier failure this session.</summary>
+    private bool FlashF16Eligible(Tensor query, Tensor key, Tensor value, Tensor output, Tensor? mask, long d)
+    {
+        if (!_flashF16 || _flashF16Dead || mask is not null || d != 256) return false;
+        if (query.DType != DType.F16 || key.DType != DType.F16 || value.DType != DType.F16 || output.DType != DType.F16)
+            return false;
+        EnsureKernels();
+        return _kernels!.HasFlashAttnF16;
+    }
+
+    /// <summary>Runs the F16 flash kernel over strided operands. A launch failure logs once, disables the kernel for the
+    /// session and returns false so the caller's cuDNN path serves the call.</summary>
+    private bool TryFlashF16(Tensor output, Tensor query, Tensor key, Tensor value, float scale,
+        int batch, int heads, int sq, int skv, int d, CudaKernels.FlashStrides so, CudaKernels.FlashStrides sQ, CudaKernels.FlashStrides sk, CudaKernels.FlashStrides sv)
+    {
+        using OpScope _op = EnterOp();
+        ulong pQ = 0, pK = 0, pV = 0, pOut = 0;
+        bool cached = false;
+        try
+        {
+            pQ = GpuTransferHelper.CopyToDevice(query);
+            pK = GpuTransferHelper.CopyToDevice(key);
+            pV = GpuTransferHelper.CopyToDevice(value);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchFlashAttnF16(d, pOut, pQ, pK, pV, so, sQ, sk, sv, batch, heads, sq, skv,
+                scale * 1.4426950408889634f, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cached = true;
+            Interlocked.Increment(ref _flashF16ExecutionCount);
+            return true;
+        }
+        catch (Exception error) when (error is not OutOfMemoryException and not OutOfVramException)
+        {
+            _flashF16Dead = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] F16 flash attention failed at D={d} ({error.Message}); using cuDNN for the rest of the session.");
+            return false;
+        }
+        finally
+        {
+            // Releases the transient uploads of host-resident operands; a no-op for cached activations.
+            GpuTransferHelper.FreeDevice(pQ);
+            GpuTransferHelper.FreeDevice(pK);
+            GpuTransferHelper.FreeDevice(pV);
+            if (!cached && pOut != 0) GpuTransferHelper.FreeDevice(pOut);
+        }
+    }
+
+    /// <summary>Validates the <c>[S, heads*headDim]</c> / <c>[1, S, heads, headDim]</c> contract of the token-major SDPA entry point.</summary>
     internal static void ValidateTokenMajorAttentionContract(Tensor output, Tensor query, Tensor key, Tensor value,
         Tensor? mask, int heads, int headDim, float scale)
     {
         if (heads <= 0 || headDim <= 0)
             throw new ArgumentException($"Token-major SDPA needs positive heads/headDim; got heads={heads}, headDim={headDim}.");
         long inner = (long)heads * headDim;
-        if (output.Shape.Rank != 2 || query.Shape.Rank != 2 || key.Shape.Rank != 2 || value.Shape.Rank != 2)
-            throw new ArgumentException(
-                $"Token-major SDPA requires rank-2 [S, heads*headDim] tensors; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
-        if (query.Shape[1] != inner || key.Shape[1] != inner || value.Shape[1] != inner || output.Shape[1] != inner)
-            throw new ArgumentException(
-                $"Token-major SDPA rows must be heads*headDim={inner}; got Q={query.Shape}, K={key.Shape}, V={value.Shape}, output={output.Shape}.");
-        if (output.Shape[0] != query.Shape[0])
+        foreach (Tensor t in (ReadOnlySpan<Tensor>)[output, query, key, value])
+        {
+            bool tokenMajor = t.Shape.Rank switch
+            {
+                2 => t.Shape[1] == inner,
+                4 => t.Shape[0] == 1 && t.Shape[2] == heads && t.Shape[3] == headDim,
+                _ => false,
+            };
+            if (!tokenMajor)
+                throw new ArgumentException(
+                    $"Token-major SDPA requires [S, heads*headDim] or [1, S, heads, headDim] tensors with heads={heads}, headDim={headDim}; got output={output.Shape}, Q={query.Shape}, K={key.Shape}, V={value.Shape}.");
+        }
+        if (TokenMajorRows(output) != TokenMajorRows(query))
             throw new ArgumentException($"Token-major SDPA output must have Q's row count; got output={output.Shape}, Q={query.Shape}.");
-        if (key.Shape[0] != value.Shape[0])
+        if (TokenMajorRows(key) != TokenMajorRows(value))
             throw new ArgumentException($"Token-major SDPA K/V row counts must match; got K={key.Shape}, V={value.Shape}.");
-        long sq = query.Shape[0], skv = key.Shape[0];
+        long sq = TokenMajorRows(query), skv = TokenMajorRows(key);
         if (sq <= 0 || skv <= 0)
             throw new ArgumentException($"Token-major SDPA dimensions must be positive; got Q={query.Shape}, K={key.Shape}.");
         if (!float.IsFinite(scale))
