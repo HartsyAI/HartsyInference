@@ -38,6 +38,7 @@ flux1-dev	vulkanbar	Stable-Diffusion/BFL/Flux1/flux1-dev-fp8.safetensors	image|a
 flux2-dev-q4ks	vulkanbar	Stable-Diffusion/Flux2/flux2-dev-Q4_K_S.gguf	image|a red apple on a wooden table|-m flux2 --steps 20 --width 1024 --height 1024
 boogu-turbo	vulkanbar	Stable-Diffusion/Boogu/boogu_image_turbo_fp8_scaled.safetensors	image|a red apple on a wooden table|-m boogu --steps 4 --width 1024 --height 1024
 qwenimage21	vulkanbar	diffusion_models/qwen_image_2.1_bf16.safetensors	image|a red apple on a wooden table|-m qwen-image-2.1 --steps 25 --width 1024 --height 1024
+wan5b	video,quality	Stable-Diffusion/Wan/wan2.2_ti2v_5B_fp16.safetensors	video|a red fox trotting through a sunlit snowy forest, cinematic, shallow depth of field|-m wan --width 832 --height 480 --frames 49 --steps 20 --cfg 5
 ideogram4	vulkanbar	Stable-Diffusion/Ideogram4/ideogram4_fp8_scaled.safetensors	image|a red apple on a wooden table|-m ideogram4 --steps 20 --width 1024 --height 1024
 chroma-hd	vulkanbar	Stable-Diffusion/Chroma/Chroma1-HD-fp8mixed-final.safetensors	image|a red apple on a wooden table|-m chroma --steps 30 --width 1024 --height 1024
 ernie-turbo	vulkanbar	Stable-Diffusion/Ernie/ernie-image-turbo-fp8.safetensors	image|a red apple on a wooden table|-m ernie-image --steps 8 --width 1024 --height 1024

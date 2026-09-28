@@ -172,6 +172,11 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SandwichFusion =
         Bool("numerics.sandwichFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.");
 
+    /// <summary>Runs cuDNN convolutions channels-last, transposing activations and weights around the call; 0 keeps them
+    /// NCHW.</summary>
+    public static readonly Knob<bool> ConvChannelsLast =
+        Bool("numerics.convChannelsLast", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs cuDNN convolutions channels-last (NHWC/NDHWC), transposing around the call, where its tensor-core engines are ~4x faster; 0 keeps them NCHW.");
+
     /// <summary>Routes scaled-dot-product attention through cuDNN's fused flash engine; 0 falls back to materialized paths.</summary>
     public static readonly Knob<bool> SdpaCudnn =
         Bool("numerics.sdpaCudnn", true, KnobScope.Runtime, KnobDomain.Numerics, "Routes scaled-dot-product attention through cuDNN's fused flash engine; 0 falls back to materialized paths.");

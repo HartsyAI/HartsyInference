@@ -14,6 +14,10 @@ public sealed unsafe class CausalConv3d
     /// so a parity test can prove the two produce identical output. Never set in production.</summary>
     public static bool DisableBatchedPath;
 
+    /// <summary>Test-only escape hatch: skips the backend's native 3-D convolution so the batched path runs its per-tap
+    /// 2-D decomposition, letting a parity test compare the two on one backend. Never set in production.</summary>
+    public static bool DisableNativeConv3d;
+
     private readonly int _cOut;
     private readonly int _cIn;
     private readonly int _kt;
@@ -30,7 +34,8 @@ public sealed unsafe class CausalConv3d
     private readonly bool _replicateFirstPad;   // LTX/HunyuanVideo: pad with copies of the edge frame instead of zeros
     private readonly bool _spatialReplicatePad; // HunyuanVideo: F.pad(mode="replicate") spatially instead of zero-pad
     private readonly bool _spatialReflectPad;   // LTX-2: F.pad(mode="reflect") spatially instead of zero-pad
-    private readonly Tensor[] _weight2d;  // kt slices of [cOut, cIn, kh, kw]
+    private readonly Tensor _weight5d;    // [cOut, cIn, kt, kh, kw] in the compute dtype — what a native 3-D conv reads
+    private Tensor[]? _weight2d;          // kt slices of [cOut, cIn, kh, kw], built on the first per-tap forward
     private readonly Tensor? _bias;
     private readonly DType _computeDtype; // activation + conv-weight dtype (F32 default; BF16 = SeedVR2 memory mode, batched path only)
 
@@ -58,8 +63,11 @@ public sealed unsafe class CausalConv3d
         _padTLeft = causal ? 2 * padT : padT;     // non-causal splits the temporal pad symmetrically
         _padTRight = causal ? 0 : padT;
         _bias = bias is null ? null : (bias.DType == DType.F32 ? bias : bias.CastTo(DType.F32));
-        _weight2d = SliceTemporal(weight5d);
+        _weight5d = weight5d.CastTo(_computeDtype);   // an owned copy either way
     }
+
+    /// <summary>Per-tap 2-D weights for backends without a native 3-D convolution; built once, on first use.</summary>
+    private Tensor[] Weight2d => _weight2d ??= SliceTemporal(_weight5d);
 
     /// <summary>Output channel count.</summary>
     public int OutChannels => _cOut;
@@ -105,10 +113,12 @@ public sealed unsafe class CausalConv3d
         return slices;
     }
 
-    /// <summary>Enumerates the (sliced) weight + bias for GPU preloading.</summary>
+    /// <summary>Enumerates the weight (plus the per-tap slices once a per-tap forward has built them) and bias for GPU preloading.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        foreach (Tensor w in _weight2d) yield return w;
+        yield return _weight5d;
+        if (_weight2d is not null)
+            foreach (Tensor w in _weight2d) yield return w;
         if (_bias is not null) yield return _bias;
     }
 
@@ -162,11 +172,15 @@ public sealed unsafe class CausalConv3d
             backend.BuildPaddedFrames(padded, input, cacheFrames, zeroPad, _replicateFirstPad,
                 prePad ? _padH : 0, prePad ? _padW : 0, reflectPre);
             Tensor fastOut = new Tensor(new TensorShape([1L, _cOut, tout, hOut, wOut]), _computeDtype);
+            // Native 3-D convolution where the backend has one: every tap in one reduction, and only the output frames
+            // are computed — the per-tap pass below convolves all paddedT frames for each of the kt taps.
+            if (!DisableNativeConv3d && backend.TryConv3DFrameMajor(fastOut, padded, _weight5d, _bias, _strideT, _strideH, _strideW, convPadH, convPadW))
+                return fastOut;
             backend.FillBias(fastOut, _bias);
             for (int dt = 0; dt < _kt; dt++)
             {
                 using Tensor convDt = new Tensor(new TensorShape(paddedT, _cOut, hOut, wOut), _computeDtype);
-                backend.Conv2D(convDt, padded, _weight2d[dt], null, _strideH, _strideW, convPadH, convPadW);
+                backend.Conv2D(convDt, padded, Weight2d[dt], null, _strideH, _strideW, convPadH, convPadW);
                 backend.AccumulateTap(fastOut, convDt, dt, _strideT);
             }
             return fastOut;
@@ -192,7 +206,7 @@ public sealed unsafe class CausalConv3d
                     frame = padded;
                 }
                 Tensor conv = new Tensor(new TensorShape(batch, _cOut, hOut, wOut), DType.F32);
-                backend.Conv2D(conv, frame, _weight2d[dt], null, _strideH, _strideW,
+                backend.Conv2D(conv, frame, Weight2d[dt], null, _strideH, _strideW,
                     _spatialReplicatePad ? 0 : _padH, _spatialReplicatePad ? 0 : _padW);
                 frame.Dispose();
                 if (acc is null) { acc = conv; }

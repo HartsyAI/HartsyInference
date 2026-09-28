@@ -60,6 +60,39 @@ internal sealed class CudnnConv : IDisposable
         Run(plan, x, w, y);
     }
 
+    /// <summary>Forward convolution over CHANNELS-LAST buffers, 2 or 3 spatial dims: X <c>[N, spatial…, C]</c>,
+    /// W <c>[K, kernel…, C]</c>, Y <c>[N, outSpatial…, K]</c>, symmetric padding. cuDNN's tensor-core engines are built
+    /// for this layout: at 3×3, 256-512 channels and BF16 they run ~155-165 TFLOPS on a 4090, where the same conv over
+    /// NCHW gets ~40. The dims arrays are in logical NC… order (<c>[N, C, spatial…]</c>, <c>[K, C, kernel…]</c>).</summary>
+    public void ExecuteChannelsLast(ulong x, ulong w, ulong y, long[] xDim, long[] wDim, long[] yDim,
+        long[] strides, long[] pads, int dataType)
+    {
+        string key = $"cl|{string.Join(',', xDim)}|{string.Join(',', wDim)}|{string.Join(',', strides)}|{string.Join(',', pads)}|{dataType}";
+        Plan plan = _plans.GetOrAdd(key, _ =>
+        {
+            long[] dil = new long[strides.Length];
+            Array.Fill(dil, 1L);
+            return BuildPlanNd(backwardData: false, xDim, ChannelsLastStrides(xDim), wDim, ChannelsLastStrides(wDim),
+                yDim, ChannelsLastStrides(yDim), strides, pads, pads, dil, dataType);
+        });
+        Run(plan, x, w, y);
+    }
+
+    /// <summary>Element strides of a channels-last buffer for logical dims <c>[N, C, s1, …, sd]</c>.</summary>
+    private static long[] ChannelsLastStrides(long[] dims)
+    {
+        long[] strides = new long[dims.Length];
+        long inner = dims[1];                    // channels are innermost
+        strides[1] = 1;
+        for (int i = dims.Length - 1; i >= 2; i--)
+        {
+            strides[i] = inner;
+            inner *= dims[i];
+        }
+        strides[0] = inner;
+        return strides;
+    }
+
     /// <summary>Transposed convolution as cuDNN convolution-backward-data: DY[n,k,h,wIn] (the transpose-conv input) ⊛ W[k,c,r,s] → DX[n,c,outH,outW]. Geometry attributes describe the corresponding FORWARD conv (DX is the conv input), so the pads crop the full transposed output: outW = (wIn−1)·strideW + dilationW·(s−1) + 1 − padWPre − padWPost.</summary>
     public unsafe void ExecuteBackwardData(ulong dy, ulong w, ulong dx,
         long n, long k, long c, long h, long wIn, long r, long s,
@@ -103,39 +136,41 @@ internal sealed class CudnnConv : IDisposable
     // X-slot dims are (h, wIn) and Y-slot dims (outH, outW): for forward X is the conv input and Y the output;
     // for backwardData X is DX (the large transposed output) and Y is DY (the small input) — the conv descriptor
     // always describes the forward geometry, so callers pass the slot dims accordingly.
-    private unsafe Plan BuildPlan(bool backwardData, long n, long c, long h, long wIn, long k, long r, long s,
+    private Plan BuildPlan(bool backwardData, long n, long c, long h, long wIn, long k, long r, long s,
         long outH, long outW, long strideH, long strideW, long padH, long padWPre, long padWPost, int dataType,
         long dilationH = 1, long dilationW = 1)
+        => BuildPlanNd(backwardData,
+            [n, c, h, wIn], [c * h * wIn, h * wIn, wIn, 1],
+            [k, c, r, s], [c * r * s, r * s, s, 1],
+            [n, k, outH, outW], [k * outH * outW, outH * outW, outW, 1],
+            [strideH, strideW], [padH, padWPre], [padH, padWPost], [dilationH, dilationW], dataType);
+
+    /// <summary>One convolution op over N spatial dims (dims/strides are rank N+2, the rest rank N).</summary>
+    private unsafe Plan BuildPlanNd(bool backwardData, long[] xDim, long[] xStr, long[] wDim, long[] wStr,
+        long[] yDim, long[] yStr, long[] strides, long[] prePads, long[] postPads, long[] dilations, int dataType)
     {
         List<nint> owned = new();
         try
         {
-            long* xDim = stackalloc long[4] { n, c, h, wIn };
-            long* xStr = stackalloc long[4] { c * h * wIn, h * wIn, wIn, 1 };
             nint tX = Tensor(owned, UidX, xDim, xStr, dataType);
-            long* wDim = stackalloc long[4] { k, c, r, s };
-            long* wStr = stackalloc long[4] { c * r * s, r * s, s, 1 };
             nint tW = Tensor(owned, UidW, wDim, wStr, dataType);
-            long* yDim = stackalloc long[4] { n, k, outH, outW };
-            long* yStr = stackalloc long[4] { k * outH * outW, outH * outW, outW, 1 };
             nint tY = Tensor(owned, UidY, yDim, yStr, dataType);
 
             Check(cudnnBackendCreateDescriptor(CUDNN_BACKEND_CONVOLUTION_DESCRIPTOR, out nint conv), "conv desc create");
             owned.Add(conv);
-            long spatial = 2;
+            long spatial = strides.Length;
             SetAttr(conv, CUDNN_ATTR_CONVOLUTION_SPATIAL_DIMS, CUDNN_TYPE_INT64, 1, &spatial);
             int comp = CUDNN_DATA_FLOAT;
             SetAttr(conv, CUDNN_ATTR_CONVOLUTION_COMP_TYPE, CUDNN_TYPE_DATA_TYPE, 1, &comp);
             int mode = CUDNN_CROSS_CORRELATION;
             SetAttr(conv, CUDNN_ATTR_CONVOLUTION_CONV_MODE, CUDNN_TYPE_CONVOLUTION_MODE, 1, &mode);
-            long* dil = stackalloc long[2] { dilationH, dilationW };
-            SetAttr(conv, CUDNN_ATTR_CONVOLUTION_DILATIONS, CUDNN_TYPE_INT64, 2, dil);
-            long* strides = stackalloc long[2] { strideH, strideW };
-            SetAttr(conv, CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64, 2, strides);
-            long* prePads = stackalloc long[2] { padH, padWPre };
-            long* postPads = stackalloc long[2] { padH, padWPost };
-            SetAttr(conv, CUDNN_ATTR_CONVOLUTION_PRE_PADDINGS, CUDNN_TYPE_INT64, 2, prePads);
-            SetAttr(conv, CUDNN_ATTR_CONVOLUTION_POST_PADDINGS, CUDNN_TYPE_INT64, 2, postPads);
+            fixed (long* dil = dilations, str = strides, pre = prePads, post = postPads)
+            {
+                SetAttr(conv, CUDNN_ATTR_CONVOLUTION_DILATIONS, CUDNN_TYPE_INT64, spatial, dil);
+                SetAttr(conv, CUDNN_ATTR_CONVOLUTION_FILTER_STRIDES, CUDNN_TYPE_INT64, spatial, str);
+                SetAttr(conv, CUDNN_ATTR_CONVOLUTION_PRE_PADDINGS, CUDNN_TYPE_INT64, spatial, pre);
+                SetAttr(conv, CUDNN_ATTR_CONVOLUTION_POST_PADDINGS, CUDNN_TYPE_INT64, spatial, post);
+            }
             Check(cudnnBackendFinalize(conv), "conv desc finalize");
 
             int opDescType = backwardData ? CUDNN_BACKEND_OPERATION_CONVOLUTION_BACKWARD_DATA_DESCRIPTOR
@@ -182,14 +217,17 @@ internal sealed class CudnnConv : IDisposable
     }
 
 
-    private unsafe nint Tensor(List<nint> owned, long uid, long* dims, long* strides, int dtype)
+    private unsafe nint Tensor(List<nint> owned, long uid, long[] dims, long[] strides, int dtype)
     {
         Check(cudnnBackendCreateDescriptor(CUDNN_BACKEND_TENSOR_DESCRIPTOR, out nint t), "tensor create");
         owned.Add(t);
         int dt = dtype;
         SetAttr(t, CUDNN_ATTR_TENSOR_DATA_TYPE, CUDNN_TYPE_DATA_TYPE, 1, &dt);
-        SetAttr(t, CUDNN_ATTR_TENSOR_DIMENSIONS, CUDNN_TYPE_INT64, 4, dims);
-        SetAttr(t, CUDNN_ATTR_TENSOR_STRIDES, CUDNN_TYPE_INT64, 4, strides);
+        fixed (long* d = dims, st = strides)
+        {
+            SetAttr(t, CUDNN_ATTR_TENSOR_DIMENSIONS, CUDNN_TYPE_INT64, dims.Length, d);
+            SetAttr(t, CUDNN_ATTR_TENSOR_STRIDES, CUDNN_TYPE_INT64, strides.Length, st);
+        }
         long id = uid;
         SetAttr(t, CUDNN_ATTR_TENSOR_UNIQUE_ID, CUDNN_TYPE_INT64, 1, &id);
         long align = 16;

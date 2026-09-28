@@ -1421,6 +1421,15 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>3-D convolution over the frame-major padded buffer <see cref="BuildPaddedFrames"/> writes:
+    /// <paramref name="paddedFrames"/> <c>[T, cIn, H, W]</c> (already padded in time), <paramref name="weight"/>
+    /// <c>[cOut, cIn, kt, kh, kw]</c>, <paramref name="output"/> <c>[1, cOut, (T − kt)/strideT + 1, H', W']</c> with
+    /// symmetric spatial padding and an optional per-channel <paramref name="bias"/>. One kernel with every tap in its
+    /// reduction, instead of a 2-D pass per tap over all T frames. Returns false when the backend does not serve the
+    /// call (the default), and the caller runs its per-tap 2-D decomposition instead.</summary>
+    bool TryConv3DFrameMajor(Tensor output, Tensor paddedFrames, Tensor weight, Tensor? bias,
+        int strideT, int strideH, int strideW, int padH, int padW) => false;
+
     /// <summary>Builds the padded input for BATCHED CausalConv3d: transpose + temporal pad + cache prepend + spatial
     /// pad. <paramref name="reflectSpatial"/> mirrors the H/W borders (<c>F.pad(mode="reflect")</c>, the LTX-2 VAE's
     /// default) instead of edge-clamping them.</summary>
