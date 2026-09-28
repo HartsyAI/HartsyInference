@@ -19,7 +19,7 @@ public sealed unsafe class StepGraphCaptureRecoveryTests
     public StepGraphCaptureRecoveryTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
-    public void CaptureInvalidatedByAnotherBackendsLegacyCopy_ResetsCleanAndTheBackendRecaptures()
+    public void CaptureInvalidatedByALegacyStreamCall_ResetsCleanAndTheBackendRecaptures()
     {
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
         using Tensor input = RandomF32(new TensorShape(2, Dim), 811);
@@ -39,8 +39,8 @@ public sealed unsafe class StepGraphCaptureRecoveryTests
 
             capturing.StepGraphBegin();
             capturing.Linear(output, input, weight, bias: null);
-            // The synchronous memset runs on the legacy stream; the offending call itself fails too.
-            Record.Exception(() => CudaMemory.Zero(scratch, 4096));
+            // A legacy-stream memset, as any caller outside the engine's transfer helpers might issue; it fails too.
+            Record.Exception(() => CudaDriverApi.cuMemsetD8(scratch, 0, 4096).ThrowOnError());
             Assert.ThrowsAny<Exception>(() => capturing.Linear(output, input, weight, bias: null));
 
             capturing.StepGraphReset();
@@ -50,6 +50,52 @@ public sealed unsafe class StepGraphCaptureRecoveryTests
             Assert.False(capturing.TransferState.TrackCaptureWindow);
             Assert.False(capturing.StepGraphReady);
             AssertCapturesAndReplays(capturing, input, weight, expected);
+        }
+        finally
+        {
+            DisposeBoth(capturing, other);
+        }
+    }
+
+    /// <summary>The engine's own synchronous transfers run on the calling backend's stream, so a second backend on the
+    /// same GPU can upload, download, fill and allocate while the first captures, and both finish.</summary>
+    [Fact]
+    public void AnotherBackendsSynchronousTransfers_DuringACapture_NeitherFailNorInvalidateIt()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        using Tensor input = RandomF32(new TensorShape(2, Dim), 831);
+        using Tensor weight = RandomF32(new TensorShape(Dim, Dim), 832);
+        float expected = ExpectedFirst(input, weight);
+        CudaBackend capturing = new(0, PtxDir());
+        CudaBackend other = new(0, PtxDir());
+        try
+        {
+            if (!((IBackend)capturing).StepGraphSupported) { _output.WriteLine("SKIPPED: StepGraph unsupported"); return; }
+            capturing.HighPrecisionGemm = true;
+            capturing.StepGraphOwner = this;
+            capturing.PreloadWeights([weight]);
+            using Tensor output = new(new TensorShape(2, Dim), DType.F32);
+            GpuTransferHelper.SetAmbient(other.TransferState);
+            ulong scratch = GpuTransferHelper.AllocateDevice(4 * sizeof(float));
+
+            capturing.StepGraphBegin();
+            capturing.Linear(output, input, weight, bias: null);
+            GpuTransferHelper.SetAmbient(other.TransferState);
+            float* host = stackalloc float[4] { 1f, 2f, 3f, 4f };
+            float* back = stackalloc float[4];
+            CudaMemory.CopyHostToDevice(scratch, host, 4 * sizeof(float));
+            CudaMemory.Fill32(scratch, BitConverter.SingleToUInt32Bits(7f), 2);
+            CudaMemory.CopyDeviceToHost(back, scratch, 4 * sizeof(float));
+            ulong persistent = CudaMemory.Allocate(1 << 20);
+            CudaMemory.Free(persistent);
+            capturing.StepGraphEndAndLaunch();
+            capturing.Sync();
+
+            Assert.Equal([7f, 7f, 3f, 4f], new[] { back[0], back[1], back[2], back[3] });
+            Assert.True(capturing.StepGraphReady);
+            Assert.Equal(expected, ((float*)output.DataPointer)[0], 3);
+            GpuTransferHelper.SetAmbient(other.TransferState);
+            GpuTransferHelper.FreeDevice(scratch);
         }
         finally
         {

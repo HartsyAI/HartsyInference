@@ -125,6 +125,9 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName, EntryPoint = "cuMemsetD32_v2")]
     internal static partial int cuMemsetD32(ulong dst, uint value, nuint count);
 
+    [LibraryImport(LibName, EntryPoint = "cuMemsetD32Async")]
+    internal static partial int cuMemsetD32Async(ulong dst, uint value, nuint count, nint stream);
+
     // ── Async Memory (CUDA 11.2+) ───────────────────────────────────────
 
     [LibraryImport(LibName)]

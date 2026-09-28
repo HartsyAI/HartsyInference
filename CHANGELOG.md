@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.193
+
+- **Engines sharing a GPU no longer break each other's captures.** `CudaMemory`'s synchronous copies and fills
+  (`CopyHostToDevice`, `CopyDeviceToHost`, `CopyDeviceToDevice`, `Zero`, `Fill32`) run stream-ordered on the calling
+  backend's compute stream and wait for it, instead of on the legacy stream. While any blocking stream in a context is
+  capturing, a legacy-stream call fails (`CUDA_ERROR_STREAM_CAPTURE_IMPLICIT`) and invalidates that capture, so in
+  SwarmUI an AudioLab or LLM request on the same GPU as an image generation failed and pushed the image model's
+  step graph back to eager. The backend's remaining raw driver copies go through the same helpers. Code with no
+  backend registered still uses the legacy stream.
+
 ## alpha.192
 
 - **A step-graph capture that ends badly costs one eager step, not the backend.** A capture on the blocking compute

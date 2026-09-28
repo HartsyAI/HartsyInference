@@ -366,9 +366,10 @@ no bug, any more than one bad seed was proof there was one.
   several engines usually wasn't caused by the model.** The compute stream is blocking, and while it captures,
   any use of the legacy stream in the same context invalidates the capture, whichever engine or thread makes
   the call (SwarmUI loads the image, audio and LLM extensions as separate engine copies on one context per
-  GPU). Check the log for another backend's generation overlapping the failed step. The owner falls back to
-  eager and recaptures (`StepGraphFailureBudget`); the same failure on every attempt means a capture-illegal op
-  in the step itself.
+  GPU); the offending call itself fails with `CUDA_ERROR_STREAM_CAPTURE_IMPLICIT` (906). The engine's own
+  synchronous transfers (`CudaMemory`) run on the calling backend's stream for this reason, so look for a raw
+  driver call on stream 0 or a context-wide sync. The owner falls back to eager and recaptures
+  (`StepGraphFailureBudget`); the same failure on every attempt means a capture-illegal op in the step itself.
 - **`step-graph capture recorded a FREE of external device ptr` outside a capture step** means a capture window
   was left open. Look for the earlier failure that should have closed it: a `StepGraphReset` that threw, or a
   capture whose owner never reached its end.
