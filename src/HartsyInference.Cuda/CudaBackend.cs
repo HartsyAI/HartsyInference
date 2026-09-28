@@ -5279,6 +5279,33 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>GPU Wan2.2 VAE DupUp3D shortcut, one thread per output element.</summary>
+    public unsafe void DupUp3dVae(Tensor output, Tensor input, int factorT, int factorS, int dropT)
+    {
+        using NvtxRange _nvtxProf = NvtxRange.Push("DupUp3dVae");
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        int b = (int)input.Shape[0], inC = (int)input.Shape[1], t = (int)input.Shape[2];
+        int h = (int)input.Shape[3], w = (int)input.Shape[4], outC = (int)output.Shape[1];
+        ulong pOut = 0, pIn = 0;
+        bool cachedOutput = false;
+        try
+        {
+            pIn = GpuTransferHelper.CopyToDevice(input);
+            nuint outBytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            _kernels!.LaunchWanVaeDupUp3d(pOut, pIn, b, inC, t, h, w, outC, factorT, factorS, dropT, output.ElementCount,
+                _stream.Handle, bf16: RequireVaeFrameDtype(output.DType, input.DType));
+            GpuTransferHelper.CacheActivation(output, pOut, outBytes);
+            cachedOutput = true;
+        }
+        finally
+        {
+            if (!cachedOutput) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pIn);
+        }
+    }
+
     /// <summary>GPU Wan2.2 VAE attention qkv split (channel↔token transpose into three [bt,1,hw,c] tensors).</summary>
     public unsafe void SplitVaeQkv(Tensor q, Tensor k, Tensor v, Tensor qkv, int bt, int c, int hw)
     {

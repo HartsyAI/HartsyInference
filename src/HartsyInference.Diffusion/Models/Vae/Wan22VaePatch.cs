@@ -44,7 +44,7 @@ public static unsafe class Wan22VaePatch
         if (packedC % (p * p) != 0)
             throw new ArgumentException($"Channels {packedC} not divisible by p² ({p * p}).");
         int c = packedC / (p * p);
-        Tensor outT = new Tensor(new TensorShape([(long)b, c, t, h * p, w * p]), DType.F32);
+        Tensor outT = new Tensor(new TensorShape([(long)b, c, t, h * p, w * p]), x.DType);
         backend.UnpatchifyVae(outT, x, patchSize);
         return outT;
     }

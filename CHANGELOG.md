@@ -6,6 +6,20 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.195
+
+- **Wan 2.2 TI2V-5B: warm 17.4 s → 6.6 s** through SwarmUI (512×320, 25 frames, 20 steps, 4090).
+  - The Wan recipe pipeline caches the last prompt pair's umT5 embeddings, keyed on the raw text so weighted and
+    plain prompts never alias; a repeat prompt skips the text encoder's upload and encode.
+  - The Wan 2.2 VAE decode no longer round-trips activations through the host. The `DupUp3D` shortcut is a new
+    backend op, `IBackend.DupUp3dVae` (CUDA kernel `wan_vae_dup_up3d`, F32 and bit-preserving BF16; the default is
+    the host loop), the up-stages no longer clone their input on the host, and the upsample's time-conv interleave
+    is a device `Permute0213`. Output frames are byte-identical.
+  - `Wan22VaeDecoder` takes a compute dtype, and the Wan recipe decodes in `VaePrecisionHelper.PreferredVaeDtype`
+    (BF16 on CUDA; `numerics.vaeF32` forces F32), which moves its convs onto cuDNN's tensor-core path. The attention
+    block stays F32. Against the F32 decode: SSIM 0.985–0.990, PSNR 39–42 dB over five seeds, visually
+    indistinguishable. Lance and Qwen-Image 2.1, which share the decoder, keep F32.
+
 ## alpha.194
 
 - **Wan stays resident across warm generations.** The single-expert Wan DiT kept on the device (vram.keepModels)

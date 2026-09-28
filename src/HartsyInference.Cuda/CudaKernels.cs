@@ -277,6 +277,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _wanVaeRmsNormChannelBf16;
     private readonly nint _wanVaeUnpatchify;
     private readonly nint _wanVaeUnpatchifyBf16;
+    private readonly nint _wanVaeDupUp3d;
+    private readonly nint _wanVaeDupUp3dBf16;
     private readonly nint _wanVaeSplitQkv;
     private readonly nint _wanVaeTokensToFrame;
 
@@ -630,6 +632,8 @@ public sealed class CudaKernels : IDisposable
         _wanVaeRmsNormChannelBf16 = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel_bf16");
         _wanVaeUnpatchify = _wanVaeNormModule.GetFunction("wan_vae_unpatchify");
         _wanVaeUnpatchifyBf16 = _wanVaeNormModule.GetFunction("wan_vae_unpatchify_bf16");
+        _wanVaeDupUp3d = _wanVaeNormModule.GetFunction("wan_vae_dup_up3d");
+        _wanVaeDupUp3dBf16 = _wanVaeNormModule.GetFunction("wan_vae_dup_up3d_bf16");
         _wanVaeSplitQkv = _wanVaeNormModule.GetFunction("wan_vae_split_qkv");
         _wanVaeTokensToFrame = _wanVaeNormModule.GetFunction("wan_vae_tokens_to_frame");
 
@@ -4476,6 +4480,20 @@ public sealed class CudaKernels : IDisposable
         args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &cA; args[4] = &tA; args[5] = &hA; args[6] = &wA; args[7] = &pA; args[8] = &nA;
         uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeUnpatchifyBf16 : _wanVaeUnpatchify, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Wan2.2 VAE DupUp3D shortcut: channel repeat scattered into the temporal/spatial cells, dropping <paramref name="dropT"/> leading frames.</summary>
+    public unsafe void LaunchWanVaeDupUp3d(ulong outp, ulong x, int b, int inC, int t, int h, int w, int outC, int factorT,
+        int factorS, int dropT, long numOut, nint stream, bool bf16)
+    {
+        ulong oA = outp, xA = x;
+        int bA = b, inCA = inC, tA = t, hA = h, wA = w, outCA = outC, fTA = factorT, fSA = factorS, dA = dropT;
+        long nA = numOut;
+        void** args = stackalloc void*[12];
+        args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &inCA; args[4] = &tA; args[5] = &hA; args[6] = &wA;
+        args[7] = &outCA; args[8] = &fTA; args[9] = &fSA; args[10] = &dA; args[11] = &nA;
+        uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeDupUp3dBf16 : _wanVaeDupUp3d, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Splits fused attention input [bt, 3c, h, w] into q, k, v, each [bt, 1, hw, c].</summary>

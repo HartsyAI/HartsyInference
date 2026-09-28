@@ -296,7 +296,8 @@ public sealed class WanVideoRecipe : IVideoRecipe
             }
 
             string vaePath = ModelDownloader.EnsureSideModelAsync(isWan21 ? SideModels.Wan21Vae : SideModels.Wan22Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
-            (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21, loaders);
+            (IWanVaeDecoder vaeDecoder, IWanVaeEncoder vaeEncoder) = VideoRecipeUtils.LoadWanVae(vaePath, isWan21, loaders,
+                VaePrecisionHelper.PreferredVaeDtype(context.VaeBackendOrDefault));
 
             ClipVisionEncoder? clipVision = null;
             if (isClipI2V)
