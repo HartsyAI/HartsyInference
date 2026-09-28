@@ -663,6 +663,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
     private int _graphSigCalls;
     private int _graphSigFlips;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
 
     /// <summary>Copies a freshly-Eulered packed latent into the transformer-owned FIXED latent buffer the
     /// captured graph reads, and returns that buffer — the pipeline denoise loop must feed the returned
@@ -785,7 +786,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             Logs.Warning($"[Flux graph] capture invalidated — falling back to eager: {ex}");
             RunStepIntoFixed(backend, packedLatent, t5Embeddings, clipPooled, txtSeqLen, hPacked, wPacked);
             return (_graphVelocity!, false);
@@ -800,7 +801,7 @@ public sealed unsafe class FluxTransformer : IDisposable, IStreamableDenoiser
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 Logs.Warning($"[Flux graph] capture failed — falling back to eager: {ex.Message}");
                 RunStepIntoFixed(backend, packedLatent, t5Embeddings, clipPooled, txtSeqLen, hPacked, wPacked);
             }

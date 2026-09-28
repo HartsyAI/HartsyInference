@@ -42,7 +42,8 @@ public sealed unsafe class ZImageTransformer : IDisposable
     private long _graphSig = long.MinValue;   // rope sig ⊕ caption identity the captured graph is valid for
     private int _graphSigCalls;               // calls at the current sig (capture on the 3rd — caches/promotions warm)
     private int _graphSigFlips;               // sig alternation counter (CFG cond/uncond → graph unusable)
-    private bool _graphDead;                  // permanent per-session fallback to eager
+    private bool _graphDead;                  // eager for the rest of the session
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     // t_embedder: sinusoidal(timestep × 1000) → Linear(adaLNDim → adaLNDim) → SiLU → Linear(adaLNDim → adaLNDim)
@@ -372,7 +373,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
             // A capture-illegal op invalidated the recording (nothing executed). Abort, disable graph mode for
             // the session, and re-run this step eagerly so the generation stays correct.
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             HartsyInference.Core.Logging.Logs.Warning($"[Z-Image graph] capture invalidated — falling back to eager: {ex}");
             Tensor projected = PackedCore(backend, packedLatent, refinedCaption, _tEmbFixed, hPacked, wPacked,
                 imgRealLen, imgPaddedLen, capPaddedLen, act);
@@ -390,7 +391,7 @@ public sealed unsafe class ZImageTransformer : IDisposable
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[Z-Image graph] capture failed — falling back to eager: {ex.Message}");
                 Tensor projected = PackedCore(backend, packedLatent, refinedCaption, _tEmbFixed, hPacked, wPacked,
                     imgRealLen, imgPaddedLen, capPaddedLen, act);

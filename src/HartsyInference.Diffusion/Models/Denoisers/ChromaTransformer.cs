@@ -507,7 +507,7 @@ public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
             // A capture-illegal op invalidated the recording (nothing executed). Abort, disable graph mode
             // for the session, and re-run this step eagerly so the generation stays correct.
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             Logs.Warning($"[Chroma graph] capture invalidated — falling back to eager: {ex}");
             RunPairIntoFixed(backend, packedLatent, condContext, uncondContext,
                 condTxtLen, uncondTxtLen, hPacked, wPacked, condMask, uncondMask);
@@ -523,7 +523,7 @@ public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 Logs.Warning($"[Chroma graph] capture failed — falling back to eager: {ex.Message}");
                 RunPairIntoFixed(backend, packedLatent, condContext, uncondContext,
                     condTxtLen, uncondTxtLen, hPacked, wPacked, condMask, uncondMask);
@@ -878,6 +878,7 @@ public sealed unsafe class ChromaTransformer : IDisposable, IStreamableDenoiser
     private int _graphSigCalls;
     private int _graphSigFlips;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
 
     /// <summary>Routes a fresh packed latent into the step-graph's FIXED latent buffer (the address the captured
     /// graph reads and the pipeline's in-place <c>CfgEulerStep</c> updates). Returns the fixed tensor —

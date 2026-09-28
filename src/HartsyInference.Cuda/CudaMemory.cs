@@ -178,6 +178,14 @@ public static class CudaMemory
         }
         if (result == 2) // CUDA_ERROR_OUT_OF_MEMORY
         {
+            GpuTransferHelper.State owner = GpuTransferHelper.CurrentState;
+            // Every recovery below synchronizes, which invalidates an open capture on this stream. Fail instead: the
+            // capture's owner falls back to an eager step, where the same recovery is legal.
+            if (owner.TrackCaptureWindow && stream == owner.StreamHandle)
+            {
+                LogOomDiagnostic("OOM inside a step-graph capture", byteSize);
+                ThrowExhausted(result, byteSize);
+            }
             LogOomDiagnostic("OOM on async first attempt", byteSize);
             GpuTransferHelper.SyncStreamsAndReleasePool();
             int retryResult = CudaDriverApi.cuMemAllocAsync(out dptr, byteSize, stream);

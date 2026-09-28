@@ -15,6 +15,9 @@ collectives are described in [MULTI_GPU.md](../MULTI_GPU.md). Remaining work:
 - [ ] Validate datacenter P2P/NVLink and ≥3 physical GPUs; same-device multi-rank tests do not establish that coverage.
 - [ ] Disaggregated prefill/decode serving.
 - [ ] Longer same-GPU concurrency soak before changing its opt-in default.
+- [ ] Move CUDA's synchronous transfers (`CudaMemory` HtoD/DtoH/memset/DtoD) onto each backend's own stream and make
+  the compute stream non-blocking. Until then, legacy-stream use by any engine on a GPU invalidates another engine's
+  step-graph capture there; `DeviceGate` does not serialize engines loaded in separate assembly load contexts.
 - [ ] Placement budgeting: charge lm_head bytes to the final stage; review audio eviction across all shard backends.
 - [ ] Cache mllama vision features per stage instead of copying each token; avoid uploading CosyVoice's unused final head.
 - [ ] GameCraft BF16-cast/cache policy validation when its checkpoint is available.

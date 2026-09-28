@@ -38,6 +38,7 @@ public sealed unsafe class OasisDit : IDisposable
     private long _graphSig = long.MinValue;
     private int _graphSigCalls;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
 
     public OasisDit(OasisDitConfig config)
     {
@@ -137,7 +138,7 @@ public sealed unsafe class OasisDit : IDisposable
             }
             catch (Exception ex) when (capture)
             {
-                backend.StepGraphReset(); _graphDead = true;
+                backend.StepGraphReset(); _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[Oasis graph] capture invalidated — eager fallback: {ex.Message}");
                 RunForwardIntoFixed(backend, t, sp, gh, gw);
                 return CopyOut(backend);
@@ -147,7 +148,7 @@ public sealed unsafe class OasisDit : IDisposable
                 try { backend.StepGraphEndAndLaunch(); HartsyInference.Core.Logging.Logs.Info("[Oasis graph] full forward (blocks+final) captured; replaying via cuGraphLaunch."); }
                 catch (Exception ex)
                 {
-                    backend.StepGraphReset(); _graphDead = true;
+                    backend.StepGraphReset(); _graphDead = _captureFailures.RecordFailure();
                     HartsyInference.Core.Logging.Logs.Warning($"[Oasis graph] capture failed — eager fallback: {ex.Message}");
                     RunForwardIntoFixed(backend, t, sp, gh, gw);
                 }
