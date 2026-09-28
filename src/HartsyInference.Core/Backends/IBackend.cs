@@ -1821,6 +1821,39 @@ public interface IBackend : IDisposable
                                 }
     }
 
+    /// <summary>Wan2.2 VAE duplicating up-sampler (<c>DupUp3D</c>): <c>[b, inC, t, h, w] → [b, outC, t·fT − dropT, h·fS, w·fS]</c>,
+    /// output cell <c>(oc, t·fT+tt, h·fS+s1, w·fS+s2)</c> reading input channel <c>(((oc·fT + tt)·fS + s1)·fS + s2) / repeats</c>.
+    /// Default = host loop.</summary>
+    unsafe void DupUp3dVae(Tensor output, Tensor input, int factorT, int factorS, int dropT)
+    {
+        int b = (int)input.Shape[0], inC = (int)input.Shape[1], t = (int)input.Shape[2];
+        int h = (int)input.Shape[3], w = (int)input.Shape[4], outC = (int)output.Shape[1];
+        int keepT = t * factorT - dropT, outH = h * factorS, outW = w * factorS;
+        int repeats = outC * factorT * factorS * factorS / inC;
+        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+            for (int oc = 0; oc < outC; oc++)
+                for (int tt = 0; tt < factorT; tt++)
+                    for (int s1 = 0; s1 < factorS; s1++)
+                        for (int s2 = 0; s2 < factorS; s2++)
+                        {
+                            int srcC = (((oc * factorT + tt) * factorS + s1) * factorS + s2) / repeats;
+                            for (int ti = 0; ti < t; ti++)
+                            {
+                                int oTime = ti * factorT + tt - dropT;
+                                if (oTime < 0) continue;
+                                for (int hi = 0; hi < h; hi++)
+                                    for (int wi = 0; wi < w; wi++)
+                                    {
+                                        long srcOff = ((((long)bi * inC + srcC) * t + ti) * h + hi) * w + wi;
+                                        long dstOff = ((((long)bi * outC + oc) * keepT + oTime) * outH + (hi * factorS + s1))
+                                            * outW + (wi * factorS + s2);
+                                        dst[dstOff] = src[srcOff];
+                                    }
+                            }
+                        }
+    }
+
     /// <summary>Wan2.2 VAE attention qkv split: <c>src [bt, 3c, h, w] → q,k,v each [bt, 1, hw, c]</c>. Default = host loop.</summary>
     unsafe void SplitVaeQkv(Tensor q, Tensor k, Tensor v, Tensor qkv, int bt, int c, int hw)
     {

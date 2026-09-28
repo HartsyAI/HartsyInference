@@ -224,30 +224,31 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
 
         foreach (UpStage s in _stages)
         {
-            Tensor main = VaeOps.Clone(cur);
+            // `cur` feeds the shortcut below, so the first block's input is borrowed, not disposed.
+            Tensor main = cur;
             foreach (Wan22ResidualBlock r in s.Res)
             {
                 Tensor next = r.Forward(backend, main, cache);
-                main.Dispose();
+                if (!ReferenceEquals(main, cur)) main.Dispose();
                 main = next;
             }
             if (s.Resample is not null)
             {
                 Tensor up = s.Resample.Forward(backend, main, cache);
-                main.Dispose();
+                if (!ReferenceEquals(main, cur)) main.Dispose();
                 main = up;
             }
             if (s.UpFlag)
             {
-                Tensor shortcut = DupUp3D.Forward(cur, s.OutDim, factorT: s.ShortcutFactorT, factorS: 2, firstChunk: firstChunk);
-                Tensor sum = new Tensor(main.Shape, DType.F32);
+                Tensor shortcut = DupUp3D.Forward(backend, cur, s.OutDim, factorT: s.ShortcutFactorT, factorS: 2, firstChunk: firstChunk);
+                Tensor sum = new Tensor(main.Shape, main.DType);
                 backend.Add(sum, main, shortcut);
-                main.Dispose();
+                if (!ReferenceEquals(main, cur)) main.Dispose();
                 shortcut.Dispose();
                 cur.Dispose();
                 cur = sum;
             }
-            else
+            else if (!ReferenceEquals(main, cur))
             {
                 cur.Dispose();
                 cur = main;

@@ -41,6 +41,12 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     private readonly List<IDisposable> _loaders;
     private readonly MergedLoraStack? _loraStack;
 
+    // Last prompt pair's host-side embeddings, keyed on the raw text so a weighted and a plain prompt never alias.
+    private string? _cachedPrompt;
+    private string? _cachedNegative;
+    private Tensor? _cachedPromptEmbeds;
+    private Tensor? _cachedNegativeEmbeds;
+
     /// <summary>Wraps the constructed Wan pipeline plus its encoders, taking ownership of every disposable. <paramref name="textBackend"/>/<paramref name="vaeBackend"/> may equal <paramref name="backend"/> (single-device default).</summary>
     public WanVideoRecipePipeline(IBackend backend, IBackend textBackend, IBackend vaeBackend, WanVideoPipeline pipeline, WanVideoConfig config, bool isClipI2V, T5Tokenizer tokenizer,
         T5TextEncoder umt5, WanVideoTransformer transformer, IWanVaeEncoder vaeEncoder, ClipVisionEncoder? clipVision, List<IDisposable> loaders,
@@ -246,6 +252,8 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     /// <inheritdoc/>
     public void Dispose()
     {
+        _cachedPromptEmbeds?.Dispose();
+        _cachedNegativeEmbeds?.Dispose();
         _pipeline.Dispose();
         _tokenizer.Dispose();
         _umt5.Dispose();
@@ -271,8 +279,27 @@ public sealed class WanVideoRecipePipeline : IVideoRecipePipeline
     /// and weighting one of them would have made <c>(word:1.5)</c> mean different things depending on whether the
     /// caller streamed.</para></summary>
     /// <summary>The family's ComfyBlend weighting, shared with the Animate/S2V/VACE variants.</summary>
-    private (Tensor Prompt, Tensor Negative) EncodeWeightedPrompts(string prompt, string negative) =>
-        VideoRecipeUtils.EncodeWeightedWanPrompts(_textBackend, _umt5, _tokenizer, _config.TextDim, prompt, negative);
+    /// <remarks>A repeat of the last prompt pair skips the umT5 upload and encode; callers own what they are handed, so
+    /// the cache keeps its own copies.</remarks>
+    private (Tensor Prompt, Tensor Negative) EncodeWeightedPrompts(string prompt, string negative)
+    {
+        if (_cachedPromptEmbeds is not null && _cachedNegativeEmbeds is not null
+            && string.Equals(prompt, _cachedPrompt, StringComparison.Ordinal)
+            && string.Equals(negative, _cachedNegative, StringComparison.Ordinal))
+        {
+            Logs.Info("[Wan] prompt-embedding cache hit — umT5 phase skipped");
+            return (_cachedPromptEmbeds.To(_cachedPromptEmbeds.Device), _cachedNegativeEmbeds.To(_cachedNegativeEmbeds.Device));
+        }
+        (Tensor promptEmbeds, Tensor negativeEmbeds) =
+            VideoRecipeUtils.EncodeWeightedWanPrompts(_textBackend, _umt5, _tokenizer, _config.TextDim, prompt, negative);
+        _cachedPromptEmbeds?.Dispose();
+        _cachedNegativeEmbeds?.Dispose();
+        _cachedPromptEmbeds = promptEmbeds.To(promptEmbeds.Device);
+        _cachedNegativeEmbeds = negativeEmbeds.To(negativeEmbeds.Device);
+        _cachedPrompt = prompt;
+        _cachedNegative = negative;
+        return (promptEmbeds, negativeEmbeds);
+    }
 
 
 }

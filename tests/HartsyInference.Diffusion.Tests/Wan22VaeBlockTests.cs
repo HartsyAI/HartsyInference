@@ -1,5 +1,6 @@
 using Xunit;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Vae;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -10,13 +11,14 @@ public unsafe class Wan22VaeBlockTests
     [Fact]
     public void DupUp3D_ShapeAndFirstChunk()
     {
+        using CpuBackend backend = new CpuBackend();
         Tensor x = Random([1, 2, 1, 2, 2], seed: 1);
-        Tensor full = DupUp3D.Forward(x, outChannels: 2, factorT: 2, factorS: 2, firstChunk: false);
+        Tensor full = DupUp3D.Forward(backend, x, outChannels: 2, factorT: 2, factorS: 2, firstChunk: false);
         Assert.Equal(2, (int)full.Shape[2]); // T·2
         Assert.Equal(4, (int)full.Shape[3]); // H·2
         Assert.Equal(4, (int)full.Shape[4]); // W·2
 
-        Tensor first = DupUp3D.Forward(x, outChannels: 2, factorT: 2, factorS: 2, firstChunk: true);
+        Tensor first = DupUp3D.Forward(backend, x, outChannels: 2, factorT: 2, factorS: 2, firstChunk: true);
         Assert.Equal(1, (int)first.Shape[2]); // drops factorT-1 lead frames → single frame
     }
 
@@ -25,11 +27,12 @@ public unsafe class Wan22VaeBlockTests
     {
         // inC=outC=2, factor=factorT·factorS²=8, repeats=8 → output channel oc draws entirely from input channel oc
         // (a nearest-style temporal+spatial duplication that preserves channels).
+        using CpuBackend backend = new CpuBackend();
         Tensor x = new Tensor(new TensorShape([1L, 2, 1, 2, 2]), DType.F32);
         float* xp = (float*)x.DataPointer;
         for (int i = 0; i < 4; i++) xp[i] = 1f;        // channel 0 = 1
         for (int i = 4; i < 8; i++) xp[i] = 2f;        // channel 1 = 2
-        Tensor outT = DupUp3D.Forward(x, 2, factorT: 2, factorS: 2, firstChunk: false); // [1,2,2,4,4]
+        Tensor outT = DupUp3D.Forward(backend, x, 2, factorT: 2, factorS: 2, firstChunk: false); // [1,2,2,4,4]
         float* op = (float*)outT.DataPointer;
 
         long perChannel = 2L * 4 * 4; // keepT·H·W
