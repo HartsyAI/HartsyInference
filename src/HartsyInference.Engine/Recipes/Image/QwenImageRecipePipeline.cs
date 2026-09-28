@@ -2,6 +2,7 @@ using HartsyInference.Core.Logging;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Memory;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
@@ -22,7 +23,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tokenizer tokenizer,
     LlamaStyleEncoder textEncoder, QwenImageTransformer transformer, QwenImageVaeDecoder vae,
     QwenImageVaeEncoder? vaeEncoder, Qwen25VlMultimodalEncoder? multimodalEncoder,
-    Qwen25VlVisionEncoder? visionEncoder, ResolvedModelVariant variant, bool refTimestepZero, List<SafeTensorsLoader> loaders,
+    Qwen25VlVisionEncoder? visionEncoder, ResolvedModelVariant variant, bool refTimestepZero, List<IDisposable> loaders,
     IDisposable? ggufHandle, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>The exact system prompt Qwen-Image conditions on (diffusers <c>QwenImagePipeline.prompt_template_encode</c>); its hidden states are dropped by the prefix-drop index.</summary>
@@ -45,7 +46,8 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
     private readonly QwenImageEditTemplate? _editTemplate = QwenImageVariants.TemplateFor(variant);
     private readonly ResolvedModelVariant _variant = variant;
     private readonly bool _refTimestepZero = refTimestepZero;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly List<IDisposable> _loaders = loaders;
+    private int _disposed;
     private readonly IDisposable? _ggufHandle = ggufHandle;
 
     private readonly MergedLoraStack? _loraStack = loraStack;
@@ -194,19 +196,10 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
     /// <inheritdoc/>
     public void Dispose()
     {
-        _pipeline.Dispose();
-        _tokenizer.Dispose();
-        _textEncoder.Dispose();
-        _transformer.Dispose();
-        _vae.Dispose();
-        _vaeEncoder?.Dispose();
-        _visionEncoder?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
-        {
-            loader.Dispose();
-        }
-        _ggufHandle?.Dispose();
-        // Last: the stack owns the merged weight tensors the transformer was serving.
-        _loraStack?.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        // Every handle is released even if one throws; the LoRA stack goes last, it owns the merged weights.
+        new CompositeDisposable([_pipeline, _tokenizer, _textEncoder, _transformer, _vae,
+            _vaeEncoder, _visionEncoder, .. _loaders, _ggufHandle, _loraStack]).Dispose();
     }
 }

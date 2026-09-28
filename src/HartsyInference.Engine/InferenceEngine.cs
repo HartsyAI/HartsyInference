@@ -249,12 +249,6 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
             return cached;
 
-        // Switch-pressure eviction: pipelines for OTHER checkpoints keep their multi-GB weights resident
-        // (vram.keepModels) and cannot share the card with the incoming model at fleet sizes — a
-        // Krea2(13 GB)→Z-Image switch measured 74 MB free on 24 GB before this existed
-        // (benchmarks/results/2026-07-23_swarm_stepcache_verification.md §engine bugs).
-        EvictOtherCheckpointPipelines(spec.LocalPath, alsoKeepPath);
-
         IBackend backend = EnsureBackend();
         RecipeContext context = new RecipeContext
         {
@@ -276,7 +270,12 @@ public sealed class InferenceEngine : IInferenceEngine
         // Reported BEFORE construction, so a request that then runs out of VRAM has already said which of the
         // operator's memory settings this family was never going to act on.
         MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
-        IRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () => recipe.Construct(context));
+        IRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () =>
+        {
+            // Other checkpoints' resident weights (vram.keepModels) can't share the card; evict under the device gate.
+            EvictOtherCheckpointPipelines(spec.LocalPath, alsoKeepPath);
+            return recipe.Construct(context);
+        });
         _recipePipelines[key] = pipeline;
         return pipeline;
     }
@@ -444,9 +443,6 @@ public sealed class InferenceEngine : IInferenceEngine
         if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
             return cached;
 
-        // Same switch-pressure eviction as the image path — video DiTs are the largest residents of all.
-        EvictOtherCheckpointPipelines(spec.LocalPath);
-
         IBackend backend = EnsureBackend();
         RecipeContext context = new RecipeContext
         {
@@ -468,7 +464,11 @@ public sealed class InferenceEngine : IInferenceEngine
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
         };
         MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
-        IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () => recipe.Construct(context));
+        IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () =>
+        {
+            EvictOtherCheckpointPipelines(spec.LocalPath);
+            return recipe.Construct(context);
+        });
         _videoRecipePipelines[key] = pipeline;
         return pipeline;
     }
@@ -730,14 +730,16 @@ public sealed class InferenceEngine : IInferenceEngine
             return;
         }
 
+        // A victim that throws is still dropped: left cached half-disposed, every later switch would pick it again.
+        List<Exception>? failures = null;
         foreach (string victim in imageVictims)
         {
-            _recipePipelines[victim].Dispose();
+            ReleaseLogged($"pipeline '{victim}'", _recipePipelines[victim].Dispose, ref failures);
             _recipePipelines.Remove(victim);
         }
         foreach (string victim in videoVictims)
         {
-            _videoRecipePipelines[victim].Dispose();
+            ReleaseLogged($"pipeline '{victim}'", _videoRecipePipelines[victim].Dispose, ref failures);
             _videoRecipePipelines.Remove(victim);
         }
         // Disposal only drops the PIPELINE's references — the backend's device weight cache still holds the
@@ -800,54 +802,48 @@ public sealed class InferenceEngine : IInferenceEngine
     /// is the "free memory" a host asks for between jobs.</summary>
     private void ReleaseLoaded(bool disposeBackend)
     {
-        foreach (IRecipePipeline pipeline in _recipePipelines.Values)
-            pipeline.Dispose();
+        // Every step runs even when an earlier one throws: a failed dispose must not strand the device memory, the
+        // services or the backend behind it.
+        List<Exception>? failures = null;
+        foreach (KeyValuePair<string, IRecipePipeline> entry in _recipePipelines)
+            ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
         _recipePipelines.Clear();
-        foreach (IVideoRecipePipeline pipeline in _videoRecipePipelines.Values)
-            pipeline.Dispose();
+        foreach (KeyValuePair<string, IVideoRecipePipeline> entry in _videoRecipePipelines)
+            ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
         _videoRecipePipelines.Clear();
         // IsValueCreated throughout, so releasing memory never forces a service (and its caches) into existence.
         if (_vision.IsValueCreated)
-        {
-            _vision.Value.Dispose();
-        }
+            ReleaseLogged("the vision service", _vision.Value.Dispose, ref failures);
         // RestoreService caches the SeedVR2 pipeline + mmap-backed weight loaders bound to the backend.
         if (_restore.IsValueCreated)
-        {
-            _restore.Value.ReleasePipeline();
-        }
+            ReleaseLogged("the restore pipeline", _restore.Value.ReleasePipeline, ref failures);
         if (_mesh.IsValueCreated)
-        {
-            _mesh.Value.Dispose();
-        }
+            ReleaseLogged("the mesh service", _mesh.Value.Dispose, ref failures);
         if (_world.IsValueCreated)
-        {
-            _world.Value.Dispose();
-        }
+            ReleaseLogged("the world service", _world.Value.Dispose, ref failures);
         // TextService owns its own per-device backends and multi-GB dequantized host buffers, so it must be released
         // explicitly — nothing else here reaches its slots.
         if (_text.IsValueCreated)
-        {
-            _text.Value.Dispose();
-        }
+            ReleaseLogged("the text service", _text.Value.Dispose, ref failures);
         // EmbeddingService's cached DecoderEmbeddingModels hold device-resident weights bound to the backend
         // being torn down/switched — same reasoning as TextService above.
         if (_embeddings.IsValueCreated)
-        {
-            _embeddings.Value.Dispose();
-        }
+            ReleaseLogged("the embedding service", _embeddings.Value.Dispose, ref failures);
         // Audio pipelines are cached per-engine by the audio runtime; drop THIS engine's so none outlives the backend
         // it was constructed against. Other engines' resident audio models are untouched.
-        _audioRuntime?.UnloadAll(AudioUnloadWaitSeconds);
+        if (_audioRuntime is not null)
+            ReleaseLogged("the audio models", () => _audioRuntime.UnloadAll(AudioUnloadWaitSeconds), ref failures);
         if (disposeBackend)
         {
             foreach (IBackend extra in _placementBackends.Values)
-            {
-                extra.Dispose();
-            }
+                ReleaseLogged("a placement backend", extra.Dispose, ref failures);
             _placementBackends.Clear();
-            _backend?.Dispose();
+            if (_backend is not null)
+                ReleaseLogged("the backend", _backend.Dispose, ref failures);
             _backend = null;
+            // Teardown callers must know something leaked; a between-jobs free has already logged each failure.
+            if (failures is not null)
+                throw new AggregateException("The engine released everything it could, but some items failed to dispose.", failures);
             return;
         }
         // Disposal only drops host references; the promoted GPU copies are freed on the finalizer queue, so force it
@@ -877,6 +873,20 @@ public sealed class InferenceEngine : IInferenceEngine
             }
         }
         HostMemory.TrimAndLog("free-memory sweep");
+    }
+
+    /// <summary>Runs one release step of a sweep, logging and collecting its failure instead of letting it abort the rest.</summary>
+    private static void ReleaseLogged(string what, Action release, ref List<Exception>? failures)
+    {
+        try
+        {
+            release();
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[Engine] Releasing {what} failed; continuing with the rest.", ex);
+            (failures ??= new List<Exception>()).Add(ex);
+        }
     }
 
     /// <inheritdoc/>
