@@ -97,7 +97,7 @@ public sealed class MemoryEstimationTests : IDisposable
 
         Assert.NotNull(model);
         MemoryEstimateRequest request = new(Width: 1280, Height: 720, Frames: 81);
-        long tokens = 21L * (720 / 8) * (1280 / 8);   // Wan2.1: 4x temporal, 8x spatial
+        long tokens = 21L * (720 / 8 / 2) * (1280 / 8 / 2);   // Wan2.1: 4x temporal, 8x spatial, (1,2,2) patches
         Assert.Equal(tokens * inner * 4 * 8 + 1536L * 1024 * 1024, model!.DenoiserActivationBytes(request));
         Assert.Equal(Math.Max(3 * Gib, 81L * 720 * 1280 * 160), model.VaeActivationBytes!(request));
         Assert.Equal(SideModels.Wan21Vae, model.Vae);

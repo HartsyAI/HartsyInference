@@ -522,6 +522,23 @@ public sealed class BlockStreamingScopeTests
 
     // ── Forced streaming must displace an already-resident set ───────────
 
+    /// <summary>A warm denoiser's own weights fill the VRAM the planner measures, so a free-VRAM reading below the weight
+    /// size must not stream it. Without the pin, warm generations alternate between resident and streamed.</summary>
+    [Fact]
+    public void AllOrNothing_AWarmPin_StaysResidentThoughFreeVramIsBelowTheWeights()
+    {
+        RecordingStreamingBackend backend = new RecordingStreamingBackend(new StubCache(), 2 * BlockBytes);
+        FakeDenoiser denoiser = new FakeDenoiser(8);
+        ResidentPrefixPin pin = new ResidentPrefixPin { Resident = true };
+
+        using BlockStreamingScope scope = BlockStreamingScope.Open(Options(backend, denoiser, 512 * Mb, pin: pin,
+            policy: BlockStreamingPolicy.AllOrNothing));
+
+        Assert.Equal(8, scope.ResidentPrefixBlocks);
+        Assert.False(scope.Streaming);
+        Assert.DoesNotContain(backend.Calls, c => c.StartsWith("free:", StringComparison.Ordinal));
+    }
+
     /// <summary>Without an eviction ahead of the plan, <see cref="VramPlanner.PlanPhase"/> answers Resident for a warm
     /// pin (its availability query cannot see past the weights occupying the space it measures), so a forced stream
     /// silently stays resident — the setting appearing to do nothing on exactly the generations it was set for.</summary>

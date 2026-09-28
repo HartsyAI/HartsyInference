@@ -52,6 +52,10 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     // so we keep only the active one loaded and swap once at the boundary crossing (high→low noise).
     private WanVideoTransformer? _loadedExpert;
 
+    // Tells the denoise planner the single-expert DiT is already on the device: its availability query cannot see past
+    // weights that occupy the space it measures, so without this warm generations alternate resident and streamed.
+    private readonly ResidentPrefixPin _ditPin = new ResidentPrefixPin();
+
     /// <summary>Standard-profile residency (vram.keepModels, default on): the single-expert DiT stays GPU-resident across generations so the next gen's preload is a cache-hit no-op; every VAE phase beside it is gated on measured free VRAM (evict when short).</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
@@ -262,8 +266,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
                 Backend = Backend,
                 Denoiser = _transformer,
                 ModelName = "Wan",
-                HeadroomBytes = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim),
+                HeadroomBytes = WanActivationReserveBytes(tLat, hLat, wLat, _config.InnerDim, _config.PatchSize),
                 Policy = BlockStreamingPolicy.AllOrNothing,
+                Pin = _ditPin,
             });
             if (stream.Streaming)
             {
@@ -563,8 +568,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Backend.Sync();
         // Before ReleaseOrKeepTransformer: disposing the scope evicts the streamed window, and the residency
         // decision below reasons about what is left resident.
+        bool streamed = stream?.Streaming == true;
         stream?.Dispose();
-        ReleaseOrKeepTransformer(numFrames, width, height);
+        ReleaseOrKeepTransformer(numFrames, width, height, streamed);
         return latents;
     }
 
@@ -702,7 +708,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         }
 
         Backend.Sync();
-        ReleaseOrKeepTransformer(numFrames, width, height);
+        ReleaseOrKeepTransformer(numFrames, width, height, streamed: false);
         // condition is NOT disposed — it is the cross-generation conditioning cache (host tensor, ~1.4 MB),
         // freed on the next cache miss or in DisposeCore.
 
@@ -807,6 +813,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Backend.Sync();
         if (_transformer2 is null) Backend.FreeWeights(_transformer.EnumerateWeights());
         else if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
+        _ditPin.Resident = false;
 
         // LOAD-BEARING for VaeDevice: the loop above steps `latents` via EulerCfgStep, a host-side unsafe-pointer
         // loop, so the final latents are already host-current — same guarantee as the other Wan denoise loops.
@@ -914,6 +921,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Backend.FreeWeights(_transformer.EnumerateWeights());
             if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
             _loadedExpert = null;
+            _ditPin.Resident = false;
             Backend.TrimMemoryPool();
         }
         else
@@ -928,9 +936,9 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
     /// token count is the patchified grid, not the pixel grid. A generous constant rides on top for cuBLAS
     /// workspace, RoPE tables and the encoder projections — under-reserving here does not fail cleanly, it
     /// over-commits VRAM at exactly the geometries streaming exists to rescue.</remarks>
-    internal static long WanActivationReserveBytes(int tLat, int hLat, int wLat, int innerDim)
+    internal static long WanActivationReserveBytes(int tLat, int hLat, int wLat, int innerDim, (int T, int H, int W) patch)
     {
-        long tokens = (long)tLat * hLat * wLat;
+        long tokens = (long)Math.Max(1, tLat / patch.T) * Math.Max(1, hLat / patch.H) * Math.Max(1, wLat / patch.W);
         // q/k/v + attention output + the FFN's two wide intermediates, all F32, plus the block's own residual.
         long perForward = tokens * innerDim * 4L * 8L;
         return perForward + (1536L * 1024 * 1024);
@@ -942,20 +950,23 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         Math.Max(3L << 30, (long)numFrames * height * width * 160);
 
     /// <summary>Post-denoise DiT residency (the vram.keepModels idiom): keeps the single-expert transformer device-resident across generations — the next gen's PreloadWeights becomes a cache-hit no-op — unless measured free VRAM can't cover the VAE decode (grid-scaled estimate; an OOM is worse than one re-upload). MoE experts always free: two 14B experts never co-reside. A VAE on its OWN device (<see cref="DiffusionPipelineBase.VaeBackend"/>) never contends with the DiT's VRAM on <see cref="DiffusionPipelineBase.Backend"/>, so the decode-headroom check is skipped when split — the DiT just stays resident.</summary>
-    private void ReleaseOrKeepTransformer(int numFrames, int width, int height)
+    /// <param name="streamed">The denoise streamed its blocks, so the scope has already evicted them and only the shared weights are left to free.</param>
+    private void ReleaseOrKeepTransformer(int numFrames, int width, int height, bool streamed)
     {
+        _ditPin.Resident = false;
         if (_transformer2 is not null)
         {
             if (_loadedExpert is not null) { Backend.FreeWeights(_loadedExpert.EnumerateWeights()); _loadedExpert = null; }
             return;
         }
-        if (!KeepModelsResident)
+        if (!KeepModelsResident || streamed)
         {
             Backend.FreeWeights(_transformer.EnumerateWeights());
             return;
         }
         if (!ReferenceEquals(VaeBackend, Backend))
         {
+            _ditPin.Resident = true;
             Logs.Info("[wan-phase] DiT kept resident across generations (KEEP_MODELS; VaeBackend is a separate device — no decode contention).");
             return;
         }
@@ -971,6 +982,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
         }
         else
         {
+            _ditPin.Resident = true;
             Logs.Info($"[wan-phase] DiT kept resident across generations " +
                 $"(KEEP_MODELS; free {free >> 20} MB ≥ ~{decodeNeed >> 20} MB decode estimate).");
         }
@@ -984,6 +996,7 @@ public sealed unsafe class WanVideoPipeline : DiffusionPipelineBase
             Backend.FreeWeights(_transformer.EnumerateWeights());
             if (_transformer2 is not null) Backend.FreeWeights(_transformer2.EnumerateWeights());
             _loadedExpert = null;
+            _ditPin.Resident = false;
             Backend.TrimMemoryPool();
         }
         catch (Exception ex)

@@ -138,7 +138,8 @@ public sealed class WanVideoRecipe : IVideoRecipe
             return null;
         }
         int innerDim = (int)patch.Shape[0];
-        int patchVolume = (int)(patch.Shape[2] * patch.Shape[3] * patch.Shape[4]);
+        (int T, int H, int W) patchSize = ((int)patch.Shape[2], (int)patch.Shape[3], (int)patch.Shape[4]);
+        int patchVolume = patchSize.T * patchSize.H * patchSize.W;
         // The model's own output head, never a block's: VACE blocks carry a proj_out of their own.
         SafeTensorDescriptor? head = header.Descriptors.Values.FirstOrDefault(d =>
             IsTopLevel(d.Name, "head.head.weight") || IsTopLevel(d.Name, "proj_out.weight"));
@@ -155,7 +156,7 @@ public sealed class WanVideoRecipe : IVideoRecipe
             {
                 int frames = Math.Max(1, request.Frames ?? 1);
                 return WanVideoPipeline.WanActivationReserveBytes((frames - 1) / temporal + 1,
-                    Math.Max(1, request.Height / spatial), Math.Max(1, request.Width / spatial), innerDim);
+                    Math.Max(1, request.Height / spatial), Math.Max(1, request.Width / spatial), innerDim, patchSize);
             },
             VaeActivationBytes = request =>
                 WanVideoPipeline.WanDecodeReserveBytes(Math.Max(1, request.Frames ?? 1), request.Width, request.Height),
