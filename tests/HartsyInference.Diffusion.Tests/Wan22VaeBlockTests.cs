@@ -167,6 +167,29 @@ public unsafe class Wan22VaeBlockTests
             Assert.True(float.IsFinite(p[i]), $"non-finite at {i}");
     }
 
+    /// <summary>The interface-default unpatchify moves a BF16 element to the same place it moves an F32 one — a
+    /// float-only default would read two BF16 values as one float and write past a two-byte output.</summary>
+    [Fact]
+    public void UnpatchifyVae_Default_MovesBf16ElementsLikeF32()
+    {
+        HartsyInference.Core.Backends.IBackend backend = new CpuBackend();
+        TensorShape inShape = new([1L, 8, 2, 3, 5]);
+        TensorShape outShape = new([1L, 2, 2, 6, 10]);
+        using Tensor f32In = new(inShape, DType.F32);
+        using Tensor bf16In = new(inShape, DType.BF16);
+        for (long i = 0; i < inShape.ElementCount; i++)
+        {
+            ((float*)f32In.DataPointer)[i] = i;
+            ((ushort*)bf16In.DataPointer)[i] = (ushort)i;
+        }
+        using Tensor f32Out = new(outShape, DType.F32);
+        using Tensor bf16Out = new(outShape, DType.BF16);
+        backend.UnpatchifyVae(f32Out, f32In, 2);
+        backend.UnpatchifyVae(bf16Out, bf16In, 2);
+        for (long i = 0; i < outShape.ElementCount; i++)
+            Assert.Equal((ushort)((float*)f32Out.DataPointer)[i], ((ushort*)bf16Out.DataPointer)[i]);
+    }
+
     private static Tensor RandShape(long[] dims, int seed)
     {
         Tensor t = new Tensor(new TensorShape(dims), DType.F32);

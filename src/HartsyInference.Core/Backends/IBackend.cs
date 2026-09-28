@@ -1800,12 +1800,16 @@ public interface IBackend : IDisposable
         PatchTokenHostShuffle.Unpatchify(output, tokens, geometry, patch, innerChannelFastest);
     }
 
-    /// <summary>Wan2.2 VAE unpatchify: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c>, unpack <c>oc = ci·p² + r·p + q</c>.</summary>
+    /// <summary>Wan2.2 VAE unpatchify: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c>, unpack <c>oc = ci·p² + r·p + q</c>.
+    /// Default = host loop, copying by element size so any dtype passes through unchanged.</summary>
     unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)
     {
+        if (output.DType != input.DType)
+            throw new ArgumentException($"UnpatchifyVae output {output.DType} must match input {input.DType}.", nameof(output));
         int b = (int)input.Shape[0], packedC = (int)input.Shape[1], t = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
         int p = patchSize, c = packedC / (p * p), outH = h * p, outW = w * p;
-        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        int elem = (int)input.DType.ComputeByteCount(1);
+        byte* src = (byte*)input.DataPointer, dst = (byte*)output.DataPointer;
         for (int bi = 0; bi < b; bi++)
             for (int ci = 0; ci < c; ci++)
                 for (int ti = 0; ti < t; ti++)
@@ -1817,7 +1821,7 @@ public interface IBackend : IDisposable
                                     int oc = ci * p * p + r * p + q;
                                     long srcOff = ((((long)bi * packedC + oc) * t + ti) * h + hh) * w + ww;
                                     long dstOff = ((((long)bi * c + ci) * t + ti) * outH + (hh * p + q)) * outW + (ww * p + r);
-                                    dst[dstOff] = src[srcOff];
+                                    Buffer.MemoryCopy(src + srcOff * elem, dst + dstOff * elem, elem, elem);
                                 }
     }
 
