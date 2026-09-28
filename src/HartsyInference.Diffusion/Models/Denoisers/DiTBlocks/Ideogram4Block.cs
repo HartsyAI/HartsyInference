@@ -241,6 +241,23 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
 
         backend.ApplyRope(qN, kN, cos, sin);
 
+        float scale = 1.0f / MathF.Sqrt(_headDim);
+        // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe.
+        if (batch == 1 && backend.SupportsTokenMajorAttention)
+        {
+            // The rotated [1, L, heads, headDim] tensors are already token-major, and the flat [L, hidden] output is
+            // what the out-projection reads — no permute on either side.
+            Tensor attnTm = new Tensor(new TensorShape(seqLen, _hidden), input.DType);
+            backend.ScaledDotProductAttentionTokenMajor(attnTm, qN, kN, v, attentionMask, _numHeads, _headDim, scale, allowF16: true);
+            qN.Dispose();
+            kN.Dispose();
+            v.Dispose();
+            Tensor projectedTm = new Tensor(flat, input.DType);
+            backend.Linear(projectedTm, attnTm, _oWeight!, null);
+            attnTm.Dispose();
+            return projectedTm;
+        }
+
         // Permute [B, L, numHeads, headDim] → [B, numHeads, L, headDim] for SDPA.
         Tensor qMh = new Tensor(mh, input.DType);
         Tensor kMh = new Tensor(mh, input.DType);
@@ -252,10 +269,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         kN.Dispose();
         v.Dispose();
 
-        float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mh, input.DType);
-        // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe and
-        // engages the cuDNN fused flash path (native zero-cast when the block runs F16 activations).
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attentionMask, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
