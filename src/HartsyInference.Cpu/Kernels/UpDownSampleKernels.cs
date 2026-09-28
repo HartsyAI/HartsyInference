@@ -13,6 +13,8 @@ public static class UpDownSampleKernels
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     public static unsafe void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW)
     {
+        if (input.DType != DType.F32 || output.DType != DType.F32)
+            throw new NotSupportedException($"CPU UpsampleNearest2D is F32-only; got input {input.DType}, output {output.DType}.");
         long N = input.Shape[0];
         long C = input.Shape[1];
         long inH = input.Shape[2];

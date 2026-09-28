@@ -2883,6 +2883,30 @@ public interface IBackend : IDisposable
     /// <summary>Nearest-neighbor 2D upsample by the given scale factor.</summary>
     void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW);
 
+    /// <summary>Nearest-neighbour ×2 upsample of NCHW <paramref name="input"/> into <paramref name="output"/>, whose height
+    /// and width are each either twice the input's or one less. Output row <c>oh</c> reads input row <c>oh / 2</c>, which
+    /// is exactly <c>interpolate(size=…, mode="nearest")</c> for those sizes — what a UNet up path needs when its stride-2
+    /// down path rounded an odd size up (diffusers passes the skip's size as <c>upsample_size</c>). Only ×2: at larger
+    /// factors a short output no longer reads the same rows as the nearest-neighbour rule. Default: the full upsample into
+    /// scratch, then two <see cref="SliceLastDim"/> prefix slices — device-resident on any backend that serves those.</summary>
+    unsafe void UpsampleNearest2DToSize(Tensor output, Tensor input)
+    {
+        (int outH, int outW) = UpsampleNearestExtent.Validate(output, input);
+        long n = input.Shape[0], c = input.Shape[1], fullH = 2 * input.Shape[2], fullW = 2 * input.Shape[3];
+        if (outH == fullH && outW == fullW)
+        {
+            UpsampleNearest2D(output, input, 2, 2);
+            return;
+        }
+        using Tensor full = new(new TensorShape(n, c, fullH, fullW), input.DType);
+        UpsampleNearest2D(full, input, 2, 2);
+        // Keep the leading outW of every row; each plane is then [fullH, outW], so its leading outH rows are one
+        // contiguous prefix — a second last-dim slice over [planes, fullH·outW]. Both stay on the device.
+        using Tensor narrow = new(new TensorShape(n * c, fullH * outW), input.DType);
+        SliceLastDim(narrow, full, 0);
+        SliceLastDim(output, narrow, 0);
+    }
+
     /// <summary>Bilinear 2D upsample by the given scale factor.</summary>
     void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW);
 

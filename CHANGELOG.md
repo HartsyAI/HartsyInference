@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.197
+## alpha.199
 
 - **Ideogram 4 steps 12% faster (≈2.5 s per 1024² / 20-step generation on a 4090).** New `flash_attn_f16` kernel:
   F16 attention with F32 accumulation on the tensor cores, reading strided operands so one kernel serves head-major,
@@ -15,6 +15,16 @@ stable release will require. Dates are UTC.
   `numerics.flashF16`.
 - Ideogram 4 attention runs token-major, dropping four permutes per block. The CUDA token-major attention entry now
   also accepts the byte-identical `[1, S, heads, headDim]` layout.
+
+## alpha.198
+
+- **SDXL and SD1.5 render at sizes whose latent is not a multiple of 8** (1280×720, 720×1280, …) instead of returning a
+  flat grey image reported as a success. The UNet's stride-2 downsample allocated `n/2` where the conv produces
+  `ceil(n/2)`, and the up path doubled instead of resizing to the skip it concatenates. The concat now refuses a
+  mismatched skip rather than blending misaligned memory. New `IBackend.UpsampleNearest2DToSize` (native on CUDA)
+  gives nearest-neighbour upsampling to a size one short of the double, as diffusers' `upsample_size` does. The
+  ControlNet condition embedding's stride-2 sizes are corrected the same way.
+- The CPU `UpsampleNearest2D` kernel refuses non-F32 tensors instead of writing floats into a narrower buffer.
 
 ## alpha.196
 

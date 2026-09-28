@@ -10811,6 +10811,16 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
     #region Sampling
 
     public void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW)
+        => UpsampleNearestCore(output, input, scaleH, scaleW, (int)input.Shape[2] * scaleH, (int)input.Shape[3] * scaleW);
+
+    /// <summary>Native: the kernel already indexes its output by an explicit extent and reads row <c>oh / scale</c>.</summary>
+    public void UpsampleNearest2DToSize(Tensor output, Tensor input)
+    {
+        (int outH, int outW) = UpsampleNearestExtent.Validate(output, input);
+        UpsampleNearestCore(output, input, 2, 2, outH, outW);
+    }
+
+    private void UpsampleNearestCore(Tensor output, Tensor input, int scaleH, int scaleW, int outH, int outW)
     {
         using NvtxRange _nvtxProf = NvtxRange.Push("UpsampleNearest2D");
         using OpScope _op = EnterOp();
@@ -10820,8 +10830,6 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         int channels = (int)input.Shape[1];
         int inH = (int)input.Shape[2];
         int inW = (int)input.Shape[3];
-        int outH = inH * scaleH;
-        int outW = inW * scaleW;
 
         ulong pOut = 0, pIn = 0;
         bool cachedOutput = false;
