@@ -24,8 +24,9 @@ stable release will require. Dates are UTC.
   produces were shrunk instead of normalized, and every F16 generation lost contrast, detail and composition
   (duplicate background figures, low-detail subjects) against ComfyUI's official template. `F16SandwichDamp` now owns
   the damp and the matching eps for both blocks that use it (Ideogram 4, Z-Image). Speed is unchanged.
-- `tests/regression-cases.sh` gains `ideogram4-json`, a structured-caption Ideogram 4 case; the plain-text case
-  cannot show this class of regression.
+- The `ideogram4` regression case (`tests/regression-cases.sh`) now uses the benchmark's structured caption instead of
+  a plain-text prompt: Ideogram 4 is trained only on structured captions, and the plain prompt could not show this
+  class of regression.
 
 ## alpha.195
 
