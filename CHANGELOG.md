@@ -23,6 +23,17 @@ stable release will require. Dates are UTC.
 - A failed capture no longer disables a model's step graph for the rest of the session: owners recapture, and only
   stop after `StepGraphFailureBudget.MaxFailures` (3) failures. A signature flip storm still disables it at once.
 
+## alpha.191
+
+- **A pipeline that fails to dispose no longer wedges the engine.** Model-switch eviction, `FreeMemory` and teardown
+  release each cached pipeline and service independently: a failure is logged, the item is still dropped from the
+  cache, and the device sweep behind it still runs. Teardown rethrows the collected failures as one
+  `AggregateException`; a between-jobs `FreeMemory` only logs them. Eviction now runs under the device gate with
+  construction, so it cannot sweep a sibling engine's in-flight generation on the same GPU.
+- The Flux.2, Qwen-Image, Qwen-Image 2.1 and HunyuanImage recipe pipelines release every handle through one
+  `CompositeDisposable` (a throw no longer strands the handles after it) and dispose once. Their loader lists take
+  any `IDisposable`, so a `CheckpointSource` in them is no longer a cast away from failing.
+
 ## alpha.190
 
 - **One resolver decides which variant a checkpoint is.** Some builds share an architecture but need different

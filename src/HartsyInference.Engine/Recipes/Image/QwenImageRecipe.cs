@@ -82,7 +82,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
         // TODO(E-IMG-4): honor user VAE / Qwen text-encoder overrides from ImageRequest.Components (the loader read
         // T2IParamTypes.QwenModel / T2IParamTypes.VAE) instead of always taking the canonical SideModels entry.
         ResolvedModelVariant variant = context.ResolveVariant(QwenImageVariants.Catalog);
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;
         try
         {
@@ -274,7 +274,7 @@ public sealed class QwenImageRecipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[QwenImageRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

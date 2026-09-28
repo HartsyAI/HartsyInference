@@ -74,7 +74,7 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
 
     public IRecipePipeline Construct(RecipeContext context)
     {
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;
         try
         {
@@ -132,7 +132,7 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[QwenImage21Recipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

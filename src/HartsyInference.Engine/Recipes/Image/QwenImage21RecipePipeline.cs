@@ -1,4 +1,5 @@
 using System.Globalization;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -20,14 +21,15 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// every disposable it is handed.</summary>
 public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen3Tokenizer tokenizer,
     LlamaStyleEncoder textEncoder, QwenImage21Transformer transformer, Wan22VaeDecoder vae,
-    List<SafeTensorsLoader> loaders, IDisposable? checkpoint) : IRecipePipeline
+    List<IDisposable> loaders, IDisposable? checkpoint) : IRecipePipeline
 {
     private readonly QwenImage21Pipeline _pipeline = pipeline;
     private readonly Qwen3Tokenizer _tokenizer = tokenizer;
     private readonly LlamaStyleEncoder _textEncoder = textEncoder;
     private readonly QwenImage21Transformer _transformer = transformer;
     private readonly Wan22VaeDecoder _vae = vae;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly List<IDisposable> _loaders = loaders;
+    private int _disposed;
     private readonly IDisposable? _checkpoint = checkpoint;
 
     /// <inheritdoc/>
@@ -131,13 +133,9 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
     /// <inheritdoc/>
     public void Dispose()
     {
-        _pipeline.Dispose();
-        _textEncoder.Dispose();
-        _transformer.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
-        {
-            loader.Dispose();
-        }
-        _checkpoint?.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        // Every handle is released even if one throws.
+        new CompositeDisposable([_pipeline, _textEncoder, _transformer, .. _loaders, _checkpoint]).Dispose();
     }
 }
