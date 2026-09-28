@@ -6,6 +6,10 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.201
+
+- Native CUDA 3-D convolution declines transient VRAM allocation failures without disabling the route for the session.
+
 ## alpha.200
 
 - **Large convolutions run channels-last on CUDA.** cuDNN's tensor-core engines are built for NHWC: at VAE-decode sizes
