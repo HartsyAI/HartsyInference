@@ -14,12 +14,14 @@ public sealed unsafe class Wan22ResidualBlock
     private CausalConv3d? _conv1;
     private CausalConv3d? _conv2;
     private CausalConv3d? _shortcut;   // null when in==out (identity)
+    private readonly DType _computeDtype;
 
     /// <param name="temporalKernel">Depth of both 3x3 convs. Wan 2.2 uses 3; Qwen-Image 2.1 reuses this VAE with
     /// 1, which also changes the causal temporal padding to 0 — padding for a depth-3 kernel against a depth-1 one
     /// grows T by 2 and the residual add then reads past its operand.</param>
-    public Wan22ResidualBlock(int inDim, int outDim, int temporalKernel = 3)
+    public Wan22ResidualBlock(int inDim, int outDim, int temporalKernel = 3, DType? computeDtype = null)
     {
+        _computeDtype = computeDtype ?? DType.F32;
         _inDim = inDim;
         _outDim = outDim;
         _temporalPad = temporalKernel / 2;
@@ -34,13 +36,13 @@ public sealed unsafe class Wan22ResidualBlock
     {
         _norm1.LoadWeights(weights[$"{prefix}.residual.0.gamma"]);
         _conv1 = new CausalConv3d(weights[$"{prefix}.residual.2.weight"], VaeOps.Bias(weights, $"{prefix}.residual.2.bias"),
-            padT: _temporalPad, padH: 1, padW: 1);
+            padT: _temporalPad, padH: 1, padW: 1, computeDtype: _computeDtype);
         _norm2.LoadWeights(weights[$"{prefix}.residual.3.gamma"]);
         _conv2 = new CausalConv3d(weights[$"{prefix}.residual.6.weight"], VaeOps.Bias(weights, $"{prefix}.residual.6.bias"),
-            padT: _temporalPad, padH: 1, padW: 1);
+            padT: _temporalPad, padH: 1, padW: 1, computeDtype: _computeDtype);
         if (_inDim != _outDim)
             _shortcut = new CausalConv3d(weights[$"{prefix}.shortcut.weight"], VaeOps.Bias(weights, $"{prefix}.shortcut.bias"),
-                padT: 0, padH: 0, padW: 0);
+                padT: 0, padH: 0, padW: 0, computeDtype: _computeDtype);
     }
 
     /// <summary>Enumerates weights for GPU preloading.</summary>
@@ -74,7 +76,7 @@ public sealed unsafe class Wan22ResidualBlock
         cc2?.Dispose();
         r2.Dispose();
 
-        Tensor outT = new Tensor(c2.Shape, DType.F32);
+        Tensor outT = new Tensor(c2.Shape, c2.DType);
         backend.Add(outT, c2, shortcut ?? x);
         c2.Dispose();
         shortcut?.Dispose();

@@ -1800,12 +1800,16 @@ public interface IBackend : IDisposable
         PatchTokenHostShuffle.Unpatchify(output, tokens, geometry, patch, innerChannelFastest);
     }
 
-    /// <summary>Wan2.2 VAE unpatchify: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c>, unpack <c>oc = ci·p² + r·p + q</c>.</summary>
+    /// <summary>Wan2.2 VAE unpatchify: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c>, unpack <c>oc = ci·p² + r·p + q</c>.
+    /// Default = host loop, copying by element size so any dtype passes through unchanged.</summary>
     unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)
     {
+        if (output.DType != input.DType)
+            throw new ArgumentException($"UnpatchifyVae output {output.DType} must match input {input.DType}.", nameof(output));
         int b = (int)input.Shape[0], packedC = (int)input.Shape[1], t = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
         int p = patchSize, c = packedC / (p * p), outH = h * p, outW = w * p;
-        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        int elem = (int)input.DType.ComputeByteCount(1);
+        byte* src = (byte*)input.DataPointer, dst = (byte*)output.DataPointer;
         for (int bi = 0; bi < b; bi++)
             for (int ci = 0; ci < c; ci++)
                 for (int ti = 0; ti < t; ti++)
@@ -1817,8 +1821,42 @@ public interface IBackend : IDisposable
                                     int oc = ci * p * p + r * p + q;
                                     long srcOff = ((((long)bi * packedC + oc) * t + ti) * h + hh) * w + ww;
                                     long dstOff = ((((long)bi * c + ci) * t + ti) * outH + (hh * p + q)) * outW + (ww * p + r);
-                                    dst[dstOff] = src[srcOff];
+                                    Buffer.MemoryCopy(src + srcOff * elem, dst + dstOff * elem, elem, elem);
                                 }
+    }
+
+    /// <summary>Wan2.2 VAE duplicating up-sampler (<c>DupUp3D</c>): <c>[b, inC, t, h, w] → [b, outC, t·fT − dropT, h·fS, w·fS]</c>,
+    /// output cell <c>(oc, t·fT+tt, h·fS+s1, w·fS+s2)</c> reading input channel <c>(((oc·fT + tt)·fS + s1)·fS + s2) / repeats</c>.
+    /// Default = host loop.</summary>
+    unsafe void DupUp3dVae(Tensor output, Tensor input, int factorT, int factorS, int dropT)
+    {
+        int b = (int)input.Shape[0], inC = (int)input.Shape[1], t = (int)input.Shape[2];
+        int h = (int)input.Shape[3], w = (int)input.Shape[4], outC = (int)output.Shape[1];
+        int keepT = t * factorT - dropT, outH = h * factorS, outW = w * factorS;
+        int repeats = outC * factorT * factorS * factorS / inC;
+        int elem = (int)input.DType.ComputeByteCount(1);
+        byte* src = (byte*)input.DataPointer, dst = (byte*)output.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+            for (int oc = 0; oc < outC; oc++)
+                for (int tt = 0; tt < factorT; tt++)
+                    for (int s1 = 0; s1 < factorS; s1++)
+                        for (int s2 = 0; s2 < factorS; s2++)
+                        {
+                            int srcC = (((oc * factorT + tt) * factorS + s1) * factorS + s2) / repeats;
+                            for (int ti = 0; ti < t; ti++)
+                            {
+                                int oTime = ti * factorT + tt - dropT;
+                                if (oTime < 0) continue;
+                                for (int hi = 0; hi < h; hi++)
+                                    for (int wi = 0; wi < w; wi++)
+                                    {
+                                        long srcOff = ((((long)bi * inC + srcC) * t + ti) * h + hi) * w + wi;
+                                        long dstOff = ((((long)bi * outC + oc) * keepT + oTime) * outH + (hi * factorS + s1))
+                                            * outW + (wi * factorS + s2);
+                                        Buffer.MemoryCopy(src + srcOff * elem, dst + dstOff * elem, elem, elem);
+                                    }
+                            }
+                        }
     }
 
     /// <summary>Wan2.2 VAE attention qkv split: <c>src [bt, 3c, h, w] → q,k,v each [bt, 1, hw, c]</c>. Default = host loop.</summary>

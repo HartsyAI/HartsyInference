@@ -128,6 +128,10 @@ The reference is single-source (`ideogram-oss/ideogram4`). The divergences worth
 6. **Fixed-constant latent norm, not BN.** Flux.2/Lens decode applies VAE `bn.running_mean/var`; Ideogram applies its own 128 constants. Confirm the Flux.2 VAE's internal BN is bypassed (see Open Q).
 7. **3D MRoPE with non-equal sections `(24,20,20)` and a 65536 image offset** — a third RoPE flavor distinct from Flux pair-rotation and Lens/Qwen complex-polar. The interleave slicing is bespoke.
 8. **head_dim = 256** is large; the existing SDPA kernels must handle 256-wide heads (verify the `sdpa_f32.ptx` shared-memory tiling at 256, or fall back to the tiled path).
+9. **ComfyUI's official template differs from `sampler_configs.py` in two places.**
+   - Its `CFGOverride(cfg 3, start 0.7, end 1)` applies the polish guidance wherever σ ≤ `percent_to_sigma(0.7)` = 0.3 (model sampling shift 1). That is the last 3 steps of the 20-step schedule, where the preset polishes 2.
+   - It wires `ConditioningZeroOut(positive)` as the negative, so the unconditional model sees zeroed text rows. Those rows carry the `llm_cond_proj` bias and text positions; upstream, and our pipeline, run the unconditional pass image-only.
+   - Same-seed Comfy runs of both negatives are visually indistinguishable (2026-09-28).
 
 ## Implementation Notes (recommendations for HartsyInference)
 

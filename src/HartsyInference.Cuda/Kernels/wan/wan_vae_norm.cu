@@ -136,3 +136,28 @@ extern "C" __global__ void wan_vae_unpatchify_bf16(
     long srcOff = ((((long)bi * packedC + oc) * t + ti) * h + hh) * (long)w + ww;
     out[idx] = x[srcOff];
 }
+
+// Wan2.2 VAE DupUp3D shortcut: [b, inC, t, h, w] -> [b, outC, t*fT - dropT, h*fS, w*fS]. Channel repeat_interleave
+// scattered into the temporal/spatial cells: source channel = (((oc*fT + tt)*fS + s1)*fS + s2) / repeats.
+// Address permutation only, so the BF16 twin is bit-preserving. One thread per output element.
+#define WAN_VAE_DUP_UP3D(NAME, T)                                                                          \
+extern "C" __global__ void NAME(                                                                            \
+    T* __restrict__ out, const T* __restrict__ x,                                                           \
+    int b, int inC, int t, int h, int w, int outC, int fT, int fS, int dropT, long numOut)                  \
+{                                                                                                           \
+    long idx = blockIdx.x * (long)blockDim.x + threadIdx.x;                                                 \
+    if (idx >= numOut) return;                                                                              \
+    int outW = w * fS, outH = h * fS, keepT = t * fT - dropT;                                               \
+    int ow = (int)(idx % outW); long tmp = idx / outW;                                                      \
+    int oh = (int)(tmp % outH); tmp /= outH;                                                                \
+    int ot = (int)(tmp % keepT); tmp /= keepT;                                                              \
+    int oc = (int)(tmp % outC); tmp /= outC;                                                                \
+    int bi = (int)tmp;                                                                                      \
+    int full = ot + dropT;                                                                                  \
+    int ti = full / fT, tt = full % fT, hi = oh / fS, s1 = oh % fS, wi = ow / fS, s2 = ow % fS;             \
+    int repeats = outC * fT * fS * fS / inC;                                                                \
+    int srcC = (((oc * fT + tt) * fS + s1) * fS + s2) / repeats;                                            \
+    out[idx] = x[((((long)bi * inC + srcC) * t + ti) * h + hi) * (long)w + wi];                             \
+}
+WAN_VAE_DUP_UP3D(wan_vae_dup_up3d, float)
+WAN_VAE_DUP_UP3D(wan_vae_dup_up3d_bf16, __nv_bfloat16)

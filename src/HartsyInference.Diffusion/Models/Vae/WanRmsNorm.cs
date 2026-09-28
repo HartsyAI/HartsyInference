@@ -30,7 +30,7 @@ public sealed unsafe class WanRmsNorm(int channels, float eps = 1e-12f)
     {
         int c = (int)x.Shape[1];
         if (c != _channels) throw new ArgumentException($"input channels {c} != {_channels}.", nameof(x));
-        Tensor outT = new Tensor(x.Shape, DType.F32);
+        Tensor outT = new Tensor(x.Shape, x.DType);
         backend.WanRmsNormChannel(outT, x, _gamma, _eps);
         return outT;
     }
