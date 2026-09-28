@@ -113,22 +113,28 @@ public static class CudaMemory
         }
     }
 
-    /// <summary>Copies bytes from host to device.</summary>
+    /// <summary>Copies bytes from host to device; complete on return.</summary>
     public static unsafe void CopyHostToDevice(ulong dst, void* src, nuint byteSize)
     {
-        CudaDriverApi.cuMemcpyHtoD(dst, (nint)src, byteSize).ThrowOnError();
+        nint stream = OwnStream();
+        CudaDriverApi.cuMemcpyHtoDAsync(dst, (nint)src, byteSize, stream).ThrowOnError();
+        CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
     }
 
-    /// <summary>Copies bytes from device to host.</summary>
+    /// <summary>Copies bytes from device to host; complete on return.</summary>
     public static unsafe void CopyDeviceToHost(void* dst, ulong src, nuint byteSize)
     {
-        CudaDriverApi.cuMemcpyDtoH((nint)dst, src, byteSize).ThrowOnError();
+        nint stream = OwnStream();
+        CudaDriverApi.cuMemcpyDtoHAsync((nint)dst, src, byteSize, stream).ThrowOnError();
+        CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
     }
 
-    /// <summary>Copies bytes between device pointers (synchronous — serializes against the null stream; NOT legal during stream capture. Hot paths should use <see cref="CopyDeviceToDeviceAsync"/>).</summary>
+    /// <summary>Copies bytes between device pointers; complete on return. NOT legal during stream capture — hot paths use <see cref="CopyDeviceToDeviceAsync"/>.</summary>
     public static void CopyDeviceToDevice(ulong dst, ulong src, nuint byteSize)
     {
-        CudaDriverApi.cuMemcpyDtoD(dst, src, byteSize).ThrowOnError();
+        nint stream = OwnStream();
+        CudaDriverApi.cuMemcpyDtoDAsync(dst, src, byteSize, stream).ThrowOnError();
+        CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
     }
 
     /// <summary>Stream-ordered device-to-device copy (capture-legal; no host serialization).</summary>
@@ -137,17 +143,26 @@ public static class CudaMemory
         CudaDriverApi.cuMemcpyDtoDAsync(dst, src, byteSize, stream).ThrowOnError();
     }
 
-    /// <summary>Zeros device memory.</summary>
+    /// <summary>Zeros device memory; complete on return.</summary>
     public static void Zero(ulong dptr, nuint byteSize)
     {
-        CudaDriverApi.cuMemsetD8(dptr, 0, byteSize).ThrowOnError();
+        nint stream = OwnStream();
+        CudaDriverApi.cuMemsetD8Async(dptr, 0, byteSize, stream).ThrowOnError();
+        CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
     }
 
-    /// <summary>Fills device memory with a 32-bit value (e.g., float pattern).</summary>
+    /// <summary>Fills device memory with a 32-bit value (e.g., float pattern); complete on return.</summary>
     public static void Fill32(ulong dptr, uint value, nuint count)
     {
-        CudaDriverApi.cuMemsetD32(dptr, value, count).ThrowOnError();
+        nint stream = OwnStream();
+        CudaDriverApi.cuMemsetD32Async(dptr, value, count, stream).ThrowOnError();
+        CudaDriverApi.cuStreamSynchronize(stream).ThrowOnError();
     }
+
+    /// <summary>The calling backend's compute stream for a synchronous transfer, or the legacy stream with no backend.</summary>
+    /// <remarks>Never the legacy stream while a backend exists: in a context where any blocking stream is capturing, a
+    /// legacy-stream call fails and invalidates that capture, whichever engine on the GPU made it.</remarks>
+    private static nint OwnStream() => GpuTransferHelper.CurrentState.StreamHandle;
 
     /// <summary>Allocates device memory asynchronously on the given stream. Mirrors <see cref="Allocate"/>'s OOM retry: if the stream-ordered allocator can't satisfy the request, drain everything and trim the pool, then retry once.</summary>
     // Capture-window alloc/free tracker (diagnostic): during step-graph capture, every cuMemAllocAsync
