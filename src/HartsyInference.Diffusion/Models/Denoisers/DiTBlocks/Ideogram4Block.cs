@@ -32,17 +32,14 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         }
     }
 
-    /// <summary>F16-mode damping for the two RmsNorm-sandwiched projections (the Z-Image recipe): the raw
-    /// <c>attention.o</c> and SwiGLU outputs can exceed F16's 65504, but both feed straight into a sandwich
-    /// RMSNorm and <c>RMSNorm(c·x) ≡ RMSNorm(x)</c> — so scaling the weights via <see cref="Tensor.Fp8ScaleFactor"/>
-    /// (folded into the GEMM alpha, zero extra kernels) is bit-exact post-norm.</summary>
-    private const float F16SandwichDamp = 1.0f / 64.0f;
-
     private readonly int _hidden;
     private readonly int _numHeads;
     private readonly int _headDim;
     private readonly int _ffnHidden;
     private readonly float _eps;
+
+    // Set at load when the F16 sandwich damp is applied; attention_norm2/ffn_norm2 then take its matching eps.
+    private bool _damped;
 
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
@@ -106,14 +103,15 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         _w2 = weights[$"{prefix}.feed_forward.w2.weight"];
         // F16 mode: damp the two sandwich-normed projections so their raw outputs fit F16 range (see
         // F16SandwichDamp). attention_norm2 cancels the o damp; ffn_norm2 cancels the w3 damp (it scales
-        // silu(w1)·w3 and thus the w2 output linearly). F32 path untouched — baseline stays bit-identical.
+        // silu(w1)·w3 and thus the w2 output linearly), each with the eps scaled to match. F32 path untouched.
         // Fused w13 has ONE scale, so the damp shrinks the gate half too — ForwardSwiGlu un-damps the gate
         // before silu (silu is non-homogeneous; the up half stays damped exactly like the split path).
-        if (DitDtype.Act == DType.F16)
+        _damped = DitDtype.Act == DType.F16;
+        if (_damped)
         {
-            _oWeight.Fp8ScaleFactor *= F16SandwichDamp;
-            if (_w3 is not null) _w3.Fp8ScaleFactor *= F16SandwichDamp;
-            if (_w13 is not null) _w13.Fp8ScaleFactor *= F16SandwichDamp;
+            _oWeight.Fp8ScaleFactor *= F16SandwichDamp.Factor;
+            if (_w3 is not null) _w3.Fp8ScaleFactor *= F16SandwichDamp.Factor;
+            if (_w13 is not null) _w13.Fp8ScaleFactor *= F16SandwichDamp.Factor;
         }
 
         _adalnWeight = weights[$"{prefix}.adaln_modulation.weight"];
@@ -176,7 +174,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         mod1.Dispose();
 
         Tensor attnNormed = new Tensor(shape, x.DType);
-        backend.RmsNorm(attnNormed, attn, _attnNorm2!, _eps);
+        backend.RmsNorm(attnNormed, attn, _attnNorm2!, F16SandwichDamp.NormEps(_eps, _damped));
         attn.Dispose();
 
         Tensor afterAttn = new Tensor(shape, x.DType);
@@ -197,7 +195,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         mod2.Dispose();
 
         Tensor mlpNormed = new Tensor(shape, x.DType);
-        backend.RmsNorm(mlpNormed, mlp, _ffnNorm2!, _eps);
+        backend.RmsNorm(mlpNormed, mlp, _ffnNorm2!, F16SandwichDamp.NormEps(_eps, _damped));
         mlp.Dispose();
 
         Tensor result = new Tensor(shape, x.DType);
@@ -289,11 +287,11 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
             backend.SliceLastDim(gate, both, 0);
             backend.SliceLastDim(up, both, _ffnHidden);
             both.Dispose();
-            if (DitDtype.Act == DType.F16)
+            if (_damped)
             {
                 // Undo the shared w13 damp on the gate half (the split path damps only w3).
                 Tensor undamped = new Tensor(ff, input.DType);
-                backend.Scale(undamped, gate, 1.0f / F16SandwichDamp);
+                backend.Scale(undamped, gate, 1.0f / F16SandwichDamp.Factor);
                 gate.Dispose();
                 gate = undamped;
             }

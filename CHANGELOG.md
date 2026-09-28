@@ -19,6 +19,18 @@ stable release will require. Dates are UTC.
   ~16 s. `CausalConv3d` keeps its 5-D weight beside the per-tap slices (the op declines convs below the channels-last threshold), both built at construction.
 - `CudnnConv` builds plans over any number of spatial dims.
 
+## alpha.196
+
+- **Ideogram 4 no longer comes out hazy and washed out.** Its F16 blocks damp the attention-output and SwiGLU
+  projections by 1/64 so they fit F16, relying on the RMSNorm that follows to cancel the factor. That cancellation
+  needs the norm's eps scaled by the same factor squared. With the plain eps, the small sublayer outputs Ideogram
+  produces were shrunk instead of normalized, and every F16 generation lost contrast, detail and composition
+  (duplicate background figures, low-detail subjects) against ComfyUI's official template. `F16SandwichDamp` now owns
+  the damp and the matching eps for both blocks that use it (Ideogram 4, Z-Image). Speed is unchanged.
+- The `ideogram4` regression case (`tests/regression-cases.sh`) now uses the benchmark's structured caption instead of
+  a plain-text prompt: Ideogram 4 is trained only on structured captions, and the plain prompt could not show this
+  class of regression.
+
 ## alpha.195
 
 - **Wan 2.2 TI2V-5B: warm 17.4 s → 6.6 s** through SwarmUI (512×320, 25 frames, 20 steps, 4090).

@@ -104,12 +104,12 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            // nvfp4ToFp8: the DiTs are ~93% nvfp4. Dequantizing to F16 would need 35.9 GB for the pair; folding the
-            // block scale into an fp8 value (global scale on Fp8ScaleFactor) keeps them at 9.3 GB each.
-            Logs.Info($"[Ideogram4Recipe] Loading conditional transformer (9.3B, nvfp4->fp8): {Path.GetFileName(context.CheckpointPath)}.");
+            // The Comfy-Org fp8_scaled DiTs are per-tensor fp8 and load as-is. nvfp4ToFp8 covers an nvfp4 build: widening
+            // it to F16 would need 35.9 GB for the pair, folding each block scale into fp8 keeps 9.3 GB each.
+            Logs.Info($"[Ideogram4Recipe] Loading conditional transformer (9.3B): {Path.GetFileName(context.CheckpointPath)}.");
             Dictionary<string, Tensor> condWeights = ComponentLoader.Load(context.CheckpointPath, "Ideogram4Recipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, loaders, nvfp4ToFp8: true);
 
-            Logs.Info($"[Ideogram4Recipe] Loading unconditional transformer (9.3B, nvfp4->fp8): {Path.GetFileName(uncondPath)}.");
+            Logs.Info($"[Ideogram4Recipe] Loading unconditional transformer (9.3B): {Path.GetFileName(uncondPath)}.");
             Dictionary<string, Tensor> uncondWeights = ComponentLoader.Load(uncondPath, "Ideogram4Recipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, loaders, nvfp4ToFp8: true);
 
             Logs.Info($"[Ideogram4Recipe] Loading Qwen3-VL-8B text encoder: {Path.GetFileName(encoderPath)}.");
