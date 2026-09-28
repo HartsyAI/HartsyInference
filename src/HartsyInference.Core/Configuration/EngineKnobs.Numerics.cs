@@ -177,6 +177,11 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> ConvChannelsLast =
         Bool("numerics.convChannelsLast", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs cuDNN convolutions channels-last (NHWC/NDHWC), transposing around the call, where its tensor-core engines are ~4x faster; 0 keeps them NCHW.");
 
+    /// <summary>Routes F16 attention at head dims the cuDNN fused engine serves slowly (256) through the engine's own
+    /// flash kernel; 0 keeps cuDNN.</summary>
+    public static readonly Knob<bool> FlashF16 =
+        Bool("numerics.flashF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Routes F16 attention at head dim 256 through the engine's own F32-accumulate flash kernel instead of cuDNN; 0 keeps cuDNN.");
+
     /// <summary>Routes scaled-dot-product attention through cuDNN's fused flash engine; 0 falls back to materialized paths.</summary>
     public static readonly Knob<bool> SdpaCudnn =
         Bool("numerics.sdpaCudnn", true, KnobScope.Runtime, KnobDomain.Numerics, "Routes scaled-dot-product attention through cuDNN's fused flash engine; 0 falls back to materialized paths.");
