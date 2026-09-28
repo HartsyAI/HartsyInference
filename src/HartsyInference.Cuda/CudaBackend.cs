@@ -3004,7 +3004,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
                 wCl = CudaMemory.AllocateAsync((nuint)(k * c * kernelSpatial * elementBytes), _stream.Handle);
                 yCl = CudaMemory.AllocateAsync((nuint)(outBatch * outSpatial * k * elementBytes), _stream.Handle);
             }
-            catch (CudaException)
+            catch (Exception ex) when (ex is OutOfVramException or CudaException)
             {
                 return false;   // no room for the layout copies: the NCHW route needs none
             }

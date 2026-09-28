@@ -16,7 +16,7 @@ stable release will require. Dates are UTC.
 - **Causal video-VAE 3-D convolutions run as one cuDNN 3-D convolution** (`IBackend.TryConv3DFrameMajor`) instead of
   one 2-D pass per temporal tap over every padded frame plus an accumulate pass. It reads the frame-major padded
   buffer `CausalConv3d` already builds. The Wan 2.2 VAE decode's convolution time at 1280×704×121 falls from ~69 s to
-  ~16 s. `CausalConv3d` keeps its 5-D weight and builds per-tap slices only for backends without the op.
+  ~16 s. `CausalConv3d` keeps its 5-D weight beside the per-tap slices (the op declines convs below the channels-last threshold), both built at construction.
 - `CudnnConv` builds plans over any number of spatial dims.
 
 ## alpha.195
