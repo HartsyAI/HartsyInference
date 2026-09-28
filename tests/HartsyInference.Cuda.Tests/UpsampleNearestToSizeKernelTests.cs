@@ -36,7 +36,7 @@ public sealed unsafe class UpsampleNearestToSizeKernelTests
 
         using CudaBackend cuda = new(0, ptx);
         using Tensor actual = new(new TensorShape(1, 4, 45, 79), dtype);
-        ((IBackend)cuda).UpsampleNearest2DToSize(actual, input, 2);
+        ((IBackend)cuda).UpsampleNearest2DToSize(actual, input);
         cuda.Sync();
 
         Assert.True(new ReadOnlySpan<byte>(expected.DataPointer, (int)expected.ElementCount * elem)

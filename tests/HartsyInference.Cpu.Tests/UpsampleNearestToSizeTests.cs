@@ -19,7 +19,7 @@ public sealed unsafe class UpsampleNearestToSizeTests
         using Tensor input = new(new TensorShape(2, 3, inH, inW), DType.F32);
         for (long i = 0; i < input.ElementCount; i++) ((float*)input.DataPointer)[i] = i;
         using Tensor output = new(new TensorShape(2, 3, outH, outW), DType.F32);
-        backend.UpsampleNearest2DToSize(output, input, 2);
+        backend.UpsampleNearest2DToSize(output, input);
 
         float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
         for (int plane = 0; plane < 6; plane++)
@@ -39,6 +39,6 @@ public sealed unsafe class UpsampleNearestToSizeTests
         IBackend backend = new CpuBackend();
         using Tensor input = new(new TensorShape(1, 1, 23, 40), DType.F32);
         using Tensor output = new(new TensorShape(1, 1, outH, outW), DType.F32);
-        Assert.Throws<ArgumentException>(() => backend.UpsampleNearest2DToSize(output, input, 2));
+        Assert.Throws<ArgumentException>(() => backend.UpsampleNearest2DToSize(output, input));
     }
 }

@@ -10727,10 +10727,10 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         => UpsampleNearestCore(output, input, scaleH, scaleW, (int)input.Shape[2] * scaleH, (int)input.Shape[3] * scaleW);
 
     /// <summary>Native: the kernel already indexes its output by an explicit extent and reads row <c>oh / scale</c>.</summary>
-    public void UpsampleNearest2DToSize(Tensor output, Tensor input, int scale)
+    public void UpsampleNearest2DToSize(Tensor output, Tensor input)
     {
-        (int outH, int outW) = UpsampleNearestExtent.Validate(output, input, scale);
-        UpsampleNearestCore(output, input, scale, scale, outH, outW);
+        (int outH, int outW) = UpsampleNearestExtent.Validate(output, input);
+        UpsampleNearestCore(output, input, 2, 2, outH, outW);
     }
 
     private void UpsampleNearestCore(Tensor output, Tensor input, int scaleH, int scaleW, int outH, int outW)

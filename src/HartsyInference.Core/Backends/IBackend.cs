@@ -2883,15 +2883,16 @@ public interface IBackend : IDisposable
     /// <summary>Nearest-neighbor 2D upsample by the given scale factor.</summary>
     void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW);
 
-    /// <summary>Nearest-neighbour upsample of NCHW <paramref name="input"/> by <paramref name="scale"/> into
-    /// <paramref name="output"/>, whose height and width may each fall up to <c>scale − 1</c> short of the input's
-    /// times <paramref name="scale"/>. Output row <c>oh</c> reads input row <c>oh / scale</c>, which is exactly
-    /// <c>interpolate(size=…, mode="nearest")</c> for those sizes — what a UNet up path needs when its stride-2 down
-    /// path rounded an odd size up (diffusers passes the skip's size as <c>upsample_size</c>). Default: the full
-    /// upsample into scratch, then the leading rows and columns copied on the host.</summary>
-    unsafe void UpsampleNearest2DToSize(Tensor output, Tensor input, int scale)
+    /// <summary>Nearest-neighbour ×2 upsample of NCHW <paramref name="input"/> into <paramref name="output"/>, whose height
+    /// and width are each either twice the input's or one less. Output row <c>oh</c> reads input row <c>oh / 2</c>, which
+    /// is exactly <c>interpolate(size=…, mode="nearest")</c> for those sizes — what a UNet up path needs when its stride-2
+    /// down path rounded an odd size up (diffusers passes the skip's size as <c>upsample_size</c>). Only ×2: at larger
+    /// factors a short output no longer reads the same rows as the nearest-neighbour rule. Default: the full upsample
+    /// into scratch, then the leading rows and columns copied on the host.</summary>
+    unsafe void UpsampleNearest2DToSize(Tensor output, Tensor input)
     {
-        (int outH, int outW) = UpsampleNearestExtent.Validate(output, input, scale);
+        const int scale = 2;
+        (int outH, int outW) = UpsampleNearestExtent.Validate(output, input);
         int inH = (int)input.Shape[2], inW = (int)input.Shape[3];
         if (outH == inH * scale && outW == inW * scale)
         {

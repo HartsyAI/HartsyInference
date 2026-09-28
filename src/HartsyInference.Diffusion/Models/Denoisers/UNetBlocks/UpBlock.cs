@@ -159,7 +159,7 @@ public sealed class UpBlock
             long upW = skips.Count > 0 ? skips[^1].Shape[3] : w * 2;
             TensorShape upShape = new TensorShape(batch, ch, upH, upW);
             Tensor upsampled = new Tensor(upShape, hidden.DType);
-            backend.UpsampleNearest2DToSize(upsampled, hidden, 2);
+            backend.UpsampleNearest2DToSize(upsampled, hidden);
             hidden.Dispose();
 
             Tensor convUp = new Tensor(upShape, upsampled.DType);
