@@ -6,6 +6,17 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.196
+
+- **Ideogram 4 no longer comes out hazy and washed out.** Its F16 blocks damp the attention-output and SwiGLU
+  projections by 1/64 so they fit F16, relying on the RMSNorm that follows to cancel the factor. That cancellation
+  needs the norm's eps scaled by the same factor squared. With the plain eps, the small sublayer outputs Ideogram
+  produces were shrunk instead of normalized, and every F16 generation lost contrast, detail and composition
+  (duplicate background figures, low-detail subjects) against ComfyUI's official template. `F16SandwichDamp` now owns
+  the damp and the matching eps for both blocks that use it (Ideogram 4, Z-Image). Speed is unchanged.
+- `tests/regression-cases.sh` gains `ideogram4-json`, a structured-caption Ideogram 4 case; the plain-text case
+  cannot show this class of regression.
+
 ## alpha.194
 
 - **Wan stays resident across warm generations.** The single-expert Wan DiT kept on the device (vram.keepModels)

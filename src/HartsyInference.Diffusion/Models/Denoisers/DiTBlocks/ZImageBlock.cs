@@ -8,15 +8,9 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Z-Image transformer block (Lumina2/NextDiT). Used for both <c>noise_refiner</c> blocks and the 30 main <c>layers</c> — they're structurally identical and only differ in which tokens they're called on. Uses AdaLN with 4 outputs (scale_msa, gate_msa, scale_mlp, gate_mlp — scale + gate, no shifts) and a fused QKV projection. The SwarmUI single-file checkpoint stores QKV as one big <c>[3*hidden, hidden]</c> tensor and the output projection as <c>attention.out</c>; QK-norm is <c>q_norm</c>/<c>k_norm</c> (not <c>norm_q</c>/<c>norm_k</c>). All attention linears have NO bias.</summary>
 public sealed unsafe class ZImageBlock
 {
-    /// <summary>F16-mode damping for the two sandwich-normed projections. Z-Image's attention out-projection
-    /// and SwiGLU produce raw magnitudes past F16's 65504 (traced live: attnProjected INF in the FIRST refiner
-    /// block; the historical layer-0 ffnOut INF is the silu(w1·x)·(w3·x) product, ~±160k) — but BOTH feed
-    /// straight into an RmsNorm, and RMSNorm(c·x) ≡ RMSNorm(x). Scaling <c>attention.out</c> and
-    /// <c>feed_forward.w3</c> (folded into the GEMM alpha via Fp8ScaleFactor — zero extra kernels, any weight
-    /// dtype) divides every intermediate on those paths with a bit-exact post-norm result: F16 floating point
-    /// loses NO relative precision to a power-of-two exponent shift. 1/64 because late-step magnitudes grow
-    /// ~4× past step 1's (raw ffnOut traced to ~1.05M at step 6 — 1/16 left exactly ONE element at INF).</summary>
-    private const float F16SandwichDamp = 1.0f / 64.0f;
+    // F16 damp (F16SandwichDamp): Z-Image's attention out-projection and SwiGLU produce raw magnitudes past F16's
+    // 65504 (attnProjected INF in the first refiner block; the silu(w1·x)·(w3·x) product reaches ~±160k at layer 0
+    // and ~1.05M by step 6 — 1/16 left exactly one element at INF, hence 1/64).
 
     /// <summary>diagnostics.zimageF16trace=true: logs min/max/nan of every block intermediate for the first few block
     /// forwards — locates the first F16 overflow site. Each probe D2H-drains the tensor (very slow); debug only.</summary>
@@ -86,7 +80,7 @@ public sealed unsafe class ZImageBlock
         // path is untouched when the flag is off so the baseline stays bit-identical.
         if (_useF16SandwichDamp)
         {
-            _attnOutWeight.Fp8ScaleFactor *= F16SandwichDamp;
+            _attnOutWeight.Fp8ScaleFactor *= F16SandwichDamp.Factor;
         }
 
         _normQ.LoadWeights(weights[$"{prefix}.attention.q_norm.weight"]);
@@ -105,8 +99,8 @@ public sealed unsafe class ZImageBlock
         _w3Weight = weights[$"{prefix}.feed_forward.w3.weight"];
         if (_useF16SandwichDamp)
         {
-            // Damps silu(w1·x)·(w3·x) AND the w2 output linearly; ffn_norm2 cancels the factor exactly.
-            _w3Weight.Fp8ScaleFactor *= F16SandwichDamp;
+            // Damps silu(w1·x)·(w3·x) AND the w2 output linearly; ffn_norm2 cancels the factor with the matched eps.
+            _w3Weight.Fp8ScaleFactor *= F16SandwichDamp.Factor;
         }
     }
 
@@ -244,7 +238,7 @@ public sealed unsafe class ZImageBlock
         if (trace) Trace("attnProjected", projected);
 
         Tensor postAttnNorm = new Tensor(shape, act);
-        backend.RmsNorm(postAttnNorm, projected, _attnNorm2Weight!, _eps);
+        backend.RmsNorm(postAttnNorm, projected, _attnNorm2Weight!, F16SandwichDamp.NormEps(_eps, _useF16SandwichDamp));
         projected.Dispose();
 
         Tensor afterAttn = new Tensor(shape, act);
@@ -260,13 +254,13 @@ public sealed unsafe class ZImageBlock
         normF1.Dispose();
 
         // The SwiGLU runs at the block dtype: F16 is range-safe because w3 is damped at load (F16SandwichDamp)
-        // — the silu(w1·x)·(w3·x) product and the w2 output are both /16, and ffn_norm2 cancels it exactly.
+        // — the silu(w1·x)·(w3·x) product and the w2 output are both damped, and ffn_norm2 cancels it.
         Tensor ffnOut = ForwardSwiGlu(backend, modulatedF, batch, seqLen, trace);
         modulatedF.Dispose();
         if (trace) Trace("ffnOut", ffnOut);
 
         Tensor postFfnNorm = new Tensor(shape, act);
-        backend.RmsNorm(postFfnNorm, ffnOut, _ffnNorm2Weight!, _eps);
+        backend.RmsNorm(postFfnNorm, ffnOut, _ffnNorm2Weight!, F16SandwichDamp.NormEps(_eps, _useF16SandwichDamp));
         ffnOut.Dispose();
 
         Tensor result = new Tensor(shape, act);

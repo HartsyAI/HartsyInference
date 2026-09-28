@@ -149,6 +149,12 @@ no bug, any more than one bad seed was proof there was one.
   65504 → solid black. SageAttention's INT8 path casts V to F16 and is **default-on regardless of
   `allowF16`** (only the cuDNN branch honors the flag). Fix: scale joint V by 1/256 before SDPA, scale
   output back by 256 (attention is linear in V; power-of-2 = exponent-only).
+- **F16 damp in front of a norm without a matched eps = washed-out image, never a NaN.** A damp `c` on a
+  projection that feeds an RMSNorm is exact only as `RMSNorm(c·x, c²·eps)`; with the plain eps the norm sees
+  `c²·mean(x²) + eps`, so a sublayer with a small output is shrunk instead of normalized and the image goes hazy,
+  low-contrast and loses composition (Ideogram 4 at 1/64). Tell: clean with `numerics.ditF16=false`, no Inf/NaN
+  anywhere. Check that every damp site's consuming norm takes `F16SandwichDamp.NormEps`. A whole-stream damp read
+  through LayerNorm (Chroma/Flux) is the same identity; it is safe only while the stream variance dwarfs `eps/c²`.
 - **YaRN RoPE needs HF's dimension-index ramp + `attention_factor` mscale** (Lens: 1.3466×), not a
   wavelength ramp.
 - **Phi head_dim=96** (non-power-of-two) hit an infinite CUDA fallback recursion; pad the flash-attn
