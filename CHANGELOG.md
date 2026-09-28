@@ -13,9 +13,22 @@ stable release will require. Dates are UTC.
   free-VRAM reading cannot see past the weights occupying it, so back-to-back Wan 2.2 TI2V-5B generations alternated
   between resident (≈19 s) and fully streamed (≈75 s at 512×320, 25 frames, 20 steps). A streamed denoise no longer
   reports the DiT as kept.
+- A warm all-or-nothing pin is honoured only while this generation's activation reserve still fits beside it
+  (`BlockStreamingScope`); a larger geometry releases the resident blocks and the planner decides afresh, instead
+  of keeping them and running out of memory.
 - `WanVideoPipeline.WanActivationReserveBytes` counts the patchified token grid, as its documentation said; it charged
   the latent grid, four times too many tokens at Wan's (1, 2, 2) patch. The recipe's memory estimate passes the
   checkpoint's own patch size.
+
+## alpha.193
+
+- **Engines sharing a GPU no longer break each other's captures.** `CudaMemory`'s synchronous copies and fills
+  (`CopyHostToDevice`, `CopyDeviceToHost`, `CopyDeviceToDevice`, `Zero`, `Fill32`) run stream-ordered on the calling
+  backend's compute stream and wait for it, instead of on the legacy stream. While any blocking stream in a context is
+  capturing, a legacy-stream call fails (`CUDA_ERROR_STREAM_CAPTURE_IMPLICIT`) and invalidates that capture, so in
+  SwarmUI an AudioLab or LLM request on the same GPU as an image generation failed and pushed the image model's
+  step graph back to eager. The backend's remaining raw driver copies go through the same helpers. Code with no
+  backend registered still uses the legacy stream.
 
 ## alpha.192
 

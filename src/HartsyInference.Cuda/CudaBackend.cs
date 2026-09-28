@@ -965,7 +965,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>Test-only: D2H-snapshots a tensor to a host F32 array via a cache-hit peek, backing <see cref="CaptureW8A8Operands"/> only.</summary>
     /// <remarks>Uses <see cref="GpuTransferHelper.CopyToDevice"/> (non-destructive on a hit) + blocking
-    /// <c>cuMemcpyDtoH</c> + cache-aware <see cref="GpuTransferHelper.FreeDevice"/> — never touches
+    /// <see cref="CudaMemory.CopyDeviceToHost"/> + cache-aware <see cref="GpuTransferHelper.FreeDevice"/> — never touches
     /// <c>Tensor.DataPointer</c>, so it can't trip the lazy-sync eviction race.</remarks>
     private unsafe float[] SnapshotToF32ForTest(Tensor t, long count)
     {
@@ -975,7 +975,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             nuint byteSize = GpuTransferHelper.ByteSize(t);
             byte[] host = new byte[byteSize];
             fixed (byte* dst = host)
-                CudaDriverApi.cuMemcpyDtoH((nint)dst, pDev, byteSize).ThrowOnError();
+                CudaMemory.CopyDeviceToHost(dst, pDev, byteSize);
             float[] result = new float[count];
             DType dt = t.DType;
             fixed (byte* src = host)
@@ -9008,13 +9008,11 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
             pB = GpuTransferHelper.CopyToDevice(b);
             pSums = GpuTransferHelper.AllocateDevice(2 * sizeof(float));
 
-            // Synchronous NULL-stream memset serializes correctly against the single blocking compute stream
-            // (same ordering guarantee CudaMemory.cuMemsetD32 relies on).
-            CudaDriverApi.cuMemsetD8(pSums, 0, 2 * sizeof(float)).ThrowOnError();
+            CudaMemory.Zero(pSums, 2 * sizeof(float));
             _kernels!.LaunchStepCacheRelL1(pSums, pA, pB, a.ElementCount, a.DType == DType.F16, _stream.Handle);
 
             float* results = stackalloc float[2];
-            CudaDriverApi.cuMemcpyDtoH((nint)results, pSums, 2 * sizeof(float)).ThrowOnError();
+            CudaMemory.CopyDeviceToHost(results, pSums, 2 * sizeof(float));
             if (!float.IsFinite(results[0]) || !float.IsFinite(results[1]))
                 return float.NaN;
             return results[1] > 0f ? results[0] / results[1] : results[0] > 0f ? float.PositiveInfinity : 0f;
@@ -9767,7 +9765,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         ulong dptr = GpuTransferHelper.AllocateDevice(bytes);
         try
         {
-            fixed (T* p = values) CudaDriverApi.cuMemcpyHtoD(dptr, (nint)p, bytes).ThrowOnError();
+            fixed (T* p = values) CudaMemory.CopyHostToDevice(dptr, p, bytes);
             return dptr;
         }
         catch
@@ -9969,7 +9967,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         ulong p = GpuTransferHelper.CopyToDevice(src);   // resident activation → cached ptr (no re-upload, no free)
         _stream.Synchronize();
         fixed (float* d = dst)
-            CudaDriverApi.cuMemcpyDtoH((nint)d, p, (nuint)((long)dst.Length * sizeof(float))).ThrowOnError();
+            CudaMemory.CopyDeviceToHost(d, p, (nuint)((long)dst.Length * sizeof(float)));
     }
 
     // ── LLM decode-graph: RoPE / embed / argmax device state ────────────────────────────────────────────────
@@ -10003,7 +10001,7 @@ public sealed class CudaBackend : GpuBackendBase, IBackend
         if (handle == 0) throw new NotSupportedException("ReadDeviceTokenId called with an unallocated buffer.");
         using OpScope _op = EnterOp();
         int v;
-        CudaDriverApi.cuMemcpyDtoH((nint)(&v), handle, (nuint)sizeof(int)).ThrowOnError();
+        CudaMemory.CopyDeviceToHost(&v, handle, (nuint)sizeof(int));
         return v;
     }
 
