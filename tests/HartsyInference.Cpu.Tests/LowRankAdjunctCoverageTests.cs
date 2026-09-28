@@ -26,8 +26,8 @@ public sealed class LowRankAdjunctCoverageTests
         /// <summary>Throws by name when handed a tensor carrying one, because it has no shape to apply it in.</summary>
         Refuses,
 
-        /// <summary>Cannot receive one: its weight is a rank-1 norm or gate vector, and
-        /// <c>LoraStack.RequireRank2AdjunctTarget</c> means an adjunct is never attached to those.</summary>
+        /// <summary>Does not compute with a rank-2 weight: a capability query or an op whose weight rank
+        /// prevents attaching an adjunct through <c>Tensor.WithLowRankAdjunct</c>.</summary>
         NotATarget,
     }
 
@@ -46,6 +46,8 @@ public sealed class LowRankAdjunctCoverageTests
         ["Conv2D"] = AdjunctCoverage.Refuses,
         ["Conv1d"] = AdjunctCoverage.Refuses,
         ["Conv3d"] = AdjunctCoverage.Refuses,
+        ["TryConv3DFrameMajor"] = AdjunctCoverage.NotATarget, // Requires a rank-5 weight.
+        ["SupportsResidentQuant"] = AdjunctCoverage.NotATarget, // Capability query; does not compute.
         ["Conv2dDepthwise"] = AdjunctCoverage.Refuses,
         ["ConvTranspose1d"] = AdjunctCoverage.Refuses,
         ["ConvTranspose2d"] = AdjunctCoverage.Refuses,
