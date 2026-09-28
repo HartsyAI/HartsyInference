@@ -19,6 +19,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
     private readonly float[] _latentStd;
     private readonly int _numResBlocks;
     private readonly bool[] _temperalUpsample;
+    private readonly DType _computeDtype;
 
     private CausalConv3d? _conv2;       // top-level WanVAE_.conv2 (48→48, 1×1×1)
     private CausalConv3d? _conv1;       // decoder.conv1 (48→dims[0], 3)
@@ -44,10 +45,15 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
     /// <param name="temporalKernel">Depth of each <c>time_conv</c>. Wan 2.2 uses 3, Qwen-Image 2.1 uses 1.</param>
     /// <param name="latentMean">Per-channel decode denormalization mean; defaults to Wan 2.2's 48-channel table.
     /// Qwen-Image 2.1 must pass <see cref="QwenImage21LatentNorm"/>, whose statistics are entirely different.</param>
+    /// <param name="computeDtype">Activation and conv-weight dtype (F32 or BF16). The latent goes in and the RGB comes
+    /// out as F32 either way.</param>
     public Wan22VaeDecoder(int dim = 256, int zDim = 48, int[]? dimMult = null, int numResBlocks = 2,
         bool[]? temperalUpsample = null, int patchSize = 2, int temporalKernel = 3,
-        float[]? latentMean = null, float[]? latentStd = null)
+        float[]? latentMean = null, float[]? latentStd = null, DType? computeDtype = null)
     {
+        _computeDtype = computeDtype ?? DType.F32;
+        if (_computeDtype != DType.F32 && _computeDtype != DType.BF16)
+            throw new ArgumentOutOfRangeException(nameof(computeDtype), computeDtype, "The Wan 2.2 VAE decodes in F32 or BF16.");
         _dim = dim;
         _zDim = zDim;
         _dimMult = dimMult ?? [1, 2, 4, 4];
@@ -75,16 +81,18 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
     /// <summary>Loads weights from a dict whose keys are <c>conv2.*</c> (top-level) and <c>decoder.*</c> (Decoder3d). The converter strips any wrapper prefix.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w)
     {
-        _conv2 = new CausalConv3d(w["conv2.weight"], VaeOps.Bias(w, "conv2.bias"), padT: 0, padH: 0, padW: 0);
+        _conv2 = new CausalConv3d(w["conv2.weight"], VaeOps.Bias(w, "conv2.bias"), padT: 0, padH: 0, padW: 0,
+            computeDtype: _computeDtype);
 
         int[] dims = BuildDims();
-        _conv1 = new CausalConv3d(w["decoder.conv1.weight"], VaeOps.Bias(w, "decoder.conv1.bias"), padT: _temporalKernel / 2, padH: 1, padW: 1);
+        _conv1 = new CausalConv3d(w["decoder.conv1.weight"], VaeOps.Bias(w, "decoder.conv1.bias"), padT: _temporalKernel / 2,
+            padH: 1, padW: 1, computeDtype: _computeDtype);
 
-        _midRes0 = new Wan22ResidualBlock(dims[0], dims[0], _temporalKernel);
+        _midRes0 = new Wan22ResidualBlock(dims[0], dims[0], _temporalKernel, _computeDtype);
         _midRes0.LoadWeights(w, "decoder.middle.0");
         _midAttn = new Wan22AttentionBlock(dims[0]);
         _midAttn.LoadWeights(w, "decoder.middle.1");
-        _midRes2 = new Wan22ResidualBlock(dims[0], dims[0], _temporalKernel);
+        _midRes2 = new Wan22ResidualBlock(dims[0], dims[0], _temporalKernel, _computeDtype);
         _midRes2.LoadWeights(w, "decoder.middle.2");
 
         int numStages = _dimMult.Length;
@@ -102,14 +110,14 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
             int cur = inDim;
             for (int j = 0; j < mult; j++)
             {
-                res[j] = new Wan22ResidualBlock(cur, outDim, _temporalKernel);
+                res[j] = new Wan22ResidualBlock(cur, outDim, _temporalKernel, _computeDtype);
                 res[j].LoadWeights(w, $"decoder.upsamples.{i}.upsamples.{j}");
                 cur = outDim;
             }
             Wan22Resample? resample = null;
             if (upFlag)
             {
-                resample = new Wan22Resample(outDim, temporal: tUp, temporalKernel: _temporalKernel);
+                resample = new Wan22Resample(outDim, temporal: tUp, temporalKernel: _temporalKernel, computeDtype: _computeDtype);
                 resample.LoadWeights(w, $"decoder.upsamples.{i}.upsamples.{mult}");
             }
             _stages[i] = new UpStage
@@ -126,7 +134,8 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         int headDim = dims[^1];
         _headNorm = new WanRmsNorm(headDim);
         _headNorm.LoadWeights(w["decoder.head.0.gamma"]);
-        _headConv = new CausalConv3d(w["decoder.head.2.weight"], VaeOps.Bias(w, "decoder.head.2.bias"), padT: _temporalKernel / 2, padH: 1, padW: 1);
+        _headConv = new CausalConv3d(w["decoder.head.2.weight"], VaeOps.Bias(w, "decoder.head.2.bias"), padT: _temporalKernel / 2,
+            padH: 1, padW: 1, computeDtype: _computeDtype);
     }
 
     /// <summary>Enumerates all weights for GPU preloading.</summary>
@@ -154,10 +163,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         int t = (int)latent.Shape[2];
 
         // z = z·std + mean (decode-side latent norm). conv2 is 1×1×1 (no temporal cache needed).
-        Tensor z = VaeOps.Clone(latent);
-        Wan22VaeLatentNorm.Denormalize(z, _latentMean, _latentStd);
-        Tensor x = _conv2!.Forward(backend, z);
-        z.Dispose();
+        Tensor x = DenormalizeAndProject(backend, latent);
 
         List<Tensor> groups = new();
         foreach (Tensor g in DecodeRgbGroups(backend, x)) groups.Add(g);
@@ -172,10 +178,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
     {
         if ((int)latent.Shape[1] != _zDim)
             throw new ArgumentException($"latent channels {latent.Shape[1]} != z_dim {_zDim}.", nameof(latent));
-        Tensor z = VaeOps.Clone(latent);
-        Wan22VaeLatentNorm.Denormalize(z, _latentMean, _latentStd);
-        Tensor x = _conv2!.Forward(backend, z);
-        z.Dispose();
+        Tensor x = DenormalizeAndProject(backend, latent);
         try
         {
             foreach (Tensor g in DecodeRgbGroups(backend, x)) yield return g;
@@ -195,7 +198,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
             Tensor twelve = DecodeFrame(backend, x, cache: null, firstChunk: true);
             Tensor rgb = Wan22VaePatch.Unpatchify(backend, twelve, _patchSize);
             twelve.Dispose();
-            yield return rgb;
+            yield return ToF32(backend, rgb);
             yield break;
         }
         using Wan22StreamCache cache = new();
@@ -207,7 +210,7 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
             frame.Dispose();
             Tensor rgb = Wan22VaePatch.Unpatchify(backend, twelve, _patchSize);
             twelve.Dispose();
-            yield return rgb;
+            yield return ToF32(backend, rgb);
         }
     }
 
@@ -263,5 +266,32 @@ public sealed unsafe class Wan22VaeDecoder : IWanVaeDecoder
         hcc?.Dispose();
         hn.Dispose();
         return twelve;
+    }
+
+    /// <summary><c>z·std + mean</c> on the host latent, then the 1×1×1 <c>conv2</c> in the compute dtype.</summary>
+    private Tensor DenormalizeAndProject(IBackend backend, Tensor latent)
+    {
+        Tensor z = VaeOps.Clone(latent);
+        Wan22VaeLatentNorm.Denormalize(z, _latentMean, _latentStd);
+        if (_computeDtype != DType.F32)
+        {
+            Tensor cast = new Tensor(z.Shape, _computeDtype);
+            backend.CastToBf16(cast, z);
+            z.Dispose();
+            z = cast;
+        }
+        Tensor x = _conv2!.Forward(backend, z);
+        z.Dispose();
+        return x;
+    }
+
+    /// <summary>Returns <paramref name="rgb"/> as F32, taking ownership of it.</summary>
+    private static Tensor ToF32(IBackend backend, Tensor rgb)
+    {
+        if (rgb.DType == DType.F32) return rgb;
+        Tensor f32 = new Tensor(rgb.Shape, DType.F32);
+        backend.CastToF32(f32, rgb);
+        rgb.Dispose();
+        return f32;
     }
 }

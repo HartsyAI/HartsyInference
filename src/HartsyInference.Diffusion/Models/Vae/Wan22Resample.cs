@@ -34,16 +34,19 @@ public sealed unsafe class Wan22Resample
     private CausalConv3d? _downTimeConv;        // downsample3d temporal branch (dim → dim, kernel (3,1,1), strideT 2, causal)
 
     private readonly int _temporalKernel;
+    private readonly DType _computeDtype;
 
-    public Wan22Resample(int dim, bool temporal = false, int temporalKernel = 3)
-        : this(dim, temporal ? Wan22ResampleMode.Upsample3d : Wan22ResampleMode.Upsample2d, temporalKernel)
+    public Wan22Resample(int dim, bool temporal = false, int temporalKernel = 3, DType? computeDtype = null)
+        : this(dim, temporal ? Wan22ResampleMode.Upsample3d : Wan22ResampleMode.Upsample2d, temporalKernel, computeDtype)
     {
     }
 
     /// <param name="temporalKernel">Depth of the <c>time_conv</c> kernel. Wan 2.2 uses 3; Qwen-Image 2.1 reuses this
     /// VAE with 1, which makes the temporal branch a pointwise conv over a single frame.</param>
-    public Wan22Resample(int dim, Wan22ResampleMode mode, int temporalKernel = 3)
+    /// <param name="computeDtype">Activation and conv-weight dtype of the upsample path (F32 or BF16); downsampling is F32.</param>
+    public Wan22Resample(int dim, Wan22ResampleMode mode, int temporalKernel = 3, DType? computeDtype = null)
     {
+        _computeDtype = computeDtype ?? DType.F32;
         _dim = dim;
         _mode = mode;
         if (temporalKernel < 1 || temporalKernel % 2 == 0)
@@ -54,13 +57,15 @@ public sealed unsafe class Wan22Resample
     /// <summary>Loads the spatial conv (Sequential index 1: <c>resample.1</c>) and, for the temporal variants, the <c>time_conv</c>.</summary>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix)
     {
-        _convW = weights[$"{prefix}.resample.1.weight"];
+        Tensor convW = weights[$"{prefix}.resample.1.weight"];
+        _convW = convW.DType == _computeDtype ? convW : convW.CastTo(_computeDtype);
         weights.TryGetValue($"{prefix}.resample.1.bias", out _convB);
         if (_mode == Wan22ResampleMode.Upsample3d)
         {
             weights.TryGetValue($"{prefix}.time_conv.bias", out Tensor? tb);
             // padding=(k//2, 0, 0), matching the reference's parameterized Resample.
-            _timeConv = new CausalConv3d(weights[$"{prefix}.time_conv.weight"], tb, padT: _temporalKernel / 2, padH: 0, padW: 0);
+            _timeConv = new CausalConv3d(weights[$"{prefix}.time_conv.weight"], tb, padT: _temporalKernel / 2, padH: 0, padW: 0,
+                computeDtype: _computeDtype);
         }
         else if (_mode == Wan22ResampleMode.Downsample3d)
         {
@@ -141,12 +146,12 @@ public sealed unsafe class Wan22Resample
         int b = (int)spatialIn.Shape[0], c = (int)spatialIn.Shape[1], t = (int)spatialIn.Shape[2], h = (int)spatialIn.Shape[3], w = (int)spatialIn.Shape[4];
         Tensor frames = Vae3dLayout.ToFrames(backend, spatialIn);        // [BT,C,H,W], on-device
         if (ownsSpatialIn) spatialIn.Dispose();
-        Tensor up = new Tensor(new TensorShape(b * t, c, h * 2, w * 2), DType.F32);
+        Tensor up = new Tensor(new TensorShape(b * t, c, h * 2, w * 2), frames.DType);
         backend.UpsampleNearest2D(up, frames, 2, 2);
         frames.Dispose();
         // Output channels come from the conv weight: Wan2.2 keeps dim→dim, Wan2.1 halves (dim→dim/2).
         int outC = (int)_convW!.Shape[0];
-        Tensor conv = new Tensor(new TensorShape(b * t, outC, h * 2, w * 2), DType.F32);
+        Tensor conv = new Tensor(new TensorShape(b * t, outC, h * 2, w * 2), up.DType);
         backend.Conv2D(conv, up, _convW!, _convB, 1, 1, 1, 1);
         up.Dispose();
         Tensor outT = Vae3dLayout.FromFrames(backend, conv, b, outC, t, h * 2, w * 2);

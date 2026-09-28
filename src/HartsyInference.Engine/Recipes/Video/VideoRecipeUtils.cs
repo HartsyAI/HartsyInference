@@ -428,7 +428,9 @@ internal static class VideoRecipeUtils
     }
 
     /// <summary>Loads the Wan VAE at F32 (the precision this family's decode is validated at) and builds the matching decoder/encoder pair — the z=16 Wan2.1 modules when <paramref name="isWan21"/>, else the z=48 Wan2.2 ones. Both halves share one weight dict, so the encoder costs no extra load.</summary>
-    internal static (IWanVaeDecoder Decoder, IWanVaeEncoder Encoder) LoadWanVae(string vaePath, bool isWan21, List<IDisposable> loaders)
+    /// <param name="decodeDtype">Compute dtype of the Wan 2.2 decoder; the Wan 2.1 decoder and both encoders run F32.</param>
+    internal static (IWanVaeDecoder Decoder, IWanVaeEncoder Encoder) LoadWanVae(string vaePath, bool isWan21, List<IDisposable> loaders,
+        DType? decodeDtype = null)
     {
         ArgumentNullException.ThrowIfNull(loaders);
         (Dictionary<string, Tensor> vaeWeightsRaw, CheckpointSource vaeSource) = LanceCheckpointConverter.LoadVae(vaePath);
@@ -442,7 +444,7 @@ internal static class VideoRecipeUtils
             wan21Encoder.LoadWeights(vaeWeights);
             return (wan21Decoder, wan21Encoder);
         }
-        Wan22VaeDecoder wan22Decoder = new Wan22VaeDecoder();
+        Wan22VaeDecoder wan22Decoder = new Wan22VaeDecoder(computeDtype: decodeDtype);
         wan22Decoder.LoadWeights(vaeWeights);
         Wan22VaeEncoder wan22Encoder = new Wan22VaeEncoder();
         wan22Encoder.LoadWeights(vaeWeights);

@@ -1830,7 +1830,8 @@ public interface IBackend : IDisposable
         int h = (int)input.Shape[3], w = (int)input.Shape[4], outC = (int)output.Shape[1];
         int keepT = t * factorT - dropT, outH = h * factorS, outW = w * factorS;
         int repeats = outC * factorT * factorS * factorS / inC;
-        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        int elem = (int)input.DType.ComputeByteCount(1);
+        byte* src = (byte*)input.DataPointer, dst = (byte*)output.DataPointer;
         for (int bi = 0; bi < b; bi++)
             for (int oc = 0; oc < outC; oc++)
                 for (int tt = 0; tt < factorT; tt++)
@@ -1848,7 +1849,7 @@ public interface IBackend : IDisposable
                                         long srcOff = ((((long)bi * inC + srcC) * t + ti) * h + hi) * w + wi;
                                         long dstOff = ((((long)bi * outC + oc) * keepT + oTime) * outH + (hi * factorS + s1))
                                             * outW + (wi * factorS + s2);
-                                        dst[dstOff] = src[srcOff];
+                                        Buffer.MemoryCopy(src + srcOff * elem, dst + dstOff * elem, elem, elem);
                                     }
                             }
                         }
