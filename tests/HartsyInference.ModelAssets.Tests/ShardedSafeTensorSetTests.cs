@@ -256,6 +256,21 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
     }
 
     [Fact]
+    public void ReadTensor_OnAPreadOnlyShard_CopiesTheBytesWithoutMapping()
+    {
+        ShardTestFiles.WriteThreeShardSet(_dir, out _);
+        using ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir,
+            new ShardSetOptions { PreadOnlyShards = ["s2.safetensors"] });
+
+        Tensor tensor = set.ReadTensor("b.1");
+
+        Assert.True(tensor.OwnsMemory);
+        Assert.Equal(9f, tensor.AsReadOnlySpan<float>()[0]);
+        Assert.Equal(0, set.MappedShardCount);
+        Assert.Throws<KeyNotFoundException>(() => set.ReadTensor("nope"));
+    }
+
+    [Fact]
     public void PreadOnlyShards_NamingAnUnknownShard_Throws()
     {
         ShardTestFiles.WriteThreeShardSet(_dir, out _);
