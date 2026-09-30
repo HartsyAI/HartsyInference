@@ -22,6 +22,8 @@ Re-check without downloading: `python fetch_upstream.py --verify-only`.
 | `run_small_config.py` | Runs upstream `Transformer` on two small seeded configs and dumps every intermediate |
 | `dump_engram_constants.py` | Dumps the Engram token map, hash multipliers, primes and offsets with SHA-256 |
 | `dump_moe_route_fixture.py` | Runs the upstream `Gate` (sqrtsoftplus, bias) and writes `fixtures/moe_route_sqrtsoftplus.json` |
+| `dump_latent_fixtures.py` | Writes `fixtures/latent_quant_bytes.json` (FP8/FP4 quantize bytes), `sparse_latent_attention.json` (float64 `sparse_attn_exact` with sink and -1 skipping) and `indexer_scores.json` (mid-group compress-length masking) |
+| `dump_hc_rope_window_fixtures.py` | Writes `fixtures/hc_mix.json` (Sinkhorn 1/3/20 iters, `hc_pre`, `hc_post`), `rope_interleaved_offset.json` (offset rotary and its inverse) and `window_indices.json` (`get_window_topk_idxs` prefill/decode) |
 | `dump_parser_reference.py` | Runs upstream `encoding.py` `parse_message_from_completion_text` on golden, canonical and malformed completions and writes `parser_reference/parser_reference.json` |
 | `cross_check_recipe.py` | Compares that fixture with the `deepseek-recipe` stream parser at ~40 split points per case (`pip install deepseek-recipe`) |
 
