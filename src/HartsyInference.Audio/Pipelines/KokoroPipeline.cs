@@ -3,6 +3,7 @@ using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Kokoro;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.PyTorch;
@@ -75,6 +76,7 @@ public sealed class KokoroPipeline : IDisposable
     private readonly IDisposable? _loader;
     private readonly Dictionary<string, KokoroVoicePack> _voicePackCache = new(StringComparer.Ordinal);
     private readonly string _repoDir;
+    private IBackend? _residentBackend;
     private int _disposed;
 
     public KokoroConfig Config => _cfg;
@@ -241,73 +243,114 @@ public sealed class KokoroPipeline : IDisposable
     /// Borrows <paramref name="sDec"/> / <paramref name="sPred"/> (the caller owns + disposes them).</summary>
     private float[] SynthesizeCore(IBackend backend, int[] tokenIds, Tensor sDec, Tensor sPred, float speed)
     {
-        // PLBERT → d_bert [1, T, 512].
-        using Tensor dBert = _plBert.Forward(backend, tokenIds);
-        // TextEncoder → text_features [1, T, 512].
-        using Tensor textFeatures = _textEncoder.Forward(backend, tokenIds);
-
-        // Predict durations.
-        (Tensor durFeatures, int[] durations) = _predictor.PredictDurations(backend, dBert, sPred, speed);
-        durFeatures.Dispose();
-
-        int tTotal = 0;
-        for (int i = 0; i < durations.Length; i++) tTotal += durations[i];
-        if (tTotal == 0) tTotal = durations.Length;
-
-        // Length-regulate d_bert + text_features → channels-first [1, 512, T_total].
-        Tensor dBertExpanded = LengthRegulate(dBert, durations, tTotal);
-        Tensor asr = LengthRegulate(textFeatures, durations, tTotal);
+        EnsureWeightsResident(backend);
+        KokoroStageTimer? timer = KokoroStageTimer.Start(backend);
+        // The two style halves feed every AdaIN in the graph; resident for the call, they cost one upload
+        // instead of one per consumer. Released before the caller disposes them.
+        Tensor[] styles = [sDec, sPred];
+        backend.PreloadWeights(styles);
         try
         {
-            (Tensor f0, Tensor n) = _predictor.F0Ntrain(backend, dBertExpanded, sPred);
+            // PLBERT → d_bert [1, T, 512].
+            using Tensor dBert = _plBert.Forward(backend, tokenIds);
+            timer?.Mark("plbert");
+            // TextEncoder → text_features [1, T, 512].
+            using Tensor textFeatures = _textEncoder.Forward(backend, tokenIds);
+            timer?.Mark("textenc");
+
+            // Predict durations.
+            (Tensor durFeatures, int[] durations) = _predictor.PredictDurations(backend, dBert, sPred, speed);
+            durFeatures.Dispose();
+            timer?.Mark("durations");
+
+            // Every predicted duration is clamped to ≥ 1 frame, so T_total ≥ T and the alignment is total.
+            int tTotal = 0;
+            for (int i = 0; i < durations.Length; i++) tTotal += durations[i];
+
+            // Length-regulate d_bert + text_features → channels-first [1, 512, T_total].
+            int[] frameToPhoneme = AlignmentIndices(durations, tTotal);
+            Tensor dBertExpanded = LengthRegulate(backend, dBert, frameToPhoneme);
+            Tensor asr = LengthRegulate(backend, textFeatures, frameToPhoneme);
+            timer?.Mark("regulate");
             try
             {
-                return _decoder.Forward(backend, asr, f0, n, sDec);
+                (Tensor f0, Tensor n) = _predictor.F0Ntrain(backend, dBertExpanded, sPred);
+                timer?.Mark("f0n");
+                try
+                {
+                    float[] audio = _decoder.Forward(backend, asr, f0, n, sDec);
+                    timer?.Mark("decoder");
+                    timer?.Report($"synth T={tokenIds.Length} T_total={tTotal}");
+                    return audio;
+                }
+                finally
+                {
+                    f0.Dispose();
+                    n.Dispose();
+                }
             }
             finally
             {
-                f0.Dispose();
-                n.Dispose();
+                dBertExpanded.Dispose();
+                asr.Dispose();
             }
         }
         finally
         {
-            dBertExpanded.Dispose();
-            asr.Dispose();
+            backend.FreeWeights(styles);
         }
+    }
+
+    /// <summary>Uploads every submodule weight to the backend once. Without this the small tensors (AdaIN
+    /// projections, biases, Snake alphas — each under the auto-promotion floor) re-upload on every op of every call.
+    /// Unsynchronized like the rest of the pipeline (one synthesis at a time, the voice-pack cache's contract). A
+    /// repeated preload is a no-op for already-resident weights, and the backend is recorded only after the preload
+    /// succeeds, so one that throws part-way is retried by the next call. The device copies live and die with the
+    /// backend.</summary>
+    private void EnsureWeightsResident(IBackend backend)
+    {
+        if (ReferenceEquals(_residentBackend, backend)) return;
+        backend.PreloadWeights(EnumerateWeights());
+        _residentBackend = backend;
+    }
+
+    /// <summary>Every device-side weight of the four submodules.</summary>
+    internal IEnumerable<Tensor> EnumerateWeights()
+    {
+        foreach (Tensor t in _plBert.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _textEncoder.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _predictor.EnumerateWeights()) yield return t;
+        foreach (Tensor t in _decoder.EnumerateWeights()) yield return t;
+    }
+
+    /// <summary>The phoneme index of every output frame: phoneme <c>i</c> owns <c>durations[i]</c> consecutive frames.</summary>
+    private static int[] AlignmentIndices(int[] durations, int tTotal)
+    {
+        int[] indices = new int[tTotal];
+        int frame = 0;
+        for (int i = 0; i < durations.Length; i++)
+        {
+            for (int j = 0; j < durations[i]; j++) indices[frame++] = i;
+        }
+        if (frame != tTotal)
+            throw new HartsyInferenceException($"Kokoro alignment covers {frame} frames but T_total is {tTotal}.");
+        return indices;
     }
 
     /// <summary>Repeats each phoneme of a <c>[1, T, C]</c> channels-last feature tensor by
     /// the predicted duration count, producing a <c>[1, C, T_total]</c> channels-first
     /// tensor ready for the decoder's conv stack. This is the Kokoro length-regulator —
-    /// equivalent to building a one-hot alignment matrix and matmul-ing, but a simple
-    /// repeat is cheaper and exact.</summary>
-    private static unsafe Tensor LengthRegulate(Tensor featuresCL, int[] durations, int tTotal)
+    /// equivalent to building a one-hot alignment matrix and matmul-ing, but a row gather
+    /// is cheaper and exact. Runs as two backend ops, so the features never leave the device.</summary>
+    private static Tensor LengthRegulate(IBackend backend, Tensor featuresCL, int[] frameToPhoneme)
     {
-        int t = (int)featuresCL.Shape[1];
         int c = (int)featuresCL.Shape[2];
-        if (durations.Length != t)
-            throw new ArgumentException($"durations length {durations.Length} does not match T {t}.");
+        int tTotal = frameToPhoneme.Length;
+        Tensor gathered = new(new TensorShape(1, tTotal, c), DType.F32);
+        backend.GatherRows(gathered, featuresCL, frameToPhoneme);
         Tensor expanded = new(new TensorShape(1, c, tTotal), DType.F32);
-        float* src = (float*)featuresCL.DataPointer;
-        float* dst = (float*)expanded.DataPointer;
-
-        int outFrame = 0;
-        for (int i = 0; i < t; i++)
-        {
-            int d = durations[i];
-            if (d <= 0) continue;
-            // Source row for phoneme i lives at offset i*C in the channels-last tensor.
-            // Destination is channels-first, so for each channel cc we write across
-            // [outFrame .. outFrame+d) at row cc * tTotal.
-            for (int cc = 0; cc < c; cc++)
-            {
-                float val = src[i * c + cc];
-                long rowBase = (long)cc * tTotal + outFrame;
-                for (int j = 0; j < d; j++) dst[rowBase + j] = val;
-            }
-            outFrame += d;
-        }
+        backend.Transpose2D(expanded, gathered, tTotal, c);
+        gathered.Dispose();
         return expanded;
     }
 

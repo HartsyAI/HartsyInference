@@ -6,6 +6,40 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.224
+
+- **Kokoro synthesis 6.7× faster on the 3060** (15-word sentence 1145 → 170 ms median in-process, 165–191 across nine
+  runs; 5 words 778 → 82 ms, 30 words 2076 → 254 ms; 1552 → 9 device→host syncs per call). The synthesis graph stays
+  device-resident: the AdaIN / AdaLN style splits, the length regulator, the style broadcast and channel concats,
+  reflection pads, residual adds and the PLBERT head permutes are backend ops (`SliceLastDim`, `LayerNormModulate`,
+  `RepeatTime`, grouped `ConvTranspose1d`, `Concat`, `GatherRows`, `Permute0213`, `Add`/`Scale`), and `KokoroPipeline`
+  preloads its weights once per backend and keeps the two style halves resident for the call. Bounded, not
+  bit-identical, by TF32 rounding only: log-magnitude-STFT correlation vs alpha.218 0.997 / 0.995 / 0.989 for 5 / 15 /
+  30 words with identical lengths and transcripts — closer than alpha.218's own full-F32 output (0.994 / 0.986, and a
+  flipped duration on 30 words) — and waveform-identical to alpha.218 when both run at full F32 (correlation
+  ≥ 0.99999). StyleTTS 2, which shares the predictor, decoder blocks and `BiLstm`, is waveform-identical at full F32
+  (correlation 1.000000) and 2–3× faster, and CosyVoice 2, which shares the NSF DSP, is unchanged (correlation
+  1.000000). Evidence and the remaining levers in `benchmarks/results/2026-09-30_kokoro_3060_perf.md`.
+- **`BiLstm` runs its recurrence on the host.** Both directions' input projections are one GEMM over the whole sequence
+  (the two `W_ih` stacked at load), read back once; the sequential `h·W_hhᵀ` step is a SIMD dot per gate row
+  (`LstmOps.RunSequence`), the two directions through `CpuParallel.For(2, …)`. `LstmCell.Step` and
+  `LstmOps.GateAndUpdate` are unchanged for `UnidirectionalLstm` and `SileroVad`. Pinned to the per-step cell in
+  `BiLstmTests`.
+- **The NSF vocoder DSP is parallel and still bit-exact.** `Fft.DirectDft` (n < 64) read `Math.Cos/Sin` for every
+  `k·t` — 2·n² transcendentals per frame, 650 ms of a Kokoro sentence at n_fft = 20 — and now indexes a cached per-size
+  `[n, n]` table of exactly those values (`DirectDftTests`). `IStft.Apply`, `NsfVocoderDsp`'s STFT and iSTFT head, and
+  the NSF harmonic source fan fixed blocks of frames out through `CpuParallel` (so they honour `numerics.cpuThreads`,
+  `CpuParallel.EnterInline()` and the process-wide worker ceiling), with a block size that depends only on the per-frame
+  cost and per-block scratch from `ArrayPool<float>.Shared`. The harmonic source records each block's starting phases
+  in a sequential additions-only pass and jumps each block's noise state with the new `DeterministicRng.Advance` (the
+  xorshift step as a GF(2) matrix power), so every piece — and chunked streaming of the source — is bit-for-bit the
+  old single-threaded loop at any core count, any cap and inline (`NsfVocoderDspTests`).
+- `KokoroBenchTests` (opt-in, `HARTSY_KOKORO_BENCH=1`) and `SharedBlockRegressionTests` (opt-in,
+  `HARTSY_SHARED_BLOCK_REGRESSION=1`, StyleTTS 2 through its espeak `en-us` front-end and a clean 24 kHz reference,
+  CosyVoice 2), both GpuIntegration on the 3060: latency, sync counts, PCM dumps, a reference comparison (max-abs,
+  waveform and log-spectral correlation), Whisper recall, and a full-F32 switch (`…_EXACT=1`) for precision-free A/Bs;
+  `KokoroStageTimer` reports per-stage wall time under `diagnostics.profile`.
+
 ## alpha.223
 
 - **Runner leases on the speech services.** `ISpeechService.OpenSynthesizerAsync(spec)` and

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Numerics;
 
 namespace HartsyInference.Audio.Preprocessing;
@@ -19,6 +20,7 @@ public static class Fft
     private static readonly Dictionary<int, (float[] Cos, float[] Sin)> _twiddleCache = new();
     private static readonly object _twiddleLock = new();
     private static readonly Dictionary<int, BluesteinPlan> _bluesteinCache = new();
+    private static readonly ConcurrentDictionary<int, (double[] Cos, double[] Sin)> _directTwiddleCache = new();
 
     /// <summary>Rounds <paramref name="n"/> up to a power of two, the size the radix-2 path needs.</summary>
     public static int NextPow2(int n)
@@ -137,29 +139,55 @@ public static class Fft
         }
     }
 
-    /// <summary>Direct O(n²) forward DFT for non-power-of-two sizes, in place via temp buffers.
-    /// Uses the same <c>e^{-2πi kn/N}</c> sign convention as the radix-2 path so the iSTFT
-    /// inverse trick (<c>conj(FFT(conj(X)))/N</c>) remains valid.</summary>
-    private static void DirectDft(Span<float> re, Span<float> im, int n)
+    /// <summary>Direct O(n²) forward DFT for the tiny non-power-of-two sizes (n &lt; 64), in place, double
+    /// accumulation. Uses the same <c>e^{-2πi kn/N}</c> sign convention as the radix-2 path so the iSTFT inverse
+    /// trick (<c>conj(FFT(conj(X)))/N</c>) remains valid. The twiddles come from a per-size <c>[n, n]</c> table
+    /// holding exactly the <c>Math.Cos/Sin(2π·k·t/n)</c> values an inline evaluation would produce, so the output
+    /// is bit-for-bit that evaluation's; an iSTFT vocoder calls this once per frame, and the 2·n² transcendentals
+    /// per call were the whole transform's budget.</summary>
+    internal static void DirectDft(Span<float> re, Span<float> im, int n)
     {
-        float[] outRe = new float[n];
-        float[] outIm = new float[n];
-        double twoPiOverN = 2.0 * Math.PI / n;
+        // Bounds the stackalloc below and the [n, n] table; larger sizes belong to Bluestein.
+        if (n < 1 || n >= 64) throw new ArgumentOutOfRangeException(nameof(n), n, "DirectDft handles 1 ≤ n < 64.");
+        (double[] cosTab, double[] sinTab) = GetDirectTwiddles(n);
+        Span<float> outRe = stackalloc float[n];
+        Span<float> outIm = stackalloc float[n];
         for (int k = 0; k < n; k++)
         {
             double sumRe = 0, sumIm = 0;
+            int row = k * n;
             for (int t = 0; t < n; t++)
             {
-                double ang = twoPiOverN * k * t;
-                double c = Math.Cos(ang), s = Math.Sin(ang);
+                double c = cosTab[row + t], s = sinTab[row + t];
                 sumRe += re[t] * c + im[t] * s;
                 sumIm += im[t] * c - re[t] * s;
             }
             outRe[k] = (float)sumRe;
             outIm[k] = (float)sumIm;
         }
-        for (int i = 0; i < n; i++) { re[i] = outRe[i]; im[i] = outIm[i]; }
+        outRe.CopyTo(re);
+        outIm.CopyTo(im);
     }
+
+    /// <summary>Lock-free after the first build: the direct DFT runs once per frame on every worker of a parallel
+    /// STFT, so a shared lock on the lookup would serialize them.</summary>
+    private static (double[] Cos, double[] Sin) GetDirectTwiddles(int n) =>
+        _directTwiddleCache.GetOrAdd(n, static size =>
+        {
+            double[] cos = new double[size * size];
+            double[] sin = new double[size * size];
+            double twoPiOverN = 2.0 * Math.PI / size;
+            for (int k = 0; k < size; k++)
+            {
+                for (int t = 0; t < size; t++)
+                {
+                    double ang = twoPiOverN * k * t;
+                    cos[k * size + t] = Math.Cos(ang);
+                    sin[k * size + t] = Math.Sin(ang);
+                }
+            }
+            return (cos, sin);
+        });
 
     /// <summary>Cached Bluestein plan for one non-power-of-two size: the chirp <c>w[n]=e^{-iπn²/N}</c> and the
     /// precomputed FFT of the convolution kernel (both constant per N).</summary>

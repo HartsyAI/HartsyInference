@@ -955,6 +955,38 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   request look "hung." Dia's real "hang" was 1152 unbatched `cublasGemmEx` launches/decode-step (16 heads
   × 2 CFG × 18 layers × 2), each a GEMV-as-GEMM at Sq=1; fixed via `cublasGemmStridedBatchedEx` (~32× fewer
   launches): 350–800s → 44–66s.
+- **A recurrent layer that launches one backend op per timestep is a sync per timestep, not a GPU layer.**
+  Kokoro's `BiLstm` ran `LstmCell.Step` (two `Linear` + `Add`, then a host gate loop reading `gates.DataPointer`)
+  for every frame of every direction: 1552 device→host drains per 15-word sentence, 1145 ms on the 3060 for 5.6 s
+  of audio, and `nvidia-smi` near idle. The shape (hidden 256, a 1 MB `W_hh` against a 1 KB state) is wrong for
+  per-step launches in either direction; the fix is one GEMM for all timesteps' input projections (both directions'
+  `W_ih` stacked), one readback, and the recurrence itself on the host with a SIMD dot per gate row — 9 syncs per
+  synthesis, 165–191 ms across runs. StyleTTS 2 shares the layer; `UnidirectionalLstm`/`Gru` (EnCodec, Chatterbox,
+  OpenVoice, RVC) still step per frame. Watch for: `Linear` call counts in the thousands with `avg_ms` ≈ 0.05 in a
+  `diagnostics.profile` dump. Write the host dot with `Fma.MultiplyAdd`, not `Vector.FusedMultiplyAdd`: the latter
+  does not exist on net8.0 (the target the SwarmUI extension loads), and the test lane only builds net10.0.
+- **Host DSP that "runs in milliseconds" was 650 ms of a 1.1 s synthesis.** `Fft.DirectDft` (the n < 64 path)
+  computed `Math.Cos/Sin` inline for every `k·t` — 2·n² transcendentals per frame — and an iSTFT vocoder at
+  n_fft = 20 runs ~27 k frames per sentence each way. A cached per-size `[n, n]` twiddle table holding exactly the
+  inline values (so the transform stays bit-identical, `DirectDftTests`) is the whole fix; the per-frame transforms
+  and the NSF harmonic source then fan out over fixed frame blocks (the source records each block's starting phases
+  in a sequential additions-only pass and jumps the xorshift noise state with `DeterministicRng.Advance`, so it stays
+  bit-identical). A `diagnostics.profile` stage timer (`KokoroStageTimer`) is what exposed it: the per-op table only
+  labels backend ops, so host DSP between them is invisible there. Waveform correlation is the wrong parity metric
+  for an NSF vocoder — a sub-cent F0 change drifts the harmonic phase and sinks it while the log-spectrum and the
+  transcript are unchanged; compare log-magnitude STFTs.
+- **Host fan-out in an audio kernel goes through `CpuParallel`, never raw TPL, and its partition must not depend on the
+  core count.** A bare `Parallel.For` ignores `numerics.cpuThreads` (which the voice host lowers to keep cores for its
+  RTP and audio threads), ignores `CpuParallel.EnterInline()` (which a real-time audio thread enters) and floods the
+  shared thread pool that async continuations run on. Size blocks by per-frame cost (`FramePartition`), rent scratch
+  from `ArrayPool`, and pin "same bytes under the default fan-out, a cap of 1 and inline" in a test.
+- **A default-precision A/B can sit below its floor on TF32 rounding alone — run a full-F32 arm before calling it a
+  regression.** StyleTTS 2's prosody predictor is recurrent, so moving one GEMV from TF32 to exact F32 moved a
+  15-word clone to log-spectral correlation 0.976 against the old build (identical length and transcripts); the old
+  build against its own full-F32 output scores 0.973 and flips a duration on 30 words. With every TF32 path off on both
+  arms (`numerics.highPrecisionGemm=true`, `numerics.noTf32=true`, `numerics.audioConvCudnn=false`) the two builds
+  were waveform-identical (correlation 1.000000). Measure the model's own TF32-vs-F32 band first; a floor inside it
+  cannot tell a regression from rounding.
 - **Audio models reloading on every STT↔TTS switch** (fixed alpha.218): the memory-pressure sweep compared the
   prefixed job key (`tts:…`) against the caches' bare keys, so once free host RAM dropped under
   `vram.audioEvictBelowGb` (default 14 GB) it evicted the model it was about to run. Symptom: an

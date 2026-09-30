@@ -1,5 +1,7 @@
+using System.Runtime.InteropServices;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Layers;
@@ -14,6 +16,12 @@ namespace HartsyInference.Audio.Layers;
 /// right; the backward LSTM runs right-to-left over the same input. At each timestep the
 /// output concatenates the two hidden states along the last dim, so the result is
 /// <c>[B, T, 2*hidden]</c>.</para>
+///
+/// <para>Execution split: the input projection of BOTH directions is one backend GEMM over the whole
+/// sequence (<c>[B, T, in] → [B, T, 8·hidden]</c>, the two <c>W_ih</c> stacked at load time), read back to
+/// the host once; the sequential recurrence then runs on the host (<see cref="LstmOps.RunSequence"/>), the
+/// two directions through <see cref="CpuParallel"/>, and the result is handed back as one host tensor — one
+/// device sync per layer instead of one per timestep.</para>
 ///
 /// <para>Weight key convention (PyTorch state dict):
 /// <code>
@@ -37,6 +45,9 @@ internal sealed unsafe class BiLstm
 
     private readonly LstmCell _fwd;
     private readonly LstmCell _bwd;
+    // Both directions' input projections stacked: [8*hidden, input] / [8*hidden], forward rows first.
+    private Tensor? _wIhStacked;
+    private Tensor? _bIhStacked;
 
     public BiLstm(int inputDim, int hiddenDim)
     {
@@ -58,6 +69,8 @@ internal sealed unsafe class BiLstm
             WhisperOps.EnsureF32(w[$"{prefix}.weight_hh_l0_reverse"]),
             WhisperOps.EnsureF32(w[$"{prefix}.bias_ih_l0_reverse"]),
             WhisperOps.EnsureF32(w[$"{prefix}.bias_hh_l0_reverse"]));
+        _wIhStacked = StackRows(_fwd.WeightIh!, _bwd.WeightIh!);
+        _bIhStacked = StackRows(_fwd.BiasIh!, _bwd.BiasIh!);
     }
 
     /// <summary>Bidirectional sweep over <paramref name="x"/> <c>[B, T, input_dim]</c>.
@@ -68,75 +81,78 @@ internal sealed unsafe class BiLstm
     {
         if (x.Shape.Rank != 3 || (int)x.Shape[0] != batch || (int)x.Shape[1] != t || (int)x.Shape[2] != InputDim)
             throw new ArgumentException($"BiLstm input must be [{batch}, {t}, {InputDim}], got {x.Shape}.", nameof(x));
+        if (_wIhStacked is null || _bIhStacked is null)
+            throw new InvalidOperationException("BiLstm weights not loaded.");
+        int hidden = HiddenDim;
+        int hidden4 = 4 * hidden;
+        int hidden8 = 8 * hidden;
 
-        Tensor output = new(new TensorShape(batch, t, 2 * HiddenDim), DType.F32);
-        float* outPtr = (float*)output.DataPointer;
-        float* xPtr = (float*)x.DataPointer;
-
-        // Reusable per-step buffers.
-        Tensor stepIn = new(new TensorShape(batch, InputDim), DType.F32);
-        Tensor hFwd = RnnOps.ZeroAllocate(batch, HiddenDim);
-        Tensor cFwd = RnnOps.ZeroAllocate(batch, HiddenDim);
-        Tensor hBwd = RnnOps.ZeroAllocate(batch, HiddenDim);
-        Tensor cBwd = RnnOps.ZeroAllocate(batch, HiddenDim);
-
+        // 1. Both directions' input projections in one GEMM: [B, T, in] → [B, T, 8*hidden].
+        Tensor gatesIn = WhisperOps.ProjectLinear(backend, x, _wIhStacked, _bIhStacked, batch, t, InputDim, hidden8);
+        Tensor output = new(new TensorShape(batch, t, 2 * hidden), DType.F32);
         try
         {
-            // Forward sweep: t = 0..T-1.
-            for (int step = 0; step < t; step++)
+            // 2. Host recurrence. This read is the single device→host sync of the layer.
+            float* gp = (float*)gatesIn.DataPointer;
+            float* op = (float*)output.DataPointer;
+            float* wHhF = (float*)_fwd.WeightHh!.DataPointer;
+            float* bHhF = (float*)_fwd.BiasHh!.DataPointer;
+            float* wHhB = (float*)_bwd.WeightHh!.DataPointer;
+            float* bHhB = (float*)_bwd.BiasHh!.DataPointer;
+            int scratchFloats = 2 * hidden + hidden4;
+            float* scratch = (float*)NativeMemory.AlignedAlloc((nuint)(2 * scratchFloats * sizeof(float)), 64);
+            try
             {
-                RnnOps.LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
-                (Tensor hNew, Tensor cNew) = _fwd.Step(backend, stepIn, hFwd, cFwd, batch);
-                hFwd.Dispose();
-                cFwd.Dispose();
-                hFwd = hNew;
-                cFwd = cNew;
-                StoreOutputHalf(outPtr, hFwd, batch, t, HiddenDim, step, leftHalf: true);
+                // Two gate rows of hidden multiply-adds per hidden unit per step, both directions.
+                long work = 2L * t * hidden4 * hidden * 2;
+                for (int b = 0; b < batch; b++)
+                {
+                    float* gIn = gp + (long)b * t * hidden8;
+                    float* outB = op + (long)b * t * 2 * hidden;
+                    // The directions write disjoint halves of each output row and own their scratch halves.
+                    CpuParallel.For(2, work, d =>
+                    {
+                        float* s = scratch + d * scratchFloats;
+                        LstmOps.RunSequence(gIn + d * hidden4, hidden8, d == 0 ? wHhF : wHhB, d == 0 ? bHhF : bHhB, t, hidden,
+                            reverse: d == 1, outB, 2 * hidden, d * hidden, s, s + hidden, s + 2 * hidden);
+                    });
+                }
             }
-
-            // Backward sweep: t = T-1..0.
-            for (int step = t - 1; step >= 0; step--)
+            finally
             {
-                RnnOps.LoadTimestep(xPtr, stepIn, batch, t, InputDim, step);
-                (Tensor hNew, Tensor cNew) = _bwd.Step(backend, stepIn, hBwd, cBwd, batch);
-                hBwd.Dispose();
-                cBwd.Dispose();
-                hBwd = hNew;
-                cBwd = cNew;
-                StoreOutputHalf(outPtr, hBwd, batch, t, HiddenDim, step, leftHalf: false);
+                NativeMemory.AlignedFree(scratch);
             }
         }
         finally
         {
-            stepIn.Dispose();
-            hFwd.Dispose();
-            cFwd.Dispose();
-            hBwd.Dispose();
-            cBwd.Dispose();
+            gatesIn.Dispose();
         }
-
         return output;
     }
 
+    /// <summary>The device-side weights: the stacked input projection. The hidden-to-hidden weights and biases are
+    /// read by the host recurrence only and are deliberately kept off the device.</summary>
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        foreach (Tensor t in _fwd.EnumerateWeights()) yield return t;
-        foreach (Tensor t in _bwd.EnumerateWeights()) yield return t;
+        if (_wIhStacked is not null) yield return _wIhStacked;
+        if (_bIhStacked is not null) yield return _bIhStacked;
     }
 
-    /// <summary>Writes a <c>[B, hidden]</c> step output into either the left half
-    /// <c>[:, step, 0:hidden]</c> or the right half <c>[:, step, hidden:2*hidden]</c> of
-    /// the bidirectional output <c>[B, T, 2*hidden]</c>.</summary>
-    private static void StoreOutputHalf(float* outPtr, Tensor h, int batch, int t, int hidden, int step, bool leftHalf)
+    /// <summary>Concatenates two F32 tensors along their leading dim: <c>[a; b]</c>.</summary>
+    private static Tensor StackRows(Tensor a, Tensor b)
     {
-        float* sp = (float*)h.DataPointer;
-        int wide = 2 * hidden;
-        int colOffset = leftHalf ? 0 : hidden;
-        for (int b = 0; b < batch; b++)
+        if (a.DType != DType.F32 || b.DType != DType.F32 || a.Shape.Rank != b.Shape.Rank)
+            throw new ArgumentException("StackRows expects two F32 tensors of the same rank.");
+        long[] dims = new long[a.Shape.Rank];
+        for (int i = 0; i < dims.Length; i++)
         {
-            int srcBase = b * hidden;
-            int dstBase = (b * t + step) * wide + colOffset;
-            for (int k = 0; k < hidden; k++) outPtr[dstBase + k] = sp[srcBase + k];
+            if (i > 0 && a.Shape[i] != b.Shape[i])
+                throw new ArgumentException($"StackRows trailing dims differ: {a.Shape} vs {b.Shape}.");
+            dims[i] = i == 0 ? a.Shape[0] + b.Shape[0] : a.Shape[i];
         }
+        Tensor stacked = new(new TensorShape(dims), DType.F32);
+        a.AsSpan<float>().CopyTo(stacked.AsSpan<float>());
+        b.AsSpan<float>().CopyTo(stacked.AsSpan<float>()[(int)a.ElementCount..]);
+        return stacked;
     }
 }

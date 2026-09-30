@@ -137,8 +137,9 @@ public sealed unsafe class KokoroProsodyPredictor
 
         // 1. DurationEncoder: 3× (concat-with-style → BiLSTM → AdaLayerNorm).
         // Working buffer x is always [B, T, dHid] after each AdaLN; we re-concat style
-        // before each BiLSTM to make the 640-dim input.
-        Tensor x = AppendStyleAcrossTime(dBert, stylePred, batch, t, dHid, sty);
+        // before each BiLSTM to make the 640-dim input. The style row is broadcast over T once.
+        Tensor styleRep = KokoroOps.RepeatStyleAcrossTime(backend, stylePred, batch, t, sty);
+        Tensor x = AppendStyleAcrossTime(backend, dBert, styleRep);
         for (int i = 0; i < 3; i++)
         {
             // BiLSTM: [B, T, 640] → [B, T, 512].
@@ -153,9 +154,10 @@ public sealed unsafe class KokoroProsodyPredictor
 
             // Re-concat style for the next BiLSTM (or to be the final DurationEncoder
             // output — predictor.lstm expects [B, T, 640] = dHid + style).
-            x = AppendStyleAcrossTime(adaLnOut, stylePred, batch, t, dHid, sty);
+            x = AppendStyleAcrossTime(backend, adaLnOut, styleRep);
             adaLnOut.Dispose();
         }
+        styleRep.Dispose();
 
         // 2. predictor.lstm: BiLSTM(640 → 512).
         Tensor durLstmOut = _durationLstm.Forward(backend, x, batch, t);
@@ -204,7 +206,9 @@ public sealed unsafe class KokoroProsodyPredictor
         Tensor xCL = new(new TensorShape(batch, tTotal, dHid), DType.F32);
         backend.Transpose2D(xCL, dBertExpanded, dHid, tTotal);
 
-        Tensor lstmIn = AppendStyleAcrossTime(xCL, stylePred, batch, tTotal, dHid, sty);
+        Tensor styleRep = KokoroOps.RepeatStyleAcrossTime(backend, stylePred, batch, tTotal, sty);
+        Tensor lstmIn = AppendStyleAcrossTime(backend, xCL, styleRep);
+        styleRep.Dispose();
         xCL.Dispose();
 
         // 2. predictor.shared BiLSTM(640 → 512).
@@ -216,67 +220,36 @@ public sealed unsafe class KokoroProsodyPredictor
         backend.Transpose2D(sharedCF, shared, tTotal, dHid);
         shared.Dispose();
 
-        // 4. F0 chain.
-        Tensor f0 = sharedCF;
-        bool ownF0 = false;     // sharedCF is shared with the N chain — clone before first mutation.
-        Tensor sharedNCopy = CloneTensor(sharedCF);
-        for (int i = 0; i < 3; i++)
-        {
-            Tensor next = _f0Blocks[i].Forward(backend, f0, stylePred);
-            if (ownF0) f0.Dispose();
-            f0 = next;
-            ownF0 = true;
-        }
-        Tensor f0Out = new(new TensorShape(batch, 1, (int)f0.Shape[2]), DType.F32);
-        backend.Conv1d(f0Out, f0, _f0ProjW!, _f0ProjB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
-        if (ownF0) f0.Dispose();
-
-        // 5. N chain — same topology, applied to the cloned shared output.
-        Tensor n = sharedNCopy;
-        bool ownN = false;
-        for (int i = 0; i < 3; i++)
-        {
-            Tensor next = _nBlocks[i].Forward(backend, n, stylePred);
-            if (ownN) n.Dispose();
-            else sharedNCopy.Dispose();
-            n = next;
-            ownN = true;
-        }
-        Tensor nOut = new(new TensorShape(batch, 1, (int)n.Shape[2]), DType.F32);
-        backend.Conv1d(nOut, n, _nProjW!, _nProjB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
-        if (ownN) n.Dispose();
-
+        // 4. F0 chain and 5. N chain, both reading sharedCF (neither block mutates its input).
+        Tensor f0Out = RunProsodyChain(backend, _f0Blocks, _f0ProjW!, _f0ProjB, sharedCF, stylePred, batch);
+        Tensor nOut = RunProsodyChain(backend, _nBlocks, _nProjW!, _nProjB, sharedCF, stylePred, batch);
+        sharedCF.Dispose();
         return (f0Out, nOut);
     }
 
-    private static Tensor AppendStyleAcrossTime(Tensor x, Tensor style, int batch, int t, int dHid, int styleDim)
+    /// <summary>Three AdainResBlk1d blocks then the 1×1 projection to one curve: <c>[B, 512, T] → [B, 1, 2T]</c>.</summary>
+    private static Tensor RunProsodyChain(IBackend backend, KokoroAdainResBlk1d[] blocks, Tensor projW, Tensor? projB,
+        Tensor input, Tensor stylePred, int batch)
     {
-        // x: [B, T, dHid]  +  style: [B, styleDim]  →  [B, T, dHid + styleDim]
-        Tensor output = new(new TensorShape(batch, t, dHid + styleDim), DType.F32);
-        float* xp = (float*)x.DataPointer;
-        float* sp = (float*)style.DataPointer;
-        float* op = (float*)output.DataPointer;
-        int outRow = dHid + styleDim;
-        for (int b = 0; b < batch; b++)
+        Tensor x = input;
+        for (int i = 0; i < blocks.Length; i++)
         {
-            for (int tt = 0; tt < t; tt++)
-            {
-                int srcBase = (b * t + tt) * dHid;
-                int dstBase = (b * t + tt) * outRow;
-                int sBase = b * styleDim;
-                for (int j = 0; j < dHid; j++) op[dstBase + j] = xp[srcBase + j];
-                for (int j = 0; j < styleDim; j++) op[dstBase + dHid + j] = sp[sBase + j];
-            }
+            Tensor next = blocks[i].Forward(backend, x, stylePred);
+            if (i > 0) x.Dispose();
+            x = next;
         }
+        Tensor output = new(new TensorShape(batch, 1, (int)x.Shape[2]), DType.F32);
+        backend.Conv1d(output, x, projW, projB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        if (blocks.Length > 0) x.Dispose();
         return output;
     }
 
-    private static Tensor CloneTensor(Tensor src)
+    /// <summary><c>[B, T, dHid]</c> ++ <c>[B, T, styleDim]</c> along the last dim → <c>[B, T, dHid + styleDim]</c>, on device.</summary>
+    private static Tensor AppendStyleAcrossTime(IBackend backend, Tensor x, Tensor styleRep)
     {
-        Tensor copy = new(src.Shape, DType.F32);
-        long bytes = src.ElementCount * 4;
-        Buffer.MemoryCopy((void*)src.DataPointer, (void*)copy.DataPointer, bytes, bytes);
-        return copy;
+        Tensor output = new(new TensorShape(x.Shape[0], x.Shape[1], x.Shape[2] + styleRep.Shape[2]), DType.F32);
+        backend.Concat(output, [x, styleRep], dim: 2);
+        return output;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

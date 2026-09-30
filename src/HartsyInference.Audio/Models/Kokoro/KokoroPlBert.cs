@@ -204,20 +204,22 @@ internal sealed unsafe class AlbertLayer
         Tensor k = WhisperOps.ProjectLinear(backend, x, _kW!, _kB, 1, t, hidden, hidden);
         Tensor v = WhisperOps.ProjectLinear(backend, x, _vW!, _vB, 1, t, hidden, hidden);
 
+        // [1, T, H·D] → [1, H, T, D] is permute(0,2,1,3) of the [1, T, H, D] view; the inverse is the same
+        // permute with the roles of T and H swapped. Both stay on device.
         TensorShape mhShape = new(1, heads, t, headDim);
         Tensor qMh = new(mhShape, DType.F32);
         Tensor kMh = new(mhShape, DType.F32);
         Tensor vMh = new(mhShape, DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(qMh, q, 1, t, heads, headDim); q.Dispose();
-        WhisperOps.ReshapeToMultiHead4D(kMh, k, 1, t, heads, headDim); k.Dispose();
-        WhisperOps.ReshapeToMultiHead4D(vMh, v, 1, t, heads, headDim); v.Dispose();
+        backend.Permute0213(qMh, q, t, heads, headDim); q.Dispose();
+        backend.Permute0213(kMh, k, t, heads, headDim); k.Dispose();
+        backend.Permute0213(vMh, v, t, heads, headDim); v.Dispose();
 
         Tensor attnMh = new(mhShape, DType.F32);
         backend.ScaledDotProductAttention(attnMh, qMh, kMh, vMh, mask: null, scale);
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         Tensor attnFlat = new(new TensorShape(1, t, hidden), DType.F32);
-        WhisperOps.ReshapeFromMultiHead4D(attnFlat, attnMh, 1, t, heads, headDim);
+        backend.Permute0213(attnFlat, attnMh, heads, t, headDim);
         attnMh.Dispose();
 
         Tensor attnProj = WhisperOps.ProjectLinear(backend, attnFlat, _oW!, _oB, 1, t, hidden, hidden);

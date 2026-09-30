@@ -1,4 +1,3 @@
-using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -12,127 +11,66 @@ namespace HartsyInference.Audio.Models.Kokoro;
 /// <para>Both blocks load a single <c>fc</c> Linear from style_dim → 2*features. The
 /// fc output is split into <c>(gamma, beta)</c> halves and passed to either
 /// <see cref="IBackend.AdaInstanceNorm1d"/> (channel-axis InstanceNorm + affine) or
-/// the LayerNorm-then-affine path inlined here.</para></summary>
-internal static unsafe class KokoroOps
+/// <see cref="IBackend.LayerNormModulate"/>.</para>
+///
+/// <para>Every helper here is a backend op: the tensors flowing through the predictor and decoder stay
+/// device-resident, and none of them reads a <c>DataPointer</c> (each such read is a stream drain).</para></summary>
+internal static class KokoroOps
 {
     /// <summary>Computes <c>fc(style)</c> and splits the result into gamma + beta halves.
     /// <paramref name="fcW"/> is <c>[2*features, style_dim]</c> and <paramref name="fcB"/>
     /// is <c>[2*features]</c> in PyTorch convention (Linear weight stored as
-    /// <c>[out, in]</c>). Returns two fresh <c>[batch, features]</c> tensors that the
-    /// caller must dispose.</summary>
+    /// <c>[out, in]</c>). <paramref name="style"/> is <c>[batch, style_dim]</c>. Returns two fresh
+    /// <c>[batch, features]</c> tensors that the caller must dispose.</summary>
     public static (Tensor Gamma, Tensor Beta) StyleToGammaBeta(IBackend backend, Tensor fcW, Tensor fcB, Tensor style, int features)
     {
-        // style: [B, style_dim] → fc → [B, 2*features]
         int batch = (int)style.Shape[0];
-        int styleDim = (int)style.Shape[1];
-
-        // We treat style as [B, 1, style_dim] for ProjectLinear to give us [B, 1, 2*features].
-        // Shape it back to [B, 2*features] for the split.
-        TensorShape proj3Shape = new(batch, 1, 2 * features);
-        Tensor proj3 = WhisperOps.ProjectLinear(backend, ReshapeAsRank3(style, batch, 1, styleDim), fcW, fcB, batch, 1, styleDim, 2 * features);
-
+        Tensor proj = new(new TensorShape(batch, 2 * features), DType.F32);
+        backend.Linear(proj, style, fcW, fcB);
         Tensor gamma = new(new TensorShape(batch, features), DType.F32);
         Tensor beta = new(new TensorShape(batch, features), DType.F32);
-        float* pp = (float*)proj3.DataPointer;
-        float* gp = (float*)gamma.DataPointer;
-        float* bp = (float*)beta.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int row = b * 2 * features;
-            for (int j = 0; j < features; j++)
-            {
-                gp[b * features + j] = pp[row + j];
-                bp[b * features + j] = pp[row + features + j];
-            }
-        }
-        proj3.Dispose();
+        backend.SliceLastDim(gamma, proj, 0);
+        backend.SliceLastDim(beta, proj, features);
+        proj.Dispose();
         return (gamma, beta);
     }
 
     /// <summary>AdaLayerNorm: LayerNorm over the last (channel) dim of a <c>[B, T, C]</c>
-    /// channels-last tensor (no affine), then apply the style-conditioned affine
-    /// <c>(1 + gamma) * x_hat + beta</c> per-channel. <paramref name="gamma"/> and
-    /// <paramref name="beta"/> are both <c>[B, C]</c> (broadcast over T).
-    ///
-    /// <para>This is the operator used inside Kokoro's DurationEncoder. <see cref="IBackend.LayerNorm"/>
-    /// is called with all-ones weight and all-zeros bias to get the pure normalized
-    /// tensor; then a small loop applies the per-channel affine.</para></summary>
+    /// channels-last tensor (no affine), then the style-conditioned affine
+    /// <c>(1 + gamma) * x_hat + beta</c> per channel — exactly <see cref="IBackend.LayerNormModulate"/>.
+    /// <paramref name="gamma"/> and <paramref name="beta"/> are both <c>[B, C]</c> (broadcast over T).
+    /// This is the operator inside Kokoro's DurationEncoder.</summary>
     public static Tensor ApplyAdaLayerNorm(IBackend backend, Tensor x, Tensor gamma, Tensor beta, int t, int c, float eps = 1e-5f)
     {
         int batch = (int)x.Shape[0];
         if (x.Shape.Rank != 3 || (int)x.Shape[1] != t || (int)x.Shape[2] != c)
             throw new ArgumentException($"ApplyAdaLayerNorm expects [{batch}, {t}, {c}], got {x.Shape}.");
-
-        // Step 1: unit-affine LayerNorm so we get the pure (x - mean) / std.
-        Tensor onesW = new(new TensorShape(c), DType.F32);
-        Tensor zerosB = new(new TensorShape(c), DType.F32);
-        float* op = (float*)onesW.DataPointer;
-        float* zp = (float*)zerosB.DataPointer;
-        for (int i = 0; i < c; i++) { op[i] = 1f; zp[i] = 0f; }
-
-        Tensor normed = new(x.Shape, DType.F32);
-        backend.LayerNorm(normed, x, onesW, zerosB, eps);
-        onesW.Dispose();
-        zerosB.Dispose();
-
-        // Step 2: per-channel (1+gamma)*x_hat + beta.
         Tensor output = new(x.Shape, DType.F32);
-        float* xp = (float*)normed.DataPointer;
-        float* op2 = (float*)output.DataPointer;
-        float* gp = (float*)gamma.DataPointer;
-        float* bp = (float*)beta.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            int gBase = b * c;
-            for (int tt = 0; tt < t; tt++)
-            {
-                int rowBase = (b * t + tt) * c;
-                for (int j = 0; j < c; j++)
-                    op2[rowBase + j] = (1f + gp[gBase + j]) * xp[rowBase + j] + bp[gBase + j];
-            }
-        }
-        normed.Dispose();
+        backend.LayerNormModulate(output, x, gamma, beta, eps);
         return output;
     }
 
-    /// <summary>Linear interpolation upsample by integer factor for a channels-first
-    /// <c>[B, C, T]</c> tensor with <c>mode='nearest'</c>. Each input frame is repeated
-    /// <paramref name="factor"/> times — output shape <c>[B, C, T * factor]</c>. This
-    /// matches PyTorch's <c>F.interpolate(scale_factor=factor, mode='nearest')</c>
-    /// at integer factors (the shortcut path of AdainResBlk1d).</summary>
-    public static Tensor NearestUpsample1d(Tensor x, int factor)
+    /// <summary>Nearest-neighbour upsample by an integer factor for a channels-first
+    /// <c>[B, C, T]</c> tensor: each input frame is repeated <paramref name="factor"/> times —
+    /// output shape <c>[B, C, T * factor]</c>. Matches PyTorch's
+    /// <c>F.interpolate(scale_factor=factor, mode='nearest')</c> at integer factors
+    /// (the shortcut path of AdainResBlk1d).</summary>
+    public static Tensor NearestUpsample1d(IBackend backend, Tensor x, int factor)
     {
         if (factor <= 1) throw new ArgumentException($"NearestUpsample1d factor must be >1, got {factor}.");
-        int batch = (int)x.Shape[0];
-        int c = (int)x.Shape[1];
-        int t = (int)x.Shape[2];
-        int tOut = t * factor;
-        Tensor output = new(new TensorShape(batch, c, tOut), DType.F32);
-        float* ip = (float*)x.DataPointer;
-        float* op = (float*)output.DataPointer;
-        for (int b = 0; b < batch; b++)
-        {
-            for (int cc = 0; cc < c; cc++)
-            {
-                long inBase = ((long)b * c + cc) * t;
-                long outBase = ((long)b * c + cc) * tOut;
-                for (int j = 0; j < t; j++)
-                {
-                    float val = ip[inBase + j];
-                    for (int r = 0; r < factor; r++) op[outBase + j * factor + r] = val;
-                }
-            }
-        }
+        Tensor output = new(new TensorShape(x.Shape[0], x.Shape[1], x.Shape[2] * factor), DType.F32);
+        backend.RepeatTime(output, x, factor);
         return output;
     }
 
     /// <summary>Depthwise (per-channel) transposed Conv1D. <paramref name="weight"/> is
     /// <c>[C, 1, K]</c> — one filter per channel. Used by the AdainResBlk1d "pool"
     /// layer in Kokoro's predictor when <c>upsample=True</c>: stride-2 depthwise transposed
-    /// conv with kernel 3, padLeft=padRight=1, outputPadding=1 gives an output length of
-    /// <c>2 * T</c>. The standard backend <see cref="IBackend.ConvTranspose1d"/> doesn't
-    /// expose <c>groups</c>, so we implement the depthwise case inline.</summary>
-    public static Tensor DepthwiseConvTranspose1d(Tensor input, Tensor weight, Tensor? bias, int stride, int padLeft, int padRight, int outputPadding)
+    /// conv with kernel 3, padding 1, output_padding 1 gives an output length of <c>2 * T</c>.
+    /// PyTorch's <c>output_padding</c> only shortens the right crop, so it maps onto the backend's
+    /// asymmetric pads as <c>padRight = padding - outputPadding</c>.</summary>
+    public static Tensor DepthwiseConvTranspose1d(IBackend backend, Tensor input, Tensor weight, Tensor? bias,
+        int stride, int padding, int outputPadding)
     {
         if (input.Shape.Rank != 3) throw new ArgumentException($"input must be [B, C, T], got {input.Shape}.");
         int batch = (int)input.Shape[0];
@@ -141,49 +79,68 @@ internal static unsafe class KokoroOps
         int kernel = (int)weight.Shape[2];
         if ((int)weight.Shape[0] != channels || (int)weight.Shape[1] != 1)
             throw new ArgumentException($"DepthwiseConvTranspose1d expects weight [C, 1, K], got {weight.Shape} vs C={channels}.");
+        if (outputPadding > padding)
+            throw new ArgumentException($"outputPadding {outputPadding} exceeds padding {padding}.");
 
-        int tOutRaw = (tIn - 1) * stride + (kernel - 1) + 1 + outputPadding;
-        int tOut = tOutRaw - padLeft - padRight;
+        int padRight = padding - outputPadding;
+        int tOut = (tIn - 1) * stride + kernel - padding - padRight;
         Tensor output = new(new TensorShape(batch, channels, tOut), DType.F32);
-
-        float* ip = (float*)input.DataPointer;
-        float* op = (float*)output.DataPointer;
-        float* wp = (float*)weight.DataPointer;
-        float* bp = bias is null ? null : (float*)bias.DataPointer;
-
-        for (int b = 0; b < batch; b++)
-        {
-            for (int c = 0; c < channels; c++)
-            {
-                float biasV = bp is null ? 0f : bp[c];
-                int outBase = (b * channels + c) * tOut;
-                for (int j = 0; j < tOut; j++) op[outBase + j] = biasV;
-
-                int inBase = (b * channels + c) * tIn;
-                int wBase = c * kernel;
-                for (int i = 0; i < tIn; i++)
-                {
-                    float xv = ip[inBase + i];
-                    if (xv == 0f) continue;
-                    int outStart = i * stride - padLeft;
-                    for (int k = 0; k < kernel; k++)
-                    {
-                        int j = outStart + k;
-                        if ((uint)j < (uint)tOut) op[outBase + j] += xv * wp[wBase + k];
-                    }
-                }
-            }
-        }
+        backend.ConvTranspose1d(output, input, weight, bias, stride, padLeft: padding, padRight: padRight, dilation: 1, groups: channels);
         return output;
     }
 
-    /// <summary>Treats the underlying f32 storage of <paramref name="src"/> as a rank-3
-    /// shape view without copying. Used internally to feed a rank-2 <c>[B, D]</c> tensor
-    /// into <see cref="WhisperOps.ProjectLinear"/> which requires <c>[B, T, D]</c>.</summary>
-    private static Tensor ReshapeAsRank3(Tensor src, int b, int t, int d)
+    /// <summary>Repeats a <c>[B, D]</c> style row across time into <c>[B, T, D]</c>, on device.</summary>
+    public static Tensor RepeatStyleAcrossTime(IBackend backend, Tensor style, int batch, int t, int styleDim)
     {
-        if (src.ElementCount != (long)b * t * d)
-            throw new ArgumentException($"ReshapeAsRank3: element count mismatch ({src.ElementCount} vs {b}*{t}*{d}).");
-        return src.Reshape(new TensorShape(b, t, d));
+        if (style.Shape.Rank != 2 || (int)style.Shape[0] != batch || (int)style.Shape[1] != styleDim)
+            throw new ArgumentException($"RepeatStyleAcrossTime expects [{batch}, {styleDim}], got {style.Shape}.");
+        // The style row is a host tensor (voice pack / style encoder output), so the view costs no device sync.
+        Tensor column = style.Reshape(new TensorShape(batch, styleDim, 1));
+        Tensor repeated = new(new TensorShape(batch, styleDim, t), DType.F32);
+        backend.RepeatTime(repeated, column, t);
+        Tensor output = new(new TensorShape(batch, t, styleDim), DType.F32);
+        backend.Transpose2D(output, repeated, styleDim, t);
+        repeated.Dispose();
+        return output;
+    }
+
+    /// <summary>Concatenates channels-first <c>[B, C_i, T]</c> tensors along the channel dim.</summary>
+    public static Tensor ConcatChannels(IBackend backend, ReadOnlySpan<Tensor> parts)
+    {
+        long batch = parts[0].Shape[0];
+        long t = parts[0].Shape[2];
+        long totalCh = 0;
+        foreach (Tensor p in parts)
+        {
+            if (p.Shape.Rank != 3 || p.Shape[0] != batch || p.Shape[2] != t)
+                throw new ArgumentException($"ConcatChannels: {p.Shape} does not match [{batch}, *, {t}].");
+            totalCh += p.Shape[1];
+        }
+        Tensor output = new(new TensorShape(batch, totalCh, t), DType.F32);
+        backend.Concat(output, parts, dim: 1);
+        return output;
+    }
+
+    /// <summary>ReflectionPad1d((1, 0)) on a channels-first <c>[B, C, T]</c>: prepends one sample by reflection
+    /// (<c>out[0] = x[1]</c>), as a last-dim slice plus a time-axis concat.</summary>
+    public static Tensor ReflectionPadLeft1(IBackend backend, Tensor x)
+    {
+        if (x.Shape.Rank != 3 || x.Shape[2] < 2) throw new ArgumentException($"ReflectionPadLeft1 expects [B, C, T>=2], got {x.Shape}.");
+        Tensor first = new(new TensorShape(x.Shape[0], x.Shape[1], 1), DType.F32);
+        backend.SliceLastDim(first, x, 1);
+        Tensor output = new(new TensorShape(x.Shape[0], x.Shape[1], x.Shape[2] + 1), DType.F32);
+        backend.Concat(output, [first, x], dim: 2);
+        first.Dispose();
+        return output;
+    }
+
+    /// <summary>Element-wise <c>a + b</c> into a fresh tensor of <paramref name="a"/>'s shape.</summary>
+    public static Tensor Add(IBackend backend, Tensor a, Tensor b)
+    {
+        if (a.ElementCount != b.ElementCount)
+            throw new ArgumentException($"Add: element counts differ ({a.Shape} vs {b.Shape}).");
+        Tensor output = new(a.Shape, DType.F32);
+        backend.Add(output, a, b);
+        return output;
     }
 }

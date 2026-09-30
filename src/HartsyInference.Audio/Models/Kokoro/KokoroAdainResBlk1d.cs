@@ -32,8 +32,9 @@ namespace HartsyInference.Audio.Models.Kokoro;
 ///
 /// <para>The block is "shape-aware" — it inspects the loaded weights' channel counts
 /// (and presence of <c>pool</c> / <c>conv1x1</c> keys) to figure out whether this
-/// instance is upsampling and/or has a learned shortcut.</para></summary>
-internal sealed unsafe class KokoroAdainResBlk1d
+/// instance is upsampling and/or has a learned shortcut. Every step is a backend op, so the
+/// activation never leaves the device inside the block.</para></summary>
+internal sealed class KokoroAdainResBlk1d
 {
     private readonly int _dimIn;
     private readonly int _dimOut;
@@ -105,7 +106,7 @@ internal sealed unsafe class KokoroAdainResBlk1d
         Tensor afterPool;
         if (_upsample)
         {
-            afterPool = KokoroOps.DepthwiseConvTranspose1d(r1, _poolW!, _poolB, stride: 2, padLeft: 1, padRight: 1, outputPadding: 1);
+            afterPool = KokoroOps.DepthwiseConvTranspose1d(backend, r1, _poolW!, _poolB, stride: 2, padding: 1, outputPadding: 1);
             r1.Dispose();
         }
         else
@@ -133,11 +134,12 @@ internal sealed unsafe class KokoroAdainResBlk1d
         backend.Conv1d(residual, r2, _conv2W!, _conv2B, stride: 1, padLeft: pad, padRight: pad, dilation: 1, groups: 1);
         r2.Dispose();
 
-        // ── Shortcut branch ─────────────────────────────────────────────────
-        Tensor shortcut;
+        // ── Shortcut branch (x is borrowed: an identity shortcut reads it without a copy) ────
+        Tensor shortcut = x;
+        bool ownShortcut = false;
         if (_upsample)
         {
-            Tensor up = KokoroOps.NearestUpsample1d(x, 2);
+            Tensor up = KokoroOps.NearestUpsample1d(backend, x, 2);
             if (_learnedSc)
             {
                 shortcut = new(new TensorShape(batch, _dimOut, tOut), DType.F32);
@@ -148,29 +150,20 @@ internal sealed unsafe class KokoroAdainResBlk1d
             {
                 shortcut = up;
             }
+            ownShortcut = true;
         }
         else if (_learnedSc)
         {
             shortcut = new(new TensorShape(batch, _dimOut, t), DType.F32);
             backend.Conv1d(shortcut, x, _conv1x1W!, bias: null, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
-        }
-        else
-        {
-            // Bare identity. We don't own x — make a copy so the caller's lifecycle is
-            // unaffected and the caller can dispose its own input freely.
-            shortcut = new(x.Shape, DType.F32);
-            Buffer.MemoryCopy((void*)x.DataPointer, (void*)shortcut.DataPointer, x.ElementCount * 4, x.ElementCount * 4);
+            ownShortcut = true;
         }
 
         // ── Combine: (residual + shortcut) / √2 ─────────────────────────────
-        Tensor output = new(residual.Shape, DType.F32);
-        float* op = (float*)output.DataPointer;
-        float* rp = (float*)residual.DataPointer;
-        float* sp = (float*)shortcut.DataPointer;
-        long n = residual.ElementCount;
-        for (long i = 0; i < n; i++) op[i] = (rp[i] + sp[i]) * _invSqrt2;
+        Tensor output = KokoroOps.Add(backend, residual, shortcut);
+        backend.Scale(output, output, _invSqrt2);
         residual.Dispose();
-        shortcut.Dispose();
+        if (ownShortcut) shortcut.Dispose();
         return output;
     }
 

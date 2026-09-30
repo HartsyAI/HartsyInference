@@ -1,3 +1,7 @@
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -40,6 +44,18 @@ internal sealed class LstmCell
         InputDim = inputDim;
         HiddenDim = hiddenDim;
     }
+
+    /// <summary>Input-to-hidden weight <c>[4*hidden, input]</c>; null until <see cref="BindWeights"/>.</summary>
+    public Tensor? WeightIh => _wIh;
+
+    /// <summary>Hidden-to-hidden weight <c>[4*hidden, hidden]</c>; null until <see cref="BindWeights"/>.</summary>
+    public Tensor? WeightHh => _wHh;
+
+    /// <summary>Input bias <c>[4*hidden]</c>; null until <see cref="BindWeights"/>.</summary>
+    public Tensor? BiasIh => _bIh;
+
+    /// <summary>Hidden bias <c>[4*hidden]</c>; null until <see cref="BindWeights"/>.</summary>
+    public Tensor? BiasHh => _bHh;
 
     /// <summary>Hands the cell its four weight tensors (already F32). Caller resolves
     /// the PyTorch state-dict key paths — typically via <see cref="BiLstm.LoadWeights"/>
@@ -109,17 +125,95 @@ internal static unsafe class LstmOps
         {
             int gateRow = b * hidden4;
             int outRow = b * hidden;
-            for (int k = 0; k < hidden; k++)
-            {
-                float iGate = Activations.SigmoidS(g[gateRow + k]);
-                float fGate = Activations.SigmoidS(g[gateRow + hidden + k]);
-                float gGate = MathF.Tanh(g[gateRow + 2 * hidden + k]);
-                float oGate = Activations.SigmoidS(g[gateRow + 3 * hidden + k]);
-
-                float cNext = fGate * c0[outRow + k] + iGate * gGate;
-                cOut[outRow + k] = cNext;
-                hOut[outRow + k] = oGate * MathF.Tanh(cNext);
-            }
+            GateAndUpdateRow(g + gateRow, c0 + outRow, hOut + outRow, cOut + outRow, hidden);
         }
+    }
+
+    /// <summary>Runs one direction of a single-layer LSTM over a whole sequence on the host, from input
+    /// projections computed up front: <paramref name="gatesIn"/> holds <c>x·W_ihᵀ + b_ih</c> for every
+    /// timestep (row <c>t</c> at <c>gatesIn + t·gatesInStride</c>, <c>4·hidden</c> wide). Each step adds
+    /// <c>h·W_hhᵀ + b_hh</c> and applies the gate math; <c>h</c> lands in <paramref name="output"/> at
+    /// <c>t·outputStride + outputOffset</c>. The recurrence is the only sequential part of an LSTM and its weight is
+    /// cache-sized, so a SIMD dot per gate row here beats a per-step device launch (each one a stream drain) and
+    /// never touches the backend, leaving the surrounding graph resident.</summary>
+    /// <param name="reverse">Walks <c>t = T-1 … 0</c> (the backward direction of a BiLSTM).</param>
+    /// <param name="h">Scratch <c>[hidden]</c>, zeroed here (PyTorch's zero initial state).</param>
+    /// <param name="c">Scratch <c>[hidden]</c>, zeroed here.</param>
+    /// <param name="gates">Scratch <c>[4·hidden]</c>.</param>
+    public static void RunSequence(float* gatesIn, int gatesInStride, float* wHh, float* bHh, int t, int hidden,
+        bool reverse, float* output, int outputStride, int outputOffset, float* h, float* c, float* gates)
+    {
+        int hidden4 = 4 * hidden;
+        new Span<float>(h, hidden).Clear();
+        new Span<float>(c, hidden).Clear();
+        for (int i = 0; i < t; i++)
+        {
+            int step = reverse ? t - 1 - i : i;
+            float* inRow = gatesIn + (long)step * gatesInStride;
+            for (int k = 0; k < hidden4; k++)
+            {
+                gates[k] = inRow[k] + bHh[k] + Dot(wHh + (long)k * hidden, h, hidden);
+            }
+            // c is updated in place; h is read by every gate row above, so it is written only after the sweep.
+            GateAndUpdateRow(gates, c, h, c, hidden);
+            new ReadOnlySpan<float>(h, hidden).CopyTo(new Span<float>(output + (long)step * outputStride + outputOffset, hidden));
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void GateAndUpdateRow(float* g, float* c0, float* hOut, float* cOut, int hidden)
+    {
+        for (int k = 0; k < hidden; k++)
+        {
+            float iGate = Activations.SigmoidS(g[k]);
+            float fGate = Activations.SigmoidS(g[hidden + k]);
+            float gGate = MathF.Tanh(g[2 * hidden + k]);
+            float oGate = Activations.SigmoidS(g[3 * hidden + k]);
+
+            float cNext = fGate * c0[k] + iGate * gGate;
+            cOut[k] = cNext;
+            hOut[k] = oGate * MathF.Tanh(cNext);
+        }
+    }
+
+    /// <summary>Four independent accumulators: a single chain is bound by FMA latency, not throughput. The x86 FMA
+    /// intrinsics and an explicit lane reduction are used on every target framework — <c>Vector.FusedMultiplyAdd</c>
+    /// does not exist on net8.0, and a framework-specific reduction order would make the net8.0 and net10.0 builds
+    /// disagree in the last bit on the same machine.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float Dot(float* a, float* b, int n)
+    {
+        int i = 0;
+        float sum = 0f;
+        if (Fma.IsSupported)
+        {
+            Vector256<float> acc0 = Vector256<float>.Zero, acc1 = acc0, acc2 = acc0, acc3 = acc0;
+            for (; i <= n - 32; i += 32)
+            {
+                acc0 = Fma.MultiplyAdd(Avx.LoadVector256(a + i), Avx.LoadVector256(b + i), acc0);
+                acc1 = Fma.MultiplyAdd(Avx.LoadVector256(a + i + 8), Avx.LoadVector256(b + i + 8), acc1);
+                acc2 = Fma.MultiplyAdd(Avx.LoadVector256(a + i + 16), Avx.LoadVector256(b + i + 16), acc2);
+                acc3 = Fma.MultiplyAdd(Avx.LoadVector256(a + i + 24), Avx.LoadVector256(b + i + 24), acc3);
+            }
+            for (; i <= n - 8; i += 8)
+            {
+                acc0 = Fma.MultiplyAdd(Avx.LoadVector256(a + i), Avx.LoadVector256(b + i), acc0);
+            }
+            Vector256<float> total = Avx.Add(Avx.Add(acc0, acc1), Avx.Add(acc2, acc3));
+            Vector128<float> half = Sse.Add(total.GetLower(), total.GetUpper());
+            sum = (half.GetElement(0) + half.GetElement(2)) + (half.GetElement(1) + half.GetElement(3));
+        }
+        else if (Vector.IsHardwareAccelerated)
+        {
+            int width = Vector<float>.Count;
+            Vector<float> acc = Vector<float>.Zero;
+            for (; i <= n - width; i += width)
+            {
+                acc += Vector.Load(a + i) * Vector.Load(b + i);
+            }
+            sum = Vector.Sum(acc);
+        }
+        for (; i < n; i++) sum += a[i] * b[i];
+        return sum;
     }
 }
