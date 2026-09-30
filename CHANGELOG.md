@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.211
+## alpha.212
 
 - **Vulkan paths for the DeepSeek-V4.1-Flash primitives** (program PR 24b). New compute shaders, each parity-tested against the CPU reference
   on an NVIDIA RTX 3060 through Vulkan: `MoeRoute`, `MoeBuildDispatch`, `MoeCombine`, `TopKLastDim`, `Softplus`; `HcSplitSinkhorn`,
@@ -22,6 +22,8 @@ stable release will require. Dates are UTC.
   Vulkan: there is no block-scaled GEMM, so recipe weights are widened, not kept packed.
 - The Vulkan expert cache is not implemented; experts are host-staged uploads. Native block-scaled GEMM on Vulkan stays `Unsupported`.
   No AMD hardware evidence has been collected; the NVIDIA-via-Vulkan runs are plumbing evidence only. Nothing here is wired into a model.
+
+## alpha.211
 
 - **Engram constants, hasher and row store** (DeepSeek-V4.1-Flash program PR 13, minus the in-model module). The constants (compressed token
   map, multipliers, offsets, primes) are dumped from the unmodified upstream `engram.py` at checkpoint revision `dba1be0a`, committed under
