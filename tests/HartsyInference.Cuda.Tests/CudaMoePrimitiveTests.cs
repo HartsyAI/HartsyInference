@@ -174,6 +174,19 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     }
 
     [Fact]
+    public void MoeCombine_SkipsSlotsBeyondTheExpertRowsInsteadOfReadingOutOfBounds()
+    {
+        if (!CudaContext.IsAvailable()) return;
+        using Tensor rows = F32(new float[] { 1, 2, 10, 20 }, 2, 2);
+        using Tensor slots = I32(new[] { 1, 2, 999999, 0 }, 2, 2);
+        using Tensor weights = F32(new float[] { 2, 3, 4, 5 }, 2, 2);
+        using Tensor output = EmptyF32(2, 2);
+        using CudaBackend cuda = new(0, PtxDir());
+        cuda.MoeCombine(output, rows, slots, weights, 2, accumulate: false);
+        Assert.Equal(new float[] { 20, 40, 5, 10 }, ReadF32(output));
+    }
+
+    [Fact]
     public void Route_Dispatch_Combine_Chain_Stays_On_Device_And_Matches_Cpu()
     {
         if (!CudaContext.IsAvailable()) return;

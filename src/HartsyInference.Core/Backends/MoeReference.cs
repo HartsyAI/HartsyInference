@@ -172,6 +172,8 @@ public static class MoeReference
         long h = output.Shape[output.Shape.Rank - 1];
         if (h != expertOut.Shape[expertOut.Shape.Rank - 1])
             throw new ArgumentException("MoeCombine output and expertOut must share the row width.");
+        if (h < 1) throw new ArgumentException("MoeCombine rows must have at least one column.");
+        if (expertOut.ElementCount % h != 0) throw new ArgumentException("MoeCombine expertOut is not a whole number of rows.");
         long tokens = output.ElementCount / h;
         if (pairSlot.ElementCount != tokens * k || topkWeight.ElementCount != tokens * k)
             throw new ArgumentException($"MoeCombine pairSlot/topkWeight must hold {tokens}x{k} entries.");

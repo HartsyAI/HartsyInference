@@ -108,7 +108,8 @@ extern "C" __global__ void moe_combine_f32(
     const float* __restrict__ topkWeight,
     int hidden,
     int k,
-    int accumulate)
+    int accumulate,
+    int expertRows)
 {
     const int t = blockIdx.x;
     const int c = blockIdx.y * blockDim.x + threadIdx.x;
@@ -117,7 +118,7 @@ extern "C" __global__ void moe_combine_f32(
     for (int j = 0; j < k; j++)
     {
         const int slot = pairSlot[(long long)t * k + j];
-        if (slot < 0) continue;
+        if (slot < 0 || slot >= expertRows) continue;
         acc = __fadd_rn(acc, __fmul_rn(topkWeight[(long long)t * k + j], expertOut[(long long)slot * hidden + c]));
     }
     float* o = output + (long long)t * hidden + c;

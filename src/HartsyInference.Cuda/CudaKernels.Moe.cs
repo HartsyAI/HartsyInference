@@ -100,15 +100,16 @@ public sealed partial class CudaKernels
             .ThrowOnError();
     }
 
-    /// <summary>Weighted gather-sum of each token's expert rows; one thread per (token, column).</summary>
+    /// <summary>Weighted gather-sum of each token's expert rows; one thread per (token, column). Slots outside
+    /// [0, expertRows) are skipped (the CPU reference throws for slot >= expertRows).</summary>
     public unsafe void LaunchMoeCombine(ulong output, ulong expertOut, ulong pairSlot, ulong topkWeight, int tokens,
-        int hidden, int k, bool accumulate, nint stream)
+        int hidden, int k, bool accumulate, int expertRows, nint stream)
     {
         if (_moeCombineF32 == 0) throw new InvalidOperationException("moe_dispatch.ptx not present in the Ptx folder.");
         ulong oA = output, xA = expertOut, sA = pairSlot, wA = topkWeight;
-        int hA = hidden, kA = k, accA = accumulate ? 1 : 0;
-        void** a = stackalloc void*[7];
-        a[0] = &oA; a[1] = &xA; a[2] = &sA; a[3] = &wA; a[4] = &hA; a[5] = &kA; a[6] = &accA;
+        int hA = hidden, kA = k, accA = accumulate ? 1 : 0, rA = expertRows;
+        void** a = stackalloc void*[8];
+        a[0] = &oA; a[1] = &xA; a[2] = &sA; a[3] = &wA; a[4] = &hA; a[5] = &kA; a[6] = &accA; a[7] = &rA;
         uint gridY = (uint)((hidden + BlockSize - 1) / BlockSize);
         CudaDriverApi.cuLaunchKernel(_moeCombineF32, (uint)tokens, gridY, 1, BlockSize, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }

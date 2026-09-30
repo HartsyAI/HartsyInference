@@ -198,6 +198,21 @@ public sealed class MoeReferenceTests
     }
 
     [Fact]
+    public void Combine_Rejects_Ragged_Expert_Rows_And_Out_Of_Range_Slots()
+    {
+        using CpuBackend cpu = new();
+        using Tensor slots = I32(new[] { 0, 1 }, 1, 2);
+        using Tensor weights = F32(new[] { 1f, 1f }, 1, 2);
+        using Tensor output = F32(new float[] { 0, 0, 0 }, 1, 3);
+        using Tensor ragged = F32(new float[] { 1, 2, 3, 4 }, 4);
+        Assert.Throws<ArgumentException>(() => cpu.MoeCombine(output, ragged, slots, weights, 2, false));
+        using Tensor rows = F32(new float[] { 1, 2, 3 }, 1, 3);
+        Assert.Throws<ArgumentOutOfRangeException>(() => cpu.MoeCombine(output, rows, slots, weights, 2, false));
+        using Tensor zeroWidth = EmptyF32(2, 0);
+        Assert.Throws<ArgumentException>(() => cpu.MoeCombine(zeroWidth, rows, slots, weights, 2, false));
+    }
+
+    [Fact]
     public void Dispatch_Then_Combine_Reproduces_The_Direct_Weighted_Sum()
     {
         const int Tokens = 6, E = 4, K = 2, H = 5;

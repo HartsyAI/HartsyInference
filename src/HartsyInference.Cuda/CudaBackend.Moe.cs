@@ -135,7 +135,8 @@ public sealed partial class CudaBackend
             pX = GpuTransferHelper.CopyToDevice(expertOut);
             pSlot = GpuTransferHelper.CopyToDevice(pairSlot);
             pW = GpuTransferHelper.CopyToDevice(topkWeight);
-            _kernels!.LaunchMoeCombine(pOut, pX, pSlot, pW, tokens, hidden, k, accumulate, _stream.Handle);
+            _kernels!.LaunchMoeCombine(pOut, pX, pSlot, pW, tokens, hidden, k, accumulate,
+                (int)(expertOut.ElementCount / hidden), _stream.Handle);
             if (accumulate) { output._gpuSyncCallback = null; output._gpuDisposeCallback = null; }
             GpuTransferHelper.CacheActivation(output, pOut, bytes);
             cached = true;
