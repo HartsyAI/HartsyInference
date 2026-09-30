@@ -23,6 +23,23 @@ stable release will require. Dates are UTC.
 - The Vulkan expert cache is not implemented; experts are host-staged uploads. Native block-scaled GEMM on Vulkan stays `Unsupported`.
   No AMD hardware evidence has been collected; the NVIDIA-via-Vulkan runs are plumbing evidence only. Nothing here is wired into a model.
 
+- **Engram constants, hasher and row store** (DeepSeek-V4.1-Flash program PR 13, minus the in-model module). The constants (compressed token
+  map, multipliers, offsets, primes) are dumped from the unmodified upstream `engram.py` at checkpoint revision `dba1be0a`, committed under
+  `DeepSeekV41/Engram/Constants/` (gitignore exception for `*.bin`), embedded, and SHA-256 checked on load; C# never re-derives them.
+  `dump_engram_constants.py --cross-check` also compares them with the DwarfStar GGUF metadata (token map, primes, multipliers) and the MLX
+  `engram_token_map.json`, recorded in the manifest.
+- `EngramHasher` (XOR of compressed ids times multipliers over the lookbacks, modulo the per-head prime plus the cumulative offset; DEAD
+  tokens and sequence-start lookbacks map to the pad id; history carries across prefill and decode) equals the upstream `NgramHashState`
+  exactly on 15 cases.
+- `EngramTableStore` in Core: `IEngramRowLayout` with the official FP8/E8M0, GGUF row264 and MLX affine layouts; `PrefetchAsync`, `Gather`,
+  `Stats`; per-batch dedup and sort, reads merged per 4 KB page over `IWeightByteSource`, LRU slab row cache, owned-row range check,
+  `Storage` and `HostResident` backings (`Device` throws `NotSupportedException`). `EngramTableStores.Open` builds one from a checkpoint table.
+- Tests: layout decode vs Python dequant on edge, seeded synthetic and range-fetched real rows; store behavior on a synthetic shard file.
+  A guarded Integration test gathers 10,000 random real rows from shard 47 and skips without the checkpoint; it did not run here, and
+  neither did an RSS-bound or cold-latency measurement. `EngramModule` waits for PR 8.
+- Known issue found, not fixed here: `DeepSeekV41Checkpoint.Open` rejects the real official checkpoint because shards 47 and 48 also hold
+  `engram.q_weight`, `engram.k_weight` and `engram.wkv.*`, and pread-only shards cannot serve those tensors.
+
 ## alpha.210
 
 - **Expert bank, expert cache and device dequant** (DeepSeek-V4.1-Flash program PR 12). `ExpertBank` builds each `ExpertWeights(W1, W2, W3)`

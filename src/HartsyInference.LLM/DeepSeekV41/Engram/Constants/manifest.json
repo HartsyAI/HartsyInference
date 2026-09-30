@@ -1,0 +1,67 @@
+{
+  "checkpoint": "deepseek-ai/DeepSeek-V4.1-Flash",
+  "checkpoint_revision": "dba1be0a40aa45a94ad051997016db3960a90277",
+  "upstream_config": "inference/config.json",
+  "tokenizer_vocab": 129280,
+  "compressed_vocab": 99092,
+  "pad_id": 2,
+  "pad_compressed_id": 2,
+  "layer_ids": [
+    1,
+    14
+  ],
+  "max_ngram_size": 4,
+  "n_heads": 8,
+  "table_rows": [
+    384006168,
+    384016682
+  ],
+  "files": {
+    "token_map.i32.bin": {
+      "shape": [
+        129280
+      ],
+      "dtype": "int32",
+      "sha256": "c60a86322ec17b4142bfef3c57a8d81fb428550cdf487f88a4320cb59fe46481"
+    },
+    "multipliers.i64.bin": {
+      "shape": [
+        2,
+        4
+      ],
+      "dtype": "int64",
+      "sha256": "7345f44ec93e965df6581af59c78a5dd6efba7be2e855486450a6594d7ebd7c6"
+    },
+    "offsets.i64.bin": {
+      "shape": [
+        2,
+        24
+      ],
+      "dtype": "int64",
+      "sha256": "edf229962df441c86f9c20cbc126579dd548421e231250b146ee6f5bea0b2f8b"
+    },
+    "primes.i64.bin": {
+      "shape": [
+        2,
+        3,
+        8
+      ],
+      "dtype": "int64",
+      "sha256": "ed542f58c4b3593c4120e899620231785b695dfc61bcc3d04b61b113abd9cf9e"
+    }
+  },
+  "cross_checks": {
+    "gguf_dwarfstar": {
+      "repo": "antirez/deepseek-v4.1-flash-gguf",
+      "revision": "dd8a266f7145edc19e2334b46e19b6821f221dc7",
+      "token_map_equal": true,
+      "primes_equal": true,
+      "multipliers_equal": true
+    },
+    "mlx_4bit": {
+      "repo": "mlx-community/DeepSeek-V4.1-Flash-MLX-4bit",
+      "revision": "100694c1c65d34e331f4f0c2841212f0e849a0ea",
+      "token_map_equal": true
+    }
+  }
+}
