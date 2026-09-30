@@ -3,6 +3,7 @@
 These exist so the unmodified upstream `model.py` can run on CPU for small-config reference dumps.
 Agreement between these ports and the tilelang originals is only checkable on Hopper/Blackwell
 hardware and is recorded in the parity ledger from the rented campaign, not from here.
+CPU only: helpers allocate on the default device.
 """
 from typing import Optional, Tuple
 
@@ -141,7 +142,10 @@ def fp8_gemm(
     scale_dtype: torch.dtype = torch.float32,
     block_size: int = 128,
 ) -> torch.Tensor:
-    """C = A[M,K] @ B[N,K]^T with per-row/K-block activation scales and (block,block) weight scales."""
+    """C = A[M,K] @ B[N,K]^T with per-row/K-block activation scales and (block,block) weight scales.
+
+    One block_size serves both operands, as in upstream (`fp8_block_size` = 32 for activations and weights).
+    """
     k: int = a.size(-1)
     m: int = a.numel() // k
     n: int = b.size(0)

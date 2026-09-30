@@ -20,6 +20,10 @@ import kernel_ports  # noqa: E402
 
 sys.modules["kernel"] = kernel_ports
 
+ENGRAM_LAYERS: int = 2
+ENGRAM_MAX_NGRAM: int = 4
+ENGRAM_HEADS: int = 2
+
 
 def build_args(model_mod, kind: str, engram_rows: Tuple[int, ...] = (), engram_vocab: int = 0):
     common = dict(dtype="bf16", expert_dtype=None, max_batch_size=2, max_seq_len=256, temperature=0.0,
@@ -38,8 +42,8 @@ def build_args(model_mod, kind: str, engram_rows: Tuple[int, ...] = (), engram_v
                                index_source_layers=(2, 5, 7), index_topk=8, candidate_source_layer=5,
                                candidate_topk_blocks=4, candidate_block_size=2, original_seq_len=64,
                                rope_factor=16, compress_rope_theta=160000.0,
-                               engram_layer_ids=(1, 4), engram_num_embeddings=engram_rows, engram_max_ngram_size=4,
-                               engram_vocab_size=engram_vocab, engram_n_heads=2, engram_head_dim=32,
+                               engram_layer_ids=(1, 4), engram_num_embeddings=engram_rows, engram_max_ngram_size=ENGRAM_MAX_NGRAM,
+                               engram_vocab_size=engram_vocab, engram_n_heads=ENGRAM_HEADS, engram_head_dim=32,
                                engram_pad_id=2, engram_compressed_vocab_size=99092,
                                dspark_block_size=4, dspark_target_layer_ids=(6, 7, 8), dspark_noise_token_id=7,
                                dspark_markov_rank=32)
@@ -130,11 +134,11 @@ def main() -> None:
         from engram import find_next_prime
         seen: set = set()
         totals = []
-        for _ in range(2):
+        for _ in range(ENGRAM_LAYERS):
             t = 0
-            for _ in range(3):
+            for _ in range(ENGRAM_MAX_NGRAM - 1):
                 cur = ev - 1
-                for _ in range(2):
+                for _ in range(ENGRAM_HEADS):
                     cur = find_next_prime(cur, seen)
                     seen.add(cur)
                     t += cur

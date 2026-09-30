@@ -38,13 +38,20 @@ def main() -> int:
         from huggingface_hub import snapshot_download
         snapshot_download(REPO, revision=REVISION, local_dir=a.dest,
                           ignore_patterns=["*.safetensors", "*.bin", "*.gguf"])
+    if not os.path.isdir(a.dest):
+        print(f"destination not found: {a.dest}")
+        return 1
+    manifest = read_manifest()
     bad = 0
-    for name, digest in read_manifest().items():
+    for name, digest in manifest.items():
         p = os.path.join(a.dest, name)
-        if not os.path.isfile(p) or sha256_file(p) != digest:
+        if not os.path.isfile(p):
+            print(f"MISSING {name}")
+            bad += 1
+        elif sha256_file(p) != digest:
             print(f"MISMATCH {name}")
             bad += 1
-    print(f"{len(read_manifest()) - bad} verified, {bad} bad ({REPO}@{REVISION[:8]})")
+    print(f"{len(manifest) - bad} verified, {bad} bad ({REPO}@{REVISION[:8]})")
     return 1 if bad else 0
 
 

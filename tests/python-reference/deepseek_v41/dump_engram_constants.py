@@ -29,8 +29,10 @@ def main() -> None:
     from engram import EngramLayout, build_compressed_token_map, compute_hash_multipliers
     from transformers import PreTrainedTokenizerFast
 
-    cfg = json.load(open(os.path.join(a.upstream, "inference", "config.json")))
-    root_cfg = json.load(open(os.path.join(a.upstream, "config.json")))["text_config"]
+    with open(os.path.join(a.upstream, "inference", "config.json")) as f:
+        cfg = json.load(f)
+    with open(os.path.join(a.upstream, "config.json")) as f:
+        root_cfg = json.load(f)["text_config"]
     for k in ("engram_layer_ids", "engram_num_embeddings", "engram_max_ngram_size", "engram_vocab_size",
               "engram_n_heads", "engram_head_dim", "engram_compressed_vocab_size"):
         assert list(np.atleast_1d(cfg[k])) == list(np.atleast_1d(root_cfg[k])), k
@@ -70,7 +72,8 @@ def main() -> None:
         path = os.path.join(a.out, name)
         arr.tofile(path)
         manifest["files"][name] = {"shape": list(arr.shape), "dtype": str(arr.dtype), "sha256": sha256(path)}
-    json.dump(manifest, open(os.path.join(a.out, "manifest.json"), "w"), indent=2)
+    with open(os.path.join(a.out, "manifest.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
     print(json.dumps({k: v for k, v in manifest.items() if k != "files"}))
     print("multipliers", mult.tolist())
     print("first primes", np.asarray(layout.primes)[0, 0].tolist())
