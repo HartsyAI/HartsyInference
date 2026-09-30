@@ -18,6 +18,7 @@ KERNELS=(
     "mul_mat_vec_q3k_f32"
     "mul_mat_vec_f16_bf16_f32"
     "lm_attn_mask"
+    "lm_topk_f32"
     "quantize_activation_q8_1_f32"
     "mul_mat_vec_q4k_q8_1"
     "mul_mat_vec_q8_0_q8_1"

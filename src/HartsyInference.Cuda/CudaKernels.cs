@@ -4,7 +4,7 @@ using HartsyInference.Core.Tensors;
 namespace HartsyInference.Cuda;
 
 /// <summary>Loads PTX modules from disk; exposes typed kernel launches via nint function handles for zero-alloc dispatch.</summary>
-public sealed class CudaKernels : IDisposable
+public sealed partial class CudaKernels : IDisposable
 {
     // ── F32 Modules ──────────────────────────────────────────────────────
     private readonly CudaModule _elementwiseModule;
@@ -1190,6 +1190,7 @@ public sealed class CudaKernels : IDisposable
         _mulMatVecQ5_0Q8_1Ksplit = _mulMatVecQ5_0Q8_1Module.GetFunction("mul_mat_vec_q5_0_q8_1_ksplit");
         _mulMatVecQ5KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q5k_q8_1"));
         _mulMatVecQ5KQ8_1 = _mulMatVecQ5KQ8_1Module.GetFunction("mul_mat_vec_q5k_q8_1");
+        LoadMoeKernels();
         }
         catch (Exception constructionFailure)
         {
