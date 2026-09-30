@@ -26,8 +26,15 @@ header, raw PCM16 for audio and source-generated JSON only for the control messa
 - **One writer thread per direction.** `LinkFrameWriter` is single-writer and throws on a concurrent call rather
   than interleaving bytes; `LinkFrameReader` is single-reader. Each process therefore runs exactly one sender and
   one receiver per connection, and the audio sender is the paced 20 ms thread.
-- **Liveness**: either side may `Ping` at any time and must answer `Pong` with the same timestamp. A side that sees
-  no traffic for 20 s treats the link as dead and closes it.
+- **Liveness**: the **gateway pings every 5 s** whether or not a call is up (it owns reconnect, so it is the side
+  that must notice a dead link), and the host answers every `Ping` with a `Pong` carrying the same timestamp. The
+  host may also ping. A side that receives no frame at all for 20 s closes the socket; the gateway then reconnects.
+- **Unknown frame types are skipped, not fatal.** The framing stays valid, so a receiver logs the type byte once and
+  reads on, which is what lets a newer peer add messages. Malformed framing (oversize length, truncated stream,
+  wrong payload size for a known type) is fatal: close and reconnect.
+- **The link layer validates the wire, not the policy.** `ReadHello` rejects an inbound rate other than 16 kHz and
+  `ReadHelloAck` an outbound rate outside the table; token and version checks, and enforcing `maxFrameMs` on what
+  the host actually sends, are the host's and gateway's own responsibility.
 
 ## Frame layout
 
@@ -80,8 +87,8 @@ G→H  Hello{version:1, inboundRate:16000, token}
 H→G  HelloAck{outboundRate:16000, maxFrameMs:20}      or  Error{text} then close
 ```
 
-The inbound rate is fixed at 16 kHz by the host's models (RNNoise, Silero, Whisper); the gateway resamples from the
-codec rate. The outbound rate is whatever the host finds cheapest to produce (the session resamples Kokoro's 24 kHz
+The inbound rate is fixed at 16 kHz by the host's models (RNNoise, Silero, Whisper) and any other value in `Hello`
+is a protocol error, not a negotiation; the gateway resamples from the codec rate. The outbound rate is whatever the host finds cheapest to produce (the session resamples Kokoro's 24 kHz
 to 16 kHz today); the gateway resamples to the codec rate. `maxFrameMs` bounds one `OutboundAudio` frame so the
 gateway's jitter buffer can size itself.
 
@@ -138,6 +145,7 @@ accounting; it is not an acknowledgement and needs no reply.
 | Outbound rates | 8000, 16000, 22050, 24000, 48000 Hz |
 | Connection-level callId | 0; calls start at 1 |
 | First turnId per call | 1 |
+| Gateway ping interval | 5 s, call or no call |
 | Liveness timeout | 20 s without any frame |
 | Reconnect backoff (gateway) | 250 ms base, 30 s cap, full jitter |
 

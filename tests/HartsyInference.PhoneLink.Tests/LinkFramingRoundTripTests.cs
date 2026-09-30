@@ -237,6 +237,7 @@ public sealed class LinkFramingRoundTripTests
             await w.WriteAsync(LinkMessageType.DtmfEvent, LinkFrameFlags.None, 1, new byte[] { (byte)'Z', 0, 0 }, None);
             byte[] shortToken = [1, 0, 0x80, 0x3E, 0, 0, 9, 0, (byte)'a'];
             await w.WriteAsync(LinkMessageType.Hello, LinkFrameFlags.None, 0, shortToken, None);
+            await w.WriteHelloAsync(new LinkHello(LinkProtocol.Version, 8000, "narrowband"), None);
         });
         List<LinkFrame> frames = await LinkRoundTrip.DecodeAsync(new MemoryStream(bytes));
 
@@ -244,6 +245,7 @@ public sealed class LinkFramingRoundTripTests
         Assert.Throws<LinkProtocolException>(() => frames[1].ReadPcm(new short[8]));
         Assert.Throws<LinkProtocolException>(() => frames[2].ReadDtmf());
         Assert.Throws<LinkProtocolException>(() => frames[3].ReadHello());
+        Assert.Contains("8000", Assert.Throws<LinkProtocolException>(() => frames[4].ReadHello()).Message);
     }
 
     private static short[] Ramp(int count)

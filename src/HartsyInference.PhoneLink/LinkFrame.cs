@@ -32,10 +32,11 @@ public readonly record struct LinkFrame(LinkFrameHeader Header, ReadOnlyMemory<b
         int tokenLength = BinaryPrimitives.ReadUInt16LittleEndian(body.Slice(6));
         if (body.Length != 8 + tokenLength)
             throw new LinkProtocolException($"Hello declares a {tokenLength}-byte token but carries {body.Length - 8} bytes.");
+        uint inboundRate = BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(2));
+        if (inboundRate != LinkProtocol.InboundSampleRate)
+            throw new LinkProtocolException($"Hello offers inbound audio at {inboundRate} Hz; the link is {LinkProtocol.InboundSampleRate} Hz.");
         return new LinkHello(
-            BinaryPrimitives.ReadUInt16LittleEndian(body),
-            BinaryPrimitives.ReadUInt32LittleEndian(body.Slice(2)),
-            Encoding.UTF8.GetString(body.Slice(8, tokenLength)));
+            BinaryPrimitives.ReadUInt16LittleEndian(body), inboundRate, Encoding.UTF8.GetString(body.Slice(8, tokenLength)));
     }
 
     public LinkHelloAck ReadHelloAck()
