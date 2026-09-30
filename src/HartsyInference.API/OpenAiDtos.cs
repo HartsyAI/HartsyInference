@@ -85,6 +85,12 @@ public sealed class ChatMessageDto
 
     /// <summary>Populated on an assistant message that invoked one or more tools.</summary>
     [JsonPropertyName("tool_calls")] public List<ChatToolCallDto>? ToolCalls { get; set; }
+
+    /// <summary>On a <c>tool</c> message: the id of the assistant tool call this result answers.</summary>
+    [JsonPropertyName("tool_call_id")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ToolCallId { get; set; }
+
+    /// <summary>Optional participant / tool name.</summary>
+    [JsonPropertyName("name")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Name { get; set; }
 }
 
 /// <summary>One tool definition a client may offer the model, OpenAI wire shape. Only <c>"type":"function"</c> is recognized (OpenAI has no other tool type today).</summary>
@@ -134,7 +140,7 @@ public sealed class ChatCompletionRequest
     [JsonPropertyName("response_format")] public ResponseFormatDto? ResponseFormat { get; set; }
     [JsonPropertyName("seed")] public ulong? Seed { get; set; }
 
-    /// <summary>Tools the model may call. Passed through to the native <c>TextRequest.Tools</c> unmodified (name/description/JSON-schema) — the native tool-calling path is fully built; this is DTO plumbing.</summary>
+    /// <summary>Tools the model may call. Passed through to the native <c>TextRequest.Tools</c> unmodified (name/description/JSON-schema). What exists natively is plumbing: the schemas render into the prompt through the chat template, the <c>&lt;tool_call&gt;</c> sentinel grammar is armed, and an <c>ITextStreamFilter</c> seam can emit parsed calls. The parsers themselves live in the separate Tools package; without one installed no call is parsed.</summary>
     [JsonPropertyName("tools")] public List<ChatToolDto>? Tools { get; set; }
 
     /// <summary>OpenAI's <c>tool_choice</c>: either a bare string (<c>"none"</c>/<c>"auto"</c>/<c>"required"</c>) or <c>{"type":"function","function":{"name":...}}</c> to force one specific tool. Kept as a raw <see cref="JsonElement"/> and parsed in <c>CompatEndpoints.ToTextRequest</c> rather than a custom converter, since it's one call site. <c>"required"</c> (call SOME tool, model's choice) has no native equivalent — <c>ForceToolId</c> forces one *specific* tool — so it best-effort maps to the same behavior as <c>"auto"</c> rather than guessing which tool to force.</summary>

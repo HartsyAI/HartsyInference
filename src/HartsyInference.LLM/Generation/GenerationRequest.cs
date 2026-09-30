@@ -12,11 +12,14 @@ public sealed record GenerationRequest
     /// <summary>Single user prompt (templated as one user turn). Ignored when <see cref="Messages"/> is set.</summary>
     public string? Prompt { get; init; }
 
-    /// <summary>System prompt for the single-prompt path; null uses the template default, empty omits it.</summary>
+    /// <summary>System prompt: prepended as a system turn to <see cref="Prompt"/>, and to <see cref="Messages"/> when they do not already start with one. Null or empty adds nothing.</summary>
     public string? SystemPrompt { get; init; }
 
     /// <summary>Multi-turn chat messages (templated). Takes precedence over <see cref="Prompt"/>.</summary>
     public IReadOnlyList<ChatMessage>? Messages { get; init; }
+
+    /// <summary>Tool schemas offered to the model through the chat template; null or empty renders the prompt without a tool block.</summary>
+    public IReadOnlyList<ToolSpec>? Tools { get; init; }
 
     /// <summary>Sets the chat template's <c>enable_thinking</c> variable (Qwen3-family reasoning toggle); null falls back to the template's own default, and templates without a thinking slot (e.g. ChatML) ignore it.</summary>
     public bool? EnableThinking { get; init; }

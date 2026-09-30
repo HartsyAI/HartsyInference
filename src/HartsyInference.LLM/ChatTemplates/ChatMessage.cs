@@ -12,6 +12,9 @@ public sealed record ChatMessage(string Role, string Content)
     /// <summary>Id of the assistant tool call a "tool" turn answers.</summary>
     public string? ToolCallId { get; init; }
 
+    /// <summary>Name of the tool a "tool" turn answers for, or the participant name templates render as <c>name</c>.</summary>
+    public string? Name { get; init; }
+
     /// <summary>Assistant reasoning text that precedes the visible answer.</summary>
     public string? ReasoningContent { get; init; }
 

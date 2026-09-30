@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.IO;
-using System.Threading.Channels;
+using System.Text;
+using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
@@ -55,6 +56,7 @@ public sealed class TextService : ITextService, IDisposable
                 Stop = outcome.Stop,
                 PromptTokens = outcome.PromptTokens,
                 CompletionTokens = outcome.CompletionTokens,
+                ToolCall = outcome.ToolCall,
             };
         }
         catch (OperationCanceledException)
@@ -171,37 +173,65 @@ public sealed class TextService : ITextService, IDisposable
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Template : slot.Model!.Template;
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer);
+        ITextStreamFilter? filter = _engine.CreateTextStreamFilter(request);
 
-        if (diagnosticId != 0)
-            genRequest = genRequest with { OnPrefillCompleted = count =>
-                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.PrefillCompleted, count) };
-        Action<int>? onToken = null;
-        if (sink is null && diagnosticId != 0)
+        int promptTokens = 0;
+        if (diagnosticId != 0 || filter is not null)
         {
-            int count = 0;
-            onToken = _ => _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
+            genRequest = genRequest with { OnPrefillCompleted = count =>
+            {
+                promptTokens = count;
+                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.PrefillCompleted, count);
+            } };
         }
+        // A filter stops generation through its own linked source so the stop maps to ToolCall, not Cancelled.
+        using CancellationTokenSource? stopSource = filter is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        CancellationToken generation = stopSource?.Token ?? cancel;
+        int count = 0;
+        Action<int>? onToken = null;
         IOutputParser? parser = null;
         Action<ParsedEvent>? emit = null;
-        if (sink is not null)
+        TextFilterSink? filterSink = null;
+        if (sink is not null || filter is not null)
         {
             parser = CreateParser(template, tokenizer, genRequest, request, rawCompletion);
-            emit = new ParsedEventTranslator(sink, Interlocked.Increment(ref _requestCounter)).Handle;
-            int count = 0;
+            Action<TextChunk> chunkSink = sink!;
+            if (filter is not null)
+            {
+                filterSink = new TextFilterSink(filter, sink, stopSource!.Cancel);
+                chunkSink = filterSink.Handle;
+            }
+            emit = new ParsedEventTranslator(chunkSink, Interlocked.Increment(ref _requestCounter)).Handle;
             onToken = id =>
             {
-                cancel.ThrowIfCancellationRequested();
+                generation.ThrowIfCancellationRequested();
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
                 parser.Push(id, emit);
             };
         }
+        else if (diagnosticId != 0)
+        {
+            onToken = _ => _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
+        }
 
-        GenerationResult result = slot.SsmPipeline is not null ? slot.SsmPipeline.Generate(genRequest, onToken, cancel)
-            : slot.Pipeline!.Generate(genRequest, onToken, cancel);
+        GenerationResult result;
+        try
+        {
+            result = slot.SsmPipeline is not null ? slot.SsmPipeline.Generate(genRequest, onToken, generation)
+                : slot.Pipeline!.Generate(genRequest, onToken, generation);
+        }
+        catch (OperationCanceledException) when (filterSink is { Stopped: true } && !cancel.IsCancellationRequested)
+        {
+            return new GenOutcome(filterSink.Text, StopReason.ToolCall, promptTokens, count, filterSink.ToolCall);
+        }
         if (parser is not null) parser.Finish(emit!);
 
         StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;
-        return new GenOutcome(result.Text, stop, result.PromptTokens, result.TokenIds.Count);
+        if (filterSink is null)
+            return new GenOutcome(result.Text, stop, result.PromptTokens, result.TokenIds.Count);
+        filterSink.End();
+        return new GenOutcome(filterSink.Text, filterSink.ToolCall is null ? stop : StopReason.ToolCall,
+            result.PromptTokens, result.TokenIds.Count, filterSink.ToolCall);
     }
 
     /// <summary>The structured parser when the model's template exposes one, else the passthrough that keeps plain-decode streaming.</summary>
@@ -212,7 +242,7 @@ public sealed class TextService : ITextService, IDisposable
         {
             try
             {
-                return adapter.CreateParser(tokenizer, messages, request.EnableThinking);
+                return adapter.CreateParser(tokenizer, messages, request.EnableThinking, genRequest.Tools);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -837,9 +867,47 @@ public sealed class TextService : ITextService, IDisposable
         }
         return genRequest with
         {
-            Messages = [.. request.Messages.Select(m => new ChatMessage(RoleName(m.Role), m.Content ?? ""))],
+            Messages = [.. request.Messages.Select(ToChatMessage)],
             SystemPrompt = request.SystemPrompt,
+            Tools = ToToolSpecs(request.Tools),
         };
+    }
+
+    private static ChatMessage ToChatMessage(TextMessage m) => new(RoleName(m.Role), m.Content ?? "")
+    {
+        ToolCalls = m.ToolCalls is { Count: > 0 }
+            ? [.. m.ToolCalls.Select(c => new ChatToolCall(c.Id, c.Name, c.Arguments) { Namespace = c.Namespace })]
+            : null,
+        ToolCallId = m.ToolCallId,
+        Name = m.Name,
+    };
+
+    /// <summary>OpenAI-form tool JSON (<c>{"type":"function","function":{name,description,parameters}}</c>) for the chat template; null when no tools are offered. A schema that is not valid JSON fails here, before any model work.</summary>
+    private static IReadOnlyList<ToolSpec>? ToToolSpecs(IReadOnlyList<ToolDefinition>? tools)
+    {
+        if (tools is not { Count: > 0 }) return null;
+        List<ToolSpec> specs = new(tools.Count);
+        foreach (ToolDefinition tool in tools) specs.Add(new ToolSpec(ToolJson(tool)));
+        return specs;
+    }
+
+    private static string ToolJson(ToolDefinition tool)
+    {
+        using MemoryStream buffer = new();
+        using (Utf8JsonWriter writer = new(buffer))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("type", "function");
+            writer.WritePropertyName("function");
+            writer.WriteStartObject();
+            writer.WriteString("name", tool.Name);
+            writer.WriteString("description", tool.Description);
+            writer.WritePropertyName("parameters");
+            writer.WriteRawValue(string.IsNullOrWhiteSpace(tool.JsonSchema) ? "{}" : tool.JsonSchema);
+            writer.WriteEndObject();
+            writer.WriteEndObject();
+        }
+        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
     }
 
     /// <summary>Per-request sampler: temperature/top-p/seed from the request; top-k/min-p/repetition-penalty are the request's backend-tuning knobs (null → filter off).</summary>
@@ -951,6 +1019,6 @@ public sealed class TextService : ITextService, IDisposable
         return backend;
     }
 
-    /// <summary>The outcome of one generation: full text, stop reason, and token counts.</summary>
-    private readonly record struct GenOutcome(string Text, StopReason Stop, int PromptTokens, int CompletionTokens);
+    /// <summary>The outcome of one generation: full text, stop reason, token counts, and the tool call a stream filter completed (null without one).</summary>
+    private readonly record struct GenOutcome(string Text, StopReason Stop, int PromptTokens, int CompletionTokens, NativeToolCall? ToolCall = null);
 }

@@ -21,16 +21,25 @@ public sealed class ChatTemplateEncoderAdapter : IChatTemplate
     /// <inheritdoc />
     public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt,
         bool? enableThinking = null)
-    {
-        EncodeOptions options = new() { AddGenerationPrompt = addGenerationPrompt, Thinking = enableThinking ?? false };
-        return _encoder.Encode(tokenizer, messages, options).Ids;
-    }
+        => Encode(tokenizer, messages, addGenerationPrompt, enableThinking, tools: null);
 
-    /// <summary>Builds the parser for completions of the prompt these <paramref name="messages"/> render to.</summary>
-    public IOutputParser CreateParser(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking)
+    /// <inheritdoc />
+    public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt,
+        bool? enableThinking, IReadOnlyList<ToolSpec>? tools)
+        => _encoder.Encode(tokenizer, messages, Options(addGenerationPrompt, enableThinking, tools)).Ids;
+
+    /// <summary>Builds the parser for completions of the prompt these <paramref name="messages"/> render to (with <paramref name="tools"/> offered, when any).</summary>
+    public IOutputParser CreateParser(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking,
+        IReadOnlyList<ToolSpec>? tools = null)
     {
-        EncodeOptions options = new() { AddGenerationPrompt = true, Thinking = enableThinking ?? false };
-        ParserInitialState initial = _encoder.ResolveParserState(messages, options);
+        ParserInitialState initial = _encoder.ResolveParserState(messages, Options(addGenerationPrompt: true, enableThinking, tools));
         return _encoder.CreateParser(tokenizer, initial.ToParserState());
     }
+
+    private static EncodeOptions Options(bool addGenerationPrompt, bool? enableThinking, IReadOnlyList<ToolSpec>? tools) => new()
+    {
+        AddGenerationPrompt = addGenerationPrompt,
+        Thinking = enableThinking ?? false,
+        Tools = tools is { Count: > 0 } ? tools : null,
+    };
 }

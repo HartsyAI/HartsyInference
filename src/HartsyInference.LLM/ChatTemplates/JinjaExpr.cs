@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 
 namespace HartsyInference.LLM.ChatTemplates;
 
@@ -51,6 +52,39 @@ internal static class Values
         StringBuilder sb = new();
         WriteJson(sb, v);
         return sb.ToString();
+    }
+
+    /// <summary>Parses JSON text into the value graph templates consume (the inverse of <see cref="ToJson"/>); throws <see cref="JsonException"/> on malformed text.</summary>
+    public static object? ParseJson(string json)
+    {
+        using JsonDocument doc = JsonDocument.Parse(json);
+        return FromJson(doc.RootElement);
+    }
+
+    /// <summary>Converts a parsed JSON element into null/bool/long/double/string/List/Dictionary, keeping object key order.</summary>
+    public static object? FromJson(JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                Dictionary<string, object?> dict = new();
+                foreach (JsonProperty property in element.EnumerateObject()) dict[property.Name] = FromJson(property.Value);
+                return dict;
+            case JsonValueKind.Array:
+                List<object?> list = new(element.GetArrayLength());
+                foreach (JsonElement item in element.EnumerateArray()) list.Add(FromJson(item));
+                return list;
+            case JsonValueKind.String:
+                return element.GetString();
+            case JsonValueKind.True:
+                return true;
+            case JsonValueKind.False:
+                return false;
+            case JsonValueKind.Number:
+                return element.TryGetInt64(out long whole) ? whole : element.GetDouble();
+            default:
+                return null;
+        }
     }
 
     private static void WriteJson(StringBuilder sb, object? v)
