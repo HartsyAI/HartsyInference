@@ -147,6 +147,26 @@ public sealed class DeepSeekV41EncoderTests
             [ChatMessage.Assistant("x") with { ReasoningContent = literal }], new EncodeOptions()));
     }
 
+    [Fact]
+    public void ImagePlaceholderInToolCallArguments_Throws()
+    {
+        ChatMessage call = ChatMessage.Assistant("x") with
+        {
+            ToolCalls = [new ChatToolCall("c1", "lookup", "{\"q\":\"" + StubTokenizer.Placeholder + "\"}")],
+        };
+        Assert.Throws<ArgumentException>(() => DeepSeekV41Encoder.RenderText([ChatMessage.User("q"), call], new EncodeOptions()));
+    }
+
+    [Fact]
+    public void EmptyOptionTools_KeepFirstMessageTools()
+    {
+        ToolSpec tool = ToolSpec.FromJson("""{"type":"function","function":{"name":"lookup","parameters":{"type":"object"}}}""");
+        List<ChatMessage> messages = [ChatMessage.System("s") with { Tools = [tool] }, ChatMessage.User("q")];
+        string expected = DeepSeekV41Encoder.RenderText(messages, new EncodeOptions());
+        Assert.Contains("\"name\": \"lookup\"", expected);
+        Assert.Equal(expected, DeepSeekV41Encoder.RenderText(messages, new EncodeOptions { Tools = [] }));
+    }
+
     private const string ConflictingNamespaceTool =
         """{"type":"function","function":{"name":"search::a"},"namespace":"files"}""";
 

@@ -152,7 +152,7 @@ public sealed class PreTokenizerPipeline
     private static char[] BuildProxyTable()
     {
         char[] table = new char[Enum.GetValues<UnicodeCategory>().Length];
-        // Stay clear of ASCII and the CJK ranges the DeepSeek stage-2 class names explicitly.
+        // A pattern naming an explicit non-ASCII range above U+00FF (beyond these CJK ones) could match a proxy by accident.
         for (int c = 0x0100; c < 0xD800; c++)
         {
             if (c is >= 0x3040 and <= 0x30FF or >= 0x4E00 and <= 0x9FFF or >= 0x3400 and <= 0x4DBF) continue;

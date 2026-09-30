@@ -64,7 +64,7 @@ internal static class DeepSeekV41PromptRenderer
             PromptMessage msg = new(source.Role)
             {
                 Content = source.Content ?? string.Empty,
-                Tools = i == 0 && options.Tools is not null ? options.Tools : source.Tools,
+                Tools = i == 0 && options.Tools is { Count: > 0 } ? options.Tools : source.Tools,
                 ResponseFormatJson = source.ResponseFormatJson,
                 ToolCalls = source.ToolCalls,
                 ReasoningContent = source.ReasoningContent,
@@ -88,6 +88,13 @@ internal static class DeepSeekV41PromptRenderer
             throw new ArgumentException($"Message content contains image special token '{ImagePlaceholder}'; use image blocks.");
         if (message.ReasoningContent is not null && message.ReasoningContent.Contains(ImagePlaceholder, StringComparison.Ordinal))
             throw new ArgumentException($"reasoning_content contains image special token '{ImagePlaceholder}'.");
+        if (message.ToolCalls is null) return;
+        foreach (ChatToolCall call in message.ToolCalls)
+        {
+            if (call.ArgumentsJson.Contains(ImagePlaceholder, StringComparison.Ordinal)
+                || call.Name.Contains(ImagePlaceholder, StringComparison.Ordinal))
+                throw new ArgumentException($"Tool call '{call.Name}' contains image special token '{ImagePlaceholder}'.");
+        }
     }
 
     private static List<PromptBlock> ConvertBlocks(IReadOnlyList<ContentBlock> blocks, int imageCount, List<int> imageOrder)
