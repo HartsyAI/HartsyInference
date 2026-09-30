@@ -1,0 +1,486 @@
+{
+ "special": {
+  "bos": "<｜begin▁of▁sentence｜>",
+  "eos": "<｜end▁of▁sentence｜>",
+  "think": "<think>",
+  "think_end": "</think>",
+  "dsml": "｜DSML｜"
+ },
+ "cases": [
+  {
+   "name": "golden_1_turn0",
+   "source": "golden",
+   "mode": "thinking",
+   "text": "The user wants the weather in Beijing. I should call get_weather.</think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"get_weather\">\n<｜DSML｜ parameter name=\"location\" string=\"true\">Beijing</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"unit\" string=\"true\">celsius</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "The user wants the weather in Beijing. I should call get_weather.",
+   "content": "",
+   "tool_calls": [
+    {
+     "name": "get_weather",
+     "namespace": null,
+     "arguments": "{\"location\": \"Beijing\", \"unit\": \"celsius\"}"
+    }
+   ]
+  },
+  {
+   "name": "golden_1_turn1",
+   "source": "golden",
+   "mode": "thinking",
+   "text": "Got the weather data. Let me format a nice response.</think>The weather in Beijing is currently sunny with a temperature of 22°C and 45% humidity.<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "Got the weather data. Let me format a nice response.",
+   "content": "The weather in Beijing is currently sunny with a temperature of 22°C and 45% humidity.",
+   "tool_calls": []
+  },
+  {
+   "name": "golden_2_turn0",
+   "source": "golden",
+   "mode": "chat",
+   "text": "Hi there! How can I help you?<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "Hi there! How can I help you?",
+   "tool_calls": []
+  },
+  {
+   "name": "golden_2_turn1",
+   "source": "golden",
+   "mode": "chat",
+   "text": "The capital of France is Paris.<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "The capital of France is Paris.",
+   "tool_calls": []
+  },
+  {
+   "name": "golden_3_turn0",
+   "source": "golden",
+   "mode": "chat",
+   "text": "\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"search\">\n<｜DSML｜ parameter name=\"queries\" string=\"true\">小柴胡冲剂 布洛芬 相互作用 一起吃</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "",
+   "tool_calls": [
+    {
+     "name": "search",
+     "namespace": null,
+     "arguments": "{\"queries\": \"小柴胡冲剂 布洛芬 相互作用 一起吃\"}"
+    }
+   ]
+  },
+  {
+   "name": "golden_3_turn1",
+   "source": "golden",
+   "mode": "chat",
+   "text": "请及时就医。<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "请及时就医。",
+   "tool_calls": []
+  },
+  {
+   "name": "golden_4_turn0",
+   "source": "golden",
+   "mode": "chat",
+   "text": "热海大滚锅在中国乃至全球的地热奇观中占有重要地位，但“世界著名”的称号更侧重于它作为独特的地质现象和旅游景点。<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "热海大滚锅在中国乃至全球的地热奇观中占有重要地位，但“世界著名”的称号更侧重于它作为独特的地质现象和旅游景点。",
+   "tool_calls": []
+  },
+  {
+   "name": "golden_4_turn1",
+   "source": "golden",
+   "mode": "chat",
+   "text": "<｜action｜>Search<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "<｜action｜>Search",
+   "tool_calls": []
+  },
+  {
+   "name": "chat_plain",
+   "source": "canonical",
+   "mode": "chat",
+   "text": "Hello there.<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "Hello there.",
+   "tool_calls": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜></think>Hello there.<｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "chat_multiline",
+   "source": "canonical",
+   "mode": "chat",
+   "text": "Line one\n\nLine two\n<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "Line one\n\nLine two\n",
+   "tool_calls": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜></think>Line one\n\nLine two\n<｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "chat_lookalike_text",
+   "source": "canonical",
+   "mode": "chat",
+   "text": "a\n\n<b>c</b> and <｜not a tag<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "a\n\n<b>c</b> and <｜not a tag",
+   "tool_calls": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜></think>a\n\n<b>c</b> and <｜not a tag<｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "chat_unicode",
+   "source": "canonical",
+   "mode": "chat",
+   "text": "日本語 😀 café नमस्ते<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "日本語 😀 café नमस्ते",
+   "tool_calls": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜></think>日本語 😀 café नमस्ते<｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "chat_empty",
+   "source": "canonical",
+   "mode": "chat",
+   "text": "<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "",
+   "tool_calls": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜></think><｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "thinking_plain",
+   "source": "canonical",
+   "mode": "thinking",
+   "text": "Let me think.\nStep 2</think>Answer.<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "Let me think.\nStep 2",
+   "content": "Answer.",
+   "tool_calls": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>q<｜Assistant｜><think>Let me think.\nStep 2</think>Answer.<｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "thinking_empty_reasoning",
+   "source": "canonical",
+   "mode": "thinking",
+   "text": "</think>Hi<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "Hi",
+   "tool_calls": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>q<｜Assistant｜><think></think>Hi<｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "thinking_lookalike_reasoning",
+   "source": "canonical",
+   "mode": "thinking",
+   "text": "a < b \n\n<｜ maybe </think</think>ok<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "a < b \n\n<｜ maybe </think",
+   "content": "ok",
+   "tool_calls": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>q<｜Assistant｜><think>a < b \n\n<｜ maybe </think</think>ok<｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "thinking_single_call",
+   "source": "canonical",
+   "mode": "thinking",
+   "text": "Need data.</think>I will look it up.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">cats</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"limit\" string=\"false\">3</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "Need data.",
+   "content": "I will look it up.",
+   "tool_calls": [
+    {
+     "name": "lookup",
+     "namespace": null,
+     "arguments": "{\"query\": \"cats\", \"limit\": 3}"
+    }
+   ],
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>q<｜Assistant｜><think>Need data.</think>I will look it up.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">cats</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"limit\" string=\"false\">3</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "thinking_call_no_content",
+   "source": "canonical",
+   "mode": "thinking",
+   "text": "r</think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "r",
+   "content": "",
+   "tool_calls": [
+    {
+     "name": "lookup",
+     "namespace": null,
+     "arguments": "{\"query\": \"x\"}"
+    }
+   ],
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>q<｜Assistant｜><think>r</think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "chat_two_calls",
+   "source": "canonical",
+   "mode": "chat",
+   "text": "Checking two things.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"weather::get_forecast\">\n<｜DSML｜ parameter name=\"city\" string=\"true\">Paris</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"days\" string=\"false\">3</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"metric\" string=\"false\">true</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"search\">\n<｜DSML｜ parameter name=\"q\" string=\"true\">He said \"hi\"\\path\nline2\ttab\u0001ctl < > & 日本語 😀 café</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"filters\" string=\"false\">{\"a\": [1, 2, {\"b\": null}]}</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"empty\" string=\"true\"></｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"ratio\" string=\"false\">0.5</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "Checking two things.",
+   "tool_calls": [
+    {
+     "name": "get_forecast",
+     "namespace": "weather",
+     "arguments": "{\"city\": \"Paris\", \"days\": 3, \"metric\": true}"
+    },
+    {
+     "name": "search",
+     "namespace": null,
+     "arguments": "{\"q\": \"He said \\\"hi\\\"\\\\path\\nline2\\ttab\\u0001ctl < > & 日本語 😀 café\", \"filters\": {\"a\": [1, 2, {\"b\": null}]}, \"empty\": \"\", \"ratio\": 0.5}"
+    }
+   ],
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜></think>Checking two things.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"weather::get_forecast\">\n<｜DSML｜ parameter name=\"city\" string=\"true\">Paris</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"days\" string=\"false\">3</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"metric\" string=\"false\">true</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"search\">\n<｜DSML｜ parameter name=\"q\" string=\"true\">He said \"hi\"\\path\nline2\ttab\u0001ctl < > & 日本語 😀 café</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"filters\" string=\"false\">{\"a\": [1, 2, {\"b\": null}]}</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"empty\" string=\"true\"></｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"ratio\" string=\"false\">0.5</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "chat_zero_param_call",
+   "source": "canonical",
+   "mode": "chat",
+   "text": "\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"ping\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "",
+   "tool_calls": [
+    {
+     "name": "ping",
+     "namespace": null,
+     "arguments": "{}"
+    }
+   ],
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜></think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"ping\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "chat_call_value_lookalikes",
+   "source": "canonical",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"t\">\n<｜DSML｜ parameter name=\"v\" string=\"true\"></｜DSML｜ nothing> < / ></｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "x",
+   "tool_calls": [
+    {
+     "name": "t",
+     "namespace": null,
+     "arguments": "{\"v\": \"</｜DSML｜ nothing> < / >\"}"
+    }
+   ],
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>q<｜Assistant｜></think>x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"t\">\n<｜DSML｜ parameter name=\"v\" string=\"true\"></｜DSML｜ nothing> < / ></｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "thinking_three_calls",
+   "source": "canonical",
+   "mode": "thinking",
+   "text": "plan</think>Doing three.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"a\">\n<｜DSML｜ parameter name=\"x\" string=\"false\">1</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"ns::b\">\n<｜DSML｜ parameter name=\"y\" string=\"true\">two</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"c\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "plan",
+   "content": "Doing three.",
+   "tool_calls": [
+    {
+     "name": "a",
+     "namespace": null,
+     "arguments": "{\"x\": 1}"
+    },
+    {
+     "name": "b",
+     "namespace": "ns",
+     "arguments": "{\"y\": \"two\"}"
+    },
+    {
+     "name": "c",
+     "namespace": null,
+     "arguments": "{}"
+    }
+   ],
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>q<｜Assistant｜><think>plan</think>Doing three.\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"a\">\n<｜DSML｜ parameter name=\"x\" string=\"false\">1</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"ns::b\">\n<｜DSML｜ parameter name=\"y\" string=\"true\">two</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"c\">\n\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>"
+  },
+  {
+   "name": "calls_without_eos",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "ok\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>",
+   "ok": true,
+   "reasoning": "",
+   "content": "ok",
+   "tool_calls": [
+    {
+     "name": "f",
+     "namespace": null,
+     "arguments": "{\"a\": \"x\"}"
+    }
+   ]
+  },
+  {
+   "name": "calls_only_no_content",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "",
+   "tool_calls": [
+    {
+     "name": "f",
+     "namespace": null,
+     "arguments": "{\"a\": \"x\"}"
+    }
+   ]
+  },
+  {
+   "name": "name_extra_space",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke  name=\"f\">\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "",
+   "content": "x",
+   "tool_calls": [
+    {
+     "name": "f",
+     "namespace": null,
+     "arguments": "{}"
+    }
+   ]
+  },
+  {
+   "name": "thinking_reasoning_then_eos",
+   "source": "handwritten",
+   "mode": "thinking",
+   "text": "r</think>done<｜end▁of▁sentence｜>",
+   "ok": true,
+   "reasoning": "r",
+   "content": "done",
+   "tool_calls": []
+  },
+  {
+   "name": "err_thinking_missing_end",
+   "source": "handwritten",
+   "mode": "thinking",
+   "text": "just reasoning<｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Invalid thinking format: missing </think>"
+  },
+  {
+   "name": "err_thinking_calls_in_reasoning",
+   "source": "handwritten",
+   "mode": "thinking",
+   "text": "r\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Invalid thinking format: missing </think>"
+  },
+  {
+   "name": "err_think_start_in_content",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "a<think>b<｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Unexpected special token '<think>' in content"
+  },
+  {
+   "name": "err_think_end_in_chat_content",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "a</think>b<｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Unexpected special token '</think>' in content"
+  },
+  {
+   "name": "err_dsml_in_content",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "a ｜DSML｜ b<｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Unexpected special token '｜DSML｜' in content"
+  },
+  {
+   "name": "err_bos_in_content",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "a <｜begin▁of▁sentence｜> b<｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Unexpected special token '<｜begin▁of▁sentence｜>' in content"
+  },
+  {
+   "name": "err_dsml_in_reasoning",
+   "source": "handwritten",
+   "mode": "thinking",
+   "text": "a ｜DSML｜ b</think>c<｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Unexpected special token '｜DSML｜' in content"
+  },
+  {
+   "name": "err_duplicate_param",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">1</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"a\" string=\"true\">2</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Duplicate parameter name: 'a'"
+  },
+  {
+   "name": "err_bad_gap_after_calls_open",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>junk\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Tool call format error: expected '>\\n' but got '>junk\n'"
+  },
+  {
+   "name": "err_garbage_after_calls_end",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls>tail<｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Unexpected content after tool calls"
+  },
+  {
+   "name": "err_param_missing_string_attr",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\">1</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Parameter format error: ' name=\"a\">1<'"
+  },
+  {
+   "name": "err_nested_namespace",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"a::b::c\">\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Tool name must not contain '::': b::c"
+  },
+  {
+   "name": "err_call_truncated",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">par",
+   "ok": false,
+   "error": "Parameter format error: ' name=\"a\" string=\"true\">par'"
+  },
+  {
+   "name": "err_call_truncated_after_invoke",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">x</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n",
+   "ok": false,
+   "error": "Missing special token in tool calls"
+  },
+  {
+   "name": "err_bad_name_attr",
+   "source": "handwritten",
+   "mode": "chat",
+   "text": "x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke nom=\"f\">\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
+   "ok": false,
+   "error": "Tool name format error: ' nom=\"f\">\n'"
+  }
+ ]
+}

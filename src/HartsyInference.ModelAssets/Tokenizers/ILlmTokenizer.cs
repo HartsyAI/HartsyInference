@@ -12,6 +12,9 @@ public interface ILlmTokenizer
     /// <summary>Decodes ids back to UTF-8 text (byte-level reversed), skipping special/control tokens.</summary>
     string Decode(IReadOnlyList<int> ids);
 
+    /// <summary>UTF-8 bytes token <paramref name="id"/> contributes to decoded text (empty for an id <see cref="Decode"/> skips, literal bytes for a special token when <paramref name="includeSpecial"/>); null when this tokenizer cannot report bytes and callers must re-decode.</summary>
+    byte[]? TokenBytes(int id, bool includeSpecial) => null;
+
     /// <summary>Id of a special/control token by its literal string, or null if not a known special token.</summary>
     int? SpecialId(string token);
 

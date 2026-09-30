@@ -11,6 +11,7 @@ using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.OutputParsing;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Multimodal;
 using HartsyInference.LLM.Sampling;
@@ -32,6 +33,8 @@ public sealed class TextService : ITextService, IDisposable
 
     /// <summary>How long <see cref="Unload"/> waits for an in-flight generation before giving up on a slot. Long enough to cover a full completion, bounded so a host's "free memory" call can never hang forever.</summary>
     private const int UnloadWaitSeconds = 120;
+
+    private static long _requestCounter;
 
     private readonly InferenceEngine _engine;
     private readonly ConcurrentDictionary<string, TextDeviceSlot> _slots = new(StringComparer.OrdinalIgnoreCase);
@@ -66,40 +69,18 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <inheritdoc/>
-    public async IAsyncEnumerable<TextChunk> StreamAsync(ModelSpec spec, TextRequest request,
-        [EnumeratorCancellation] CancellationToken cancel = default)
-    {
-        Channel<TextChunk> channel = Channel.CreateUnbounded<TextChunk>();
-        Task worker = Task.Run(
-            async () =>
+    public IAsyncEnumerable<TextChunk> StreamAsync(ModelSpec spec, TextRequest request, CancellationToken cancel = default)
+        => TextStreamPump.Run(
+            async (sink, token) =>
             {
-                try
-                {
-                    void Sink(TextChunk chunk) => channel.Writer.TryWrite(chunk);
-                    GenOutcome outcome = await RunAsync(spec, request, Sink, cancel).ConfigureAwait(false);
-                    channel.Writer.TryWrite(new TextChunk { Kind = TextChunkKind.Result, Text = outcome.Text });
-                    channel.Writer.TryWrite(new TextChunk { Kind = TextChunkKind.StopReason, Stop = outcome.Stop });
-                }
-                catch (OperationCanceledException)
-                {
-                    Logs.Debug("Text stream cancelled.");
-                    channel.Writer.TryWrite(new TextChunk { Kind = TextChunkKind.StopReason, Stop = StopReason.Cancelled });
-                }
-                catch (Exception ex)
-                {
-                    Logs.Error($"Text stream failed: {ex.Message}", ex);
-                    channel.Writer.TryWrite(new TextChunk { Kind = TextChunkKind.StopReason, Stop = StopReason.Error });
-                }
-                finally
-                {
-                    channel.Writer.Complete();
-                }
+                GenOutcome outcome = await RunAsync(spec, request, sink, token).ConfigureAwait(false);
+                return
+                [
+                    new TextChunk { Kind = TextChunkKind.Result, Text = outcome.Text },
+                    new TextChunk { Kind = TextChunkKind.StopReason, Stop = outcome.Stop },
+                ];
             },
             cancel);
-        await foreach (TextChunk chunk in channel.Reader.ReadAllAsync(CancellationToken.None).ConfigureAwait(false))
-            yield return chunk;
-        await worker.ConfigureAwait(false);
-    }
 
     /// <inheritdoc/>
     public int CountTokens(ModelSpec spec, string text)
@@ -199,29 +180,45 @@ public sealed class TextService : ITextService, IDisposable
             int count = 0;
             onToken = _ => _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
         }
+        IOutputParser? parser = null;
+        Action<ParsedEvent>? emit = null;
         if (sink is not null)
         {
-            List<int> acc = [];
-            int emitted = 0;
+            parser = CreateParser(template, tokenizer, genRequest, request, rawCompletion);
+            emit = new ParsedEventTranslator(sink, Interlocked.Increment(ref _requestCounter)).Handle;
+            int count = 0;
             onToken = id =>
             {
                 cancel.ThrowIfCancellationRequested();
-                acc.Add(id);
-                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, acc.Count);
-                string full = tokenizer.Decode(acc);
-                if (full.Length > emitted)
-                {
-                    sink(new TextChunk { Kind = TextChunkKind.Chunk, Text = full[emitted..] });
-                    emitted = full.Length;
-                }
+                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
+                parser.Push(id, emit);
             };
         }
 
         GenerationResult result = slot.SsmPipeline is not null ? slot.SsmPipeline.Generate(genRequest, onToken, cancel)
             : slot.Pipeline!.Generate(genRequest, onToken, cancel);
+        if (parser is not null) parser.Finish(emit!);
 
         StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;
         return new GenOutcome(result.Text, stop, result.PromptTokens, result.TokenIds.Count);
+    }
+
+    /// <summary>The structured parser when the model's template exposes one, else the passthrough that keeps plain-decode streaming.</summary>
+    private static IOutputParser CreateParser(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest,
+        TextRequest request, bool rawCompletion)
+    {
+        if (!rawCompletion && template is ChatTemplateEncoderAdapter adapter && genRequest.Messages is { } messages)
+        {
+            try
+            {
+                return adapter.CreateParser(tokenizer, messages, request.EnableThinking);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                Logs.Warning($"Structured output parser unavailable, streaming plain text: {ex.Message}");
+            }
+        }
+        return new PassthroughOutputParser(tokenizer);
     }
 
     private static GenOutcome RunVision(TextDeviceSlot slot, TextRequest request, ImageData image, Action<TextChunk>? sink, CancellationToken cancel)

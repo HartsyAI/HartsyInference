@@ -97,6 +97,13 @@ internal static class PyJson
     private static void WriteString(StringBuilder sb, string s)
     {
         sb.Append('"');
+        AppendEscaped(sb, s);
+        sb.Append('"');
+    }
+
+    /// <summary>Appends <paramref name="s"/> escaped as the body of a JSON string exactly like <c>json.dumps(ensure_ascii=False)</c>; per-character, so it may be applied to a string in pieces.</summary>
+    public static void AppendEscaped(StringBuilder sb, string s)
+    {
         foreach (char c in s)
         {
             switch (c)
@@ -114,7 +121,6 @@ internal static class PyJson
                     break;
             }
         }
-        sb.Append('"');
     }
 
     /// <summary>Python's shortest-repr float formatting (exponent form when the decimal point sits at or below -4 or above 16).</summary>
