@@ -759,9 +759,9 @@
       "feature": "Streaming output parser (reasoning, DSML tool calls)",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Unsupported",
+        "Vulkan": "Unsupported"
       },
       "placement": [
         "n/a"
@@ -780,7 +780,8 @@
       ],
       "acceptanceTest": "every split point == one-shot parse; abandoned consumer releases slot < 1 s",
       "pr": 11,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "DeepSeekV41OutputParser + IncrementalDetokenizer + TextStreamPump: every split point equals encoding.py (26 ok + 15 malformed cases, also on the real tokenizer); TextService streams Reasoning/ToolCallDelta chunks; Usage/Status chunks are declared but not emitted yet; no model template maps to the encoder adapter yet, so the parser is dormant in production"
     },
     {
       "id": "spec.contract",

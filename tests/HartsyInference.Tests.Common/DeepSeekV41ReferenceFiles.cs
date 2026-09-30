@@ -13,6 +13,10 @@ public static class DeepSeekV41ReferenceFiles
     /// <summary>Path of the upstream golden input/output fixtures directory.</summary>
     public static string EncodingDir => Path.Combine(ReferenceDir, "encoding");
 
+    /// <summary>Path of the encoding.py completion-parse dump (parser_reference.json) that the streaming parser is checked against.</summary>
+    public static string ParserReferenceJson { get; } = Path.Combine(
+        RepoRoot.Path, "tests", "python-reference", "deepseek_v41", "parser_reference", "parser_reference.json");
+
     /// <summary>Real tokenizer.json from DSV41_TOKENIZER_JSON, the reference checkout or the model RAID; null when absent.</summary>
     public static string? FindTokenizerJson()
     {

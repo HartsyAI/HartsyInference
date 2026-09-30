@@ -27,6 +27,7 @@ public sealed class GgufTokenizer : ILlmTokenizer
     private readonly Regex? _preTokenRegex;                  // family-specific pre-token split
     private readonly PreTokenizerPipeline? _pipeline;        // multi-stage HF pre-tokenizer (wins over the regex)
     private readonly bool _ignoreMerges;                     // emit a whole pre-token directly if it's in vocab
+    private readonly byte[]?[] _tokenBytes;                  // lazily filled id → decoded bytes
 
     public int? BosId { get; }
     public int? EosId { get; }
@@ -48,6 +49,7 @@ public sealed class GgufTokenizer : ILlmTokenizer
             throw new NotSupportedException("GGUF has no BPE merges (tiktoken/SentencePiece-style); Phase 1 supports byte-level BPE only.");
 
         _tokens = tokens;
+        _tokenBytes = new byte[tokens.Length][];
         _tokenToId = new Dictionary<string, int>(tokens.Length, StringComparer.Ordinal);
         for (int i = 0; i < tokens.Length; i++) _tokenToId.TryAdd(tokens[i], i);
 
@@ -118,6 +120,13 @@ public sealed class GgufTokenizer : ILlmTokenizer
             i = next;
         }
         return [.. ids];
+    }
+
+    public byte[]? TokenBytes(int id, bool includeSpecial)
+    {
+        if (id < 0 || id >= _tokens.Length) return [];
+        if (_specialIds.Contains(id)) return includeSpecial ? Encoding.UTF8.GetBytes(_tokens[id]) : [];
+        return _tokenBytes[id] ??= ByteLevelCodec.DecodeToBytes(_tokens[id]);
     }
 
     public string Decode(IReadOnlyList<int> ids)
