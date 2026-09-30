@@ -6,6 +6,28 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.229
+
+- **Folders under the models root are matched ignoring case when the engine's spelling is missing.** On a
+  case-sensitive filesystem the catalog's `LLM/qwen3/Qwen3-4B-Q4_K_M.gguf` never found the SwarmUI store's
+  `llm/qwen3/`, so `qwen3` resolved to nothing and a download would have created a second `LLM/` beside `llm/`.
+  `CaseInsensitivePath` (`HartsyInference.Core.IO`: `ResolveFile`, `ResolveDirectory`, `ResolveEntry`) resolves a path
+  under a root one segment at a time:
+  - an existing exact path comes back exactly as `Path.Combine` builds it, which is always the case on Windows and
+    macOS;
+  - otherwise each segment takes the one sibling of the right kind whose name differs only in case; two or more are
+    ambiguous, logged once, and keep the engine's spelling;
+  - a segment that resolves to nothing keeps its spelling along with the rest of the path, so a download lands in the
+    folders that already exist. Only a missing segment costs a listing of its parent.
+- Used by `ModelDownloader.TargetPath` (the catalog path `ModelResolver` checks first, every download target and
+  `MissingAssets`) and the `ModelResolver` modality-folder guess. The readers of the same folders resolve them the same
+  way, so a download and its loader keep agreeing: `AudioModelRoot` (root and weights folders), the downloader's audio
+  stand-in check, the `AudioModelCache` root, `ModelFileLocator` subfolders, `VisionModelPaths`, and the LTX-2
+  latent-upsampler and IP-Adapter face-detector scans. The wake model root is now `WakeService.DefaultModelRoot()`,
+  shared by the service, `SpeakerProfileStore.DefaultDirectory` and `hartsy wake train`.
+- A lookup that used to miss on a store holding a case variant now finds it, e.g. AudioLab's `audio/music/YuE2/` for
+  YuE2's `audio/music/yue2` and `audio/clone/RVC/` for RVC's `clone/rvc`. Documented in `docs/SETTINGS.md`.
+
 ## alpha.227
 
 - **Whisper transcription is GPU-resident; small.en meets the phone-agent STT gate on the RTX 3060.** Per utterance
