@@ -20,7 +20,8 @@ namespace HartsyInference.PhoneGateway.Media;
 /// deadline; the refusal reason is logged once and kept in <see cref="FifoReason"/>. Only PCMU and PCMA at 8 kHz
 /// are offered. An exception on the tick thread ends it: <see cref="Faulted"/> turns true before <see cref="Start"/>
 /// returns or anything else runs, and <see cref="TickFaulted"/> is raised once, on the dying thread, so the owner can
-/// end a call that would otherwise stay up in silence.</remarks>
+/// end a call that would otherwise stay up in silence. One source serves one call: it may be stopped and started
+/// again, but a faulted source refuses to start.</remarks>
 public sealed class ClockedAudioSource : IAudioSource, IDisposable
 {
     /// <summary>The only sample rate this source produces.</summary>
@@ -189,12 +190,15 @@ public sealed class ClockedAudioSource : IAudioSource, IDisposable
         lock (_lifecycleLock)
         {
             ObjectDisposedException.ThrowIf(_closed, this);
+            if (_faulted)
+            {
+                throw new InvalidOperationException("This ClockedAudioSource faulted and is not restarted; end the call and give the next one a new source.");
+            }
             if (_thread is not null)
             {
                 throw new InvalidOperationException("ClockedAudioSource is already started.");
             }
             _running = true;
-            _faulted = false;
             _started.Reset();
             _thread = new Thread(ThreadMain, ThreadStackBytes) { Name = _options.ThreadName, IsBackground = false };
             _thread.Start();

@@ -13,6 +13,7 @@
     "codec": "Any",
     "inboundPolicy": "AllowAll",
     "allowlist": [],
+    "destinationPrefixes": [],
     "greetingPromptFile": null,
     "ringTimeoutSeconds": 45
   },

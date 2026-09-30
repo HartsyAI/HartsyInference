@@ -101,7 +101,7 @@ never in the environment: the `*File` fields name secret files, read once at sta
     "registrationExpirySeconds": 60,
     "publicAddress": "none",
     "rtpPortStart": 20000, "rtpPortEnd": 20100,
-    "codec": "Any", "inboundPolicy": "AllowAll", "allowlist": [],
+    "codec": "Any", "inboundPolicy": "AllowAll", "allowlist": [], "destinationPrefixes": [],
     "greetingPromptFile": null, "ringTimeoutSeconds": 45
   },
   "link": {
@@ -124,7 +124,8 @@ never in the environment: the `*File` fields name secret files, read once at sta
 | `sip.publicAddress` | `none` (local address), an IP literal, or `stun:host[:port]`; STUN is re-asked before every REGISTER and the Contact host rewritten. |
 | `sip.rtpPortStart/End` | RTP port range (shuffled). Forward it, and `sip.port`, on the router for a provider; nothing to do on a LAN. |
 | `sip.codec` | `Any` (PCMU then PCMA), `Pcmu`, `Pcma`. Only G.711 at 8 kHz is ever negotiated. |
-| `sip.inboundPolicy` | `AllowAll`, `Allowlist` (caller user part in `allowlist`, else 603), `Reject` (always 603). |
+| `sip.inboundPolicy` | `AllowAll`, `Allowlist` (caller user part in `allowlist`, else 603), `Reject` (always 603). The allowlist matches the `From` header, which anyone who can reach `sip.port` can set: on a trunk, firewall `sip.port` and the RTP range to the provider's addresses. |
+| `sip.destinationPrefixes` | Number prefixes (e.g. `+1555`) that outbound calls and the `transfer` tool may dial, matched against the number or a SIP URI's user part; empty allows any. The agent can be talked into dialling by its caller, so set this on a real trunk to rule out premium-rate toll fraud. |
 | `sip.greetingPromptFile` | Raw 8 kHz PCM16 file played to every answered inbound call before the host speaks. |
 | `link.outageHangupSeconds` | How long a live call waits for the host before "goodbye" and hang-up. |
 | `link.tokenFile` | Absolute path of the file holding the shared PhoneLink token sent in `Hello`; empty sends no token. |
@@ -165,10 +166,12 @@ Admin endpoint (loopback only): `GET /health` (JSON, 200 when the link is up and
 (`calls_media_fault_total`), link state and RTT, lane drops, and for the live call the tick lateness histogram,
 jitter-buffer counters and pump counters), `POST /calls` with
 `Authorization: Bearer <token>` and `{"destination":"sip:user@host"}` (or a number, dialled through the
-registrar): 202 placed, 409 busy, 503 host down, 502 not answered.
+registrar): 202 placed, 409 busy, 503 host down, 403 destination outside `sip.destinationPrefixes`, 400 a bare
+number with no registrar, 502 not answered or media setup failed. A failed media setup (no free RTP port, for one)
+answers an INVITE with 500 and leaves the gateway idle, ready for the next call.
 
 Telephony tools the host may request over the link: `hangup`, `send_dtmf` (`digits`, optional `gapMs`),
-`transfer` (`target`, blind), `hold`, `unhold`, `play_prompt` (`file` = raw 8 kHz PCM16 path, or `name` =
+`transfer` (`target`, blind, refused outside `sip.destinationPrefixes`), `hold`, `unhold`, `play_prompt` (`file` = raw 8 kHz PCM16 path, or `name` =
 `one-moment` | `goodbye`; `text` is answered `Unsupported`, the gateway has no TTS). Caller DTMF (RFC 4733)
 arrives as `DtmfEvent` with the duration in ms.
 

@@ -12,6 +12,10 @@ public sealed record CallControllerOptions
     /// <summary>Caller user parts (numbers or SIP users) answered under <see cref="InboundPolicy.Allowlist"/>.</summary>
     public IReadOnlyList<string> Allowlist { get; init; } = [];
 
+    /// <summary>When not empty, an outbound call or a <c>transfer</c> must dial a number (a SIP URI's user part)
+    /// starting with one of these; empty allows any destination.</summary>
+    public IReadOnlyList<string> DestinationPrefixes { get; init; } = [];
+
     /// <summary>Raw 8 kHz PCM16 file played to every answered inbound call before the host speaks; null for none.</summary>
     public string? GreetingPromptFile { get; init; }
 

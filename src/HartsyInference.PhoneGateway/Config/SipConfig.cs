@@ -36,6 +36,10 @@ public sealed record SipConfig
 
     public string[] Allowlist { get; set; } = [];
 
+    /// <summary>Number prefixes outbound calls and transfers may dial (e.g. <c>+1555</c>); empty allows any. The agent
+    /// can be talked into dialling by its caller, so set this on a real trunk.</summary>
+    public string[] DestinationPrefixes { get; set; } = [];
+
     /// <summary>Raw 8 kHz PCM16 file played to every answered inbound call; null for none.</summary>
     public string? GreetingPromptFile { get; set; }
 

@@ -108,6 +108,71 @@ public sealed class CallControllerSipTests
     }
 
     [Fact]
+    public async Task MediaSetupFailure_OnAnOutboundCall_ReturnsFailedAndLeavesTheGatewayUsable()
+    {
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
+        using Softphone phone = new();
+        gateway.Controller.MediaCreated = (_, _) => throw new InvalidOperationException("injected setup failure");
+
+        CallPlacementResult failed = await gateway.Controller.PlaceCallAsync($"sip:phone@127.0.0.1:{phone.Port}");
+
+        Assert.Equal(CallPlacementStatus.Failed, failed.Status);
+        Assert.Equal(CallState.Idle, gateway.Controller.State);
+        gateway.Controller.MediaCreated = null;
+        CallPlacementResult placed = await gateway.Controller.PlaceCallAsync($"sip:phone@127.0.0.1:{phone.Port}");
+        Assert.True(placed.Placed, placed.Message);
+        gateway.Controller.HangUp(LinkCallEndReason.Completed);
+        Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Idle, WaitMs));
+    }
+
+    [Fact]
+    public async Task MediaSetupFailure_OnAnInboundCall_Answers500AndLeavesTheGatewayUsable()
+    {
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
+        gateway.Controller.MediaCreated = (_, _) => throw new InvalidOperationException("injected setup failure");
+        using Softphone first = new();
+
+        Assert.False(await first.CallAsync(gateway.Port));
+
+        _output.WriteLine($"failed setup: {first.LastFailureStatus} {first.LastFailure}");
+        Assert.Equal(500, first.LastFailureStatus);
+        Assert.Equal(CallState.Idle, gateway.Controller.State);
+        gateway.Controller.MediaCreated = null;
+        using Softphone second = new();
+        Assert.True(await second.CallAsync(gateway.Port), $"call failed: {second.LastFailure}");
+        Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Active, WaitMs));
+        second.Agent.Hangup();
+        Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Idle, WaitMs));
+    }
+
+    [Fact]
+    public async Task DestinationPrefixes_RefuseAnOutboundCallAndATransfer()
+    {
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions { DestinationPrefixes = ["+1555"] });
+        using Softphone phone = new();
+
+        CallPlacementResult refused = await gateway.Controller.PlaceCallAsync($"sip:phone@127.0.0.1:{phone.Port}");
+        Assert.Equal(CallPlacementStatus.NotAllowed, refused.Status);
+        Assert.Equal(CallState.Idle, gateway.Controller.State);
+
+        Assert.True(await phone.CallAsync(gateway.Port), $"call failed: {phone.LastFailure}");
+        Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Active, WaitMs));
+        uint callId = gateway.Controller.Current!.CallId;
+        using (System.Text.Json.JsonDocument arguments = System.Text.Json.JsonDocument.Parse("{\"target\":\"sip:+19005551234@premium.example\"}"))
+        {
+            gateway.Host.SendToolRequest(callId, 9, new ToolRequestMessage { Name = "transfer", Arguments = arguments.RootElement });
+        }
+        Assert.True(gateway.Host.WaitUntil(() => gateway.Host.FramesOf(LinkMessageType.ToolResult).Count == 1, WaitMs));
+        ToolResultMessage result = gateway.Host.FramesOf(LinkMessageType.ToolResult)[0].AsFrame().ReadToolResult(out uint requestId);
+        Assert.Equal(9u, requestId);
+        Assert.Equal(LinkToolStatus.Failed, result.Status);
+        Assert.Contains("destinationPrefixes", result.Message, StringComparison.Ordinal);
+        Assert.Equal(CallState.Active, gateway.Controller.State);
+        phone.Agent.Hangup();
+        Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Idle, WaitMs));
+    }
+
+    [Fact]
     public async Task BusyInvite_RetransmittedThreeTimes_IsAnsweredEachTimeAndCountedOnce()
     {
         using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());

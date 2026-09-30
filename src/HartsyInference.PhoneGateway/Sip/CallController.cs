@@ -147,24 +147,34 @@ public sealed class CallController : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         SIPUserAgent agent = _agent ?? throw new InvalidOperationException("CallController is not started.");
-        string uri = destination.Contains(':') ? destination : $"sip:{destination}@{_account.Registrar}";
-        if (!destination.Contains(':') && _account.Registrar.Length == 0)
+        bool isUri = destination.Contains(':');
+        if (!isUri && _account.Registrar.Length == 0)
         {
-            return new CallPlacementResult(false, "a bare number needs a registrar; give a full sip: URI");
+            return new CallPlacementResult(CallPlacementStatus.Invalid, "a bare number needs a registrar; give a full sip: URI");
         }
+        if (!IsDestinationAllowed(destination, _options.DestinationPrefixes))
+        {
+            return new CallPlacementResult(CallPlacementStatus.NotAllowed, "the destination does not match sip.destinationPrefixes");
+        }
+        string uri = isUri ? destination : $"sip:{destination}@{_account.Registrar}";
         lock (_stateLock)
         {
             if (_state != CallState.Idle)
             {
-                return new CallPlacementResult(false, "busy");
+                return new CallPlacementResult(CallPlacementStatus.Busy, "busy");
             }
             if (!_link.IsConnected)
             {
-                return new CallPlacementResult(false, "voice host unavailable");
+                return new CallPlacementResult(CallPlacementStatus.HostUnavailable, "voice host unavailable");
             }
             _state = CallState.Ringing;
         }
-        ActiveCall call = CreateCall(LinkCallDirection.Outbound, _account.Username, destination, "");
+        ActiveCall? call = TryCreateCall(LinkCallDirection.Outbound, _account.Username, destination, "");
+        if (call is null)
+        {
+            _metrics.Failed();
+            return new CallPlacementResult(CallPlacementStatus.Failed, "the call's media could not be set up");
+        }
         bool answered;
         try
         {
@@ -181,15 +191,41 @@ public sealed class CallController : IDisposable
         {
             AbandonRinging(call);
             _metrics.Failed();
-            return new CallPlacementResult(false, LastCallFailure.Length == 0 ? "not answered" : LastCallFailure);
+            return new CallPlacementResult(CallPlacementStatus.NotAnswered, LastCallFailure.Length == 0 ? "not answered" : LastCallFailure);
         }
         call.SipCallId = agent.Dialogue?.CallId ?? "";
         if (!Activate(call))
         {
             EndBeforeAnnouncing(call, agent);
-            return new CallPlacementResult(false, "media fault");
+            return new CallPlacementResult(CallPlacementStatus.Failed, "media fault");
         }
         return CallPlacementResult.Ok;
+    }
+
+    /// <summary>True when <paramref name="destination"/> may be dialled: <paramref name="prefixes"/> is empty, or the
+    /// number (a SIP URI's user part, or the text before <c>@</c>) starts with one of them. The agent is steerable by its
+    /// caller, so an open dial plan on a real trunk is toll fraud waiting to happen.</summary>
+    internal static bool IsDestinationAllowed(string destination, IReadOnlyList<string> prefixes)
+    {
+        if (prefixes.Count == 0)
+        {
+            return true;
+        }
+        string number;
+        if (destination.Contains(':'))
+        {
+            if (!SIPURI.TryParse(destination, out SIPURI uri) || uri is null)
+            {
+                return false;
+            }
+            number = uri.User ?? "";
+        }
+        else
+        {
+            int at = destination.IndexOf('@');
+            number = at < 0 ? destination : destination[..at];
+        }
+        return number.Length > 0 && prefixes.Any(prefix => number.StartsWith(prefix, StringComparison.Ordinal));
     }
 
     /// <summary>Ends the live call from our side with <paramref name="reason"/> and tells the host.</summary>
@@ -341,6 +377,12 @@ public sealed class CallController : IDisposable
                 Logs.Info($"[PhoneGateway] INVITE from {caller} declined by policy {_options.InboundPolicy}: 603.");
                 break;
         }
+        RejectOnTransaction(request, status, reason);
+    }
+
+    /// <summary>Sends a final response on a new server transaction for <paramref name="request"/>.</summary>
+    private void RejectOnTransaction(SIPRequest request, SIPResponseStatusCodesEnum status, string reason)
+    {
         try
         {
             UASInviteTransaction transaction = new(_account.Transport, request, null);
@@ -373,7 +415,14 @@ public sealed class CallController : IDisposable
 
     private async Task AnswerAsync(SIPUserAgent agent, SIPRequest request, string? caller, string? called)
     {
-        ActiveCall call = CreateCall(LinkCallDirection.Inbound, caller, called, request.Header.CallId ?? "");
+        ActiveCall? call = TryCreateCall(LinkCallDirection.Inbound, caller, called, request.Header.CallId ?? "");
+        if (call is null)
+        {
+            // Nothing was answered: refuse the INVITE so the caller is not left ringing.
+            RejectOnTransaction(request, SIPResponseStatusCodesEnum.InternalServerError, "Media setup failed");
+            _metrics.Failed();
+            return;
+        }
         SIPServerUserAgent? uas = null;
         bool answered;
         try
@@ -449,26 +498,58 @@ public sealed class CallController : IDisposable
         _ => false,
     };
 
+    /// <summary>Builds a ringing call's media. On failure (no free RTP port, for one) it logs, puts the controller back to
+    /// idle and returns null, so one failed setup cannot leave the gateway answering 486 until it restarts.</summary>
+    private ActiveCall? TryCreateCall(LinkCallDirection direction, string? callerId, string? called, string sipCallId)
+    {
+        try
+        {
+            return CreateCall(direction, callerId, called, sipCallId);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[PhoneGateway] Could not set up media for the {direction} call; staying idle", ex);
+            lock (_stateLock)
+            {
+                _state = CallState.Idle;
+                _ringingSipCallId = null;
+            }
+            return null;
+        }
+    }
+
     private ActiveCall CreateCall(LinkCallDirection direction, string? callerId, string? called, string sipCallId)
     {
         uint callId = Interlocked.Increment(ref _nextCallId);
         CallRecorder? recorder = _options.Recording.Enabled ? CallRecorder.TryOpen(_options.Recording.Directory, sipCallId.Length == 0 ? callId.ToString() : sipCallId) : null;
         ClockedAudioSource source = new(_options.Tick with { Codec = _options.Codec });
-        InboundAudioSink sink = new(_options.Codec);
-        PhoneMediaSession session = new(
-            new MediaEndPoints { AudioSource = source, AudioSink = sink },
-            _options.BindAddress,
-            new PortRange(_options.RtpPortStart, _options.RtpPortEnd, shuffle: true),
-            _account.PublicAddress.LastResolved);
-        RtpJitterBuffer jitter = new();
-        InboundAudioPath inbound = new(jitter, _link, callId, recorder);
-        OutboundAudioPath outbound = new(source, recorder);
-        session.OnRtpPacketReceived += inbound.HandleRtpPacket;
-        ActiveCall call = new(callId, direction, callerId, called, sipCallId, source, session, jitter, inbound, outbound, recorder);
-        source.TickFaulted += fault => OnMediaFault(call, "RTP tick", fault);
-        inbound.PumpFaulted += fault => OnMediaFault(call, "RTP pump", fault);
-        MediaCreated?.Invoke(source, inbound);
-        return call;
+        PhoneMediaSession? session = null;
+        try
+        {
+            InboundAudioSink sink = new(_options.Codec);
+            session = new PhoneMediaSession(
+                new MediaEndPoints { AudioSource = source, AudioSink = sink },
+                _options.BindAddress,
+                new PortRange(_options.RtpPortStart, _options.RtpPortEnd, shuffle: true),
+                _account.PublicAddress.LastResolved);
+            RtpJitterBuffer jitter = new();
+            InboundAudioPath inbound = new(jitter, _link, callId, recorder);
+            OutboundAudioPath outbound = new(source, recorder);
+            session.OnRtpPacketReceived += inbound.HandleRtpPacket;
+            ActiveCall call = new(callId, direction, callerId, called, sipCallId, source, session, jitter, inbound, outbound, recorder);
+            source.TickFaulted += fault => OnMediaFault(call, "RTP tick", fault);
+            inbound.PumpFaulted += fault => OnMediaFault(call, "RTP pump", fault);
+            MediaCreated?.Invoke(source, inbound);
+            return call;
+        }
+        catch
+        {
+            // Nothing has started yet; release the sockets and the recording files the half-built call holds.
+            session?.Dispose();
+            source.Dispose();
+            recorder?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Media is up: announce the call, start the pump, play the greeting. False, and nothing announced, when a
@@ -770,6 +851,11 @@ public sealed class CallController : IDisposable
                 case "transfer":
                 {
                     string target = Argument(request, "target") ?? throw new ArgumentException("transfer needs 'target'.");
+                    if (!IsDestinationAllowed(target, _options.DestinationPrefixes))
+                    {
+                        Reply(call.CallId, requestId, LinkToolStatus.Failed, "the transfer target does not match sip.destinationPrefixes");
+                        return;
+                    }
                     if (agent is null)
                     {
                         throw new InvalidOperationException("no SIP agent");

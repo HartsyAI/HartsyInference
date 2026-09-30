@@ -46,6 +46,7 @@ public sealed class GatewayHost : IDisposable
         {
             InboundPolicy = config.Sip.InboundPolicy,
             Allowlist = config.Sip.Allowlist,
+            DestinationPrefixes = config.Sip.DestinationPrefixes,
             GreetingPromptFile = config.Sip.GreetingPromptFile,
             Codec = config.Sip.Codec,
             RtpPortStart = config.Sip.RtpPortStart,

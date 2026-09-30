@@ -106,6 +106,10 @@ public static class GatewayConfigLoader
         {
             throw new GatewayConfigException("sip.inboundPolicy is Allowlist but sip.allowlist is empty.");
         }
+        if (sip.DestinationPrefixes.Any(string.IsNullOrWhiteSpace))
+        {
+            throw new GatewayConfigException("sip.destinationPrefixes may not contain an empty prefix (it would allow every destination).");
+        }
         if (sip.GreetingPromptFile is not null && !File.Exists(sip.GreetingPromptFile))
         {
             throw new GatewayConfigException($"sip.greetingPromptFile '{sip.GreetingPromptFile}' does not exist.");

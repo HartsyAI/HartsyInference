@@ -14,6 +14,7 @@ namespace HartsyInference.PhoneGateway.Admin;
 public sealed class AdminEndpoint : IDisposable
 {
     private const int MaxBodyBytes = 4096;
+    private const int StopWaitMs = 1000;
 
     private readonly int _port;
     private readonly byte[]? _token;
@@ -55,6 +56,8 @@ public sealed class AdminEndpoint : IDisposable
         {
             _listener.Stop();
         }
+        // The accept loop ends as soon as the listener stops; let it finish before Dispose closes the listener.
+        _loop?.Wait(StopWaitMs);
     }
 
     private async Task AcceptLoopAsync()
@@ -132,10 +135,23 @@ public sealed class AdminEndpoint : IDisposable
             await WriteAsync(response, 413, "text/plain", "body too large\n"u8.ToArray()).ConfigureAwait(false);
             return;
         }
+        // A chunked body declares no length, so the cap is enforced on what is actually read.
+        byte[] buffer = new byte[MaxBodyBytes + 1];
+        int length = 0;
+        int read;
+        while (length < buffer.Length && (read = await request.InputStream.ReadAsync(buffer.AsMemory(length)).ConfigureAwait(false)) > 0)
+        {
+            length += read;
+        }
+        if (length > MaxBodyBytes)
+        {
+            await WriteAsync(response, 413, "text/plain", "body too large\n"u8.ToArray()).ConfigureAwait(false);
+            return;
+        }
         PlaceCallRequest? body;
         try
         {
-            body = await JsonSerializer.DeserializeAsync(request.InputStream, AdminJsonContext.Default.PlaceCallRequest).ConfigureAwait(false);
+            body = JsonSerializer.Deserialize(buffer.AsSpan(0, length), AdminJsonContext.Default.PlaceCallRequest);
         }
         catch (JsonException)
         {
@@ -147,10 +163,20 @@ public sealed class AdminEndpoint : IDisposable
             return;
         }
         CallPlacementResult result = await _placeCall(body.Destination).ConfigureAwait(false);
-        int status = result.Placed ? 202 : result.Message == "busy" ? 409 : result.Message == "voice host unavailable" ? 503 : 502;
         PlaceCallResponse reply = new() { Placed = result.Placed, Message = result.Message };
-        await WriteJsonAsync(response, status, JsonSerializer.SerializeToUtf8Bytes(reply, AdminJsonContext.Default.PlaceCallResponse)).ConfigureAwait(false);
+        await WriteJsonAsync(response, HttpStatusFor(result.Status), JsonSerializer.SerializeToUtf8Bytes(reply, AdminJsonContext.Default.PlaceCallResponse)).ConfigureAwait(false);
     }
+
+    /// <summary>The HTTP status <c>POST /calls</c> answers for each placement outcome.</summary>
+    internal static int HttpStatusFor(CallPlacementStatus status) => status switch
+    {
+        CallPlacementStatus.Placed => 202,
+        CallPlacementStatus.Busy => 409,
+        CallPlacementStatus.HostUnavailable => 503,
+        CallPlacementStatus.NotAllowed => 403,
+        CallPlacementStatus.Invalid => 400,
+        _ => 502,
+    };
 
     private bool Authorized(HttpListenerRequest request)
     {

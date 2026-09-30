@@ -27,29 +27,31 @@ internal static class SecretFile
         {
             throw new GatewayConfigException($"{setting} '{path}' must be an absolute path.");
         }
-        FileInfo info = new(path);
-        if (!info.Exists)
+        if (!File.Exists(path))
         {
             throw new GatewayConfigException($"{setting}: secret file {path} does not exist.");
-        }
-        if (!OperatingSystem.IsWindows())
-        {
-            UnixFileMode mode = File.GetUnixFileMode(path);
-            if ((mode & GroupOrOther) != 0)
-            {
-                throw new GatewayConfigException(
-                    $"{setting}: secret file {path} is accessible by group or others (mode 0{Convert.ToString((int)mode, 8)}); "
-                    + $"restrict it to its owner, e.g. chmod 600 {path}.");
-            }
-        }
-        if (info.Length > MaxBytes)
-        {
-            throw new GatewayConfigException($"{setting}: secret file {path} is {info.Length} bytes; a secret is at most {MaxBytes}.");
         }
         string value;
         try
         {
-            value = File.ReadAllText(path, Encoding.UTF8);
+            // One handle for the mode check, the size check and the read, so the file checked is the file read.
+            using FileStream stream = new(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (!OperatingSystem.IsWindows())
+            {
+                UnixFileMode mode = File.GetUnixFileMode(stream.SafeFileHandle);
+                if ((mode & GroupOrOther) != 0)
+                {
+                    throw new GatewayConfigException(
+                        $"{setting}: secret file {path} is accessible by group or others (mode 0{Convert.ToString((int)mode, 8)}); "
+                        + $"restrict it to its owner, e.g. chmod 600 {path}.");
+                }
+            }
+            if (stream.Length > MaxBytes)
+            {
+                throw new GatewayConfigException($"{setting}: secret file {path} is {stream.Length} bytes; a secret is at most {MaxBytes}.");
+            }
+            using StreamReader reader = new(stream, Encoding.UTF8);
+            value = reader.ReadToEnd();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {

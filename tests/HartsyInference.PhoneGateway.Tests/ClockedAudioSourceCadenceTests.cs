@@ -181,6 +181,8 @@ public sealed class ClockedAudioSourceCadenceTests
         source.Stop();
         Assert.Same(injected, reported);
         Assert.Equal(0, source.Ticks);
+        InvalidOperationException restart = Assert.Throws<InvalidOperationException>(source.Start);
+        Assert.Contains("faulted", restart.Message, StringComparison.Ordinal);
     }
 
     [Fact]
