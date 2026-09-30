@@ -47,6 +47,7 @@ public sealed partial class CudaKernels
         long scaleStride, int scaleColOffset, int blockRows, int blockCols, nint stream)
     {
         if (_nvfp4ModelOptToBf16 == 0) throw new InvalidOperationException("dequant_recipe_to_bf16.ptx not present in the Ptx folder.");
+        if (blockCols <= 0) throw new ArgumentOutOfRangeException(nameof(blockCols), blockCols, "NVFP4 dequant needs a positive block width.");
         ulong pArg = packed, sArg = scale, oArg = output, gArg = globalScale;
         uint rowsArg = (uint)rows, widthArg = (uint)packedCols, offsetArg = (uint)scaleColOffset;
         uint blockRowsArg = (uint)blockRows, blockColsArg = (uint)blockCols;
