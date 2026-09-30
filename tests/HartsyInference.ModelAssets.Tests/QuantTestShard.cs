@@ -28,7 +28,7 @@ internal sealed class QuantTestShard : IDisposable
     private static int ElementBytes(string dtype) => dtype switch
     {
         "F8_E4M3" or "F8_E8M0" or "I8" or "U8" => 1,
-        "BF16" or "F16" => 2,
+        "BF16" or "F16" or "I16" => 2,
         "F32" or "U32" or "I32" => 4,
         _ => throw new ArgumentException($"Unknown test dtype {dtype}."),
     };

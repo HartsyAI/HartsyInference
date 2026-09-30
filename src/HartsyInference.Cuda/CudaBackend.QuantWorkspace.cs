@@ -56,6 +56,16 @@ public sealed partial class CudaBackend
         EnsureKernels();
         if (_kernels is not { HasRecipeDequantKernels: true })
             throw new NotSupportedException("dequant_recipe_to_bf16.ptx is not loaded (Kernels/dequant/build.sh).");
+        if (recipe.Encoding == QuantEncoding.Exl3Trellis)
+        {
+            if (!_kernels.HasExl3DequantKernel)
+                throw new NotSupportedException("The EXL3 dequant kernel is not available on this device (missing PTX entry or no 66,048-byte shared memory opt-in).");
+            // packed = trellis, scale = suh, extra = svh (the workspace resolves the resident pointers).
+            _kernels.LaunchExl3Dequant(
+                output, packed, scale, extra, checked((int)(recipe.LogicalRows / Exl3Format.TileSize)), 0,
+                checked((int)(recipe.LogicalRows / Exl3Format.HadamardBlock)), checked((int)recipe.LogicalCols), _stream.Handle);
+            return;
+        }
         long stride = recipe.Scale!.Shape[1];
         int rows = checked((int)recipe.LogicalRows);
         int cols = checked((int)recipe.LogicalCols);

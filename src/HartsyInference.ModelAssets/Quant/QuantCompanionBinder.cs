@@ -61,7 +61,7 @@ public static class QuantCompanionBinder
         QuantFlavor.AmdQuark => [".weight_scale"],
         QuantFlavor.NvidiaNvfp4 => [".scale", ".weight_scale", ".weight_scale_2", ".input_scale"],
         QuantFlavor.Mlx => [".scales", ".biases"],
-        _ => [".suh", ".svh", ".mcg"],
+        _ => [".suh", ".svh", ".mcg", ".scale", ".weight_scale"],
     };
 
     private static void BindScaledWeight(BindingRun run, string key, QuantFlavor flavor)
@@ -69,11 +69,18 @@ public static class QuantCompanionBinder
         if (!key.EndsWith(".weight", StringComparison.Ordinal)) return;
         TensorLocation weight = run.Inventory[key];
         bool isFp8 = weight.DType == DType.F8E4M3;
-        bool isFp4 = weight.DType == DType.I8 || (flavor == QuantFlavor.AmdQuark && weight.DType == DType.U8);
+        // The EXL3 derivative keeps FP8 for everything the trellis does not cover, so it has no FP4 weights.
+        bool isFp4 = flavor != QuantFlavor.Exl3 && (weight.DType == DType.I8 || (flavor == QuantFlavor.AmdQuark && weight.DType == DType.U8));
         if (!isFp8 && !isFp4) return;
 
         string baseName = key[..^".weight".Length];
-        string[] suffixes = flavor == QuantFlavor.Official ? [".scale", ".weight_scale_inv"] : [".weight_scale"];
+        // Read from the real index: the dense weights carry '.scale' (F8_E8M0) and the MXFP8 lm_head carries '.weight_scale' (U8).
+        string[] suffixes = flavor switch
+        {
+            QuantFlavor.Official => [".scale", ".weight_scale_inv"],
+            QuantFlavor.Exl3 => [".scale", ".weight_scale"],
+            _ => [".weight_scale"],
+        };
         List<string> present = suffixes.Select(s => baseName + s).Where(run.Inventory.ContainsKey).ToList();
         if (present.Count != 1)
         {
@@ -213,26 +220,63 @@ public static class QuantCompanionBinder
 
     private static void BindExl3(BindingRun run, string key)
     {
+        // Everything except the routed experts keeps the official FP8 layout (and the lm_head is MXFP8); only '.trellis' is EXL3.
+        if (key.EndsWith(".weight", StringComparison.Ordinal))
+        {
+            BindScaledWeight(run, key, QuantFlavor.Exl3);
+            return;
+        }
         if (!key.EndsWith(".trellis", StringComparison.Ordinal)) return;
         TensorLocation trellis = run.Inventory[key];
         string baseName = key[..^".trellis".Length];
-        string[] names = [baseName + ".suh", baseName + ".svh", baseName + ".mcg"];
-        List<string> missing = names.Where(n => !run.Inventory.ContainsKey(n)).ToList();
+        string suhKey = baseName + ".suh", svhKey = baseName + ".svh", mcgKey = baseName + ".mcg";
+        string[] names = [suhKey, svhKey, mcgKey];
         foreach (string n in names) run.Claimed.Add(n);
+        List<string> missing = names.Where(n => !run.Inventory.ContainsKey(n)).ToList();
         if (missing.Count > 0)
         {
             run.Problems.Add($"EXL3 weight '{key}' is missing {string.Join(", ", missing)}");
             return;
         }
-        if (trellis.Shape.Rank != 3 || trellis.Shape[2] % 16 != 0)
+        if (trellis.DType != DType.I16 || trellis.Shape.Rank != 3)
         {
-            run.Problems.Add($"EXL3 '{key}' has trellis shape {trellis.Shape}; expected [in/16, out/16, 16*bits]");
+            run.Problems.Add($"EXL3 '{key}' is {trellis.DType.Name} {trellis.Shape}; expected I16 [in/16, out/16, 16*bits]");
             return;
         }
-        // Unverified against real EXL3 files: rows/cols are taken from the svh/suh element counts.
-        long rows = run.Inventory[names[1]].Shape.ElementCount, cols = run.Inventory[names[0]].Shape.ElementCount;
-        run.Bindings[key] = new QuantBinding(key, QuantEncoding.Exl3Trellis, new BlockGeometry(16, 16), trellis.DType, rows, cols, null,
-            Exl3: new Exl3Keys(names[0], names[1], names[2], (int)(trellis.Shape[2] / 16)));
+        long bitsWide = trellis.Shape[2];
+        if (bitsWide != Exl3Format.SupportedBits * Exl3Format.TileSize)
+        {
+            run.Problems.Add(bitsWide % Exl3Format.TileSize == 0
+                ? $"EXL3 '{key}' {trellis.Shape} is {bitsWide / Exl3Format.TileSize} bits per weight; only {Exl3Format.SupportedBits} bits (last dim {Exl3Format.SupportedBits * Exl3Format.TileSize}) is decoded"
+                : $"EXL3 '{key}' has trellis shape {trellis.Shape}; the last dim must be 16*bits");
+            return;
+        }
+        long inDim = trellis.Shape[0] * Exl3Format.TileSize, outDim = trellis.Shape[1] * Exl3Format.TileSize;
+        if (inDim % Exl3Format.HadamardBlock != 0 || outDim % Exl3Format.HadamardBlock != 0)
+        {
+            run.Problems.Add(
+                $"EXL3 '{key}' {trellis.Shape} is in={inDim} out={outDim}; both must be multiples of {Exl3Format.HadamardBlock} (block-diagonal Hadamard)");
+            return;
+        }
+        TensorLocation suh = run.Inventory[suhKey], svh = run.Inventory[svhKey], mcg = run.Inventory[mcgKey];
+        if (suh.DType != DType.F16 || suh.Shape.Rank != 1 || suh.Shape[0] != inDim)
+        {
+            run.Problems.Add($"EXL3 '{suhKey}' is {suh.DType.Name} {suh.Shape}; '{key}' {trellis.Shape} needs F16 [{inDim}] (in)");
+            return;
+        }
+        if (svh.DType != DType.F16 || svh.Shape.Rank != 1 || svh.Shape[0] != outDim)
+        {
+            run.Problems.Add($"EXL3 '{svhKey}' is {svh.DType.Name} {svh.Shape}; '{key}' {trellis.Shape} needs F16 [{outDim}] (out)");
+            return;
+        }
+        if (mcg.DType != DType.I32 || mcg.Shape.ElementCount != 1)
+        {
+            run.Problems.Add($"EXL3 '{mcgKey}' is {mcg.DType.Name} {mcg.Shape}; the MCG multiplier is one I32 scalar");
+            return;
+        }
+        // Rows are the output width and columns the input width, as for every other recipe; the mcg value itself is data, checked at decode.
+        run.Bindings[key] = new QuantBinding(key, QuantEncoding.Exl3Trellis, new BlockGeometry(Exl3Format.TileSize, Exl3Format.TileSize),
+            suh.DType, outDim, inDim, null, Exl3: new Exl3Keys(suhKey, svhKey, mcgKey, Exl3Format.SupportedBits));
     }
 
     private static bool TryLogicalShape(BindingRun run, string key, TensorLocation weight, QuantEncoding encoding, out long rows, out long cols)

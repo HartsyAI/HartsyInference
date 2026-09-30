@@ -129,6 +129,9 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>Unsigned 64-bit integer.</summary>
     public static readonly DType U64 = new("U64", 8, false);
 
+    /// <summary>Signed 16-bit integer; EXL3 stores its trellis bitstream in it (the bytes are an opaque bit-packed stream, not numbers).</summary>
+    public static readonly DType I16 = new("I16", 2, false);
+
     /// <summary>Signed 32-bit integer.</summary>
     public static readonly DType I32 = new("I32", 4, false);
 

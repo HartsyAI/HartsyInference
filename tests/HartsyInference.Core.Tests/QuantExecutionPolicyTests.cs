@@ -18,6 +18,7 @@ public sealed class QuantExecutionPolicyTests
     [InlineData(QuantEncoding.AffineInt4, "W4A16")]
     [InlineData(QuantEncoding.AffineInt8, "W8A16")]
     [InlineData(QuantEncoding.Fp8E4M3BlockE8M0, "W8A16")]
+    [InlineData(QuantEncoding.Exl3Trellis, "W2A16")]
     public void Plan_DequantizesToBf16AndNeverClaimsFourBitActivations(QuantEncoding encoding, string label)
     {
         QuantRecipe recipe = Recipe(encoding);
@@ -32,7 +33,6 @@ public sealed class QuantExecutionPolicyTests
     }
 
     [Theory]
-    [InlineData(QuantEncoding.Exl3Trellis)]
     [InlineData(QuantEncoding.Gguf)]
     public void Plan_RefusesEncodingsWithoutADequantPath(QuantEncoding encoding)
     {

@@ -26,6 +26,7 @@ public static class SafeTensorDTypes
             case "F4_E2M1": dtype = DType.F4E2M1; return true;
             case "I64": dtype = DType.I64; return true;
             case "I32": dtype = DType.I32; return true;
+            case "I16": dtype = DType.I16; return true;
             case "I8": dtype = DType.I8; return true;
             case "U8": dtype = DType.U8; return true;
             case "U16": dtype = DType.U16; return true;

@@ -167,6 +167,7 @@ public sealed class SafeTensorHeaderReaderTests : IDisposable
     [Theory]
     [InlineData("F8_E8M0")]
     [InlineData("U16")]
+    [InlineData("I16")]
     [InlineData("U32")]
     [InlineData("U64")]
     [InlineData("F8_E4M3FNUZ")]

@@ -6,6 +6,19 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.215
+
+- **EXL3 trellis decode** (DeepSeek-V4.1-Flash program PR 23b). `Exl3Codec` decodes the `sfxnz/DeepSeek-V4.1-Flash-EXL3` 2-bit MCG experts: 16x16 tail-biting trellis tiles
+  through the MCG hash, a 128-point Hadamard per block and the `suh`/`svh` sign vectors. The trellis stage is bit-exact against exllamav3's own `reconstruct_tile` on a
+  committed 256x384 fixture (`tests/HartsyInference.ModelAssets.Tests/Fixtures/Exl3/`). The full F32 result stays within 1.1e-7 of an fp64 dense-Hadamard oracle and within 1.2e-3
+  of exllamav3's fused fp16 kernel, relative to max|W|; it is not bit-identical to that kernel, whose butterflies run in fp16.
+- `QuantCompanionBinder` binds EXL3 experts from `.trellis` and refuses a missing `suh`, `svh` or `mcg`, bit widths other than 2 (naming the key and shape), geometry that is not a multiple of 128
+  and wrong companion dtypes. Non-routed FP8 weights and the row-scaled `lm_head` bind through the FP8 path. New `DType.I16` and the safetensors `I16` mapping carry the trellis.
+- `QuantRecipe` slicing: input-column windows on 128 boundaries slice the trellis and `suh`; a partial output-row window throws `NotSupportedException` naming the key and range.
+- **CUDA.** `dequant_recipe_to_bf16` gains `dequant_exl3_2bit_to_bf16` (sm_80 PTX regenerated; the existing entries are unchanged). `CudaQuantWorkspace` dequantizes EXL3 matrices to BF16
+  and `QuantExecutionPolicy` plans W2A16. The device result equals the host F32 rounded once to BF16, bit for bit, on an RTX 3060.
+- Not done: no real-checkpoint tensor has been decoded, the BF16 output is coarser than exllamav3's fp16, output-row windows, a Vulkan path and `IBackend.Linear` wiring.
+
 ## alpha.214
 
 - **Derivative quant formats** (DeepSeek-V4.1-Flash program PR 23). `ModelOptNvfp4Codec` decodes NVIDIA NVFP4 (low nibble first, E4M3 scale per 16,

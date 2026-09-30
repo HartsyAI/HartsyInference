@@ -526,8 +526,8 @@
       "feature": "Weight decode/dequant (EXL3 2 bpw MCG trellis)",
       "format": "exl3",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -550,8 +550,8 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
-      "status": "Unimplemented",
-      "note": "deferred to PR 23b: trellis decode needs the exllamav3 tile shape confirmed; the binder and QuantExecutionPolicy refuse EXL3 explicitly"
+      "status": "InProgress",
+      "note": "Exl3Codec (2-bit MCG only; other bit widths are refused naming the key) decodes the trellis bit-exactly against exllamav3 reconstruct_tile on a committed 256x384 fixture, then the F32 128-point Hadamard and suh/svh; the F32 result is within 1.1e-7 (fp64 oracle) and 1.2e-3 (upstream fused fp16 kernel) of max|W|, not bit-identical to the fused fp16 kernel; CUDA dequant_exl3_2bit_to_bf16 equals the host F32 rounded once to BF16 bit-for-bit on the RTX 3060 (fixture plus random shapes) and is reachable through CudaQuantWorkspace; slicing is input-column windows on 128 boundaries only, partial output-row windows are refused; binder validated on the real shard 3 and 43 headers only; the real checkpoint tensors have not been decoded, no expert-level parity or generation evidence, not wired into IBackend.Linear, so not Verified"
     },
     {
       "id": "quant.official.native",
