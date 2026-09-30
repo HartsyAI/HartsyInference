@@ -16,7 +16,6 @@ public static partial class RealtimeScheduling
 
     private const int SchedFifo = 1;
     private const int RlimitRtprio = 14;
-    private const ulong RlimInfinity = ulong.MaxValue;
     private const int Eperm = 1;
     private const int Einval = 22;
     // A 1024-bit cpu_set_t, the size glibc's CPU_SETSIZE describes.
@@ -62,25 +61,16 @@ public static partial class RealtimeScheduling
     [SupportedOSPlatform("linux")]
     private static bool TryEnterFifoLinux(int priority, out string reason)
     {
+        // The limit is read for the advice only: a caller with CAP_SYS_NICE (root, or a unit granting the capability)
+        // is not bound by it, and the kernel is the one place that knows, so the request is always attempted.
         Rlimit limit = default;
-        if (GetRlimit(RlimitRtprio, ref limit) != 0)
-        {
-            reason = $"getrlimit(RLIMIT_RTPRIO) failed with errno {Marshal.GetLastPInvokeError()}.";
-            return false;
-        }
-        // Root (CAP_SYS_NICE) is not bound by the limit, so only an unprivileged caller is refused up front.
-        bool limited = limit.Current != RlimInfinity && limit.Current < (ulong)priority;
-        if (limited && GetEuid() != 0)
-        {
-            reason = RtprioAdvice(priority, limit.Current);
-            return false;
-        }
+        bool haveLimit = GetRlimit(RlimitRtprio, ref limit) == 0;
         SchedParam param = new() { Priority = priority };
         if (SchedSetScheduler(0, SchedFifo, ref param) != 0)
         {
             int errno = Marshal.GetLastPInvokeError();
             reason = errno == Eperm
-                ? RtprioAdvice(priority, limit.Current)
+                ? RtprioAdvice(priority, haveLimit ? limit.Current.ToString() : "unknown")
                 : $"sched_setscheduler(SCHED_FIFO, {priority}) failed with errno {errno}.";
             return false;
         }
@@ -106,10 +96,10 @@ public static partial class RealtimeScheduling
         return true;
     }
 
-    private static string RtprioAdvice(int priority, ulong current) =>
-        $"SCHED_FIFO {priority} refused: RLIMIT_RTPRIO is {current} (ulimit -r). Grant it with LimitRTPRIO={priority} "
-        + $"in the systemd unit, or a '<user> - rtprio {priority}' line under /etc/security/limits.d/ followed by a "
-        + "new login session.";
+    private static string RtprioAdvice(int priority, string current) =>
+        $"SCHED_FIFO {priority} refused: RLIMIT_RTPRIO is {current} (ulimit -r) and the process lacks CAP_SYS_NICE. "
+        + $"Grant it with LimitRTPRIO={priority} (or AmbientCapabilities=CAP_SYS_NICE) in the systemd unit, or a "
+        + $"'<user> - rtprio {priority}' line under /etc/security/limits.d/ followed by a new login session.";
 
     [LibraryImport("libc", EntryPoint = "getrlimit", SetLastError = true)]
     [SupportedOSPlatform("linux")]
@@ -122,10 +112,6 @@ public static partial class RealtimeScheduling
     [LibraryImport("libc", EntryPoint = "sched_setaffinity", SetLastError = true)]
     [SupportedOSPlatform("linux")]
     private static partial int SchedSetAffinity(int pid, nuint cpuSetSize, ref byte mask);
-
-    [LibraryImport("libc", EntryPoint = "geteuid")]
-    [SupportedOSPlatform("linux")]
-    private static partial uint GetEuid();
 
     /// <summary><c>struct rlimit</c> on LP64 Linux: two <c>unsigned long</c> fields.</summary>
     [StructLayout(LayoutKind.Sequential)]

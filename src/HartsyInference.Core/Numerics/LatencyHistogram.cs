@@ -94,7 +94,8 @@ public sealed class LatencyHistogram
         return new Summary(total, meanUs, PercentileUs(0.50), PercentileUs(0.99), _maxNs / NsPerMicrosecond);
     }
 
-    /// <summary>Clears every counter.</summary>
+    /// <summary>Clears every counter. Call it from the recording thread, or while that thread is stopped; it is not
+    /// safe against a concurrent <see cref="Record"/>.</summary>
     public void Reset()
     {
         Array.Clear(_counts);

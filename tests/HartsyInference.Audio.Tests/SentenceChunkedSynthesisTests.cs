@@ -152,6 +152,25 @@ public sealed class SentenceChunkedSynthesisTests
     }
 
     [Fact]
+    public async Task StreamBySentence_AJobsOwnCancellation_IsNotMistakenForAbandonment()
+    {
+        // The synth cancels itself (an internal timeout, say) with the caller's token untouched. The consumer
+        // drains what was produced and must then see that cancellation, not a clean, short stream.
+        IReadOnlyList<string> sentences = SentenceSplitter.Split(ThreeSentences);
+        int received = 0;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+        {
+            await foreach (AudioChunk _ in SentenceChunkedSynthesis.StreamBySentence(ThreeSentences, Rate,
+                (s, _) => s == sentences[1] ? throw new OperationCanceledException("synth timed out") : FakeSynth(s), RunOnPool,
+                SentenceSplitter.MinSentenceLength, SentenceChunkedSynthesis.NoClauseLimit, CancellationToken.None))
+            {
+                received++;
+            }
+        });
+        Assert.Equal(1, received);
+    }
+
+    [Fact]
     public async Task StreamBySentence_ConsumerBreakingWithoutCancelling_DoesNotHang()
     {
         const string Many = "One sentence that is long enough to stand alone. Two sentences that are long enough to stand alone. "

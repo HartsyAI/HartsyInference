@@ -69,6 +69,17 @@ public sealed class CpuParallelInlineScopeTests
     }
 
     [Fact]
+    public void ADefaultScope_DisposesToNothing()
+    {
+        using (CpuParallel.EnterInline())
+        {
+            default(CpuParallel.InlineScope).Dispose();
+            Assert.True(CpuParallel.IsInline, "a default instance must not clear an enclosing scope");
+        }
+        Assert.False(CpuParallel.IsInline);
+    }
+
+    [Fact]
     public void TheScope_IsPerThread()
     {
         using CpuParallel.InlineScope scope = CpuParallel.EnterInline();

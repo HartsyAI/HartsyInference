@@ -9,16 +9,20 @@ namespace HartsyInference.Audio.Frontends;
 /// the splitter accepted was followed by text that started a new sentence, and nothing that arrives later can
 /// undo that. The last piece is never emitted from <see cref="Push"/>, because the splitter treats end of input as
 /// a sentence end and a later delta may show it was not one; it comes out of <see cref="Flush"/> when the reply is
-/// complete. The sentences emitted are therefore exactly what <see cref="SentenceSplitter.Split"/> returns for the
-/// joined text, for any way of cutting it into deltas.
+/// complete. With one minimum for every sentence, the sentences emitted are therefore exactly what
+/// <see cref="SentenceSplitter.Split"/> returns for the joined text, for any way of cutting it into deltas.
 /// <para>The first sentence may be allowed shorter than the rest, so a reply's opening words can be spoken while
-/// the model is still writing the sentence after them.</para></remarks>
+/// the model is still writing the sentence after them; that is the one deliberate departure from the joined
+/// split.</para></remarks>
 public sealed class StreamingSentenceSplitter
 {
+    private static readonly char[] _terminators = ['.', '!', '?'];
+
     private readonly StringBuilder _pending = new();
     private readonly int _minLength;
     private readonly int _firstSentenceMinLength;
     private bool _firstEmitted;
+    private bool _pendingHasTerminator;
 
     /// <summary>Creates a splitter that emits sentences of at least <paramref name="minLength"/> characters, except
     /// the first, which may be as short as <paramref name="firstSentenceMinLength"/> (defaults to <paramref name="minLength"/>).</summary>
@@ -48,6 +52,13 @@ public sealed class StreamingSentenceSplitter
             return [];
         }
         _pending.Append(delta);
+        // Without a terminator the splitter cannot produce a second piece, so a long unterminated run is not
+        // re-scanned on every token.
+        _pendingHasTerminator |= delta.AsSpan().IndexOfAny(_terminators) >= 0;
+        if (!_pendingHasTerminator)
+        {
+            return [];
+        }
         List<string>? completed = null;
         string buffer = _pending.ToString();
         while (true)
@@ -71,6 +82,7 @@ public sealed class StreamingSentenceSplitter
         }
         _pending.Clear();
         _pending.Append(buffer);
+        _pendingHasTerminator = buffer.AsSpan().IndexOfAny(_terminators) >= 0;
         return completed;
     }
 
@@ -81,6 +93,7 @@ public sealed class StreamingSentenceSplitter
     {
         string tail = _pending.ToString().Trim();
         _pending.Clear();
+        _pendingHasTerminator = false;
         return tail.Length == 0 ? null : tail;
     }
 
@@ -88,6 +101,7 @@ public sealed class StreamingSentenceSplitter
     public void Reset()
     {
         _pending.Clear();
+        _pendingHasTerminator = false;
         _firstEmitted = false;
     }
 }

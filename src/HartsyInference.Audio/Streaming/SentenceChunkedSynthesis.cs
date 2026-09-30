@@ -127,23 +127,30 @@ public static class SentenceChunkedSynthesis
         CancellationToken token = abandon.Token;
         using AudioStreamer streamer = new(maxInFlight);
         Task producer = Task.Run(() => ProduceAsync(sentences, announcedCount, sampleRate, synth, run, maxChars, streamer, token), token);
+        bool drained = false;
         try
         {
             await foreach (AudioChunk chunk in streamer.ReadAllAsync(token).ConfigureAwait(false))
             {
                 yield return chunk;
             }
+            drained = true;
         }
         finally
         {
             // A consumer that stopped without cancelling must not leave the producer parked on a full channel.
-            abandon.Cancel();
+            if (!drained)
+            {
+                abandon.Cancel();
+            }
             try
             {
                 await producer.ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            catch (OperationCanceledException) when (!drained && !ct.IsCancellationRequested)
             {
+                // Only the abandonment above is expected here; a job's own cancellation after a drained channel
+                // would otherwise pass as a clean, short stream, so it propagates.
                 Logs.Debug("[Audio][SentenceStream] Consumer stopped early; the remaining sentences were not synthesized.");
             }
         }

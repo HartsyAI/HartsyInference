@@ -142,15 +142,23 @@ public static class CpuParallel
     public readonly struct InlineScope : IDisposable
     {
         private readonly bool _previous;
+        private readonly bool _active;
 
         /// <summary>Enters the scope on the calling thread.</summary>
         public InlineScope()
         {
             _previous = _inline;
+            _active = true;
             _inline = true;
         }
 
-        /// <summary>Restores the state the calling thread had before the scope was entered.</summary>
-        public void Dispose() => _inline = _previous;
+        /// <summary>Restores the state the calling thread had before the scope was entered; a <c>default</c> instance does nothing.</summary>
+        public void Dispose()
+        {
+            if (_active)
+            {
+                _inline = _previous;
+            }
+        }
     }
 }
