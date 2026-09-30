@@ -10,6 +10,7 @@ public readonly record struct QuantExecutionPlan(QuantExecutionKind Kind, long W
         int weightBits = recipe.Encoding switch
         {
             QuantEncoding.Mxfp4E8M0 or QuantEncoding.Nvfp4 or QuantEncoding.AffineInt4 => 4,
+            QuantEncoding.Exl3Trellis => recipe.Exl3?.Bits ?? Exl3Format.SupportedBits,
             _ => 8,
         };
         return $"W{weightBits}A{(Activation == QuantActivationPrecision.Fp4 ? 4 : 16)}";

@@ -60,12 +60,17 @@ public sealed record QuantRecipe
     /// <summary>Elements per packed byte: 2 for the 4-bit encodings, 1 otherwise.</summary>
     public int ElementsPerByte => Encoding is QuantEncoding.Mxfp4E8M0 or QuantEncoding.Nvfp4 or QuantEncoding.AffineInt4 ? 2 : 1;
 
-    /// <summary>The tensors a BF16 dequant reads besides the packed weight: scale, global scale and bias, whichever the encoding has. <see cref="InputScale"/> is not one of them.</summary>
+    /// <summary>The tensors a BF16 dequant reads besides the packed weight: scale, global scale and bias, whichever the encoding has, and for EXL3 the <c>suh</c>/<c>svh</c> sign-scale vectors. <see cref="InputScale"/> is not one of them, nor is EXL3's <c>mcg</c> (a constant the host validates, never read by a kernel).</summary>
     public IEnumerable<Tensor> DequantCompanions()
     {
         if (Scale is not null) yield return Scale;
         if (GlobalScale is not null) yield return GlobalScale;
         if (Bias is not null) yield return Bias;
+        if (Exl3 is not null)
+        {
+            yield return Exl3.Suh;
+            yield return Exl3.Svh;
+        }
     }
 
     /// <summary>Narrows the recipe to <paramref name="rowCount"/> rows from <paramref name="rowOffset"/>, viewing the matching scale rows.</summary>
@@ -74,7 +79,14 @@ public sealed record QuantRecipe
         if (rowOffset < 0 || rowCount < 0 || rowOffset + rowCount > LogicalRows)
             throw new NotSupportedException($"'{weightKey}': rows [{rowOffset}..{rowOffset + rowCount}) are outside [0..{LogicalRows}).");
         if (Encoding == QuantEncoding.Exl3Trellis)
-            throw new NotSupportedException($"'{weightKey}' is EXL3, whose Hadamard rotation spans every row; rows cannot be windowed.");
+        {
+            // Rows are the output axis. The trellis is [in/16, out/16, 16*bits], so an output window is a strided set of byte runs,
+            // not a contiguous slice the caller could hand over; the whole matrix is the only window a view can describe.
+            if (rowOffset == 0 && rowCount == LogicalRows) return this;
+            throw new NotSupportedException(
+                $"'{weightKey}' is EXL3: its trellis is [in/16, out/16, 16*bits], so output rows [{rowOffset}..{rowOffset + rowCount}) of {LogicalRows} "
+                + "are not a contiguous byte range. Decode the whole matrix, or window it by input columns in multiples of 128.");
+        }
 
         int blockRows = ScaleLayout == ScaleLayout.Swizzled128 ? QuantWeightInfo.BlockScaleTileRows : Geometry.BlockRows;
         bool endsAtEdge = rowOffset + rowCount == LogicalRows;
@@ -99,7 +111,9 @@ public sealed record QuantRecipe
     {
         if (colOffset < 0 || colCount < 0 || colOffset + colCount > LogicalCols)
             throw new NotSupportedException($"'{weightKey}': columns [{colOffset}..{colOffset + colCount}) are outside [0..{LogicalCols}).");
-        if (Encoding == QuantEncoding.Exl3Trellis || ScaleLayout == ScaleLayout.Swizzled128)
+        if (Encoding == QuantEncoding.Exl3Trellis)
+            return SliceExl3Cols(colOffset, colCount, weightKey);
+        if (ScaleLayout == ScaleLayout.Swizzled128)
             throw new NotSupportedException($"'{weightKey}' ({Encoding}, {ScaleLayout}) cannot be sliced by columns.");
 
         bool endsAtEdge = colOffset + colCount == LogicalCols;
@@ -112,5 +126,18 @@ public sealed record QuantRecipe
                 $"'{weightKey}' packs two 4-bit values per byte, so columns [{colOffset}..{colOffset + colCount}) are not byte aligned.");
 
         return this with { LogicalCols = colCount, ScaleColOffset = ScaleColOffset + colOffset / Geometry.BlockCols };
+    }
+
+    // Columns are the input axis, the leading trellis dimension, so a window is a contiguous run of [in/16] rows the caller slices with
+    // Tensor.SliceRows(colOffset / 16, colCount / 16). The Hadamard is block-diagonal over 128 inputs, so a window on a 128 boundary
+    // decodes exactly as those columns of the whole matrix; anything else would mix inputs from outside the window.
+    private QuantRecipe SliceExl3Cols(long colOffset, long colCount, string weightKey)
+    {
+        if (colOffset % Exl3Format.HadamardBlock != 0 || colCount % Exl3Format.HadamardBlock != 0 || colCount == 0)
+            throw new NotSupportedException(
+                $"'{weightKey}' is EXL3: input columns [{colOffset}..{colOffset + colCount}) split a {Exl3Format.HadamardBlock}-wide Hadamard block; "
+                + $"windows must start and end on multiples of {Exl3Format.HadamardBlock}.");
+        Exl3Companions exl3 = Exl3 ?? throw new NotSupportedException($"'{weightKey}' is EXL3 but the recipe carries no suh/svh/mcg companions.");
+        return this with { LogicalCols = colCount, Exl3 = exl3 with { Suh = exl3.Suh.SliceRows(colOffset, colCount) } };
     }
 }
