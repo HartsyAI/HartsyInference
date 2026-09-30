@@ -147,6 +147,8 @@ public static class Fft
     /// per call were the whole transform's budget.</summary>
     internal static void DirectDft(Span<float> re, Span<float> im, int n)
     {
+        // Bounds the stackalloc below and the [n, n] table; larger sizes belong to Bluestein.
+        if (n < 1 || n >= 64) throw new ArgumentOutOfRangeException(nameof(n), n, "DirectDft handles 1 ≤ n < 64.");
         (double[] cosTab, double[] sinTab) = GetDirectTwiddles(n);
         Span<float> outRe = stackalloc float[n];
         Span<float> outIm = stackalloc float[n];
