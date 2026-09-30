@@ -12,11 +12,14 @@ public sealed record GenerationRequest
     /// <summary>Single user prompt (templated as one user turn). Ignored when <see cref="Messages"/> is set.</summary>
     public string? Prompt { get; init; }
 
-    /// <summary>System prompt for the single-prompt path; null uses the template default, empty omits it.</summary>
+    /// <summary>System prompt: prepended as a system turn to <see cref="Prompt"/>, and to <see cref="Messages"/> when they do not already start with one. Null or empty adds nothing.</summary>
     public string? SystemPrompt { get; init; }
 
     /// <summary>Multi-turn chat messages (templated). Takes precedence over <see cref="Prompt"/>.</summary>
     public IReadOnlyList<ChatMessage>? Messages { get; init; }
+
+    /// <summary>Tool schemas offered to the model through the chat template; null or empty renders the prompt without a tool block.</summary>
+    public IReadOnlyList<ToolSpec>? Tools { get; init; }
 
     /// <summary>Sets the chat template's <c>enable_thinking</c> variable (Qwen3-family reasoning toggle); null falls back to the template's own default, and templates without a thinking slot (e.g. ChatML) ignore it.</summary>
     public bool? EnableThinking { get; init; }
@@ -35,6 +38,9 @@ public sealed record GenerationRequest
 
     /// <summary>Overrides whether CUDA-graph decode is attempted (null defers to <c>numerics.graphDecode</c>); still requires <see cref="Sampling"/> to be greedy and the model/backend to report eligibility via <c>SupportsGraphDecode</c> — this only controls the opt-in gate itself.</summary>
     public bool? GraphDecode { get; init; }
+
+    /// <summary>The messages the template actually renders: <see cref="Messages"/> with <see cref="SystemPrompt"/> prepended as a system turn unless they already open with one; null when <see cref="Messages"/> is null. Parsers must resolve their initial state from this view, not from <see cref="Messages"/>.</summary>
+    public IReadOnlyList<ChatMessage>? EffectiveMessages() => Messages is null ? null : PromptBuilder.WithSystemPrompt(Messages, SystemPrompt);
 
     /// <summary>Overrides whether prompt-lookup speculative decoding is attempted (null defers to <c>numerics.specDecode</c>); requires greedy non-JSON <see cref="Sampling"/>, is skipped when <see cref="GraphDecode"/> is eligible, and uses no draft model — drafts come from n-gram matches against the prompt/generated-so-far, so it speeds up repetitive content but costs nothing extra on prose (an unmatched draft degenerates to one plain decode step).</summary>
     public bool? SpeculativeDecode { get; init; }

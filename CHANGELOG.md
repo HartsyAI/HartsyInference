@@ -6,6 +6,35 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.220
+
+- **Text stream lifetime.** `TextStreamPump` now uses an unbounded channel, reversing alpha.206's bounded (256) one by
+  decision: the sink runs on the decode thread inside the slot lock and the device gate, so a bounded channel with a
+  blocking writer let a slow SSE client stall decode while holding the GPU. Memory stays bounded by `MaxTokens` deltas
+  and abandonment still cancels the producer through the linked token. The `Error` stop chunk carries the exception
+  message in `Text`; a pre-cancelled token and a load failure both end the stream within 100 ms (unit-tested).
+- **Behaviour change:** `TextRequest.SystemPrompt` is no longer dropped when `Messages` is set: `PromptBuilder` prepends it
+  as a system turn unless `Messages[0]` is already a system message (a host that folds its system text into the first
+  message keeps its single copy), so the CLI's `--system` now takes effect. `GenerationRequest.EffectiveMessages()` is
+  that single rule, and the output parser resolves its initial state from the same view the template renders.
+- `IncrementalDetokenizer`'s fallback for tokenizers without `TokenBytes` decodes a short window from the last
+  emitted boundary (the tokens emitted there stay as context) and holds a delta back while it ends in U+FFFD, instead
+  of re-decoding the whole id list per token. Concatenated deltas equal a one-shot decode; the GGUF byte path is unchanged.
+- **Generic tool-call plumbing (Engine/LLM only).** `TextMessage` and `ChatMessage` carry `ToolCalls`, `ToolCallId` and
+  `Name`; `GenerationRequest.Tools` and a default-interface `IChatTemplate.Encode(..., tools)` overload pass tool
+  schemas to the template. `JinjaChatTemplate` builds the OpenAI-shaped context (`tools` parsed from each schema, or
+  null when none; per-message `tool_calls[].function.{name,arguments}`, `tool_call_id`, `name`, `reasoning_content`);
+  `ChatMlTemplate` renders Qwen2.5's `# Tools` block, `<tool_call>` turns and `<tool_response>` results byte for byte
+  with the real template; a conversation without tools or tool turns renders exactly as before, while a `tool`-role
+  message now lands inside a user turn as `<tool_response>` (Qwen's format) instead of a bare `tool` turn. New `ITextStreamFilter` seam
+  (`OnDelta`/`OnEnd` → `TextFilterResult{ForwardText, ToolCall, Stop}`) installed per request through
+  `EngineOptions.TextStreamFilterFactory`: `RunText` routes every content delta through it, emits
+  `TextChunkKind.NativeToolCall`, and a stop ends generation as `StopReason.ToolCall` with `TextResult.ToolCall`
+  set. `TextRequest.Tools` still arms the `<tool_call>` sentinel grammar. Parsers, registries and the agent loop are
+  not here; they arrive with the separate Tools package, and `ForceToolId` stays unimplemented (documented).
+- OpenAI-compat `/v1/chat/completions` maps `tool_calls`, `tool_call_id` and `name` both ways; the two new
+  `ChatMessageDto` fields are omitted when null so existing responses are byte-identical.
+
 ## alpha.219
 
 - **Shared real-time helpers (Core).** `Runtime/MonotonicClock` (`CLOCK_MONOTONIC` reads and `clock_nanosleep` to an

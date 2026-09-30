@@ -7,7 +7,7 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.API.Endpoints;
 
-/// <summary>OpenAI-shaped <c>/v1/chat/completions</c> and <c>/v1/images/generations</c> — thin DTO mappers that call the SAME native handlers <see cref="TextEndpoints"/>/<see cref="ImageEndpoints"/> use, not a parallel implementation. Deliberately narrow: composition-heavy requests (LoRA/ControlNet/regional prompting, tool calling, JSON-schema response format) don't fit OpenAI's schema and belong on the native routes instead.</summary>
+/// <summary>OpenAI-shaped <c>/v1/chat/completions</c> and <c>/v1/images/generations</c> — thin DTO mappers that call the SAME native handlers <see cref="TextEndpoints"/>/<see cref="ImageEndpoints"/> use, not a parallel implementation. Deliberately narrow: composition-heavy requests (LoRA/ControlNet/regional prompting, JSON-schema response format) don't fit OpenAI's schema and belong on the native routes instead; tool definitions, <c>tool_calls</c> and <c>tool_call_id</c> map both ways.</summary>
 public static class CompatEndpoints
 {
     /// <summary>Server-process start time, reused as every <see cref="ModelEntry.Created"/> value — see that field's doc comment for why this isn't a real per-model timestamp.</summary>
@@ -328,7 +328,8 @@ public static class CompatEndpoints
         return (null, null);
     }
 
-    private static TextRequest ToTextRequest(ChatCompletionRequest req)
+    /// <summary>OpenAI chat request → native <see cref="TextRequest"/>: messages with their <c>tool_calls</c>/<c>tool_call_id</c>/<c>name</c>, sampling knobs, tools and tool choice.</summary>
+    internal static TextRequest ToTextRequest(ChatCompletionRequest req)
     {
         // "none" suppresses tool-calling for this turn entirely, matching OpenAI's own semantics -- everything
         // else (unset/"auto"/"required"/the named-function object form) passes Tools through when present.
@@ -343,10 +344,7 @@ public static class CompatEndpoints
 
         return new TextRequest
         {
-            // Native TextMessage has no tool_call_id correlation field -- a "tool" role message's content is
-            // passed through as-is. Fine for the common single-pending-call case; a multi-tool-call turn can't
-            // disambiguate which call a result answers, a real gap versus full OpenAI compat.
-            Messages = [.. req.Messages.Select(m => new TextMessage { Role = ParseRole(m.Role), Content = m.Content ?? "" })],
+            Messages = [.. req.Messages.Select(ToTextMessage)],
             Temperature = req.Temperature ?? 0.7,
             TopP = req.TopP ?? 0.95,
             TopK = req.TopK,
@@ -376,7 +374,24 @@ public static class CompatEndpoints
         _ => TextRole.User,
     };
 
-    private static ChatToolCallDto ToToolCallDto(NativeToolCall call, int? index = null) => new ChatToolCallDto
+    /// <summary>One OpenAI message → native <see cref="TextMessage"/>, carrying an assistant turn's <c>tool_calls</c> and a tool turn's <c>tool_call_id</c>/<c>name</c>.</summary>
+    internal static TextMessage ToTextMessage(ChatMessageDto m) => new TextMessage
+    {
+        Role = ParseRole(m.Role),
+        Content = m.Content ?? "",
+        ToolCalls = m.ToolCalls is { Count: > 0 } ? [.. m.ToolCalls.Select(ToNativeToolCall)] : null,
+        ToolCallId = m.ToolCallId,
+        Name = m.Name,
+    };
+
+    internal static NativeToolCall ToNativeToolCall(ChatToolCallDto call) => new NativeToolCall
+    {
+        Id = call.Id,
+        Name = call.Function.Name ?? "",
+        Arguments = string.IsNullOrEmpty(call.Function.Arguments) ? "{}" : call.Function.Arguments,
+    };
+
+    internal static ChatToolCallDto ToToolCallDto(NativeToolCall call, int? index = null) => new ChatToolCallDto
     {
         Id = string.IsNullOrEmpty(call.Id) ? $"call_{Guid.NewGuid():N}" : call.Id,
         Index = index,

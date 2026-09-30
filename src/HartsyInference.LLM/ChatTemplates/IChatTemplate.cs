@@ -11,4 +11,9 @@ public interface IChatTemplate
 
     /// <summary>Encodes <paramref name="messages"/> to ids, appending a trailing assistant header when <paramref name="addGenerationPrompt"/> is true; <paramref name="enableThinking"/> sets the Qwen3-family <c>enable_thinking</c> toggle, or falls back to the template's default when null.</summary>
     int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking = null);
+
+    /// <summary>Encodes like the four-argument overload and also offers <paramref name="tools"/> to the model; templates without a tool slot ignore them (this default). Null or empty renders exactly as the tool-less overload.</summary>
+    int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking,
+        IReadOnlyList<ToolSpec>? tools)
+        => Encode(tokenizer, messages, addGenerationPrompt, enableThinking);
 }
