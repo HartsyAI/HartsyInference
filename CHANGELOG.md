@@ -32,8 +32,10 @@ stable release will require. Dates are UTC.
     Whisper's 30 s window for a 2 s utterance went from ~155 ms to 4 ms (10 s: 17 ms). Bit-exact:
     `MelSpectrogramExactnessTests` compare every preset against the dense form, and the zero-padded path against
     `Compute` on the padded buffer at the window boundaries.
-- `WhisperStageTimer` under `diagnostics.profile`: wall time and D2H syncs per stage (mel, encoder stem and layers,
-  cross K/V, prompt, and per step embed / layers / logits / argmax) and the smallest top-1/top-2 logit margin.
+- One `diagnostics.profile` stage timer for the Audio package (`Audio/Diagnostics/StageTimer`, replacing
+  `KokoroStageTimer`): wall time and D2H syncs per stage, repeated sub-stages summed with their means, and noted
+  minimums. Whisper marks mel, encoder stem and layers, cross K/V, prompt, and per step embed / layers / logits /
+  argmax, with the smallest top-1/top-2 logit margin; Kokoro's report now carries sync counts too.
 - `WhisperBenchTests` (GpuIntegration, opt-in `HARTSY_WHISPER_BENCH=1`, asserts a 3060): the Probe A/C cases of
   `VoiceTurnBenchTests`, per-case token dumps for comparing builds, a model list for regression rows, stage and per-op
   profiles, and a CPU mode. Results: `benchmarks/results/2026-09-30_whisper_3060_perf.md`.

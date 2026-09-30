@@ -435,7 +435,13 @@ no bug, any more than one bad seed was proof there was one.
 - **The lm_head dominates decode for large-vocab models.** Orpheus: the tied lm_head (3072→156,940 vocab)
   ran as an F32 GEMM at M=1 = 90% of the step. Fused BF16/F16 M=1 GEMV → 221ms→3.8ms/tok. Same class:
   `Qwen2Model` re-transposing weights per call via `WhisperOps.ProjectLinear` defeated the weight cache
-  (~123× decode slowdown when non-resident).
+  (~123× decode slowdown when non-resident). Whisper's was a scalar host loop — 60 % of a 10 s transcription,
+  invisible in the per-op table because it was never a backend op.
+- **A host read of an auto-promoted weight gives its device copy up for good.** Promotion plants a demote hook, so a
+  `DataPointer` read drops the device copy and blocks re-promotion. A tied token table read on the host for the
+  embedding lookup while it serves as the logits GEMM weight would re-upload the whole table on every step (159 MB for
+  Whisper small). Read weights on the host through a pointer taken at load (they are never written), or preload them
+  explicitly: an explicit `PreloadWeights` plants no hook.
 - **Method rule (hard-won, stated twice):** instrument EVERY device op before concluding a bottleneck is
   "many small kernels / occupancy-bound" — an uninstrumented op (Concat, host FourierEmbed) hid the real
   wall repeatedly. Also **measure the premise/headroom of an optimization before building it** — the
@@ -971,7 +977,7 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   inline values (so the transform stays bit-identical, `DirectDftTests`) is the whole fix; the per-frame transforms
   and the NSF harmonic source then fan out over fixed frame blocks (the source records each block's starting phases
   in a sequential additions-only pass and jumps the xorshift noise state with `DeterministicRng.Advance`, so it stays
-  bit-identical). A `diagnostics.profile` stage timer (`KokoroStageTimer`) is what exposed it: the per-op table only
+  bit-identical). A `diagnostics.profile` stage timer (`Audio/Diagnostics/StageTimer`) is what exposed it: the per-op table only
   labels backend ops, so host DSP between them is invisible there. Waveform correlation is the wrong parity metric
   for an NSF vocoder — a sub-cent F0 change drifts the harmonic phase and sinks it while the log-spectrum and the
   transcript are unchanged; compare log-magnitude STFTs.

@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
@@ -179,7 +180,7 @@ public sealed class KokoroIStftNetDecoder
         int upProd = 1;
         foreach (int u in g.UpsampleRates) upProd *= u;     // 60
         int f0UpScale = upProd * hop;      // 300
-        KokoroStageTimer? timer = KokoroStageTimer.Start(backend);
+        StageTimer? timer = StageTimer.Start(backend, "Kokoro");
 
         // 1. Harmonic source at audio rate → forward STFT → [1, n_fft+2, frames].
         float[] harSource = NsfVocoderDsp.GenerateHarmonicSource(f0, f0UpScale, _cfg.SampleRate, harmonics: 9, _mSourceW!, _mSourceB!);

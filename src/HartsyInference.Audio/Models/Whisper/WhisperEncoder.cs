@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -97,7 +98,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
     public Tensor Forward(IBackend backend, Tensor mel) => Forward(backend, mel, timer: null);
 
     /// <summary><see cref="Forward(IBackend, Tensor)"/> with the stem and each layer attributed to <paramref name="timer"/>.</summary>
-    internal Tensor Forward(IBackend backend, Tensor mel, WhisperStageTimer? timer)
+    internal Tensor Forward(IBackend backend, Tensor mel, StageTimer? timer)
     {
         ThrowIfDisposed();
         if (!_weightsLoaded) throw new InvalidOperationException("Call LoadWeights before Forward.");

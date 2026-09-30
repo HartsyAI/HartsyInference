@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -24,9 +25,8 @@ public sealed unsafe class WhisperDecoder : IDisposable
     private Tensor? _projOutWeight;
     private bool _projOutIsTied;
 
-    // Host copies of the two embedding tables, taken at load. The token table doubles as the tied logits weight and
-    // goes device-resident, and a DataPointer read of a device-resident weight gives that copy up; weights are never
-    // written, so the host bytes stay authoritative and the per-step lookup reads them without touching residency.
+    // Host pointers taken at load: the token table is also the device-resident logits weight, and a per-step
+    // DataPointer read would give that device copy up. Weights are never written, so the host bytes stay exact.
     private float* _embedTokensHost;
     private float* _embedPositionsHost;
 
@@ -112,7 +112,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
         public int CurrentPos { get; set; }
 
         /// <summary>Stage attribution for each step's embed / layers / logits parts; null unless profiling.</summary>
-        internal WhisperStageTimer? Timer { get; set; }
+        internal StageTimer? Timer { get; set; }
 
         public DecodeState(WhisperConfig cfg, int encoderSeqLen)
         {
@@ -226,8 +226,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
             normed.Dispose();
         }
 
-        // Logits = lastHidden @ proj_out^T (the token table when tied). Full F32: this GEMM decides every greedy
-        // token, and TF32 would round the 768-term dot products the host loop used to sum exactly.
+        // Logits = lastHidden @ proj_out^T (the token table when tied), at full F32 because its argmax is the token.
         Tensor logits = new(new TensorShape(1, _cfg.VocabSize), DType.F32);
         WhisperOps.LinearFullPrecision(backend, logits, lastHidden, _projOutWeight!, bias: null);
         lastHidden.Dispose();
