@@ -10,25 +10,31 @@ namespace HartsyInference.PhoneGateway.Transport;
 /// <remarks>Driven by four notifications from the controller and link (<see cref="CallStarted"/>, <see cref="CallEnded"/>,
 /// <see cref="LinkConnected"/>, <see cref="LinkDisconnected"/>) and three callbacks it invokes: <see cref="PlayPrompt"/>
 /// returns the prompt's length in milliseconds, <see cref="ResumeCall"/> re-announces the call, <see cref="HangUp"/>
-/// ends it. The wait runs on a thread-pool task with <c>Task.Delay</c>; it is not on the media path.</remarks>
+/// ends it. Whether the link is up when a call starts is read from the link itself, not from the notifications: the
+/// link reports itself connected just before it raises its connected callback, and a call starting in that gap must
+/// not be treated as an outage. The wait runs on a thread-pool task with <c>Task.Delay</c>; it is not on the media
+/// path.</remarks>
 public sealed class LinkOutageGuard : IDisposable
 {
     private const int HangupGraceMs = 100;
 
     private readonly LinkOutageGuardOptions _options;
+    private readonly Func<bool> _isLinkUp;
     private readonly object _lock = new();
     private CancellationTokenSource? _outage;
     private bool _inCall;
-    private bool _linkUp;
     private long _outages;
     private long _outageHangups;
 
-    public LinkOutageGuard(LinkOutageGuardOptions options)
+    /// <param name="isLinkUp">Reads the link's own connected state.</param>
+    public LinkOutageGuard(LinkOutageGuardOptions options, Func<bool> isLinkUp)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(isLinkUp);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.OutageHangupMs, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(options.PromptRepeatMs, 1);
         _options = options;
+        _isLinkUp = isLinkUp;
     }
 
     /// <summary>An outage wait has started for a live call (metrics hook).</summary>
@@ -66,7 +72,6 @@ public sealed class LinkOutageGuard : IDisposable
         bool resume;
         lock (_lock)
         {
-            _linkUp = true;
             resume = CancelOutageLocked() && _inCall;
         }
         if (resume)
@@ -81,7 +86,6 @@ public sealed class LinkOutageGuard : IDisposable
         bool started;
         lock (_lock)
         {
-            _linkUp = false;
             started = _inCall && StartOutageLocked();
         }
         if (started)
@@ -96,7 +100,7 @@ public sealed class LinkOutageGuard : IDisposable
         lock (_lock)
         {
             _inCall = true;
-            started = !_linkUp && StartOutageLocked();
+            started = !_isLinkUp() && StartOutageLocked();
         }
         if (started)
         {

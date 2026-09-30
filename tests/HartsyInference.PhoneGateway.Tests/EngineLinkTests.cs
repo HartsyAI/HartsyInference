@@ -221,7 +221,7 @@ public sealed class EngineLinkTests
         using FakeLinkHost host = new();
         host.Start();
         using EngineLink link = new(Options(host));
-        using LinkOutageGuard guard = new(new LinkOutageGuardOptions { OutageHangupMs = 600, PromptRepeatMs = 200 });
+        using LinkOutageGuard guard = new(new LinkOutageGuardOptions { OutageHangupMs = 600, PromptRepeatMs = 200 }, () => link.IsConnected);
         ConcurrentQueue<PromptKind> prompts = new();
         using ManualResetEventSlim hungUp = new(false);
         int resumes = 0;
@@ -258,7 +258,7 @@ public sealed class EngineLinkTests
         using FakeLinkHost host = new();
         host.Start();
         using EngineLink link = new(Options(host));
-        using LinkOutageGuard guard = new(new LinkOutageGuardOptions { OutageHangupMs = 3000, PromptRepeatMs = 200 });
+        using LinkOutageGuard guard = new(new LinkOutageGuardOptions { OutageHangupMs = 3000, PromptRepeatMs = 200 }, () => link.IsConnected);
         ConcurrentQueue<PromptKind> prompts = new();
         using ManualResetEventSlim resumed = new(false);
         int hangups = 0;
@@ -284,6 +284,35 @@ public sealed class EngineLinkTests
         Assert.Equal(0, hangups);
         Assert.Equal(1, guard.Outages);
         guard.CallEnded();
+    }
+
+    [Fact]
+    public void OutageGuard_CallStartingInTheConnectGap_IsNotAnOutage()
+    {
+        // EngineLink reports IsConnected just before it raises Connected; a call activated in between used to start an
+        // outage (a "one moment" prompt) and then "resume" with a second CallStart.
+        bool linkUp = true;
+        using LinkOutageGuard guard = new(new LinkOutageGuardOptions { OutageHangupMs = 1000, PromptRepeatMs = 200 }, () => linkUp);
+        int prompts = 0;
+        int resumes = 0;
+        guard.PlayPrompt = _ =>
+        {
+            Interlocked.Increment(ref prompts);
+            return 0;
+        };
+        guard.ResumeCall = () => Interlocked.Increment(ref resumes);
+        guard.CallStarted();
+        guard.LinkConnected();
+        Assert.False(guard.InOutage);
+        Assert.Equal(0, guard.Outages);
+        Assert.Equal(0, prompts);
+        Assert.Equal(0, resumes);
+        linkUp = false;
+        guard.LinkDisconnected();
+        Assert.True(guard.InOutage);
+        Assert.Equal(1, guard.Outages);
+        guard.CallEnded();
+        Assert.False(guard.InOutage);
     }
 
     [Fact]

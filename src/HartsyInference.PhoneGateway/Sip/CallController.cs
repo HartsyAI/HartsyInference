@@ -69,7 +69,7 @@ public sealed class CallController : IDisposable
         _options = options;
         _prompts = prompts;
         _metrics = metrics;
-        _guard = new LinkOutageGuard(options.Outage)
+        _guard = new LinkOutageGuard(options.Outage, () => link.IsConnected)
         {
             OutageStarted = metrics.Outage,
             PlayPrompt = PlayGuardPrompt,
