@@ -89,7 +89,7 @@ internal static class SttCatalog
         },
     };
 
-    /// <summary>OpenAI Whisper. Honors the request's language and translate task.</summary>
+    /// <summary>OpenAI Whisper. Honors the request's language and translate task on the multilingual checkpoints; the English-only <c>*.en</c> releases (<c>whisper:small.en</c> etc.) have no slot for either and ignore them.</summary>
     internal static SttModelDescriptor Whisper { get; } = new SttModelDescriptor
     {
         ResolveRepo = ResolveWhisperRepo,
@@ -98,9 +98,9 @@ internal static class SttCatalog
         {
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
             return new SttRunner((backend, audio, request) =>
-                pipeline.TranscribeAudio(backend, audio, 16_000, ToWhisperOptions(request)), pipeline)
+                pipeline.TranscribeAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual)), pipeline)
             {
-                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request))),
+                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),
             };
         },
     };
@@ -114,9 +114,9 @@ internal static class SttCatalog
         {
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
             return new SttRunner((backend, audio, request) =>
-                pipeline.TranscribeAudio(backend, audio, 16_000, ToWhisperOptions(request)), pipeline)
+                pipeline.TranscribeAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual)), pipeline)
             {
-                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request))),
+                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),
             };
         },
     };
@@ -210,14 +210,14 @@ internal static class SttCatalog
             WhisperPipeline pipeline = await WhisperPipeline.LoadAsync(repo, ct: cancel).ConfigureAwait(false);
             return new SttRunner((backend, audio, request) =>
             {
-                using WhisperStreamingPipeline stream = new WhisperStreamingPipeline(pipeline, backend, ToWhisperOptions(request));
+                using WhisperStreamingPipeline stream = new WhisperStreamingPipeline(pipeline, backend, ToWhisperOptions(request, pipeline.IsMultilingual));
                 stream.PushAudio(audio, 16_000);
                 return stream.Finish();
             }, pipeline)
             {
                 // The stabilizer carries no timing of its own, so timestamps come from the underlying batch decode —
                 // which the streaming pipeline's own docs describe as the same result for a whole-clip call.
-                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request))),
+                Timed = (backend, audio, request) => ToSegments(pipeline.SegmentAudio(backend, audio, 16_000, ToWhisperOptions(request, pipeline.IsMultilingual))),
             };
         },
     };
@@ -233,14 +233,14 @@ internal static class SttCatalog
         return result;
     }
 
-    /// <summary>Maps the typed request to the engine's Whisper decode options.</summary>
-    private static WhisperOptions ToWhisperOptions(AudioRequest request) => new WhisperOptions
+    /// <summary>Maps the typed request to the engine's Whisper decode options. An English-only checkpoint has no language or task slot in its prompt, so both are dropped for it; an empty language means "no language token" on a multilingual one.</summary>
+    private static WhisperOptions ToWhisperOptions(AudioRequest request, bool multilingual) => new WhisperOptions
     {
-        Language = string.IsNullOrEmpty(request.Language) ? null : request.Language,
-        Translate = request.Translate,
+        Language = multilingual && !string.IsNullOrEmpty(request.Language) ? request.Language : null,
+        Translate = multilingual && request.Translate,
     };
 
-    /// <summary>Whisper / distil-whisper variant → HF repo. Full repo ids pass through; otherwise a size token is matched, else a sensible family default.</summary>
+    /// <summary>Whisper / distil-whisper variant → HF repo. Full repo ids pass through; otherwise a size token is matched (with the <c>.en</c> suffix selecting the English-only release: <c>tiny.en</c>, <c>base.en</c>, <c>small.en</c>, <c>medium.en</c>), else a sensible family default.</summary>
     private static string ResolveWhisperRepo(string variant)
     {
         string id = (variant ?? string.Empty).Trim();
@@ -262,19 +262,21 @@ internal static class SttCatalog
         {
             return lower.Contains("v2", StringComparison.Ordinal) ? "openai/whisper-large-v2" : "openai/whisper-large-v3";
         }
+        // Only the four smaller sizes have an English-only release.
+        string english = lower.EndsWith(".en", StringComparison.Ordinal) ? ".en" : string.Empty;
         if (lower.Contains("medium", StringComparison.Ordinal))
         {
-            return "openai/whisper-medium";
+            return "openai/whisper-medium" + english;
         }
         if (lower.Contains("small", StringComparison.Ordinal))
         {
-            return "openai/whisper-small";
+            return "openai/whisper-small" + english;
         }
         if (lower.Contains("tiny", StringComparison.Ordinal))
         {
-            return "openai/whisper-tiny";
+            return "openai/whisper-tiny" + english;
         }
-        return "openai/whisper-base";
+        return "openai/whisper-base" + english;
     }
 
     /// <summary>distil-whisper variant → HF repo; unlike <see cref="ResolveWhisperRepo"/> this always resolves into the distil-whisper family because its ids are bare ("large-v3", "large-v3.5").</summary>

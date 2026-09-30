@@ -931,6 +931,17 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   not engine code.
 - **Always verify TTS with whisper `medium.en`, never `base.en`** — `base.en` was actively misleading in
   multiple cases.
+- **English-only Whisper (`openai/whisper-*.en`, `distil-whisper/distil-*.en`): different special-token layout.**
+  Symptom: empty transcript and a decode that runs to the max-length limit (~11 s per utterance on a 3060,
+  ~100 s on CPU). Their 51864-entry vocabulary puts every special one below the multilingual ids (EOT 50256,
+  SOT 50257, `<|transcribe|>` 50358, `<|notimestamps|>` 50362, `<|0.00|>` 50363) and the prompt is SOT +
+  `<|notimestamps|>` with no language or task token (`forced_decoder_ids = [[1, 50362]]`). With the multilingual
+  constants the prompt became `<|en|>, <|zh|>, <|transcribe|>, <|notimestamps|>` and the loop waited for an EOT
+  (50257) the model never emits. Never hardcode Whisper special ids: read them from the checkpoint's
+  `added_tokens.json`/`vocab.json` (`WhisperTokenizer.EotId`/`SotId`/…, `IsMultilingual`), stop on *that* EOT, and
+  keep `WhisperConfig.VocabSize` equal to the embedding's row count (the decoder now refuses a mismatch; before, it
+  read the next tensor in the file as a phantom logit). The HF files also name no-speech `<|nocaptions|>`, not
+  `<|nospeech|>`.
 - **F5-TTS:** ConvNeXt filler-tail masking; ×1000 timestep sinusoid scale; erf-GELU stem vs tanh-GELU FFN.
 - **Fish-Speech:** the fast depth-LM must take the **PRE-norm** slow hidden (`norm_fastlayer_input=False`).
 - **espeak `MatchRule` RULE_PRE OOB:** indexed past the per-word buffer start on words like "Americans" —

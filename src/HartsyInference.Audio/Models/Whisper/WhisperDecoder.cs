@@ -41,6 +41,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> weights, string prefix = "model.decoder")
     {
         _embedTokens = WhisperOps.EnsureF32(weights[$"{prefix}.embed_tokens.weight"]);
+        RequireVocabShape(_embedTokens, $"{prefix}.embed_tokens.weight");
         _embedPositions = WhisperOps.EnsureF32(weights[$"{prefix}.embed_positions.weight"]);
 
         for (int i = 0; i < _layers.Length; i++)
@@ -52,6 +53,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
         if (weights.TryGetValue("proj_out.weight", out Tensor? proj))
         {
             _projOutWeight = WhisperOps.EnsureF32(proj);
+            RequireVocabShape(_projOutWeight, "proj_out.weight");
             _projOutIsTied = false;
         }
         else
@@ -62,6 +64,15 @@ public sealed unsafe class WhisperDecoder : IDisposable
             _projOutIsTied = true;
         }
         _weightsLoaded = true;
+    }
+
+    /// <summary>Fails fast when a <c>[vocab, d_model]</c> weight disagrees with the config: the logits loop reads exactly <see cref="WhisperConfig.VocabSize"/> rows, so an oversized config silently reads whatever tensor follows the embedding in the file as an extra logit (the English-only releases are one row short of the multilingual 51865).</summary>
+    private void RequireVocabShape(Tensor weight, string name)
+    {
+        if (weight.Shape.Rank == 2 && weight.Shape[0] == _cfg.VocabSize && weight.Shape[1] == _cfg.HiddenSize) return;
+        throw new InvalidOperationException(
+            $"{name} has shape {weight.Shape} but the config expects [{_cfg.VocabSize}, {_cfg.HiddenSize}]. " +
+            "The vocabulary size must match the checkpoint: 51865 multilingual, 51866 v3+, 51864 English-only (*.en).");
     }
 
     /// <summary>State carried across decode steps; the pipeline owns one of these for the duration of a single transcription.</summary>

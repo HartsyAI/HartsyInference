@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Whisper;
@@ -41,6 +42,9 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     /// <summary>Name of the loaded model (HF repo id).</summary>
     public string ModelName { get; }
 
+    /// <summary>Whether the loaded checkpoint uses the multilingual token layout. English-only (<c>*.en</c>) checkpoints prompt with SOT alone, so <see cref="WhisperOptions.Language"/> and <see cref="WhisperOptions.Translate"/> have no effect on them.</summary>
+    public bool IsMultilingual => _tokenizer.IsMultilingual;
+
     private WhisperPipeline(
         string modelName,
         WhisperConfig cfg,
@@ -66,7 +70,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         new("vocab.json"),
         new("merges.txt"),
         new("config.json"),
-        // Only multilingual checkpoints ship these.
+        // Every OpenAI and distil release ships these; optional so a hand-built directory still loads.
         new("added_tokens.json", Required: false),
         new("tokenizer_config.json", Required: false),
         new("generation_config.json", Required: false),
@@ -76,18 +80,18 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     /// <summary>Loads a Whisper pipeline from a HuggingFace repo, downloading <see cref="ModelFiles"/> into the
     /// shared cache on first use.</summary>
     /// <param name="hfRepoId">Repo id, e.g. <c>"openai/whisper-tiny"</c>.</param>
-    /// <param name="cfg">Override config; if null we infer it from the repo name
-    /// (works for the standard OpenAI / distil-whisper releases).</param>
+    /// <param name="cfg">Override config, used as given; if null we infer it from the repo name
+    /// (works for the standard OpenAI / distil-whisper releases) and take the vocabulary size from the
+    /// checkpoint's own <c>config.json</c>.</param>
     public static async Task<WhisperPipeline> LoadAsync(
         string hfRepoId,
         WhisperConfig? cfg = null,
         CancellationToken ct = default)
     {
-        WhisperConfig resolvedCfg = cfg ?? InferConfig(hfRepoId);
-
         string repoDir = AudioModelCache.GetRepoDirectory(hfRepoId, "stt");
         IReadOnlyDictionary<string, string> fetched = await AudioModelCache
             .FetchAllAsync(hfRepoId, ModelFiles, category: "stt", ct: ct).ConfigureAwait(false);
+        WhisperConfig resolvedCfg = cfg ?? ApplyCheckpointVocab(InferConfig(hfRepoId), fetched["config.json"]);
 
         SafeTensorsLoader loader = new();
         loader.Load(fetched["model.safetensors"]);
@@ -238,7 +242,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 
     private List<int> GreedyDecode(IBackend backend, WhisperDecoder.DecodeState state, WhisperOptions opts)
     {
-        // Prompt: [SOT, <|lang|>, transcribe|translate, <|notimestamps|>?].
+        // Prompt: [SOT, <|lang|>, transcribe|translate, <|notimestamps|>?] — or [SOT, <|notimestamps|>?] English-only.
         int[] prompt = _tokenizer.BuildPromptIds(opts.Language, opts.Translate, opts.WithTimestamps);
 
         // Run the prompt through the decoder in a single pass — the logits at the last
@@ -251,7 +255,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         int[] singleBuf = new int[1];
         for (int step = 0; step < opts.MaxNewTokens; step++)
         {
-            if (nextToken == WhisperTokenizer.EndOfTextId) break;
+            if (nextToken == _tokenizer.EotId) break;
             generated.Add(nextToken);
 
             // Feed only the new token forward; the cache holds everything prior.
@@ -270,14 +274,14 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     /// re-emits its own start tokens and freezes the decode. The full OpenAI suppress
     /// list (~99 entries including punctuation heuristics) lands with temperature
     /// fallback later. Ids come from the tokenizer, not the config — only it knows
-    /// whether this checkpoint uses the v3 (100-language) layout.</summary>
+    /// whether this checkpoint uses the v3 (100-language) or the English-only layout.</summary>
     private static unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperTokenizer tokenizer)
     {
         int vocab = (int)logits.Shape[logits.Shape.Rank - 1];
         float* p = (float*)logits.DataPointer;
 
         // Suppress prompt-only tokens: SOT, every language tag, and both task tokens.
-        for (int id = WhisperTokenizer.StartOfTranscriptId; id <= tokenizer.TranscribeId; id++)
+        for (int id = tokenizer.SotId; id <= tokenizer.TranscribeId; id++)
             if (id < vocab) p[id] = float.NegativeInfinity;
         if (tokenizer.NoSpeechId < vocab) p[tokenizer.NoSpeechId] = float.NegativeInfinity;
         if (tokenizer.NoTimestampsId < vocab) p[tokenizer.NoTimestampsId] = float.NegativeInfinity;
@@ -304,17 +308,21 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     }
 
     /// <summary>Infers a <see cref="WhisperConfig"/> from a HuggingFace repo name. Covers
-    /// the official OpenAI releases plus the distil-whisper variants. Falls back to a
-    /// load from the repo's <c>config.json</c> for unrecognized names (future work).</summary>
+    /// the official OpenAI releases (multilingual and <c>.en</c>) plus the distil-whisper variants.
+    /// Falls back to a load from the repo's <c>config.json</c> for unrecognized names (future work).</summary>
     public static WhisperConfig InferConfig(string hfRepoId)
     {
         string lower = hfRepoId.ToLowerInvariant();
         return lower switch
         {
-            "openai/whisper-tiny" or "openai/whisper-tiny.en" => WhisperConfig.Tiny,
-            "openai/whisper-base" or "openai/whisper-base.en" => WhisperConfig.Base,
-            "openai/whisper-small" or "openai/whisper-small.en" => WhisperConfig.Small,
-            "openai/whisper-medium" or "openai/whisper-medium.en" => WhisperConfig.Medium,
+            "openai/whisper-tiny" => WhisperConfig.Tiny,
+            "openai/whisper-tiny.en" => WhisperConfig.TinyEn,
+            "openai/whisper-base" => WhisperConfig.Base,
+            "openai/whisper-base.en" => WhisperConfig.BaseEn,
+            "openai/whisper-small" => WhisperConfig.Small,
+            "openai/whisper-small.en" => WhisperConfig.SmallEn,
+            "openai/whisper-medium" => WhisperConfig.Medium,
+            "openai/whisper-medium.en" => WhisperConfig.MediumEn,
             "openai/whisper-large-v2" => WhisperConfig.LargeV2,
             "openai/whisper-large-v3" => WhisperConfig.LargeV3,
             "openai/whisper-large-v3-turbo" => WhisperConfig.LargeV3Turbo,
@@ -327,6 +335,19 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
                 $"Unknown Whisper repo '{hfRepoId}'. Pass an explicit WhisperConfig to LoadAsync.",
                 nameof(hfRepoId)),
         };
+    }
+
+    /// <summary>Replaces the preset's vocabulary size with the checkpoint's own <c>vocab_size</c> when the two differ: the embedding row count is a checkpoint fact (51864 English-only, 51865 multilingual, 51866 v3+), and the decoder refuses to load a mismatch.</summary>
+    private static WhisperConfig ApplyCheckpointVocab(WhisperConfig cfg, string configJsonPath)
+    {
+        using FileStream fs = File.OpenRead(configJsonPath);
+        using JsonDocument doc = JsonDocument.Parse(fs);
+        if (!doc.RootElement.TryGetProperty("vocab_size", out JsonElement vocab)
+            || !vocab.TryGetInt32(out int vocabSize) || vocabSize == cfg.VocabSize)
+        {
+            return cfg;
+        }
+        return cfg with { VocabSize = vocabSize, IsMultilingual = vocabSize >= WhisperTokenizer.MultilingualVocabSize };
     }
 
     private void ThrowIfDisposed()
