@@ -12,8 +12,8 @@ public static class HfQuantFlavorDetector
     {
         if (config.ValueKind != JsonValueKind.Object)
             return null;
-        if (!TryObject(config, "quantization_config", out JsonElement quant)
-            && !TryObject(config, "quantization", out quant))
+        if (!TryQuantObject(config, out JsonElement quant)
+            && !(TryObject(config, "text_config", out JsonElement text) && TryQuantObject(text, out quant)))
             return null;
 
         string? method = String(quant, "quant_method")?.ToLowerInvariant();
@@ -41,6 +41,9 @@ public static class HfQuantFlavorDetector
         return TryObject(quant, "producer", out JsonElement producer)
             && string.Equals(String(producer, "name"), "modelopt", StringComparison.OrdinalIgnoreCase);
     }
+
+    private static bool TryQuantObject(JsonElement parent, out JsonElement quant) =>
+        TryObject(parent, "quantization_config", out quant) || TryObject(parent, "quantization", out quant);
 
     private static bool TryObject(JsonElement parent, string name, out JsonElement value)
     {

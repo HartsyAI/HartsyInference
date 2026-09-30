@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.210
+## alpha.209
 
 - **DeepSeek-V4.1-Flash config, HF directory loader and catalog rows** (program PR 7). `HfCheckpointDirectory.TryProbe` recognises a
   config plus safetensors directory from `config.json` and the file listing alone, and `HfQuantFlavorDetector` names the producer

@@ -73,7 +73,7 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
             throw new HartsyInferenceException(
                 $"'{directory}' has no {HfCheckpointDirectory.IndexFileName}; a DeepSeek-V4.1 checkpoint is always sharded.");
         QuantFlavor flavor = info.Flavor
-            ?? throw new HartsyInferenceException($"'{info.ConfigPath}' has no recognisable quantization_config; cannot choose companion naming.");
+            ?? throw new HartsyInferenceException($"'{info.ConfigPath}' has no recognisable quantization_config; unquantized checkpoints are not supported.");
         DeepSeekV41Config config = DeepSeekV41Config.Load(info.ConfigPath);
         IHfKeyMapper mapper = HfKeyMappers.ForSafeTensors(flavor);
 
@@ -203,15 +203,22 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
         if (!index.RootElement.TryGetProperty("weight_map", out JsonElement weightMap) || weightMap.ValueKind != JsonValueKind.Object)
             throw new HartsyInferenceException($"'{indexPath}' has no weight_map object.");
         HashSet<string> names = new(StringComparer.Ordinal);
+        HashSet<string> shared = new(StringComparer.Ordinal);
         foreach (JsonProperty entry in weightMap.EnumerateObject())
         {
             string? canonical = mapper.MapToCanonical(entry.Name);
-            if (canonical is not null && DeepSeekV41WeightClassifier.Classify(canonical) == DeepSeekV41WeightClass.Engram
-                && entry.Value.GetString() is { } file)
-            {
+            if (canonical is null || entry.Value.GetString() is not { } file)
+                continue;
+            if (DeepSeekV41WeightClassifier.Classify(canonical) == DeepSeekV41WeightClass.Engram)
                 names.Add(file);
-            }
+            else
+                shared.Add(file);
         }
+        string[] mixed = names.Where(shared.Contains).Order(StringComparer.Ordinal).ToArray();
+        if (mixed.Length > 0)
+            throw new HartsyInferenceException(
+                $"Engram tables share shards with other weights ({string.Join(", ", mixed)}); " +
+                "Engram shards are read by offset only, so they must hold nothing else.");
         return names.Order(StringComparer.Ordinal).ToArray();
     }
 

@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
@@ -130,6 +131,21 @@ public sealed class DeepSeekV41CheckpointTests : IDisposable
         Assert.False(checkpoint.HasWeight("mtp.0.ffn.experts.1.w1.weight"));
         Assert.True(checkpoint.HasWeight("mtp.0.ffn.experts.0.w1.weight"));
         Assert.NotNull(checkpoint.GetQuant("layers.0.ffn.experts.0.w1.weight"));
+    }
+
+    [Fact]
+    public void Open_RefusesEngramTablesSharingAShardWithOtherWeights()
+    {
+        TinyDeepSeekV41Checkpoint.Write(_directory);
+        string indexPath = Path.Combine(_directory, "model.safetensors.index.json");
+        JsonNode index = JsonNode.Parse(File.ReadAllText(indexPath))!;
+        foreach (KeyValuePair<string, JsonNode?> entry in index["weight_map"]!.AsObject().ToArray())
+            index["weight_map"]![entry.Key] = "model-00001-of-00003.safetensors";
+        File.WriteAllText(indexPath, index.ToJsonString());
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => DeepSeekV41Checkpoint.Open(_directory));
+
+        Assert.Contains("Engram tables share shards", error.Message);
     }
 
     [Fact]

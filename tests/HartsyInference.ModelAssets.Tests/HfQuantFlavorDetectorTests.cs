@@ -32,6 +32,12 @@ public sealed class HfQuantFlavorDetectorTests
     }
 
     [Fact]
+    public void QuantizationBlockNestedUnderTextConfig_IsFound()
+    {
+        Assert.Equal(QuantFlavor.AmdQuark, Detect("{\"text_config\":{\"quantization_config\":{\"quant_method\":\"quark\"}}}"));
+    }
+
+    [Fact]
     public void AmdQuark_IsQuarkMethod()
     {
         Assert.Equal(QuantFlavor.AmdQuark, Detect("{\"quantization_config\":{\"quant_method\":\"quark\",\"algo_config\":null}}"));
