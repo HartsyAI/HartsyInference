@@ -13,6 +13,8 @@ public sealed class CpuParallelInlineScopeTests
     private const int Items = 64;
     private const long WorkAboveThreshold = CpuParallel.MinWorkForParallel * 64;
 
+    private static readonly Action<int, int[]> Store = static (i, results) => results[i] = i * 2;
+
     private readonly ITestOutputHelper _output;
     public CpuParallelInlineScopeTests(ITestOutputHelper output) => _output = output;
 
@@ -52,6 +54,37 @@ public sealed class CpuParallelInlineScopeTests
         });
         Assert.Equal(Items, threads.Count);
         Assert.True(threads.Distinct().Count() > 1, "the work never left the calling thread");
+    }
+
+    /// <summary>The stateful overload is for kernels on the audio thread: with its body in a static field, a call
+    /// that runs inline must not allocate — not even the fan-out closure, which the compiler would otherwise build
+    /// on entry.</summary>
+    [Fact]
+    public void StatefulFor_Inline_VisitsEveryIndex_AndAllocatesNothing()
+    {
+        int[] results = new int[Items];
+        using CpuParallel.InlineScope scope = CpuParallel.EnterInline();
+        CpuParallel.For(Items, WorkAboveThreshold, results, Store);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int call = 0; call < 100; call++) CpuParallel.For(Items, WorkAboveThreshold, results, Store);
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+        for (int i = 0; i < Items; i++) Assert.Equal(i * 2, results[i]);
+    }
+
+    [Fact]
+    public void StatefulFor_FansOut_AndRethrowsAWorkerExceptionUnwrapped()
+    {
+        ConcurrentBag<int> seen = [];
+        CpuParallel.For(Items, WorkAboveThreshold, seen, static (i, bag) =>
+        {
+            Thread.SpinWait(20_000);
+            bag.Add(i);
+        });
+        Assert.Equal(Enumerable.Range(0, Items), seen.Order());
+        Assert.Throws<ArgumentException>(() => CpuParallel.For(Items, WorkAboveThreshold, 0, static (i, _) =>
+        {
+            if (i == 7) throw new ArgumentException("item 7");
+        }));
     }
 
     [Fact]

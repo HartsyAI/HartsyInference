@@ -20,6 +20,9 @@ namespace HartsyInference.Cpu.Kernels;
 /// layer in every codec.</para></remarks>
 public static class Conv1dKernels
 {
+    // Held in a field so a call that runs inline allocates nothing; see MatMulKernels.LinearTileBody.
+    private static readonly unsafe Action<int, Conv1dTasks> Conv1dTaskBody = Conv1dTask;
+
     /// <summary>1D convolution. Caller pre-allocates the output tensor.</summary>
     /// <remarks>Output shape must be <c>[B, C_out, (T_in + padLeft + padRight - dilation*(K-1) - 1) / stride + 1]</c>.</remarks>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
@@ -65,87 +68,123 @@ public static class Conv1dKernels
         if (timeChunks < 1) timeChunks = 1;
         long work = (long)rows * tOut * inPerGroup * kernel;
 
-        CpuParallel.For(rows * timeChunks, work, task =>
+        Conv1dTasks state = new(ip, op, wp, bp, cIn, tIn, cOut, tOut, inPerGroup, outPerGroup, kernel, stride,
+            padLeft, dilation, timeChunks, chunkLen);
+        CpuParallel.For(rows * timeChunks, work, state, Conv1dTaskBody);
+    }
+
+    /// <summary>One (batch, out-channel, time-slice) task of <see cref="Conv1d"/>. A static method over passed-in state
+    /// rather than a capturing lambda, so the delegate is cached and an inline call allocates nothing.</summary>
+    private static unsafe void Conv1dTask(int task, Conv1dTasks s)
+    {
+        float* ip = s.Input;
+        float* op = s.Output;
+        float* wp = s.Weight;
+        float* bp = s.Bias;
+        int cIn = s.CIn, tIn = s.TIn, cOut = s.COut, tOut = s.TOut, inPerGroup = s.InPerGroup;
+        int outPerGroup = s.OutPerGroup, kernel = s.Kernel, stride = s.Stride, padLeft = s.PadLeft;
+        int dilation = s.Dilation, timeChunks = s.TimeChunks, chunkLen = s.ChunkLen;
+        int row = task / timeChunks;
+        int chunk = task - row * timeChunks;
+        int b = row / cOut;
+        int oc = row - b * cOut;
+        int jStart = chunk * chunkLen;
+        int jEnd = Math.Min(tOut, jStart + chunkLen);
+
+        int group = oc / outPerGroup;
+        int icStart = group * inPerGroup;
+        float biasV = bp is null ? 0f : bp[oc];
+        int wRow = oc * inPerGroup * kernel;
+        int outBase = (b * cOut + oc) * tOut;
+
+        if (stride == 1)
         {
-            int row = task / timeChunks;
-            int chunk = task - row * timeChunks;
-            int b = row / cOut;
-            int oc = row - b * cOut;
-            int jStart = chunk * chunkLen;
-            int jEnd = Math.Min(tOut, jStart + chunkLen);
+            // Stride 1 is almost everything a VITS/HiFi-GAN graph runs: its projections and feed-forwards
+            // are 1x1 convolutions and its residual stacks are dilated k3. With unit stride the source
+            // index moves in lockstep with j, so one (input channel, tap) pair contributes a scaled copy
+            // of a contiguous input run to a contiguous output run — a vectorizable accumulate, instead of
+            // the gather's strided walk across channels for every single output element.
+            //
+            // The per-element order of accumulation is unchanged (input channel major, then tap), so this
+            // produces bit-identical results to the gather below.
+            for (int j = jStart; j < jEnd; j++) op[outBase + j] = biasV;
 
-            int group = oc / outPerGroup;
-            int icStart = group * inPerGroup;
-            float biasV = bp is null ? 0f : bp[oc];
-            int wRow = oc * inPerGroup * kernel;
-            int outBase = (b * cOut + oc) * tOut;
-
-            if (stride == 1)
+            for (int ic = 0; ic < inPerGroup; ic++)
             {
-                // Stride 1 is almost everything a VITS/HiFi-GAN graph runs: its projections and feed-forwards
-                // are 1x1 convolutions and its residual stacks are dilated k3. With unit stride the source
-                // index moves in lockstep with j, so one (input channel, tap) pair contributes a scaled copy
-                // of a contiguous input run to a contiguous output run — a vectorizable accumulate, instead of
-                // the gather's strided walk across channels for every single output element.
-                //
-                // The per-element order of accumulation is unchanged (input channel major, then tap), so this
-                // produces bit-identical results to the gather below.
-                for (int j = jStart; j < jEnd; j++) op[outBase + j] = biasV;
-
-                for (int ic = 0; ic < inPerGroup; ic++)
+                int inBase = (b * cIn + icStart + ic) * tIn;
+                int wBase = wRow + ic * kernel;
+                for (int k = 0; k < kernel; k++)
                 {
-                    int inBase = (b * cIn + icStart + ic) * tIn;
-                    int wBase = wRow + ic * kernel;
-                    for (int k = 0; k < kernel; k++)
-                    {
-                        float w = wp[wBase + k];
-                        if (w == 0f) continue;
-                        int shift = k * dilation - padLeft;
-                        // Clamp to the window where src = j + shift is a real input sample; outside it the
-                        // gather form contributed nothing, so neither does this.
-                        int lo = Math.Max(jStart, -shift);
-                        int hi = Math.Min(jEnd, tIn - shift);
-                        if (lo >= hi) continue;
+                    float w = wp[wBase + k];
+                    if (w == 0f) continue;
+                    int shift = k * dilation - padLeft;
+                    // Clamp to the window where src = j + shift is a real input sample; outside it the
+                    // gather form contributed nothing, so neither does this.
+                    int lo = Math.Max(jStart, -shift);
+                    int hi = Math.Min(jEnd, tIn - shift);
+                    if (lo >= hi) continue;
 
-                        float* src = ip + inBase + shift;
-                        float* dst = op + outBase;
-                        int j = lo;
-                        if (Vector.IsHardwareAccelerated && hi - lo >= Vector<float>.Count)
+                    float* src = ip + inBase + shift;
+                    float* dst = op + outBase;
+                    int j = lo;
+                    if (Vector.IsHardwareAccelerated && hi - lo >= Vector<float>.Count)
+                    {
+                        Vector<float> wv = new(w);
+                        int vecEnd = hi - Vector<float>.Count;
+                        for (; j <= vecEnd; j += Vector<float>.Count)
                         {
-                            Vector<float> wv = new(w);
-                            int vecEnd = hi - Vector<float>.Count;
-                            for (; j <= vecEnd; j += Vector<float>.Count)
-                            {
-                                Vector<float> acc = Vector.Load(dst + j);
-                                Vector<float> x = Vector.Load(src + j);
-                                Vector.Store(acc + x * wv, dst + j);
-                            }
+                            Vector<float> acc = Vector.Load(dst + j);
+                            Vector<float> x = Vector.Load(src + j);
+                            Vector.Store(acc + x * wv, dst + j);
                         }
-                        for (; j < hi; j++) dst[j] += src[j] * w;
                     }
+                    for (; j < hi; j++) dst[j] += src[j] * w;
                 }
-                return;
             }
+            return;
+        }
 
-            for (int j = jStart; j < jEnd; j++)
+        for (int j = jStart; j < jEnd; j++)
+        {
+            int srcLeftmost = j * stride - padLeft;
+            float acc = biasV;
+            for (int ic = 0; ic < inPerGroup; ic++)
             {
-                int srcLeftmost = j * stride - padLeft;
-                float acc = biasV;
-                for (int ic = 0; ic < inPerGroup; ic++)
+                int inCh = icStart + ic;
+                int inBase = (b * cIn + inCh) * tIn;
+                int wBase = wRow + ic * kernel;
+                for (int k = 0; k < kernel; k++)
                 {
-                    int inCh = icStart + ic;
-                    int inBase = (b * cIn + inCh) * tIn;
-                    int wBase = wRow + ic * kernel;
-                    for (int k = 0; k < kernel; k++)
-                    {
-                        int src = srcLeftmost + k * dilation;
-                        if ((uint)src < (uint)tIn)
-                            acc += ip[inBase + src] * wp[wBase + k];
-                    }
+                    int src = srcLeftmost + k * dilation;
+                    if ((uint)src < (uint)tIn)
+                        acc += ip[inBase + src] * wp[wBase + k];
                 }
-                op[outBase + j] = acc;
             }
-        });
+            op[outBase + j] = acc;
+        }
+    }
+
+    /// <summary>What <see cref="Conv1dTask"/> needs from the call that fans it out.</summary>
+    private readonly unsafe struct Conv1dTasks(float* input, float* output, float* weight, float* bias, int cIn,
+        int tIn, int cOut, int tOut, int inPerGroup, int outPerGroup, int kernel, int stride, int padLeft,
+        int dilation, int timeChunks, int chunkLen)
+    {
+        public readonly float* Input = input;
+        public readonly float* Output = output;
+        public readonly float* Weight = weight;
+        public readonly float* Bias = bias;
+        public readonly int CIn = cIn;
+        public readonly int TIn = tIn;
+        public readonly int COut = cOut;
+        public readonly int TOut = tOut;
+        public readonly int InPerGroup = inPerGroup;
+        public readonly int OutPerGroup = outPerGroup;
+        public readonly int Kernel = kernel;
+        public readonly int Stride = stride;
+        public readonly int PadLeft = padLeft;
+        public readonly int Dilation = dilation;
+        public readonly int TimeChunks = timeChunks;
+        public readonly int ChunkLen = chunkLen;
     }
 
     /// <summary>1D transposed convolution. PyTorch weight layout <c>[C_in, C_out, K]</c>.</summary>
