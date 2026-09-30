@@ -128,6 +128,62 @@ public sealed class ClockedAudioSourceCadenceTests
     }
 
     [Fact]
+    public void SubscriberFault_RaisesTickFaultedOnceOnTheTickThreadAndEndsIt()
+    {
+        using ClockedAudioSource source = new(new ClockedAudioSourceOptions());
+        InvalidOperationException injected = new("injected tick fault");
+        long frames = 0;
+        source.OnAudioSourceEncodedSample += (_, _) =>
+        {
+            if (Interlocked.Increment(ref frames) == 5)
+            {
+                throw injected;
+            }
+        };
+        int raised = 0;
+        Exception? reported = null;
+        string? thread = null;
+        using ManualResetEventSlim faulted = new(false);
+        source.TickFaulted += ex =>
+        {
+            Interlocked.Increment(ref raised);
+            reported = ex;
+            thread = Thread.CurrentThread.Name;
+            faulted.Set();
+        };
+        source.Start();
+        Assert.True(faulted.Wait(5000), "TickFaulted was never raised");
+        source.Stop();
+        Assert.Same(injected, reported);
+        Assert.Equal("phone-rtp-tick", thread);
+        Assert.Equal(1, raised);
+        Assert.True(source.Faulted);
+        Assert.False(source.IsRunning);
+        Assert.Equal(5, Interlocked.Read(ref frames));
+    }
+
+    [Fact]
+    public void StartFault_IsReportedAndStartStillReturns()
+    {
+        using ClockedAudioSource source = new(new ClockedAudioSourceOptions());
+        InvalidOperationException injected = new("injected start fault");
+        source.InjectedStartFault = injected;
+        Exception? reported = null;
+        using ManualResetEventSlim faulted = new(false);
+        source.TickFaulted += ex =>
+        {
+            reported = ex;
+            faulted.Set();
+        };
+        source.Start();
+        Assert.True(source.Faulted, "Faulted must be set before Start returns");
+        Assert.True(faulted.Wait(5000));
+        source.Stop();
+        Assert.Same(injected, reported);
+        Assert.Equal(0, source.Ticks);
+    }
+
+    [Fact]
     public void SetAudioSourceFormat_SwitchesTheLaw()
     {
         using ClockedAudioSource source = new(new ClockedAudioSourceOptions());

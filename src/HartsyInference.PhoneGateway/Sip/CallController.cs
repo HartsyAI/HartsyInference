@@ -1,3 +1,4 @@
+using System.Net.Sockets;
 using System.Text.Json;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
@@ -16,20 +17,28 @@ namespace HartsyInference.PhoneGateway.Sip;
 /// <summary>The one-call state machine: answers or places a call, builds its media (tick source, jitter buffer, pump,
 /// outbound path, prompts), announces it to the voice host, relays DTMF and telephony tools, and tears everything
 /// down exactly once whichever side ends the call.</summary>
-/// <remarks>Inbound screening runs before anything is allocated: a second INVITE while a call is up gets <c>486 Busy
-/// Here</c>, a caller the policy refuses gets <c>603 Decline</c>, and an INVITE while the host link is down gets
-/// <c>503</c>. Tool requests arrive on the link reader thread and run on the pool so that thread never waits on SIP.
-/// <c>OnCallHungup</c> fires for a remote BYE and for our own <c>Hangup()</c>, so the end reason is decided before
-/// hanging up and teardown is guarded by the state under <c>_stateLock</c>, which is never held across an await or
-/// a sipsorcery call.</remarks>
+/// <remarks>Every new INVITE is screened on the transport before the user agent sees it: <c>486 Busy Here</c> while a
+/// call is up, <c>503</c> while the host link is down, <c>603 Decline</c> by policy. Each refusal goes out on its own
+/// server transaction, which answers the caller's retransmissions and absorbs the ACK, and is recorded in an
+/// <see cref="InviteRejectionLedger"/> so it is counted once and a copy is never offered as a call. A call whose tick
+/// thread faults is ended at once: BYE, <c>CallEnd(Failed)</c> to the host, <c>calls_media_fault_total</c>; if the
+/// fault lands before the call was announced, the call is never announced and is ended with a BYE. Tool requests
+/// arrive on the link reader thread and run on the pool so that thread never waits on SIP. <c>OnCallHungup</c> fires
+/// for a remote BYE and for our own <c>Hangup()</c>, so the end reason is decided before hanging up and teardown is
+/// guarded by the state under <c>_stateLock</c>, which is never held across an await or a sipsorcery call.</remarks>
 public sealed class CallController : IDisposable
 {
+    // Four 200 OK retransmissions at T1 = 500 ms doubling; a caller that has not ACKed by then is not getting them.
+    private const int AckWaitMs = 8000;
+    private const int AckPollMs = 20;
+
     private readonly SipAccount _account;
     private readonly EngineLink _link;
     private readonly CallControllerOptions _options;
     private readonly PromptPlayer _prompts;
     private readonly GatewayMetrics _metrics;
     private readonly LinkOutageGuard _guard;
+    private readonly InviteRejectionLedger _rejections = new();
     private readonly object _stateLock = new();
     private SIPUserAgent? _agent;
     private CallState _state;
@@ -99,6 +108,9 @@ public sealed class CallController : IDisposable
     /// <summary>Why the last outbound call attempt failed, for the admin endpoint.</summary>
     public string LastCallFailure => Volatile.Read(ref _lastCallFailure);
 
+    /// <summary>Test seam: called with each call's tick source right after it is created, before it starts.</summary>
+    internal Action<ClockedAudioSource>? SourceCreated { get; set; }
+
     public void Start()
     {
         lock (_stateLock)
@@ -107,6 +119,9 @@ public sealed class CallController : IDisposable
             {
                 throw new InvalidOperationException("CallController is already started.");
             }
+            // The screen must see an INVITE before the user agent does: sipsorcery offers every copy of an INVITE to
+            // OnIncomingCall, and ignores a new one outright while it holds a call. Handlers run in subscription order.
+            _account.Transport.SIPTransportRequestReceived += OnTransportRequest;
             SIPUserAgent agent = new(_account.Transport, null);
             agent.OnIncomingCall += OnIncomingCall;
             agent.OnCallHungup += OnCallHungup;
@@ -114,8 +129,6 @@ public sealed class CallController : IDisposable
             agent.ClientCallFailed += (_, message, _) => Volatile.Write(ref _lastCallFailure, message ?? "");
             _agent = agent;
         }
-        // sipsorcery's user agent ignores a new INVITE while it has a call, so the busy answer is given at the transport.
-        _account.Transport.SIPTransportRequestReceived += OnTransportRequest;
         _link.Connected = OnLinkConnected;
         _link.Disconnected = _ => _guard.LinkDisconnected();
         _link.OutboundAudio = OnOutboundAudio;
@@ -170,19 +183,24 @@ public sealed class CallController : IDisposable
             return new CallPlacementResult(false, LastCallFailure.Length == 0 ? "not answered" : LastCallFailure);
         }
         call.SipCallId = agent.Dialogue?.CallId ?? "";
-        Activate(call);
+        if (!Activate(call))
+        {
+            EndBeforeAnnouncing(call, agent);
+            return new CallPlacementResult(false, "media fault");
+        }
         return CallPlacementResult.Ok;
     }
 
     /// <summary>Ends the live call from our side with <paramref name="reason"/> and tells the host.</summary>
-    public void HangUp(LinkCallEndReason reason) => HangUp(reason, tellHost: true);
+    public void HangUp(LinkCallEndReason reason) => HangUp(reason, tellHost: true, only: null);
 
-    private void HangUp(LinkCallEndReason reason, bool tellHost)
+    /// <summary>Hangs up the live call, or only <paramref name="only"/> when given, so a late request never ends a newer call.</summary>
+    private void HangUp(LinkCallEndReason reason, bool tellHost, ActiveCall? only)
     {
         SIPUserAgent? agent;
         lock (_stateLock)
         {
-            if (_state is CallState.Idle or CallState.Ending)
+            if (_state is CallState.Idle or CallState.Ending || (only is not null && !ReferenceEquals(_current, only)))
             {
                 return;
             }
@@ -208,68 +226,158 @@ public sealed class CallController : IDisposable
         EndCall(reason, tellHost);
     }
 
-    /// <summary>Answers a new INVITE with 486 while a call is up or being set up. Re-INVITEs (with a To tag) and the
-    /// INVITE currently being answered are left to the user agent.</summary>
+    /// <summary>First look at every request, before the user agent's: refuses a new INVITE the gateway will not take,
+    /// and answers a copy of an already-refused INVITE the same way. Re-INVITEs (with a To tag), the INVITE being
+    /// answered and one to offer pass through.</summary>
     private Task OnTransportRequest(SIPEndPoint localEndPoint, SIPEndPoint remoteEndPoint, SIPRequest request)
     {
-        if (request.Method != SIPMethodsEnum.INVITE || !string.IsNullOrEmpty(request.Header.To?.ToTag))
+        if (!IsNewInvite(request))
         {
             return Task.CompletedTask;
         }
-        string? callId = request.Header.CallId;
-        lock (_stateLock)
+        if (_rejections.TryGet(request, out InviteRejection known))
         {
-            if (_state == CallState.Idle || callId == _ringingSipCallId || (_current is not null && callId == _current.SipCallId))
-            {
-                return Task.CompletedTask;
-            }
+            // The refusal's transaction absorbs copies while it lives; this one got past it, so answer it here.
+            _ = SendStatelessAsync(request, known.Status, known.Reason);
+            return Task.CompletedTask;
         }
-        Logs.Info($"[PhoneGateway] INVITE from {request.Header.From?.FromURI?.User} while busy: 486 Busy Here.");
-        _metrics.RejectedBusy();
-        SIPResponse busy = SIPResponse.GetResponse(request, SIPResponseStatusCodesEnum.BusyHere, null);
-        return _account.Transport.SendResponseAsync(busy);
+        InviteDecision decision = Screen(request);
+        if (decision is not (InviteDecision.Offer or InviteDecision.OwnCall))
+        {
+            RejectInvite(request, decision);
+        }
+        return Task.CompletedTask;
     }
 
     private void OnIncomingCall(SIPUserAgent agent, SIPRequest request)
     {
-        string? caller = request.Header.From?.FromURI?.User;
-        string? called = request.URI?.User;
+        if (_rejections.TryGet(request, out _))
+        {
+            // Refused by the transport screen, which runs first.
+            return;
+        }
+        InviteDecision decision = Screen(request);
+        if (decision == InviteDecision.Offer)
+        {
+            lock (_stateLock)
+            {
+                if (_state == CallState.Idle)
+                {
+                    _state = CallState.Ringing;
+                    _ringingSipCallId = request.Header.CallId;
+                }
+                else
+                {
+                    // Another INVITE got in since the screen ran.
+                    decision = IsOwnCallLocked(request.Header.CallId) ? InviteDecision.OwnCall : InviteDecision.Busy;
+                }
+            }
+        }
+        switch (decision)
+        {
+            case InviteDecision.Offer:
+                _ = AnswerAsync(agent, request, request.Header.From?.FromURI?.User, request.URI?.User);
+                return;
+            case InviteDecision.OwnCall:
+                return;
+            default:
+                RejectInvite(request, decision);
+                return;
+        }
+    }
+
+    private InviteDecision Screen(SIPRequest request)
+    {
         lock (_stateLock)
         {
             if (_state != CallState.Idle)
             {
-                // Normally answered by OnTransportRequest before the user agent sees it.
-                _metrics.RejectedBusy();
-                Reject(agent, request, SIPResponseStatusCodesEnum.BusyHere, "Busy Here");
-                return;
+                return IsOwnCallLocked(request.Header.CallId) ? InviteDecision.OwnCall : InviteDecision.Busy;
             }
-            if (!_link.IsConnected)
-            {
-                Logs.Warning($"[PhoneGateway] INVITE from {caller} while the voice host is down: 503.");
-                _metrics.RejectedHostDown();
-                Reject(agent, request, SIPResponseStatusCodesEnum.ServiceUnavailable, "Voice host unavailable");
-                return;
-            }
-            if (!IsAllowed(caller))
-            {
-                Logs.Info($"[PhoneGateway] INVITE from {caller} declined by policy {_options.InboundPolicy}: 603.");
-                _metrics.Declined();
-                Reject(agent, request, SIPResponseStatusCodesEnum.Decline, "Decline");
-                return;
-            }
-            _state = CallState.Ringing;
-            _ringingSipCallId = request.Header.CallId;
         }
-        _ = AnswerAsync(agent, request, caller, called);
+        if (!_link.IsConnected)
+        {
+            return InviteDecision.HostDown;
+        }
+        return IsAllowed(request.Header.From?.FromURI?.User) ? InviteDecision.Offer : InviteDecision.Declined;
+    }
+
+    private bool IsOwnCallLocked(string? sipCallId) =>
+        sipCallId is not null && (sipCallId == _ringingSipCallId || sipCallId == _current?.SipCallId);
+
+    private static bool IsNewInvite(SIPRequest request) =>
+        request.Method == SIPMethodsEnum.INVITE && string.IsNullOrEmpty(request.Header.To?.ToTag);
+
+    /// <summary>Refuses an INVITE on its own server transaction, which then answers the caller's retransmissions and
+    /// absorbs the ACK. The ledger makes the refusal count once, whichever path saw the INVITE first.</summary>
+    private void RejectInvite(SIPRequest request, InviteDecision decision)
+    {
+        (SIPResponseStatusCodesEnum status, string reason) = decision switch
+        {
+            InviteDecision.Busy => (SIPResponseStatusCodesEnum.BusyHere, "Busy Here"),
+            InviteDecision.HostDown => (SIPResponseStatusCodesEnum.ServiceUnavailable, "Voice host unavailable"),
+            _ => (SIPResponseStatusCodesEnum.Decline, "Decline"),
+        };
+        if (!_rejections.TryRecord(request, status, reason, out InviteRejection first))
+        {
+            // A copy that raced the first one past the transaction layer: same answer, not counted again.
+            _ = SendStatelessAsync(request, first.Status, first.Reason);
+            return;
+        }
+        string caller = request.Header.From?.FromURI?.User ?? "anonymous";
+        switch (decision)
+        {
+            case InviteDecision.Busy:
+                _metrics.RejectedBusy();
+                Logs.Info($"[PhoneGateway] INVITE from {caller} while a call is up: 486 Busy Here.");
+                break;
+            case InviteDecision.HostDown:
+                _metrics.RejectedHostDown();
+                Logs.Warning($"[PhoneGateway] INVITE from {caller} while the voice host is down: 503.");
+                break;
+            default:
+                _metrics.Declined();
+                Logs.Info($"[PhoneGateway] INVITE from {caller} declined by policy {_options.InboundPolicy}: 603.");
+                break;
+        }
+        try
+        {
+            UASInviteTransaction transaction = new(_account.Transport, request, null);
+            SIPServerUserAgent uas = new(_account.Transport, null, transaction, null);
+            uas.Reject(status, reason);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[PhoneGateway] Could not send {status} to an INVITE", ex);
+        }
+    }
+
+    /// <summary>Answers an INVITE outside any transaction, for a copy the transaction layer did not catch.</summary>
+    private async Task SendStatelessAsync(SIPRequest request, SIPResponseStatusCodesEnum status, string reason)
+    {
+        try
+        {
+            SIPResponse response = SIPResponse.GetResponse(request, status, reason);
+            SocketError result = await _account.Transport.SendResponseAsync(response).ConfigureAwait(false);
+            if (result != SocketError.Success)
+            {
+                Logs.Debug($"[PhoneGateway] Resending {status} for an INVITE copy failed: {result}.");
+            }
+        }
+        catch (Exception ex) when (ex is SocketException or ObjectDisposedException or InvalidOperationException)
+        {
+            Logs.Debug($"[PhoneGateway] Resending {status} for an INVITE copy failed: {ex.Message}");
+        }
     }
 
     private async Task AnswerAsync(SIPUserAgent agent, SIPRequest request, string? caller, string? called)
     {
         ActiveCall call = CreateCall(LinkCallDirection.Inbound, caller, called, request.Header.CallId ?? "");
+        SIPServerUserAgent? uas = null;
         bool answered;
         try
         {
-            SIPServerUserAgent uas = agent.AcceptCall(request);
+            uas = agent.AcceptCall(request);
             answered = await agent.Answer(uas, call.Session, _account.PublicAddress.LastResolved).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -279,23 +387,57 @@ public sealed class CallController : IDisposable
         }
         if (!answered)
         {
+            FinishUnanswered(request, uas);
             AbandonRinging(call);
             _metrics.Failed();
             return;
         }
-        Activate(call);
+        if (!Activate(call))
+        {
+            await WaitForAckAsync(uas).ConfigureAwait(false);
+            EndBeforeAnnouncing(call, agent);
+        }
     }
 
-    private static void Reject(SIPUserAgent agent, SIPRequest request, SIPResponseStatusCodesEnum status, string reason)
+    /// <summary>A UAS must not send BYE before the ACK for its 200 (RFC 3261 §15): if the 200 was lost, the caller would
+    /// pick up a retransmission later and sit in a call already ended here. Waits for the ACK, bounded.</summary>
+    private static async Task WaitForAckAsync(SIPServerUserAgent? uas)
+    {
+        if (uas is null)
+        {
+            return;
+        }
+        long deadline = Environment.TickCount64 + AckWaitMs;
+        while (uas.ClientTransaction.TransactionState == SIPTransactionStatesEnum.Completed && Environment.TickCount64 < deadline)
+        {
+            await Task.Delay(AckPollMs).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>After a failed answer, makes sure the caller is not left ringing: a final response when none went out
+    /// (sipsorcery sends its own for an SDP mismatch), a BYE when the 200 already did.</summary>
+    private void FinishUnanswered(SIPRequest request, SIPServerUserAgent? uas)
     {
         try
         {
-            SIPServerUserAgent uas = agent.AcceptCall(request);
-            uas.Reject(status, reason);
+            if (uas is null)
+            {
+                _ = SendStatelessAsync(request, SIPResponseStatusCodesEnum.InternalServerError, "Media setup failed");
+                return;
+            }
+            if (uas.IsUASAnswered)
+            {
+                uas.SIPDialogue?.Hangup(_account.Transport, null);
+                return;
+            }
+            if (!uas.IsCancelled && uas.ClientTransaction.TransactionState is SIPTransactionStatesEnum.Proceeding or SIPTransactionStatesEnum.Trying)
+            {
+                uas.Reject(SIPResponseStatusCodesEnum.InternalServerError, "Media setup failed");
+            }
         }
         catch (Exception ex)
         {
-            Logs.Error($"[PhoneGateway] Could not send {status} to an INVITE", ex);
+            Logs.Error("[PhoneGateway] Could not end an INVITE the gateway failed to answer", ex);
         }
     }
 
@@ -321,14 +463,22 @@ public sealed class CallController : IDisposable
         InboundAudioPath inbound = new(jitter, _link, callId, recorder);
         OutboundAudioPath outbound = new(source, recorder);
         session.OnRtpPacketReceived += inbound.HandleRtpPacket;
-        return new ActiveCall(callId, direction, callerId, called, sipCallId, source, session, jitter, inbound, outbound, recorder);
+        ActiveCall call = new(callId, direction, callerId, called, sipCallId, source, session, jitter, inbound, outbound, recorder);
+        source.TickFaulted += fault => OnTickFault(call, fault);
+        SourceCreated?.Invoke(source);
+        return call;
     }
 
-    /// <summary>Media is up: start the pump, announce the call, play the greeting.</summary>
-    private void Activate(ActiveCall call)
+    /// <summary>Media is up: start the pump, announce the call, play the greeting. False, and nothing announced, when the
+    /// call's tick thread has already faulted; the caller then ends the answered call.</summary>
+    private bool Activate(ActiveCall call)
     {
         lock (_stateLock)
         {
+            if (call.Source.Faulted)
+            {
+                return false;
+            }
             _current = call;
             _state = CallState.Active;
             _pendingEndReason = null;
@@ -355,6 +505,21 @@ public sealed class CallController : IDisposable
                 Logs.Error("[PhoneGateway] Greeting prompt could not be played", ex);
             }
         }
+        return true;
+    }
+
+    /// <summary>Ends an answered call that <see cref="Activate"/> refused: BYE, then release its media.</summary>
+    private void EndBeforeAnnouncing(ActiveCall call, SIPUserAgent agent)
+    {
+        try
+        {
+            agent.Hangup();
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("[PhoneGateway] SIP hangup failed; releasing the call anyway", ex);
+        }
+        AbandonRinging(call);
     }
 
     /// <summary>A call that never became active: release its media and go idle.</summary>
@@ -362,6 +527,7 @@ public sealed class CallController : IDisposable
     {
         lock (_stateLock)
         {
+            call.Ended = true;
             _state = CallState.Idle;
             _current = null;
             _ringingSipCallId = null;
@@ -371,12 +537,55 @@ public sealed class CallController : IDisposable
         call.Dispose();
     }
 
+    /// <summary>A call's tick thread died. Runs on that thread, so it only logs, counts and hands the teardown (which
+    /// joins this thread) to the pool.</summary>
+    private void OnTickFault(ActiveCall call, Exception fault)
+    {
+        lock (_stateLock)
+        {
+            if (call.Ended)
+            {
+                Logs.Debug($"[PhoneGateway] Call {call.CallId}: tick thread faulted during teardown: {fault.Message}");
+                return;
+            }
+        }
+        Logs.Error($"[PhoneGateway] Call {call.CallId} (SIP {call.SipCallId}): the RTP tick thread faulted; ending the call", fault);
+        _metrics.MediaFault();
+        _ = Task.Run(() => EndFaultedCall(call));
+    }
+
+    private void EndFaultedCall(ActiveCall call)
+    {
+        bool active;
+        lock (_stateLock)
+        {
+            active = _state == CallState.Active && ReferenceEquals(_current, call);
+        }
+        if (active)
+        {
+            HangUp(LinkCallEndReason.Failed, tellHost: true, only: call);
+            return;
+        }
+        // Not announced yet: Activate refuses a faulted call and the answer or placement path ends it. An outbound call
+        // still ringing is cancelled so the placement returns now rather than at the ring timeout.
+        SIPUserAgent? agent = _agent;
+        if (call.Direction == LinkCallDirection.Outbound && agent is { IsCalling: true, IsCallActive: false })
+        {
+            agent.Cancel();
+        }
+    }
+
     private void OnCallHungup(SIPDialogue dialogue)
     {
         LinkCallEndReason reason;
         bool tellHost;
         lock (_stateLock)
         {
+            if (_current is null || (dialogue?.CallId is string ended && _current.SipCallId.Length > 0 && ended != _current.SipCallId))
+            {
+                // A dialogue that is not the live call's (one refused before it was announced, or a stale one).
+                return;
+            }
             reason = _pendingEndReason ?? LinkCallEndReason.RemoteHangup;
             tellHost = _pendingTellHost;
         }
@@ -394,6 +603,7 @@ public sealed class CallController : IDisposable
                 return;
             }
             call = _current;
+            call.Ended = true;
             _state = CallState.Ending;
         }
         _guard.CallEnded();
@@ -431,7 +641,7 @@ public sealed class CallController : IDisposable
         RtpJitterBuffer j = call.Jitter;
         Logs.Info(
             $"[PhoneGateway] Call {call.CallId} ended {reason} after {seconds} s: rtp out frames={call.Source.FramesSent} silence={call.Source.SilenceFrames} " +
-            $"catchUp={call.Source.CatchUpFrames} resyncs={call.Source.Resyncs} fifo={call.Source.FifoActive} " +
+            $"catchUp={call.Source.CatchUpFrames} resyncs={call.Source.Resyncs} fifo={call.Source.FifoActive} tickFault={call.Source.Faulted} " +
             $"lateness p50={late.P50Us}us p99={late.P99Us}us max={late.MaxUs}us; rtp in received={j.Received} late={j.Late} lost={j.Lost} " +
             $"dup={j.Duplicate} reorder={j.Reordered} resets={j.Resets}; pump frames={call.Inbound.FramesPumped} concealed={call.Inbound.FramesConcealed} " +
             $"droppedByLink={call.Inbound.DroppedByLink}; outbound frames={call.Outbound.FramesQueued} ringDropped={call.Outbound.DroppedSamples}.");
@@ -510,7 +720,7 @@ public sealed class CallController : IDisposable
             return;
         }
         Logs.Info($"[PhoneGateway] Host ended call {callId} ({reason}).");
-        _ = Task.Run(() => HangUp(LinkCallEndReason.Completed, tellHost: false));
+        _ = Task.Run(() => HangUp(LinkCallEndReason.Completed, tellHost: false, only: call));
     }
 
     private void OnToolRequest(uint callId, uint requestId, ToolRequestMessage request)
@@ -533,7 +743,7 @@ public sealed class CallController : IDisposable
             {
                 case "hangup":
                     Reply(call.CallId, requestId, LinkToolStatus.Ok, null);
-                    HangUp(LinkCallEndReason.Completed, tellHost: false);
+                    HangUp(LinkCallEndReason.Completed, tellHost: false, only: call);
                     return;
                 case "send_dtmf":
                 {
@@ -692,6 +902,21 @@ public sealed class CallController : IDisposable
         agent?.Dispose();
     }
 
+    /// <summary>What the screen decided for a new INVITE.</summary>
+    private enum InviteDecision
+    {
+        /// <summary>Offer it as a call.</summary>
+        Offer,
+        /// <summary>A copy of the INVITE being answered, or of the live call's: leave it to the user agent.</summary>
+        OwnCall,
+        /// <summary>486: a call is up or being set up.</summary>
+        Busy,
+        /// <summary>503: the voice host link is down.</summary>
+        HostDown,
+        /// <summary>603: refused by the inbound policy.</summary>
+        Declined,
+    }
+
     /// <summary>Everything one call owns; disposed exactly once by <see cref="EndCall"/> or <see cref="AbandonRinging"/>.</summary>
     private sealed class ActiveCall(
         uint callId, LinkCallDirection direction, string? callerId, string? called, string sipCallId,
@@ -711,6 +936,9 @@ public sealed class CallController : IDisposable
         public OutboundAudioPath Outbound => outbound;
         public long StartedNs { get; } = MonotonicClock.NowNs();
         public DateTime StartedUtc { get; } = DateTime.UtcNow;
+
+        /// <summary>Set under the controller's state lock once teardown of this call has begun.</summary>
+        public bool Ended { get; set; }
 
         public CallStartMessage ToCallStart(bool resume) => new()
         {

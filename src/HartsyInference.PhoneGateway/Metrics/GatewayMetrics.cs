@@ -12,6 +12,7 @@ public sealed class GatewayMetrics
     private long _callsDeclined;
     private long _callsRejectedHostDown;
     private long _callsFailed;
+    private long _callsMediaFault;
     private long _callSecondsTotal;
     private long _dtmfReceived;
     private long _toolRequests;
@@ -35,6 +36,9 @@ public sealed class GatewayMetrics
     public long CallsDeclined => Volatile.Read(ref _callsDeclined);
     public long CallsRejectedHostDown => Volatile.Read(ref _callsRejectedHostDown);
     public long CallsFailed => Volatile.Read(ref _callsFailed);
+
+    /// <summary>Calls ended because their RTP tick thread faulted.</summary>
+    public long CallsMediaFault => Volatile.Read(ref _callsMediaFault);
     public long CallSecondsTotal => Volatile.Read(ref _callSecondsTotal);
     public long DtmfReceived => Volatile.Read(ref _dtmfReceived);
     public long ToolRequests => Volatile.Read(ref _toolRequests);
@@ -61,6 +65,8 @@ public sealed class GatewayMetrics
     public void RejectedHostDown() => Interlocked.Increment(ref _callsRejectedHostDown);
 
     public void Failed() => Interlocked.Increment(ref _callsFailed);
+
+    public void MediaFault() => Interlocked.Increment(ref _callsMediaFault);
 
     public void Dtmf() => Interlocked.Increment(ref _dtmfReceived);
 

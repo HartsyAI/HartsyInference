@@ -1,15 +1,7 @@
-using System.Net;
-using HartsyInference.PhoneGateway.Media;
 using HartsyInference.PhoneGateway.Metrics;
 using HartsyInference.PhoneGateway.Sip;
 using HartsyInference.PhoneGateway.Tests.Support;
-using HartsyInference.PhoneGateway.Transport;
 using HartsyInference.PhoneLink;
-using SIPSorcery.Media;
-using SIPSorcery.Net;
-using SIPSorcery.SIP;
-using SIPSorcery.SIP.App;
-using SIPSorceryMedia.Abstractions;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -31,7 +23,7 @@ public sealed class LoopbackSipCallTests
     [Fact]
     public async Task InboundCall_AudioBothWays_DtmfAndRemoteHangup()
     {
-        using Loopback gateway = Loopback.Start(new CallControllerOptions());
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
         using Softphone phone = new();
         Assert.True(await phone.CallAsync(gateway.Port), $"call failed: {phone.LastFailure}");
         Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Active, WaitMs));
@@ -64,7 +56,7 @@ public sealed class LoopbackSipCallTests
     [Fact]
     public async Task HostHangupTool_EndsTheCallAtThePhone()
     {
-        using Loopback gateway = Loopback.Start(new CallControllerOptions());
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
         using Softphone phone = new();
         Assert.True(await phone.CallAsync(gateway.Port), $"call failed: {phone.LastFailure}");
         Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Active, WaitMs));
@@ -84,7 +76,7 @@ public sealed class LoopbackSipCallTests
     [Fact]
     public async Task SecondInvite_DuringACall_GetsBusyHere()
     {
-        using Loopback gateway = Loopback.Start(new CallControllerOptions());
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
         using Softphone first = new();
         using Softphone second = new();
         Assert.True(await first.CallAsync(gateway.Port), $"call failed: {first.LastFailure}");
@@ -101,7 +93,7 @@ public sealed class LoopbackSipCallTests
     [Fact]
     public async Task OutboundCall_PlacedByTheGateway_AndHungUpByIt()
     {
-        using Loopback gateway = Loopback.Start(new CallControllerOptions());
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
         using Softphone phone = new();
         CallPlacementResult placed = await gateway.Controller.PlaceCallAsync($"sip:phone@127.0.0.1:{phone.Port}");
         Assert.True(placed.Placed, placed.Message);
@@ -125,7 +117,7 @@ public sealed class LoopbackSipCallTests
     [Fact]
     public async Task RejectPolicy_DeclinesWith603()
     {
-        using Loopback gateway = Loopback.Start(new CallControllerOptions { InboundPolicy = InboundPolicy.Reject });
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions { InboundPolicy = InboundPolicy.Reject });
         using Softphone phone = new();
         Assert.False(await phone.CallAsync(gateway.Port));
         _output.WriteLine($"declined: {phone.LastFailureStatus} {phone.LastFailure}");
@@ -133,120 +125,5 @@ public sealed class LoopbackSipCallTests
         Assert.Equal(CallState.Idle, gateway.Controller.State);
         Assert.Equal(1, gateway.Metrics.CallsDeclined);
         Assert.Empty(gateway.Host.FramesOf(LinkMessageType.CallStart));
-    }
-
-    /// <summary>The gateway side: fake echo host, link, SIP account on an ephemeral loopback port, controller.</summary>
-    private sealed class Loopback : IDisposable
-    {
-        public required FakeLinkHost Host { get; init; }
-        public required EngineLink Link { get; init; }
-        public required SipAccount Account { get; init; }
-        public required CallController Controller { get; init; }
-        public required GatewayMetrics Metrics { get; init; }
-
-        public int Port => Account.ListeningPort;
-
-        public static Loopback Start(CallControllerOptions options)
-        {
-            FakeLinkHost host = new() { Echo = true, OutboundRate = 16000 };
-            host.Start();
-            EngineLink link = new(new EngineLinkOptions { SocketPath = host.SocketPath, ReconnectBaseMs = 10, ReconnectCapMs = 100 });
-            SipAccount account = new(new SipAccountOptions { ListenAddress = "127.0.0.1", Port = 0, PublicAddress = PublicAddressResolver.Parse("none") });
-            GatewayMetrics metrics = new();
-            CallController controller = new(account, link, options with
-            {
-                RtpPortStart = 40000,
-                RtpPortEnd = 40100,
-                BindAddress = IPAddress.Loopback,
-                Outage = new LinkOutageGuardOptions { OutageHangupMs = 5000 },
-            }, new PromptPlayer(), metrics);
-            controller.Start();
-            link.Start();
-            account.Start();
-            Loopback loopback = new() { Host = host, Link = link, Account = account, Controller = controller, Metrics = metrics };
-            if (!loopback.WaitUntil(() => link.IsConnected, WaitMs))
-            {
-                loopback.Dispose();
-                throw new InvalidOperationException("The gateway never connected to the fake host.");
-            }
-            return loopback;
-        }
-
-        public bool WaitUntil(Func<bool> condition, int timeoutMs) => Host.WaitUntil(condition, timeoutMs);
-
-        public void Dispose()
-        {
-            Controller.Dispose();
-            Account.Dispose();
-            Link.Dispose();
-            Host.Dispose();
-        }
-    }
-
-    /// <summary>A stock sipsorcery user agent with a sine-wave source; answers any inbound INVITE.</summary>
-    private sealed class Softphone : IDisposable
-    {
-        private readonly SIPTransport _transport = new();
-        private long _rtpFrames;
-
-        public Softphone()
-        {
-            _transport.AddSIPChannel(new SIPUDPChannel(new IPEndPoint(IPAddress.Loopback, 0)));
-            Agent = new SIPUserAgent(_transport, null);
-            Agent.OnCallHungup += _ => HungUp.Set();
-            Agent.ClientCallFailed += (_, message, response) =>
-            {
-                LastFailure = message;
-                LastFailureStatus = response?.StatusCode;
-            };
-            Agent.OnIncomingCall += (ua, request) => _ = AnswerAsync(ua, request);
-        }
-
-        public SIPUserAgent Agent { get; }
-
-        public ManualResetEventSlim HungUp { get; } = new(false);
-
-        public string? LastFailure { get; private set; }
-
-        public int? LastFailureStatus { get; private set; }
-
-        public int Port => _transport.GetSIPChannels()[0].ListeningEndPoint.Port;
-
-        public long RtpFramesReceived => Interlocked.Read(ref _rtpFrames);
-
-        public Task<bool> CallAsync(int gatewayPort) => Agent.Call($"sip:agent@127.0.0.1:{gatewayPort}", null, null, CreateSession(), 10);
-
-        private async Task AnswerAsync(SIPUserAgent ua, SIPRequest request)
-        {
-            SIPServerUserAgent uas = ua.AcceptCall(request);
-            await ua.Answer(uas, CreateSession());
-        }
-
-        private VoIPMediaSession CreateSession()
-        {
-            AudioExtrasSource source = new(new AudioEncoder(), new AudioSourceOptions { AudioSource = AudioSourcesEnum.SineWave });
-            VoIPMediaSession session = new(new VoIPMediaSessionConfig
-            {
-                MediaEndPoint = new MediaEndPoints { AudioSource = source },
-                BindAddress = IPAddress.Loopback,
-            });
-            session.AcceptRtpFromAny = true;
-            session.OnRtpPacketReceived += (_, mediaType, packet) =>
-            {
-                if (mediaType == SDPMediaTypesEnum.audio && packet.Header.PayloadType is 0 or 8)
-                {
-                    Interlocked.Increment(ref _rtpFrames);
-                }
-            };
-            return session;
-        }
-
-        public void Dispose()
-        {
-            Agent.Dispose();
-            _transport.Shutdown();
-            _transport.Dispose();
-            HungUp.Dispose();
-        }
     }
 }

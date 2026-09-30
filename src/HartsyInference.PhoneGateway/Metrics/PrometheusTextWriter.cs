@@ -18,6 +18,7 @@ public static class PrometheusTextWriter
         Counter(sb, "calls_rejected_total", "INVITEs refused, by reason.",
             ("reason", "busy", metrics.CallsRejectedBusy), ("reason", "declined", metrics.CallsDeclined),
             ("reason", "host_down", metrics.CallsRejectedHostDown), ("reason", "failed", metrics.CallsFailed));
+        Counter(sb, "calls_media_fault_total", "Calls ended because their RTP tick thread faulted.", metrics.CallsMediaFault);
         Counter(sb, "call_seconds_total", "Seconds of active calls.", metrics.CallSecondsTotal);
         Counter(sb, "dtmf_received_total", "DTMF digits received from callers.", metrics.DtmfReceived);
         Counter(sb, "tool_requests_total", "Telephony tool requests from the host.", metrics.ToolRequests);

@@ -18,7 +18,9 @@ namespace HartsyInference.PhoneGateway.Media;
 /// that the next tick applies with <see cref="SpscRing{T}.DiscardAll"/>, so a barge-in empties the queue within one
 /// period. The thread asks for <c>SCHED_FIFO</c> once at start and otherwise falls back to a short spin before each
 /// deadline; the refusal reason is logged once and kept in <see cref="FifoReason"/>. Only PCMU and PCMA at 8 kHz
-/// are offered.</remarks>
+/// are offered. An exception on the tick thread ends it: <see cref="Faulted"/> turns true before <see cref="Start"/>
+/// returns or anything else runs, and <see cref="TickFaulted"/> is raised once, on the dying thread, so the owner can
+/// end a call that would otherwise stay up in silence.</remarks>
 public sealed class ClockedAudioSource : IAudioSource, IDisposable
 {
     /// <summary>The only sample rate this source produces.</summary>
@@ -88,6 +90,10 @@ public sealed class ClockedAudioSource : IAudioSource, IDisposable
     /// <summary>Raised on the tick thread with one encoded 20 ms frame; <c>VoIPMediaSession</c> binds it to <c>SendAudio</c>.</summary>
     public event EncodedSampleDelegate? OnAudioSourceEncodedSample;
 
+    /// <summary>Raised once, on the tick thread as it dies, with the exception that ended it. Handlers must return quickly
+    /// and must not stop or dispose this source synchronously; with no handler the fault is logged here.</summary>
+    public event Action<Exception>? TickFaulted;
+
     /// <summary>Never raised: the session consumes <see cref="OnAudioSourceEncodedSample"/>.</summary>
     public event Action<EncodedAudioFrame>? OnAudioSourceEncodedFrameReady
     {
@@ -102,7 +108,7 @@ public sealed class ClockedAudioSource : IAudioSource, IDisposable
         remove { }
     }
 
-    /// <summary>Never raised: faults are exposed through <see cref="Faulted"/>.</summary>
+    /// <summary>Never raised: faults are reported through <see cref="TickFaulted"/>.</summary>
     public event SourceErrorDelegate? OnAudioSourceError
     {
         add { }
@@ -118,7 +124,7 @@ public sealed class ClockedAudioSource : IAudioSource, IDisposable
     /// <summary>True while the tick thread is running.</summary>
     public bool IsRunning => _running && !_faulted;
 
-    /// <summary>True when the tick thread died on an exception; the call should be torn down.</summary>
+    /// <summary>True when the tick thread died on an exception (<see cref="TickFaulted"/> has been or is being raised).</summary>
     public bool Faulted => _faulted;
 
     /// <summary>True when the tick thread runs under <c>SCHED_FIFO</c>.</summary>
@@ -159,6 +165,10 @@ public sealed class ClockedAudioSource : IAudioSource, IDisposable
 
     /// <summary>Managed bytes the tick thread allocated since its baseline (taken after the FIFO attempt); zero by design.</summary>
     public long TickThreadAllocatedBytes => Volatile.Read(ref _allocatedNow) - Volatile.Read(ref _allocatedBaseline);
+
+    /// <summary>Test seam: when set, the tick thread throws this as its first action, the way a clock or scheduling
+    /// failure during start would, so the fault path can be driven before a call is announced.</summary>
+    internal Exception? InjectedStartFault { get; set; }
 
     /// <summary>Producer side: queues 8 kHz PCM for the tick thread. One producer thread at a time.</summary>
     /// <returns>Samples accepted; the rest were dropped and counted.</returns>
@@ -264,6 +274,11 @@ public sealed class ClockedAudioSource : IAudioSource, IDisposable
     {
         try
         {
+            Exception? injected = InjectedStartFault;
+            if (injected is not null)
+            {
+                throw injected;
+            }
             if (_options.FifoPriority > 0)
             {
                 bool fifo = RealtimeScheduling.TryEnterFifo(_options.FifoPriority, out string reason);
@@ -304,7 +319,27 @@ public sealed class ClockedAudioSource : IAudioSource, IDisposable
         {
             _faulted = true;
             _started.Set();
-            Logs.Error("[PhoneGateway] RTP tick thread faulted; the call must be torn down", ex);
+            ReportFault(ex);
+        }
+    }
+
+    /// <summary>Hands a tick-thread fault to <see cref="TickFaulted"/>, or logs it when nobody listens. Runs on the dying
+    /// thread, where an exception escaping a handler would take the whole process down, so that one is logged too.</summary>
+    private void ReportFault(Exception fault)
+    {
+        Action<Exception>? handler = TickFaulted;
+        if (handler is null)
+        {
+            Logs.Error("[PhoneGateway] RTP tick thread faulted with no call owner listening", fault);
+            return;
+        }
+        try
+        {
+            handler(fault);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("[PhoneGateway] The RTP tick fault handler threw", ex);
         }
     }
 
