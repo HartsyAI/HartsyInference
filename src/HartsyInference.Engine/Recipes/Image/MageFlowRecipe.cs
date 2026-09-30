@@ -14,6 +14,8 @@ using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
+using HartsyInference.Engine.Variants;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Microsoft Mage-Flow recipe (4B NR-MMDiT, arXiv 2607.19064). The transformer is a dual-stream MMDiT with diffusers-standard keys, so it reuses <see cref="QwenImageTransformer"/> with the <see cref="QwenImageConfig.MageFlow"/> preset (12 blocks, patch-1, 128-ch, image-only RoPE). The Qwen3-VL-4B text encoder (<see cref="SideModels.Qwen3VL_4B"/>, already fp8) and the bespoke one-step <see cref="MageVaeDecoder"/> (<see cref="SideModels.MageVae"/>) resolve as side models when not bundled. Base vs Edit-Turbo is auto-detected from the checkpoint filename. Drives through <see cref="MageFlowRecipePipeline"/>.</summary>
@@ -27,6 +29,10 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
     /// Qwen3-VL one, which disables weights, so the prompt is encoded at weight 1 and each token's cond row is scaled
     /// afterwards — on this family, after the system-prefix drop.</summary>
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
+
+    /// <inheritdoc/>
+    /// <remarks>The pipeline reads only <c>Img2Img.InitImage</c>.</remarks>
+    public ImageInputLimits InputLimits => ImageInputLimits.SingleInitImage;
 
     /// <summary>Mage-Flow-Edit-Turbo rides this recipe: the init image is the edit reference (VAE-encoded to in-context ref latents). Declared for both variants — the recipe encodes a reference only when one is supplied.</summary>
     /// <remarks>Reference editing, not strength-based img2img: MageFlowPipeline appends the encoded init image as
@@ -45,12 +51,17 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
     public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = 4, CfgScale = 1.0f, Width = 1024, Height = 1024 };
     public ImageDefaults Defaults => FamilyDefaults;
 
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => MageFlowVariants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) => MageFlowVariants.IsTurbo(variant) ? TurboDefaults : FamilyDefaults;
+
     public IRecipePipeline Construct(RecipeContext context)
     {
         string fileName = Path.GetFileName(context.CheckpointPath);
-        string lower = fileName.ToLowerInvariant();
-        bool isTurbo = lower.Contains("turbo") || lower.Contains("tdm") || lower.Contains("distill");
-        bool isEdit = lower.Contains("edit");
+        ResolvedModelVariant variant = context.ResolveVariant(MageFlowVariants.Catalog);
+        bool isTurbo = MageFlowVariants.IsTurbo(variant);
 
         List<IDisposable> loaders = new();
         IDisposable? checkpoint = null;
@@ -62,7 +73,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             Dictionary<string, Tensor> ditWeights = Remap(source.Weights, CheckpointConvertUtils.StripTransformerPrefix);
             if (ditWeights.Count == 0)
                 throw new InvalidOperationException($"Mage-Flow checkpoint '{fileName}' contains no transformer weights (looked for transformer_blocks.* / img_in.*).");
-            Logs.Info($"[MageFlowRecipe] Parsed DiT: {ditWeights.Count} tensors ({(isEdit ? "edit" : "t2i")}{(isTurbo ? ", turbo" : "")}).");
+            Logs.Info($"[MageFlowRecipe] Parsed DiT: {ditWeights.Count} tensors ({variant.Variant.DisplayName}).");
 
             QwenImageConfig config = QwenImageConfig.MageFlow;
             QwenImageTransformer transformer = new QwenImageTransformer(config);
@@ -82,7 +93,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
             transformer.LoadWeights(ditWeights);
 
             // ── Text encoder: Qwen3-VL-4B (fp8_scaled), vision tower dropped. ──
-            string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_4B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> teWeights, CheckpointSource teSource) = ComponentLoader.Load(encoderPath, "MageFlowRecipe", CheckpointConvertUtils.RemapQwenLanguageKey, applyFp8Dequant: true);
             loaders.Add(teSource);
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen3_VL_4B);
@@ -90,7 +101,7 @@ public sealed class MageFlowRecipe : IArchitectureRecipe
 
             // ── MageVAE: split the file into decoder (`pipeline.*`) and encoder (`student.dconv_encoder.*`). Encoder is
             // only needed for edit; a decode-only VAE file simply has no encoder keys. ──
-            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.MageVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> allVae, CheckpointSource vaeSource) = ComponentLoader.Load(vaePath, "MageFlowRecipe", keyTransform: null, applyFp8Dequant: false);
             loaders.Add(vaeSource);
             (Dictionary<string, Tensor> decW, Dictionary<string, Tensor> encW) = SplitMageVae(allVae);

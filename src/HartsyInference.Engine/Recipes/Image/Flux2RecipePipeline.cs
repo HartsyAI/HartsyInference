@@ -1,6 +1,7 @@
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
@@ -18,7 +19,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>A constructed Flux.2 pipeline driven against the native <see cref="ImageRequest"/>. <see cref="Flux2Pipeline"/> owns the text encoder, so this only produces the token ids — the embedded Qwen3 chat template for Klein, or the spliced Mistral tekken conditioning ids for Dev — and calls <see cref="Flux2Pipeline.GenerateFromTokens"/>. Mirrors the SwarmUI backend's <c>Flux2Loader.Generate</c> text-to-image drive path. Wraps the constructed Flux.2 pipeline plus its tokenizer, taking ownership of every disposable. Exactly one of <paramref name="qwenTokenizer"/> (Klein) / <paramref name="mistralTokenizer"/> (Dev) is non-null. <paramref name="checkpoint"/> holds whatever keeps the transformer's weights alive — the checkpoint's memory map, which pass-through tensors still point into, and any copies the backend needed widened.</summary>
 public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config config, Qwen3Tokenizer? qwenTokenizer, ErnieTokenizer? mistralTokenizer,
-    string mistralSystemPrompt, LlamaStyleEncoder encoder, List<SafeTensorsLoader> loaders, IDisposable? checkpoint = null,
+    string mistralSystemPrompt, LlamaStyleEncoder encoder, List<IDisposable> loaders, IDisposable? checkpoint = null,
     MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     private readonly Flux2Pipeline _pipeline = pipeline;
@@ -27,7 +28,8 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
     private readonly ErnieTokenizer? _mistralTokenizer = mistralTokenizer;
     private readonly string _mistralSystemPrompt = mistralSystemPrompt;
     private readonly LlamaStyleEncoder _encoder = encoder;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly List<IDisposable> _loaders = loaders;
+    private int _disposed;
     private readonly IDisposable? _checkpoint = checkpoint;
 
     private readonly MergedLoraStack? _loraStack = loraStack;
@@ -192,16 +194,10 @@ public sealed class Flux2RecipePipeline(Flux2Pipeline pipeline, Flux2Config conf
     /// <inheritdoc/>
     public void Dispose()
     {
-        _pipeline.Dispose();
-        _qwenTokenizer?.Dispose();
-        _mistralTokenizer?.Dispose();
-        _encoder.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
-        {
-            loader.Dispose();
-        }
-        _checkpoint?.Dispose();
-        // Last: the stack owns the merged weight tensors the transformer was serving.
-        _loraStack?.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        // Every handle is released even if one throws; the LoRA stack goes last, it owns the merged weights.
+        new CompositeDisposable([_pipeline, _qwenTokenizer, _mistralTokenizer, _encoder,
+            .. _loaders, _checkpoint, _loraStack]).Dispose();
     }
 }

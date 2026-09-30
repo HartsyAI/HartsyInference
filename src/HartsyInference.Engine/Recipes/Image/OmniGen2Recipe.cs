@@ -31,6 +31,10 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
+    /// <inheritdoc/>
+    /// <remarks>The pipeline reads only <c>Img2Img.InitImage</c>.</remarks>
+    public ImageInputLimits InputLimits => ImageInputLimits.SingleInitImage;
+
     public ImageFeatures Supports => ImageFeatures.RefEdit | ImageFeatures.SeamlessTiling | ImageFeatures.VariationSeed | ImageFeatures.Refiner | ImageFeatures.Lora;
     /// <inheritdoc/>
     public bool Matches(string familyId) => string.Equals(familyId, "omnigen2", StringComparison.OrdinalIgnoreCase);
@@ -77,14 +81,14 @@ public sealed class OmniGen2Recipe : IArchitectureRecipe
                 "OmniGen2Recipe");
             transformer.LoadWeights(VaePrecisionHelper.CastWeights(converted.Transformer, [DType.F16, DType.F32], DType.BF16));
 
-            string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_3B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_3B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader teLoader = new SafeTensorsLoader();
             teLoader.Load(encoderPath);
             loaders.Add(teLoader);
             LlamaStyleEncoder textEncoder = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_3B);
             textEncoder.LoadWeights(teLoader.GetAllTensors());
 
-            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
             loaders.Add(vaeLoader);
             // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —

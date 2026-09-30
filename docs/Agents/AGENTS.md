@@ -1,129 +1,103 @@
 # Shared architecture and task routing
 
-Read with [code style](../CODE_STYLE.md); load only relevant linked sections.
+Read with [code style](../CODE_STYLE.md); load only the linked sections a task needs.
 
 ## Task Routing
 
-Pick the specialized agent file that matches your task. Read it before starting work.
+Read the file matching your task before starting. A task spanning two (add a model *and* write its kernel) loads both.
 
-| Task | Agent File |
+| Task | File |
 |---|---|
-| Add a new model (any modality) | `ADD_MODEL.md` |
-| Build a new non-model feature (engine, CLI, API, extension) | `BUILD_FEATURE.md` |
-| Review / audit code for correctness & quality | `AUDIT.md` |
-| GPU math, SIMD/PTX/SPIR-V kernels & performance | `KERNEL.md` |
-| Research a topic in depth before implementing | `RESEARCH.md` |
-| Cleanup, formatting, doc/checklist upkeep, NuGet packaging | `CLEANUP.md` |
+| Add a model (any modality) | `ADD_MODEL.md` |
+| Non-model feature (engine, CLI, API, extension) | `BUILD_FEATURE.md` |
+| Review or audit code | `AUDIT.md` |
+| GPU math, SIMD/PTX/SPIR-V kernels, performance | `KERNEL.md` |
+| Research a topic before implementing | `RESEARCH.md` |
+| Cleanup, doc upkeep, NuGet packaging | `CLEANUP.md` |
 
-If your task spans two agents (e.g. add a model *and* write its kernel), load both files.
+## Shipping a change
+
+Author is `kalebbroo <kalebbroo@gmail.com>` alone: no co-author, session, or tool-attribution trailers in any
+commit message or PR body, and none in the changelog.
+
+1. Branch and **push as soon as commits exist** — unpushed non-`main` branches get reaped. Check
+   `git branch --show-current` before every commit; the checkout is shared with other agents and a commit
+   landing on someone else's branch is rescued with a cherry-pick, never by rewriting theirs.
+2. Open a **draft PR** early, before the work is finished.
+3. Finish implementation and all testing against it:
+   - Run the CPU lane and the tests covering the changed area; see [testing](../CODE_STYLE.md#testing) for the
+     trait filters. A docs-only change needs a link and claim check instead.
+   - GPU suites run one at a time, never alongside another suite, benchmark, or generation — concurrent runs
+     manufacture contention failures that bury real ones. Record failures by test name, not count.
+   - A CUDA/Vulkan change runs the whole `Category=GpuIntegration` category for the affected backends, not the
+     tests it appears to touch: a dispatch-gate change runs on every weight of that dtype.
+   - Anything that can move output or speed needs a real-generation A/B: `origin/main` built fresh (PTX
+     included) against the branch, interleaved on the same seeds, reporting wall clock, per-step ms, VRAM and
+     SSIM or raw-pixel digest per pair, via `tests/regression-ab.sh`. State up front whether the expectation
+     is identical (refactor) or bounded (numerics change, with a floor and a reason). Table goes in the PR body.
+4. Final pass: comment/doc cleanup, a `## alpha.N` section in `CHANGELOG.md`, and the matching
+   `Directory.Build.props` `VersionSuffix` bump — one per PR, docs-only PRs skip both. The bump is not
+   optional for code: the engine version is what the SwarmUI extension's NuGet pin resolves against.
+5. Mark ready for review. `claude-code-review.yml` reviews on open, on each push and on ready; the Codex
+   connector reviews independently. A Codex usage-limit note means no review happened — comment
+   `@claude review pr` on the PR and wait for `claude[bot]`.
+6. Resolve every comment. Reviews and comments are different API objects, so check all three surfaces:
+   ```bash
+   gh api --paginate repos/HartsyAI/HartsyInference/issues/<N>/comments --jq '.[]|"\(.user.login) \(.created_at)"'
+   gh api --paginate repos/HartsyAI/HartsyInference/pulls/<N>/reviews  --jq '.[]|"\(.user.login) \(.state)"'
+   gh api --paginate repos/HartsyAI/HartsyInference/pulls/<N>/comments --jq '.[]|"\(.path):\(.line)"'
+   ```
+   Reply per thread, then resolve it with the GraphQL `resolveReviewThread` mutation — `gh pr` has no resolve verb.
+7. Merge once CI is green and every thread is resolved, one PR at a time: each merge stale-dates the
+   others' version bump and changelog insert, and a single push carrying several merges publishes only the
+   top version.
+
+Report in plain language. Keep answers terse, skip restating what the diff already shows, and close a long
+answer or a research session with a short plain-English TL;DR.
 
 ## Shared Design Rules
 
-These apply to ALL agents. Specialized files only add task-specific rules.
+These apply to ALL agents; specialized files only add task-specific rules.
 
-**Pure C# runtime/model implementation** — no Python/C++ inference wrappers, ONNX Runtime, or managed GPU frameworks. Vendor driver/compute-library P/Invoke, CUDA kernel sources compiled to PTX, and offline Python reference tools are existing boundaries.
+**Pure C# runtime and model implementation** — no Python/C++ inference wrappers, ONNX Runtime, or managed GPU
+frameworks. Vendor driver/compute-library P/Invoke, CUDA sources compiled to PTX, and offline Python reference
+tools are existing boundaries.
 
-**Eager model execution** — backend CUDA graph capture/replay is an existing optimization, not a model computation graph.
+**Eager model execution** — backend CUDA graph capture/replay is a backend optimization, not a model graph.
 
-**Zero GC on hot paths** — no managed allocations during inference. Use `NativeMemory.AlignedAlloc(byteCount, 64)` and `ArrayPool<T>.Shared` only for managed metadata. (`TensorPool` exists for pooled temporaries but has no production call site yet — adopt it or retire it, see ROADMAP; don't cite it as established practice.)
+**Zero GC on hot paths** — no managed allocations during inference. `NativeMemory.AlignedAlloc(byteCount, 64)`;
+`ArrayPool<T>.Shared` for managed metadata only. (`TensorPool` still has no production call site — adopt or
+retire it, see ROADMAP; do not cite it as established practice.)
 
 **IBackend abstraction** — model code never calls CPU/CUDA/Vulkan directly. Each backend delegates to static kernels.
 
-**Package boundaries** — one folder per NuGet package under `src/`; the dependency direction is one-way (`Core` ← modality packages ← `Engine` ← CLI/API/extension). Don't leak CUDA/Vulkan into CPU-only packages (`HartsyInference.Core`, model packages) — GPU code lives behind `IBackend` in the backend packages. When unsure, match the package a sibling model/feature already lives in.
+**Package boundaries** — one folder per NuGet package under `src/`; dependencies run one way
+(`Core` ← modality packages ← `Engine` ← CLI/API/extension). No CUDA/Vulkan in CPU-only packages — GPU code lives
+behind `IBackend`. When unsure, match the package a sibling model or feature already lives in.
 
-**Reuse shared primitives — no redundant bloat.** The backend is modular *so that models share it*. Before writing ANY helper (inline or a new shared one), grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`, `Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics. Cross-package, in `HartsyInference.Core`: `TensorCasts` for host dtype casts (`EnsureF32`, `LoadF32`/`LoadF32Opt`, `F32ToBf16Bits`, `RelabelRank2Copy`) — note Diffusion's `DtypeCastHelper` is the *backend-routed, source-disposing* variant, so pick by ownership, not by name — and `ByteFormat` for VRAM log lines. Per package: `DiTUtils` (Diffusion denoiser blocks), `WeightBytes`, `VaeOps`/`MageVaeOps`, `NoiseSchedule` (scheduler math), `CheckpointConvertUtils` (key remaps, quant-aware QKV splits), `WhisperOps` for `ProjectLinear`, `Layers/Activations` (`ErfGelu`, `SigmoidS`), `RnnOps`, `VqOps`, `WeightNormFusion.LoadFused`, `LogitSampling`, `SignalPadding`, `IStft`, `HartsyInference.Audio/Dsp/` → `NsfVocoderDsp` for NSF source / forward-STFT / iSTFT head / pad / scale, `DeterministicRng` for seeded noise. Concrete: a `[1,C,T]↔[1,T,C]` layout transpose is `backend.Transpose2D(out, in, d1, d2)` — never a hand-rolled loop. When 2+ models need the same operation, hoist ONE helper **parameterized by the differences** (a few extra params or a `switch` beats a dozen near-identical small methods). When adding a model, audit it for duplication against the models already built and fold the shared parts. Re-run affected models' tests after hoisting — shared code is load-bearing.
+**Reuse before writing anything.** The backend is modular so models share it. Before adding ANY helper, inline or
+shared, grep for an existing primitive: `IBackend` ops first (`Transpose2D`, `Conv1d`/`ConvTranspose1d`, `Snake`,
+`Silu`, `GroupNorm`, `ScaledDotProductAttention`, …), then the shared statics below. A `[1,C,T]↔[1,T,C]` layout
+transpose is `backend.Transpose2D(out, in, d1, d2)`, never a hand-rolled loop.
 
-## Core Engine Patterns (Single Source of Truth)
-
-These are the engine's own established patterns for tensors, CUDA launches, config, and disposal. They are native to HartsyInference and are not a dependency on any external framework. LLM text generation itself is native too, in the `HartsyInference.LLM` package (config-driven generic decoder transformer: Qwen2/Qwen3/Llama/Mistral, GGUF quantized inference, device-resident KV cache, sampler chain, chat templates). See `docs/CODE_STYLE.md` for full P/Invoke and disposal patterns.
-
-### Tensor Type System
-
-| Type | Owns Memory | Dispose | Use For |
-|---|---|---|---|
-| `Tensor` | Yes | `Interlocked.Exchange` + `AlignedFree` | Weights, intermediates |
-| `TensorView` | No | No-op | Borrowed refs, mmap slices |
-| `TensorRef` | No | N/A (value type) | Kernel hot paths |
-
-**Rules:** Creator disposes `Tensor`. `TensorView` never outlives backing memory. `TensorRef` is a non-owning readonly record struct, not a stack-only `ref struct`; its lifetime must also remain within the storage lifetime.
-
-### CUDA Launch Pattern
-```csharp
-nint outputArg = output, inputArg = input;
-int nArg = n;
-float epsArg = eps;
-void** args = stackalloc void*[] {&outputArg, &inputArg, &nArg, &epsArg};
-CudaDriverApi.cuLaunchKernel(func, grid, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
-```
-Key: `stackalloc void*[]` with **local variables** for stable addresses. Never pass field refs directly.
-
-### PTX Loading
-PTX from disk via `CudaModule.LoadFromFile(path)`. Function handles as `nint` fields (not dictionary). Target `sm_80` minimum.
-
-### Config & Options
-- `ModelConfig`: class `record` with `required` + `init`
-- Options: three-tier (flat props / explicit composition / custom injection)
-- JSON: source-generated `[JsonSerializable]` contexts — no reflection
-
-### Video Planning Contract
-- Every video request is planned by `VideoService.PlanAsync` before pipeline construction or weight loading. Recipe
-  declarations supply generic family defaults/features, then the resulting `VideoPlan` becomes the authority for
-  profile defaults, locked settings, supported features, component paths/formats, recipe-cache identity, release
-  gates, and the execution summary.
-- Keep profile and composition decisions in `Engine/Planning`; a video recipe consumes the resolved plan and must not
-  re-infer task, acceleration, attention, or component roles from filenames. Generic video families still receive a
-  plan so validation and execution use one service-layer path.
-- H3 semantics activate only from an exact full-file SHA-256 in the built-in manifest or an exact-hash-bound local
-  profile/converter sidecar. The durable hash cache is keyed by canonical path, byte length, and last-write ticks;
-  its records live under `paths.modelCacheRoot/video-checkpoint-hashes` (or the same subdirectory below
-  `~/.cache/hartsyinference`). Verified catalog downloads seed it immediately from their streamed verification,
-  while an arbitrary local file pays one visible exact-hash pass before the result can survive process restarts. A
-  filename is never profile evidence.
-- Planning errors and non-bypassable release gates return before backend probing or model construction. Execution
-  rechecks the planned artifact stamps, so a replaced checkpoint requires a new plan instead of reusing stale cache
-  identity or profile semantics.
-
-### Streaming
-`IAsyncEnumerable<GenerationProgress>` where `GenerationProgress` is `readonly record struct`.
-
-### Error Handling
-- Shape mismatches: fail fast with `HartsyInferenceException`
-- CUDA/Vulkan: check every native status result; preserve void/handle-returning ABI signatures
-- Reserve `Environment.FailFast` for unrecoverable process corruption, not ordinary request failures
-- Custom exceptions: `HartsyInferenceException`, `OutOfVramException`, `UnsupportedModelException`
-
-### Performance Attributes
-| Attribute | When |
+| Package | Shared statics |
 |---|---|
-| `[AggressiveInlining]` | Small hot methods, tensor accessors, SIMD helpers |
-| `[SkipLocalsInit]` | Large `stackalloc` paths |
-| `[SuppressGCTransition]` | Short CUDA P/Invoke (< 1us) |
+| `Core` | `TensorCasts` host dtype casts (`EnsureF32`, `LoadF32`/`LoadF32Opt`, `F32ToBf16Bits`, `RelabelRank2Copy`), `ByteFormat` for VRAM log lines |
+| `Diffusion` | `DiTUtils` (denoiser blocks), `CfgHelper` (`SliceBatchElement`, `ApplyCfg`, `ConcatLastDim`), `DtypeCastHelper` (backend-routed, source-disposing casts), `Img2ImgSetup.Prepare`, `Schedulers/SchedulerFactory.Create`, `NoiseSchedule`, `VaeOps`/`MageVaeOps`, `WeightBytes` |
+| `ModelAssets` | `CheckpointConvertUtils` (key remaps, quant-aware QKV splits) |
+| `Audio` | `WhisperOps.ProjectLinear`, `Layers/Activations` (`ErfGelu`, `SigmoidS`), `RnnOps`, `VqOps`, `WeightNormFusion.LoadFused`, `LogitSampling`, `SignalPadding`, `IStft`, `Dsp/NsfVocoderDsp` (NSF source, STFT/iSTFT head, pad, scale), `Dsp/DeterministicRng` |
 
-### GPU Weight Management
-- Weights preloaded to GPU via `backend.PreloadWeights(model.EnumerateWeights())`
-- Dispose CPU weight tensors after preload only when the residency policy guarantees they will not be needed for streaming, recaching, or fallback
-- `GpuTransferHelper.CopyToDevice` checks cache by `Tensor` reference equality BEFORE accessing `DataPointer` — works on disposed CPU tensors
-- Model code must NEVER access `weight.DataPointer` directly — always route through `IBackend` ops
-- At pipeline stage transitions (e.g., UNet → VAE), call `backend.Sync()` + `backend.FreeWeights(model.EnumerateWeights())` to reclaim VRAM
-- **Pair `PreloadWeights` with `FreeWeights` symmetrically.** If you `FreeWeights` a component at the end of a phase, also `PreloadWeights` it before the first heavy use — otherwise the first kernel pays a per-op cache-miss H2D transfer that defeats the bulk-upload optimization. Every diffusion pipeline follows this pattern; see `FluxPipeline` or `Sd3Pipeline` for the canonical placement (preload before text-encode, then again before the denoise loop). Check each backend’s cache and ownership implementation; do not assume Vulkan has no weight cache.
-- Open kernel/perf work is `docs/Checklists/ROADMAP.md` §2; `docs/Research/CUDA_PERFORMANCE.md` and
-  `CUDA_PERFORMANCE_PLAN.md` are the historical optimization record and technique reference
+Pick by ownership, not by name: `TensorCasts` is host-side, `DtypeCastHelper` routes through the backend and
+disposes its source. New shared code stays generic: when two or more callers need an operation, hoist ONE helper
+**parameterized by the differences** — a few extra parameters or a `switch` beats a dozen near-identical methods.
+Adding a model includes auditing it against models already built and folding the shared parts; re-run the
+affected models' tests afterwards, because shared code is load-bearing.
 
-### Diffusion Pipeline Conventions
-- All pipelines inherit `HartsyInference.Diffusion.Pipelines.DiffusionPipelineBase` — provides `Backend` property, idempotent `Dispose` + `ThrowIfDisposed`, `DisposeCore()` hook for subclass cleanup.
-- **Component ownership**: pipelines do NOT own their components (text encoders, transformers/UNets, VAE) — those are shared resources passed in by the caller. `Dispose()` on a pipeline only releases pipeline-internal state.
-- **Public API shape**: pipelines expose synchronous `GenerateFromTokens` / `GenerateFromEmbeddings` / `InpaintFromTokens` / `RefineFromTokens` methods that return `(byte[] rgbData, int width, int height, int seed)` tuples and accept `Action<GenerationProgress>?` callbacks. They do NOT implement `IAsyncEnumerable<GenerationProgress>` — there is no `IDiffusionPipeline` interface (the old one was deleted because it didn't match what any pipeline actually does).
-- **Shared utilities** under `HartsyInference.Diffusion/Utilities/`:
-  - `CfgHelper.SliceBatchElement` / `SliceBatchElement1D` / `ApplyCfg` / `ConcatLastDim` — every CFG pipeline routes through these.
-  - `DtypeCastHelper.EnsureDtype` / `EnsureF32` — single source for F16/F32/BF16 activation casts. Don't write `new Tensor(shape, dt); backend.CastTo*(...)` inline.
-  - `Img2ImgSetup.Prepare(request, h, w, steps)` — validates source/mask and computes `StartStep` for img2img/inpaint. Handles strength=0 pass-through detection.
-  - `Schedulers/SchedulerFactory.Create(name)` — user-selectable scheduler dispatch (DDIM / DPM++ 2M / LCM / Euler default).
-- **Why no `DenoiseLoopRunner`**: the per-step body varies meaningfully across pipelines (Flux streaming controller, Z-Image non-standard CFG, Lumina timestep inversion, F-Lite custom integrator, Anima Cosmos normalization, SDXL refiner step-swap). The genuine duplication has been extracted into the utilities above; the loops themselves stay inline where the model quirks live. See class-level docs on `DiffusionPipelineBase` for the full rationale.
+## Engine Patterns
 
-### GPU Activation Cache Rules
-- All `CudaBackend` ops call `CacheActivation(output)` to keep results on GPU
-- No per-op `cuStreamSynchronize` — CUDA stream ordering guarantees correctness on a single blocking stream
-- `FreeDevice` uses `cuMemFreeAsync` (stream-ordered) — memory is NOT immediately reclaimed
-- **In-place ops**: When modifying a tensor's GPU buffer in-place (BroadcastAdd, etc.), clear `_gpuSyncCallback` and `_gpuDisposeCallback` to `null` BEFORE calling `CacheActivation`. Old callbacks close over the GPU pointer and will free it.
-- **OOM retry**: `CudaMemory.Allocate` syncs the stream on `CUDA_ERROR_OUT_OF_MEMORY` to flush pending `FreeAsync` ops, then retries
-- **Gated activations (GEGLU/SwiGLU)**: Split along last dimension, NOT at flat midpoint. See `TROUBLESHOOTING.md` #16.
+Tensor ownership, CUDA launch/PTX, config, streaming, error handling, video planning, GPU weight and activation
+management, and diffusion pipeline conventions live in [ENGINE_PATTERNS.md](ENGINE_PATTERNS.md). Read it when
+touching engine, backend or pipeline code; the rules above stand on their own for everything else.
+
+Ownership in one line: `Tensor` is owned and disposed by its creator, `TensorView` and `TensorRef` are borrowed
+and must never outlive the storage behind them.

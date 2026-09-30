@@ -32,7 +32,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly HiDreamConfig _config;
 
-    /// <summary>Keeps the 17 GB fp8 DiT GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~5 s re-upload). The quad encoder stack (T5 ~5 GB + Llama ~8 GB) cannot co-reside with it, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables).</summary>
+    /// <summary>Keeps the 17 GB fp8 DiT GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~5 s re-upload). The quad encoder stack (T5 ~5 GB + Llama ~8 GB) cannot co-reside with it, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (vram.keepModels=false disables).</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
@@ -278,7 +278,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
 
         // ── 4. Denoising loop ──
         // Bulk-upload transformer weights before the denoise loop (no-op when already resident under
-        // HARTSY_KEEP_MODELS). Paired with the conditional FreeWeights at the VAE handoff.
+        // vram.keepModels). Paired with the conditional FreeWeights at the VAE handoff.
         // DiT sharding: asymmetric preload — Backend gets the shared weights (embedders + caption_projection[]
         // + final layer) PLUS its block range, DitShardBackend gets ONLY its block range. Preloading
         // EnumerateWeights() on both would replicate the transformer instead of pooling VRAM.
@@ -298,7 +298,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         // DiT sharding (ForwardSharded has no cache-consuming entry point). True CFG here too — two independent
         // instances (cond/uncond), each stream's hidden states differ. NOTE: the generic uncalibrated threshold
         // ("1"/"true" -> 0.10) was measured too aggressive for SD3 (visibly degraded output); pass an explicit
-        // conservative HARTSY_STEP_CACHE value (e.g. 0.03) until HiDream gets its own calibration pass.
+        // conservative vram.stepCache value (e.g. 0.03) until HiDream gets its own calibration pass.
         bool stepCacheFastPath = !isImg2Img && !isMaskedInpaint && DitShardBackend is null;
         (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) = StepCacheEnv.Resolve(null);
         DeviceFeatureCache? stepCacheCond = null;
@@ -315,7 +315,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }
@@ -432,7 +432,7 @@ public sealed unsafe class HiDreamPipeline : DiffusionPipelineBase
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
-        // Under HARTSY_KEEP_MODELS the 17 GB fp8 DiT stays resident (the tiled VAE decode fits beside it);
+        // Under vram.keepModels the 17 GB fp8 DiT stays resident (the tiled VAE decode fits beside it);
         // otherwise free it before the decode as before. Phase 3 deviations #18.
         Backend.Sync();
         DitShardBackend?.Sync();

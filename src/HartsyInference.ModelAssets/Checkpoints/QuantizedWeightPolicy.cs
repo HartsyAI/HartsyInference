@@ -48,7 +48,7 @@ public static class QuantizedWeightPolicy
             return PrepareForBackend(weights, resolved[0], wideDType);
 
         string name = string.Join(" + ", resolved.Select(backend => backend.Capabilities.Name));
-        return PrepareFor(weights, dtype => resolved.TrueForAll(backend => backend.SupportsResidentQuant(dtype)),
+        return PrepareFor(weights, weight => resolved.TrueForAll(backend => backend.SupportsResidentQuant(weight)),
             name, wideDType);
     }
 
@@ -56,7 +56,7 @@ public static class QuantizedWeightPolicy
     /// <remarks>Offline tooling reads a checkpoint to re-quantize or inspect it with no device attached, and wants the
     /// same rule stated against whatever it can decode. Naming the consumer keeps the log line meaningful.</remarks>
     public static PreparedWeights PrepareFor(IDictionary<string, Tensor> weights,
-        Func<DType, bool> supportsResidentQuant, string consumerName, DType wideDType = default)
+        Func<Tensor, bool> supportsResidentQuant, string consumerName, DType wideDType = default)
     {
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentNullException.ThrowIfNull(supportsResidentQuant);
@@ -80,7 +80,7 @@ public static class QuantizedWeightPolicy
                 // matrix, reaches an op with no dequant path at all — so a quantized SD1.5 UNet would load happily
                 // and then die in Conv2D. Rank decides this, not the backend, which is why it is checked first.
                 bool matrix = weight.Shape.Rank == 2;
-                if (matrix && supportsResidentQuant(weight.DType))
+                if (matrix && supportsResidentQuant(weight))
                     continue;
                 Tensor wide = Widen(weight, key, wideDType);
                 created.Add(wide);
@@ -108,11 +108,11 @@ public static class QuantizedWeightPolicy
     }
 
     /// <summary>Decodes one packed weight to <paramref name="wideDType"/>, by whichever scheme it was packed under.</summary>
-    /// <remarks>Three schemes reach here and they share nothing: GGUF's block quants carry their scales inside the
+    /// <remarks>Four schemes reach here and they share nothing: GGUF's block quants carry their scales inside the
     /// blocks, <c>int8_tensorwise</c> carries a per-row scale beside the weight and may have been Hadamard-rotated
-    /// along the input dimension, and NVFP4 carries padded swizzled block scales. Picking by <see cref="Tensor.QuantInfo"/>
-    /// rather than by dtype is what keeps an I8 ComfyUI weight out of the GGUF dequantizer, which would report a
-    /// missing codec for a format that has one.</remarks>
+    /// along the input dimension, and NVFP4 and MXFP8 carry padded swizzled block scales. Picking by
+    /// <see cref="Tensor.QuantInfo"/> rather than by dtype is what keeps an I8 ComfyUI weight out of the GGUF
+    /// dequantizer, which would report a missing codec for a format that has one.</remarks>
     private static Tensor Widen(Tensor weight, string key, DType wideDType)
     {
         if (weight.QuantInfo is not QuantWeightInfo info)
@@ -120,6 +120,16 @@ public static class QuantizedWeightPolicy
         if (weight.DType == DType.I8 && info.RowScale is not null)
         {
             using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(weight, info.RowScale, info.ConvRotGroupSize);
+            return wideDType == DType.BF16 ? bf16.To(bf16.Device) : bf16.CastTo(wideDType);
+        }
+        if (weight.DType == DType.F4E2M1 && info is { BlockScale: not null, GlobalScale: not null })
+        {
+            using Tensor bf16 = Nvfp4ResidentCodec.DequantToBf16(weight, info.BlockScale, info.GlobalScale);
+            return wideDType == DType.BF16 ? bf16.To(bf16.Device) : bf16.CastTo(wideDType);
+        }
+        if (weight.DType == DType.F8E4M3 && info.Format == "mxfp8" && info.BlockScale is not null)
+        {
+            using Tensor bf16 = Mxfp8ResidentCodec.DequantToBf16(weight, info.BlockScale);
             return wideDType == DType.BF16 ? bf16.To(bf16.Device) : bf16.CastTo(wideDType);
         }
         throw new UnsupportedModelException(

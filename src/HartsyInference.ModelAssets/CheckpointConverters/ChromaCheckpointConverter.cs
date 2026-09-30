@@ -85,7 +85,7 @@ public sealed class ChromaCheckpointConverter
         TryRename(bfl, "img_in.weight", "x_embedder.weight", transformer);
         TryRename(bfl, "img_in.bias", "x_embedder.bias", transformer);
 
-        // Fused-QKV mode (HARTSY_CHROMA_FUSED_QKV=1, INFERENCE_ACCEL_GRIND §H3.1): keep the BFL fused
+        // Fused-QKV mode (numerics.chromaFusedQkv=true, INFERENCE_ACCEL_GRIND §H3.1): keep the BFL fused
         // attention projections instead of splitting them, so the blocks run ONE qkv GEMM + the fused
         // QkvSplitNorm kernel (the Hunyuan3DFluxBlocks recipe) in place of 3 GEMMs + 2 separate RMSNorm
         // passes per stream. The fp8_scaled companion was folded onto the FUSED tensor above, so Q/K/V
@@ -205,11 +205,11 @@ public sealed class ChromaCheckpointConverter
             }
         }
 
-        // ── fp8 weight requant for the Radiance backbone (HARTSY_RADIANCE_FP8, default ON) ──
+        // ── fp8 weight requant for the Radiance backbone (numerics.radianceFp8, default ON) ──
         // The block Linears are the dominant cost (~58% of GPU time, SYNC-profiled) and BF16-weight-HBM-BANDWIDTH-
         // bound — F16 activations barely move them. Requant the large block .weight matrices to fp8 e4m3 (per-tensor
         // scale folded onto the GEMM alpha) to halve that weight traffic; the fp8 GEMM consumes the F16 block
-        // activations (HARTSY_DIT_F16) and dynamically re-quantizes them, transparently absorbing the ForwardCore
+        // activations (numerics.ditF16) and dynamically re-quantizes them, transparently absorbing the ForwardCore
         // residual-damp scale. Norms / QK-norm / modulation / embedders / patchifier / NeRF head stay BF16 (the
         // ≥1M-element + rank-2 gate skips them), so the residual-damp bookkeeping (context_embedder + branch-output
         // Fp8ScaleFactor, NeRF param_generator un-damp) is unaffected — those scales just compose with the quant

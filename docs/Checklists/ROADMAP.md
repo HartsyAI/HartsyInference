@@ -15,6 +15,9 @@ collectives are described in [MULTI_GPU.md](../MULTI_GPU.md). Remaining work:
 - [ ] Validate datacenter P2P/NVLink and ≥3 physical GPUs; same-device multi-rank tests do not establish that coverage.
 - [ ] Disaggregated prefill/decode serving.
 - [ ] Longer same-GPU concurrency soak before changing its opt-in default.
+- [ ] `DeviceGate` does not serialize engines loaded in separate assembly load contexts (SwarmUI's image, audio and
+  LLM extensions); `LtGemmExecutor` teardown still drains with `cuCtxSynchronize`, which fails during another
+  engine's capture on the same GPU.
 - [ ] Placement budgeting: charge lm_head bytes to the final stage; review audio eviction across all shard backends.
 - [ ] Cache mllama vision features per stage instead of copying each token; avoid uploading CosyVoice's unused final head.
 - [ ] GameCraft BF16-cast/cache policy validation when its checkpoint is available.
@@ -26,6 +29,9 @@ Benchmark infrastructure already exists in [benchmarks](../../benchmarks/README.
 
 - [ ] Refresh matched baselines across consumer, Ada, A100, and Hopper hardware.
 - [ ] General/packed variable-length attention; audit existing attention paths before designing another kernel.
+- [ ] `flash_attn_f16` at head dim 256 runs 122 TFLOPS on a 4090 (2.93 ms at Ideogram 4's 18×4400² shape) against
+  FlashAttention-2's 143: every warp stalls through its softmax phase at once. Next rung is a warp ping-pong (FA3-style)
+  or FA2's own hdim-256 forward compiled to PTX. Measure d=128 against cuDNN before routing it there.
 - [ ] QKV/gate-up/norm/activation fusion where full-model profiling shows launch or bandwidth cost.
 - [ ] Extend memory reuse and graph capture only on measured eligible paths; both mechanisms already exist.
 - [ ] F16/BF16 coverage and Hopper FA3/WGMMA experiments with numerical gates.
@@ -42,7 +48,9 @@ Benchmark infrastructure already exists in [benchmarks](../../benchmarks/README.
   batched convolution, the batch-independence of GroupNorm/Silu/Linear/SDPA, `CfgEulerStep` and TF32 are all
   ruled out; attention and the GEMM dtype path are untested. A cross-backend SSIM gate cannot be set until this
   is understood — for scale, toggling TF32 inside CUDA alone costs ~2% over 20 steps.
-- [ ] Subgroup-size pinning, im2col 64-bit indexing, descriptor-pool timeline lifetime checks.
+- [x] Subgroup-size pinning (to the device default; `sdpa_flash` passes no spec constants and is not pinned),
+  descriptor-pool reuse waits on the timeline, and the int64/int16 shader features are enabled. im2col past
+  2^31 elements is refused on the host rather than indexed in 64 bits.
 - [ ] Real-model Vulkan decode parity/throughput before enabling GraphDecodeSupported by default.
 - [ ] INT8 loading policy, end-to-end quality gate, cached quantized-weight lifetime, and shape-specific tuning.
   The opt-in Linear primitive already exists; that alone does not establish model support.
@@ -92,6 +100,14 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] F16 input/output Sage attention and loadable few-step accelerators, subject to quality gates.
 - [ ] LoRA extraction/checkpoint-diff utility.
 - [ ] PAG/SAG attention hooks and per-pipeline regional-tag handling.
+- [ ] Declare variant catalogs (`ENGINE_PATTERNS.md#model-variants`) for the families still ignoring theirs: HiDream
+  Full/Dev/Fast, Boogu Turbo, SD3.5 Large-Turbo and Flux.2 Klein base get their own defaults. Flux.1
+  Kontext/Fill/Depth/Canny and HiDream-Edit get an explicit refusal until those paths exist. LTX-Video 0.9.5/13B
+  still mixes its key probe with a filename check.
+- [ ] Real-weight check of Qwen-Image-Edit v1 through its own template, and of the Auto-mode edit path.
+- [ ] Wan 2.2 TI2V-5B to ComfyUI parity (warm 6.6 s vs 4.5 s at 512×320, 25 f, 20 steps on a 4090). The gap is the
+  denoise: GEMMs already run near the card's F16 rate, and ~1.5 s per generation is per-op glue across ~330 ops per
+  block forward. `WanVideoTransformer` has no step-graph capture yet; that is the next rung.
 - [ ] Pixel-space tiled VAE encode: reproduce the documented BF16 CUDA crash at 1536² SDXL img2img.
   VaeTiledEncoder exists but production wiring was reverted; a source-only dtype fix is not a working feature.
 

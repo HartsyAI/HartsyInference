@@ -28,9 +28,6 @@ internal static partial class VulkanApi
     internal static partial VkResult vkEnumerateInstanceLayerProperties(ref uint pCount, nint pProperties);
 
     [LibraryImport(Lib)]
-    internal static partial VkResult vkEnumerateInstanceExtensionProperties(nint pLayerName, ref uint pCount, nint pProperties);
-
-    [LibraryImport(Lib)]
     internal static partial VkResult vkEnumerateDeviceExtensionProperties(nint physicalDevice, nint pLayerName, ref uint pCount, nint pProperties);
 
     // ── Physical Device Enumeration & Queries ───────────────────────────
@@ -169,9 +166,6 @@ internal static partial class VulkanApi
     internal static partial void vkDestroyCommandPool(nint device, ulong commandPool, nint pAllocator);
 
     [LibraryImport(Lib)]
-    internal static partial VkResult vkResetCommandPool(nint device, ulong commandPool, uint flags);
-
-    [LibraryImport(Lib)]
     internal static partial VkResult vkAllocateCommandBuffers(nint device, in VkCommandBufferAllocateInfo pAllocateInfo, nint pCommandBuffers);
 
     [LibraryImport(Lib)]
@@ -210,9 +204,6 @@ internal static partial class VulkanApi
     internal static partial void vkCmdCopyBuffer(nint commandBuffer, ulong srcBuffer, ulong dstBuffer, uint regionCount, nint pRegions);
 
     [LibraryImport(Lib)]
-    internal static partial void vkCmdFillBuffer(nint commandBuffer, ulong dstBuffer, ulong dstOffset, ulong size, uint data);
-
-    [LibraryImport(Lib)]
     internal static partial void vkCmdPipelineBarrier2(nint commandBuffer, in VkDependencyInfo pDependencyInfo);
 
     // ── Query pools (GPU timestamp instrumentation — see VulkanGpuTimer) ──
@@ -247,16 +238,10 @@ internal static partial class VulkanApi
     internal static partial VkResult vkWaitForFences(nint device, uint fenceCount, nint pFences, uint waitAll, ulong timeout);
 
     [LibraryImport(Lib)]
-    internal static partial VkResult vkGetFenceStatus(nint device, ulong fence);
-
-    [LibraryImport(Lib)]
     internal static partial VkResult vkCreateSemaphore(nint device, in VkSemaphoreCreateInfo pCreateInfo, nint pAllocator, out ulong pSemaphore);
 
     [LibraryImport(Lib)]
     internal static partial void vkDestroySemaphore(nint device, ulong semaphore, nint pAllocator);
-
-    [LibraryImport(Lib)]
-    internal static partial VkResult vkSignalSemaphore(nint device, in VkSemaphoreSignalInfo pSignalInfo);
 
     [LibraryImport(Lib)]
     internal static partial VkResult vkWaitSemaphores(nint device, in VkSemaphoreWaitInfo pWaitInfo, ulong timeout);

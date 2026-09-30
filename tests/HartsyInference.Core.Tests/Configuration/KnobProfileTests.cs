@@ -9,7 +9,7 @@ namespace HartsyInference.Core.Tests.Configuration;
 public sealed class KnobProfileTests
 {
     private static Knob<bool> Declare(string id, bool defaultValue = false)
-        => new(id, legacyEnv: null, defaultValue, KnobScope.Runtime, KnobDomain.Numerics, "test knob");
+        => new(id, defaultValue, KnobScope.Runtime, KnobDomain.Numerics, "test knob");
 
     /// <summary>A scoped profile beats the machine's configured value — the property that lets one request run at reference numerics while others keep the machine's settings.</summary>
     [Fact]

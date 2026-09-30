@@ -75,21 +75,14 @@ public sealed unsafe class Codec_Q3_K : GgufCodecBase
         }
     }
 
-    /// <summary>Unpacks 16 6-bit signed scales from 12 bytes per the canonical ggml layout. Bytes 0..7 contain the low 4 bits of each scale plus packed high 2 bits in bytes 8..11.</summary>
+    /// <summary>Canonical ggml 6-bit signed scale unpack (dequantize_row_q3_K): entry s takes its low nibble from byte s (s &lt; 8) or the high nibble of byte s − 8, and its two high bits from byte 8 + s % 4 at bit 2·(s / 4).</summary>
     private static void UnpackQ3KScales(byte* packed, sbyte* result)
     {
-        for (int i = 0; i < 8; i++)
+        for (int s = 0; s < 16; s++)
         {
-            byte lowByte = packed[i];
-            int low0 = lowByte & 0x0F;
-            int low1 = lowByte >> 4;
-            byte highByte = packed[8 + i / 2];
-            int hi0 = (i % 2 == 0) ? (highByte & 0x03) : ((highByte >> 4) & 0x03);
-            int hi1 = (i % 2 == 0) ? ((highByte >> 2) & 0x03) : ((highByte >> 6) & 0x03);
-            int s0 = low0 | (hi0 << 4);
-            int s1 = low1 | (hi1 << 4);
-            result[2 * i + 0] = (sbyte)(s0 - 32);
-            result[2 * i + 1] = (sbyte)(s1 - 32);
+            int low = s < 8 ? packed[s] & 0x0F : packed[s - 8] >> 4;
+            int high = (packed[8 + (s & 3)] >> (2 * (s >> 2))) & 0x03;
+            result[s] = (sbyte)((low | (high << 4)) - 32);
         }
     }
 }

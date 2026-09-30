@@ -71,10 +71,10 @@ public sealed class VramPolicyScopeTests
     [Fact]
     public void ScopeWinsOverTheBackendRegistryThenYieldsBack()
     {
-        string? previous = Environment.GetEnvironmentVariable(LowVramPolicy.EnvironmentVariable);
+        string? previous = Environment.GetEnvironmentVariable(LowVramPolicy.SettingId);
         try
         {
-            Environment.SetEnvironmentVariable(LowVramPolicy.EnvironmentVariable, null);
+            Environment.SetEnvironmentVariable(LowVramPolicy.SettingId, null);
             LowVramPolicy.ResetCacheForTests();
             using RecordingStreamingBackend backend = new RecordingStreamingBackend(cache: null);
             VramPolicyRegistry.Set(backend, VramPolicy.For(VramTier.Performance));
@@ -91,7 +91,7 @@ public sealed class VramPolicyScopeTests
         }
         finally
         {
-            Environment.SetEnvironmentVariable(LowVramPolicy.EnvironmentVariable, previous);
+            Environment.SetEnvironmentVariable(LowVramPolicy.SettingId, previous);
             LowVramPolicy.ResetCacheForTests();
         }
     }

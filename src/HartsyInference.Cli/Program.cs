@@ -24,18 +24,7 @@ public static class Program
         // --set profile is pushed below, since that is where a caller raising it for one run supplies it.
         Logs.MinLevel = ResolveLogLevel();
 
-        foreach ((string variable, string setting) in KnobStore.ReportStaleEnvironmentVariables())
-        {
-            AnsiConsole.MarkupLine($"[yellow]{Markup.Escape(variable)} is exported but no longer read. "
-                + $"Set [/][#2ea5e0]{Markup.Escape(setting)}[/][yellow] in hartsyinference.settings.json, "
-                + "or pass --set.[/]");
-        }
 
-        if (args.Contains("--list-settings", StringComparer.Ordinal))
-        {
-            KnobCli.ListSettings();
-            return 0;
-        }
 
         // Applied here rather than per command: it must be in force before the engine is constructed, since
         // construction-scoped settings are read while the model loads. The CLI is one run per process, so a
@@ -106,6 +95,22 @@ public static class Program
             config.AddCommand<ConvertCommand>("convert")
                 .WithDescription("Re-voice audio using a target speaker reference.")
                 .WithExample("convert", "source.wav", "-m", "openvoice", "--target", "reference.wav");
+            config.AddBranch("settings", settings =>
+            {
+                settings.SetDescription("Read and change engine settings. They live in one file; 'settings path' prints it.");
+                settings.AddCommand<SettingsListCommand>("list")
+                    .WithDescription("List every setting with its type, default and scope.")
+                    .WithExample("settings", "list");
+                settings.AddCommand<SettingsGetCommand>("get")
+                    .WithDescription("Show one setting's effective value and which layer supplied it.")
+                    .WithExample("settings", "get", "paths.modelsRoot");
+                settings.AddCommand<SettingsSetCommand>("set")
+                    .WithDescription("Write one setting to the settings file so it survives a restart.")
+                    .WithExample("settings", "set", "paths.modelsRoot", "/mnt/models");
+                settings.AddCommand<SettingsPathCommand>("path")
+                    .WithDescription("Print the settings file this process reads and writes.")
+                    .WithExample("settings", "path");
+            });
             config.AddBranch("fx", fx =>
             {
                 fx.SetDescription("Audio effects: stem separation (Demucs) and speech enhancement (Resemble-Enhance).");
@@ -144,7 +149,34 @@ public static class Program
                 .WithExample("quantize", "--model-path", "/models/flux2-klein.safetensors", "-o", "/models/klein-Q8_0.gguf", "--quant", "Q8_0");
         });
 
-        return app.Run(args);
+        // Without this the run always fails: StrictParsing above refuses any option no command declares, and no
+        // command declares --profile/--set because they are read here, before the parser exists. They have to be
+        // taken out of what the parser sees or every invocation that uses one dies on "Unexpected option 'set'".
+        return app.Run(WithoutKnobArgs(args));
+    }
+
+    /// <summary>Drops each <c>--profile</c>/<c>--set</c> flag and the value that follows it, leaving the command line the parser should see.</summary>
+    /// <remarks>A trailing flag with no value is left in place on purpose: <see cref="ArgValues"/> cannot have read
+    /// it, so silently swallowing it here would run the generation while ignoring what the operator asked for —
+    /// the same failure mode <c>StrictParsing</c> exists to prevent. The parser rejects it by name instead.
+    /// <para>Both names are stripped wherever they appear, not only ahead of the subcommand, because
+    /// <see cref="ArgValues"/> reads them the same way. No command declares an option by either name today; one
+    /// that did would have its value removed before the parser saw it.</para></remarks>
+    internal static string[] WithoutKnobArgs(string[] args)
+    {
+        List<string> kept = new List<string>(args.Length);
+        for (int i = 0; i < args.Length; i++)
+        {
+            bool isKnobFlag = string.Equals(args[i], "--profile", StringComparison.Ordinal)
+                || string.Equals(args[i], "--set", StringComparison.Ordinal);
+            if (isKnobFlag && i + 1 < args.Length)
+            {
+                i++;
+                continue;
+            }
+            kept.Add(args[i]);
+        }
+        return [.. kept];
     }
 
     /// <summary>Last value of a repeated <c>--flag value</c> pair, or null when absent.</summary>

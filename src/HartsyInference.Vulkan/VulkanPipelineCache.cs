@@ -17,11 +17,17 @@ public sealed class VulkanPipelineCache : IDisposable
     /// <summary>Filesystem path of the on-disk pipeline-cache blob (set at construction). Exposed so tests can verify persist+reload behavior across backend instances.</summary>
     public string CachePath => _cachePath;
 
+    /// <summary>Bytes handed to the driver as initial cache data at construction, 0 when nothing was read. A driver
+    /// that persists no pipelines leaves the blob at its 32-byte header, so the reload cannot be observed from the
+    /// file's size alone — this is what makes that assertion real on such a driver.</summary>
+    public int InitialDataBytes { get; }
+
     public VulkanPipelineCache(nint device, VulkanCapabilities caps)
     {
         _device = device;
         _cachePath = ResolveCachePath(caps);
         byte[]? cacheData = TryReadCacheFile();
+        InitialDataBytes = cacheData?.Length ?? 0;
         InitCache(cacheData);
     }
 

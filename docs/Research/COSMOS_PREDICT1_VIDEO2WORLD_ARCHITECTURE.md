@@ -156,7 +156,7 @@ Cosmos-Predict1-13B-Video2World/
 **No safetensors.** Weights ship as **`model.pt`** PyTorch pickles. The pickle root is `collections.OrderedDict` containing `torch.BFloat16Storage` tensors via `torch._utils._rebuild_tensor_v2`. **For HartsyInference this is a concrete blocker**: we don't have a PyTorch pickle loader and don't want one. The conversion approach is:
 
 1. **One-off Python script** (off-ship) that loads `model.pt` and re-emits as `.safetensors`. HartsyInference's existing safetensors loader then consumes it.
-2. Document this in `samples/ConvertCosmosCheckpoint/` so the user runs it once per model.
+2. Document the conversion so the user runs it once per model. The `samples/` tree this step originally proposed no longer exists; the equivalent home is a CLI convert command or a documented script beside the recipe.
 
 The `config.json` is a Cosmos-private dataclass dump, not a `transformers.PretrainedConfig`. It's tiny (480-621 bytes); we'll read it as a JSON metadata header (or just hard-code the architecture in `CosmosCheckpointConverter` keyed by file size / model name).
 

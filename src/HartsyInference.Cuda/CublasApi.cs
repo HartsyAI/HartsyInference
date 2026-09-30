@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cuda;
 
@@ -64,10 +65,29 @@ internal static partial class CublasApi
     internal const int CUDA_R_8F_E4M3 = 28;  // CUDA 11.8+ (Ada / SM 8.9+)
     internal const int CUDA_R_8F_E5M2 = 29;  // CUDA 11.8+ (Ada / SM 8.9+)
     internal const int CUDA_R_16BF = 14;
-    internal const int CUDA_R_4F_E2M1 = 33;  // CUDA 12.8+ (Blackwell / SM 10.0+) — native FP4 GEMM operand
-    internal const int CUDA_R_8F_UE8M0 = 34; // CUDA 12.8+ — UE8M0 microscaling block-scale type
+    // Values are cudaDataType, read from library_types.h (CUDA 13.6). 34 is past the end of that enum, which is
+    // what CUDA_R_8F_UE8M0 was set to — nothing had caught it because no FP4 path was wired up to use it.
+    internal const int CUDA_R_4F_E2M1 = 33;  // Blackwell (SM 10.0 / 12.0) native FP4 GEMM operand
+    internal const int CUDA_R_6F_E2M3 = 31;  // Blackwell FP6; no codec or loader mapping in the engine yet
+    internal const int CUDA_R_6F_E3M2 = 32;  // Blackwell FP6; likewise
+    internal const int CUDA_R_8F_UE4M3 = 28; // NVFP4's block-scale type — an alias of E4M3, not a distinct value
+    internal const int CUDA_R_8F_UE8M0 = 30; // MXFP4/MXFP8's exponent-only block-scale type
     internal const int CUDA_R_8I = 3;        // int8 GEMM operand (IMMA tensor cores on SM 7.5+)
     internal const int CUDA_R_32I = 10;      // int32 accumulate/output for int8 GEMM
+
+    /// <summary>The cudaDataType for a tensor dtype — the one map every cuBLAS/cuBLASLt layout is created through, so an operand's element type is never restated by hand at a call site.</summary>
+    internal static int DataTypeOf(DType dtype)
+    {
+        if (dtype == DType.F32) return CUDA_R_32F;
+        if (dtype == DType.F16) return CUDA_R_16F;
+        if (dtype == DType.BF16) return CUDA_R_16BF;
+        if (dtype == DType.F8E4M3) return CUDA_R_8F_E4M3;
+        if (dtype == DType.F8E5M2) return CUDA_R_8F_E5M2;
+        if (dtype == DType.F4E2M1) return CUDA_R_4F_E2M1;
+        if (dtype == DType.I8) return CUDA_R_8I;
+        if (dtype == DType.I32) return CUDA_R_32I;
+        throw new NotSupportedException($"cuBLAS has no data type for {dtype}.");
+    }
 
     // ── Compute Type Constants ──────────────────────────────────────────
 

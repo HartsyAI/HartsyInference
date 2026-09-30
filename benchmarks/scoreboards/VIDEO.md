@@ -23,7 +23,7 @@ how to reproduce these numbers. Standard workload (unless noted): 25 frames, 512
 | Wan 2.1 T2V 14B (fp8, 15 steps) | RTX 4090 | 30.58 s | 30.62 s | 1.00× — tied (parity) | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
 | Wan 2.1 T2V 1.3B (fp16, 20 steps) | RTX 4090 | 11.22 s | **6.28 s** | 1.79× slower | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
 | LTX-0.9 2B (fp16, 20 steps) | RTX 4090 | 4.59 s | **2.84 s** | 1.62× slower | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
-| Wan 2.2 TI2V-5B (fp16, 20 steps) | RTX 4090 | 15.5 s | **4.52 s** | 3.4× slower | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
+| Wan 2.2 TI2V-5B (fp16, 20 steps) | RTX 4090 | 6.6 s | **4.52 s** | 1.46× slower | 2026-09-28 | SwarmUI warm, repeat prompt; ComfyUI side from video_comfy-vs-hartsy_2026-07-11.md |
 | LTX-2.3 22B (video+audio, 20 steps) | RTX 4090 | 42.3 s | n/a — no comparable Comfy workflow | n/a | 2026-07-11 | video_comfy-vs-hartsy_2026-07-11.md |
 | LTX-2.5 22B dev (video+audio, int8-convrot, 30 steps)† | RTX 4090 | **47.40 s** | **42.48 s** | **1.12× slower** | 2026-08-14 | bench_ltx25.py |
 | LTX-2.5 22B dev, recommended profile (1280×736×145f, conv decoder, 20 steps, cfg 4.0, 24fps) | RTX 4090 | 153.18 s | **142.86 s** | **1.07× slower** | 2026-08-15 | ltx25_ab.sh |

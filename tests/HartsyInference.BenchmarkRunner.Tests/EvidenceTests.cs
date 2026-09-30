@@ -200,6 +200,8 @@ public sealed class EvidenceTests : IDisposable
         Assert.Equal(1, rows[0].Machines);
         Assert.Equal(3, rows[0].Sessions);
         Assert.Single(rows[0].Evidence);
+        Assert.False(rows[0].Attested);
+        Assert.Null(rows[0].MedianMsPerStep);
         Assert.Contains(Hashes.FileHash(Path.Combine(first, "campaign.json")), rows[0].Evidence[0]);
         foreach (string file in Directory.GetFiles(receipts))
         {
@@ -276,6 +278,119 @@ public sealed class EvidenceTests : IDisposable
         string file = Path.Combine(_root, "alternate.png"); File.WriteAllBytes(file, png);
         Assert.True(OutputChecks.Image(file, 2, 2));
     }
+
+    [Fact]
+    public void TelemetryClaimsAreBoundedByTheirOwnEvidence()
+    {
+        string root = Fixture("quick-v1");
+        CampaignRecord campaign = Read(root);
+        DeviceTelemetry sound = new()
+        {
+            Source = DeviceTelemetry.DeviceWide, SampleCount = 10, MaxSampleIntervalMs = 110, PeakUsedDeviceBytes = 512,
+            PeakGpuUtilizationPercent = 99, MeanGpuUtilizationPercent = 80, PeakPowerWatts = 420, MeanPowerWatts = 400,
+            MaxTemperatureCelsius = 62, MinSmClockMhz = 2600, MeanSmClockMhz = 2700, SwPowerCapSamples = 9
+        };
+        Save(root, Stamp(campaign, sound));
+        // A software power cap on nine of ten samples is what a stock card under load looks like, not a defect.
+        Assert.True(Validator.Validate(root).Valid);
+        foreach (DeviceTelemetry broken in new[]
+        {
+            sound with { SampleCount = 0 },
+            sound with { PeakUsedDeviceBytes = 2048 },
+            sound with { MaxSampleIntervalMs = DeviceTelemetry.MaxCoveragePeriods * 100 + 1 },
+            sound with { MeanPowerWatts = 500 },
+            sound with { HwThermalSamples = 11 },
+            sound with { Source = "hand-written" },
+            sound with { Source = DeviceTelemetry.Unavailable },
+        })
+        {
+            Save(root, Stamp(campaign, broken));
+            Assert.False(Validator.Validate(root).Valid);
+        }
+    }
+
+    [Fact]
+    public void AThrottledSessionCannotClaimToBeCompleted()
+    {
+        string root = Fixture("standard-v1");
+        CampaignRecord campaign = Read(root);
+        DeviceTelemetry throttled = new()
+        {
+            Source = DeviceTelemetry.DeviceWide, SampleCount = 10, MaxSampleIntervalMs = 110, HwThermalSamples = 3
+        };
+        Save(root, Stamp(campaign, throttled));
+        Assert.False(Validator.Validate(root).Valid);
+        Save(root, Stamp(campaign, throttled, status: "throttled"));
+        ValidationReport report = Validator.Validate(root);
+        Assert.True(report.Valid);
+        Assert.False(report.HeadlineEligible);
+    }
+
+    [Fact]
+    public void AnUnattestedCampaignStillPublishesButAMismatchedProfileDoesNot()
+    {
+        string root = Fixture("standard-v1");
+        CampaignRecord campaign = Read(root);
+        ValidationReport report = Validator.Validate(root);
+        Assert.True(report.HeadlineEligible);
+        Assert.Contains(report.Notes, note => note.Contains("unattested", StringComparison.Ordinal));
+        Save(root, campaign with { Environment = campaign.Environment with { PowerProfile = "power.limit=450.00 W" } });
+        Assert.False(Validator.Validate(root).Valid);
+    }
+
+    [Fact]
+    public void ASharedDeviceNeedsTheOperatorOverrideToBeValidEvidence()
+    {
+        string root = Fixture("standard-v1");
+        CampaignRecord campaign = Read(root);
+        AttestationRecord shared = new()
+        {
+            Source = AttestationRecord.Smi, SharedProcessCount = 1, SharedProcessBytes = 1024
+        };
+        Save(root, Attest(campaign, shared));
+        Assert.False(Validator.Validate(root).Valid);
+        Save(root, Attest(campaign, shared with { SharedDeviceAllowed = true }));
+        Assert.True(Validator.Validate(root).Valid);
+    }
+
+    [Fact]
+    public void ASessionThatSharedTheDeviceCannotClaimToBeCompleted()
+    {
+        string root = Fixture("standard-v1");
+        CampaignRecord campaign = Read(root);
+        CampaignRecord shared = campaign with
+        {
+            Sessions = campaign.Sessions.Select(s => s.Measurements.Length == 0 ? s : s with { SharedProcessCount = 1 }).ToArray()
+        };
+        Save(root, shared);
+        Assert.False(Validator.Validate(root).Valid);
+        // A tenant that appeared mid-campaign keeps its evidence; it just stops being publishable.
+        Save(root, shared with { Sessions = shared.Sessions.Select(s => s.Measurements.Length == 0 ? s : s with
+        {
+            Status = "shared"
+        }).ToArray() });
+        ValidationReport report = Validator.Validate(root);
+        Assert.True(report.Valid);
+        Assert.False(report.HeadlineEligible);
+    }
+
+    private static CampaignRecord Stamp(CampaignRecord campaign, DeviceTelemetry telemetry, string? status = null) => campaign with
+    {
+        Sessions = campaign.Sessions.Select(s => s.Measurements.Length == 0 ? s : s with
+        {
+            Status = status ?? s.Status,
+            Measurements = s.Measurements.Select(m => m with { Telemetry = telemetry }).ToArray()
+        }).ToArray()
+    };
+
+    private static CampaignRecord Attest(CampaignRecord campaign, AttestationRecord attestation) => campaign with
+    {
+        Environment = campaign.Environment with
+        {
+            Attestation = attestation,
+            PowerProfile = DeviceAttestation.Profile(attestation)
+        }
+    };
 
     private string Fixture(string suiteId)
     {

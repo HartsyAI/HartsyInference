@@ -16,9 +16,9 @@ public sealed class TranscribeCommand : Command<TranscribeCommand.Settings>
         [Description("Path to a WAV file (auto-resampled to 16 kHz mono).")]
         public string Audio { get; init; } = "";
 
-        /// <summary>Whisper model id or HF repo (e.g. whisper-tiny, openai/whisper-large-v3).</summary>
+        /// <summary>Transcription model id, optionally with a variant (e.g. whisper:tiny, moonshine:base), or an HF repo.</summary>
         [CommandOption("-m|--model")]
-        [Description("Whisper model: whisper-tiny/base/small/medium/large-v3, or any HF repo id.")]
+        [Description("Model, optionally 'id:variant' (e.g. whisper:tiny, whisper:large-v3, moonshine:base), or any HF repo id.")]
         public string Model { get; init; } = "whisper";
 
         /// <summary>Compute backend selector.</summary>

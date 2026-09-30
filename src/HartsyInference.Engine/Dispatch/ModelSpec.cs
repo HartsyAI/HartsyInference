@@ -17,6 +17,10 @@ public sealed record ModelSpec
     /// <summary>The resolved on-disk path (file or directory), or null when nothing local was found.</summary>
     public string? LocalPath { get; init; }
 
+    /// <summary>Caller's variant hint — SwarmUI's model-class id (<c>qwen-image-edit</c>) or a short id (<c>edit</c>).
+    /// A hint the family does not recognise is ignored; the weights still override a hint they contradict.</summary>
+    public string? Variant { get; init; }
+
     /// <summary>Optional checkpoint-profile hint; it may select or confirm a structurally compatible profile but never overrides a conflicting artifact hash.</summary>
     public string? ProfileId { get; init; }
 

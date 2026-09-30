@@ -21,15 +21,15 @@ public sealed class ZetaChromaTransformer : IDisposable
     private readonly ZetaChromaDecoderHead _decoder;
     private int _disposed;
 
-    // Binary stage dumps for the torch oracle (HARTSY_ZETA_DUMP=<dir>): raw F32 .bin per stage on the
+    // Binary stage dumps for the torch oracle (diagnostics.zetaDump=<dir>): raw F32 .bin per stage on the
     // FIRST forward only (step-0 cond pass — the pipeline runs cond before uncond), plus a shapes manifest.
     private static string? ZetaDumpDir => EngineKnobs.ZetaDump.Value;
     private static int _dumpForwardIndex = -1;
 
-    /// <summary>True while the step-0 cond forward is being dumped (HARTSY_ZETA_DUMP set).</summary>
+    /// <summary>True while the step-0 cond forward is being dumped (diagnostics.zetaDump set).</summary>
     internal static bool DumpActive => ZetaDumpDir is not null && _dumpForwardIndex == 0;
 
-    /// <summary>Writes <paramref name="t"/> as raw F32 to <c>{HARTSY_ZETA_DUMP}/{name}.bin</c> and appends the shape to the manifest. No-op unless <see cref="DumpActive"/>.</summary>
+    /// <summary>Writes <paramref name="t"/> as raw F32 to <c>{diagnostics.zetaDump}/{name}.bin</c> and appends the shape to the manifest. No-op unless <see cref="DumpActive"/>.</summary>
     internal static unsafe void DumpBin(string name, Tensor t)
     {
         if (!DumpActive) return;

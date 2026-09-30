@@ -2,6 +2,7 @@ using HartsyInference.Core.Logging;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using HartsyInference.Core.Memory;
 using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae.QwenImage;
@@ -14,6 +15,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -21,7 +23,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tokenizer tokenizer,
     LlamaStyleEncoder textEncoder, QwenImageTransformer transformer, QwenImageVaeDecoder vae,
     QwenImageVaeEncoder? vaeEncoder, Qwen25VlMultimodalEncoder? multimodalEncoder,
-    Qwen25VlVisionEncoder? visionEncoder, bool refTimestepZero, List<SafeTensorsLoader> loaders,
+    Qwen25VlVisionEncoder? visionEncoder, ResolvedModelVariant variant, bool refTimestepZero, List<IDisposable> loaders,
     IDisposable? ggufHandle, MergedLoraStack? loraStack = null) : IRecipePipeline
 {
     /// <summary>The exact system prompt Qwen-Image conditions on (diffusers <c>QwenImagePipeline.prompt_template_encode</c>); its hidden states are dropped by the prefix-drop index.</summary>
@@ -41,8 +43,11 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
     private readonly QwenImageVaeEncoder? _vaeEncoder = vaeEncoder;
     private readonly Qwen25VlMultimodalEncoder? _multimodalEncoder = multimodalEncoder;
     private readonly Qwen25VlVisionEncoder? _visionEncoder = visionEncoder;
+    private readonly QwenImageEditTemplate? _editTemplate = QwenImageVariants.TemplateFor(variant);
+    private readonly ResolvedModelVariant _variant = variant;
     private readonly bool _refTimestepZero = refTimestepZero;
-    private readonly List<SafeTensorsLoader> _loaders = loaders;
+    private readonly List<IDisposable> _loaders = loaders;
+    private int _disposed;
     private readonly IDisposable? _ggufHandle = ggufHandle;
 
     private readonly MergedLoraStack? _loraStack = loraStack;
@@ -57,30 +62,39 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         float cfg = request.CfgScale ?? QwenImageRecipe.FamilyDefaults.CfgScale;
 
         // TODO(E-IMG-5): regional prompting is deferred — the SwarmUI loader resolved it from T2IParamInput too.
-        // Qwen-Image is the only family offering BOTH init-image modes, so the choice is explicit rather than inferred:
-        // Reference routes the images to the in-context edit tokens, anything else to the classic noised start. Extra
-        // references force the edit path — nothing else can consume more than one image — so an explicit denoise mode
-        // is refused rather than silently dropping them.
+        // Reference routes the images to the in-context edit tokens, Denoise to the classic noised start; Auto follows
+        // the variant (an Edit build edits an init image unless a mask asks for inpainting). Extra references force the
+        // edit path — nothing else can consume more than one image — so an explicit denoise mode is refused rather
+        // than silently dropping them.
         bool hasExtraReferences = request.ReferenceImages is { Count: > 0 };
-        if (hasExtraReferences && request.Img2Img?.Mode == Img2ImgMode.Denoise)
+        Img2ImgMode mode = request.Img2Img?.Mode ?? Img2ImgMode.Auto;
+        if (_editTemplate is null && (hasExtraReferences || mode == Img2ImgMode.Reference))
+        {
+            throw new InvalidOperationException($"This checkpoint resolved as {_variant.Variant.DisplayName} "
+                + $"({_variant.Source}: {_variant.Evidence}), a text-to-image model with no reference-edit conditioning. "
+                + "If it is an Edit build, set its SwarmUI model class to Qwen Image Edit (Plus), or pass -m qwen-image:edit "
+                + "(or :edit-plus); otherwise drop the reference images and use Img2Img.Mode Denoise.");
+        }
+        if (hasExtraReferences && mode == Img2ImgMode.Denoise)
         {
             throw new InvalidOperationException("Reference images are consumed by Qwen-Image-Edit conditioning, which has "
                 + "no denoise-strength path. Set Img2Img.Mode to Reference or Auto, or drop the reference images.");
         }
-        bool refEdit = hasExtraReferences || request.Img2Img?.Mode == Img2ImgMode.Reference;
+        bool refEdit = hasExtraReferences || mode == Img2ImgMode.Reference
+            || (mode == Img2ImgMode.Auto && _editTemplate is not null && request.Img2Img?.InitImage is not null && request.Inpaint is null);
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
         using Img2ImgResolver.Img2ImgSpec? img2img = refEdit
             ? null : RecipeImg2ImgBinder.Resolve(request, reqWidth, reqHeight);
-        // References carry their own aspect-preserving rescales (~1 MP for the VAE, ~384² for the vision tower), so they
+        // References carry their own aspect-preserving rescales (~1 MP for the VAE, the template's area for the vision tower), so they
         // deliberately bypass the img2img resolver's resize-to-output-size.
         using QwenImageEditConditioning.References? references = refEdit
-            ? QwenImageEditConditioning.Resolve(request.Img2Img?.InitImage, request.ReferenceImages) : null;
+            ? QwenImageEditConditioning.Resolve(_editTemplate!, request.Img2Img?.InitImage, request.ReferenceImages) : null;
         bool editVision = references is not null && _multimodalEncoder is not null;
         IReadOnlyList<int> visionTokens = references is not null ? CountVisionTokens(references) : [];
         // One tokenizer for the base ids and for every scheduled variant, so a variant cannot drift from the
         // template the base was built with — the edit path splices vision placeholders the plain path does not.
         WeightedTokenSequence Tokenize(string text) => editVision
-            ? QwenImageEditConditioning.BuildTokens(_tokenizer, text, visionTokens).Tokens
+            ? QwenImageEditConditioning.BuildTokens(_tokenizer, text, visionTokens, _editTemplate!).Tokens
             : EncodeWithTemplate(_tokenizer, text).tokens;
         // ImagesService now leaves <alternate:>/<fromto[N]:> raw for this recipe, so everything outside the
         // schedule builder needs them collapsed to their step-0 value or the literal tag text is tokenized as
@@ -88,10 +102,10 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
         string flatPrompt = PromptTagFlattening.Flatten(prompt);
         string flatNegative = PromptTagFlattening.Flatten(negative);
         (WeightedTokenSequence promptTokens, int promptDrop) = editVision
-            ? QwenImageEditConditioning.BuildTokens(_tokenizer, flatPrompt, visionTokens)
+            ? QwenImageEditConditioning.BuildTokens(_tokenizer, flatPrompt, visionTokens, _editTemplate!)
             : EncodeWithTemplate(_tokenizer, flatPrompt);
         (WeightedTokenSequence negTokens, int negDrop) = editVision
-            ? QwenImageEditConditioning.BuildTokens(_tokenizer, flatNegative, visionTokens)
+            ? QwenImageEditConditioning.BuildTokens(_tokenizer, flatNegative, visionTokens, _editTemplate!)
             : EncodeWithTemplate(_tokenizer, flatNegative);
         // Only the positive prompt schedules: SwarmUI's scheduling tags are emitted into the prompt the user
         // wrote, and the negative is a separate field it does not rewrite.
@@ -182,19 +196,10 @@ public sealed class QwenImageRecipePipeline(QwenImagePipeline pipeline, Qwen3Tok
     /// <inheritdoc/>
     public void Dispose()
     {
-        _pipeline.Dispose();
-        _tokenizer.Dispose();
-        _textEncoder.Dispose();
-        _transformer.Dispose();
-        _vae.Dispose();
-        _vaeEncoder?.Dispose();
-        _visionEncoder?.Dispose();
-        foreach (SafeTensorsLoader loader in _loaders)
-        {
-            loader.Dispose();
-        }
-        _ggufHandle?.Dispose();
-        // Last: the stack owns the merged weight tensors the transformer was serving.
-        _loraStack?.Dispose();
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            return;
+        // Every handle is released even if one throws; the LoRA stack goes last, it owns the merged weights.
+        new CompositeDisposable([_pipeline, _tokenizer, _textEncoder, _transformer, _vae,
+            _vaeEncoder, _visionEncoder, .. _loaders, _ggufHandle, _loraStack]).Dispose();
     }
 }

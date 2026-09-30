@@ -81,8 +81,8 @@ public sealed unsafe class ControlNetCondEmbedding : IDisposable
             int inCh = (int)_blockWeights[i]!.Shape[1];
             int outCh = (int)_blockWeights[i]!.Shape[0];
             int stride = _blockStride2[i] ? 2 : 1;
-            int newH = stride == 2 ? h / 2 : h;
-            int newW = stride == 2 ? w / 2 : w;
+            int newH = stride == 2 ? (h + 1) / 2 : h;   // conv 3×3 pad 1 rounds up
+            int newW = stride == 2 ? (w + 1) / 2 : w;
             TensorShape blockShape = new TensorShape(batch, outCh, newH, newW);
             Tensor next = new Tensor(blockShape, dtype);
             backend.Conv2D(next, hidden, _blockWeights[i]!, _blockBiases[i], stride, stride, 1, 1);

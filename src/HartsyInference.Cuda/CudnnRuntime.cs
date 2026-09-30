@@ -5,7 +5,7 @@ using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Locates, version-guards, and (optionally) auto-provisions the cuDNN runtime so the conv/SDPA fast paths engage across OS / CUDA-version / GPU combos WITHOUT the user hand-installing it — and emits one clear diagnostic line at engine start so a "why is it slow?" report is a single log check. <para>cuDNN is a ~1 GB, <b>CUDA-major-specific</b>, OS-specific set of libraries, so it is NOT shipped inside the DLL folder (that would be ~6 GB across CUDA 11/12/13 × Windows/Linux). Instead the matching build is resolved from, in order: <c>HARTSY_CUDNN_DIR</c> → the per-user engine cache → a <c>cudnn/</c> folder beside the assembly (an optional bundled deploy) → the OS default (a system install). If none is found and auto-fetch is on, the matching redist is downloaded once to the cache. A cuDNN built for a different CUDA major than the running driver is <b>REJECTED</b> — that exact mismatch (a CUDA-12 cuDNN on a CUDA-13 runtime) previously hung the engine mid-inference.</para></summary>
+/// <summary>Locates, version-guards, and (optionally) auto-provisions the cuDNN runtime so the conv/SDPA fast paths engage across OS / CUDA-version / GPU combos WITHOUT the user hand-installing it — and emits one clear diagnostic line at engine start so a "why is it slow?" report is a single log check. <para>cuDNN is a ~1 GB, <b>CUDA-major-specific</b>, OS-specific set of libraries, so it is NOT shipped inside the DLL folder (that would be ~6 GB across CUDA 11/12/13 × Windows/Linux). Instead the matching build is resolved from, in order: <c>paths.cudnnDir</c> → the per-user engine cache → a <c>cudnn/</c> folder beside the assembly (an optional bundled deploy) → the OS default (a system install). If none is found and auto-fetch is on, the matching redist is downloaded once to the cache. A cuDNN built for a different CUDA major than the running driver is <b>REJECTED</b> — that exact mismatch (a CUDA-12 cuDNN on a CUDA-13 runtime) previously hung the engine mid-inference.</para></summary>
 public static class CudnnRuntime
 {
     /// <summary>True when a version-matched cuDNN loaded and passed the CUDA-major guard.</summary>
@@ -77,9 +77,9 @@ public static class CudnnRuntime
         {
             Available = false;
             LibDir = null;
-            Reason = $"cuDNN not found (searched HARTSY_CUDNN_DIR, {CacheLibDir(cudaMajor)}, {BundledDir()}, and the OS path; " +
+            Reason = $"cuDNN not found (searched paths.cudnnDir, {CacheLibDir(cudaMajor)}, {BundledDir()}, and the OS path; " +
                      $"driver is CUDA {cudaMajor}). {ex.GetType().Name}. " +
-                     $"Enable with HARTSY_CUDNN_AUTOFETCH=1, drop the matching cuDNN 9 libs in the cache dir, or install cuDNN system-wide.";
+                     $"Enable with paths.cudnnAutofetch=true, drop the matching cuDNN 9 libs in the cache dir, or install cuDNN system-wide.";
             return;
         }
 
@@ -89,7 +89,7 @@ public static class CudnnRuntime
             Available = false;
             Reason = $"cuDNN REJECTED: built for CUDA {cudnnCudaMajor} but the driver runtime is CUDA {cudaMajor} — a mismatch " +
                      $"hangs the engine mid-inference, so the fast paths stay off. Install cuDNN 9 for CUDA {cudaMajor} " +
-                     $"(or set HARTSY_CUDNN_DIR to a matching build).";
+                     $"(or set paths.cudnnDir to a matching build).";
             return;
         }
 
@@ -132,7 +132,7 @@ public static class CudnnRuntime
         return null;   // fall through to the OS default (system install) in the loader
     }
 
-    /// <summary>Best-effort one-time download of the matching cuDNN redist into the cache. Uses <c>HARTSY_CUDNN_URL</c> when set (a direct .tar.xz / .zip), else NVIDIA's public redist for this CUDA major + OS. Extraction shells to the system <c>tar</c>. Returns the cache lib dir on success, else null (the diagnostic then tells the user how to install manually).</summary>
+    /// <summary>Best-effort one-time download of the matching cuDNN redist into the cache. Uses <c>paths.cudnnUrl</c> when set (a direct .tar.xz / .zip), else NVIDIA's public redist for this CUDA major + OS. Extraction shells to the system <c>tar</c>. Returns the cache lib dir on success, else null (the diagnostic then tells the user how to install manually).</summary>
     private static string? TryFetch(int cudaMajor)
     {
         try
@@ -146,7 +146,7 @@ public static class CudnnRuntime
                 if (cudaMajor < 12)
                 {
                     Logs.Warning($"[cuDNN] no public cuDNN 9.21 redist exists for CUDA {cudaMajor} — install " +
-                        "cuDNN 9 manually or point HARTSY_CUDNN_URL/HARTSY_CUDNN_DIR at a compatible build.");
+                        "cuDNN 9 manually or point paths.cudnnUrl/paths.cudnnDir at a compatible build.");
                     return null;
                 }
                 // NVIDIA redist. Version is pinned but overridable; the redist layout is stable per major.
@@ -164,7 +164,7 @@ public static class CudnnRuntime
             string archive = Path.Combine(work, Path.GetFileName(new Uri(url).LocalPath));
 
             Logs.Info($"[cuDNN] not found for CUDA {cudaMajor}; auto-fetching {url} " +
-                $"(one-time, ~1 GB → {libDir}; set HARTSY_CUDNN_AUTOFETCH=0 to disable)...");
+                $"(one-time, ~1 GB → {libDir}; set paths.cudnnAutofetch=false to disable)...");
             using (System.Net.Http.HttpClient http = new() { Timeout = TimeSpan.FromMinutes(30) })
             using (Stream s = http.GetStreamAsync(url).GetAwaiter().GetResult())
             using (FileStream f = File.Create(archive))
@@ -183,7 +183,7 @@ public static class CudnnRuntime
         }
         catch (Exception ex)
         {
-            Logs.Warning($"[cuDNN] auto-fetch failed ({ex.Message}) — install cuDNN 9 for CUDA {cudaMajor} manually or set HARTSY_CUDNN_DIR.");
+            Logs.Warning($"[cuDNN] auto-fetch failed ({ex.Message}) — install cuDNN 9 for CUDA {cudaMajor} manually or set paths.cudnnDir.");
             return null;
         }
     }

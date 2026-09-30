@@ -13,7 +13,7 @@ and stale toolchain tables were removed. Query the actual device/driver and cons
 - Load shipped PTX from disk through CudaModule. Store resolved function handles; no embedded PTX or
   per-launch name lookup. Argument pointers must point to stable local variables on the stack.
 - Stream-ordered allocation/free is asynchronous. Synchronize only where host access/lifetime demands it;
-  an OOM retry must account for pending frees. See [engine rules](../Agents/AGENTS.md).
+  an OOM retry must account for pending frees. See [engine patterns](../Agents/ENGINE_PATTERNS.md).
 - A toolchain that emits newer PTX than the driver supports fails at JIT time. Inspect emitted .version
   and .target rather than equating SDK availability with runtime compatibility.
 - cuBLAS is column-major: validate transpose/leading-dimension conventions against the row-major tensor

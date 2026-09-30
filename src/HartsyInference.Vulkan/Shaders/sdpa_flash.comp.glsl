@@ -1,37 +1,11 @@
-// sdpa_flash: fused online-softmax scaled-dot-product attention. Never materializes the [Sq,Skv] score
-// matrix — the documented root cause of the Wan-video full-resolution OOM on the old 3-pass path (a
-// single self-attention call there needs a ~19 GB score matrix). One workgroup per (batch, head, query
-// row); each of the TILE threads in the workgroup owns one key within the current KV tile, so scoring a
-// tile needs no cross-thread reduction (only tile-level online-softmax combine, done by thread 0 over
-// TILE values). GQA: query head h reads kv head h/(hq/hkv). Supports causal masking, a sliding window,
-// and (HAS_MASK=1 variant) an optional additive [Sq,Skv] mask broadcast across batch/head — the same
-// broadcast convention VulkanBackend's prior 3-pass SDPA used. Does NOT support softcap/sink/ALiBi
-// (Gemma-2/GPT-OSS/MPT-class models) — those fall through to IBackend's CPU reference; a documented
-// "flash-lite" scope boundary, not an oversight (see docs/Checklists/TROUBLESHOOTING.md).
+// sdpa_flash: fused online-softmax scaled-dot-product attention, Br=1. Never materializes the [Sq,Skv] score
+// matrix, which is what made Wan-video full-resolution attention fit.
 //
-// Algorithm per query row (standard tiled online-softmax flash attention, Br=1):
-//   m = -inf, l = 0, acc[d] = 0
-//   for each KV tile:
-//     load K/V tile into shared memory (one thread per key)
-//     score[tid] = dot(Q, K[tid]) * scale (+ mask), or -inf if causal/window-masked
-//     tileMax = max over tile; newMax = max(m, tileMax)
-//     corrOld = exp(m - newMax); p[j] = exp(score[j] - newMax); tileSum = sum(p)
-//     l = l*corrOld + tileSum
-//     acc[d] = acc[d]*corrOld + sum_j(p[j] * V[j][d])   (each thread owns a strided subset of d)
-//     m = newMax
-//   O = acc / l
-//
-// Compile:
-//   glslc sdpa_flash.comp.glsl -o sdpa_flash_f32.spv
-//   glslc -DUSE_FP16=1 sdpa_flash.comp.glsl -o sdpa_flash_f16.spv
-//   glslc -DHAS_MASK=1 sdpa_flash.comp.glsl -o sdpa_flash_mask_f32.spv
-//   glslc -DUSE_FP16=1 -DHAS_MASK=1 sdpa_flash.comp.glsl -o sdpa_flash_mask_f16.spv
-//   glslc -DHAS_DEVICE_POS=1 sdpa_flash.comp.glsl -o sdpa_flash_dev_f32.spv
-//
-// HAS_DEVICE_POS (mutually exclusive with HAS_MASK — FlashAttentionDev's decode-graph signature has no
-// mask parameter): reads skv/qOffset from a device buffer (Pos_[0]=kvLen, Pos_[1]=qOffset, the same
-// layout AllocDevicePos/WriteDevicePos and rope_decode_step/kv_cache_append_dev already use) instead of
-// push constants — a captured/replayed command buffer cannot re-bake a per-step position into its bytes.
+// One workgroup per (batch, head, query row); each of the TILE threads owns one key in the current KV tile, so
+// scoring a tile needs no cross-thread reduction — only the tile-level online-softmax combine, done by thread 0.
+// GQA: query head h reads kv head h/(hq/hkv). Supports causal masking, a sliding window, and (HAS_MASK=1) an
+// additive [Sq,Skv] mask broadcast across batch/head. Softcap, attention sinks and ALiBi are NOT supported and
+// fall through to IBackend's reference — a scope boundary, not an oversight.
 
 #version 460
 

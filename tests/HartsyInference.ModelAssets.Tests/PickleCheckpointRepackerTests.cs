@@ -1,3 +1,4 @@
+using HartsyInference.ModelAssets.Metadata;
 using System.IO.Compression;
 using System.Security.Cryptography;
 using System.Text;
@@ -67,6 +68,62 @@ public sealed class PickleCheckpointRepackerTests
             Assert.Throws<InvalidDataException>(() => PickleCheckpointRepacker.Repack(source, output, _ => null));
             Assert.False(File.Exists(output));
             Assert.False(File.Exists(output + ".tmp"));
+        }
+        finally
+        {
+            Delete(source, output, output + ".tmp");
+        }
+    }
+
+    /// <summary>The conversion sites build their metadata with <see cref="ArtifactMetadata"/> rather than by hand, so
+    /// the two halves of the empty-hash-slot convention have to agree: the builder emits the slot, the repacker fills
+    /// it. A builder that started omitting the key would leave every locally converted file unhashed.</summary>
+    [Fact]
+    public void Repack_FillsTheSlotArtifactMetadataLeaves()
+    {
+        string source = WriteSamplePickle();
+        string output = Path.Combine(Path.GetTempPath(), $"hi_repack_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            ArtifactIdentity identity = ModelIdentityCatalog.All["kokoro"];
+            Dictionary<string, string> metadata = ArtifactMetadata.ForRepack(identity,
+                ArtifactProvenance.FromSourceFile("test", ArtifactProvenance.MainComponent, source));
+            PickleCheckpointRepacker.Repack(source, output, keyMap: null, recursiveFlatten: false, metadata: metadata);
+
+            using SafeTensorsLoader loader = new();
+            loader.Load(output);
+            Assert.NotNull(loader.Metadata);
+            Assert.Equal("kokoro_tts", loader.Metadata!["modelspec.architecture"]);
+            Assert.Equal(ArtifactProvenance.MainComponent, loader.Metadata["hartsy.component"]);
+            Assert.Equal(Path.GetFileName(source), loader.Metadata["hartsy.source_file"]);
+            Assert.StartsWith("0x", loader.Metadata["modelspec.hash_sha256"], StringComparison.Ordinal);
+            Assert.Equal(loader.Metadata["modelspec.hash_sha256"][2..], PayloadSha256(output));
+        }
+        finally
+        {
+            Delete(source, output, output + ".tmp");
+        }
+    }
+
+    /// <summary>A component keeps its provenance but gains no architecture, so converting YuE's x-codec cannot put a
+    /// second selectable "model" in the list beside YuE itself.</summary>
+    [Fact]
+    public void Repack_ComponentIsTraceableButNotClassifiable()
+    {
+        string source = WriteSamplePickle();
+        string output = Path.Combine(Path.GetTempPath(), $"hi_repack_{Guid.NewGuid():N}.safetensors");
+        try
+        {
+            Dictionary<string, string> metadata = ArtifactMetadata.ForRepack(ModelIdentityCatalog.All["yue"],
+                ArtifactProvenance.FromSourceFile("test", "codec", source));
+            PickleCheckpointRepacker.Repack(source, output, keyMap: null, recursiveFlatten: false, metadata: metadata);
+
+            using SafeTensorsLoader loader = new();
+            loader.Load(output);
+            Assert.False(loader.Metadata!.ContainsKey("modelspec.architecture"));
+            Assert.Equal("codec", loader.Metadata["hartsy.component"]);
+            Assert.Equal("yue", loader.Metadata["hartsy.engine_id"]);
+            Assert.False(string.IsNullOrEmpty(loader.Metadata["hartsy.source_sha256"]));
         }
         finally
         {

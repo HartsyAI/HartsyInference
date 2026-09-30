@@ -52,8 +52,13 @@ public static class BackendFactory
     /// so every caller (facade, TextService, recipes) agrees on where kernels live.</summary>
     public static IBackend CreateCuda(int ordinal) => new CudaBackend(ordinal, KernelDir(PtxDirName));
 
-    /// <summary>Constructs a Vulkan backend on <paramref name="ordinal"/> with the resolved SPIR-V directory.</summary>
-    public static IBackend CreateVulkan(int ordinal) => new VulkanBackend(ordinal, KernelDir(SpirvDirName));
+    /// <summary>Constructs a Vulkan backend with the resolved SPIR-V directory; a null <paramref name="ordinal"/> lets
+    /// the engine rank the devices and take the best.</summary>
+    /// <remarks>Null is not a synonym for 0. A raw index pins whatever the loader happens to list first, which on a
+    /// machine that also exposes a software rasterizer (Mesa's lavapipe, standard on Linux CI images) is routinely not
+    /// the GPU; the null path scores devices by type and by the capabilities the kernels need. So a caller who did not
+    /// name a device has to pass null, or a host with its real GPU at index 1 quietly runs on the rasterizer at 0.</remarks>
+    public static IBackend CreateVulkan(int? ordinal = null) => new VulkanBackend(ordinal, KernelDir(SpirvDirName));
 
     /// <summary>Constructs the backend named by <paramref name="selector"/>, mapping <c>auto</c> via <see cref="Resolve"/>
     /// and honoring a <c>cuda:1</c>-style device-ordinal suffix.</summary>
@@ -64,32 +69,73 @@ public static class BackendFactory
         return chosen switch
         {
             "cuda" => CreateCuda(ValidateCudaOrdinal(ordinal, selector)),
-            "vulkan" => CreateVulkan(ordinal),
+            "vulkan" => CreateVulkan(HasExplicitOrdinal(selector) ? ordinal : null),
             "cpu" => new CpuBackend(),
             _ => throw new ArgumentException($"Unknown backend '{selector}'. Valid: {string.Join(", ", ValidSelectors)}."),
         };
     }
 
-    /// <summary>Maps <c>auto</c> to the best available backend (CUDA when a device is present, else CPU) and reduces an
-    /// explicit selector to its bare kind — the <c>:{ordinal}</c> suffix is stripped (see <see cref="ParseOrdinal"/>).</summary>
+    /// <summary>Maps <c>auto</c> to the best available backend and reduces an explicit selector to its bare kind,
+    /// with the <c>:{ordinal}</c> suffix stripped (see <see cref="ParseOrdinal"/>).
+    ///
+    /// <para>Order is CUDA, then Vulkan, then CPU. Vulkan is the path for every GPU CUDA does not serve (AMD, Intel,
+    /// and NVIDIA cards whose CUDA toolkit is absent), so resolving straight to CPU when CUDA is missing sent those
+    /// machines to the slowest backend they own while a working GPU sat idle. CPU stays the answer only when no GPU
+    /// is present at all: a software-rasterizer Vulkan device does not count as one (see
+    /// <see cref="VulkanContext.GetDeviceCount"/>).</para>
+    ///
+    /// <para>An ordinal on <c>auto</c> is read by whichever backend wins, and the two APIs enumerate independently:
+    /// <c>auto:2</c> means CUDA device 2 on a machine that resolves to CUDA and Vulkan device 2 on one that resolves
+    /// to Vulkan, which need not be the same card, or exist. The ambiguity predates the Vulkan step (an ordinal has
+    /// always been written before the backend was known) but only became reachable through <c>auto</c> with it, so a
+    /// caller that cares which physical device it gets should name the backend rather than leave it to
+    /// <c>auto</c>.</para>
+    ///
+    /// <para>With no ordinal written at all, nothing is pinned and each API picks for itself: CUDA's ordinal 0 is its
+    /// own fastest-first choice, and Vulkan ranks the devices (see <see cref="CreateVulkan"/>) rather than taking raw
+    /// index 0. That difference matters on exactly the machines this fallthrough was added for, where the loader lists
+    /// a software rasterizer alongside the real card.</para></summary>
     public static string Resolve(string selector)
     {
         string s = Kind(selector);
         if (s != "auto")
             return s;
-        return CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0 ? "cuda" : "cpu";
+        if (CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0)
+        {
+            return "cuda";
+        }
+        return VulkanContext.IsAvailable() ? "vulkan" : "cpu";
     }
 
-    /// <summary>Why <see cref="Resolve"/> last fell back to CPU instead of CUDA; <c>null</c> when CUDA was usable.
+    /// <summary>Why <see cref="Resolve"/> last passed over CUDA; <c>null</c> when CUDA was usable.
     /// Only meaningful after a Resolve/IsAvailable call.</summary>
     public static string? CudaUnavailableReason => CudaContext.LastUnavailableReason;
 
-    private static readonly object _probeLock = new();
-    private static bool? _probeResult;
+    /// <summary>Why <see cref="Resolve"/> last passed over Vulkan; <c>null</c> when a Vulkan GPU was found.
+    /// Only meaningful after a Resolve/IsAvailable call.</summary>
+    public static string? VulkanUnavailableReason => VulkanContext.LastUnavailableReason;
+
+    // One lock per API, not one shared: the two probes touch independent hardware and cache independent answers,
+    // so a slow or wedged CUDA probe has no business blocking a caller asking about Vulkan.
+    // Cached per device rather than once overall, because the answer is per device: one box can hold a card that
+    // computes and a card that does not, and a single bool hands the first caller's verdict to every later one.
+    private static readonly object _cudaProbeLock = new();
+    private static readonly Dictionary<int, (bool Ok, string? Reason)> _cudaProbes = [];
     private static string? _probeReason;
+    private static readonly object _vulkanProbeLock = new();
+    private static readonly Dictionary<int, (bool Ok, string? Reason)> _vulkanProbes = [];
+    private static string? _vulkanProbeReason;
+
+    /// <summary>Probe-cache key for "no device named, let the engine rank them", which is a different request from raw
+    /// index 0 and must not share its cached answer. A sentinel rather than a nullable key because <see cref="Dictionary{TKey, TValue}"/>
+    /// rejects a null key even when TKey is a nullable value type; ordinals are non-negative, so this cannot collide.</summary>
+    private const int UnspecifiedDevice = -1;
 
     /// <summary>Why <see cref="ProbeCuda"/> last failed; <c>null</c> when it passed or has not run.</summary>
     public static string? CudaProbeFailureReason => _probeReason;
+
+    /// <summary>Why <see cref="ProbeVulkan"/> last failed; <c>null</c> when it passed or has not run.</summary>
+    public static string? VulkanProbeFailureReason => _vulkanProbeReason;
 
     /// <summary>Actually runs something on the GPU and checks the answer, rather than asking whether one exists.
     ///
@@ -110,14 +156,16 @@ public static class BackendFactory
     /// <returns>True when a real matmul ran on the GPU and agreed with the CPU.</returns>
     public static bool ProbeCuda(int ordinal = 0)
     {
-        lock (_probeLock)
+        lock (_cudaProbeLock)
         {
-            if (_probeResult is bool cached)
+            if (!_cudaProbes.TryGetValue(ordinal, out (bool Ok, string? Reason) cached))
             {
-                return cached;
+                bool ok = RunCudaProbe(ordinal, out string? reason);
+                cached = (ok, reason);
+                _cudaProbes[ordinal] = cached;
             }
-            _probeResult = RunCudaProbe(ordinal, out _probeReason);
-            return _probeResult.Value;
+            _probeReason = cached.Reason;
+            return cached.Ok;
         }
     }
 
@@ -128,6 +176,22 @@ public static class BackendFactory
             reason = CudaContext.LastUnavailableReason ?? "CUDA is not available.";
             return false;
         }
+        return RunMatMulProbe(() => CreateCuda(ordinal), out reason);
+    }
+
+    private static bool RunVulkanProbe(int? ordinal, out string? reason)
+    {
+        if (!VulkanContext.IsAvailable())
+        {
+            reason = VulkanContext.LastUnavailableReason ?? "Vulkan is not available.";
+            return false;
+        }
+        return RunMatMulProbe(() => CreateVulkan(ordinal), out reason);
+    }
+
+    /// <summary>Builds a backend, multiplies two small matrices on it and checks the answer against the CPU's.</summary>
+    private static bool RunMatMulProbe(Func<IBackend> create, out string? reason)
+    {
         // Small enough to cost nothing, large enough that a broken kernel cannot accidentally agree: 32x32x32
         // is 32768 multiply-adds against values that are not all the same.
         const int n = 32;
@@ -135,7 +199,7 @@ public static class BackendFactory
         Tensor b = new(new TensorShape(n, n), DType.F32);
         Tensor gpu = new(new TensorShape(n, n), DType.F32);
         Tensor cpu = new(new TensorShape(n, n), DType.F32);
-        IBackend? cuda = null;
+        IBackend? device = null;
         try
         {
             unsafe
@@ -152,9 +216,9 @@ public static class BackendFactory
             {
                 reference.MatMul(cpu, a, b);
             }
-            cuda = CreateCuda(ordinal);
-            cuda.MatMul(gpu, a, b);
-            cuda.Sync();
+            device = create();
+            device.MatMul(gpu, a, b);
+            device.Sync();
 
             float worst = 0f;
             unsafe
@@ -167,7 +231,8 @@ public static class BackendFactory
                 }
             }
             // Loose: cuBLAS accumulates in a different order and may use tensor cores. A real failure here is
-            // not a last-place difference, it is a zeroed or garbage buffer.
+            // not a last-place difference, it is a zeroed or garbage buffer. Vulkan's own F32 matmul tests hold
+            // themselves to 1e-4, so this threshold constrains neither backend's honest rounding.
             if (worst > 1e-2f)
             {
                 reason = $"the GPU computed a 32x32 matmul that differs from the CPU by {worst:E2} — kernels are "
@@ -184,7 +249,7 @@ public static class BackendFactory
         }
         finally
         {
-            cuda?.Dispose();
+            device?.Dispose();
             a.Dispose();
             b.Dispose();
             gpu.Dispose();
@@ -192,11 +257,45 @@ public static class BackendFactory
         }
     }
 
-    /// <summary>Like <see cref="Resolve"/>, but <c>auto</c> only picks CUDA if <see cref="ProbeCuda"/> passes.
+    /// <summary>The Vulkan twin of <see cref="ProbeCuda"/>: builds a Vulkan backend and checks that it computes,
+    /// rather than asking whether the loader can see a device.
     ///
-    /// <para>For a host deciding once at startup what device to build its engine on. Costs the probe the first
+    /// <para>Worth as much here as it is on CUDA, for different reasons. A Vulkan device can enumerate and then
+    /// fail to meet the engine's own requirements (FP16, the subgroup ops the kernels are written against, a
+    /// compute queue), which surfaces as a throw from device creation rather than a missing device. And the SPIR-V
+    /// directory can be absent exactly as the PTX one can.</para></summary>
+    /// <param name="ordinal">Device to probe; null probes whichever device <see cref="CreateVulkan"/> would rank best.</param>
+    /// <returns>True when a real matmul ran on the GPU and agreed with the CPU.</returns>
+    /// <remarks>Pass what will actually be built. Probing raw index 0 and then running on the ranked-best device
+    /// tests the wrong card, and on a box whose index 0 is a software rasterizer it is the one test that passes
+    /// regardless of whether the real GPU works.</remarks>
+    public static bool ProbeVulkan(int? ordinal = null)
+    {
+        lock (_vulkanProbeLock)
+        {
+            int key = ordinal ?? UnspecifiedDevice;
+            if (!_vulkanProbes.TryGetValue(key, out (bool Ok, string? Reason) cached))
+            {
+                bool ok = RunVulkanProbe(ordinal, out string? reason);
+                cached = (ok, reason);
+                _vulkanProbes[key] = cached;
+            }
+            _vulkanProbeReason = cached.Reason;
+            return cached.Ok;
+        }
+    }
+
+    /// <summary>Like <see cref="Resolve"/>, but each GPU candidate has to prove it computes before it is picked:
+    /// CUDA if <see cref="ProbeCuda"/> passes, else Vulkan if <see cref="ProbeVulkan"/> passes, else CPU.
+    ///
+    /// <para>For a host deciding once at startup what device to build its engine on. Costs the probes the first
     /// time and nothing after; the payoff is that a machine which would have failed on its first request fails
-    /// here instead, with a reason, and runs on the CPU rather than not at all.</para></summary>
+    /// here instead, with a reason, and runs on the CPU rather than not at all.</para>
+    ///
+    /// <para>The Vulkan step is what makes this more than a stricter CUDA check. A machine whose CUDA install is
+    /// broken rather than absent (driver present, toolkit skewed, kernels built for another architecture) has
+    /// its GPU rejected here, and on most such machines that same card answers on Vulkan. Falling to CPU without
+    /// asking would leave it idle.</para></summary>
     public static string ResolveProbed(string selector)
     {
         string s = Kind(selector);
@@ -204,8 +303,21 @@ public static class BackendFactory
         {
             return s;
         }
-        return ProbeCuda(ParseOrdinal(selector)) ? "cuda" : "cpu";
+        int ordinal = ParseOrdinal(selector);
+        if (ProbeCuda(ordinal))
+        {
+            return "cuda";
+        }
+        // Null rather than the parsed 0 when the caller named no device, so the probe builds the device Create will.
+        return ProbeVulkan(HasExplicitOrdinal(selector) ? ordinal : null) ? "vulkan" : "cpu";
     }
+
+    /// <summary>Whether <paramref name="selector"/> names a device outright (<c>vulkan:1</c>) instead of leaving the
+    /// choice to the engine (<c>vulkan</c>, <c>auto</c>).</summary>
+    /// <remarks>Not the same question as <c>ParseOrdinal(selector) == 0</c>, which cannot tell <c>vulkan:0</c> from
+    /// <c>vulkan</c>. Vulkan honors the distinction: the first pins the loader's raw index 0, the second ranks the
+    /// devices (see <see cref="CreateVulkan"/>).</remarks>
+    public static bool HasExplicitOrdinal(string? selector) => (selector ?? "").Trim().Contains(':');
 
     /// <summary>The bare backend kind of <paramref name="selector"/> with any <c>:{ordinal}</c> suffix removed; <c>auto</c> stays <c>auto</c>.</summary>
     public static string Kind(string? selector)
@@ -318,7 +430,12 @@ public static class BackendFactory
     ///
     /// <para>A layer-split composite (<c>cuda:0+cuda:1</c>) and anything <see cref="IsValidSelector"/> rejects come
     /// back unchanged: the first is a list of selectors rather than one, and the second has no concrete device to
-    /// name. Both are the caller's to handle.</para></remarks>
+    /// name. Both are the caller's to handle.</para>
+    ///
+    /// <para>This keys the REQUEST, not the hardware. It reports <c>vulkan:0</c> for a bare <c>vulkan</c> because that
+    /// is what the string says, while the backend built from it runs on whichever device ranked best. A caller asking
+    /// "are these two engines on one physical GPU" wants <see cref="IBackend.DeviceKey"/> from the built backend
+    /// instead; this answers only "did these two callers ask for the same thing".</para></remarks>
     public static string CanonicalDeviceKey(string? selector)
     {
         string key = (selector ?? "").Trim().ToLowerInvariant();
@@ -339,10 +456,14 @@ public static class BackendFactory
     /// <summary>Throws when <paramref name="selector"/> cannot resolve to a constructible backend on this machine,
     /// without constructing one — syntax plus a driver device-count query only. Lets a host surface a bad
     /// configuration (missing driver, out-of-range GPU id) at startup instead of on the first generation.</summary>
-    /// <remarks>Stricter than <see cref="Create"/>'s lazy path in one way: an explicit <c>cuda</c>/<c>cuda:0</c>
-    /// selector fails here when no CUDA device exists at all, instead of deferring to a driver error mid-generation.
-    /// Vulkan has no cheap availability probe, so only its syntax is checked. <c>auto</c> always validates — it
-    /// falls back to CPU by design.</remarks>
+    /// <remarks>Stricter than <see cref="Create"/>'s lazy path in one way: an explicit <c>cuda</c>/<c>cuda:0</c> or
+    /// <c>vulkan</c> selector fails here when that API has no device at all, instead of deferring to a driver error
+    /// mid-generation. <c>auto</c> always validates, since it falls back to CPU by design.
+    ///
+    /// <para>Only Vulkan's device presence is checked, not its ordinal: <see cref="VulkanContext.GetDeviceCount"/>
+    /// counts GPUs, while a <c>vulkan:{n}</c> ordinal indexes the loader's raw device list, software rasterizers
+    /// included. Bounding one by the other would reject valid ordinals. The raw list's own bound is enforced where
+    /// it is known, at device creation.</para></remarks>
     public static void Validate(string selector)
     {
         if (!IsValidSelector(selector))
@@ -353,6 +474,17 @@ public static class BackendFactory
             }
             throw new ArgumentException(
                 $"Unknown backend '{selector}'. Valid: {string.Join(", ", ValidSelectors)}.", nameof(selector));
+        }
+        if (Kind(selector) == "vulkan")
+        {
+            if (!VulkanContext.IsAvailable())
+            {
+                throw new ArgumentException(
+                    $"Backend selector '{selector}' requires Vulkan, but no Vulkan GPU is available on this machine: "
+                    + $"{VulkanContext.LastUnavailableReason ?? "no reason reported"}",
+                    nameof(selector));
+            }
+            return;
         }
         if (Kind(selector) != "cuda")
         {

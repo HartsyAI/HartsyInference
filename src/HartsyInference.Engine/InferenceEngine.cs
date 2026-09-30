@@ -10,6 +10,7 @@ using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.Engine.Variants;
 using HartsyInference.ModelAssets.Registry;
 
 namespace HartsyInference.Engine;
@@ -70,6 +71,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     private readonly Lazy<ImagesService> _images;
     private readonly Lazy<VideoService> _video;
+    private readonly Lazy<MemoryEstimationService> _memoryEstimation;
     private readonly Lazy<TextService> _text;
     private readonly Lazy<MusicService> _music;
     private readonly Lazy<SpeechService> _speech;
@@ -93,6 +95,7 @@ public sealed class InferenceEngine : IInferenceEngine
         PlacementPlanner.ValidatePlacement(_placement);
         _images = new Lazy<ImagesService>(() => new ImagesService(this));
         _video = new Lazy<VideoService>(() => new VideoService(this));
+        _memoryEstimation = new Lazy<MemoryEstimationService>(() => new MemoryEstimationService(this));
         _text = new Lazy<TextService>(() => new TextService(this));
         _music = new Lazy<MusicService>(() => new MusicService(this));
         _speech = new Lazy<SpeechService>(() => new SpeechService(this));
@@ -118,8 +121,17 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <inheritdoc/>
     public string BackendSelector => _backendSelector;
 
-    /// <summary>The device ordinal this engine's backend will be (or was) constructed on; 0 unless the selector carries a suffix.</summary>
+    /// <summary>The device ordinal this engine's selector ASKED for; 0 unless the selector carries a suffix.</summary>
+    /// <remarks>A property of the string, not of the hardware, and it does not query anything. When no ordinal was
+    /// written the backend picks its own device and this still reads 0, which on Vulkan need not be the device in use.
+    /// <see cref="DeviceKey"/> is the one to key or log.</remarks>
     public int DeviceOrdinal => BackendFactory.ParseOrdinal(_backendSelector);
+
+    /// <summary>Identity of the physical device this engine is actually running on, for logging and for telling two
+    /// engines that share a GPU apart from two engines on separate GPUs.</summary>
+    /// <remarks>Forces the backend to exist, since nothing can honestly answer this before a device is chosen. Read it
+    /// at startup, where paying for construction is the point, rather than on a request path.</remarks>
+    public string DeviceKey => EnsureBackend().DeviceKey;
 
     /// <inheritdoc/>
     public string BackendDescription => BackendFactory.Describe(_backendSelector);
@@ -139,6 +151,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IVideoPlanningService VideoPlanning => _video.Value;
+
+    /// <inheritdoc/>
+    public IMemoryEstimationService MemoryEstimation => _memoryEstimation.Value;
 
     /// <inheritdoc/>
     public ITextService Text => _text.Value;
@@ -227,22 +242,19 @@ public sealed class InferenceEngine : IInferenceEngine
             throw NoCheckpoint(spec);
         }
 
-        // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity.
-        string key = $"recipe:{spec.LocalPath}|{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        ResolvedModelVariant? variant = ModelCapabilities.ResolveVariant(recipe.Variants, spec);
+        // LoRA, component overrides and the variant are baked into the loaded pipeline, so they are cache identity.
+        string key = $"recipe:{spec.LocalPath}|{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
         if (_recipePipelines.TryGetValue(key, out IRecipePipeline? cached))
             return cached;
 
-        // Switch-pressure eviction: pipelines for OTHER checkpoints keep their multi-GB weights resident
-        // (HARTSY_KEEP_MODELS) and cannot share the card with the incoming model at fleet sizes — a
-        // Krea2(13 GB)→Z-Image switch measured 74 MB free on 24 GB before this existed
-        // (benchmarks/results/2026-07-23_swarm_stepcache_verification.md §engine bugs).
-        EvictOtherCheckpointPipelines(spec.LocalPath, alsoKeepPath);
-
-        IArchitectureRecipe recipe = ResolveRecipe(spec);
         IBackend backend = EnsureBackend();
         RecipeContext context = new RecipeContext
         {
             CheckpointPath = spec.LocalPath,
+            Variant = variant,
+            VariantHints = ModelCapabilities.HintsFor(spec),
             Backend = backend,
             TextEncoderBackend = _placement.TextEncoderDevice is null ? null : EnsureBackend(_placement.TextEncoderDevice),
             VaeBackend = _placement.VaeDevice is null ? null : EnsureBackend(_placement.VaeDevice),
@@ -258,7 +270,12 @@ public sealed class InferenceEngine : IInferenceEngine
         // Reported BEFORE construction, so a request that then runs out of VRAM has already said which of the
         // operator's memory settings this family was never going to act on.
         MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
-        IRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () => recipe.Construct(context));
+        IRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () =>
+        {
+            // Other checkpoints' resident weights (vram.keepModels) can't share the card; evict under the device gate.
+            EvictOtherCheckpointPipelines(spec.LocalPath, alsoKeepPath);
+            return recipe.Construct(context);
+        });
         _recipePipelines[key] = pipeline;
         return pipeline;
     }
@@ -269,7 +286,7 @@ public sealed class InferenceEngine : IInferenceEngine
     /// on the success path. An <see cref="OutOfVramException"/> partway through therefore leaves every earlier phase
     /// resident with nothing running — the measured symptom was ~11.5 GB held after a failed request, which then made a
     /// *separate* ComfyUI process on the same card fail too. Scoped deliberately to capacity failures: a cancellation or
-    /// a validation error must not evict a healthy resident model (HARTSY_KEEP_MODELS) and pay a re-upload for nothing.
+    /// a validation error must not evict a healthy resident model (vram.keepModels) and pay a re-upload for nothing.
     /// The reclaim is best-effort — an exception inside it must never replace the real one the caller needs to see.</remarks>
     internal T GenerateWithVramCleanup<T>(Func<T> generate)
     {
@@ -359,18 +376,15 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>The composition features the recipe for <paramref name="spec"/> declares it can apply. Resolved through
     /// the same family-id + registry lookup <see cref="GetOrConstructRecipe"/> uses, so the answer can never disagree
     /// with the pipeline that will actually run.</summary>
-    internal ImageFeatures SupportedFeatures(ModelSpec spec)
+    internal ImageFeatures SupportedFeatures(ModelSpec spec) => ModelCapabilities.ImageFeaturesFor(ResolveRecipe(spec), spec);
+
+    /// <summary>The input-image limits of the recipe for <paramref name="spec"/>.</summary>
+    /// <remarks>Resolved through the same lookup as <see cref="SupportedFeatures"/>.</remarks>
+    internal ImageInputLimits ImageInputLimitsFor(ModelSpec spec)
     {
         IArchitectureRecipe recipe = ResolveRecipe(spec);
-        return recipe.Supports
-            | (AppliesWeighting(recipe.PromptWeighting) ? ImageFeatures.PromptWeighting : ImageFeatures.None);
+        return recipe.InputLimitsFor(ModelCapabilities.ResolveVariant(recipe.Variants, spec));
     }
-
-    /// <summary>Whether a declared mode means the emphasis grammar must survive prompt flattening. The feature bit is
-    /// derived from the mode here rather than declared per recipe so the two can never disagree — a recipe that set the
-    /// bit without a mode would keep the parens and hand its encoder the digits as prose.</summary>
-    private static bool AppliesWeighting(Diffusion.Prompting.PromptWeightingMode mode) =>
-        mode != Diffusion.Prompting.PromptWeightingMode.None;
 
     /// <summary>The weighting mechanism the recipe for <paramref name="spec"/> applies, resolved through the same
     /// registry lookup the construction path uses.</summary>
@@ -379,7 +393,7 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The video counterpart of <see cref="PromptWeightingFor"/>; an unregistered family weights nothing.</summary>
     internal static Diffusion.Prompting.PromptWeightingMode VideoPromptWeightingFor(ModelSpec spec) =>
-        VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec))?.PromptWeighting
+        VideoRecipeRegistry.Resolve(ModelCapabilities.VideoFamilyIdFor(spec))?.PromptWeighting
         ?? Diffusion.Prompting.PromptWeightingMode.None;
 
     /// <summary>The officially recommended defaults for <paramref name="spec"/>: the constructed pipeline's
@@ -389,60 +403,8 @@ public sealed class InferenceEngine : IInferenceEngine
     internal ImageDefaults DefaultsFor(ModelSpec spec, IRecipePipeline pipeline)
     {
         ArgumentNullException.ThrowIfNull(pipeline);
-        return pipeline.VariantDefaults ?? ResolveRecipe(spec).Defaults;
-    }
-
-    /// <summary>The officially recommended video defaults for <paramref name="spec"/>, resolved through the same
-    /// family-id + registry lookup <see cref="GetOrConstructVideoRecipe"/> uses.</summary>
-    internal static VideoDefaults VideoDefaultsFor(ModelSpec spec)
-    {
-        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
-        return recipe switch
-        {
-            null => VideoDefaults.Standard,
-            // Checkpoint-aware for the same reason SupportsFor is — see WanVideoRecipe.DefaultsFor.
-            Recipes.Video.WanVideoRecipe wan => wan.DefaultsFor(spec.LocalPath),
-            _ => recipe.Defaults,
-        };
-    }
-
-    /// <summary>Video-path family id: <see cref="ResolveFamilyId"/> plus checkpoint-aware remaps (currently only
-    /// LTX-2.5 distilled-by-filename). Video-only — image recipes carry no per-checkpoint contracts by name.</summary>
-    internal static string ResolveVideoFamilyId(ModelSpec spec)
-        => Recipes.Video.LtxVideo2DistilledRouting.RemapFamilyId(ResolveFamilyId(spec), spec.LocalPath);
-
-    /// <summary>The conditioning the video recipe for <paramref name="spec"/> declares it can apply. Resolved through
-    /// the same registry lookup the construction path uses, so it cannot disagree with the pipeline that will run.
-    /// Wan is checkpoint-aware: its conditioning variants share the family's compat classes and are detected by
-    /// header sniff, exactly like the construction-time delegation.</summary>
-    internal static VideoFeatures SupportedVideoFeatures(ModelSpec spec)
-    {
-        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
-        VideoFeatures declared = recipe switch
-        {
-            null => VideoFeatures.None,
-            Recipes.Video.WanVideoRecipe wan => wan.SupportsFor(spec.LocalPath),
-            Recipes.Video.LtxVideoRecipe ltx => ltx.SupportsFor(spec.LocalPath),
-            _ => recipe.Supports,
-        };
-        return recipe is not null && AppliesWeighting(recipe.PromptWeighting)
-            ? declared | VideoFeatures.PromptWeighting
-            : declared;
-    }
-
-    /// <summary>The sampler/schedule selection the video recipe for <paramref name="spec"/> accepts. Resolved through
-    /// the same registry lookup the construction path uses. Wan is checkpoint-aware for the same reason
-    /// <see cref="SupportedVideoFeatures"/> is: Animate and Animate-2 share the family's compat classes and are only
-    /// detected by header sniff, so a query keyed on the compat class id alone would under-report.</summary>
-    internal static SamplingCapabilities.SamplingSupport SamplingSupportForVideo(ModelSpec spec)
-    {
-        IVideoRecipe? recipe = VideoRecipeRegistry.Resolve(ResolveVideoFamilyId(spec));
-        return recipe switch
-        {
-            null => SamplingCapabilities.Unknown,
-            Recipes.Video.WanVideoRecipe wan => wan.SamplingSupportFor(spec.LocalPath),
-            _ => SamplingCapabilities.ForVideo(ResolveVideoFamilyId(spec)),
-        };
+        IArchitectureRecipe recipe = ResolveRecipe(spec);
+        return pipeline.VariantDefaults ?? recipe.DefaultsFor(ModelCapabilities.ResolveVariant(recipe.Variants, spec));
     }
 
     /// <summary>The family id (catalog slug) that <paramref name="spec"/> resolves to, for diagnostics.</summary>
@@ -470,19 +432,16 @@ public sealed class InferenceEngine : IInferenceEngine
 
         // LoRA and component overrides are baked into the loaded weights, so they are part of the cache identity —
         // the same rule the image path already follows. Without this a LoRA request reuses the un-merged pipeline.
-        string planKey = plan is null ? "" : plan.CacheIdentity;
-        string key = $"video-recipe:{spec.LocalPath}|{planKey}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
-        if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
-            return cached;
-
-        // Same switch-pressure eviction as the image path — video DiTs are the largest residents of all.
-        EvictOtherCheckpointPipelines(spec.LocalPath);
-
-        string familyId = ResolveVideoFamilyId(spec);
-        IVideoRecipe recipe = VideoRecipeRegistry.Resolve(familyId)
+        string familyId = ModelCapabilities.VideoFamilyIdFor(spec);
+        (IVideoRecipe? resolvedRecipe, ResolvedModelVariant? variant) = ModelCapabilities.ResolveVideo(spec);
+        IVideoRecipe recipe = resolvedRecipe
             ?? throw new NotSupportedException(
                 $"Video family '{familyId}' has no recipe lifted into the Engine yet (E-IMG-3). " +
                 $"Currently drivable: {string.Join(", ", VideoRecipeRegistry.RegisteredNames)}.");
+        string planKey = plan is null ? "" : plan.CacheIdentity;
+        string key = $"video-recipe:{spec.LocalPath}|{planKey}{variant?.CacheToken}{RecipeCacheKey.Describe(request)}{_placement.CacheKey()}";
+        if (_videoRecipePipelines.TryGetValue(key, out IVideoRecipePipeline? cached))
+            return cached;
 
         IBackend backend = EnsureBackend();
         RecipeContext context = new RecipeContext
@@ -497,13 +456,19 @@ public sealed class InferenceEngine : IInferenceEngine
             CpBackends = EnsureCpBackends(),
             Components = request?.Components,
             Loras = request?.Loras,
+            Variant = variant,
+            VariantHints = ModelCapabilities.HintsFor(spec),
             VideoPlan = plan,
             VideoSwapModelPath = string.IsNullOrWhiteSpace(request?.VideoSwapModel) ? null : request!.VideoSwapModel,
             VideoSwapPercent = request?.VideoSwapPercent,
             VramPolicy = VramPolicyRegistry.Resolve(backend, request?.Vram),
         };
         MemorySupportReport.Report(recipe.Name, context, recipe.MemorySupports);
-        IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () => recipe.Construct(context));
+        IVideoRecipePipeline pipeline = ConstructWithVramCleanup(backend, spec, () =>
+        {
+            EvictOtherCheckpointPipelines(spec.LocalPath);
+            return recipe.Construct(context);
+        });
         _videoRecipePipelines[key] = pipeline;
         return pipeline;
     }
@@ -516,14 +481,15 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <summary>The family id (catalog slug) for <paramref name="spec"/>: the catalog id when present, else a slug
     /// mapped from the coarse tensor-signature architecture the Engine can detect from a raw checkpoint.</summary>
-    private static string ResolveFamilyId(ModelSpec spec)
+    internal static string ResolveFamilyId(ModelSpec spec)
     {
         if (spec.Catalog is not null)
             return spec.Catalog.Id;
         // A registered recipe name is a valid answer even with no catalog entry behind it. The video error text
         // lists those names as "currently drivable", and several (the Wan compat classes) exist only there — so
         // without this, -m wan-22-5b was advertised, accepted, and then reported as family 'unknown'.
-        string requested = (spec.Requested ?? "").Trim();
+        // A family:variant selector names its family by the part before the colon; the variant is resolved separately.
+        string requested = ModelSelector.Parse(spec.Requested).Id;
         if (requested.Length > 0
             && (VideoRecipeRegistry.Resolve(requested) is not null || RecipeRegistry.Resolve(requested) is not null))
         {
@@ -764,14 +730,16 @@ public sealed class InferenceEngine : IInferenceEngine
             return;
         }
 
+        // A victim that throws is still dropped: left cached half-disposed, every later switch would pick it again.
+        List<Exception>? failures = null;
         foreach (string victim in imageVictims)
         {
-            _recipePipelines[victim].Dispose();
+            ReleaseLogged($"pipeline '{victim}'", _recipePipelines[victim].Dispose, ref failures);
             _recipePipelines.Remove(victim);
         }
         foreach (string victim in videoVictims)
         {
-            _videoRecipePipelines[victim].Dispose();
+            ReleaseLogged($"pipeline '{victim}'", _videoRecipePipelines[victim].Dispose, ref failures);
             _videoRecipePipelines.Remove(victim);
         }
         // Disposal only drops the PIPELINE's references — the backend's device weight cache still holds the
@@ -834,54 +802,48 @@ public sealed class InferenceEngine : IInferenceEngine
     /// is the "free memory" a host asks for between jobs.</summary>
     private void ReleaseLoaded(bool disposeBackend)
     {
-        foreach (IRecipePipeline pipeline in _recipePipelines.Values)
-            pipeline.Dispose();
+        // Every step runs even when an earlier one throws: a failed dispose must not strand the device memory, the
+        // services or the backend behind it.
+        List<Exception>? failures = null;
+        foreach (KeyValuePair<string, IRecipePipeline> entry in _recipePipelines)
+            ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
         _recipePipelines.Clear();
-        foreach (IVideoRecipePipeline pipeline in _videoRecipePipelines.Values)
-            pipeline.Dispose();
+        foreach (KeyValuePair<string, IVideoRecipePipeline> entry in _videoRecipePipelines)
+            ReleaseLogged($"pipeline '{entry.Key}'", entry.Value.Dispose, ref failures);
         _videoRecipePipelines.Clear();
         // IsValueCreated throughout, so releasing memory never forces a service (and its caches) into existence.
         if (_vision.IsValueCreated)
-        {
-            _vision.Value.Dispose();
-        }
+            ReleaseLogged("the vision service", _vision.Value.Dispose, ref failures);
         // RestoreService caches the SeedVR2 pipeline + mmap-backed weight loaders bound to the backend.
         if (_restore.IsValueCreated)
-        {
-            _restore.Value.ReleasePipeline();
-        }
+            ReleaseLogged("the restore pipeline", _restore.Value.ReleasePipeline, ref failures);
         if (_mesh.IsValueCreated)
-        {
-            _mesh.Value.Dispose();
-        }
+            ReleaseLogged("the mesh service", _mesh.Value.Dispose, ref failures);
         if (_world.IsValueCreated)
-        {
-            _world.Value.Dispose();
-        }
+            ReleaseLogged("the world service", _world.Value.Dispose, ref failures);
         // TextService owns its own per-device backends and multi-GB dequantized host buffers, so it must be released
         // explicitly — nothing else here reaches its slots.
         if (_text.IsValueCreated)
-        {
-            _text.Value.Dispose();
-        }
+            ReleaseLogged("the text service", _text.Value.Dispose, ref failures);
         // EmbeddingService's cached DecoderEmbeddingModels hold device-resident weights bound to the backend
         // being torn down/switched — same reasoning as TextService above.
         if (_embeddings.IsValueCreated)
-        {
-            _embeddings.Value.Dispose();
-        }
+            ReleaseLogged("the embedding service", _embeddings.Value.Dispose, ref failures);
         // Audio pipelines are cached per-engine by the audio runtime; drop THIS engine's so none outlives the backend
         // it was constructed against. Other engines' resident audio models are untouched.
-        _audioRuntime?.UnloadAll(AudioUnloadWaitSeconds);
+        if (_audioRuntime is not null)
+            ReleaseLogged("the audio models", () => _audioRuntime.UnloadAll(AudioUnloadWaitSeconds), ref failures);
         if (disposeBackend)
         {
             foreach (IBackend extra in _placementBackends.Values)
-            {
-                extra.Dispose();
-            }
+                ReleaseLogged("a placement backend", extra.Dispose, ref failures);
             _placementBackends.Clear();
-            _backend?.Dispose();
+            if (_backend is not null)
+                ReleaseLogged("the backend", _backend.Dispose, ref failures);
             _backend = null;
+            // Teardown callers must know something leaked; a between-jobs free has already logged each failure.
+            if (failures is not null)
+                throw new AggregateException("The engine released everything it could, but some items failed to dispose.", failures);
             return;
         }
         // Disposal only drops host references; the promoted GPU copies are freed on the finalizer queue, so force it
@@ -911,6 +873,20 @@ public sealed class InferenceEngine : IInferenceEngine
             }
         }
         HostMemory.TrimAndLog("free-memory sweep");
+    }
+
+    /// <summary>Runs one release step of a sweep, logging and collecting its failure instead of letting it abort the rest.</summary>
+    private static void ReleaseLogged(string what, Action release, ref List<Exception>? failures)
+    {
+        try
+        {
+            release();
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[Engine] Releasing {what} failed; continuing with the rest.", ex);
+            (failures ??= new List<Exception>()).Add(ex);
+        }
     }
 
     /// <inheritdoc/>

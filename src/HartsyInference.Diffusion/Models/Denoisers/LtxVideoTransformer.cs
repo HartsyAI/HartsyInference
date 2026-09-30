@@ -25,7 +25,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     private Tensor? _cachedCos, _cachedSin;
     private (int F, int H, int W, double T, double IH, double IW) _cosKey = (-1, -1, -1, 0, 0, 0);
 
-    // ── Step-graph state (HARTSY_DIT_GRAPH; see ForwardPaired) ──────────────────────────────────────────
+    // ── Step-graph state (numerics.ditGraph; see ForwardPaired) ──────────────────────────────────────────
     // The captured body (proj_in → 28 blocks → final norm → proj_out, for the cond and uncond passes) reads ONLY
     // fixed device buffers and writes the velocity buffers. Everything per-step-varying is refreshed into a fixed
     // buffer OUTSIDE the capture: the latent (in-place device CfgEulerStep by the pipeline + PrepareGraphLatent),
@@ -38,7 +38,8 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     private long _graphSig = long.MinValue;   // grid ⊕ interp ⊕ cond/uncond encoder identity the capture is valid for
     private int _graphSigCalls;               // calls at the current sig (capture on the 3rd — caches/promotions warm)
     private int _graphSigFlips;               // sig alternation counter (safety: disable if it never converges)
-    private bool _graphDead;                  // permanent per-session fallback to eager
+    private bool _graphDead;                  // eager for the rest of the session
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     public LtxVideoTransformer(LtxVideoConfig config)
@@ -185,7 +186,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
     }
 
     /// <summary>One denoise step for the CFG pair (cond + optional uncond), sharing the RoPE tables and — with the
-    /// step graph active (<see cref="DiTBlocks.DitStepGraph"/>, opt-in via <c>HARTSY_DIT_GRAPH=1</c> and the latent
+    /// step graph active (<see cref="DiTBlocks.DitStepGraph"/>, opt-in via <c>numerics.ditGraph=true</c> and the latent
     /// routed through <see cref="PrepareGraphLatent"/>) — capturing the ENTIRE pair once per generation and replaying
     /// it with a single <c>cuGraphLaunch</c> per step, erasing the host-issue tail over LTX's ~50k ops/gen. The only
     /// per-step-varying content (timestep temb6/shift/scale) enters through fixed buffers refreshed OUTSIDE the
@@ -278,7 +279,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             Logs.Warning($"[LTX graph] capture invalidated — falling back to eager: {ex.Message}");
             RunPairIntoFixed(backend, uncondEncoder is not null, grid, interpScale, s);
             return (_graphVelCond!, uncondEncoder is not null ? _graphVelUncond : null, false);
@@ -293,7 +294,7 @@ public sealed unsafe class LtxVideoTransformer : IDisposable
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 Logs.Warning($"[LTX graph] capture failed — falling back to eager: {ex.Message}");
                 RunPairIntoFixed(backend, uncondEncoder is not null, grid, interpScale, s);
             }

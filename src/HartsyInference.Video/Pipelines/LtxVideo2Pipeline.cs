@@ -195,7 +195,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         // The shipped template runs euler_ancestral in both stages, but measured here it costs audio: same prompt,
         // seed and geometry, the 2-4 kHz dynamic range is 39.5 dB ancestral against 47.8 dB plain, and the noise
         // floor -5.6 dB against -14.2 dB. Three ancestral injections is enough to leave a broadband bed the 3-step
-        // refine cannot re-absorb. Plain Euler is the default in both arms; HARTSY_LTX2_ANCESTRAL=1 opts back in.
+        // refine cannot re-absorb. Plain Euler is the default in both arms; numerics.ltx2Ancestral=true opts back in.
         bool ancestral = EngineKnobs.Ltx2Ancestral.Value ?? _config.EulerAncestral;
 
         Logs.Info($"LTX-2 T2V+A: {numFrames}f {width}x{height}, {steps}{(twoStage ? $"+{refineSteps}" : "")} steps, " +
@@ -773,7 +773,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Token count the shift formula is evaluated at: the real count, unless <see
-    /// cref="LtxVideo2Config.ShiftMaxTokens"/> (or <c>HARTSY_LTX2_SHIFT_MAX_TOKENS</c>, which wins) caps it.</summary>
+    /// cref="LtxVideo2Config.ShiftMaxTokens"/> (or <c>numerics.ltx2ShiftMaxTokens</c>, which wins) caps it.</summary>
     internal static int ShiftTokens(int videoTokens, LtxVideo2Config config)
     {
         int cap = EngineKnobs.Ltx2ShiftMaxTokens.Value ?? config.ShiftMaxTokens;
@@ -853,7 +853,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Writes a stage tensor as raw little-endian F32 + a shape sidecar into
-    /// <c>HARTSY_LTX2_AUDIO_DUMP</c>; no-op when unset. Lets the reference implementation decode OUR tensors.</summary>
+    /// <c>diagnostics.ltx2AudioDump</c>; no-op when unset. Lets the reference implementation decode OUR tensors.</summary>
     private static void DumpTensor(string name, Tensor tensor)
     {
         if (EngineKnobs.Ltx2AudioDump.Value is not { Length: > 0 } dir)
@@ -873,7 +873,7 @@ public sealed unsafe class LtxVideo2Pipeline : DiffusionPipelineBase
         Logs.Debug($"[ltx2-dump] wrote {name} {tensor.Shape} to {dir}");
     }
 
-    /// <summary>Logs min/max/mean/rms for a stage output under <c>HARTSY_LTX2_PROBE=1</c>; no-op otherwise.</summary>
+    /// <summary>Logs min/max/mean/rms for a stage output under <c>diagnostics.ltx2Probe=true</c>; no-op otherwise.</summary>
     private static void ProbeTensor(string label, Tensor tensor)
     {
         if (!EngineKnobs.Ltx2Probe.Value)

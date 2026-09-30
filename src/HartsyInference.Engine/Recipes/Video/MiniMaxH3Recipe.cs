@@ -599,7 +599,15 @@ public sealed class MiniMaxH3Recipe : IVideoRecipe
 
     private static MiniMaxH3TextEncoder LoadTextEncoder(string file, List<IDisposable> loaders)
     {
-        CheckpointSource source = CheckpointSource.Open(file);
+        // The encoder binds every projection as Nvfp4Linear, which keeps the weight packed and dequantizes one slice
+        // at a time inside the forward — the reason a 15.7 GB nvfp4 checkpoint costs a mmap here and not its widened
+        // size. That layer reads `.weight_scale`/`.weight_scale_2` as KEYS, so folding them away leaves it nothing to
+        // read and the pass widens the weight instead, which is how the published qwen3vl_32b nvfp4-AWQ encoder
+        // started materializing in full and taking the DiT's headroom with it. Nothing renames these keys between
+        // here and LoadWeights, so the hazard folding exists to prevent cannot arise. int8 and fp8 builds are
+        // unaffected: their companions still fold onto QuantInfo, which is where this encoder reads them.
+        CheckpointSource source = CheckpointSource.Open(file,
+            new CheckpointOpenOptions { KeepNvfp4Companions = true });
         loaders.Add(source);
         Dictionary<string, Tensor> weights = new Dictionary<string, Tensor>(source.Weights, StringComparer.Ordinal);
         MiniMaxH3TextEncoder encoder = new MiniMaxH3TextEncoder();

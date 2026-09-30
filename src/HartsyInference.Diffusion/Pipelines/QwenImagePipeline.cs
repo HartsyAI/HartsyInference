@@ -30,14 +30,14 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
     private readonly Qwen25VlMultimodalEncoder? _multimodalEncoder;
     private readonly QwenImageConfig _config;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The Qwen2.5-VL TE cannot coexist with the resident DiT on 24 GB, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (vram.keepModels=false disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
     /// <summary>True when N-way DiT block-range sharding (Phase 8+ generalization) is configured for this pipeline. Qwen-Image is the one pipeline that reads <see cref="DiffusionPipelineBase.DitShardStages"/> instead of the base class's 2-way <c>DitShardBackend</c>/<c>DitShardSplitBlock</c> — see <c>QwenImageRecipe</c> for how the stage list is built from <c>PlacementConfig.ShardDevices</c>.</summary>
     private bool IsDitSharded => DitShardStages is { Count: > 0 };
 
-    /// <summary>Calibrated step-cache ship point (HARTSY_STEP_CACHE=1): the TeaCache-style polynomial gate at budget 0.20 — 1.20× at SSIM 0.9500 on the 4090 A/B. Fit: 54 pairs, R²=0.966 (results doc 2026-07-22_accel_stepcache_qwen_4090.md §polynomial).</summary>
+    /// <summary>Calibrated step-cache ship point (vram.stepCache=1): the TeaCache-style polynomial gate at budget 0.20 — 1.20× at SSIM 0.9500 on the 4090 A/B. Fit: 54 pairs, R²=0.966 (results doc 2026-07-22_accel_stepcache_qwen_4090.md §polynomial).</summary>
     private static readonly StepCacheProfile CalibratedStepCache =
         new(Threshold: 0.20f, Cap: 3, Poly: [-0.0481274f, 2.57494f, -3.17407f, 4.38356f], LateWindow: 0f);
 
@@ -169,8 +169,8 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
         bool useCfg = cfgScale > 1.0f;
 
         // Default-off perf knobs (reference wiring for the fleet — see docs/Checklists/INFERENCE_ACCEL_GRIND.md).
-        // HARTSY_CFG_INTERVAL=lo,hi skips the uncond forward outside the normalized-t band (limited-interval
-        // guidance); HARTSY_STEP_CACHE=<threshold|1> reuses the block-stack residual across steps when the
+        // numerics.cfgInterval=lo,hi skips the uncond forward outside the normalized-t band (limited-interval
+        // guidance); vram.stepCache=<threshold|1> reuses the block-stack residual across steps when the
         // first block's output has barely drifted (First-Block cache). Unset ⇒ byte-identical baseline path.
         GuidanceInterval cfgInterval = GuidanceInterval.FromEnvironment();
         (float stepCacheThreshold, int stepCacheCap, float[]? stepCachePoly, float stepCacheLate) =
@@ -207,7 +207,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }
@@ -273,7 +273,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             bool visionEncode = _multimodalEncoder is not null && hasEditRefs
                 && Array.IndexOf(promptTokenIds, Qwen25VlMultimodalEncoder.ImageTokenId) >= 0;
 
-            // The TE cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
+            // The TE cannot coexist with the resident DiT (vram.keepModels); evict for this
             // new-prompt generation and re-preload below. The vision tower is staged with the language
             // tower on the vision path (and freed with it below) — the double encode (cond + uncond) would
             // otherwise auto-promote its weights into the resident cache, permanently shrinking the DiT budget.
@@ -840,7 +840,7 @@ public sealed unsafe class QwenImagePipeline : DiffusionPipelineBase
             bool cfgThisStep = useCfg && cfgInterval.Applies(normalizedT);
             if (useCfg && !cfgThisStep) cfgSkippedSteps++;
 
-            // Late-window cache gate (HARTSY_STEP_CACHE_LATE): reuse eligible only in the last `late` fraction
+            // Late-window cache gate (vram.stepCacheLate): reuse eligible only in the last `late` fraction
             // of the schedule; earlier steps run uncached (byte-identical forward). See the Ideogram 4 results
             // doc — early-schedule residual drift is where reuse damage concentrates.
             // `!nonDefaultSampler`: the step cache is a first-block-cache calibrated on the drift between

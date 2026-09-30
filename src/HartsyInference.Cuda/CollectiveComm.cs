@@ -34,7 +34,7 @@ public static class CollectiveComm
         }
         if (fallbackReason is null && !NcclApi.IsLoadable)
         {
-            fallbackReason = "libnccl not resolvable (set HARTSY_NCCL_DIR or place libnccl.so.2 in a probe dir)";
+            fallbackReason = "libnccl not resolvable (set paths.ncclDir or place libnccl.so.2 in a probe dir)";
         }
         if (fallbackReason is null)
         {

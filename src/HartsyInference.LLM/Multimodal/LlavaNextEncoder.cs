@@ -72,7 +72,7 @@ public sealed unsafe class LlavaNextEncoder : IVlmImageEncoder
         }
     }
 
-    /// <summary>Same <c>HARTSY_VLM_DUMP</c> capture-hook convention as <see cref="SiglipVlmEncoder"/>'s internal <c>Dbg</c> — raw little-endian f32, file <c>cs_{tag}.f32</c> — so the same Python reference harness (<c>dump_llavanext_vision_ref.py</c>) can load and compare them.</summary>
+    /// <summary>Same <c>diagnostics.vlmDump</c> capture-hook convention as <see cref="SiglipVlmEncoder"/>'s internal <c>Dbg</c> — raw little-endian f32, file <c>cs_{tag}.f32</c> — so the same Python reference harness (<c>dump_llavanext_vision_ref.py</c>) can load and compare them.</summary>
     private static void Dbg(IBackend backend, string tag, Tensor t)
     {
         if (!EngineKnobs.VlmDebug.Value && EngineKnobs.VlmDump.Value is null) return;

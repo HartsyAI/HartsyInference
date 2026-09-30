@@ -40,7 +40,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
 
     private int _disposed;
 
-    // ── Step-graph capture (HARTSY_DIT_GRAPH) — CFG-pair (LTX-0.9 ForwardPaired template) with the host boundary
+    // ── Step-graph capture (numerics.ditGraph) — CFG-pair (LTX-0.9 ForwardPaired template) with the host boundary
     // work (PatchEmbed, the timestep sinusoid, Unpatchify) hoisted OUTSIDE the capture. Both passes share the
     // packed latent → shared _visualFixed; temb differs per pass (pooled differs); text proj + pooled proj are
     // step-invariant (computed once, pinned). Restricted to b==1 (RoPE ApplyGpu is a b==1 device path) + resident
@@ -53,6 +53,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
     private long _graphSig = long.MinValue;
     private int _graphSigCalls, _graphSigFlips;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     /// <summary>True once the CFG-pair step graph is being captured/replayed (from <see cref="GraphCaptureCall"/>
@@ -212,7 +213,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
             ropeScaleT, ropeScaleH, ropeScaleW, outShape);
     }
 
-    /// <summary>CFG-pair forward: cond + uncond velocities for one denoising step. With HARTSY_DIT_GRAPH the whole
+    /// <summary>CFG-pair forward: cond + uncond velocities for one denoising step. With numerics.ditGraph the whole
     /// pair (both passes sharing the packed latent's patch-embed) is captured once and replayed via a single
     /// cuGraphLaunch; the host boundary work (PatchEmbed, the timestep sinusoid, Unpatchify) runs OUTSIDE the
     /// capture and refreshes the fixed buffers via CopyInto. Falls back to two eager <see cref="ForwardVideo"/>
@@ -342,7 +343,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             HartsyInference.Core.Logging.Logs.Warning($"[Kandinsky5 graph] capture invalidated — falling back to eager: {ex.Message}");
             RunPairIntoFixed(backend, numPatches);
             return (SnapshotUnpatchify(backend, _graphProjCond!, gridT, gridH, gridW, latH, latW, outShape),
@@ -358,7 +359,7 @@ public sealed unsafe class Kandinsky5Transformer : IDisposable
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[Kandinsky5 graph] capture failed — falling back to eager: {ex.Message}");
                 RunPairIntoFixed(backend, numPatches);
             }

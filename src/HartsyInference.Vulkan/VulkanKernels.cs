@@ -54,6 +54,15 @@ public sealed class VulkanKernelRegistry : IDisposable
         Marshal.Copy(_mainEntryUtf8, 0, _mainEntry, _mainEntryUtf8.Length);
     }
 
+    /// <summary>The device feature a shader declares beyond the Vulkan 1.3 baseline, or null. Checked before a pipeline is built, so a device lacking it is refused by feature name here rather than by the driver at pipeline creation; the lint test keeps this in step with the shaders' <c>#extension</c> lines.</summary>
+    internal static string? RequiredFeature(string shaderName)
+    {
+        if (shaderName.StartsWith("im2col", StringComparison.Ordinal)) return "shaderInt64";
+        if (shaderName is "cast_bf16_f32" or "cast_f32_bf16") return "shaderInt16";
+        if (shaderName is "matmul_fp8_coopmat" or "matmul_fp8_coopmat2") return "shaderFloat8CooperativeMatrix";
+        return null;
+    }
+
     /// <summary>Builds (or returns cached) a pipeline for the given kernel + spec constants. <paramref name="forCapture"/> selects the push-descriptor-flavored pipeline used by step-graph capture (see <see cref="KernelKey"/>).</summary>
     public VulkanKernel Get(string shaderName, int storageBufferCount, ReadOnlySpan<SpecConstant> specConstants, bool forCapture = false)
     {
@@ -68,6 +77,18 @@ public sealed class VulkanKernelRegistry : IDisposable
 
     private VulkanKernel Build(string shaderName, int storageBufferCount, ReadOnlySpan<SpecConstant> specConstants, bool forCapture)
     {
+        string? feature = RequiredFeature(shaderName);
+        bool offered = feature switch
+        {
+            null => true,
+            "shaderInt64" => _caps.ShaderInt64,
+            "shaderInt16" => _caps.ShaderInt16,
+            "shaderFloat8CooperativeMatrix" => _caps.HasFloat8CooperativeMatrix,
+            _ => false,
+        };
+        if (!offered)
+            throw new NotSupportedException($"Shader '{shaderName}' needs {feature}, which this device does not offer.");
+
         ulong module = GetOrLoadModule(shaderName);
         ulong setLayout = _descMgr.GetSetLayout(storageBufferCount, forCapture);
         ulong pipelineLayout = _descMgr.GetPipelineLayout(storageBufferCount, forCapture);
@@ -109,16 +130,9 @@ public sealed class VulkanKernelRegistry : IDisposable
                     pData = specDataPtr,
                 };
 
-                // Ask for a full subgroup of a fixed size only when the workgroup can actually hold whole ones.
-                // A kernel dispatched 8 wide cannot be made of 32-wide subgroups, and asking for a required
-                // subgroup size it cannot satisfy is invalid usage — invisible until the features were really
-                // enabled (see VulkanEnums), and a driver that enforces it refuses the pipeline rather than
-                // ignoring the request.
-                //
-                // The width comes from spec constant 0, which is how nearly every kernel here declares it
-                // (LocalSizeId). The exception is sdpa_flash, whose size is a compile-time literal and which is
-                // built with no spec constants at all: that leaves localX at 0 and the request unmade, which is
-                // the safe answer for a width this cannot see.
+                // A required subgroup size the workgroup cannot hold is invalid usage, and a driver that enforces
+                // it refuses the pipeline. The width comes from spec constant 0; sdpa_flash declares its own as a
+                // literal and passes no spec constants, leaving localX 0 and the request unmade.
                 uint localX = 0;
                 for (int i = 0; i < specCount; i++)
                 {

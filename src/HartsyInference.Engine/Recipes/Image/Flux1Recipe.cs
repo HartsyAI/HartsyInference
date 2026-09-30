@@ -85,7 +85,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
 
             if (clipLWeights.Count == 0)
             {
-                string clipLPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                string clipLPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                 SafeTensorsLoader clipLLoader = new SafeTensorsLoader();
                 clipLLoader.Load(clipLPath);
                 loaders.Add(clipLLoader);
@@ -94,7 +94,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             }
             if (t5Weights.Count == 0)
             {
-                string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                 SafeTensorsLoader t5Loader = new SafeTensorsLoader();
                 t5Loader.Load(t5Path);
                 loaders.Add(t5Loader);
@@ -103,7 +103,7 @@ public sealed class Flux1Recipe : IArchitectureRecipe
             }
             if (vaeWeights.Count == 0)
             {
-                string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                 (vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
                 loaders.Add(vaeLoader);
                 Logs.Info("[Flux1Recipe] Flux VAE resolved as side model.");

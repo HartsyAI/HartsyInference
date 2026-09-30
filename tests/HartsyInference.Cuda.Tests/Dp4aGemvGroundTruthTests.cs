@@ -46,6 +46,14 @@ public sealed class Dp4aGemvGroundTruthTests
     [InlineData("Q6_K", 8960, 256, 1, false)]   // ksplit path
     [InlineData("Q8_0", 13696, 256, 1, false)]  // ksplit path
     [InlineData("Q5_0", 13696, 256, 2, true)]   // ksplit path
+    [InlineData("Q2_K", 256, 64, 1, false)]     // single-super-block minimal
+    [InlineData("Q2_K", 2048, 256, 1, false)]   // Llama-3.2-1B hidden size
+    [InlineData("Q2_K", 512, 96, 4, true)]      // batched decode + bias
+    [InlineData("Q2_K", 8960, 256, 1, false)]   // ksplit path
+    [InlineData("Q3_K", 256, 64, 1, false)]     // single-super-block minimal
+    [InlineData("Q3_K", 2048, 256, 1, false)]   // Llama-3.2-1B hidden size
+    [InlineData("Q3_K", 512, 96, 4, true)]      // batched decode + bias
+    [InlineData("Q3_K", 8960, 256, 2, true)]    // ksplit path
     public unsafe void Dp4aGemv_MatchesExactSimulationAndErrorBound(
         string dtypeName, int inDim, int outDim, int batch, bool withBias)
     {
@@ -58,6 +66,8 @@ public sealed class Dp4aGemvGroundTruthTests
             "Q8_0" => DType.Q8_0,
             "Q4_0" => DType.Q4_0,
             "Q5_0" => DType.Q5_0,
+            "Q2_K" => DType.Q2_K,
+            "Q3_K" => DType.Q3_K,
             _ => throw new ArgumentOutOfRangeException(nameof(dtypeName)),
         };
 
@@ -78,11 +88,11 @@ public sealed class Dp4aGemvGroundTruthTests
             float* ip = (float*)input.DataPointer;
             for (long i = 0; i < (long)batch * inDim; i++) ip[i] = (float)((rng.NextDouble() * 2.0 - 1.0) * 0.5);
             long wc = (long)outDim * inDim;
-            if (quantDtype == DType.Q4_0 || quantDtype == DType.Q5_0)
+            if (quantDtype == DType.Q4_0 || quantDtype == DType.Q5_0 || quantDtype == DType.Q2_K || quantDtype == DType.Q3_K)
             {
                 // These codecs are read-only (no F32→quant path) — synthesize raw block bytes directly;
                 // the CPU reference dequantizes them through the canonical codec either way.
-                FillLegacyBlockRandom(weightQuant, quantDtype, blocks: (int)(wc / 32), rng);
+                FillBlockRandom(weightQuant, quantDtype, blocks: (int)(wc / quantDtype.BlockElementCount), rng);
             }
             else
             {
@@ -186,15 +196,21 @@ public sealed class Dp4aGemvGroundTruthTests
         }
     }
 
-    private static unsafe void FillLegacyBlockRandom(Tensor t, DType dtype, int blocks, Random rng)
+    /// <summary>Random block bytes with small positive FP16 values at the block's scale offsets (Q2_K's d/dmin sit at its end, Q3_K's d too).</summary>
+    private static unsafe void FillBlockRandom(Tensor t, DType dtype, int blocks, Random rng)
     {
-        int blockBytes = dtype == DType.Q4_0 ? 18 : 22;
+        int blockBytes = dtype.BlockByteSize;
+        int[] halfOffsets = dtype == DType.Q2_K ? [80, 82] : dtype == DType.Q3_K ? [108] : [0];
         byte* p = (byte*)t.DataPointer;
         for (int b = 0; b < blocks; b++)
         {
             byte* block = p + (long)b * blockBytes;
-            *(Half*)block = (Half)((rng.NextDouble() * 0.04) + 0.005);
-            for (int i = 2; i < blockBytes; i++) block[i] = (byte)rng.Next(256);
+            for (int i = 0; i < blockBytes; i++) block[i] = (byte)rng.Next(256);
+            foreach (int off in halfOffsets)
+            {
+                ushort bits = BitConverter.HalfToUInt16Bits((Half)((rng.NextDouble() * 0.04) + 0.005));
+                block[off] = (byte)bits; block[off + 1] = (byte)(bits >> 8);
+            }
         }
     }
 }

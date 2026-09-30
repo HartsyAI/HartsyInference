@@ -93,17 +93,6 @@ public sealed unsafe class WanAnimate2Transformer : IStreamableDenoiser, IDispos
     /// build ships 0, which takes the unmasked attention path.</summary>
     public const float DistillLogScale = -1.3f;
 
-    /// <summary>Resolves <see cref="WanVideoConfig.Animate2LogScale"/> for a checkpoint. The two builds are
-    /// key-for-key identical and their <c>__metadata__</c> carries only <c>model_type: "animate2"</c>, so the
-    /// FILE NAME is the only discriminator that exists — upstream ships the distillation weights as
-    /// <c>wan_animate_2_bf16_distillation.safetensors</c>. Anything else is treated as the base build, whose 0
-    /// leaves the score bias off entirely.</summary>
-    public static float ResolveLogScale(string? checkpointPath)
-    {
-        string name = Path.GetFileNameWithoutExtension(checkpointPath ?? string.Empty);
-        return name.Contains("distill", StringComparison.OrdinalIgnoreCase) ? DistillLogScale : 0f;
-    }
-
     private readonly WanVideoConfig _config;
     private readonly WanVideoBlock[] _blocks;
     private readonly WanImageEmbedder _imgEmbedder;

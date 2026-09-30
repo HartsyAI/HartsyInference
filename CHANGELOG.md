@@ -3,8 +3,910 @@
 All notable changes to HartsyInference are recorded here. Versions follow `2.0.0-alpha.N` (the scheme moved
 up from `1.0.0-alpha.N`; entries below that pre-date the change and keep their original numbers). The single
 source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props` — see
-[`docs/Checklists/PRODUCTION_RELEASE_CRITERIA.md`](docs/Checklists/ROADMAP.md) for what a
+[`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
+
+## alpha.201
+
+- Native CUDA 3-D convolution declines transient VRAM allocation failures without disabling the route for the session.
+
+## alpha.200
+
+- **Large convolutions run channels-last on CUDA.** cuDNN's tensor-core engines are built for NHWC: at VAE-decode sizes
+  a BF16 3×3 conv ran ~40 TFLOPS over NCHW and ~155-165 over channels-last on a 4090. cuDNN convolutions whose input
+  has at least 2²⁵ elements now transpose the activation and weight into channels-last scratch around the call (new
+  tiled transpose kernel, `channels_last.ptx`) and fall back to NCHW when the scratch will not fit. Smaller UNet-scale
+  convs stay NCHW, where the transposes cost more than they save. Kill switch: `numerics.convChannelsLast`.
+- **Causal video-VAE 3-D convolutions run as one cuDNN 3-D convolution** (`IBackend.TryConv3DFrameMajor`) instead of
+  one 2-D pass per temporal tap over every padded frame plus an accumulate pass. It reads the frame-major padded
+  buffer `CausalConv3d` already builds. The Wan 2.2 VAE decode's convolution time at 1280×704×121 falls from ~69 s to
+  ~16 s. `CausalConv3d` keeps its 5-D weight beside the per-tap slices (the op declines convs below the channels-last threshold), both built at construction.
+- `CudnnConv` builds plans over any number of spatial dims.
+
+## alpha.199
+
+- **Ideogram 4 steps 12% faster (≈2.5 s per 1024² / 20-step generation on a 4090).** New `flash_attn_f16` kernel:
+  F16 attention with F32 accumulation on the tensor cores, reading strided operands so one kernel serves head-major,
+  token-major and fused-projection layouts. It serves head dim 256, where cuDNN offers a single engine at about half
+  FlashAttention-2's throughput: 2.93 ms per call vs cuDNN's 4.2 ms at Ideogram 4's shape. Kill switch:
+  `numerics.flashF16`.
+- Ideogram 4 attention runs token-major, dropping four permutes per block. The CUDA token-major attention entry now
+  also accepts the byte-identical `[1, S, heads, headDim]` layout.
+
+## alpha.198
+
+- **SDXL and SD1.5 render at sizes whose latent is not a multiple of 8** (1280×720, 720×1280, …) instead of returning a
+  flat grey image reported as a success. The UNet's stride-2 downsample allocated `n/2` where the conv produces
+  `ceil(n/2)`, and the up path doubled instead of resizing to the skip it concatenates. The concat now refuses a
+  mismatched skip rather than blending misaligned memory. New `IBackend.UpsampleNearest2DToSize` (native on CUDA)
+  gives nearest-neighbour upsampling to a size one short of the double, as diffusers' `upsample_size` does. The
+  ControlNet condition embedding's stride-2 sizes are corrected the same way.
+- The CPU `UpsampleNearest2D` kernel refuses non-F32 tensors instead of writing floats into a narrower buffer.
+
+## alpha.196
+
+- **Ideogram 4 no longer comes out hazy and washed out.** Its F16 blocks damp the attention-output and SwiGLU
+  projections by 1/64 so they fit F16, relying on the RMSNorm that follows to cancel the factor. That cancellation
+  needs the norm's eps scaled by the same factor squared. With the plain eps, the small sublayer outputs Ideogram
+  produces were shrunk instead of normalized, and every F16 generation lost contrast, detail and composition
+  (duplicate background figures, low-detail subjects) against ComfyUI's official template. `F16SandwichDamp` now owns
+  the damp and the matching eps for both blocks that use it (Ideogram 4, Z-Image). Speed is unchanged.
+- The `ideogram4` regression case (`tests/regression-cases.sh`) now uses the benchmark's structured caption instead of
+  a plain-text prompt: Ideogram 4 is trained only on structured captions, and the plain prompt could not show this
+  class of regression.
+
+## alpha.195
+
+- **Wan 2.2 TI2V-5B: warm 17.4 s → 6.6 s** through SwarmUI (512×320, 25 frames, 20 steps, 4090).
+  - The Wan recipe pipeline caches the last prompt pair's umT5 embeddings, keyed on the raw text so weighted and
+    plain prompts never alias; a repeat prompt skips the text encoder's upload and encode.
+  - The Wan 2.2 VAE decode no longer round-trips activations through the host. The `DupUp3D` shortcut is a new
+    backend op, `IBackend.DupUp3dVae` (CUDA kernel `wan_vae_dup_up3d`, F32 and bit-preserving BF16; the default is
+    the host loop), the up-stages no longer clone their input on the host, and the upsample's time-conv interleave
+    is a device `Permute0213`. Output frames are byte-identical.
+  - `Wan22VaeDecoder` takes a compute dtype, and the Wan recipe decodes in `VaePrecisionHelper.PreferredVaeDtype`
+    (BF16 on CUDA; `numerics.vaeF32` forces F32), which moves its convs onto cuDNN's tensor-core path. The attention
+    block stays F32. Against the F32 decode: SSIM 0.985–0.990, PSNR 39–42 dB over five seeds, visually
+    indistinguishable. Lance and Qwen-Image 2.1, which share the decoder, keep F32.
+
+## alpha.194
+
+- **Wan stays resident across warm generations.** The single-expert Wan DiT kept on the device (vram.keepModels)
+  now tells the denoise planner it is resident, through the same `ResidentPrefixPin` LTX-2 uses. The planner's
+  free-VRAM reading cannot see past the weights occupying it, so back-to-back Wan 2.2 TI2V-5B generations alternated
+  between resident (≈19 s) and fully streamed (≈75 s at 512×320, 25 frames, 20 steps). A streamed denoise no longer
+  reports the DiT as kept.
+- A warm all-or-nothing pin is honoured only while this generation's activation reserve still fits beside it
+  (`BlockStreamingScope`); a larger geometry releases the resident blocks and the planner decides afresh, instead
+  of keeping them and running out of memory.
+- `WanVideoPipeline.WanActivationReserveBytes` counts the patchified token grid, as its documentation said; it charged
+  the latent grid, four times too many tokens at Wan's (1, 2, 2) patch. The recipe's memory estimate passes the
+  checkpoint's own patch size.
+
+## alpha.193
+
+- **Engines sharing a GPU no longer break each other's captures.** `CudaMemory`'s synchronous copies and fills
+  (`CopyHostToDevice`, `CopyDeviceToHost`, `CopyDeviceToDevice`, `Zero`, `Fill32`) run stream-ordered on the calling
+  backend's compute stream and wait for it, instead of on the legacy stream. While any blocking stream in a context is
+  capturing, a legacy-stream call fails (`CUDA_ERROR_STREAM_CAPTURE_IMPLICIT`) and invalidates that capture, so in
+  SwarmUI an AudioLab or LLM request on the same GPU as an image generation failed and pushed the image model's
+  step graph back to eager. The backend's remaining raw driver copies go through the same helpers. Code with no
+  backend registered still uses the legacy stream.
+
+## alpha.192
+
+- **A step-graph capture that ends badly costs one eager step, not the backend.** A capture on the blocking compute
+  stream is invalidated by any use of the legacy stream in the same context, including another engine's synchronous
+  copy on the same GPU. Before, aborting that capture threw, left the capture flags set, and every later reset,
+  generation and `FreeMemory` on that backend failed until the process restarted.
+  - `CudaGraph.AbortCapture` ends an invalidated capture as expected and does nothing for a stream that has already
+    left capture mode.
+  - `StepGraphReset` clears the capture state before any native call and runs every cleanup step (abort, purge of
+    graph-private allocations, graph reset, pool trim) even when one fails; the failures are rethrown together after.
+  - `StepGraphBegin` starts tracking only once capture is open; `StepGraphEndAndLaunch` purges graph-private
+    allocations when instantiation fails.
+  - An out-of-memory inside a capture fails straight away instead of synchronizing (which invalidates the capture),
+    so the owner falls back to an eager step where the usual recovery is legal.
+- A failed capture no longer disables a model's step graph for the rest of the session: owners recapture, and only
+  stop after `StepGraphFailureBudget.MaxFailures` (3) failures. A signature flip storm still disables it at once.
+
+## alpha.191
+
+- **A pipeline that fails to dispose no longer wedges the engine.** Model-switch eviction, `FreeMemory` and teardown
+  release each cached pipeline and service independently: a failure is logged, the item is still dropped from the
+  cache, and the device sweep behind it still runs. Teardown rethrows the collected failures as one
+  `AggregateException`; a between-jobs `FreeMemory` only logs them. Eviction now runs under the device gate with
+  construction, so it cannot sweep a sibling engine's in-flight generation on the same GPU.
+- The Flux.2, Qwen-Image, Qwen-Image 2.1 and HunyuanImage recipe pipelines release every handle through one
+  `CompositeDisposable` (a throw no longer strands the handles after it) and dispose once. Their loader lists take
+  any `IDisposable`, so a `CheckpointSource` in them is no longer a cast away from failing.
+
+## alpha.190
+
+- **One resolver decides which variant a checkpoint is.** Some builds share an architecture but need different
+  contracts: Qwen-Image base/Edit/Edit-Plus, Z-Image Base/Turbo, LTX-2.5 dev/distilled, Mage-Flow, Krea 2 and Lens
+  Turbo, the Wan VACE/Animate/S2V/TI2V-5B task variants, and Wan-Animate-2's distillation build. Each family now
+  declares these once as a `ModelVariantCatalog` instead of sniffing file names by hand. `ModelVariantResolver`
+  checks, in order: the weights; the caller's hint; `modelspec.architecture` / `hartsy.model_id`; whole-token file
+  names (logged as a guess); and finally the default.
+  - The caller's hint is the new `ModelSpec.Variant` (SwarmUI's model class) or a `family:variant` selector such as
+    `-m qwen-image:edit`.
+  - The result feeds construction (`RecipeContext.Variant`), the pipeline cache key, `SupportsFor` / `DefaultsFor` /
+    `InputLimitsFor`, and the new public `ModelCapabilities` queries hosts call.
+  - `CheckpointProbe` replaces the video-only header peeks and adds tensor shapes.
+- **Qwen-Image knows base from Edit.** The base no longer declares `RefEdit`, refuses reference images by name, and
+  skips loading the vision tower. On an Edit build, Auto init-image mode edits rather than denoises. Edit v1 gets
+  ComfyUI's `TextEncodeQwenImageEdit` template (one unlabelled reference, ~1 MP vision copy) instead of the Plus
+  `Picture N:` form, and the input limits follow the variant (1 for v1, 3 for Plus). Repacks are stamped
+  `qwen-image-edit` / `qwen-image-edit-plus`.
+- File-name detection is whole-token now, so `credit` no longer reads as `edit`. Wan-Animate-2 distillation takes its
+  10-step / CFG 1.0 defaults when a hint or metadata, not only a file name, identifies it.
+- Removed: `LtxVideo2DistilledRouting`, `InferenceEngine.ResolveVideoFamilyId` / `VideoDefaultsFor` /
+  `SupportedVideoFeatures` / `SamplingSupportForVideo` (use `ModelCapabilities`), `WanVideoRecipe.SupportsFor(path)`
+  and its siblings (use the variant overloads), `WanAnimate2Transformer.ResolveLogScale`, and
+  `ZImageCheckpointConverter.DetectVariantFromFileName` / `CheckpointVariant`.
+
+## alpha.189
+
+- **Image families declare how many input images they read, and the gate refuses past it.** A fourth reference on
+  Qwen-Image-Edit used to be dropped with a log warning, and a reference image on Boogu, OmniGen2 or Mage-Flow was
+  never read at all — with no init image the result was plain text-to-image. Each recipe now exposes
+  `IArchitectureRecipe.InputLimits` (`ImageInputLimits { MaxImages, ReferencesRequireInitImage }`): Qwen-Image 3
+  (`QwenImageEditConditioning.MaxReferences`, references usable without an init image), Boogu / OmniGen2 /
+  Mage-Flow 1 with the init image required, every other init-image family 1 by default. `ImagesService` throws
+  `NotSupportedException` after the feature check with `Model family '<id>' takes at most N input images; M were
+  supplied.` or `Model family '<id>' needs an init image to edit; reference images alone are not used.`
+
+## alpha.188
+
+- **Wan claims an end frame only where one has been checked.** `WanVideoRecipe.Supports` declared
+  `VideoFeatures.EndFrame` for the `wan-21-14b` compat class and the generic `wan` slug, though only the Wan2.2
+  TI2V-5B has been run with one (`WanEndFrameRealWeightTests`). Both now declare the init image only. Because that
+  real-weight run goes through the generic slug, `SupportsFor` adds the end frame back when the file's plain
+  `patch_embedding.weight` takes 48 latent channels — the Wan2.2 VAE width only the 5B uses — read from the header
+  with no weight I/O. A folder or an unrecognized layout stays init-image only.
+
+## alpha.187
+
+- **Vulkan's fp8 Linear is on wherever the device offers fp8 cooperative matrices**, validated on an RTX 4090 under
+  driver 595 (E4M3 16x16x32). Unset `numerics.vkFp8` now follows the device, like `fp8Native`; the `reference` profile
+  still pins it off. Cards without the extension (Ampere and older, or a pre-595 NVIDIA driver) keep the F16-cast path.
+- **A cooperative-matrix-2 fp8 GEMM.** Where `VK_NV_cooperative_matrix2` lists an E4M3 configuration (RTX 4090 under
+  595), the fp8 Linear runs `matmul_fp8_coopmat2`: `matmul_coopmat2`'s structure with E4M3 operands read from 8-bit
+  storage and an aligned fast path. Including the activation quantization, it beats the F16 GEMM at every DiT shape
+  measured on the 4090 (4096×3072×12288: 1.91 ms vs 2.69; 4096×12288×3072: 1.97 vs 2.46). The coopmat1 fp8 kernel,
+  about 20 TFLOPS, remains the fallback for devices without it.
+- **The fp8 GEMM now matches CUDA's accuracy.** Ada's fp8 tensor cores accumulate below F32 — 7.6e-4 of the output
+  range at K=512 — so `matmul_fp8_coopmat` adds a partial into a true F32 accumulator every 128 of K. On the same
+  operands that gives 1.731e-4, cuBLASLt's native fp8 error to the digit.
+- A 595-or-newer NVIDIA driver without `VK_EXT_shader_float8` is now reported as the card lacking fp8 tensor cores,
+  not as an old driver.
+
+## alpha.186
+
+- **Vulkan attention on cooperative-matrix-2.** `sdpa_flash_cm2` is a query-tiled flash attention on
+  `VK_NV_cooperative_matrix2` (64 query rows × 64 keys, head dim 64 or 128, optional additive mask). It addresses
+  Q/K/V by stride, so token-major layouts need no permute and grouped-query K/V need no head repeat. `IBackend`
+  gains a grouped-query token-major overload, which Krea2 uses when the backend serves it. A shape the kernel does
+  not serve falls back to the existing head-major path. On Krea2 at 1024² attention went from 167.6 s to 1.3 s of
+  GPU time per generation.
+- **The Vulkan memory pool reuses frees still pending on the GPU timeline.** A request that misses the pool first
+  takes back what the GPU has finished with, then waits for the oldest pending free of the same memory type when
+  those could cover it, and only then asks the driver. Before, per-Linear weight casts were never reclaimed between
+  submits, so every cast became a new `vkAllocateMemory` until VRAM ran out. Each out-of-memory retry then drained
+  the queue to idle and destroyed the pooled blocks. On Krea2 that was 2,423 driver allocations (17.7 s) and 28 full
+  drains per generation; now it is 236, almost all of them weight loading. A free made while nothing is recording
+  is released without waiting on a tick no submit will signal (that hung Boogu mid-denoise).
+- **coopmat2 GEMM tiles.** Large products run on 128×256 tiles. Interior tiles with 8-element-aligned strides load
+  unclamped, unrolled eight blocks deep, and workgroups walk eight tile rows per column band so B stays in L2. On
+  Krea2 shapes that is 125–140 TFLOPS, against cuBLAS's 155–167 with F32 accumulation.
+- **SDXL on Vulkan now matches CUDA** (SSIM 0.999 at 1024², was 0.57). Vulkan's `BroadcastAdd` read row 0 of a
+  `[B, C]` bias for every batch item, so the conditional half of each CFG batch got the unconditional half's
+  ADM-conditioned time embedding. It now reads each item's own row, and a `[C]` bias is still shared.
+- **Flux.2 generations no longer fail after the image is made.** `Flux2RecipePipeline.Dispose` iterated its
+  `IDisposable` loaders as `SafeTensorsLoader`, which threw `InvalidCastException` at teardown once the text encoder
+  opened through `CheckpointSource`.
+- **Vulkan caches a weight cast only while a fifth of the heap stays free**; past that the cast is made per call and
+  freed. fp8, GGUF and bf16 checkpoints whose F16 casts did not fit beside their own weights ran out of memory
+  mid-denoise on a 24 GB card. Flux.2 Q4_K_S (SSIM 0.998 against CUDA F16), ERNIE-Image Turbo (0.95), Boogu, Chroma
+  and Lens now run; Chroma, Lens and Boogu produce wrong images on Vulkan, which the out-of-memory failure hid.
+- `diagnostics.vkProfileGpu` times every dispatch with timestamp queries and prints GPU time per op and per kernel,
+  plus blocking host waits by call chain. The host-wall profile charged a queue stall to whichever op was waiting.
+- Krea2 Turbo at 1024², 8 steps, RTX 4090: 1.06 s/step on Vulkan, against 0.83 s on CUDA with
+  `numerics.fp8Native=false` and 0.53 s on CUDA's fp8 tensor cores. The Vulkan image matches CUDA F16 at SSIM 0.998.
+
+## alpha.185
+
+- **Vulkan fp8 activation scale was an ulp off on NVIDIA.** `divRn` corrected the quotient with `fma()`, which
+  Vulkan may run as a separate multiply and add, so the residual was not exact and the scale (and every E4M3 byte
+  scaled by it) could differ from CUDA's `div.rn`. The residual is now Dekker's exact product from correctly rounded
+  multiplies and adds, and the nearest of the quotient's neighbours is kept, rounded once even when the scale is subnormal.
+
+## alpha.184
+
+- **Native FP4 never ran on a real checkpoint, and nothing said so.** `numerics.fp4Native` on or off produced a
+  byte-identical image from Z-Image Turbo's nvfp4 DiT on a Blackwell card, because `ZImageRecipe` opened its
+  checkpoint with no options: all 180 nvfp4 groups unpacked to F16 at load, so the dispatch gate never saw a
+  block scale whatever the knob said. `CheckpointOpenOptions.ForNativeNvfp4Gemm` asks the backend first and
+  returns plain defaults when it cannot run the native GEMM, so nothing below Blackwell changes.
+- `numerics.fp4Native` is now `Construction` scope. It was declared `Runtime`, but the capability it feeds decides
+  **at checkpoint open** whether weights stay packed, so a per-request value could never reach the path. Nothing
+  in this repo, SwarmUI or the API client sends it per request.
+- **Three one-shot diagnostics**, because the question "did the native path run" had no answer in any log: the
+  checkpoint open counts nvfp4 groups by outcome (resident / companion / fp8 / F16), the backend constructor
+  lists every static condition refusing the native GEMM rather than the first, and the first block-scaled Linear
+  latches whether it engaged or the specific gate condition that refused it. No per-layer logging.
+
+## alpha.183
+
+- **A converted audio checkpoint loads under its Hartsy name.** A converted file names, in `hartsy.stands_in_for`,
+  the upstream paths it replaces. `AudioStandIns` hard-links it into each missing one on first use, so every loader
+  finds it where it already looks: the HF cache, `ModelDownloader` assets and fixed-path loaders alike. An existing
+  file is never replaced. Links are recorded in `.hartsy-standins.json`: one whose artifact is replaced is relinked,
+  one whose artifact is removed is deleted, and a link replaced by a real file is left alone. Checked end to end in
+  SwarmUI with all 253 upstream weight files deleted: 154 generations, 142 pass, 10 with quality notes.
+- **Converting a checkpoint could silently ship a broken model.** `tools/CheckpointRepacker`:
+  - It kept only the first state dict of a nested checkpoint (Kokoro converted as 25 of its 548 tensors, exit 0). It
+    now refuses a conversion that would drop tensors, and lists what it would lose.
+  - It ignored mistyped options; they are now rejected with a suggestion.
+  - It wrote no identity unless it was hand-typed. Identity now comes from `ModelIdentityCatalog`
+    (`--model/--variant/--component`).
+  - Restamping a safetensors keeps its tensors byte for byte, recognizes the file by content (even under a `.pt`
+    name) and drops identity keys the new stamp omits.
+  - A folder output is named the way Hartsy stores files: `<model>[-<variant>][-<part>]_<precision>`.
+- **The repacker reproduces third-party repacks from official releases:**
+  - it merges shards and casts with PyTorch's round-to-nearest-even (`SafeTensorsMerger`);
+  - recipes (`--recipe`) cover key maps, fusing, copies, drops, squeezes and embedded tokenizers
+    (`TiktokenConverter`);
+  - LoRA baking (`LoraBaker`, `--lora`, the recipe `lora` step) matches single-threaded torch bit for bit;
+  - `--stands-in-for` stamps the paths a file replaces.
+
+  ACE-Step XL, Orpheus, CSM, YuE2, the ACE-Step VAE, Stable Audio Open Small and SheetSage2 are all rebuilt from
+  official releases, tensor-identical to the repacks they replace.
+- **Every audio loader reads a converted checkpoint.** `AnyFormatCheckpointLoader` recognizes safetensors by content,
+  replacing `PytorchPickleLoader` wherever an audio family opened a pickle directly.
+- **AudioLab can admit a converted file.** Artifacts carry `hartsy.provider_id` and `hartsy.model_id`, and variants
+  stamp their own class. Licenses were corrected from the model cards: ACE-Step `mit`, YuE2 `cc-by-nc-4.0`,
+  Fish-Speech `cc-by-nc-sa-4.0`, NeuTTS `apache-2.0`.
+- **Demucs htdemucs_6s never loaded.** It has no channel projection around its transformer (`bottom_channels=0`),
+  and the engine required one.
+- **ACE-Step selected by path used the wrong config.** This covers SwarmUI's core list and any renamed file: XL
+  failed to load, and base and sft silently ran as turbo. It also missed its silence latent. The variant now comes
+  from the checkpoint's `hartsy.model_id` when the given one is unknown, and the config and latent from the catalog.
+- **SheetSage2 no longer discards a whole score over one chord shorter than a subbeat.**
+- **Resemble-Enhance has a denoise-only mode** (`FxEnhanceRequest.DenoiseOnly`, upstream's `denoise()`). On a real
+  recording it takes about 2 s, against 4.5 min for the enhancer.
+- `SafeTensorsWriter.Save` writes a tensor over 2 GiB; the PocketTTS revision pin is applied (it was passed as the
+  cache category).
+
+## alpha.182
+
+- **Vulkan can run an fp8 Linear on fp8 cooperative matrices, opt in.** Where the driver offers `VK_EXT_shader_float8`
+  with an E4M3 × E4M3 → F32 cooperative-matrix shape, `numerics.vkFp8=true` runs CUDA's native fp8 scheme: the weight
+  stays packed with its per-tensor scale in alpha, and the activation is quantized per tensor to E4M3 — the checkpoint's
+  `.input_scale` under `numerics.fp8StaticInputScale`, else absmax/448 on the device. The quantizer writes the same
+  bytes as CUDA's `fp8_quant`; GLSL's `/` is not correctly rounded, so the scale and its reciprocal take one FMA
+  correction to match `div.rn`. **Off by default:** the GEMM has not yet run on a card. NVIDIA's 580 driver lacks the
+  extension; 595 has it.
+- A Vulkan backend logs once per device whether fp8 Linear runs and why not (the driver lacks the extension, the card
+  has no fp8 tensor cores, or the knob), and warns when `numerics.vkFp8=true` cannot be honored.
+
+## alpha.181
+
+- **All 27 ComfyUI k-samplers.** The 18 that were listed as not implemented now run: `ipndm`, `ipndm_v`, `deis`,
+  `res_multistep`, `gradient_estimation`, `ddpm`, `heunpp2`, `dpmpp_sde`, `dpmpp_3m_sde`, `er_sde`, `seeds_2`,
+  `seeds_3`, `sa_solver`, `uni_pc`, `uni_pc_bh2`, `euler_cfg_pp`, `dpm_fast` and `dpm_adaptive`. Each matches ComfyUI
+  0.37's `sample_*` per step within 5e-5 on eps, v-prediction and flow models, including img2img from a truncated
+  schedule (`SamplerParityTests`, fixtures from `tests/python-reference/dump_k_samplers.py`). The `_gpu` names resolve
+  as aliases. `euler_cfg_pp` refuses a model whose pipeline does not produce a separate unconditional prediction.
+- **Flow models get ComfyUI's flow math.** `euler_ancestral`, `dpm_2_ancestral` and `dpmpp_2s_ancestral` use the
+  rectified-flow ancestral step, `dpmpp_2m_sde` is CONST-aware, and the SDE samplers draw Brownian-bridge noise so
+  their overlapping draws have the right statistics. `lms` no longer indexes past its history in img2img.
+- **SDXL and SD1.5 fed timestep 0 to any sampler that evaluates between schedule points.** `SigmaToTimestep` searched
+  the ascending training sigmas as if they descended, so every off-schedule sigma mapped to timestep 0: `heun`,
+  `dpm_2`, `dpmpp_2s_ancestral` and the new multi-stage samplers produced noise. It now interpolates in log sigma.
+  Karras schedules also took their endpoints from the wrong ends of the table.
+- The SDXL CFG-parallel loop used to replace any non-default sampler or schedule with Euler without saying so. It now
+  uses the sequential loop for them.
+
+## alpha.180
+
+- **The Vulkan suite runs against a non-NVIDIA driver.** Mesa's software ICD reports subgroup size 8 and no
+  cooperative matrix — the two regimes NVIDIA hardware never reaches — and 220 of 221 GPU-integration tests pass
+  there. `VulkanPipelineCache` now reports `InitialDataBytes`, the on-disk bytes it was handed at construction,
+  because the pipeline-cache test asserted the reload from the file the *second* backend wrote: a driver that
+  persists no pipelines writes a fresh 32-byte header either way, so that assertion was green without any reload.
+- The rental script gains an opt-in `swarm` stage: SwarmUI loads the extension in its own load context against
+  the pinned NuGet engine, so the engine generating from the command line never proved the extension does.
+
+## alpha.178
+
+- **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
+  encoder, VAE and CLIP through `ModelDownloader.EnsureSideModelAsync`, whose three-argument overload was strict:
+  an absent file threw before any network call and told the operator to fetch it by hand. Found on a rented
+  Blackwell card, where Z-Image Turbo refused to generate through SwarmUI because `VAE/Flux/ae.safetensors` was
+  not on disk — with the repo, the path and the hash all sitting in the catalog entry. The overload now follows
+  `paths.sideModelAutofetch`, new and **on by default**, which is what SwarmUI's own ComfyUI backend does; LTX-2.5
+  already opted in per-call and can stop special-casing it. Turning the setting off restores the old behavior for
+  an air-gapped install, and the error then names the setting and the repo rather than a bare path. A caller that
+  must never reach the network still passes `downloadIfMissing: false` explicitly.
+- **Z-Image Turbo LoRAs load.** `hartsy image -m zimage --lora …` failed with "Could not detect LoRA format":
+  the format detector has arms for Flux, Wan, SDXL and SD1.5 prefixes and none for Z-Image's
+  `diffusion_model.{layers,context_refiner,noise_refiner}.`, so every Z-Image adapter was rejected outright.
+  Comfy-Org's own `z_image_turbo_distill_patch_lora_bf16` is one. A new `ZImageLoraMapper` plus a detector arm
+  covers them; the `.lora_A.default.weight` suffix vocabulary already worked, so nothing there changed. Q/K/V
+  arrive split and the checkpoint stores them fused, which the existing `FusedProjectionLayouts` row resolves at
+  merge time — all 238 of that file's mapped targets hit the real checkpoint, 136 directly and 102 as fused
+  slices, none missing.
+
+## alpha.177
+
+- **A missing side model now downloads instead of failing the generation.** Every recipe resolves its text
+  encoder, VAE and CLIP through `ModelDownloader.EnsureSideModelAsync`, whose three-argument overload was strict:
+  an absent file threw before any network call and told the operator to fetch it by hand. Found on a rented
+  Blackwell card, where Z-Image Turbo refused to generate through SwarmUI because `VAE/Flux/ae.safetensors` was
+  not on disk — with the repo, the path and the hash all sitting in the catalog entry. The overload now follows
+  `paths.sideModelAutofetch`, new and **on by default**, which is what SwarmUI's own ComfyUI backend does; LTX-2.5
+  already opted in per-call and can stop special-casing it. Turning the setting off restores the old behavior for
+  an air-gapped install, and the error then names the setting and the repo rather than a bare path. A caller that
+  must never reach the network still passes `downloadIfMissing: false` explicitly.
+
+## alpha.175
+
+- **The Blackwell kernel never compiled, and it took the whole CUDA backend down with it.** `block_quant.sm120.ptx`,
+  shipped since alpha.166, contained `cvt.rn.satfinite.e2m1x2.f32` with a 16-bit destination; that instruction packs
+  two nibbles into one byte and takes a `.b8`, so ptxas refused the module. `CudaKernels` loads it on any
+  compute-capability 12.0 card, so construction threw and **every** CUDA operation failed on an RTX 5090 or RTX PRO
+  6000 — not just the FP4 path. Measured on a PRO 6000: 165 of 178 GPU tests failed as shipped, 178 of 178 pass with
+  the corrected kernel. The inline asm now routes through an explicit `.b8` temporary, the shape NVIDIA's own
+  `cuda_fp4` header uses.
+- **The build now assembles what it emits.** nvrtc and `nvcc -ptx` both stop at PTX, so an instruction whose operands
+  are wrong for the target survives to the card and fails at module load. `build_common.sh` runs `ptxas` against each
+  emitted file wherever a toolkit is present. That is the check that would have caught this at the commit that
+  introduced it.
+- **The native block-scaled GEMM is correct, and the bring-up gate was measuring the wrong thing.** Its NVFP4 case
+  compared a 4-bit-activation product against a 16-bit-activation one, so its error was dominated by quantization
+  loss — 10.2% on hardware, against a budget of 8% written without a card. `Nvfp4GemmReferenceTests` feeds the
+  reference the same activation the native path quantized and bounds the kernel itself at 0.36%; the older test keeps
+  its end-to-end comparison with a budget set from that measurement. First hardware numbers, RTX PRO 6000, DiT shape
+  4096×3072×3072: native 0.184 ms/Linear against 0.404 for the unpack path, 2.19× faster.
+
+## alpha.174
+
+- **Vulkan's INT8 Linear runs on the device.** With `numerics.vkInt8=true` the weight is quantized per row by
+  `quant_int8_rowwise` once and cached under `I8` beside its other casts — the scales packed at the buffer's tail
+  behind push-constant offsets, so it is one buffer per weight and dtype and is freed with the weight — the activation
+  is quantized by the same shader per call, and the bias goes through `broadcast_add`. Before, both quantizations and
+  the bias add were host loops and the weight was re-quantized on every call. Still off by default.
+- The Vulkan tests take `HARTSY_TEST_VULKAN_DEVICE` (a test-harness switch, not an engine knob) to run on a second card.
+
+## alpha.173
+
+- **Vulkan computes a 16-bit-weight GEMM in F16.** `ResolveGemmDtype` takes both operands and the output, the CUDA
+  backend's rule: an fp8 or GGUF operand computes in F16 (what it unpacks to), a BF16/F16 operand makes the product
+  F16 with the F32 side cast to it (the weight's cast cached, the activation's transient), F32 × F32 stays F32. Before,
+  the output's dtype decided alone, so an F32-output Linear over F16 weights ran the scalar F32 kernel with the weights
+  widened. An F16 product written to an F32 output goes through the cooperative-matrix kernels' F32 store, or the tiled
+  kernel's transient plus one cast where the shape admits no cooperative-matrix kernel; `Conv2D` computes and adds its
+  bias in the product's dtype and casts once. `numerics.vkF16Gemm=false` restores the output-dtype rule, and the
+  reference profile pins it off.
+
+## alpha.172
+
+- **Every Vulkan GEMM goes through one dispatcher.** `DispatchGemm` takes a `GemmOperands` record (buffer handles,
+  element offsets, transposes, leading dimensions, alpha/beta, a bias in either form) and picks coopmat2, then
+  coopmat, then the tiled kernel by what the operands admit — the three shaders already shared one push-constant
+  layout. `Linear`, `MatMul`, `BatchedMatMul`'s per-slice loop, the naive attention's score and value products and
+  `Conv2D`'s im2col GEMM all call it, so a batched or convolution product on F16 reaches the cooperative-matrix
+  kernels it used to bypass (the column tile of a convolution is now 16-aligned where it can be). GEMMs whose dtype
+  resolves to F32 run the same tiled kernel as before; the compute-dtype policy is a separate change.
+- `matmul_coopmat_blocked` — a diagnostic shader on no production path — is deleted with its benchmark.
+
+## alpha.171
+
+- The IQ1_S and IQ1_M dequant kernels drop the word and sign helpers they never called (regenerated PTX, same
+  code path), and the GGUF format table gives IQ1_M its 56-byte block and IQ1_S / IQ2_S their exact bits per
+  weight — the two follow-ups from the alpha.170 review that a mid-rebase push left behind.
+
+## alpha.170
+
+- **The rest of llama.cpp's i-quant family loads and stays packed on CUDA.** IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS,
+  IQ3_S, IQ1_S and IQ1_M each gain a host codec and a CUDA dequant kernel; `IqTables` / `iq_tables.cuh` carry ggml's
+  codebook grids, sign patterns and mask verbatim (a kernel includes only the tables it indexes). The three formats
+  with a small published file — IQ3_S (Llama-3.2-1B IQ3_M, Qwen2.5-1.5B IQ3_XS), IQ3_XXS (Qwen2.5-1.5B IQ3_XS) and
+  IQ2_S (Qwen2.5-1.5B IQ2_M) — are settled against their Q8_0 copies in `GgufRealFileCorrelationTests`; IQ2_XS,
+  IQ2_XXS, IQ1_S and IQ1_M rest on hand-built known-block tests, one field flipped at a time, until a small file
+  exists. Below decode they take the same dequantize-then-GEMM route as IQ4_XS; none has a fused GEMV yet.
+
+## alpha.169
+
+- **Q3_K weights were decoded wrong everywhere.** The host codec unpacked the sixteen 6-bit scales in Q4_K's
+  interleaved order, and the CUDA dequant kernel had been written to match it; against the same tensors in a Q8_0
+  file the decoded Q3_K weights correlated at 0.21. All four decoders (host, CUDA dequant, the new CUDA GEMV, the
+  new Vulkan shader) now read ggml's `dequantize_row_q3_K` layout — low nibbles of bytes 0..7 are entries 0..7, high
+  nibbles entries 8..15, byte 8 + s % 4 carries entry s's high bits — and correlate at 0.99. Any Q3_K_M GGUF, and
+  the Q3_K tensors inside every Q2_K file, generated garbage before this.
+- **Real weights settle a codec, not synthetic blocks.** `GgufRealFileCorrelationTests` dequantizes every tensor a
+  lower-bit Llama-3.2-1B file stores in the format under test and correlates it with the Q8_0 copy; that is what
+  caught the Q3_K bug that the block-vs-block GPU tests could not (both sides shared the mistake). It runs when the
+  files are staged.
+- **IQ4_XS loads and stays packed on both GPU backends, IQ4_NL on CUDA.** `Codec_IQ4_XS` (host), `dequant_iq4_xs_to_f16`
+  and `dequant_iq4_nl_to_f16` (CUDA) and `dequant_iq4_xs` (Vulkan). The CUDA backend's GGUF dequant is one table —
+  a dtype maps to its kernel and launch width, `SupportsResidentQuant` reads the keys — so a new format is a kernel
+  and one line, not an if-chain entry in three places.
+- **Q2_K and Q3_K decode with fused GEMVs on both tiers.** `mul_mat_vec_q2k_q8_1` / `q3k_q8_1` are the int8
+  dp4a tier (Q2_K's per-run min rides on `dp4a(0x01010101, xq)`, Q3_K's signed 3-bit value on `__vsubss4`, each
+  with the k-split entry the other K-quants have) and `mul_mat_vec_q2k_f32` / `q3k_f32` the float tier; both
+  dispatch at M ≤ 8 like Q4_K, where these formats used to fall to the dequantize-then-cuBLAS route. Vulkan
+  gained `dequant_q2_k` and `dequant_q3_k`, so a Q2_K or Q3_K weight is resident there too.
+- `tests/regression-cases.sh` carries the three new-format text cases under the `quant` tag; they run head-only
+  (`--no-base`) because no prior build could load them.
+
+## alpha.168
+
+- **`tests/blackwell-run.sh` is the rented-GPU session, scripted.** Preflight (driver ≥ 580 — every nvcc-built PTX
+  here is ISA 9.0 — the right card, cuBLAS resolvable), bootstrap (SDK, build, settings), probe (the shipped PTX
+  JITs or the run stops there), GPU tests with a skipped test counted as a failure, the regression gate head-only
+  and native-block-scaled off vs on, within-session determinism, an optional Vulkan pass capped at five minutes,
+  and a bundle plus summary; stage markers make a rerun repeat only what did not finish, `--budget-minutes` stops
+  the clock, `--auto-stop` stops a RunPod pod. `--rehearsal` runs the same script on the local card with the
+  Blackwell-only rows allowed to skip, so the pod run differs only in hardware. `benchmarks/CLOUD_GPU_RUNBOOK.md`
+  points at it. The GPU test stages run pinned to the session card by UUID and with the models root exported, so
+  the real-weight tests find their assets instead of failing under the repo.
+- `tests/regression-ab.sh` labels a knob arm by a hash of its knobs, so off-vs-on arms of one commit never share a
+  run directory, and `--gpu-name ""` with `--gpu N` names the card directly.
+
+## alpha.167
+
+- **MXFP8 weights stay packed the way nvfp4 ones do.** `Mxfp8Codec.TryAttachResident` hangs a weight's UE8M0 block
+  scales on `QuantInfo` (`Format = "mxfp8"`) instead of unpacking it at load, and the CUDA backend's resident path
+  is now written for any block-scaled weight: one scale upload, one eligibility check, one unpack substitution
+  (`dequant_mxfp8_to_f16`, the mxfp8 twin of the nvfp4 kernel) and the same native branch — the
+  `BlockScaledGemmExecutor` multiplies MXFP8 operands with `VEC32_UE8M0` scales, and `block_quant` gained the
+  MXFP8 activation quantizer (an OCP MX shared exponent per 32 elements). The weight stays packed only where that
+  native GEMM will consume it — Blackwell with `numerics.fp4Native` on; anywhere else it widens on the host to the
+  same BF16 as before, so a card below Blackwell generates the same bytes at the same speed. `Mxfp8ResidentCodec`
+  in Core is that host decode and what the tests measure against.
+- **Residency is answered per weight, not per dtype.** `IBackend.SupportsResidentQuant(Tensor)` defaults to the
+  dtype answer; CUDA says yes to an mxfp8 weight only where the native GEMM runs. `QuantizedWeightPolicy`'s
+  predicate takes the weight, and `Widen` gained the two arms it lacked — nvfp4 and mxfp8 — so a CPU or Vulkan
+  shard receiving either widens on the host instead of throwing. The Lens pipeline runs the policy like every other
+  recipe, before its LoRA hook: a merge onto a packed weight rides as a runtime adjunct on that tensor, which a
+  later widening would have left behind, and `LoraStack` now treats any block-scaled weight that way regardless of
+  its dtype (an mxfp8 target used to be requantized as per-tensor fp8, dropping its block scales).
+- The native fp8 dispatch gate refuses a weight carrying block scales, so an mxfp8 weight can never be multiplied
+  as per-tensor fp8. A block-scaled weight now splits by whole 128-row tiles of its swizzled scales — the fused QKV
+  weights of the Lens DiT split into Q, K and V with their own scales instead of refusing. MXFP4 (GPT-OSS's ggml blocks) is not repacked in this release: its experts go through the MoE
+  slice path, not `Linear`, and gain nothing here until that path is resident.
+- An `int8_tensorwise` weight without a ConvRot rotation is eligible for the resident int8 path again: the
+  shared-memory ceiling introduced in alpha.163 divided by the rotation group, and a group of zero threw before the
+  check could say no.
+
+## alpha.166
+
+- **A kernel can ship a per-architecture PTX beside its baseline.** `CudaKernels.PtxPath` loads
+  `<kernel>.sm<CC>.ptx` for the device's exact compute capability when one exists and `<kernel>.ptx` otherwise;
+  every module path in the kernel set, the VSA probe and the tensor-core GEMM go through it, and the backend logs
+  which variants it picked. Exact match only — PTX built for a family-specific arch (`sm_120a`) does not JIT
+  anywhere else, so the baseline serves every other card unchanged. The first and only variant is
+  `block_quant.sm120.ptx`, whose e2m1 packing uses the hardware `cvt` on consumer Blackwell; the `Ptx\*.ptx`
+  packaging glob already carries it.
+- **Nine `build.sh` scripts are now one body and nine kernel lists.** `Kernels/build_common.sh` holds the
+  toolchain resolution, compilation, the PTX ISA 9.0 check and the install step; each domain script declares its
+  lists and calls `build_all`. `--arch sm_120a` builds a domain's `ARCH_VARIANTS` as suffixed variants;
+  `--install-tuned` keeps its meaning for `lm`. Rebuilding every domain through the shared body reproduces 52 of
+  55 shipped artifacts byte for byte; the three that differ — `lm_f32`, `mul_mat_vec_q6k_q8_1`, `h3_vsa` — are the
+  known nvcc-built kernels whose sources match their PTX's commit, and they are left as shipped.
+- `CudaKernels` takes the `CudaContext` it will run under instead of two shared-memory numbers; `TensorCoreGemm`
+  takes the compute capability rather than its major digit.
+
+## alpha.165
+
+- **Native block-scaled GEMM is wired, behind `numerics.fp4Native`.** `Fp4GemmExecutor` is now
+  `BlockScaledGemmExecutor`, one executor for NVFP4, MXFP4 and MXFP8 driven by a `BlockScaleFormat` descriptor
+  (group size, operand type, cuBLASLt scale mode, checkpoint format string) that the quantizer, the dispatch gate
+  and the codecs all read. On Blackwell with the knob on, a resident nvfp4 weight and its checkpoint scale tensor
+  are the GEMM operands as stored; the activation is block-quantized on the stream by the new `block_quant`
+  kernel — e2m1 nibbles, E4M3 scales written straight into cuBLASLt's blocked layout, and the per-tensor scalars
+  left in device memory where the GEMM reads alpha (pointer mode DEVICE), so dynamic quantization costs no host
+  sync. Below Blackwell nothing changes: the knob is off by default, and stays off until a card has run it.
+- **The nvfp4 fold now follows the backend.** `Flux2Recipe` opened its encoder with `Nvfp4ToFp8` unconditionally,
+  which would have made the native path unreachable on exactly the hardware it targets.
+  `CheckpointOpenOptions.ForNvfp4Consumer` keeps the groups packed where `BackendCapabilities.NativeBlockScaledGemm`
+  says they multiply natively and folds to fp8 everywhere else, which is today's behaviour on every card here.
+- **The device-side block-scale codecs live in one header.** `swizzled_scale_index`, the e4m3/e2m1 decoders, the
+  e4m3 encoder and the F16 bit reader moved from `dequant_nvfp4_to_f16.cu` and `fp8_quant.cu` into
+  `block_scale.cuh`, joined by the e2m1 encoder; both kernels' PTX reproduces byte for byte. The e2m1 packer uses
+  the hardware `cvt.rn.satfinite.e2m1x2.f32` under the sm_100a/sm_120a family-feature macros and bit math
+  elsewhere, with the same rounding.
+- The bias epilogue the native fp8 branch applied by hand is one helper both native branches call; it now
+  applies a row range after the dtype cast rather than before, which the cast used to discard.
+
+## alpha.164
+
+- **Vulkan now enables the shader features its own shaders declare.** `im2col` requires 64-bit integer arithmetic
+  and the two BF16 casts require 16-bit, but the 1.0 feature block inside `VkPhysicalDeviceFeatures2` was never
+  filled at device creation, so `shaderInt64` and `shaderInt16` shipped disabled and the pipelines worked only
+  because the NVIDIA driver does not check; a conformant driver may reject them. Both are queried, reported on
+  `VulkanCapabilities` and enabled, and the kernel registry refuses a shader whose feature the device lacks by
+  naming the feature, before pipeline creation. A lint test reads every shader's `#extension … : require` lines
+  and holds the registry's map to them.
+- **A descriptor pool is no longer reset while the GPU may still be reading it.** The pool ring flipped on
+  exhaustion with a bare `vkResetDescriptorPool`, from inside a dispatch, with no check that the submissions
+  binding that pool's sets had completed. A pool now retires at the tick the next submit signals; the flip back
+  to it submits that recording if it is still open and waits for the tick before the reset. The set is also
+  allocated before the command buffer is touched, so that submit cannot split a dispatch across two buffers.
+- `DtypeSuffix` throws for any dtype other than F16/F32 instead of silently choosing the F32 shader.
+- `tests/regression-ab.sh` runs a backend other than CUDA only over the cases tagged with its name (Vulkan takes
+  `sd15` and `krea2`), and a case that crashes on both arms every seed is reported as pre-existing rather than
+  failed; a head crash with a running base still fails.
+
+## alpha.163
+
+- **One home each for the CUDA arch gate, the cuBLASLt executor boilerplate and the dtype map.** `CudaArch` turns
+  a compute capability into one comparable number with the tiers the engine gates on; the FP8 executor, the FP4
+  executor and the cuBLAS-version warning had each spelled their own threshold, and the warning's (`major >= 12`)
+  skipped SM 10.x datacenter Blackwell entirely. `CublasLtExecutorBase` owns the handle, workspace, TN
+  descriptor/layout creation and teardown that `Fp8GemmExecutor`, `Fp4GemmExecutor` and `Int8GemmExecutor` had
+  each carried a copy of. `CublasApi.DataTypeOf` is the single `DType → cudaDataType` map every layout is created
+  through — which is the F8E5M2 fix: the fp8 executor hard-coded E4M3 for both operands and would have multiplied an
+  E5M2 weight as E4M3. The one pairing cuBLASLt cannot run, E5M2 × E5M2, now takes the cast path instead.
+- **Shared-memory limits come from the device.** `CudaContext` reports the per-block default and the opt-in
+  ceiling; the int8 mma GEMM is left unbound, with a warning, on a device whose ceiling is below its tiles rather
+  than failing at launch, and the ConvRot group-size refusal is the rotate kernel's own shared footprint against
+  the default instead of a literal.
+- **`tests/regression-ab.sh` is the regression gate every PR runs.** Both arms are built fresh, PTX and SPIR-V
+  included; generations alternate seed by seed; per-step ms, wall and peak VRAM are medians over the warm seeds;
+  quality is SSIM plus a raw-pixel digest per seed pair (the token stream for text), with a `before | after | diff`
+  montage of each; the verdict is against a declared expectation, `identical` or `bounded:<ssim>`, and a step time
+  past the speed tolerance fails the case either way. The case list lives in `tests/regression-cases.sh`, shared
+  with `migration-baseline.sh`.
+
+## alpha.162
+
+- **Hosts can now ask whether a generation fits a GPU before sending it there.** New
+  `IInferenceEngine.MemoryEstimation` (`IMemoryEstimationService`): `EstimateAsync` returns the per-phase VRAM a
+  model needs at a geometry (text encoder, denoiser, VAE, each with its weights and working memory), and
+  `AssessAsync` judges that against the engine's own device as `Resident`, `Streamed`, `Infeasible` or `Unknown`.
+  Nothing is loaded: weights are sized from checkpoint headers (quantized weights the backend cannot hold packed
+  are widened, as `QuantizedWeightPolicy` does at load), read once per checkpoint per process and cached, so every
+  later answer is arithmetic. This is what lets the SwarmUI extension route a large video model to the large card
+  instead of the one that was idle longest.
+- **The verdict uses the VRAM policy the generation will actually run with.** The backend's policy with the
+  request's `VramOverrides` applied (`VramPolicyRegistry.Resolve`), so Performance never streams and keeps every
+  phase resident, and a per-request tier override changes the answer exactly as it changes the generation.
+  Only memory levers the engine acts on count: block streaming when the recipe wires it and the backend has a
+  streaming cache, phase unload unless pinned off, DiT sharding and component placement when the recipe wires them.
+  Capacity is total VRAM less the placement planner's per-device reserve, never free VRAM, so identical requests
+  get identical answers.
+- **Recipes can describe their own activations.** New default-null `DescribeMemory(CheckpointHeader)` on
+  `IArchitectureRecipe` and `IVideoRecipe`. Wan implements it with the pipeline's own
+  `WanActivationReserveBytes` and the decode estimate now shared as `WanDecodeReserveBytes`, so the estimate and the
+  planner cannot drift. Families without it get header weights plus a pixel-scaled allowance, reported as
+  `MemoryEstimateAccuracy.HeaderOnly`.
+- `ByteFormat.GbF1` and `BlockStreamingOptions.DefaultPrefetchAhead` join the shared primitives.
+
+## alpha.161
+
+- **A bare `vulkan` selector pinned the loader's device 0, so alpha.158's fallthrough could land on a software
+  rasterizer with a real GPU sitting next to it.** `VulkanDevice.Create` has always taken a nullable ordinal whose
+  null path ranks devices (discrete GPU first, rejecting anything that fails the kernels' capability requirements),
+  and `VulkanBackend`'s own summary claims it creates "a Vulkan backend on the best discrete GPU". Its parameter
+  defaulted to `0`, and `BackendFactory.CreateVulkan` took a plain `int`, so nothing in production ever reached the
+  ranking: `PickBest` was live only in tests. That was survivable while Vulkan had to be asked for by name. It stopped
+  being survivable in alpha.158, when `auto` started choosing Vulkan on its own, because the machines that gain are
+  exactly the ones that enumerate Mesa's lavapipe alongside the real card. `VulkanContext` would correctly count one
+  GPU, `auto` would correctly answer `vulkan`, and `Create` would then bind raw index 0 and run the model on a CPU
+  implementation of Vulkan. The test harness already knew: `BackendGate` hand-rolls a scan for a non-software device,
+  its comment noting that probing only ordinal 0 "would report a machine with a 4090 in it as having no usable
+  Vulkan". Selection now reaches production, and an explicit `vulkan:N` still means raw index N.
+- **New `BackendFactory.HasExplicitOrdinal`, because `ParseOrdinal` answers 0 for a selector that named nothing.**
+  `vulkan` and `vulkan:0` are different requests (rank the devices versus pin index 0) and no existing API could tell
+  them apart, so `Resolve`, `Create` and the probes all treated an absent ordinal as an explicit zero.
+- **The Vulkan probe now builds the device it is vouching for.** `ResolveProbed` probed ordinal 0 and then let `Create`
+  choose, so on a box whose index 0 is a rasterizer the probe tested the one device guaranteed to pass and reported
+  the real GPU as proven. Both take the same nullable ordinal now and agree by construction.
+- **Probe results are cached per device rather than once per API.** A single `bool?` handed the first caller's verdict
+  to every later one, so `ProbeCuda(1)` returned device 0's answer. Latent while one ordinal was ever probed; live as
+  soon as "ranked best" and "index 0" became distinct requests.
+- **The LLM path built its backend from the slot key, which pinned index 0 on exactly the boxes ranking exists for.**
+  `TextService` canonicalizes a request device into a slot-and-gate key, and `CanonicalDeviceKey` MANUFACTURES an
+  ordinal — a bare `vulkan` comes back as `vulkan:0`. That key was then handed to `CreateBackendFor`, so the one
+  spelling that should rank was the one guaranteed not to, and an explicit `vulkan` request reached the rasterizer
+  even after the fix above. Blank requests were unaffected and so disagreed with named ones, because `PrimaryDeviceKey`
+  goes through `WithOrdinal`, which keeps ordinal 0 bare. The key still identifies the slot and the gate; the backend
+  is now built from the selector as written.
+- **New `IBackend.DeviceKey`: the identity of the device a backend actually bound to.** Hosts that track which engines
+  share a GPU were composing a key from the selector they requested, which stops being the device in use the moment
+  selection is left to the engine. Vulkan reports its device UUID, so two identical cards stay distinguishable and one
+  shared card cannot read as two; CUDA reports its ordinal, which it honours as given. `VulkanDevice` also exposes the
+  index it chose, and `VulkanBackend`'s `DeviceKind` now carries that instead of the one it was handed.
+
+## alpha.160
+
+- **HeartMuLa and MiniMax Music 3 quant caches were read back transposed.** Since alpha.130 (#41) `GgufWriter`
+  emits ggml `ne` order, the reverse of the engine's, and the checkpoint loader relabels on the way back in. The
+  two disk-cached quantizations never did: `CsmWeightCache.LoadQuantized` and
+  `MiniMaxMusic3WeightPolicy.QuantizeToCache` read their own cache through the raw `GgufLoader`, so every
+  projection came back `[in, out]`, the backend derived `M = 0` from it and the first dp4a launch failed with
+  `CUDA_ERROR_INVALID_VALUE` after the model had spent its minutes loading. Every `:q8`/`:q4` HeartLib and
+  MiniMax variant on the CUDA path was affected; bf16 never touched the cache and kept working, which is what made
+  it look like a card problem. `CsmWeightCacheTests` asserted the source shapes all along and has been failing
+  since the writer changed.
+- **The shape now comes from the source dictionary, not from a guess about the writer.** New
+  `GgufQuantizer.ReadBack(loader, source)` hands each cached tensor back under its source tensor's shape, which is
+  a no-op for a cache written before the writer changed and a swap for one written after, so no cache on any host
+  has to be deleted and re-converted. A tensor with no source falls back to reversing the file's axes, which is
+  right for anything the current writer produced. Both readers use it; a MiniMax depth-decoder test and a
+  quantizer round trip over both file orders join the CSM one.
+
+## alpha.159
+
+- **NVFP4 weights were being dequantized with the wrong block scales.** ComfyUI stores them in NVIDIA's blocked
+  layout — `BlockScaleSwizzle` says so and says it was verified byte-exact against `comfy.float.to_blocked`, and
+  `Nvfp4ResidentCodec` and `Nvfp4Linear` both honour it — but `DequantNvfp4ToF16`/`ToFp8` indexed the same bytes
+  row-major. That is the path every `LlamaStyleEncoder` text encoder takes. Nothing caught it: when rows are a
+  multiple of 128 the stored and padded shapes match, so the shape guard passes and the output is merely
+  degraded. Measured against a BF16 copy of the same real tensor (Qwen3-8B `layers.0.self_attn.k_proj`, 20k
+  sampled elements): row-major correlates **0.9186**, swizzled **0.9954**, and 0.9954 is nvfp4's own
+  quantization error. Five staged encoders are affected, Gemma-3-12B worst at 302 nvfp4 groups.
+- **The test that should have caught it asserted the bug.** Its reference was generated with
+  `repeat_interleave(16, dim=1)` — the row-major assumption — and it skipped unless two local files existed.
+  Replaced with a swizzle round-trip over distinct per-block scales, confirmed to fail against the old indexing.
+- **FP4 is finished, and still unexecuted.** `Fp4GemmExecutor` existed but was never wired, its docs listing two
+  things to confirm on hardware. The installed cuBLAS 13.6 headers answer both without a card: the scale-mode
+  attributes are `A/B_SCALE_MODE` 31/32 with `VEC16_UE4M3` for NVFP4 and `VEC32_UE8M0` for MXFP4, and the layout
+  question dissolves — cuBLASLt wants its own blocked layout, which is what checkpoints already store, so their
+  scale tensors pass through untouched. The mode must be set or cuBLASLt reads each pointer as one per-tensor
+  F32. `CUDA_R_8F_UE8M0` was bound to 34, past the end of `cudaDataType`; it is 30. Native FP4 GEMM has **never
+  run** — no Blackwell hardware here — so it stays SM-gated with its refusal tested.
+- **Flux.2 Klein 9B is no longer refused.** The check scanned `DType.Name` for `F4` and the encoder holds only
+  U8/F32/F8_E4M3/BF16, so it never fired; a file that did declare FP4 would have died earlier in `ParseDType`,
+  which now maps it. The encoder opens through `CheckpointSource`, which also frees what it allocates —
+  `LlamaStyleEncoder.Dispose` never released projection tensors, so the previous route leaked them.
+
+## alpha.158
+
+- **`auto` considers Vulkan, so a non-NVIDIA GPU stops being treated as no GPU.** `BackendFactory.Resolve` chose
+  between CUDA and CPU and nothing else, so every machine whose GPU is served by Vulkan rather than CUDA (AMD,
+  Intel, and NVIDIA cards with no CUDA toolkit installed) resolved `auto` to the CPU backend while a working GPU
+  sat idle. Vulkan was selectable, but only by naming it explicitly, which means it was reachable only by someone
+  who already knew the default had failed them. The order is now CUDA, then Vulkan, then CPU, in both
+  `Resolve` and `ResolveProbed`.
+- **A software rasterizer does not count as a GPU.** New `VulkanContext.IsAvailable`/`GetDeviceCount` back the
+  decision above, and they exclude `VK_PHYSICAL_DEVICE_TYPE_CPU` devices: Mesa's lavapipe enumerates as a Vulkan
+  device on a machine with no graphics hardware, and it is a CPU implementation of Vulkan, so counting it would
+  make `auto` pick something slower than the CPU backend it was chosen over. Linux CI images ship lavapipe, so
+  without the exclusion this would have moved every containerized `Create("auto")` onto a software rasterizer.
+  The count is cached, because unlike CUDA's device query it has to start the loader, and `Resolve` is called from
+  banner and cache-key paths that assume it is cheap.
+- **`ProbeVulkan` is the Vulkan twin of `ProbeCuda`**, sharing its matmul-against-the-CPU body. It earns its keep
+  for a reason CUDA's does not have: a Vulkan device can enumerate and still fail the engine's own requirements
+  (FP16, the subgroup ops the kernels are written against, a compute queue), which surfaces as a throw from device
+  creation rather than as a missing device.
+- **`Validate("vulkan")` checks for a device instead of only checking spelling.** Its remark that "Vulkan has no
+  cheap availability probe" stopped being true with `VulkanContext`. An explicit `vulkan` selector on a machine
+  with no Vulkan GPU now fails at startup with the loader's reason, matching what an explicit `cuda` already did,
+  rather than deferring to a driver error mid-generation. Only presence is checked, not the ordinal: a
+  `vulkan:{n}` ordinal indexes the loader's raw device list, software rasterizers included, so bounding it by the
+  GPU count would reject valid ordinals.
+
+Behavior change worth calling out: a machine with a Vulkan GPU and no usable CUDA now runs on the GPU where it
+previously ran on the CPU. That is the point, but it is a change of device for anyone who was relying on `auto`
+meaning "CUDA or CPU"; naming `cpu` explicitly still pins it.
+
+## alpha.157
+
+- **`--set` works.** It has never worked: it shipped in alpha.39 on 2026-08-26 parsing the flag out of `args`
+  but never removing it, and `StrictParsing` then refused the run with `Unexpected option 'set'`. So the only
+  way to change a setting for one run, without writing to the settings file, failed on every invocation.
+  `--profile` was broken the same way and is fixed with it. A trailing `--set` with no value is deliberately
+  still rejected rather than silently dropped.
+- **The benchmark scripts set knobs instead of environment variables.** They exported `HARTSY_*`, which the
+  engine stopped reading at the settings rebuild, so seven scripts had been configuring nothing: `h3_gold.sh`'s
+  deterministic reference ran with neither its precision settings nor its probe, `ltx25_distilled_bench.sh`'s
+  single-pass arm ran the two-stage path it meant to disable, and `run_benchmarks.sh` wrote a "flags this run
+  executed under" section listing flags that were never applied — that section now asks the engine what is in
+  force rather than asserting it.
+- **`h3_gold.sh` resolves its checkpoint through the configured models root**, as `h3_bench.sh` does. The
+  hardcoded repo path stopped existing when the checkpoints moved to the array, so the script could not run.
+- **Flux.2 Klein is not unsupported.** `Flux2Recipe` already detects it from the transformer's hidden size
+  (3072/4096/6144 → Klein 4B / Klein 9B / Dev) and carries its 10-step distilled defaults. Klein 9B is blocked
+  on its FP4 text encoder, which the recipe refuses by name; the weights are gated on HuggingFace, not open.
+
+## alpha.156
+
+- **One README serves GitHub and nuget.org.** `README.nuget.md` existed because nuget.org renders a package
+  readme with no repository context — but what that needs is absolute links, not a second file, since
+  nuget.org does not resolve repository-relative paths. Every link and the benchmark badge are now full URLs,
+  `PackageReadmeFile` and the pack include both point at `README.md`, and the packed nupkg carries it without
+  NU5039. The merged file also gains the Configuration section the package-facing copy never had, because a
+  consumer otherwise has no route to "settings live in one file and the engine reads no environment variables".
+- **The docs name knobs again instead of environment variables that stopped working.** The settings rebuild
+  moved every engine switch onto a knob and left the engine reading no environment variables, but 28 mentions
+  across 9 files still told a reader to export something inert — the same failure that had every MiniMax-H3
+  benchmark running at Warning level while its harness claimed Info. Twenty renames (`HARTSY_STEP_CACHE` →
+  `vram.stepCache`, `HARTSY_FP8_NATIVE` → `numerics.fp8Native`, and so on); three switches have no
+  replacement and now say so. `HARTSY_REQUIRE_REAL_WEIGHTS` and `HARTSY_RUN_H3_GUIDE_MASK_REAL` are untouched
+  — those are real variables the test harness reads.
+- **The model status docs say what is missing, from the upstream diff rather than memory.** Both "not yet
+  built" lists are now `RecipeRegistry`/`VideoRecipeRegistry` against SwarmUI's `T2IModelClassSorter.cs` and
+  ComfyUI's `supported_models.py`, dated and attributed; video had no such section at all. "Flux.2 Klein 9B
+  (no public weights)" was false, and the extension already routes both Klein classes into the 32B `flux2`
+  recipe. Wan 2.5/2.6/2.7 video are not open weights and are now a do-not-chase note.
+- **MiniMax-H3's status entry records the alpha.97-to-154 regression**, which it previously read straight past.
+
+## alpha.155
+
+- **MiniMax-H3 generates again.** It has produced nothing since alpha.97: the DiT's weight preload runs out of
+  VRAM 310 weights in (`requested 250 MB but only 310 MB available`) on a 4090 with the card otherwise empty, at
+  the same 141f 512x288 geometry that completed in 215 s on alpha.75. Both consumer paths fail identically —
+  the CLI errors out, and `/v1/native/video/stream` answers 200 and then emits one `event: error` carrying that
+  message and zero frames — because the engine has a single video path and both consume it.
+- **The cause was the text encoder materializing in full, not the DiT.** alpha.97 moved H3's components onto
+  `CheckpointSource`, and its default folds quantization companions onto the weights they describe. H3's
+  conditioning tower is the one consumer in the tree that does not want that: it binds every projection as
+  `Nvfp4Linear`, which keeps the U8 bank packed and dequantizes one BF16 slice per forward out of a shared
+  scratch, and it finds the block scales by KEY (`.weight_scale`, `.weight_scale_2`, `.pre_quant_scale`). Folding
+  removes those keys, so the pass widened all 350 banks to F16 instead: `qwen3vl_32b_minimax_h3_nvfp4_awq`'s 2054
+  tensors arrived as 1002, the load went from a memory-mapped open to 50 GB of host RSS, and what it left on the
+  card was 59 MB short of the DiT.
+- **`CheckpointOpenOptions.KeepNvfp4Companions` leaves a complete nvfp4 group exactly as the file wrote it** —
+  the packed U8 weight plus its two scale companions — while fp8, int8 and NF4 fold as before. A group is
+  identified structurally (U8 `.weight` + rank-2 F8E4M3 `.weight_scale` + F32 scalar `.weight_scale_2`), by the
+  same three conditions the eager branch tests, so a weight this does not cover keeps its existing handling
+  rather than being stranded with companions no loader expects.
+- **The two narrower options do not reach this case.** `ResidentNvfp4` moves the scales onto `Tensor.QuantInfo`,
+  which has no `pre_quant_scale` field, so `Nvfp4Codec.TryAttachResident` refuses AWQ layers — and this encoder
+  ships 100 of them. Turning `FoldQuantCompanions` off wholesale would stop H3's `model.embed_tokens.weight`,
+  which is int8 with an F32 `[151936, 1]` row scale read through `QuantInfo.RowScale`, from getting a scale at
+  all, taking the published `int8_convrot` build down with it.
+
+## alpha.154
+
+- **Every checkpoint the engine converts now stamps itself.** The five conversion sites that ran on a user's own
+  machine — Kokoro's `.pth` fallback, RVC's ContentVec encoder and RMVPE pitch estimator, YuE's x-codec and its
+  Vocos vocoders — wrote anonymous files. Nothing ever stamped them afterwards either: the install-time sidecar
+  only runs for models fetched whole from a repo, so a locally converted file had no identity by any route.
+- **Kokoro's repack is the one primary artifact and carries a full ModelSpec block**; the other four are
+  components and carry provenance without an architecture, so converting them cannot add four unusable entries
+  to the model list.
+- **Provenance records the source, not just the family.** `ArtifactProvenance.FromSourceFile` hashes the input, so
+  a converted file names the exact bytes it came from rather than a file name that may since have been replaced.
+  Hashing failures are swallowed — provenance is worth recording and never worth failing a conversion over.
+- `YuePipeline`'s `yue_dump.safetensors` is deliberately left unstamped: it is a parity diagnostic, not a model.
+
+## alpha.153
+
+- **Converted checkpoints can now say what they are.** Every safetensors the engine wrote was anonymous: of the
+  48 artifacts staged for publishing, none carried a `modelspec.*` key and 26 had no `__metadata__` block at all.
+  `SafeTensorsWriter.Save` and `PickleCheckpointRepacker.Repack` both took an optional metadata map that defaulted
+  to null, and six of the eight places that write a checkpoint passed nothing. SwarmUI classifies a scanned model
+  from `modelspec.architecture` before it reads a single tensor, so a repack we produced landed with a null class —
+  which for an audio model means its parameters silently disappear from the UI.
+- **`ModelIdentityCatalog` is the one place a family's publishing identity lives.** Class id, title, author,
+  license, upstream repo and standard resolution, keyed by engine model id, for 74 families. That information was
+  split across three tables that no conversion site could reach: the backend extension's `ModelSupport`, the
+  classes that extension registers itself, and a JSON file beside a Python tool. It sits in `ModelAssets` rather
+  than `Engine` so the conversion sites in `Audio` can read it.
+- **`ArtifactMetadata` builds the header, and emits a resolution only when the class declares one.**
+  `IdentifyClassFor` accepts a model whose resolution matches the class standard or is absent; for anything else
+  it substitutes a clone carrying the stamped size with its heuristic matcher disabled, so the class ends up
+  reporting a standard size nobody declared. Audio classes are registered 0x0, so they must carry none, and
+  Qwen-Image 2.1 must carry its own 1024 rather than Qwen-Image v1's 1328.
+- **Only the primary weights get an architecture.** A codec, vocoder or pitch estimator that lives in its own
+  file is part of a model, not a model, and the index admits only `hartsy.component=main`. Naming the component
+  is required rather than defaulted, because the default is the dangerous one: four of the five conversion sites
+  in the engine write components, and stamping them as primary would put each one in the model list as something
+  a user can select and generate nothing with. A component also claims no author or license — ContentVec and
+  RMVPE ship inside RVC but are other people's work under other terms.
+- **`ArtifactNaming` writes down the file-name convention that was never written down.**
+  `<engine-id>[-<variant>]_<precision>.<ext>`, so `fp8_scaled` and `fp8 scaled` cannot produce two names for one
+  build, while GGUF presets keep their upstream `Q4_K_M` casing.
+
+No behaviour changes yet: this release adds the catalog and the builder. Threading them through the conversion
+sites, and the `hartsy pack` command that produces a whole upload-ready bundle, follow.
+
+## alpha.152
+
+- **Community benchmark runs now attest the GPU and sample it while they run.** `EnvironmentRecord.PowerProfile`
+  was a cohort-key component that nothing ever assigned — it was the literal `"unreported"` on every campaign —
+  so a card power-limited to 300 W pooled with a stock 450 W one and their medians were averaged together. The
+  controller now reads the device's power limit, clock caps, persistence and ECC mode from `nvidia-smi` before
+  the budget starts and makes that the cohort profile.
+- **A campaign refuses to start on a GPU another process is already using.** Nothing checked before, and the
+  protocol notes conceded as much ("background utilization is currently operator-controlled and unverified").
+  `run` names the offending PIDs and their VRAM and stops before producing anything; `--allow-shared-device`
+  records the sharing and proceeds. `doctor` reports the same two things without running a workload.
+- **Per-request GPU telemetry replaces the two dead memory fields.** Each worker session runs one long-lived
+  `nvidia-smi -lms` child and stores aggregates per measured request: peak device VRAM, utilization, power,
+  temperature, clocks, sample coverage, and throttle-reason counts. `Measurement.SampledUsedDeviceBytes` and
+  `MemorySource`, which the validator previously *required* to be absent, are gone in favour of a
+  `DeviceTelemetry` record. Only aggregates ship, because `Bundle.Export` whitelists what leaves the machine.
+- **A thermally or hardware-throttled session is retained but never published.** The limit is frozen in the
+  suite manifest (`maxThrottledSampleFraction`), the worker marks the session `throttled`, and the validator
+  re-derives the same fraction so a session cannot publish by claiming otherwise. `gpu_idle` is not counted as
+  a throttle — an idle card reports it continuously — and neither is a software power cap, which is what a
+  stock card under sustained load looks like.
+- **A device `nvidia-smi` cannot describe stays publishable, in its own cohort.** Its profile records as
+  `unattested`, so it never pools with attested runs and the explorer marks it. Vulkan and CPU campaigns record
+  no telemetry and are not disqualified for its absence.
+- **Binding is by GPU UUID, never by ordinal.** CUDA enumerates fastest-first, so on a two-card host
+  `cuda:0` is nvidia-smi's index 1. The controller matches a device by hashing each `nvidia-smi` UUID with the
+  recipe that produced `DeviceRecord.Identity`, which keeps the raw UUID out of the exported record, and
+  refuses rather than guessing when nothing matches. NVML is deliberately not used: its process-list entry
+  point is struct-size versioned and its throttle reasons are header constants, while `nvidia-smi` names both
+  as CSV columns readable with no toolkit installed.
+- **The explorer shows peak VRAM, peak power, and ms/step for image cases**, and marks unattested rows. The
+  image scoreboards already quote ms/step, so community data is now in the same unit as our own tables.
+- **The CLI step counter prints each step's own duration** (`denoise [7/20] 691 ms`). It printed only the
+  counter, which is why `benchmarks/minimax_h3/h3_bench.sh` could never report a per-step mean; that harness now
+  parses the timing and resolves its checkpoint through the engine's configured models root instead of a repo
+  path that does not exist.
+- **The README benchmark badge points at the checked-in snapshot.** The Pages URL it used returns 404 until
+  Pages is activated for the repository, so the badge was a broken image.
+
+## alpha.151
+
+- **Qwen-Image 2.1 now matches SwarmUI's own native support.** SwarmUI core gained a `qwen-image-2.1` model
+  class, compat class and VAE family of its own (`2de300f6`, "Adds Qwen2.1 support"), so this release lines the
+  engine up with what its ComfyUI backend does rather than running a parallel set of choices.
+- **The text encoder is `qwen3vl_8b_int8_convrot.safetensors`, the same file SwarmUI downloads for ComfyUI**
+  (`GetQwenImage21TextEncoder`), instead of `qwen3vl_8b_bf16`. One 8.6 GB copy serves both backends where two
+  backends previously wanted 8.6 + 16.4 GB of the same encoder. Per-row int8 with a Hadamard rotation is also a
+  tighter fit than fp8 at this model's no-final-norm tap.
+- **Fixed: an int8-quantized token embedding loaded at ~100× its true magnitude.** `DType.I8` reports
+  `IsQuantized == false`, so `LlamaStyleEncoder` widened `embed_tokens` through `Tensor.CastTo` and dropped both
+  the per-row scale and the ConvRot rotation. Every int8 encoder shipped so far (LTX-2.5's Gemma-4) keeps its
+  embedding BF16, which is why nothing had hit it; Comfy-Org's Qwen-Image 2.1 encoder quantizes it.
+- **Fixed: the Qwen-Image 2.1 VAE downloaded to a second path.** `SideModels.QwenImage21Vae` wrote
+  `VAE/qwen_image_2.1_vae_bf16.safetensors` while SwarmUI core registers
+  `VAE/QwenImage/qwen_image_2.1_vae_bf16.safetensors`, so the two backends each fetched their own copy. Same sha,
+  same file, now the same path — matching what every other VAE in `SideModels` already did. An install that
+  already has it under the alpha.149 name keeps using it: the asset carries `LegacyTargetNames`, so
+  `ModelDownloader.TargetPath` resolves to the existing file rather than re-fetching 675 MB. (Deliberately *not*
+  done for the text encoder — bf16→int8 is a content swap, not a rename, and falling back would silently keep
+  serving the wrong file.)
+- **Fixed: Qwen-Image 2.1 reported that it takes no sampler or scheduler.** It had no row in
+  `SamplingCapabilities`, and a miss there is indistinguishable from a family that owns its own solver — so
+  SwarmUI hid the Sampler and Scheduler controls and refused any explicit pick, while the pipeline was calling
+  `FlowMatchSampling.Resolve` all along. It now declares the full seam, as Qwen-Image v1 does.
+- **Fixed: the test that was supposed to catch that could not fail.** `CapabilityTable_NamesOnlyRealFamilies`
+  asserted `Count > 0 || == Unknown || Count == 0`, which is a tautology. Replaced with
+  `CapabilityTable_CoversEveryImageRecipe` over the new `SamplingCapabilities.HasImageEntry`, plus a negative
+  control so the coverage check cannot silently become vacuous again.
+
+## alpha.150
+
+- **Settings have one home and can be written.** The file is now exactly `~/.config/hartsyinference/settings.json`
+  (`hartsy settings path` prints it), instead of being searched for in the working directory, beside the entry
+  assembly and then the home directory — which meant the settings that applied depended on where a process was
+  started from. A host that keeps its settings elsewhere still sets `KnobFile.ExplicitPath`.
+- **`hartsy settings list | get <id> | set <id> <value> | path`.** `set` persists, so changing the models folder
+  survives a restart, which is the thing users were expected to change and could not. `get` reports the effective
+  value **and which layer supplied it**. `--set` and `--profile` are unchanged and still affect one run only.
+  `--list-settings` is replaced by `settings list`, which hides the diagnostics domain unless `--all` is passed.
+- **`GET /settings` now describes the engine, not just the host.** It gained an `engine` section listing every
+  setting with its value, source, type, default and when it applies; `GET`/`PUT /settings/engine/{id}` read and
+  persist one setting. Server options (ports, backend, API key) stay ASP.NET-owned and read-only here.
+- **A written value is validated and coerced when it is written.** An unknown id, a wrong type or an
+  out-of-range value fails at `set` rather than at the next startup, through the same parse the file load uses,
+  and the stored value is the one the engine will actually honour — `numerics.gemvWpb=999` is written as `16`
+  because that knob clamps rather than rejects.
+- **`KnobStore` records which layer set each value** instead of inferring it. A host override and a file value
+  share one dictionary, so once the file had supplied a value a later `KnobStore.Set` was indistinguishable from
+  it. This is load-bearing for the SwarmUI extension, which drives `paths.modelsRoot` from SwarmUI's own
+  `ModelRoot`; `settings get` now reports that as `host` rather than claiming the file set it.
+- **The environment names nothing reads are gone.** The environment layer was removed in alpha.40, but every
+  knob still recorded the variable it used to be read from — 219 in the registry, plus 293 comments and `--help`
+  strings telling an operator to export something inert. Those are rewritten to the setting id that replaced
+  each (`HARTSY_KEEP_MODELS=0` → `vram.keepModels=false`), and `LowVramPolicy.EnvironmentVariable` became
+  `SettingId` — it only ever built log lines, so the VRAM logs had been announcing a variable the engine had
+  not read in months. **A stale export is now silently ignored**; the reporter that named it is deleted.
+- Guard tests replaced rather than dropped: the source scan now asserts engine code reads **no** environment
+  variable outside the third-party set we do not own, and the two deliberate knob pairs (graph capture,
+  SageAttention) are pinned by id and default instead of by a shared variable name. `docs/SETTINGS.md` replaces
+  `ENV_VARS.md`.
 
 ## alpha.149
 

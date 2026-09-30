@@ -23,13 +23,37 @@ public sealed class GgufCodecRegistryTests
         Assert.True(GgufCodecRegistry.Supports(DType.Q3_K));
         Assert.True(GgufCodecRegistry.Supports(DType.Q6_K));
         Assert.True(GgufCodecRegistry.Supports(DType.IQ4_NL));
+        Assert.True(GgufCodecRegistry.Supports(DType.IQ4_XS));
         Assert.True(GgufCodecRegistry.Supports(DType.MXFP4));
+    }
+
+    /// <summary>One hand-built IQ4_XS super-block: sub-block 0 at scale 33 (dl = 1), sub-block 1 at 34 (dl = 2), so the
+    /// nibble → codepoint → scale chain shows through at every position checked. A wrong bit split of the 6-bit
+    /// scale between scales_l and scales_h moves these values, which is the transcription error this pins.</summary>
+    [Fact]
+    public unsafe void IQ4_XS_KnownBlock_DequantizesCorrectly()
+    {
+        using Tensor t = new Tensor(new TensorShape(256), DType.IQ4_XS);
+        byte* b = (byte*)t.DataPointer;
+        new Span<byte>(b, 136).Clear();
+        b[0] = 0x00; b[1] = 0x3C;            // d = 1.0
+        b[2] = 0x0A; b[3] = 0x00;            // scales_h: ib0 high bits = 2, ib1 high bits = 2
+        b[4] = 0x21;                         // scales_l: ib0 low nibble = 1 (ls 33), ib1 low nibble = 2 (ls 34)
+        b[8] = 0x08;                         // sub-block 0, byte 0: low nibble 8 → +1, high nibble 0 → −127
+        b[8 + 16] = 0xF0;                    // sub-block 1, byte 0: low nibble 0 → −127, high nibble 15 → +113
+        float* dst = stackalloc float[256];
+        GgufCodecRegistry.Get(DType.IQ4_XS).DequantizeToF32(b, dst, 256);
+        Assert.Equal(1f, dst[0]);
+        Assert.Equal(-127f, dst[16]);
+        Assert.Equal(-127f, dst[1]);
+        Assert.Equal(-254f, dst[32]);
+        Assert.Equal(226f, dst[48]);
     }
 
     [Fact]
     public void Registry_ThrowsOnUnregisteredDtype()
     {
-        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => GgufCodecRegistry.Get(DType.IQ2_XXS));
+        Assert.Throws<HartsyInference.Core.Exceptions.HartsyInferenceException>(() => GgufCodecRegistry.Get(DType.TQ1_0));   // ternary, no codec by decision
     }
 
     [Fact]
@@ -341,5 +365,68 @@ public sealed class GgufCodecRegistryTests
             src.Dispose();
             quantized.Dispose();
         }
+    }
+
+    /// <summary>Q3_K's sixteen 6-bit scales are packed the way ggml's <c>dequantize_row_q3_K</c> reads them: low nibbles
+    /// of bytes 0..7 are entries 0..7, high nibbles are entries 8..15, and byte 8 + s % 4 carries entry s's two high bits at
+    /// bit 2·(s / 4). Every entry gets a distinct value so a permuted read shows up as the wrong run scaled.</summary>
+    [Fact]
+    public unsafe void Q3_K_KnownBlock_ScalesUnpackInGgmlOrder()
+    {
+        byte[] block = new byte[110];
+        for (int i = 0; i < 32; i++) block[i] = 0xFF;             // hmask: every high bit set → no −4 offset
+        block[0] = 0xFC;                                           // except bits 0 and 1 of byte 0: element 0 of runs 0 (h0 j0) and 2 (h0 j1) gets −4
+        for (int i = 32; i < 96; i++) block[i] = 0x55;             // qs: every 2-bit field is 1
+        for (int s = 0; s < 16; s++)                               // scale entry s = s − 8 (raw 6-bit s + 24)
+        {
+            int raw = s + 24;
+            if (s < 8) block[96 + s] |= (byte)(raw & 0x0F); else block[96 + s - 8] |= (byte)((raw & 0x0F) << 4);
+            block[96 + 8 + (s & 3)] |= (byte)((raw >> 4) << (2 * (s >> 2)));
+        }
+        block[108] = 0x00; block[109] = 0x3C;                      // d = 1.0
+        float[] dst = new float[256];
+        fixed (byte* src = block) fixed (float* d = dst)
+            GgufCodecRegistry.Get(DType.Q3_K).DequantizeToF32(src, d, 256);
+        for (int s = 0; s < 16; s++) Assert.Equal(s - 8, dst[16 * s + 1]);   // run s, element 1: scale × 1
+        Assert.Equal(24f, dst[0]);                                            // run 0, element 0: (−8) × (1 − 4)
+        Assert.Equal(18f, dst[32]);                                           // run 2 (h0 j1 half0): hmask byte 0, bit 1
+        Assert.Equal(-7f, dst[16]);                                           // run 1 (h0 j0 half1): hmask byte 16, untouched
+    }
+
+    /// <summary>Each i-quant format from a hand-built block: codebook index 0 everywhere (a known grid entry), zero scale
+    /// fields (a known multiplier), and exactly one sign or shift field set, so a misread of any field lands on a
+    /// distinct element. Values follow ggml's <c>dequantize_row_iq*</c> with d = 1.</summary>
+    [Theory]
+    [InlineData("IQ2_XXS", 66, -1.0f, 1, 1.0f)]    // grid[0] = 8s, db = 0.125; ksigns[1] flips elements 0 and 7
+    [InlineData("IQ2_XS", 74, -1.0f, 1, 1.0f)]
+    [InlineData("IQ2_S", 82, 1.0f, 5, -1.0f)]      // explicit sign byte 0x20 flips element 5
+    [InlineData("IQ3_XXS", 98, -1.0f, 1, 1.0f)]    // grid[0] = 4s, db = 0.25
+    [InlineData("IQ3_S", 110, 1.0f, 5, -1.0f)]     // grid[0] = 1s, db = 1
+    [InlineData("IQ1_S", 50, -0.875f, 32, -1.125f)] // grid[0] = −1s; group 1 carries the −1/8 shift
+    [InlineData("IQ1_M", 56, -1.125f, 8, -0.875f)]  // half 0 of group 0 carries the −1/8 shift, half 1 does not
+    public unsafe void IQ_KnownBlock_DecodesEachField(string name, int blockBytes, float first, int probe, float probed)
+    {
+        DType dtype = name switch
+        {
+            "IQ2_XXS" => DType.IQ2_XXS, "IQ2_XS" => DType.IQ2_XS, "IQ2_S" => DType.IQ2_S, "IQ3_XXS" => DType.IQ3_XXS,
+            "IQ3_S" => DType.IQ3_S, "IQ1_S" => DType.IQ1_S, "IQ1_M" => DType.IQ1_M, _ => throw new ArgumentOutOfRangeException(nameof(name)),
+        };
+        Assert.Equal(blockBytes, dtype.BlockByteSize);
+        byte[] block = new byte[blockBytes];
+        switch (name)
+        {
+            case "IQ2_XXS": block[0] = 0x00; block[1] = 0x3C; block[6] = 1; break;          // aux1 of group 0 = 1: sign pattern 1, scale 0
+            case "IQ2_XS": block[0] = 0x00; block[1] = 0x3C; block[3] = 0x02; break;        // word 0 = 512: grid 0, sign pattern 1
+            case "IQ2_S": block[0] = 0x00; block[1] = 0x3C; block[34] = 0x20; break;        // signs[0] bit 5
+            case "IQ3_XXS": block[0] = 0x00; block[1] = 0x3C; block[66] = 1; break;         // scales-and-signs word 0 = 1
+            case "IQ3_S": block[0] = 0x00; block[1] = 0x3C; block[74] = 0x20; break;        // signs[0] bit 5
+            case "IQ1_S": block[0] = 0x00; block[1] = 0x3C; block[37] = 0x80; break;        // qh[1] bit 15: group 1 shifts by −1/8
+            case "IQ1_M": block[53] = 0xC0; block[55] = 0x30; block[32] = 0x08; break;      // d = 1.0 (0x3C00 spread over the nibbles); qh[0] bit 3
+        }
+        float[] dst = new float[256];
+        fixed (byte* src = block) fixed (float* d = dst)
+            GgufCodecRegistry.Get(dtype).DequantizeToF32(src, d, 256);
+        Assert.Equal(first, dst[0]);
+        Assert.Equal(probed, dst[probe]);
     }
 }

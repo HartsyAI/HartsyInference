@@ -1,5 +1,6 @@
 using HartsyInference.Cuda;
 using HartsyInference.Engine;
+using HartsyInference.Vulkan;
 using Xunit;
 using Xunit.Abstractions;
 
@@ -31,7 +32,10 @@ public sealed class GpuProbeTests
         _out.WriteLine($"IsAvailable: {available} ({CudaContext.LastUnavailableReason ?? "no reason"})");
         _out.WriteLine($"probe: {(ok ? "passed" : "failed")} {BackendFactory.CudaProbeFailureReason}");
 
-        Assert.Equal(ok ? "cuda" : "cpu", BackendFactory.ResolveProbed("auto"));
+        // A failed CUDA probe means Vulkan gets asked, not that CPU wins: this machine's card answers on one API
+        // after refusing the other, and that is the case the fallthrough exists for.
+        Assert.Equal(ok ? "cuda" : BackendFactory.ProbeVulkan() ? "vulkan" : "cpu",
+            BackendFactory.ResolveProbed("auto"));
         if (ok)
         {
             Assert.Null(BackendFactory.CudaProbeFailureReason);
@@ -41,6 +45,58 @@ public sealed class GpuProbeTests
             Assert.False(string.IsNullOrWhiteSpace(BackendFactory.CudaProbeFailureReason),
                 "the probe failed without saying why, which is the situation it exists to end");
         }
+    }
+
+    /// <summary>The Vulkan half of the same contract: <c>auto</c> follows the probe, and a failure says why.
+    ///
+    /// <para>Ordering is asserted rather than an outcome, for the same reason the CUDA test does it: a box with a
+    /// working CUDA install never reaches the Vulkan branch, so demanding "vulkan" here would fail on exactly the
+    /// machines the engine runs best on.</para></summary>
+    [Fact]
+    public void VulkanIsAskedOnlyAfterCuda_AndAFailureSaysWhy()
+    {
+        bool cuda = BackendFactory.ProbeCuda();
+        bool vulkan = BackendFactory.ProbeVulkan();
+        _out.WriteLine($"vulkan devices: {VulkanContext.GetDeviceCount()} ({VulkanContext.LastUnavailableReason ?? "available"})");
+        _out.WriteLine($"vulkan probe: {(vulkan ? "passed" : "failed")} {BackendFactory.VulkanProbeFailureReason}");
+
+        if (cuda)
+        {
+            Assert.Equal("cuda", BackendFactory.ResolveProbed("auto"));
+        }
+        else
+        {
+            Assert.Equal(vulkan ? "vulkan" : "cpu", BackendFactory.ResolveProbed("auto"));
+        }
+        if (vulkan)
+        {
+            Assert.Null(BackendFactory.VulkanProbeFailureReason);
+        }
+        else
+        {
+            Assert.False(string.IsNullOrWhiteSpace(BackendFactory.VulkanProbeFailureReason),
+                "the probe failed without saying why, which is the situation it exists to end");
+        }
+    }
+
+    /// <summary>A software rasterizer is not a GPU. Mesa's lavapipe enumerates as a Vulkan device on a machine with
+    /// no graphics hardware at all, and it is a CPU implementation of Vulkan, so letting it win <c>auto</c> would
+    /// route the engine onto something slower than the CPU backend it was chosen over. Linux CI images ship it, so
+    /// this is the default case on a runner rather than an exotic one.</summary>
+    [Fact]
+    public void ASoftwareRasterizerDoesNotCountAsAVulkanGpu()
+    {
+        if (VulkanContext.IsAvailable())
+        {
+            _out.WriteLine($"Real Vulkan GPU present here ({VulkanContext.GetDeviceCount()}); nothing to check.");
+            return;
+        }
+        // Unavailable must mean unavailable all the way down: no probe success, and never the auto answer.
+        Assert.False(BackendFactory.ProbeVulkan());
+        Assert.NotEqual("vulkan", BackendFactory.ResolveProbed("auto"));
+        Assert.NotEqual("vulkan", BackendFactory.Resolve("auto"));
+        Assert.False(string.IsNullOrWhiteSpace(VulkanContext.LastUnavailableReason),
+            "a host that cannot offer Vulkan has to be able to tell the user why");
     }
 
     /// <summary>The probe is allowed to disagree with availability, and that disagreement is the whole point.
@@ -56,7 +112,7 @@ public sealed class GpuProbeTests
             return;
         }
         Assert.False(BackendFactory.ProbeCuda());
-        Assert.Equal("cpu", BackendFactory.ResolveProbed("auto"));
+        Assert.Equal(BackendFactory.ProbeVulkan() ? "vulkan" : "cpu", BackendFactory.ResolveProbed("auto"));
     }
 
     [Fact]

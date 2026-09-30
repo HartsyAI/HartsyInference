@@ -21,7 +21,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable, IStreamableDenoiser
     private Tensor? _finalModW, _finalModB; // [2*hidden, hidden]
     private Tensor? _outW, _outB;           // [outCh*pT*pH*pW, hidden]
 
-    // ── Step-graph capture (HARTSY_DIT_GRAPH, opt-in) ─────────────────────────────────────────────────────────
+    // ── Step-graph capture (numerics.ditGraph, opt-in) ─────────────────────────────────────────────────────────
     // HunyuanVideo is single-forward (embedded guidance, no CFG) → the Krea2 single-forward template. The captured
     // body is img_in → double+single blocks → final AdaLN → proj_out, reading ONLY the persistent fixed buffers
     // below; the host boundary work (Patchify, the token refiner, BuildTemb, Unpatchify, and the pipeline's host
@@ -36,6 +36,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable, IStreamableDenoiser
     private long _graphSig = long.MinValue;
     private int _graphSigCalls, _graphSigFlips;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     /// <summary>True while the step graph is engaged for this session (opt-in flag on, the graph path has run at least once, not self-disabled). The pipeline suppresses its per-step <c>FreeActivations</c> while this holds: the captured graph balances its own allocations, and freeing activations would release the fixed buffers the capture bakes. Re-check AFTER each <see cref="Forward"/> so a mid-gen self-disable re-enables the sweep.</summary>
@@ -262,7 +263,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable, IStreamableDenoiser
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             HartsyInference.Core.Logging.Logs.Warning($"[HunyuanVideo graph] capture invalidated — falling back to eager: {ex.Message}");
             RunGraphBody(backend, hidden, hOut, wOut, tOut, sImg, outVec);
             return UnpatchifyToVelocity(backend, T, H, W, pT, pH, pW, tOut, hOut, wOut);
@@ -277,7 +278,7 @@ public sealed unsafe class HunyuanVideoDit : IDisposable, IStreamableDenoiser
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[HunyuanVideo graph] capture failed — falling back to eager: {ex.Message}");
                 RunGraphBody(backend, hidden, hOut, wOut, tOut, sImg, outVec);
             }

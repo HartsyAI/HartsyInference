@@ -58,7 +58,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
         // TODO(E-IMG-4): honor user VAE / Qwen text-encoder overrides from ImageRequest.Components (the SwarmUI
         // loader read T2IParamTypes.QwenModel / T2IParamTypes.VAE) instead of always taking the SideModels entry.
         // The optional ByT5 glyph branch is not wired here either (it is optional at forward time upstream too).
-        List<SafeTensorsLoader> loaders = new List<SafeTensorsLoader>();
+        List<IDisposable> loaders = new List<IDisposable>();
         IDisposable? checkpoint = null;
         try
         {
@@ -113,7 +113,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
                     + $"primary backend, [{ditShardSplitBlock},{transformer.BlockCount}) on the shard backend.");
             }
 
-            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen25Vl7BHunyuan, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
             qwenLoader.Load(qwenPath);
             loaders.Add(qwenLoader);
@@ -121,7 +121,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             llama.LoadWeights(qwenLoader.GetAllTensors());
             HunyuanImageQwenTextEncoder qwenEncoder = new HunyuanImageQwenTextEncoder(llama);
 
-            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanImageVae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.HunyuanImageVae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
             vaeLoader.Load(vaePath);
             loaders.Add(vaeLoader);
@@ -149,7 +149,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
         catch (Exception ex)
         {
             Logs.Error("[HunyuanImageRecipe] Construction failed.", ex);
-            foreach (SafeTensorsLoader loader in loaders)
+            foreach (IDisposable loader in loaders)
             {
                 loader.Dispose();
             }

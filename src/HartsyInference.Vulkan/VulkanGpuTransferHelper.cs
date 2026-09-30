@@ -39,13 +39,6 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
         CacheWeightCasts = !EngineKnobs.VkNoWeightCastCache.Value;
     }
 
-    /// <summary>Lazy D2H syncs since the last <see cref="ResetSyncCount"/>. Each is a full stall plus a copy back; a
-    /// GPU-resident loop should fire none.</summary>
-    public long GetSyncCount() => D2hSyncCount;
-
-    /// <summary>Resets the D2H sync counter, to measure one region rather than a whole run.</summary>
-    public void ResetSyncCount() => ResetD2hSyncCount();
-
     // ── Step-graph capture ──────────────────────────────────────────────────────────────────────────────
     // A captured command buffer bakes device addresses at record time, through bound descriptors and any
     // push-descriptor writes. Every buffer a recorded dispatch referenced must therefore outlive the graph, not
@@ -122,18 +115,11 @@ public sealed class VulkanGpuTransferHelper : GpuResidencyCache<VulkanBuffer>
     private bool _releasingInBulk;
 
     /// <inheritdoc/>
-    /// <remarks>Deferred, not immediate: the stream may still hold recorded work referencing this buffer, so it is
-    /// released against the timeline rather than destroyed now.
-    ///
-    /// <para>Except inside a bulk release, where deferring would strand every byte it was asked to reclaim. A
-    /// deferred free is tagged with the tick the NEXT submit will take, and a bulk release ends there — nothing
-    /// records afterwards, so the timeline never reaches that tick and the buffers sit allocated until whatever
-    /// work happens to come next. Each of these paths drains the stream before releasing anything, so by here no
-    /// command buffer can still reference what is being destroyed.</para>
-    ///
-    /// <para>For teardown specifically it is not merely wasteful but fatal: the device is about to be destroyed and
-    /// the buffer's own finalizer would then call <c>vkDestroyBuffer</c> against it, which crashed the test host
-    /// with <c>vkDestroyBuffer: Invalid device</c> the first time this cache deferred its teardown frees.</para></remarks>
+    /// <remarks>Deferred against the timeline, because the stream may still hold recorded work referencing this
+    /// buffer — except inside a bulk release, which drains first and then ends, so a deferred free tagged with the
+    /// next submit's tick would strand every byte it was asked to reclaim. At teardown that is fatal rather than
+    /// wasteful: the buffer's finalizer would call <c>vkDestroyBuffer</c> against an already-destroyed
+    /// device.</remarks>
     protected override void FreeDevice(VulkanBuffer buffer, long bytes)
     {
         if (_releasingInBulk)

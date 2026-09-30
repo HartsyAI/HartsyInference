@@ -1,41 +1,11 @@
-// matmul_coopmat2: GEMM via VK_NV_cooperative_matrix2 — a genuinely different instruction/memory path from
-// matmul_coopmat.comp.glsl / matmul_coopmat_blocked.comp.glsl, not just a different tiling strategy over the
-// same coopmat1 instructions. Built after the 2026-07-31 GPU-profiling breakthrough (see
-// docs/Checklists/TROUBLESHOOTING.md) showed VK_KHR_cooperative_matrix (coopmat1, subgroup-scope,
-// 16x16x16 fragments) has IDENTICAL real GPU throughput to the plain scalar fallback kernel on this RTX
-// 4090 — i.e. coopMatMulAdd isn't buying any real tensor-core advantage via that API on this driver.
-// coopmat2 (VK_NV_cooperative_matrix2) is architecturally distinct: WORKGROUP scope (the entire workgroup
-// cooperates on ONE big matrix multiply instead of each subgroup doing its own independent 16x16 tile),
-// addressed via tensorLayoutNV descriptors + coopMatLoadTensorNV/coopMatStoreTensorNV directly against
-// global memory (no manual shared-memory staging — the driver handles cooperative loading internally), with
-// built-in bounds CLAMPING (gl_CooperativeMatrixClampModeConstantNV: out-of-bounds reads return 0,
-// out-of-bounds writes are dropped) so M/N/K need not be multiples of the tile size at all — unlike every
-// coopmat1 kernel in this codebase, no manual partial-tile bounds-checking is needed here.
+// matmul_coopmat2: GEMM via VK_NV_cooperative_matrix2 (workgroup scope), a different instruction and memory
+// path from the coopmat1 kernels rather than a different tiling of them.
 //
-// Modeled on ggml/llama.cpp's mul_mm_cm2.comp (fetched directly from the ggml-org/llama.cpp repo — see
-// docs/Checklists/TROUBLESHOOTING.md for the URL) but drastically simplified: no quantization, no MoE
-// (MUL_MAT_ID) row remapping, no K-splitting, no register-blocked sub-tiling, no alpha/beta epilogue — this
-// started as a diagnostic asking ONE question (does the coopmat2 instruction path alone go faster than
-// coopmat1 on real GEMM shapes?) and is now wired into DispatchMatmul behind VulkanBackend.EnableCoopMat2
-// (opt-in, off by default — see that property's doc comment).
-//
-// Specialized for TRANSPOSE_A=false, TRANSPOSE_B=true (A:[M,K] row-major, B:[N,K] row-major) — the only
-// combination the production Linear path and existing coopmat diagnostics actually exercise; a genuinely
-// different combination would need its own tensorLayoutNV dimension/stride setup, not a spec-constant flag.
-//
-// Bias epilogue (HAS_BIAS, 2026-07-31): a real Krea2 e2e run found the original follow-up-BroadcastAdd-
-// dispatch design measured FASTER in isolated GPU-only-time benchmarks but SLOWER in real wall-clock — the
-// extra dispatch's host-side submission + the unconditional per-dispatch VkMemoryBarrier2 (see ROADMAP.md's
-// "per-dispatch barrier scoping" entry) isn't visible to a VkQueryPool-timestamp-only measurement, but it's
-// very real. Fused directly here instead via a broadcast tensorLayoutNV (stride 0 on the M dimension, so
-// every row's coopMatLoadTensorNV reads the same underlying bias[n] regardless of row) loaded straight into
-// an Accumulator-typed coopmat and added to the matmul result — no shared memory, no extra dispatch.
-//
-// Tile shape (BM, BN) is spec-constant, HOST-SUPPLIED from VulkanCapabilities.CoopMat2{M,N}Granularity —
-// the actual "flexible dimensions" configuration the driver reported via
-// vkGetPhysicalDeviceCooperativeMatrixFlexibleDimensionsPropertiesNV (see VulkanDevice.CoopMat2Supported).
-// local_size_x is likewise host-supplied from CoopMat2WorkgroupInvocations — mismatching it against what
-// the driver expects for this BM/BN config is undefined behavior per the NV_cooperative_matrix2 spec.
+// Unlike every coopmat1 kernel here, this one needs no partial-tile handling: tensorLayoutNV addressing with
+// gl_CooperativeMatrixClampModeConstantNV clamps out-of-bounds reads to 0 and drops out-of-bounds writes, so
+// M/N/K need not be multiples of the tile size. Modeled on ggml/llama.cpp's mul_mm_cm2.comp, without
+// quantization or MoE. See docs/Checklists/TROUBLESHOOTING.md for why coopmat1 did not pay off here.
+
 #version 460
 
 #extension GL_KHR_cooperative_matrix : require
@@ -79,8 +49,18 @@ layout(push_constant) uniform Push {
 } pc;
 
 void main() {
-    uint wgRow = gl_WorkGroupID.y * BM;   // M-tile origin
-    uint wgCol = gl_WorkGroupID.x * BN;   // N-tile origin
+    // Grouped tile order: consecutive workgroups walk GROUP_M tile rows down one column band before moving right, so a
+    // band of B stays in L2 while those rows reuse it instead of every row streaming all of B.
+    const uint GROUP_M = 8;
+    uint tilesN = gl_NumWorkGroups.x;
+    uint tilesM = gl_NumWorkGroups.y;
+    uint linear = gl_WorkGroupID.y * tilesN + gl_WorkGroupID.x;
+    uint perGroup = GROUP_M * tilesN;
+    uint firstM = (linear / perGroup) * GROUP_M;
+    uint groupRows = min(tilesM - firstM, GROUP_M);
+    uint inGroup = linear % perGroup;
+    uint wgRow = (firstM + (inGroup % groupRows)) * BM;   // M-tile origin
+    uint wgCol = (inGroup / groupRows) * BN;              // N-tile origin
 
     // Clamped layouts: reads/writes past the tensor's declared (M,K)/(N,K)/(M,N) dimensions are silently
     // zeroed (loads) or dropped (stores) by the driver — no manual bounds checking needed for M/N/K that
@@ -111,11 +91,38 @@ void main() {
     coopmat<float, gl_ScopeWorkgroup, BM, BN, gl_MatrixUseAccumulator> sum =
         coopmat<float, gl_ScopeWorkgroup, BM, BN, gl_MatrixUseAccumulator>(0.0);
 
-    uint kIters = (pc.K + BK - 1) / BK;
-    [[dont_unroll]]
-    for (uint i = 0; i < kIters; i++) {
-        uint kStart = i * BK;
+    // Interior tiles with 8-element-aligned strides and offsets load unclamped, unrolled eight BK blocks deep; the
+    // masked strides tell the compiler the rows are 16-byte aligned so it can issue vector loads (ggml's mul_mm_cm2
+    // fast path). Everything else, and the K tail, takes the clamped loop below.
+    uint kStart = 0;
+    const uint UNROLL = 8;
+    if (wgRow + BM <= pc.M && wgCol + BN <= pc.N && (pc.lda % 8) == 0 && (pc.ldb % 8) == 0
+        && (pc.aOffset % 8) == 0 && (pc.bOffset % 8) == 0) {
+        uint lda = pc.lda & ~7u;
+        uint ldb = pc.ldb & ~7u;
+        tensorLayoutNV<2> fastA = createTensorLayoutNV(2);
+        tensorLayoutNV<2> fastB = createTensorLayoutNV(2);
+        fastA = setTensorLayoutDimensionNV(fastA, pc.M, pc.K);
+        fastA = setTensorLayoutStrideNV(fastA, lda, 1);
+        fastB = setTensorLayoutDimensionNV(fastB, pc.N, pc.K);
+        fastB = setTensorLayoutStrideNV(fastB, ldb, 1);
+        uint aOff = pc.aOffset & ~7u;
+        uint bOff = pc.bOffset & ~7u;
+        uint unrolled = pc.K / (BK * UNROLL);
+        for (uint i = 0; i < unrolled; i++) {
+            [[unroll]] for (uint j = 0; j < UNROLL; j++) {
+                coopmat<float16_t, gl_ScopeWorkgroup, BM, BK, gl_MatrixUseA> matA;
+                coopmat<float16_t, gl_ScopeWorkgroup, BK, BN, gl_MatrixUseB> matB;
+                coopMatLoadTensorNV(matA, A, aOff, sliceTensorLayoutNV(fastA, wgRow, BM, kStart, BK));
+                coopMatLoadTensorNV(matB, B, bOff, sliceTensorLayoutNV(fastB, wgCol, BN, kStart, BK), viewTranspose);
+                sum = coopMatMulAdd(matA, matB, sum);
+                kStart += BK;
+            }
+        }
+    }
 
+    [[dont_unroll]]
+    for (; kStart < pc.K; kStart += BK) {
         coopmat<float16_t, gl_ScopeWorkgroup, BM, BK, gl_MatrixUseA> matA;
         coopmat<float16_t, gl_ScopeWorkgroup, BK, BN, gl_MatrixUseB> matB;
 

@@ -287,6 +287,11 @@ public sealed class TextService : ITextService, IDisposable
             LoadSharded(slot, deviceKey, path, request, shardDevices);
             return;
         }
+        // Build from the selector as written, not the slot key: CanonicalDeviceKey spells a bare "vulkan" as
+        // "vulkan:0", which reads as an EXPLICIT ordinal and pins loader index 0 instead of ranking.
+        string buildSelector = string.IsNullOrWhiteSpace(request.Device)
+            ? PrimaryDeviceKey()
+            : request.Device.Trim().ToLowerInvariant();
         if (shardDevices.Length >= 2)
         {
             // SSM recurrent state has no per-layer-crossing story, so layer-split isn't offered for it — this
@@ -302,8 +307,9 @@ public sealed class TextService : ITextService, IDisposable
                 + $"'{architecture0}' is an SSM/recurrent architecture — layer-split isn't supported for it. "
                 + $"Loading on '{fallbackDevice}' only; the rest of the device list is ignored.");
             deviceKey = fallbackDevice;
+            buildSelector = fallbackDevice;
         }
-        IBackend backend = slot.Backend ??= CreateBackendFor(deviceKey);
+        IBackend backend = slot.Backend ??= CreateBackendFor(buildSelector);
         // A backend that cannot read quantized weights needs them dequantized on the way in. Asking the backend
         // what it supports rather than what class it is means Vulkan gets the right answer the moment it publishes
         // SupportsQuantized, instead of silently paying an F32 expansion forever because it is not CUDA.

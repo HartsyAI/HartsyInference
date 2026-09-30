@@ -32,17 +32,14 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         }
     }
 
-    /// <summary>F16-mode damping for the two RmsNorm-sandwiched projections (the Z-Image recipe): the raw
-    /// <c>attention.o</c> and SwiGLU outputs can exceed F16's 65504, but both feed straight into a sandwich
-    /// RMSNorm and <c>RMSNorm(c·x) ≡ RMSNorm(x)</c> — so scaling the weights via <see cref="Tensor.Fp8ScaleFactor"/>
-    /// (folded into the GEMM alpha, zero extra kernels) is bit-exact post-norm.</summary>
-    private const float F16SandwichDamp = 1.0f / 64.0f;
-
     private readonly int _hidden;
     private readonly int _numHeads;
     private readonly int _headDim;
     private readonly int _ffnHidden;
     private readonly float _eps;
+
+    // Set at load when the F16 sandwich damp is applied; attention_norm2/ffn_norm2 then take its matching eps.
+    private bool _damped;
 
     private readonly QkNorm _normQ;
     private readonly QkNorm _normK;
@@ -61,7 +58,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
     private Tensor? _w1; // gate
     private Tensor? _w2; // down
     private Tensor? _w3; // up
-    private Tensor? _w13; // fused [gate; up] (converter HARTSY_FUSED_FFN=1 — one GEMM, INFERENCE_ACCEL_GRIND §H3.2)
+    private Tensor? _w13; // fused [gate; up] (converter numerics.fusedFfn=true — one GEMM, INFERENCE_ACCEL_GRIND §H3.2)
 
     // AdaLN modulation: Linear(adalnDim → 4*hidden), bias=True.
     private Tensor? _adalnWeight;
@@ -93,7 +90,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         _normQ.LoadWeights(weights[$"{prefix}.attention.norm_q.weight"]);
         _normK.LoadWeights(weights[$"{prefix}.attention.norm_k.weight"]);
 
-        // Fused-FFN path (converter emits w13 = [w1; w3] under HARTSY_FUSED_FFN=1) — else the split pair.
+        // Fused-FFN path (converter emits w13 = [w1; w3] under numerics.fusedFfn=true) — else the split pair.
         if (weights.TryGetValue($"{prefix}.feed_forward.w13.weight", out Tensor? w13))
         {
             _w13 = w13;
@@ -106,14 +103,15 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         _w2 = weights[$"{prefix}.feed_forward.w2.weight"];
         // F16 mode: damp the two sandwich-normed projections so their raw outputs fit F16 range (see
         // F16SandwichDamp). attention_norm2 cancels the o damp; ffn_norm2 cancels the w3 damp (it scales
-        // silu(w1)·w3 and thus the w2 output linearly). F32 path untouched — baseline stays bit-identical.
+        // silu(w1)·w3 and thus the w2 output linearly), each with the eps scaled to match. F32 path untouched.
         // Fused w13 has ONE scale, so the damp shrinks the gate half too — ForwardSwiGlu un-damps the gate
         // before silu (silu is non-homogeneous; the up half stays damped exactly like the split path).
-        if (DitDtype.Act == DType.F16)
+        _damped = DitDtype.Act == DType.F16;
+        if (_damped)
         {
-            _oWeight.Fp8ScaleFactor *= F16SandwichDamp;
-            if (_w3 is not null) _w3.Fp8ScaleFactor *= F16SandwichDamp;
-            if (_w13 is not null) _w13.Fp8ScaleFactor *= F16SandwichDamp;
+            _oWeight.Fp8ScaleFactor *= F16SandwichDamp.Factor;
+            if (_w3 is not null) _w3.Fp8ScaleFactor *= F16SandwichDamp.Factor;
+            if (_w13 is not null) _w13.Fp8ScaleFactor *= F16SandwichDamp.Factor;
         }
 
         _adalnWeight = weights[$"{prefix}.adaln_modulation.weight"];
@@ -176,7 +174,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         mod1.Dispose();
 
         Tensor attnNormed = new Tensor(shape, x.DType);
-        backend.RmsNorm(attnNormed, attn, _attnNorm2!, _eps);
+        backend.RmsNorm(attnNormed, attn, _attnNorm2!, F16SandwichDamp.NormEps(_eps, _damped));
         attn.Dispose();
 
         Tensor afterAttn = new Tensor(shape, x.DType);
@@ -197,7 +195,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         mod2.Dispose();
 
         Tensor mlpNormed = new Tensor(shape, x.DType);
-        backend.RmsNorm(mlpNormed, mlp, _ffnNorm2!, _eps);
+        backend.RmsNorm(mlpNormed, mlp, _ffnNorm2!, F16SandwichDamp.NormEps(_eps, _damped));
         mlp.Dispose();
 
         Tensor result = new Tensor(shape, x.DType);
@@ -243,6 +241,23 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
 
         backend.ApplyRope(qN, kN, cos, sin);
 
+        float scale = 1.0f / MathF.Sqrt(_headDim);
+        // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe.
+        if (batch == 1 && backend.SupportsTokenMajorAttention)
+        {
+            // The rotated [1, L, heads, headDim] tensors are already token-major, and the flat [L, hidden] output is
+            // what the out-projection reads — no permute on either side.
+            Tensor attnTm = new Tensor(new TensorShape(seqLen, _hidden), input.DType);
+            backend.ScaledDotProductAttentionTokenMajor(attnTm, qN, kN, v, attentionMask, _numHeads, _headDim, scale, allowF16: true);
+            qN.Dispose();
+            kN.Dispose();
+            v.Dispose();
+            Tensor projectedTm = new Tensor(flat, input.DType);
+            backend.Linear(projectedTm, attnTm, _oWeight!, null);
+            attnTm.Dispose();
+            return projectedTm;
+        }
+
         // Permute [B, L, numHeads, headDim] → [B, numHeads, L, headDim] for SDPA.
         Tensor qMh = new Tensor(mh, input.DType);
         Tensor kMh = new Tensor(mh, input.DType);
@@ -254,10 +269,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         kN.Dispose();
         v.Dispose();
 
-        float scale = 1.0f / MathF.Sqrt(_headDim);
         Tensor attnOut = new Tensor(mh, input.DType);
-        // allowF16: Q/K are per-head RMSNormed above, so scores are bounded — F16 SDPA is range-safe and
-        // engages the cuDNN fused flash path (native zero-cast when the block runs F16 activations).
         backend.ScaledDotProductAttention(attnOut, qMh, kMh, vMh, attentionMask, scale, allowF16: true);
         qMh.Dispose();
         kMh.Dispose();
@@ -274,7 +286,7 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
         return projected;
     }
 
-    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c> (HARTSY_FUSED_FFN) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
+    /// <summary>SwiGLU FFN: <c>w2(silu(w1(x)) * w3(x))</c>, all bias=False. With the fused <c>w13</c> (numerics.fusedFfn) the two projections run as ONE GEMM and split via contiguous slices; in F16 mode the shared damp on w13 is undone on the gate half before silu (see LoadWeights).</summary>
     private Tensor ForwardSwiGlu(IBackend backend, Tensor input, int batch, int seqLen)
     {
         TensorShape ff = new TensorShape(batch, seqLen, _ffnHidden);
@@ -289,11 +301,11 @@ public sealed unsafe class Ideogram4Block : IStreamingBlock
             backend.SliceLastDim(gate, both, 0);
             backend.SliceLastDim(up, both, _ffnHidden);
             both.Dispose();
-            if (DitDtype.Act == DType.F16)
+            if (_damped)
             {
                 // Undo the shared w13 damp on the gate half (the split path damps only w3).
                 Tensor undamped = new Tensor(ff, input.DType);
-                backend.Scale(undamped, gate, 1.0f / F16SandwichDamp);
+                backend.Scale(undamped, gate, 1.0f / F16SandwichDamp.Factor);
                 gate.Dispose();
                 gate = undamped;
             }

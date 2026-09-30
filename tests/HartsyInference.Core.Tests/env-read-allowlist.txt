@@ -3,13 +3,13 @@
 # Every entry is a file that still reads the environment directly, with the number of reads.
 # EnvReadAllowlistTests fails the build if a file not listed here reads the environment, and
 # fails if any count here GROWS. Lower a number when you migrate a read; delete the line at zero.
-# Target: this file ends up empty (see docs/ENV_VARS.md and the config rebuild plan).
 #
-# Seeded 2026-08-26 at 240 reads across 111 files.
+# Seeded 2026-08-26 at 240 reads across 111 files. What remains is third-party convention we do not
+# own -- HF_TOKEN/HF_ENDPOINT, ESPEAK_DATA_DIR, NO_COLOR/COLORFGBG -- so this file does not reach zero.
+# No ENGINE setting is read from the environment; see docs/SETTINGS.md.
 
 src/HartsyInference.Audio/Cache/AudioModelCache.cs 3
 src/HartsyInference.Audio/Phonemizer/Espeak/EspeakPhonemizer.cs 1
 src/HartsyInference.Cli/Infra/CliTheme.cs 1
 src/HartsyInference.Cli/Infra/TerminalImage.cs 1
 src/HartsyInference.Engine/HuggingFace/HuggingFaceClient.cs 1
-src/HartsyInference.Core/Configuration/KnobStore.cs 1

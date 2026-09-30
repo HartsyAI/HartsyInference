@@ -884,6 +884,8 @@ public sealed class VulkanBackendSmokeTests
         if (!VulkanAvailable()) return;
         using VulkanBackend backend = new();
         if (!backend.Capabilities.SupportsF16) return;
+        // This checks the F16-cast path's scale folding per element; the fp8 Linear quantizes the activation, checked below.
+        backend.EnableFp8Linear = false;
 
         Tensor input = new(new TensorShape(M, K), DType.F16);
         Tensor weightF32 = new(new TensorShape(N, K), DType.F32);
@@ -924,6 +926,28 @@ public sealed class VulkanBackendSmokeTests
             }
         }
         Assert.True(maxRel < 0.05f, $"FP8 Linear (scale={scale}) maxRelErr {maxRel:P2} too high — suggests the scale factor isn't applied exactly once.");
+
+        // The fp8 Linear: an E4M3 activation is within a few percent of the output's range, not of each element; a scale
+        // applied twice or not at all would be off by 6.7x or 0.002x everywhere.
+        if (backend.Vk.HasFloat8CooperativeMatrix)
+        {
+            backend.EnableFp8Linear = true;
+            using Tensor fp8Out = new(new TensorShape(M, N), DType.F16);
+            backend.Linear(fp8Out, input, weightFp8, null);
+            ReadOnlySpan<Half> fS = fp8Out.AsReadOnlySpan<Half>();
+            float maxErr = 0f, maxAbs = 0f;
+            for (int m = 0; m < M; m++)
+            {
+                for (int n = 0; n < N; n++)
+                {
+                    float acc = 0;
+                    for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wRef[n * K + k];
+                    maxErr = MathF.Max(maxErr, MathF.Abs((float)fS[m * N + n] - acc));
+                    maxAbs = MathF.Max(maxAbs, MathF.Abs(acc));
+                }
+            }
+            Assert.True(maxErr / maxAbs < 0.05f, $"fp8 Linear (scale={scale}) error {maxErr / maxAbs:P2} of the output range.");
+        }
 
         input.Dispose(); weightF32.Dispose(); weightFp8.Dispose(); weightF16Ref.Dispose(); output.Dispose();
     }
@@ -1019,6 +1043,8 @@ public sealed class VulkanBackendSmokeTests
         using VulkanBackend backend = new();
         if (!backend.Capabilities.SupportsF16) return;
         backend.CacheWeightCasts = false;
+        // The per-element check below is the F16-cast path's; the fp8 Linear's activation error is checked against the range.
+        backend.EnableFp8Linear = false;
 
         const int M = 4108, K = 6144, N = 16384;
         const float scale = 0.00166f;   // Krea2's actual ff.gate scale magnitude
@@ -1588,6 +1614,34 @@ public sealed class VulkanBackendSmokeTests
                 Assert.InRange(hOut[i] - expected[i], -1e-5f, 1e-5f);
         }
         finally { hidden.Dispose(); bias.Dispose(); }
+    }
+
+    /// <summary>A <c>[B, C]</c> bias adds each batch item's own row: SDXL's ADM-conditioned time embedding differs between
+    /// the unconditional and conditional halves, and reading row 0 for both bent every SDXL image on Vulkan.</summary>
+    [Fact]
+    public void Backend_BroadcastAdd_PerBatchBias_Matches_Cpu()
+    {
+        if (!VulkanAvailable()) return;
+        using VulkanBackend backend = new();
+
+        const int B = 3, C = 4, Spatial = 16;
+        using Tensor hidden = new(new TensorShape(B, C, Spatial), DType.F32);
+        using Tensor bias = new(new TensorShape(B, C), DType.F32);
+        Span<float> hS = hidden.AsSpan<float>();
+        Span<float> bS = bias.AsSpan<float>();
+        for (int i = 0; i < B * C * Spatial; i++) hS[i] = MathF.Sin(i * 0.13f);
+        for (int i = 0; i < B * C; i++) bS[i] = (i + 1) * 0.5f;
+        float[] expected = new float[B * C * Spatial];
+        for (int b = 0; b < B; b++)
+            for (int c = 0; c < C; c++)
+                for (int s = 0; s < Spatial; s++)
+                    expected[b * C * Spatial + c * Spatial + s] = hS[b * C * Spatial + c * Spatial + s] + bS[b * C + c];
+
+        backend.BroadcastAdd(hidden, bias, C, Spatial);
+
+        ReadOnlySpan<float> hOut = hidden.AsReadOnlySpan<float>();
+        for (int i = 0; i < B * C * Spatial; i++)
+            Assert.InRange(hOut[i] - expected[i], -1e-5f, 1e-5f);
     }
 
     /// <summary>GroupNorm at SD1.5 U-Net shapes (32 groups, C=320, spatial=64×64) — the dominant U-Net norm.</summary>
@@ -3526,9 +3580,12 @@ public sealed class VulkanBackendSmokeTests
         "Q4_0" => new[] { 0 },
         "Q5_0" => new[] { 0 },
         "Q8_0" => new[] { 0 },
+        "Q2_K" => new[] { 80, 82 }, // d and dmin sit at the END of the super-block.
+        "Q3_K" => new[] { 108 },
         "Q4_K" => new[] { 0, 2 },
         "Q5_K" => new[] { 0, 2 },
         "Q6_K" => new[] { 208 },   // Q6_K's scale sits at the END of the super-block, not the start.
+        "IQ4_XS" => new[] { 0 },   // scales_h/scales_l after d are integer fields.
         _ => throw new ArgumentException(dtypeName),
     };
 
@@ -3536,9 +3593,12 @@ public sealed class VulkanBackendSmokeTests
     [InlineData("Q4_0")]
     [InlineData("Q5_0")]
     [InlineData("Q8_0")]
+    [InlineData("Q2_K")]
+    [InlineData("Q3_K")]
     [InlineData("Q4_K")]
     [InlineData("Q5_K")]
     [InlineData("Q6_K")]
+    [InlineData("IQ4_XS")]
     public unsafe void Backend_DequantizeToF32_MatchesGgufDequantizer(string dtypeName)
     {
         if (!VulkanAvailable()) return;
@@ -3549,9 +3609,12 @@ public sealed class VulkanBackendSmokeTests
             "Q4_0" => DType.Q4_0,
             "Q5_0" => DType.Q5_0,
             "Q8_0" => DType.Q8_0,
+            "Q2_K" => DType.Q2_K,
+            "Q3_K" => DType.Q3_K,
             "Q4_K" => DType.Q4_K,
             "Q5_K" => DType.Q5_K,
             "Q6_K" => DType.Q6_K,
+            "IQ4_XS" => DType.IQ4_XS,
             _ => throw new ArgumentException(dtypeName),
         };
         // 3 super-blocks/blocks worth of elements — exercises block-boundary handling without a huge buffer.
@@ -3594,61 +3657,6 @@ public sealed class VulkanBackendSmokeTests
         }
 
         quant.Dispose();
-    }
-
-    /// <summary>Correctness gate for <c>matmul_coopmat_blocked.comp.glsl</c> (2026-07-31), the register-
-    /// blocked GEMM built to test whether ggml/llama.cpp's core GEMM optimization (each subgroup computes
-    /// a GRID of 16x16 output tiles from ONE shared-memory-staged input tile, instead of one tile per
-    /// direct global-memory load) closes the ~30-160x Vulkan-vs-CUDA gap — see
-    /// docs/Checklists/TROUBLESHOOTING.md. NOT wired into DispatchMatmul; called directly via the internal
-    /// diagnostic entry point. Shapes deliberately >= 128 in M/N so BOTH register-blocking dimensions
-    /// (multiple subgroups per workgroup AND multiple accumulators per subgroup) are actually exercised —
-    /// a shape smaller than one workgroup tile (64) wouldn't test the thing this kernel exists to test.</summary>
-    [Theory]
-    [InlineData(128, 128, 128, false, 32u, 32u)]
-    [InlineData(256, 512, 256, true, 32u, 32u)]
-    [InlineData(129, 128, 144, false, 32u, 32u)]   // M not a multiple of 16; N not a multiple of 64 (both 16-aligned per the gate)
-    [InlineData(256, 512, 256, true, 16u, 16u)]    // register blocking DISABLED (1 accumulator/subgroup) -- the
-                                                    // "staged-only" benchmark config, needs its own correctness check
-    public void Backend_CoopmatBlocked_Diagnostic_MatchesCpu(int M, int K, int N, bool hasBias, uint wm, uint wn)
-    {
-        if (!VulkanAvailable()) return;
-        using VulkanBackend backend = new();
-        if (!backend.Capabilities.SupportsF16 || !backend.Vk.HasCooperativeMatrix) return;
-
-        Tensor input = new(new TensorShape(M, K), DType.F16);
-        Tensor weight = new(new TensorShape(N, K), DType.F16);
-        Tensor? bias = hasBias ? new Tensor(new TensorShape(N), DType.F16) : null;
-        Tensor output = new(new TensorShape(M, N), DType.F16);
-
-        Random rng = new(2000 + M + N);
-        Span<Half> iS = input.AsSpan<Half>();
-        Span<Half> wS = weight.AsSpan<Half>();
-        Half[] bS = new Half[N];
-        for (int i = 0; i < M * K; i++) iS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.3f);
-        for (int i = 0; i < N * K; i++) wS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.2f);
-        if (hasBias)
-        {
-            Span<Half> bSpan = bias!.AsSpan<Half>();
-            for (int i = 0; i < N; i++) { bS[i] = (Half)((float)(rng.NextDouble() * 2 - 1) * 0.05f); bSpan[i] = bS[i]; }
-        }
-
-        bool dispatched = backend.TryDispatchCoopmatBlockedDiagnostic(output, input, weight, transposeA: false, transposeB: true, bias, wm, wn);
-        Assert.True(dispatched, "TryDispatchCoopmatBlockedDiagnostic returned false (gate didn't pass) for a shape it should handle.");
-
-        ReadOnlySpan<Half> oS = output.AsReadOnlySpan<Half>();
-        float maxRel = 0f; int firstM = -1, firstN = -1;
-        for (int m = 0; m < M; m++)
-            for (int n = 0; n < N; n++)
-            {
-                float acc = hasBias ? (float)bS[n] : 0f;
-                for (int k = 0; k < K; k++) acc += (float)iS[m * K + k] * (float)wS[n * K + k];
-                float rel = MathF.Abs((float)oS[m * N + n] - acc) / MathF.Max(1e-3f, MathF.Abs(acc));
-                if (rel > maxRel) { maxRel = rel; firstM = m; firstN = n; }
-            }
-        Assert.True(maxRel < 0.02f, $"Coopmat-blocked (M={M},K={K},N={N},bias={hasBias}) maxRelErr {maxRel:P2} at [{firstM},{firstN}] too high.");
-
-        input.Dispose(); weight.Dispose(); bias?.Dispose(); output.Dispose();
     }
 
     /// <summary>Correctness gate for <c>matmul_coopmat2.comp.glsl</c> (2026-07-31), the

@@ -98,7 +98,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             }
             else
             {
-                Dictionary<string, Tensor> w = LoadSideModel(SideModels.HiDreamClipL, "text_encoders.clip_l.transformer.", loaders);
+                Dictionary<string, Tensor> w = LoadSideModel(SideModels.HiDreamClipL, "text_encoders.clip_l.transformer.", loaders, context.Cancel);
                 clipL.LoadWeights(w, prefix: "text_model");
             }
 
@@ -109,7 +109,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             }
             else
             {
-                Dictionary<string, Tensor> w = LoadSideModel(SideModels.HiDreamClipG, "text_encoders.clip_g.transformer.", loaders);
+                Dictionary<string, Tensor> w = LoadSideModel(SideModels.HiDreamClipG, "text_encoders.clip_g.transformer.", loaders, context.Cancel);
                 clipG.LoadWeights(w, prefix: "text_model");
             }
 
@@ -120,7 +120,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             }
             else
             {
-                t5.LoadWeights(LoadSideModel(SideModels.T5XxlEnconly, "text_encoders.t5xxl.transformer.", loaders));
+                t5.LoadWeights(LoadSideModel(SideModels.T5XxlEnconly, "text_encoders.t5xxl.transformer.", loaders, context.Cancel));
             }
 
             LlamaStyleEncoder llama = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Llama31_8B);
@@ -130,7 +130,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             }
             else
             {
-                llama.LoadWeights(LoadSideModel(SideModels.Llama31_8B, "text_encoders.llama.transformer.", loaders));
+                llama.LoadWeights(LoadSideModel(SideModels.Llama31_8B, "text_encoders.llama.transformer.", loaders, context.Cancel));
             }
 
             VaeDecoder vae = new VaeDecoder(VaeConfig.Flux);
@@ -141,7 +141,7 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
             }
             else
             {
-                string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                 (Dictionary<string, Tensor> standaloneVae, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
                 loaders.Add(vaeLoader);
                 // The canonical flux ae.safetensors is BFL-native LDM naming; VaeDecoder wants diffusers keys.
@@ -189,9 +189,9 @@ public sealed class HiDreamRecipe : IArchitectureRecipe
     }
 
     /// <summary>Resolves + loads one standalone side-model file, registering its loader for disposal and stripping the Comfy <paramref name="comfyPrefix"/> wrapper off every key.</summary>
-    private static Dictionary<string, Tensor> LoadSideModel(ModelAsset asset, string comfyPrefix, List<IDisposable> loaders)
+    private static Dictionary<string, Tensor> LoadSideModel(ModelAsset asset, string comfyPrefix, List<IDisposable> loaders, CancellationToken cancel)
     {
-        string path = ModelDownloader.EnsureSideModelAsync(asset, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string path = ModelDownloader.EnsureSideModelAsync(asset, onProgress: null, cancel).GetAwaiter().GetResult();
         SafeTensorsLoader loader = new SafeTensorsLoader();
         loader.Load(path);
         loaders.Add(loader);

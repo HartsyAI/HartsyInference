@@ -241,7 +241,8 @@ public sealed class CheckpointSource : IDisposable
             // set anywhere in the file aborts the pass with everything before it already allocated.
             Dictionary<string, Tensor> folded = Nf4CompanionFold.Apply(weights, owned);
             Dictionary<string, Tensor> normalized =
-                CheckpointConvertUtils.ApplyFp8ScaledDequant(folded, options.Nvfp4ToFp8, options.ResidentNvfp4);
+                CheckpointConvertUtils.ApplyFp8ScaledDequant(folded, options.Nvfp4ToFp8, options.ResidentNvfp4,
+                    options.KeepNvfp4Companions);
             // Against `folded`, not `weights`: the NF4 decodes are already owned, and re-adding them here would
             // dispose each one twice.
             CollectAllocations(folded, normalized, owned);

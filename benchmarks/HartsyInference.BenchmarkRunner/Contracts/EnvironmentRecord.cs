@@ -13,5 +13,8 @@ public sealed record EnvironmentRecord
     public required SortedDictionary<string, string> Binaries { get; init; }
     public required SortedDictionary<string, string> Settings { get; init; }
     public SortedDictionary<string, string> NativeLibraries { get; init; } = new(StringComparer.Ordinal);
-    public string PowerProfile { get; init; } = "unreported";
+    public AttestationRecord Attestation { get; init; } = new() { Source = AttestationRecord.Unavailable };
+    /// <summary>Canonical one-line summary of the attested power and clock configuration, or
+    /// <c>unattested</c>. A cohort key component, so an unattested run never pools with an attested one.</summary>
+    public string PowerProfile { get; init; } = "unattested";
 }

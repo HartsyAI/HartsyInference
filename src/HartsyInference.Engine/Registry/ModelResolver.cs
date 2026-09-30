@@ -26,6 +26,18 @@ public static class ModelResolver
     public static ModelSpec Resolve(string modelArg, string? modelPathArg, Modality modality)
     {
         CatalogEntry? catalog = ModelCatalog.Find(modelArg);
+        string? variant = null;
+        // Image and video take a family:variant selector (qwen-image:edit); audio descriptors parse the raw token
+        // themselves, so for them an unmatched selector must stay catalog-less.
+        if (catalog is null && modality is Modality.Image or Modality.Video)
+        {
+            ModelSelector selector = ModelSelector.Parse(modelArg);
+            if (selector.Variant is not null && ModelCatalog.Find(selector.Id) is CatalogEntry family)
+            {
+                catalog = family;
+                variant = selector.Variant;
+            }
+        }
         string? local = LocateLocal(modelArg, modelPathArg, catalog, modality);
         return new ModelSpec
         {
@@ -33,6 +45,7 @@ public static class ModelResolver
             Modality = modality,
             Catalog = catalog,
             LocalPath = local,
+            Variant = variant,
         };
     }
 

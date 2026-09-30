@@ -253,7 +253,7 @@ model/
 - **Repository:** [github.com/city96/ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF)
 - GGUF quantization support for ComfyUI diffusion models.
 - Uses memory-mapped loading and on-demand dequantization.
-- Supports Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K through Q6_K, IQ4_NL, IQ4_XS.
+- Supports Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K through Q6_K, IQ4_NL, IQ4_XS, IQ3_S, IQ3_XXS, IQ2_S, IQ2_XS, IQ2_XXS, IQ1_S, IQ1_M.
 - Initial T5 quantization support added recently.
 - VAE quantization NOT supported — kept in FP16/FP32.
 - Pre-quantized Flux models: [city96/FLUX.1-dev-gguf](https://huggingface.co/city96/FLUX.1-dev-gguf)

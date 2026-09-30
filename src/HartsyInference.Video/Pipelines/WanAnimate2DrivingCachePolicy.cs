@@ -80,12 +80,12 @@ public static class WanAnimate2DrivingCachePolicy
         }
         if (globalMode == LowVramMode.ForceOn)
         {
-            decidedBy = $"{LowVramPolicy.EnvironmentVariable}=on";
+            decidedBy = $"{LowVramPolicy.SettingId}=on";
             return true;
         }
         if (globalMode == LowVramMode.ForceOff)
         {
-            decidedBy = $"{LowVramPolicy.EnvironmentVariable}=off";
+            decidedBy = $"{LowVramPolicy.SettingId}=off";
             return false;
         }
         if (freeBytes <= 0)

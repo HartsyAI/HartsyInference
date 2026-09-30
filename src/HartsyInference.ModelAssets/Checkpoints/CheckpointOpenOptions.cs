@@ -1,3 +1,5 @@
+using HartsyInference.Core.Backends;
+
 namespace HartsyInference.ModelAssets.Checkpoints;
 
 /// <summary>How a <see cref="CheckpointSource"/> presents a checkpoint's weights to the converter that consumes them.</summary>
@@ -18,6 +20,28 @@ public sealed record CheckpointOpenOptions
 
     /// <summary>Keep NVFP4 weights packed with their scales on <see cref="Core.Tensors.Tensor.QuantInfo"/> instead of unpacking them, for a caller that knows a CUDA backend will consume them.</summary>
     public bool ResidentNvfp4 { get; init; }
+
+    /// <summary>Keep NVFP4 weights packed with their scales as COMPANION KEYS, for a caller whose own layer reads that
+    /// form — the opposite trade to <see cref="ResidentNvfp4"/>, which moves the scales onto the tensor.</summary>
+    /// <remarks>Set this only for a dictionary that reaches such a consumer directly, never one an architecture
+    /// converter renames: surviving companions are exactly what folding exists to prevent a converter from splitting
+    /// from their weight. It covers AWQ layers, which <see cref="ResidentNvfp4"/> cannot — <c>QuantInfo</c> has no
+    /// <c>pre_quant_scale</c> field, so those layers take the eager path there and widen. Ignored unless
+    /// <see cref="FoldQuantCompanions"/> is on, which is the pass it modifies.</remarks>
+    public bool KeepNvfp4Companions { get; init; }
+
+    /// <summary>The options for a checkpoint whose nvfp4 groups <paramref name="backend"/> will consume: kept packed where it multiplies them natively, folded to fp8 (half the F16 footprint, the same fp8 GEMM path) everywhere else. One decision, so the native path is reachable on exactly the hardware it targets and nothing else changes.</summary>
+    public static CheckpointOpenOptions ForNvfp4Consumer(IBackend backend)
+        => backend.Capabilities.NativeBlockScaledGemm ? new() { ResidentNvfp4 = true } : new() { Nvfp4ToFp8 = true };
+
+    /// <summary>The options for a checkpoint whose nvfp4 groups <paramref name="backend"/> will consume ONLY where it
+    /// multiplies them natively; everywhere else the defaults stand, so a fleet without the native GEMM produces the
+    /// same bytes it did before.</summary>
+    /// <remarks>The narrow half of <see cref="ForNvfp4Consumer"/>, for a model whose F16 expansion already fits: that
+    /// one also folds to fp8 off Blackwell, which is a numerics change on every card in the fleet, and a model that
+    /// does not need the footprint should not pay it to make the native path reachable on one that does.</remarks>
+    public static CheckpointOpenOptions ForNativeNvfp4Gemm(IBackend backend)
+        => backend.Capabilities.NativeBlockScaledGemm ? new() { ResidentNvfp4 = true } : new();
 
     /// <summary>Relabel rank-2 GGUF tensors from ggml's <c>[in, out]</c> order to the <c>[out, in]</c> order the engine assumes for a matrix weight.</summary>
     /// <remarks>Only a caller that wants GGUF's own layout — a re-quantizer rewriting a GGUF — sets this false. With it

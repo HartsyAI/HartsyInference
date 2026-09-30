@@ -198,12 +198,12 @@ public sealed unsafe class LtxVideoPipeline : DiffusionPipelineBase
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }
 
-        // With HARTSY_DIT_GRAPH the transformer captures the CFG-pair step and replays it; the working latent must
+        // With numerics.ditGraph the transformer captures the CFG-pair step and replays it; the working latent must
         // live in its fixed buffer (denoised in place by device CfgEulerStep). Off (default), this returns `latents`.
         Tensor stepLatent = condCache is null ? _transformer.PrepareGraphLatent(Backend, latents) : latents;
         float[] tsteps = LancePipelineCommon.BuildShiftedTimesteps(steps, shift);

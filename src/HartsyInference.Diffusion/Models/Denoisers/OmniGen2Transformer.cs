@@ -299,7 +299,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
         backend.Linear(txtTokens, txtNormed, _captionEmbedderWeight!, _captionEmbedderBias);
         txtNormed.Dispose();
 
-        // F16 hot path (HARTSY_DIT_F16): cast both streams to F16 once; the blocks run entirely in F16. Safe now
+        // F16 hot path (numerics.ditF16): cast both streams to F16 once; the blocks run entirely in F16. Safe now
         // that ConcatAlongSeqDim/SplitAlongSeqDim are dtype-aware (they were F32-hardcoded → 2× OOB read on the
         // F16 buffers = the intermittent segfault). No-op when the flag is off.
         imgTokens = CastStreamToAct(backend, imgTokens);
@@ -660,7 +660,7 @@ public sealed unsafe class OmniGen2Transformer : IDisposable
     private static Tensor? CastToF32IfNeeded(Tensor? t) =>
         t is null ? null : t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
-    /// <summary>Casts an F32 block-input stream to the DiT activation dtype (F16 on the <c>HARTSY_DIT_F16</c> hot
+    /// <summary>Casts an F32 block-input stream to the DiT activation dtype (F16 on the <c>numerics.ditF16</c> hot
     /// path, else a no-op passthrough). Disposes the source when it casts. Device-resident.</summary>
     private static Tensor CastStreamToAct(IBackend backend, Tensor f32Stream)
     {

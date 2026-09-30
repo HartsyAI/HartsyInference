@@ -10,4 +10,9 @@ Use [methodology](../docs/Research/PROFILING_METHODOLOGY.md) and the [benchmark 
 6. Copy artifacts to the agreed durable destination, verify the copy, and update the canonical scoreboard with date/source. benchmarks/results is ignored locally; do not assume output was committed or uploaded.
 7. Stop the workload and terminate the rented compute; check storage and other continuing charges. Confirm completion in the provider control plane.
 
+The scripted form of steps 2–7 is `tests/blackwell-run.sh` (preflight → bootstrap → probe → gpu-tests → models →
+collect, stage-resumable, `--budget-minutes` hard stop, `--auto-stop` for RunPod). Rehearse it with `--rehearsal` on the
+local card before renting: if it completes there, the pod run differs only in hardware. Its preflight refuses a driver
+below 580, because every nvcc-built PTX shipped here is ISA 9.0.
+
 PTX load failures require checking the actual emitted ISA, target and installed driver. Do not “fix” the header manually or assume an old toolkit version supports every shipped artifact.

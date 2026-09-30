@@ -14,6 +14,9 @@ namespace HartsyInference.Diffusion.Tests;
 /// slot makes "the second image" in a prompt point at the wrong picture with no error anywhere.</summary>
 public sealed class QwenImageEditConditioningTests
 {
+    private static readonly QwenImageEditTemplate Plus = QwenImageEditTemplate.EditPlus;
+    private static readonly QwenImageEditTemplate V1 = QwenImageEditTemplate.Edit;
+
     private static ImageData Image(int width, int height) =>
         new ImageData { Rgb = new byte[(long)width * height * 3], Width = width, Height = height };
 
@@ -23,7 +26,7 @@ public sealed class QwenImageEditConditioningTests
     public void Resolve_PresentsInitImageFirst()
     {
         using QwenImageEditConditioning.References? references =
-            QwenImageEditConditioning.Resolve(Image(640, 480), [Image(480, 640)]);
+            QwenImageEditConditioning.Resolve(Plus, Image(640, 480), [Image(480, 640)]);
         Assert.NotNull(references);
         Assert.Equal(2, references!.Latent.Count);
         Assert.Equal(2, references.Vision.Count);
@@ -37,18 +40,18 @@ public sealed class QwenImageEditConditioningTests
     [Fact]
     public void Resolve_CapsAtThreeReferences()
     {
-        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(
+        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(Plus,
             Image(512, 512), [Image(512, 512), Image(512, 512), Image(512, 512)]);
         Assert.NotNull(references);
-        Assert.Equal(QwenImageEditConditioning.MaxReferences, references!.Latent.Count);
+        Assert.Equal(Plus.MaxReferences, references!.Latent.Count);
     }
 
     /// <summary>No init image and no references is text-to-image, not an empty edit.</summary>
     [Fact]
     public void Resolve_WithNothingAttached_ReturnsNull()
     {
-        Assert.Null(QwenImageEditConditioning.Resolve(null, null));
-        Assert.Null(QwenImageEditConditioning.Resolve(null, []));
+        Assert.Null(QwenImageEditConditioning.Resolve(Plus, null, null));
+        Assert.Null(QwenImageEditConditioning.Resolve(Plus, null, []));
     }
 
     /// <summary>The VAE copy lands on the ~1 MP budget with both sides divisible by 16, which is what the packed
@@ -60,7 +63,7 @@ public sealed class QwenImageEditConditioningTests
     [InlineData(64, 64)]
     public void Resolve_RescalesEachReferenceForItsConsumer(int width, int height)
     {
-        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(Image(width, height), null);
+        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(Plus, Image(width, height), null);
         Assert.NotNull(references);
         Tensor latent = references!.Latent[0];
         Assert.Equal(0, latent.Shape[2] % 16);
@@ -70,15 +73,15 @@ public sealed class QwenImageEditConditioningTests
             (long)(QwenImageEditConditioning.LatentTargetArea * 1.1));
         Tensor vision = references.Vision[0];
         long visionArea = vision.Shape[2] * vision.Shape[3];
-        Assert.InRange(visionArea, (long)(QwenImageEditConditioning.VisionTargetArea * 0.9),
-            (long)(QwenImageEditConditioning.VisionTargetArea * 1.1));
+        Assert.InRange(visionArea, (long)(Plus.VisionTargetArea * 0.9),
+            (long)(Plus.VisionTargetArea * 1.1));
     }
 
     /// <summary>Aspect ratio survives both rescales — a stretched reference edits as a stretched subject.</summary>
     [Fact]
     public void Resolve_PreservesAspectRatio()
     {
-        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(Image(1920, 1080), null);
+        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(Plus, Image(1920, 1080), null);
         Assert.NotNull(references);
         foreach (Tensor reference in new[] { references!.Latent[0], references.Vision[0] })
         {
@@ -94,7 +97,7 @@ public sealed class QwenImageEditConditioningTests
     {
         using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
         (WeightedTokenSequence sequence, int dropIndex) =
-            QwenImageEditConditioning.BuildTokens(tokenizer, "make it red", [7, 3]);
+            QwenImageEditConditioning.BuildTokens(tokenizer, "make it red", [7, 3], Plus);
         int[] tokens = sequence.Tokens;
         Assert.Equal(2, tokens.Count(t => t == Qwen25VlMultimodalEncoder.VisionStartId));
         Assert.Equal(2, tokens.Count(t => t == Qwen25VlMultimodalEncoder.VisionEndId));
@@ -115,7 +118,7 @@ public sealed class QwenImageEditConditioningTests
     public void BuildTokens_DropIndexEndsTheUserHeader()
     {
         using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
-        (WeightedTokenSequence sequence, int dropIndex) = QwenImageEditConditioning.BuildTokens(tokenizer, "x", [4]);
+        (WeightedTokenSequence sequence, int dropIndex) = QwenImageEditConditioning.BuildTokens(tokenizer, "x", [4], Plus);
         int[] tokens = sequence.Tokens;
         int secondImStart = Array.IndexOf(tokens, Qwen3Tokenizer.ImStartId,
             Array.IndexOf(tokens, Qwen3Tokenizer.ImStartId) + 1);
@@ -128,7 +131,7 @@ public sealed class QwenImageEditConditioningTests
     public void BuildTokens_IsNotTruncatedToTheTextToImageWindow()
     {
         using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
-        (WeightedTokenSequence sequence, _) = QwenImageEditConditioning.BuildTokens(tokenizer, "compose these", [196, 196, 196]);
+        (WeightedTokenSequence sequence, _) = QwenImageEditConditioning.BuildTokens(tokenizer, "compose these", [196, 196, 196], Plus);
         int[] tokens = sequence.Tokens;
         Assert.Equal(588, tokens.Count(t => t == Qwen25VlMultimodalEncoder.ImageTokenId));
         Assert.True(tokens.Length > 512);
@@ -143,6 +146,40 @@ public sealed class QwenImageEditConditioningTests
     public void BuildTokens_RejectsAnEmptyPlaceholderRun()
     {
         using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
-        Assert.Throws<ArgumentOutOfRangeException>(() => QwenImageEditConditioning.BuildTokens(tokenizer, "x", [4, 0]));
+        Assert.Throws<ArgumentOutOfRangeException>(() => QwenImageEditConditioning.BuildTokens(tokenizer, "x", [4, 0], Plus));
+    }
+
+    /// <summary>Edit v1 (ComfyUI <c>TextEncodeQwenImageEdit</c>) was trained on one image: the rest are dropped, not
+    /// silently presented as a second picture the model has no slot for.</summary>
+    [Fact]
+    public void Resolve_EditV1_TakesOneReferenceAtTheOneMegapixelVisionArea()
+    {
+        using QwenImageEditConditioning.References? references = QwenImageEditConditioning.Resolve(V1, Image(1920, 1080), [Image(512, 512)]);
+        Assert.NotNull(references);
+        Assert.Single(references!.Latent);
+        long visionArea = references.Vision[0].Shape[2] * references.Vision[0].Shape[3];
+        Assert.InRange(visionArea, (long)(V1.VisionTargetArea * 0.9), (long)(V1.VisionTargetArea * 1.1));
+    }
+
+    /// <summary>v1's template puts the vision block straight after the user header — ComfyUI's
+    /// <c>llama_template_images</c> has no <c>Picture 1:</c> label, and a label the model never saw shifts the text.</summary>
+    [Fact]
+    public void BuildTokens_EditV1_EmitsAnUnlabelledVisionBlock()
+    {
+        using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
+        (WeightedTokenSequence sequence, int dropIndex) = QwenImageEditConditioning.BuildTokens(tokenizer, "make it red", [5], V1);
+        int[] tokens = sequence.Tokens;
+        Assert.Equal(Qwen25VlMultimodalEncoder.VisionStartId, tokens[dropIndex]);
+        Assert.Equal(5, tokens.Count(t => t == Qwen25VlMultimodalEncoder.ImageTokenId));
+        (WeightedTokenSequence labelled, int labelledDrop) = QwenImageEditConditioning.BuildTokens(tokenizer, "make it red", [5], Plus);
+        Assert.NotEqual(Qwen25VlMultimodalEncoder.VisionStartId, labelled.Tokens[labelledDrop]);
+    }
+
+    /// <summary>More references than the template addresses is a caller bug, refused rather than emitted.</summary>
+    [Fact]
+    public void BuildTokens_RejectsMoreReferencesThanTheTemplate()
+    {
+        using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
+        Assert.Throws<ArgumentOutOfRangeException>(() => QwenImageEditConditioning.BuildTokens(tokenizer, "x", [4, 4], V1));
     }
 }

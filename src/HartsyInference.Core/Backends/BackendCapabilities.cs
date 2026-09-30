@@ -15,6 +15,9 @@ public sealed class BackendCapabilities
     /// <summary>Whether this backend supports quantized (Q8_0, Q4_K) operations.</summary>
     public bool SupportsQuantized { get; init; }
 
+    /// <summary>Whether a block-scaled weight (NVFP4/MXFP4/MXFP8 with its scale tensor on <c>QuantInfo</c>) multiplies natively here, so a loader should keep it packed rather than fold it to fp8 or F16.</summary>
+    public bool NativeBlockScaledGemm { get; init; }
+
     /// <summary>Whether this backend supports Conv2D.</summary>
     public bool SupportsConv2D { get; init; }
 

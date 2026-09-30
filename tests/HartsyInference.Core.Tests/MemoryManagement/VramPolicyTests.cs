@@ -15,16 +15,16 @@ public sealed class VramPolicyTests
     /// back to the environment, so a stray value on the dev box would otherwise decide these assertions.</summary>
     private static void WithEnvironment(string? value, Action body)
     {
-        string? previous = Environment.GetEnvironmentVariable(LowVramPolicy.EnvironmentVariable);
+        string? previous = Environment.GetEnvironmentVariable(LowVramPolicy.SettingId);
         try
         {
-            Environment.SetEnvironmentVariable(LowVramPolicy.EnvironmentVariable, value);
+            Environment.SetEnvironmentVariable(LowVramPolicy.SettingId, value);
             LowVramPolicy.ResetCacheForTests();
             body();
         }
         finally
         {
-            Environment.SetEnvironmentVariable(LowVramPolicy.EnvironmentVariable, previous);
+            Environment.SetEnvironmentVariable(LowVramPolicy.SettingId, previous);
             LowVramPolicy.ResetCacheForTests();
         }
     }

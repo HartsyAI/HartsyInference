@@ -94,7 +94,7 @@ public sealed class CudaGraph : IDisposable
         DestroyGraph(graph, throwOnError: true);
     }
 
-    /// <summary>HARTSY_GRAPH_DUMP=1: logs the captured graph's node count and per-type histogram — the direct measurement of how many kernel vs mem-alloc/free vs other nodes a decode step replays (alloc/free nodes come from per-intermediate AllocateDevice/Dispose during capture).</summary>
+    /// <summary>diagnostics.graphDump=true: logs the captured graph's node count and per-type histogram — the direct measurement of how many kernel vs mem-alloc/free vs other nodes a decode step replays (alloc/free nodes come from per-intermediate AllocateDevice/Dispose during capture).</summary>
     private static void DumpNodeHistogram(nint graph)
     {
         if (!EngineKnobs.GraphDump.Value) return;
@@ -154,12 +154,26 @@ public sealed class CudaGraph : IDisposable
     }
 
     /// <summary>Aborts an open capture region, leaving the stream clean (call from exception handlers between <see cref="BeginCapture"/> and <see cref="EndCaptureAndInstantiate"/>).</summary>
+    /// <remarks>An invalidated capture is still open and ends with the invalidation error, which is the expected outcome
+    /// here; a stream that already left capture mode has nothing to abort.</remarks>
     public void AbortCapture()
     {
         List<Exception>? failures = null;
         nint graph = 0;
-        try { CudaDriverApi.cuStreamEndCapture(_stream, out graph).ThrowOnError(); }
+        int status = -1;
+        try { CudaDriverApi.cuStreamIsCapturing(_stream, out status).ThrowOnError(); }
         catch (Exception error) { (failures ??= []).Add(error); }
+        if (status != CudaDriverApi.CU_STREAM_CAPTURE_STATUS_NONE)
+        {
+            int ended = CudaDriverApi.cuStreamEndCapture(_stream, out graph);
+            bool expected = status == CudaDriverApi.CU_STREAM_CAPTURE_STATUS_INVALIDATED
+                && ended == CudaDriverApi.CUDA_ERROR_STREAM_CAPTURE_INVALIDATED;
+            if (!expected)
+            {
+                try { ended.ThrowOnError(); }
+                catch (Exception error) { (failures ??= []).Add(error); }
+            }
+        }
         if (graph != 0)
         {
             try { DestroyGraph(graph, throwOnError: true); }

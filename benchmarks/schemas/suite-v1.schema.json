@@ -19,6 +19,12 @@
     "publishable": {
       "type": "boolean"
     },
+    "telemetryCadenceMs": {
+      "type": "integer"
+    },
+    "maxThrottledSampleFraction": {
+      "type": "number"
+    },
     "cases": {
       "type": "array",
       "items": {

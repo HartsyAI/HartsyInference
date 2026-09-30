@@ -40,7 +40,7 @@ public static class VramPolicyRegistry
         {
             return pinned;
         }
-        return VramPolicyResolver.FromLegacyMode(LowVramPolicy.ResolveEnvironment());
+        return VramPolicyResolver.FromLegacyMode(LowVramPolicy.ResolveProcessWide());
     }
 
     /// <summary>The policy for one generation: <paramref name="backend"/>'s, refined by any per-request overrides.</summary>

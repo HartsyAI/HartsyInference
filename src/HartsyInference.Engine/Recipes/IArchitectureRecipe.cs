@@ -1,3 +1,5 @@
+using HartsyInference.Engine.Variants;
+
 namespace HartsyInference.Engine.Recipes;
 
 /// <summary>One architecture family's construction recipe: it knows which family id it handles (the catalog slug, e.g.
@@ -21,6 +23,13 @@ public interface IArchitectureRecipe
     /// been wired rejects every composition object with a precise error instead of silently ignoring it.</summary>
     ImageFeatures Supports => ImageFeatures.None;
 
+    /// <summary>How many input images (init plus references) this family reads.</summary>
+    /// <remarks>Also whether references need an init image. Defaults from <see cref="Supports"/>.</remarks>
+    ImageInputLimits InputLimits => ImageInputLimits.DerivedFrom(Supports);
+
+    /// <summary>The input-image limits of <paramref name="variant"/>; the default is the family-level <see cref="InputLimits"/>.</summary>
+    ImageInputLimits InputLimitsFor(ResolvedModelVariant? variant) => InputLimits;
+
     /// <summary>Memory and multi-device behaviours this recipe actually wires; the default declares none, so a family
     /// nobody has wired reports each configured-but-ignored setting instead of silently doing nothing with it.</summary>
     MemoryCapabilities MemorySupports => MemoryCapabilities.None;
@@ -35,4 +44,19 @@ public interface IArchitectureRecipe
     /// left null. The generic 20-step / CFG-7.5 fallback keeps a recipe that has not declared its own numbers working;
     /// variant-dependent families refine it further via <see cref="IRecipePipeline.VariantDefaults"/>.</summary>
     ImageDefaults Defaults => ImageDefaults.Standard;
+
+    /// <summary>The variants this family ships whose weights alone may not tell them apart; null when it has one.</summary>
+    ModelVariantCatalog? Variants => null;
+
+    /// <summary>The features <paramref name="variant"/> of this family applies; the default is the family-level <see cref="Supports"/>.</summary>
+    ImageFeatures SupportsFor(ResolvedModelVariant? variant) => Supports;
+
+    /// <summary>The official defaults for <paramref name="variant"/>; the default is the family-level <see cref="Defaults"/>.</summary>
+    ImageDefaults DefaultsFor(ResolvedModelVariant? variant) => Defaults;
+
+    /// <summary>What this family's activations cost at a given geometry, read from the checkpoint header without
+    /// loading weights; the default describes nothing and the memory estimate falls back to a generic allowance.</summary>
+    /// <remarks>Implementations must call the same formulas the pipeline budgets with, so the estimate a host routes on
+    /// and the planner that later places the weights cannot disagree.</remarks>
+    Planning.Memory.RecipeMemoryModel? DescribeMemory(ModelAssets.Checkpoints.CheckpointHeader header) => null;
 }

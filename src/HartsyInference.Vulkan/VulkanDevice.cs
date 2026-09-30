@@ -16,6 +16,11 @@ public sealed class VulkanDevice : IDisposable
     private nint _queue;
 
     public nint PhysicalDevice => _physicalDevice;
+
+    /// <summary>Index of the chosen device in the loader's enumeration, whether it was named or ranked for.</summary>
+    /// <remarks>What was picked, not what was asked for. The two differ on every call that left the choice open, and
+    /// reporting the request there would name a device the engine is not on.</remarks>
+    public int PhysicalDeviceIndex { get; private set; }
     public nint Handle
     {
         get
@@ -60,6 +65,7 @@ public sealed class VulkanDevice : IDisposable
         VulkanApi.vkGetDeviceQueue(device, caps.ComputeQueueFamilyIndex, 0, out nint queue);
 
         VulkanDevice d = new(instance) { Capabilities = caps, MemoryProperties = memProps };
+        d.PhysicalDeviceIndex = Array.IndexOf(phys, chosen);
         d._physicalDevice = chosen;
         d._device = device;
         d._queue = queue;
@@ -200,7 +206,7 @@ public sealed class VulkanDevice : IDisposable
             if ((h.flags & VkMemoryHeapFlags.DeviceLocal) != 0) vram += h.size;
         }
 
-        (bool hasMemoryBudget, bool hasPushDescriptor, bool hasCoopMatrix, bool hasCoopMatrix2Raw) = QueryDeviceExtensions(pd);
+        (bool hasMemoryBudget, bool hasPushDescriptor, bool hasCoopMatrix, bool hasCoopMatrix2Raw, bool hasFloat8Ext) = QueryDeviceExtensions(pd);
 
         // The extension being present is not enough: the matmul_coopmat shader hard-codes a
         // specific configuration (16x16x16, FP16 A/B, FP32 accumulate, subgroup scope). NVIDIA
@@ -218,6 +224,23 @@ public sealed class VulkanDevice : IDisposable
         bool hasCoopMatrix2 = hasCoopMatrix && hasCoopMatrix2Raw
             && CoopMat2Supported(instance, pd, out coopMat2MGran, out coopMat2NGran, out coopMat2KGran, out coopMat2WgInvocations);
 
+        // fp8 cooperative matrices need the extension, both of its features, and an enumerated E4M3 configuration;
+        // an Ampere card can offer fp8 types without the tensor-core math, so the features alone are not the answer.
+        uint fp8M = 0, fp8N = 0, fp8K = 0;
+        string? fp8Reason =
+            !hasCoopMatrix ? "the device has no cooperative matrices"
+            : !hasFloat8Ext ? (props2.properties.vendorID != 0x10DE ? "the driver does not offer VK_EXT_shader_float8"
+                // NVIDIA packs the major version in the top 10 bits; from 595 a missing extension is the card, not the driver.
+                : (props2.properties.driverVersion >> 22) >= 595 ? "the card does not offer VK_EXT_shader_float8 (no fp8 tensor cores; Ada or newer has them)"
+                : "the driver does not offer VK_EXT_shader_float8 (NVIDIA 595 or newer does)")
+            : !Float8FeaturesOffered(pd) ? "the driver offers VK_EXT_shader_float8 without fp8 cooperative matrices"
+            : !Fp8CoopMatShape(instance, pd, out fp8M, out fp8N, out fp8K) ? "the device lists no E4M3 cooperative-matrix shape (no fp8 tensor cores)"
+            : null;
+        bool hasFp8CoopMat = fp8Reason is null;
+        uint fp8Cm2M = 0, fp8Cm2N = 0, fp8Cm2K = 0, fp8Cm2Wg = 0;
+        bool hasFp8CoopMat2 = hasFp8CoopMat && hasCoopMatrix2 && f12.storageBuffer8BitAccess != 0
+            && CoopMat2Config(instance, pd, VkComponentTypeKHR.Float8E4M3, out fp8Cm2M, out fp8Cm2N, out fp8Cm2K, out fp8Cm2Wg);
+
         // The query is the answer. It used to come back all zeros, and this block used to work around that with
         // apiVersion and a vendor-ID allowlist, on the belief that "older NVIDIA Linux blobs" misreport promoted
         // features. They do not: the feature structs carried sTypes no driver recognises, so they were skipped on
@@ -231,6 +254,8 @@ public sealed class VulkanDevice : IDisposable
         bool cfs   = f13.computeFullSubgroups != 0;
         bool sync2 = f13.synchronization2 != 0;
         bool int8dot = f13.shaderIntegerDotProduct != 0;
+        bool int64 = feat2.features.shaderInt64 != 0;
+        bool int16 = feat2.features.shaderInt16 != 0;
 
         VulkanCapabilities caps = new()
         {
@@ -266,6 +291,8 @@ public sealed class VulkanDevice : IDisposable
             SupportsFp16 = fp16,
             Storage16Bit = f11.storageBuffer16BitAccess != 0,
             HasInt8DotProduct = int8dot,
+            ShaderInt64 = int64,
+            ShaderInt16 = int16,
             SubgroupSizeControl = sgs,
             ComputeFullSubgroups = cfs,
             Synchronization2 = sync2,
@@ -280,6 +307,16 @@ public sealed class VulkanDevice : IDisposable
             CoopMat2NGranularity = coopMat2NGran,
             CoopMat2KGranularity = coopMat2KGran,
             CoopMat2WorkgroupInvocations = coopMat2WgInvocations,
+            HasFloat8CooperativeMatrix = hasFp8CoopMat,
+            Fp8CoopMatUnavailableReason = fp8Reason,
+            HasFp8CoopMat2 = hasFp8CoopMat2,
+            Fp8CoopMat2MGranularity = fp8Cm2M,
+            Fp8CoopMat2NGranularity = fp8Cm2N,
+            Fp8CoopMat2KGranularity = fp8Cm2K,
+            Fp8CoopMat2WorkgroupInvocations = fp8Cm2Wg,
+            Fp8CoopMatM = fp8M,
+            Fp8CoopMatN = fp8N,
+            Fp8CoopMatK = fp8K,
             HasReBar = hasReBar,
 
             ComputeQueueFamilyIndex = queueFamily,
@@ -290,20 +327,20 @@ public sealed class VulkanDevice : IDisposable
         return (caps, memProps);
     }
 
-    private static unsafe (bool memBudget, bool pushDesc, bool coopMatrix, bool coopMatrix2) QueryDeviceExtensions(nint pd)
+    private static unsafe (bool memBudget, bool pushDesc, bool coopMatrix, bool coopMatrix2, bool float8) QueryDeviceExtensions(nint pd)
     {
         uint count = 0;
         if (VulkanApi.vkEnumerateDeviceExtensionProperties(pd, 0, ref count, 0) != VkResult.Success || count == 0)
-            return (false, false, false, false);
+            return (false, false, false, false, false);
 
         int sz = sizeof(VkExtensionProperties);
         nint block = Marshal.AllocHGlobal((int)count * sz);
         try
         {
             if (VulkanApi.vkEnumerateDeviceExtensionProperties(pd, 0, ref count, block) != VkResult.Success)
-                return (false, false, false, false);
+                return (false, false, false, false, false);
 
-            bool budget = false, push = false, coop = false, coop2 = false;
+            bool budget = false, push = false, coop = false, coop2 = false, float8 = false;
             byte* p = (byte*)block;
             for (uint i = 0; i < count; i++)
             {
@@ -313,8 +350,9 @@ public sealed class VulkanDevice : IDisposable
                 else if (name == "VK_KHR_push_descriptor") push = true;
                 else if (name == "VK_KHR_cooperative_matrix") coop = true;
                 else if (name == "VK_NV_cooperative_matrix2") coop2 = true;
+                else if (name == "VK_EXT_shader_float8") float8 = true;
             }
-            return (budget, push, coop, coop2);
+            return (budget, push, coop, coop2, float8);
         }
         finally { Marshal.FreeHGlobal(block); }
     }
@@ -348,8 +386,58 @@ public sealed class VulkanDevice : IDisposable
         return false;
     }
 
+    /// <summary>Queries <c>shaderFloat8</c> and <c>shaderFloat8CooperativeMatrix</c>; only called once the extension is listed.</summary>
+    private static unsafe bool Float8FeaturesOffered(nint pd)
+    {
+        VkPhysicalDeviceShaderFloat8FeaturesEXT f8 = new() { sType = VkStructureType.PhysicalDeviceShaderFloat8FeaturesEXT };
+        VkPhysicalDeviceFeatures2 feat2 = new() { sType = VkStructureType.PhysicalDeviceFeatures2, pNext = (nint)(&f8) };
+        VulkanApi.vkGetPhysicalDeviceFeatures2(pd, ref feat2);
+        Logs.Verbose($"[vk-features] float8={f8.shaderFloat8} float8CoopMat={f8.shaderFloat8CooperativeMatrix}");
+        return f8.shaderFloat8 != 0 && f8.shaderFloat8CooperativeMatrix != 0;
+    }
+
+    /// <summary>Finds the E4M3 × E4M3 → F32 subgroup-scope, non-saturating cooperative-matrix configuration
+    /// <c>matmul_fp8_coopmat</c> needs, preferring the deepest K (fewest fragment loads per output).</summary>
+    private static unsafe bool Fp8CoopMatShape(nint instance, nint pd, out uint m, out uint n, out uint k)
+    {
+        m = n = k = 0;
+        nint fp = VulkanApi.vkGetInstanceProcAddr(instance, "vkGetPhysicalDeviceCooperativeMatrixPropertiesKHR");
+        if (fp == 0) return false;
+        delegate* unmanaged<nint, uint*, VkCooperativeMatrixPropertiesKHR*, VkResult> query =
+            (delegate* unmanaged<nint, uint*, VkCooperativeMatrixPropertiesKHR*, VkResult>)fp;
+
+        uint count = 0;
+        if (query(pd, &count, null) != VkResult.Success || count == 0) return false;
+        VkCooperativeMatrixPropertiesKHR[] props = new VkCooperativeMatrixPropertiesKHR[count];
+        for (uint i = 0; i < count; i++) props[i].sType = VkStructureType.CooperativeMatrixPropertiesKHR;
+        fixed (VkCooperativeMatrixPropertiesKHR* p = props)
+        {
+            if (query(pd, &count, p) != VkResult.Success) return false;
+            for (uint i = 0; i < count; i++)
+            {
+                VkCooperativeMatrixPropertiesKHR e = p[i];
+                if (e.AType == VkComponentTypeKHR.Float8E4M3 || e.BType == VkComponentTypeKHR.Float8E4M3)
+                    Logs.Verbose($"[vk-features] fp8 coopmat {e.MSize}x{e.NSize}x{e.KSize} A={e.AType} B={e.BType} C={e.CType} R={e.ResultType} scope={e.scope} sat={e.saturatingAccumulation}");
+                if (e.AType == VkComponentTypeKHR.Float8E4M3 && e.BType == VkComponentTypeKHR.Float8E4M3
+                    && e.CType == VkComponentTypeKHR.Float32 && e.ResultType == VkComponentTypeKHR.Float32
+                    && e.scope == VkScopeKHR.Subgroup && e.saturatingAccumulation == 0 && e.KSize % 4 == 0 && e.KSize > k)
+                {
+                    m = e.MSize;
+                    n = e.NSize;
+                    k = e.KSize;
+                }
+            }
+        }
+        return k != 0;
+    }
+
     /// <summary>Confirms the device's enumerated <c>VK_NV_cooperative_matrix2</c> "flexible dimensions" configurations include a usable one: FP16 A and B, FP32 accumulate (C and Result), WORKGROUP scope (not subgroup — this is the architectural difference from coopmat1), non-saturating. Unlike coopmat1's fixed 16x16x16 shape, this reports granularities (M/N/K tile dims used by a kernel must be multiples of these) and the exact workgroup invocation count the driver expects for this configuration, both needed to size the <c>matmul_coopmat2</c> shader correctly.</summary>
-    private static unsafe bool CoopMat2Supported(nint instance, nint pd, out uint mGranularity, out uint nGranularity, out uint kGranularity, out uint workgroupInvocations)
+    private static bool CoopMat2Supported(nint instance, nint pd, out uint mGranularity, out uint nGranularity, out uint kGranularity, out uint workgroupInvocations)
+        => CoopMat2Config(instance, pd, VkComponentTypeKHR.Float16, out mGranularity, out nGranularity, out kGranularity, out workgroupInvocations);
+
+    /// <summary>The largest-workgroup <c>VK_NV_cooperative_matrix2</c> flexible-dimensions configuration with <paramref name="operand"/>
+    /// A and B, an F32 accumulator and result, workgroup scope and no saturation.</summary>
+    private static unsafe bool CoopMat2Config(nint instance, nint pd, VkComponentTypeKHR operand, out uint mGranularity, out uint nGranularity, out uint kGranularity, out uint workgroupInvocations)
     {
         mGranularity = nGranularity = kGranularity = workgroupInvocations = 0;
 
@@ -374,10 +462,10 @@ public sealed class VulkanDevice : IDisposable
                 {
                     Logs.Warning($"coopmat2[{i}]: M/N/Kgran={e.MGranularity}/{e.NGranularity}/{e.KGranularity} A={e.AType} B={e.BType} C={e.CType} R={e.ResultType} sat={e.saturatingAccumulation} scope={e.scope} wgInvocations={e.workgroupInvocations}");
                 }
-                // Prefer the config with the largest workgroupInvocations among FP16-in/FP32-out,
+                // Prefer the config with the largest workgroupInvocations among the operand-in/FP32-out,
                 // workgroup-scope, non-saturating matches — a bigger workgroup does more MACs per
                 // dispatch of the coopmat2 op, which is the whole point of workgroup (vs subgroup) scope.
-                if (e.AType == VkComponentTypeKHR.Float16 && e.BType == VkComponentTypeKHR.Float16
+                if (e.AType == operand && e.BType == operand
                     && e.CType == VkComponentTypeKHR.Float32 && e.ResultType == VkComponentTypeKHR.Float32
                     && e.scope == VkScopeKHR.Workgroup && e.saturatingAccumulation == 0
                     && (!found || e.workgroupInvocations > workgroupInvocations))
@@ -395,9 +483,16 @@ public sealed class VulkanDevice : IDisposable
 
     private static unsafe nint CreateLogicalDevice(nint pd, VulkanCapabilities caps)
     {
+        VkPhysicalDeviceShaderFloat8FeaturesEXT f8 = new()
+        {
+            sType = VkStructureType.PhysicalDeviceShaderFloat8FeaturesEXT,
+            shaderFloat8 = 1u,
+            shaderFloat8CooperativeMatrix = 1u,
+        };
         VkPhysicalDeviceVulkan11Features f11 = new()
         {
             sType = VkStructureType.PhysicalDeviceVulkan11Features,
+            pNext = caps.HasFloat8CooperativeMatrix ? (nint)(&f8) : 0,
             storageBuffer16BitAccess = caps.Storage16Bit ? 1u : 0u,
         };
         VkPhysicalDeviceVulkan12Features f12 = new()
@@ -405,6 +500,7 @@ public sealed class VulkanDevice : IDisposable
             sType = VkStructureType.PhysicalDeviceVulkan12Features,
             pNext = (nint)(&f11),
             shaderFloat16 = caps.SupportsFp16 ? 1u : 0u,
+            storageBuffer8BitAccess = caps.HasFp8CoopMat2 ? 1u : 0u,
             timelineSemaphore = caps.TimelineSemaphore ? 1u : 0u,
             bufferDeviceAddress = 0u,
         };
@@ -438,6 +534,13 @@ public sealed class VulkanDevice : IDisposable
             pNext = caps.HasCooperativeMatrix2 ? (nint)(&fCoop2)
                   : caps.HasCooperativeMatrix ? (nint)(&fCoop)
                   : (nint)(&f13),
+            // The 1.0 feature block rides inside features2; left default it enables nothing, and the shaders
+            // that declare int64/int16 then depend on the driver not checking.
+            features = new VkPhysicalDeviceFeatures
+            {
+                shaderInt64 = caps.ShaderInt64 ? 1u : 0u,
+                shaderInt16 = caps.ShaderInt16 ? 1u : 0u,
+            },
         };
 
         float prio = 1.0f;
@@ -454,6 +557,7 @@ public sealed class VulkanDevice : IDisposable
         if (caps.HasPushDescriptor) extList.Add("VK_KHR_push_descriptor");
         if (caps.HasCooperativeMatrix) extList.Add("VK_KHR_cooperative_matrix");
         if (caps.HasCooperativeMatrix2) extList.Add("VK_NV_cooperative_matrix2");
+        if (caps.HasFloat8CooperativeMatrix) extList.Add("VK_EXT_shader_float8");
 
         using PinnedStringArray ext = new(extList);
 
@@ -471,9 +575,6 @@ public sealed class VulkanDevice : IDisposable
         VulkanApi.vkCreateDevice(pd, in devCi, 0, out nint device).ThrowOnError("vkCreateDevice");
         return device;
     }
-
-    /// <summary>Blocks until all GPU work submitted to any queue on this device has completed.</summary>
-    public void WaitIdle() => VulkanApi.vkDeviceWaitIdle(Handle).ThrowOnError("vkDeviceWaitIdle");
 
     public void Dispose()
     {

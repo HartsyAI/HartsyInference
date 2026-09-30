@@ -301,7 +301,7 @@ public sealed unsafe class YuePipeline : IDisposable
         return peak;
     }
 
-    /// <summary>Writes every decode-stage intermediate to <c>$HARTSY_YUE_DUMP/yue_dump.safetensors</c> so the Python
+    /// <summary>Writes every decode-stage intermediate to <c>$diagnostics.yueDump/yue_dump.safetensors</c> so the Python
     /// reference can be run on the SAME codes. Opt-in and off by default — this is a diagnostic, not a product path.</summary>
     private void DumpParityArtifacts(IBackend backend, int[][] vocalCodes, int[][] accompCodes,
         float[] vocalWav, float[] instWav, float[] vocoderMix, float[] draftMix, float[] final)

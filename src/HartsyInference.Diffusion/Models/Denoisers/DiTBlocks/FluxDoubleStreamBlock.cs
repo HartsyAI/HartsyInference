@@ -202,7 +202,7 @@ public sealed class FluxDoubleStreamBlock
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
         // Activation dtype follows the INPUT (the Chroma/Krea2 pattern): FluxTransformer casts the token
-        // streams to F16 once before the block loop on the HARTSY_DIT_F16 path; the AdaLN modulation vectors
+        // streams to F16 once before the block loop on the numerics.ditF16 path; the AdaLN modulation vectors
         // stay F32 (F16 kernels take an F16 activation + F32 params). The F32 path is byte-identical.
         DType act = image.DType;
 

@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Diffusion.Models.TextEncoders;
 using HartsyInference.Diffusion.Models.Vae;
 using HartsyInference.ModelAssets.CheckpointConverters;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.Diffusion.Pipelines;
@@ -37,16 +38,21 @@ public static class LensPipelineFactory
     {
         (LensCheckpointConverter.ConvertedWeights weights, SafeTensorsLoader[] loaders) =
             LensCheckpointConverter.LoadAndConvertComfy(ditPath, textEncoderPath, vaePath);
+        List<IDisposable> owned = [.. loaders];
         try
         {
+            // Packed MXFP8 linears stay packed where the backend holds them and widen to BF16 elsewhere. This runs
+            // before the LoRA hook: a merge onto a packed weight rides as a runtime adjunct on THAT tensor, which a
+            // later widening would silently leave behind.
+            owned.Add(QuantizedWeightPolicy.PrepareForBackend(weights.Transformer, backend, DType.BF16));
             onTransformerWeights?.Invoke(weights.Transformer);
             return Wire(backend, weights.Transformer, weights.TextEncoder, weights.Vae, config,
-                withTextEncoder, bnEps, loaders);
+                withTextEncoder, bnEps, [.. owned]);
         }
         catch (Exception ex)
         {
             Logs.Error($"Failed to wire Lens pipeline from ComfyUI files (dit={ditPath})", ex);
-            for (int i = 0; i < loaders.Length; i++) loaders[i].Dispose();
+            for (int i = owned.Count - 1; i >= 0; i--) owned[i].Dispose();
             throw;
         }
     }

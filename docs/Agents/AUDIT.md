@@ -1,6 +1,7 @@
 # Audit
 
-Review the affected path against [shared architecture](AGENTS.md), [style](../CODE_STYLE.md), and relevant [known failures](../Checklists/TROUBLESHOOTING.md).
+Review the affected path against [shared architecture](AGENTS.md), [engine patterns](ENGINE_PATTERNS.md),
+[style](../CODE_STYLE.md), and relevant [known failures](../Checklists/TROUBLESHOOTING.md).
 
 - Trace inputs through Engine, ownership, backend execution, result delivery, cancellation and disposal. Check package boundaries, shape/dtype validation, path handling and resource limits.
 - Borrowed TensorView/TensorRef values must not outlive storage. Check preload/CPU disposal, GPU callbacks, stream ordering, partial construction and exception cleanup.

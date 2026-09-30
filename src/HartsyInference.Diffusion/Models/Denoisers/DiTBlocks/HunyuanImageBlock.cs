@@ -162,7 +162,7 @@ public sealed unsafe class HunyuanImageBlock : IStreamingBlock
         int totalSeqLen = imgSeqLen + txtSeqLen;
         float scale = 1.0f / MathF.Sqrt(_headDim);
 
-        // Stream activation dtype follows the input (F16 on the HARTSY_DIT_F16 hot path; the transformer casts the
+        // Stream activation dtype follows the input (F16 on the numerics.ditF16 hot path; the transformer casts the
         // img/txt streams to F16 before the block loop). Every stream intermediate below is `act`; the modulation
         // params (imgMod/txtMod) stay F32 because temb is F32, and NormModulate/GatedResidualLastDim/SDPA all accept
         // an F16 stream with F32 params. QK-norm weights + RoPE tables are F32 too.

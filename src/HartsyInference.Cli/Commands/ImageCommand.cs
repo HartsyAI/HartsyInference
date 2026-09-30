@@ -87,7 +87,7 @@ public sealed class ImageCommand : Command<ImageCommand.Settings>
         [Description("Flow-match sigma shift (default: the model family's trained shift).")]
         public double? SigmaShift { get; init; }
 
-        /// <summary>Per-run VRAM posture; unset follows the engine's own (the HARTSY_LOWVRAM environment).</summary>
+        /// <summary>Per-run VRAM posture; unset follows the engine's own (the vram.lowVram environment).</summary>
         [CommandOption("--vram-mode")]
         [Description("VRAM posture for THIS run: Performance (never stream, fail instead), Auto, Balanced, Aggressive (always stream) or Maximum. Unset follows the engine default. A model that cannot honour it says so in the log rather than ignoring it.")]
         public string? VramMode { get; init; }

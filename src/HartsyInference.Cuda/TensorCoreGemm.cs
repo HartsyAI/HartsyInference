@@ -23,11 +23,14 @@ public sealed class TensorCoreGemm : IDisposable
     /// <summary>Requires SM 8.0+ (mma.sync.m16n8k16). True on Ampere/Ada/Hopper, false on Turing and below.</summary>
     public bool IsSupported { get; }
 
-    /// <summary>Creates the launcher. PTX is loaded lazily on first <see cref="Run"/>.</summary>
-    public TensorCoreGemm(string ptxDir, int smMajor)
+    private readonly int _sm;
+
+    /// <summary>Creates the launcher for a device of compute capability <paramref name="sm"/> (<see cref="CudaArch"/>). PTX is loaded lazily on first <see cref="Run"/>.</summary>
+    public TensorCoreGemm(string ptxDir, int sm)
     {
         _ptxDir = ptxDir ?? throw new ArgumentNullException(nameof(ptxDir));
-        IsSupported = smMajor >= 8;
+        _sm = sm;
+        IsSupported = sm >= CudaArch.Ampere;
     }
 
     /// <summary>Whether the kernel can handle these dimensions without bounds checks.</summary>
@@ -66,7 +69,7 @@ public sealed class TensorCoreGemm : IDisposable
     private void EnsureLoaded()
     {
         if (_module is not null) return;
-        CudaModule module = CudaModule.LoadFromFile(Path.Combine(_ptxDir, "hgemm_mma_sm80.ptx"));
+        CudaModule module = CudaModule.LoadFromFile(CudaKernels.PtxPath(_ptxDir, "hgemm_mma_sm80", _sm));
         nint function;
         try
         {

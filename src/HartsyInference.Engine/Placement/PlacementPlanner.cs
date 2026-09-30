@@ -11,7 +11,7 @@ public readonly record struct LlmStagePlan(string Device, int StartLayer, int En
 public static class PlacementPlanner
 {
     /// <summary>VRAM held back per device when auto-splitting by free memory: activations, KV, workspaces.</summary>
-    private const long PerDeviceReserveBytes = 2L << 30;
+    internal const long PerDeviceReserveBytes = 2L << 30;
 
     /// <summary>Splits <paramref name="layerCount"/> layers across <paramref name="shardDevices"/> proportionally to <paramref name="ratios"/> (explicit, llama.cpp tensor-split style) or to probed free VRAM minus a fixed reserve. The last stage is additionally charged <paramref name="lastStageExtraBytes"/> (final norm + lm_head + logits) when planning by VRAM. Every stage gets at least one layer.</summary>
     public static IReadOnlyList<LlmStagePlan> LlmSplitPlan(

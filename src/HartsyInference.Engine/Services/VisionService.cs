@@ -463,7 +463,7 @@ public sealed class VisionService : IVisionService, IDisposable
     private static string SiblingPath(string path, string fileName) =>
         Path.Combine(Path.GetDirectoryName(path) ?? ".", fileName);
 
-    /// <summary>Diagnostic: when <c>HARTSY_VISION_PROBE=1</c>, logs min/max/mean/NaN/Inf for a named intermediate tensor. Used to bisect where a CUDA-backend forward pass first diverges.</summary>
+    /// <summary>Diagnostic: when <c>diagnostics.visionProbe=true</c>, logs min/max/mean/NaN/Inf for a named intermediate tensor. Used to bisect where a CUDA-backend forward pass first diverges.</summary>
     private static unsafe void ProbeStats(string label, Tensor t)
     {
         Tensor f32 = t.DType == DType.F32 ? t : t.CastTo(DType.F32);

@@ -36,6 +36,8 @@ layout(push_constant) uniform Push {
     uint M;
     uint N;
     uint K;
+    uint saOffset;   // float offset of the activation scales in binding 3 (they may trail the packed int8 in one buffer)
+    uint sbOffset;   // float offset of the weight scales in binding 4
 } pc;
 
 // Padded stride (BKP+1) so the register column-load across rows is bank-conflict-free.
@@ -95,7 +97,7 @@ void main() {
             uint gRow = blockRow + threadRow + i;
             uint gCol = blockCol + threadCol + j;
             if (gRow < pc.M && gCol < pc.N)
-                C[gRow * pc.N + gCol] = float(acc[i * TN + j]) * sA[gRow] * sB[gCol];
+                C[gRow * pc.N + gCol] = float(acc[i * TN + j]) * sA[pc.saOffset + gRow] * sB[pc.sbOffset + gCol];
         }
     }
 }

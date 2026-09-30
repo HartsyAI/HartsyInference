@@ -38,7 +38,7 @@ public static class CliTheme
     private static readonly (byte R, byte G, byte B) LogoKey = (13, 17, 23);
 
     /// <summary>Whether the terminal appears to use a light background, so muted text can pick a contrasting grey.</summary>
-    /// <remarks>Determined once from <c>HARTSY_THEME</c> (dark/light) then <c>COLORFGBG</c>, defaulting to dark — the
+    /// <remarks>Determined once from <c>diagnostics.theme</c> (dark/light) then <c>COLORFGBG</c>, defaulting to dark — the
     /// common developer setting and what any terminal that doesn't advertise its theme is assumed to be.</remarks>
     public static bool IsLightBackground { get; } = DetectLightBackground();
 

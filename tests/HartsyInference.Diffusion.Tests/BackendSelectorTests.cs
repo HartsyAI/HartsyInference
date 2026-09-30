@@ -1,5 +1,8 @@
+using HartsyInference.Core.Backends;
+using HartsyInference.Cuda;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Vulkan;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -203,6 +206,105 @@ public sealed class BackendSelectorTests
         Assert.Equal(selector, BackendFactory.CanonicalDeviceKey(selector));
     }
 
+    /// <summary>A canonical key must never be fed back into <see cref="BackendFactory.Create"/>. Canonicalization
+    /// MANUFACTURES an ordinal — a bare <c>vulkan</c> comes back as <c>vulkan:0</c> — so a caller that keys a slot
+    /// and then builds from that same string turns a rankable request into a pin on loader index 0, which is the
+    /// rasterizer on exactly the machines ranking exists for.</summary>
+    [Theory]
+    [InlineData("vulkan")]
+    [InlineData("cuda")]
+    public void A_Canonical_Key_Is_Not_A_Construction_Selector(string selector)
+    {
+        Assert.False(BackendFactory.HasExplicitOrdinal(selector));
+        Assert.True(BackendFactory.HasExplicitOrdinal(BackendFactory.CanonicalDeviceKey(selector)));
+    }
+
+    /// <summary>A written ordinal and an absent one are different requests, and this is the only thing that separates
+    /// them: <see cref="BackendFactory.ParseOrdinal"/> answers 0 for both, so every caller that asked it "did the user
+    /// pick a device?" has been getting "yes, device 0" from a selector that named nothing.</summary>
+    [Theory]
+    [InlineData("vulkan:0", true)]
+    [InlineData("auto:0", true)]
+    [InlineData("cuda:2", true)]
+    [InlineData("vulkan", false)]
+    [InlineData("auto", false)]
+    [InlineData("cpu", false)]
+    [InlineData(null, false)]
+    public void HasExplicitOrdinal_Separates_A_Written_Zero_From_No_Ordinal(string? selector, bool expected)
+    {
+        Assert.Equal(expected, BackendFactory.HasExplicitOrdinal(selector));
+        if (!expected)
+        {
+            Assert.Equal(0, BackendFactory.ParseOrdinal(selector));
+        }
+    }
+
+    /// <summary>The identity a backend reports is the device it bound to, and asking twice gives the same answer.
+    ///
+    /// <para>That stability is what a host's device-sharing map rests on: two engines that landed on one GPU have to
+    /// collide in it. Keying such a map on the SELECTOR instead cannot do that once selection is left to the engine,
+    /// since <c>vulkan</c> and <c>vulkan:1</c> can name the same card while reading as two.</para></summary>
+    [Fact]
+    public void A_Backend_Reports_The_Device_It_Bound_To()
+    {
+        using IBackend a = BackendFactory.Create("cpu");
+        using IBackend b = BackendFactory.Create("cpu");
+        Assert.Equal("cpu", a.DeviceKey);
+        Assert.Equal(a.DeviceKey, b.DeviceKey);
+
+        if (!VulkanContext.IsAvailable())
+        {
+            return;
+        }
+        // Ranking is deterministic, so two bare selectors must land on one device and say so identically.
+        using IBackend v1 = BackendFactory.Create("vulkan");
+        using IBackend v2 = BackendFactory.Create("vulkan");
+        Assert.StartsWith("vulkan:", v1.DeviceKey);
+        Assert.Equal(v1.DeviceKey, v2.DeviceKey);
+        // And it is not the request laundered into a device name: that would read "vulkan:0" whatever was chosen.
+        Assert.NotEqual(BackendFactory.CanonicalDeviceKey("vulkan"), v1.DeviceKey);
+    }
+
+    /// <summary>'auto' tries CUDA, then Vulkan, then CPU. Asserted as the ordering rather than a fixed answer,
+    /// because the answer is whatever hardware this runs on, but the ordering holds everywhere, and CPU being
+    /// last is the part that matters: resolving to it while a Vulkan GPU sat idle is what this order fixes.</summary>
+    [Fact]
+    public void Resolve_Auto_Prefers_Cuda_Then_Vulkan_Then_Cpu()
+    {
+        string resolved = BackendFactory.Resolve("auto");
+        bool cuda = CudaContext.IsAvailable() && CudaContext.GetDeviceCount() > 0;
+        Assert.Equal(cuda ? "cuda" : VulkanContext.IsAvailable() ? "vulkan" : "cpu", resolved);
+        Assert.Contains(resolved, new[] { "cuda", "vulkan", "cpu" });
+    }
+
+    /// <summary>'auto' never resolves to something <see cref="BackendFactory.Create"/> would refuse to build.
+    /// <see cref="BackendFactory.Create"/> routes through <see cref="BackendFactory.Resolve"/>, so a resolution the
+    /// factory cannot construct would be a startup crash rather than a fallback.</summary>
+    [Fact]
+    public void Resolve_Auto_Names_A_Buildable_Backend()
+    {
+        string resolved = BackendFactory.Resolve("auto");
+        Assert.True(BackendFactory.IsValidSelector(resolved));
+        BackendFactory.Validate(resolved);
+    }
+
+    /// <summary>An explicit 'vulkan' is refused up front when the machine has no Vulkan GPU, the way an explicit
+    /// 'cuda' already was, and the refusal carries the loader's reason, since "it does not work" without a cause
+    /// is what sends people to the issue tracker. Driver-free: it asserts refusal and availability agree, not which
+    /// one this machine is.</summary>
+    [Fact]
+    public void Validate_Vulkan_Refuses_Exactly_When_No_Vulkan_Gpu_Is_Present()
+    {
+        if (VulkanContext.IsAvailable())
+        {
+            BackendFactory.Validate("vulkan");
+            return;
+        }
+        ArgumentException ex = Assert.Throws<ArgumentException>(() => BackendFactory.Validate("vulkan"));
+        Assert.Contains("Vulkan", ex.Message);
+        Assert.False(string.IsNullOrWhiteSpace(VulkanContext.LastUnavailableReason));
+    }
+
     /// <summary>A registered recipe name resolves as its own family id. The video error text advertises these names as
     /// "currently drivable", and the Wan compat classes exist ONLY there — no catalog entry carries them — so before
     /// this they were advertised, accepted on the command line, and then rejected as family 'unknown'.</summary>
@@ -213,7 +315,7 @@ public sealed class BackendSelectorTests
     public void A_Registered_Recipe_Name_Resolves_As_Its_Own_Family(string familyId)
     {
         ModelSpec spec = new() { Requested = familyId, Modality = Modality.Video, LocalPath = "/nonexistent.safetensors" };
-        Assert.Equal(familyId, InferenceEngine.ResolveVideoFamilyId(spec));
+        Assert.Equal(familyId, ModelCapabilities.VideoFamilyIdFor(spec));
     }
 
     /// <summary>A name no registry knows still falls through to header detection rather than being invented. Resolution
@@ -223,7 +325,7 @@ public sealed class BackendSelectorTests
     public void An_Unregistered_Name_Falls_Through_To_Detection()
     {
         ModelSpec spec = new() { Requested = "not-a-real-family", Modality = Modality.Video, LocalPath = "/nonexistent.safetensors" };
-        FileNotFoundException ex = Assert.Throws<FileNotFoundException>(() => InferenceEngine.ResolveVideoFamilyId(spec));
+        FileNotFoundException ex = Assert.Throws<FileNotFoundException>(() => ModelCapabilities.VideoFamilyIdFor(spec));
         Assert.Contains("/nonexistent.safetensors", ex.Message);
     }
 }

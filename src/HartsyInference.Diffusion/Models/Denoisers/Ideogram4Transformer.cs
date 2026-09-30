@@ -203,7 +203,7 @@ public sealed unsafe class Ideogram4Transformer : IDisposable, IStreamableDenois
         (Tensor cos, Tensor sin) = GetOrBuildRope(backend, positionIds);
 
         // ── Blocks ──
-        // F16 hot path (HARTSY_DIT_F16): cast once at the loop boundary; the blocks follow the input dtype.
+        // F16 hot path (numerics.ditF16): cast once at the loop boundary; the blocks follow the input dtype.
         // Masked (regional) passes stay F32 — the additive-mask SDPA path is F32-only.
         bool f16Blocks = DiTBlocks.DitDtype.Act == DType.F16 && attentionMask is null;
         Tensor cur = f16Blocks ? Utilities.DtypeCastHelper.EnsureDtype(backend, h, DType.F16) : h;

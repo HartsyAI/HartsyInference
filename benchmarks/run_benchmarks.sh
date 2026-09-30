@@ -167,14 +167,18 @@ echo "[1/6] Capturing hardware + software fingerprints..."
     fi
     echo "## git rev"; git rev-parse HEAD 2>/dev/null || echo "no git"
     echo "## git status (uncommitted)"; git status --porcelain 2>/dev/null || true
-    echo "## perf flags (HARTSY_*) — the A/B config this run executed under"
+    # Records the settings this run actually executed under. It used to print HARTSY_* environment
+    # variables, which the engine stopped reading at the settings rebuild — so the section named a
+    # configuration that was never applied, on every run since. `settings list --all` asks the engine
+    # what is in force instead of asserting it, so the record cannot drift from the run again.
+    echo "## settings — what this run executed under"
     echo "run_tag=${TAG:-<none>}"
     echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>} (phys idx ${PHYS_IDX}, ${GPU_NAME})"
     echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH:-<unset>}"
-    for v in HARTSY_EPILOGUE_FUSION HARTSY_TENSORCORE_GEMM HARTSY_FP8_NATIVE \
-             HARTSY_HIGH_PRECISION_GEMM HARTSY_LOWVRAM_QUANT HARTSY_PROFILE; do
-        echo "${v}=${!v:-0}"
-    done
+    echo "bench_set=${BENCH_SET:-<none>}"
+    dotnet run --project "$REPO_ROOT/src/HartsyInference.Cli/HartsyInference.Cli.csproj" -c Release -f net10.0 \
+        --no-build -- ${BENCH_SET:-} settings list --all 2>/dev/null \
+        || echo "(settings snapshot unavailable)"
 } > "$STAGING/software.txt"
 
 {

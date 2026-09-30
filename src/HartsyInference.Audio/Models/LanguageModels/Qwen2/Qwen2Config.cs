@@ -55,7 +55,7 @@ public sealed record Qwen2Config
     /// <summary>Whether <c>lm_head.weight</c> is tied to <c>embed_tokens.weight</c> (true for 1.5B / 0.5B, false for 7B).</summary>
     public bool TieWordEmbeddings { get; init; } = true;
 
-    /// <summary>Route quantized weights through the low-VRAM <c>QuantizedMatMul</c> (weight stays compressed, transient dequant, no cached F16 copy) — set for big quant models on small cards (YuE 7B Q4_K on 12 GB) so the prefill dequant doesn't OOM the F16 cast-cache; default false falls back to the global <c>HARTSY_LOWVRAM_QUANT</c> env.</summary>
+    /// <summary>Route quantized weights through the low-VRAM <c>QuantizedMatMul</c> (weight stays compressed, transient dequant, no cached F16 copy) — set for big quant models on small cards (YuE 7B Q4_K on 12 GB) so the prefill dequant doesn't OOM the F16 cast-cache; default false falls back to the global <c>vram.lowvramQuant</c> env.</summary>
     public bool LowVramQuant { get; init; }
 
     /// <summary>Per-head dimension, <see cref="HiddenSize"/> / <see cref="NumAttentionHeads"/> — 128 across all VibeVoice variants.</summary>

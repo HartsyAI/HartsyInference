@@ -8,7 +8,7 @@ namespace HartsyInference.Core.MemoryManagement;
 /// <remarks>The eight pipelines that streamed before this existed each hand-rolled the same twenty lines with a
 /// different policy — a hard-coded 6 GB margin here, a planner call there, a resident prefix in a third — so a fix or
 /// a measurement in one never reached the others, and a denoiser that had not been hand-wired (Wan) silently ignored
-/// <c>HARTSY_LOWVRAM</c> entirely.
+/// <c>vram.lowVram</c> entirely.
 /// <para><see cref="VramPlanner"/> resolves the policy (<see cref="LowVramMode"/>) here rather than the split:
 /// <see cref="VramPlanner.PlanPhase"/> measures <see cref="IStreamingWeightCache.QueryAvailableWeightCacheBytes"/>
 /// while the prefix sizing measures <see cref="IBackend.FreeMemoryBytes"/> after a trim, and near the boundary the
@@ -212,17 +212,11 @@ public sealed class BlockStreamingScope : IDisposable
         // alone and displacing the weights here is what makes a forced stream take effect on a warm generation
         // instead of silently staying resident. Mirrors PlanResidentPrefix's release-on-force branch.
         if (planner.Mode == LowVramMode.ForceOn && pin is not null && pin.Resident)
-        {
-            // AllOrNothing never records a partial count, so an unsized pin means the whole set is resident.
-            int residentBlocks = pin.PinnedBlocks >= 0 ? pin.PinnedBlocks : blocks.Length;
-            VramGraphGuard.InvalidateBeforeRelease(backend);
-            backend.FreeWeights(BlockRangeWeights(denoiser, 0, residentBlocks));
-            backend.TrimMemoryPool();
-            pin.Resident = false;
-            pin.PinnedBlocks = -1;
-            Logs.Info($"[VRAM] {options.ModelName}/denoise: resident blocks released "
-                + "(the resolved policy forces streaming).");
-        }
+            ReleasePinnedBlocks(options, blocks.Length, "the resolved policy forces streaming");
+        // A warm pin was kept for an earlier geometry; this generation's activations must still fit beside it, or
+        // the planner would honour the pin and run into an OOM a streamed plan avoids.
+        else if (pin is not null && pin.Resident && planner.ShouldEvictForHeadroom("denoise", options.HeadroomBytes))
+            ReleasePinnedBlocks(options, blocks.Length, "this generation's activations do not fit beside them");
 
         long totalBlockBytes = 0;
         foreach (IStreamingBlock block in blocks) totalBlockBytes += block.EstimatedWeightBytes;
@@ -230,6 +224,19 @@ public sealed class BlockStreamingScope : IDisposable
             alreadyResident: pin?.Resident == true, canStream: true);
         backend.PreloadWeights(denoiser.EnumerateSharedWeights());
         return placement == PhasePlacement.Resident ? blocks.Length : 0;
+    }
+
+    /// <summary>Frees a warm pin's resident blocks so the planner decides afresh; an unsized pin means every block.</summary>
+    private static void ReleasePinnedBlocks(BlockStreamingOptions options, int blockCount, string reason)
+    {
+        ResidentPrefixPin pin = options.Pin!;
+        int residentBlocks = pin.PinnedBlocks >= 0 ? pin.PinnedBlocks : blockCount;
+        VramGraphGuard.InvalidateBeforeRelease(options.Backend);
+        options.Backend.FreeWeights(BlockRangeWeights(options.Denoiser, 0, residentBlocks));
+        options.Backend.TrimMemoryPool();
+        pin.Resident = false;
+        pin.PinnedBlocks = -1;
+        Logs.Info($"[VRAM] {options.ModelName}/denoise: resident blocks released ({reason}).");
     }
 
     private static IEnumerable<Tensor> EnumerateAll(IStreamableDenoiser denoiser)

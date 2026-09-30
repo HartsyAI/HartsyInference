@@ -227,8 +227,8 @@ public sealed class VideoServiceGateTests
     private static Task<VideoPlan> PlanGenericAsync(string family, VideoRequest request)
     {
         ModelSpec spec = Spec(family);
-        VideoDefaults defaults = InferenceEngine.VideoDefaultsFor(spec);
-        VideoFeatures features = InferenceEngine.SupportedVideoFeatures(spec);
+        VideoDefaults defaults = ModelCapabilities.VideoDefaultsFor(spec);
+        VideoFeatures features = ModelCapabilities.VideoFeaturesFor(spec);
         return VideoProfileResolver.ResolveAsync(spec, request, family, defaults, features, CancellationToken.None);
     }
 }

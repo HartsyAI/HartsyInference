@@ -52,8 +52,8 @@ public sealed class WanVaceRecipe : IVideoRecipe
         WanVideoConfig config = string.Equals(_familyId, WanVideoRecipe.Wan21_1_3BCompatClassId, StringComparison.OrdinalIgnoreCase)
             ? WanVideoConfig.Vace_1_3B : WanVideoConfig.Vace_14B;
 
-        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string umt5Path = ModelDownloader.EnsureSideModelAsync(SideModels.Umt5Xxl, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Wan21Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         // Side-model loaders and the checkpoint share one bag: the container is format-agnostic, so what it hands
         // back is an IDisposable rather than a SafeTensorsLoader.

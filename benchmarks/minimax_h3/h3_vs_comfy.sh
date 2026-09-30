@@ -22,7 +22,9 @@ COMFY_PY="/home/hartsy/Desktop/Swarm/SwarmUI.not too old/dlbackend/ComfyUI/venv/
 COMFY_LOG=$OUT/comfy_server.log
 GPU_SMI=${H3_BENCH_GPU:-1}
 # Matches what h3_bench.sh runs, per the user's full-precision-attention decision.
-OURS_ENV=${H3_VS_COMFY_OURS_ENV:-"HARTSY_SAGE_ATTN=0 HARTSY_SDPA_F16=1"}
+# --set args, not env: exporting these stopped doing anything at the settings rebuild, so this arm was
+# running production attention while claiming full precision.
+OURS_SET=${H3_VS_COMFY_OURS_SET:-"--set numerics.sageAttn=false --set numerics.sdpaF16=true"}
 
 mkdir -p "$OUT"
 [ -f "$COMFY_PY" ] || { echo "FATAL: comfy python not found: $COMFY_PY"; exit 1; }
@@ -95,7 +97,7 @@ for r in $(seq 1 "$ROUNDS"); do
         -d '{"unload_models": true, "free_memory": true}' > /dev/null
     sleep 5
 
-    ms=$(H3_BENCH_ENV="$OURS_ENV" bash "$REPO/benchmarks/minimax_h3/h3_bench.sh" 30 "vs_ours_r$r" 1 2>&1 \
+    ms=$(H3_BENCH_SET="$OURS_SET" bash "$REPO/benchmarks/minimax_h3/h3_bench.sh" 30 "vs_ours_r$r" 1 2>&1 \
         | grep -oE "MEAN steps 4\.\.30: [0-9.]+" | grep -oE "[0-9.]+$")
     echo "$r,hartsy,$(python3 -c "print(f'{float('${ms:-0}')/1000:.3f}')")"
 done

@@ -19,7 +19,11 @@ REPO=/home/hartsy/Desktop/HartsyInference
 OUT=${H3_BENCH_OUT:-$REPO/benchmarks/results/h3}
 # H3_BENCH_CKPT swaps the DiT build without moving files around — the point of the same-seed A/B
 # between the fp8_scaled and int8_convrot releases, which are the same weights at different precision.
-CKPT=${H3_BENCH_CKPT:-$REPO/Models/Stable-Diffusion/MiniMaxH3/flat/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors}
+# The engine's own models root, not the repo's Models/ symlink farm — the checkpoints live on the array.
+SETTINGS=${XDG_CONFIG_HOME:-$HOME/.config}/hartsyinference/settings.json
+MODELS=$(sed -n 's/.*"paths.modelsRoot"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$SETTINGS" 2>/dev/null | head -n1)
+[ -n "$MODELS" ] || MODELS=$REPO/Models
+CKPT=${H3_BENCH_CKPT:-$MODELS/Stable-Diffusion/MiniMaxH3/flat/diffusion_models/minimax_h3_fl2va_pruned_fp8_scaled.safetensors}
 PROMPT_FILE=$REPO/Models/bench-comfy/prompt.txt
 
 # The 4090 is nvidia-smi index 1 (PCI 04:00.0); the 3060 is index 0. CUDA_VISIBLE_DEVICES alone
@@ -63,11 +67,20 @@ if [ "$FREE" -lt "$MIN_FREE_MB" ]; then
 fi
 
 cd "$REPO"
+# H3_BENCH_SET carries `--set knob=value` pairs for an A/B arm. H3_BENCH_ENV survives for genuine process
+# environment (CUDA_*, LD_LIBRARY_PATH); it cannot configure the engine, which reads none.
 # `env` rather than a bare assignment prefix: bash does not re-parse KEY=VALUE that arrives via
 # variable expansion, so $H3_BENCH_ENV would be taken as the command name.
-env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA HARTSY_LOG_LEVEL=Info \
+# No HARTSY_LOG_LEVEL here: the engine reads no environment variables at all since the settings rebuild, so
+# that used to silently leave the run at Warning — which hides the component tensor counts and the residency
+# line, the two things a load problem shows up in. Ask for them with:
+#   hartsy settings set diagnostics.logLevel Info
+# -c Release because Debug is roughly an order of magnitude slower here and no timing from it is comparable.
+env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_CUDA \
     ${H3_BENCH_ENV:-} \
-    dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -f net10.0 ${H3_BENCH_NOBUILD:---no-build} -- \
+    dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -c "${H3_BENCH_CONFIG:-Release}" \
+    -f net10.0 ${H3_BENCH_NOBUILD:---no-build} -- \
+    ${H3_BENCH_SET:-} \
     video -m minimax-h3 --model-path "$CKPT" \
     --frames "$FRAMES" --width "$WIDTH" --height "$HEIGHT" --steps "$STEPS" --seed "$SEED" \
     -o "$OUT/${LABEL}_out" "$PROMPT" > "$LOG" 2>&1
@@ -82,19 +95,22 @@ if [ -n "$AFTER" ]; then
     echo "$AFTER"
 fi
 
+# ConsoleStepProgress rewrites one line with \r, so every tick lands on the same physical line; -o pulls
+# them out individually. The figure on tick N is the interval since tick N-1, i.e. step N's own cost.
+STEP_RE="denoise \[[0-9]+/$STEPS\] [0-9]+ ms"
 echo "--- per-step (exit=$RC) ---"
-grep -oE "step [0-9]+/$STEPS: [0-9]+ ms" "$LOG"
+grep -oE "$STEP_RE" "$LOG"
 
 # Steps 1-3 are warm-up-ish (step 1 carries first-touch costs); report the mean of 4..N.
 # Field-split rather than gawk's 3-arg match() — the default awk here is mawk, which lacks it.
-grep -oE "step [0-9]+/$STEPS: [0-9]+ ms" "$LOG" | awk -v steps="$STEPS" '
+grep -oE "$STEP_RE" "$LOG" | tr -d '[]' | awk -v steps="$STEPS" '
     { split($2, p, "/"); idx = p[1] + 0; ms = $3 + 0;
       if (idx >= 4) { s += ms; n++; if (n == 1 || ms < lo) lo = ms; if (ms > hi) hi = ms } }
     END {
         if (n > 0) printf "MEAN steps 4..%d: %.1f ms  (n=%d, range %d-%d)\n", steps, s / n, n, lo, hi
         else if (steps < 4) print "MEAN: n/a (need >=4 steps for a reportable figure)"
-        else print "MEAN: n/a — NO per-step lines in the log at all. The CLI prints `denoise [n/m]` with no timing, \
-so this harness cannot report s/step. Derive it from two runs instead: (T_30 - T_10) / 20 cancels load and decode."
+        else print "MEAN: n/a — no per-step lines in the log. Check that the run was not --quiet, which suppresses \
+the counter entirely; otherwise derive it from two runs: (T_30 - T_10) / 20 cancels load and decode."
     }'
 
 [ "$RC" != "0" ] && { echo "RUN FAILED — tail of $LOG:"; tail -25 "$LOG"; }

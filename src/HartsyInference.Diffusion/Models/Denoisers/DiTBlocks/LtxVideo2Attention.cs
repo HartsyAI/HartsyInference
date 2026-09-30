@@ -18,7 +18,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// to text passes no RoPE.</remarks>
 public sealed unsafe class LtxVideo2Attention
 {
-    /// <summary>Kill switch for the token-major attention route (<c>HARTSY_LTX2_TOKENMAJOR=0</c>). Also the seam
+    /// <summary>Kill switch for the token-major attention route (<c>numerics.ltx2Tokenmajor=false</c>). Also the seam
     /// the layout-equivalence test flips to run the two routes against one another on one backend.</summary>
     internal static bool TokenMajorAttention => EngineKnobs.Ltx2Tokenmajor.Value;
 

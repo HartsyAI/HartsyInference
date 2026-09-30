@@ -164,10 +164,25 @@ internal static class TtsCatalog
         Logs.Info($"[Audio][Kokoro] Fetching voice pack '{voiceName}'...");
         string ptPath = await AudioModelCache.GetAsync("hexgrad/Kokoro-82M", $"voices/{voiceName}.pt", category: "tts", ct: cancel).ConfigureAwait(false);
         Directory.CreateDirectory(Path.GetDirectoryName(binPath)!);
+        string tempPath = binPath + ".tmp";
+        // A converted voice is one contiguous F32 tensor; its payload is the .bin byte for byte.
+        if (AnyFormatCheckpointLoader.IsSafeTensors(ptPath))
+        {
+            using (FileStream source = File.OpenRead(ptPath))
+            using (FileStream destination = File.Create(tempPath))
+            {
+                byte[] length = new byte[8];
+                source.ReadExactly(length);
+                source.Seek(8 + BitConverter.ToInt64(length), SeekOrigin.Begin);
+                await source.CopyToAsync(destination, cancel).ConfigureAwait(false);
+            }
+            File.Move(tempPath, binPath, overwrite: true);
+            Logs.Info($"[Audio][Kokoro] Voice pack '{voiceName}' ready.");
+            return;
+        }
         using ZipArchive zip = ZipFile.OpenRead(ptPath);
         ZipArchiveEntry storage = zip.Entries.FirstOrDefault(e => e.FullName.Replace('\\', '/').EndsWith("/data/0", StringComparison.Ordinal))
             ?? throw new InvalidOperationException($"Unexpected Kokoro voice format in '{ptPath}' — no tensor storage entry.");
-        string tempPath = binPath + ".tmp";
         using (Stream source = storage.Open())
         using (FileStream destination = File.Create(tempPath))
         {

@@ -7,59 +7,18 @@
 // Layout, matching HartsyInference.Core.Tensors.Nvfp4ResidentCodec:
 //   weight        U8 [n, k/2], two E2M1 nibbles per byte, HIGH nibble = even element (opposite of MXFP4)
 //   weight_scale  E4M3 [paddedRows, paddedCols], one scale per 16 input elements, in NVIDIA's swizzled
-//                 blocked layout (the permutation restated in swizzled_scale_index below)
+//                 blocked layout (swizzled_scale_index in block_scale.cuh)
 //   weight_scale_2  F32 scalar
 // value = e2m1(nibble) * e4m3(scale byte) * scaleFactor * globalScale, multiplied left to right so the BF16
 // variant comes out bit-identical to the host reference rather than one ulp away.
 //
-// E4M3 is decoded by hand: __nv_cvt_fp8_to_halfraw needs SM 8.9 and this must also run on the 3060 (SM 8.6).
-// Following this repo's E4M3FN convention there is no NaN encoding — 0x7F is the maximum magnitude 480.
+// The codecs are decoded by hand (block_scale.cuh): __nv_cvt_fp8_to_halfraw needs SM 8.9 and this must also run on the 3060.
 
 #include <cuda_fp16.h>
 
+#include "block_scale.cuh"
+
 #define NVFP4_GROUP_BYTES 8u   // 16 elements per block scale, 2 elements per packed byte
-
-__device__ __forceinline__ float nvfp4_e4m3_decode(unsigned int b)
-{
-    unsigned int exponent = (b >> 3) & 0xFu;
-    unsigned int mantissa = b & 0x7u;
-    float magnitude;
-    if (exponent == 0u)
-    {
-        // Subnormal: 2^-6 * (mant/8). Exact in float, so no rounding can separate this from the host table.
-        magnitude = 0.015625f * (mantissa * 0.125f);
-    }
-    else
-    {
-        float power = __uint_as_float((127u + exponent - 7u) << 23);
-        magnitude = power * (1.0f + mantissa * 0.125f);
-    }
-    return (b & 0x80u) ? -magnitude : magnitude;
-}
-
-__device__ __forceinline__ float nvfp4_e2m1_decode(unsigned int nibble)
-{
-    unsigned int exponent = (nibble >> 1) & 0x3u;
-    unsigned int mantissa = nibble & 0x1u;
-    float magnitude = (exponent == 0u)
-        ? (0.5f * mantissa)
-        : (__uint_as_float((127u + exponent - 1u) << 23) * (1.0f + 0.5f * mantissa));
-    return (nibble & 0x8u) ? -magnitude : magnitude;
-}
-
-__device__ __forceinline__ unsigned long long swizzled_scale_index(
-    unsigned int row, unsigned int blockColumn, unsigned int paddedCols)
-{
-    unsigned int ncb = paddedCols >> 2;
-    unsigned int rb = row >> 7;
-    unsigned int r128 = row & 127u;
-    unsigned int a = r128 >> 5;
-    unsigned int b = r128 & 31u;
-    unsigned int cb = blockColumn >> 2;
-    unsigned int d = blockColumn & 3u;
-    unsigned long long g = (unsigned long long)rb * ncb + cb;
-    return (g * 32ull + b) * 16ull + a * 4u + d;
-}
 
 // One thread per packed byte -> two output elements. The grid is 2-D (x over the row's packed bytes, y over rows
 // with a stride loop) purely to keep the per-thread integer division out of a memory-bound kernel.

@@ -80,10 +80,26 @@ public static class Publisher
             MedianFirstTokenMs = Metric(machines, m => m.FirstTokenMs),
             MedianDecodeTokensPerSecond = Metric(machines, m => m.DecodeTokensPerSecond),
             MedianOutputTokens = first.Case.Adapter == "text" ? Metric(machines, m => m.CompletionTokens) : null,
+            MedianMsPerStep = first.Case.Adapter == "image" && first.Case.Steps > 0
+                ? Statistics.Median(medians) / first.Case.Steps : null,
+            Attested = environment.Attestation.Source == AttestationRecord.Smi, PowerProfile = environment.PowerProfile,
+            PeakDeviceMemoryBytes = (long?)Peak(machines, m => m.Telemetry.PeakUsedDeviceBytes),
+            PeakPowerWatts = Peak(machines, m => m.Telemetry.PeakPowerWatts),
             MedianMs = Statistics.Median(medians), MeanMs = medians.Average(), IntervalLowMs = low, IntervalHighMs = high,
             Machines = machines.Length, Sessions = machines.Length * Suites.Load(first.Campaign.SuiteId).Sessions,
             Evidence = machines.Select(x => x.Submission.ArchiveUrl).Order(StringComparer.Ordinal).ToArray(),
         };
+    }
+
+    /// <summary>Highest warm-lane observation in the cohort. A peak is not averaged across machines: one
+    /// machine whose sampler dropped out must not erase the figure the others measured.</summary>
+    private static double? Peak(AcceptedCase[] machines, Func<Measurement, double?> selector)
+    {
+        double[] values = machines
+            .SelectMany(x => x.Campaign.Sessions.Where(s => s.CaseId == x.Case.Id && s.Status == "completed"))
+            .SelectMany(s => s.Measurements.Where(m => m.Lane == "warm")).Select(selector)
+            .Where(v => v is not null).Select(v => v!.Value).ToArray();
+        return values.Length > 0 ? values.Max() : null;
     }
 
     private static double? Metric(AcceptedCase[] machines, Func<Measurement, double?> selector, string lane = "warm")
@@ -154,7 +170,8 @@ public static class Publisher
             SummaryRow row = rows[i];
             string gpu = row.Gpu.Length > 42 ? row.Gpu[..39] + "…" : row.Gpu;
             string label = $"{row.CaseId} | {gpu} | {row.Backend} | {row.EngineRevision[..7]} | "
-                + row.MedianMs.ToString("F1", CultureInfo.InvariantCulture) + $" ms | n={row.Machines}";
+                + row.MedianMs.ToString("F1", CultureInfo.InvariantCulture) + $" ms | n={row.Machines}"
+                + (row.Attested ? "" : " | unattested");
             double maximum = rows.Where(r => r.CaseId == row.CaseId && r.EngineRevision == row.EngineRevision).Max(r => r.MedianMs);
             string width = (900 * row.MedianMs / maximum).ToString("F1", CultureInfo.InvariantCulture);
             svg.Append($"<text x=\"24\" y=\"{72 + i * 58}\" font-size=\"13\">").Append(WebUtility.HtmlEncode(label)).Append("</text>");

@@ -27,7 +27,7 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
     private Tensor? _toVWeight, _toVBias;
     private Tensor? _projMlpWeight, _projMlpBias;
 
-    // Fused BFL linear1 [3*hidden + mlp, hidden] (HARTSY_CHROMA_FUSED_QKV: the converter kept it whole).
+    // Fused BFL linear1 [3*hidden + mlp, hidden] (numerics.chromaFusedQkv: the converter kept it whole).
     // When set, the split projections above stay null and the forward runs one GEMM + SliceLastDim×2 +
     // QkvSplitNorm (the Hunyuan3DFluxBlocks recipe).
     private Tensor? _lin1Weight, _lin1Bias;
@@ -133,7 +133,7 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
         int seqLen = (int)x.Shape[1];
         float scale = 1.0f / MathF.Sqrt(_headDim);
         // Activation dtype follows the INPUT (see ChromaDoubleStreamBlock.Forward): F16 on the
-        // HARTSY_DIT_F16 path; modulation vectors and the SDPA mask stay F32.
+        // numerics.ditF16 path; modulation vectors and the SDPA mask stay F32.
         DType act = x.DType;
 
         // ── 1. Slice modulation rows into tiny [B, hidden] tensors: shift, scale, gate. Device slices
@@ -150,7 +150,7 @@ public sealed unsafe class ChromaSingleStreamBlock : IStreamingBlock
         // ── 2. LayerNorm (no affine) + modulate: x*(1+scale)+shift ──
         Tensor modulated = DiTUtils.NormModulate(backend, x, mod[0], mod[1], shape);
 
-        // ── 3+4. Q/K/V + MLP projection + QK-Norm. Fused path (HARTSY_CHROMA_FUSED_QKV): the BFL
+        // ── 3+4. Q/K/V + MLP projection + QK-Norm. Fused path (numerics.chromaFusedQkv): the BFL
         //         linear1 [3*hidden + mlp, hidden] runs as ONE GEMM; qkv + mlp slice off the activation
         //         and QkvSplitNorm does split + per-head RMSNorm + v copy in one kernel (4 GEMMs +
         //         2 RmsNorm passes → 1 GEMM + 3 kernels, the Hunyuan3DFluxBlocks recipe). Split path:

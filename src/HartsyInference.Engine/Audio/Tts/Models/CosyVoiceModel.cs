@@ -46,11 +46,11 @@ internal static class CosyVoiceModel
             string hiftPath = fetched["hift.pt"];
             string s3genPath = fetched["s3gen.safetensors"];
 
-            PytorchPickleLoader llmLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader llmLoader = new AnyFormatCheckpointLoader();
             llmLoader.Load(llmPath);
-            PytorchPickleLoader flowLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader flowLoader = new AnyFormatCheckpointLoader();
             flowLoader.Load(flowPath);
-            PytorchPickleLoader hiftLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader hiftLoader = new AnyFormatCheckpointLoader();
             hiftLoader.Load(hiftPath);
             SafeTensorsLoader s3genLoader = new SafeTensorsLoader();
             s3genLoader.Load(s3genPath);

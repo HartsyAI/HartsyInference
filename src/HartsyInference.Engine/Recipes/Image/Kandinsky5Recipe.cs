@@ -82,21 +82,21 @@ public sealed class Kandinsky5Recipe : IArchitectureRecipe
                 "Kandinsky5Recipe");
             transformer.LoadWeights(transformerWeights);
 
-            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_7B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen2_5_VL_7B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader qwenLoader = new SafeTensorsLoader();
             qwenLoader.Load(qwenPath);
             loaders.Add(qwenLoader);
             LlamaStyleEncoder qwen = new LlamaStyleEncoder(LlamaStyleEncoderConfig.Qwen2_5_VL_7B);
             qwen.LoadWeights(qwenLoader.GetAllTensors());
 
-            string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string clipPath = ModelDownloader.EnsureSideModelAsync(SideModels.ClipL, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             SafeTensorsLoader clipLoader = new SafeTensorsLoader();
             clipLoader.Load(clipPath);
             loaders.Add(clipLoader);
             ClipTextEncoder clipL = new ClipTextEncoder(ClipTextEncoderConfig.SdxlClipL);
             clipL.LoadWeights(LoaderClipUtils.StripClipPrefix(clipLoader.GetAllTensors(), "clip_l", 0), prefix: "text_model");
 
-            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, context.Cancel).GetAwaiter().GetResult();
             (Dictionary<string, Tensor> vaeWeights, SafeTensorsLoader vaeLoader) = LoaderVaeUtils.LoadFluxVaeF32(vaePath);
             loaders.Add(vaeLoader);
             // BF16 on Ampere+ (F32-equivalent range, halves the full-res decode workspace), F32 otherwise —

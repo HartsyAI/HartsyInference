@@ -32,18 +32,19 @@ public sealed unsafe class F5Dit : IDisposable
     private int _txtCacheLen = -1;
     private int _disposed;
 
-    // ── CUDA-graph step capture (opt-in via HARTSY_F5_GRAPH; ZImage pattern) ───────────────────────────
+    // ── CUDA-graph step capture (opt-in via numerics.f5Graph; ZImage pattern) ───────────────────────────
     // The 22-block core has an identical op sequence every forward (cond/uncond differ only in the embedding
     // stage, which stays outside the graph). Capturing it once and replaying via a single cuGraphLaunch
     // collapses the ~7k per-op host calls that dominate the eager path. Fixed input buffers (_xFixed embedded
     // hidden, _siluFixed timestep-SiLU) are refreshed per forward via CopyInto; the velocity lands in
-    // _graphVelocity. Any capture-illegal op trips _graphDead → permanent eager fallback for the session.
+    // _graphVelocity. A capture-illegal op that keeps failing trips _graphDead → eager for the session.
     // EXPERIMENTAL / WIP — capture works but replay throws CUDA_ERROR_ILLEGAL_ADDRESS: the block core
     // allocates+frees intermediate tensors per-forward, so pool addresses shift on replay and the recorded
     // kernels read stale pointers. Landing this needs graph-stable scratch: pre-allocate every F5DitBlock
     // intermediate ONCE so the captured region does zero alloc/free (the remaining work). Keep OFF.
     private static bool GraphEnabled => EngineKnobs.F5Graph.Value;
     private bool _graphDead;
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private Tensor? _xFixed, _siluFixed, _graphVelocity;
     private long _graphSig = long.MinValue;
     private int _graphSigCalls;
@@ -220,7 +221,7 @@ public sealed unsafe class F5Dit : IDisposable
         catch (Exception ex) when (capture)
         {
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             HartsyInference.Core.Logging.Logs.Warning($"[F5 graph] capture invalidated — eager fallback: {ex.Message}");
             return RunBlocks(backend, x, siluTime, t);
         }
@@ -230,7 +231,7 @@ public sealed unsafe class F5Dit : IDisposable
             catch (Exception ex)
             {
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[F5 graph] capture failed — eager fallback: {ex.Message}");
                 return RunBlocks(backend, x, siluTime, t);
             }

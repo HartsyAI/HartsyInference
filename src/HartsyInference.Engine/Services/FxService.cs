@@ -91,8 +91,8 @@ public sealed class FxService : IFxService
             // not take an LCFM step count or solver yet, so those knobs have no counterpart here.
             float lambd = (float)(request.Lambd ?? 0.5);
             float tau = (float)(request.Tau ?? 0.5);
-            float[] enhanced = runner.Enhance(backend, mono, lambd, tau, request.Seed < 0 ? 0 : request.Seed,
-                request.Nfe, request.Solver);
+            float[] enhanced = request.DenoiseOnly ? runner.Denoise(backend, mono)
+                : runner.Enhance(backend, mono, lambd, tau, request.Seed < 0 ? 0 : request.Seed, request.Nfe, request.Solver);
             double seconds = AudioClipCodec.Seconds(enhanced.Length, runner.SampleRate);
             Logs.Verbose($"[Audio][Resemble-Enhance] Enhanced {AudioClipCodec.Seconds(mono.Length, FxCatalog.EnhanceSampleRate):0.0}s "
                 + $"in {Environment.TickCount64 - started}ms.");

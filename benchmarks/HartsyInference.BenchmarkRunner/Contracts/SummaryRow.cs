@@ -17,6 +17,13 @@ public sealed record SummaryRow
     public double? MedianFirstTokenMs { get; init; }
     public double? MedianDecodeTokensPerSecond { get; init; }
     public double? MedianOutputTokens { get; init; }
+    /// <summary>Warm median divided by the case's step count, for image cases only.</summary>
+    public double? MedianMsPerStep { get; init; }
+    /// <summary>False when nvidia-smi did not describe the device; such a cohort never pools with an attested one.</summary>
+    public bool Attested { get; init; }
+    public string PowerProfile { get; init; } = "unattested";
+    public long? PeakDeviceMemoryBytes { get; init; }
+    public double? PeakPowerWatts { get; init; }
     public required double MedianMs { get; init; }
     public required double MeanMs { get; init; }
     public required double IntervalLowMs { get; init; }

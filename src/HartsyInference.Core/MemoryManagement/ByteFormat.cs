@@ -8,4 +8,7 @@ public static class ByteFormat
 
     /// <summary>One-decimal mebibytes, e.g. "512.3 MB".</summary>
     public static string MbF1(long bytes) => $"{bytes / (1024.0 * 1024):F1} MB";
+
+    /// <summary>One-decimal gibibytes, e.g. "23.6 GB" — for user-facing capacity and requirement text.</summary>
+    public static string GbF1(long bytes) => $"{bytes / (1024.0 * 1024 * 1024):F1} GB";
 }

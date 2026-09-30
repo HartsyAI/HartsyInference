@@ -469,7 +469,9 @@ public static partial class AbcSerializer
             // An interval that quantizes entirely onto the final subbeat is dropped; that step exists to close
             // the grid, not to hold a value.
             if (startT == endT && endT == result.Length - 1) continue;
-            if (endT <= startT)
+            // A chord or key shorter than one subbeat occupies no grid step, so it is skipped rather than raised.
+            if (endT == startT) continue;
+            if (endT < startT)
             {
                 throw new AbcRebuildException(
                     $"Interval {Seconds(row.Start)}-{Seconds(row.End)} ({row.Value}) is shorter than the ABC subbeat grid");

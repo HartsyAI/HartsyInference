@@ -36,7 +36,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
     private readonly float _vaeBnEps;
     private readonly float _schedulerShift;
 
-    /// <summary>Standard-profile DiT residency (HARTSY_KEEP_MODELS, default ON): transformer weights stay GPU-resident across generations; a prompt-cache MISS evicts them first so the ~7.7 GB TE still fits.</summary>
+    /// <summary>Standard-profile DiT residency (vram.keepModels, default ON): transformer weights stay GPU-resident across generations; a prompt-cache MISS evicts them first so the ~7.7 GB TE still fits.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
@@ -165,7 +165,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         {
             if (_ditResident)
             {
-                // The TE cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
+                // The TE cannot coexist with the resident DiT (vram.keepModels); evict for this
                 // new-prompt generation and re-preload below.
                 Backend.Sync();
                 Backend.FreeWeights(_transformer.EnumerateWeights());
@@ -238,7 +238,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
 
         // ── 4. Denoising loop ─────────────────────────────────────────────
         // Bulk-upload transformer weights before the denoise loop (no-op when already resident under
-        // HARTSY_KEEP_MODELS). Paired with the conditional FreeWeights at the VAE handoff.
+        // vram.keepModels). Paired with the conditional FreeWeights at the VAE handoff.
         Backend.PreloadWeights(_transformer.EnumerateWeights());
         _ditResident = true;
 
@@ -372,7 +372,7 @@ public sealed unsafe class ErnieImagePipeline : DiffusionPipelineBase
         sourceLatent?.Dispose();
         latentMask?.Dispose();
 
-        // ── 5. Transformer weights: keep GPU-resident across gens under HARTSY_KEEP_MODELS (the Flux2-VAE
+        // ── 5. Transformer weights: keep GPU-resident across gens under vram.keepModels (the Flux2-VAE
         //       decode below fits beside the ~7.5 GB fp8 DiT); a future prompt-cache miss evicts for the TE ──
         Backend.Sync();
         if (!KeepModelsResident)

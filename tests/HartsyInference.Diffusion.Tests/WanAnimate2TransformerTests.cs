@@ -2,6 +2,9 @@ using Xunit;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.Diffusion.Models.Denoisers;
+using HartsyInference.Engine.Recipes.Video;
+using HartsyInference.Engine.Variants;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -284,8 +287,8 @@ public unsafe class WanAnimate2TransformerTests
     }
 
     /// <summary>The two Animate-2 builds are key-for-key identical and both declare only
-    /// <c>model_type: "animate2"</c>, so the distillation build's <c>log_scale = -1.3</c> can only come from the file
-    /// name. It never reached the config at all before: <c>WanConfigDetector</c> set <c>IsAnimate2</c> and left the
+    /// <c>model_type: "animate2"</c>, so without a hint or <c>hartsy.model_id</c> the distillation build's
+    /// <c>log_scale = -1.3</c> can only come from the file name (the resolver's last-resort tier). It never reached the config at all before: <c>WanConfigDetector</c> set <c>IsAnimate2</c> and left the
     /// score bias at the base build's 0, so a distillation checkpoint silently ran without the bias it was trained
     /// with, and <c>LogScaleBias</c> took the null/unmasked path.</summary>
     [Theory]
@@ -295,6 +298,8 @@ public unsafe class WanAnimate2TransformerTests
     [InlineData("wan_animate_2_int8_convrot.safetensors", 0f)]
     public void ResolveLogScale_RoutesTheDistillationBuildByName(string path, float expected)
     {
-        Assert.Equal(expected, WanAnimate2Transformer.ResolveLogScale(path));
+        CheckpointProbe probe = CheckpointProbe.Empty with { FileNames = [Path.GetFileNameWithoutExtension(path)] };
+        bool distillation = ModelVariantResolver.Classify(WanAnimate2Variants.Catalog, probe, []).Is(WanAnimate2Variants.Distillation);
+        Assert.Equal(expected, distillation ? WanAnimate2Transformer.DistillLogScale : 0f);
     }
 }

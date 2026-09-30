@@ -13,7 +13,7 @@ public sealed class EngineOptions
     /// <summary>Model cache directory for HuggingFace downloads (null = default <c>~/.hartsyinference/models</c>).</summary>
     public string? ModelCacheDirectory { get; set; }
 
-    /// <summary>Low-VRAM policy for this engine's backend; null = follow the <c>HARTSY_LOWVRAM</c> environment
+    /// <summary>Low-VRAM policy for this engine's backend; null = follow the <c>vram.lowVram</c> environment
     /// variable. Hosts with a per-backend setting (the SwarmUI extension) pass it here — the env var is process-wide
     /// last-writer-wins, which breaks one-backend-per-GPU setups with differing card sizes.</summary>
     /// <remarks>Superseded by <see cref="VramPolicy"/>, which carries every lever rather than the streaming one alone.

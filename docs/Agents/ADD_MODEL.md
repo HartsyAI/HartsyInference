@@ -2,9 +2,10 @@
 
 1. Read the relevant architecture reference and modality status; search TROUBLESHOOTING for the family/operation.
 2. Map shapes, dtypes, masks, prediction type and ownership at every boundary. Inspect checkpoint keys/metadata before designing conversion; repack once at load time.
-3. Use the sibling package and IBackend/shared operations. Engine owns registration, catalog, loading and consumer dispatch; video must use the planning contract in [core](AGENTS.md).
-4. Validate components with saved reference noise/embeddings, then real weights, generated output and the intended consumer. Matching seeds does not match RNG implementations.
-5. Record exact checkpoint, reference version, inputs, dtype/backend, tolerances and evidence in the canonical status/parity docs.
+3. Use the sibling package and IBackend/shared operations. Engine owns registration, catalog, loading and consumer dispatch; video must use the planning contract in [engine patterns](ENGINE_PATTERNS.md#video-planning-contract).
+4. If builds share the architecture but not the contract (base/edit, turbo/distilled), declare a variant catalog; see [model variants](ENGINE_PATTERNS.md#model-variants). Map each SwarmUI class id and `modelspec.architecture` value before reaching for filename tokens.
+5. Validate components with saved reference noise/embeddings, then real weights, generated output and the intended consumer. Matching seeds does not match RNG implementations.
+6. Record exact checkpoint, reference version, inputs, dtype/backend, tolerances and evidence in the canonical status/parity docs.
 
 Use the safe-subset pickle parser; never execute checkpoint pickle. Preserve configuration/tokenizer metadata and report quantization loss. Choose precision per family from validated behavior, not a universal Q8/F16 prescription.
 

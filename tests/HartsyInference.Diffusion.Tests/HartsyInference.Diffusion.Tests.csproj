@@ -39,6 +39,7 @@
        otherwise idle. Same fix as Audio.Tests/World.Tests: force single-threaded execution. -->
   <ItemGroup>
     <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\Samplers\**\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

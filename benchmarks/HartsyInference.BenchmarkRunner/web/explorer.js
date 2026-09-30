@@ -14,18 +14,19 @@ async function main() {
     document.getElementById('empty').hidden = selected.length > 0;
     const root = document.getElementById('results'); root.replaceChildren();
     const table = node('table'); const header = node('tr');
-    for (const text of ['GPU / workload', 'Backend / engine / driver', 'Warm median', 'TTFT / decode', '95% interval', 'Coverage / evidence']) header.append(node('th', text));
+    for (const text of ['GPU / workload', 'Backend / engine / driver', 'Warm median', 'TTFT / decode', 'Peak VRAM / power', '95% interval', 'Coverage / evidence']) header.append(node('th', text));
     table.append(header);
     for (const row of selected) {
-      const tr = node('tr'); tr.append(node('td', row.gpu + ' / ' + row.caseId));
+      const tr = node('tr'); tr.append(node('td', row.gpu + ' / ' + row.caseId + (row.attested ? '' : ' \u00b7 unattested')));
       tr.append(node('td', row.backend + ' / ' + row.engineRevision.slice(0, 7) + ' / ' + row.driver));
-      const latency = node('td', row.medianMs.toFixed(1) + ' ms');
+      const latency = node('td', row.medianMs.toFixed(1) + ' ms' + (row.medianMsPerStep ? ' (' + row.medianMsPerStep.toFixed(1) + ' ms/step)' : ''));
       const bar = node('div');
       const maximum = Math.max(...selected.filter(r => r.caseId === row.caseId && r.engineRevision === row.engineRevision).map(r => r.medianMs));
       bar.style.width = Math.max(1, row.medianMs / maximum * 150) + 'px';
       bar.style.height = '6px'; bar.style.background = '#7dd3fc'; latency.append(bar); tr.append(latency);
       tr.append(node('td', (row.medianFirstTokenMs?.toFixed(1) ?? '—') + ' ms / ' + (row.medianDecodeTokensPerSecond?.toFixed(1) ?? '—') + ' tok/s'));
-      tr.title = row.operatingSystem + ' | ' + row.runtime + ' | ' + (row.deviceMemoryBytes / 1073741824).toFixed(1) + ' GiB | config ' + row.configuration + ' | native ' + row.nativeConfiguration;
+      tr.append(node('td', (row.peakDeviceMemoryBytes ? (row.peakDeviceMemoryBytes / 1073741824).toFixed(1) + ' GiB' : '—') + ' / ' + (row.peakPowerWatts?.toFixed(0) ?? '—') + ' W'));
+      tr.title = row.operatingSystem + ' | ' + row.runtime + ' | ' + (row.deviceMemoryBytes / 1073741824).toFixed(1) + ' GiB | power ' + row.powerProfile + ' | config ' + row.configuration + ' | native ' + row.nativeConfiguration;
       tr.append(node('td', row.machines > 1 ? row.intervalLowMs.toFixed(1) + '–' + row.intervalHighMs.toFixed(1) + ' ms' : 'Single machine'));
       const evidence = node('td', row.machines + ' machines, ' + row.sessions + ' sessions ');
       for (const [index, url] of row.evidence.entries()) {

@@ -42,7 +42,7 @@ public sealed unsafe class QuantizedWeightPolicyTests
         try
         {
             using QuantizedWeightPolicy.PreparedWeights prepared =
-                QuantizedWeightPolicy.PrepareFor(weights, dtype => dtype == DType.Q8_0, "packed-quant backend");
+                QuantizedWeightPolicy.PrepareFor(weights, weight => weight.DType == DType.Q8_0, "packed-quant backend");
 
             Assert.Equal(0, prepared.WidenedCount);
             // Widening a format the backend reads natively would quadruple a 20 GB checkpoint for nothing.
@@ -141,7 +141,7 @@ public sealed unsafe class QuantizedWeightPolicyTests
         try
         {
             using QuantizedWeightPolicy.PreparedWeights prepared =
-                QuantizedWeightPolicy.PrepareFor(weights, dtype => dtype == DType.I8, "int8 backend");
+                QuantizedWeightPolicy.PrepareFor(weights, weight => weight.DType == DType.I8, "int8 backend");
 
             Assert.Equal(0, prepared.WidenedCount);
             // Widening it would turn LTX 2.5's 21.5 GB DiT back into 42 GB, which is the whole reason for the format.

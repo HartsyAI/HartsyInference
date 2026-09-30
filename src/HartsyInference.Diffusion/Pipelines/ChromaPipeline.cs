@@ -32,7 +32,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
     private readonly ChromaConfig _config;
     private readonly float _schedulerShiftFallback;
 
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The T5-XXL cannot coexist with the resident DiT on smaller cards, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen re-upload). The T5-XXL cannot coexist with the resident DiT on smaller cards, so a prompt-cache MISS under this flag frees the DiT first, encodes, then re-preloads — repeat prompts skip both. Standard-profile default ON (vram.keepModels=false disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
@@ -188,7 +188,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             // CUDA 700).
             if (_ditResident && ReferenceEquals(TextEncoderBackend, Backend))
             {
-                // The T5 cannot coexist with the resident DiT (HARTSY_KEEP_MODELS); evict for this
+                // The T5 cannot coexist with the resident DiT (vram.keepModels); evict for this
                 // new-prompt generation and re-preload below (invalidate-before-free lives inside
                 // FreeTransformerWeights).
                 Backend.Sync();
@@ -360,7 +360,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }
@@ -563,7 +563,7 @@ public sealed unsafe class ChromaPipeline : DiffusionPipelineBase
         ChromaTransformer.DumpFinalLatent(packedLatent);
 
         // Free transformer + T5 weights from GPU before VAE decode (mirrors SD3/Flux/AuraFlow pattern).
-        // Under HARTSY_KEEP_MODELS the DiT stays resident (~9 GB fp8; the full-res VAE decode's banded im2col
+        // Under vram.keepModels the DiT stays resident (~9 GB fp8; the full-res VAE decode's banded im2col
         // fits beside it, falling back to tiles if not).
         Backend.Sync();
         DitShardBackend?.Sync();

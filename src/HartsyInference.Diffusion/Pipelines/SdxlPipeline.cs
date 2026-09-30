@@ -30,7 +30,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
     private readonly VaeEncoder? _vaeEncoder;
     private readonly float _vaeScalingFactor;
 
-    /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS): UNet weights stay GPU-resident across generations, skipping the per-generation free + ~2 s re-upload. SDXL's UNet (2.5 GB F16) + BF16 VAE + dual CLIP fit 24 GB together, so no evict-for-TE dance is needed.</summary>
+    /// <summary>Standard-profile residency (vram.keepModels): UNet weights stay GPU-resident across generations, skipping the per-generation free + ~2 s re-upload. SDXL's UNet (2.5 GB F16) + BF16 VAE + dual CLIP fit 24 GB together, so no evict-for-TE dance is needed.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _unetResident;
 
@@ -276,7 +276,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // 5. Denoise loop (both paths run the same loop from their respective startStep)
         // Bulk-upload UNet weights before the denoise loop. SDXL UNet is ~2.5 GB at F16 —
         // without preload the first step would pay cache-miss overhead for every parameter.
-        // Under HARTSY_KEEP_MODELS the weights stay resident across generations and the
+        // Under vram.keepModels the weights stay resident across generations and the
         // preload is skipped. No-op on backends without a weight cache.
         Stopwatch preloadSw = Stopwatch.StartNew();
         if (!_unetResident)
@@ -306,6 +306,8 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
         // generation using them always falls back to whichever loop it would have taken anyway. Decided AFTER
         // fusedLoop so eligibility can only fire on generations that already qualify for the batched fast path.
         bool useCfg = CfgHelper.IsGuidanceActive(cfgScale);
+        bool nonDefaultSelection = !string.IsNullOrEmpty(scheduleName)
+            || (samplerName.Length > 0 && !string.Equals(SamplerRegistry.Resolve(samplerName), "euler", StringComparison.Ordinal));
         bool cfgParallelEligible = false;
         LastCfgParallelDecision = null;
         if (CfgParallelBackend is not null)
@@ -317,6 +319,11 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             else if (!fusedLoop)
             {
                 RecordCfgParallelDecision("fell-back(eager-path-features)");
+            }
+            else if (nonDefaultSelection)
+            {
+                // The split loop is a fixed Euler step; a chosen sampler or schedule must run on the fused loop.
+                RecordCfgParallelDecision("fell-back(sampler)");
             }
             else
             {
@@ -352,9 +359,14 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
                 + "cfg-rescale and tcfg each force that fallback. Drop the sampler/schedule selection, or drop the "
                 + "feature that forced the fallback.");
         }
-        ISampler? sampler = fusedLoop
-            ? SamplerRegistry.Create(samplerName, SigmaSchedule.Apply(scheduleName, ((EulerDiscreteScheduler)scheduler).Sigmas()), seed)
-            : null;
+        ISampler? sampler = null;
+        if (fusedLoop)
+        {
+            EulerDiscreteScheduler euler = (EulerDiscreteScheduler)scheduler;
+            sampler = SamplerRegistry.Create(samplerName,
+                SamplerRegistry.BuildSigmas(samplerName, scheduleName, euler.Sigmas(), startStep > 0, euler.SigmasFor), seed,
+                new SamplerOptions { PercentToSigma = euler.SigmaAtPercent });
+        }
 
         Stopwatch denoiseSw = Stopwatch.StartNew();
         latent = cfgParallelEligible
@@ -377,7 +389,7 @@ public sealed class SdxlPipeline : DiffusionPipelineBase
             clipGForRefiner.Dispose();
         }
 
-        // 6. VAE decode. Under HARTSY_KEEP_MODELS the UNet stays resident (2.5 GB F16 beside the
+        // 6. VAE decode. Under vram.keepModels the UNet stays resident (2.5 GB F16 beside the
         // VAE's banded-conv workspace fits 24 GB with ~14 GB headroom — measured peak 10.2 GB);
         // otherwise free it to reclaim VRAM for the high-res VAE conv2d buffers. CLIP-L/CLIP-G were
         // already released at the end of the text-encode phase above.

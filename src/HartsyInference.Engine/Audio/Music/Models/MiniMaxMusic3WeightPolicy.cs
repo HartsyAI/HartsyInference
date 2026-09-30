@@ -112,9 +112,11 @@ internal static class MiniMaxMusic3WeightPolicy
         loader.Load(cachePath);
         cache = loader;
         Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(passthrough, StringComparer.Ordinal);
-        foreach (string name in loader.Descriptors.Keys)
+        // Read back under the source shapes: the file is in ggml order, and the raw loader would hand every
+        // projection over transposed (see GgufQuantizer.ReadBack).
+        foreach (KeyValuePair<string, Tensor> entry in GgufQuantizer.ReadBack(loader, selected))
         {
-            merged[name] = loader.GetTensor(name);
+            merged[entry.Key] = entry.Value;
         }
         Logs.Info($"[Audio][MiniMaxMusic3] Loaded the {backbone.Name} {label} from cache "
             + $"({new FileInfo(cachePath).Length / (1024 * 1024)} MB).");

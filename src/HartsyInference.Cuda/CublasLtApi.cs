@@ -73,6 +73,8 @@ internal static partial class CublasLtApi
 
     // ── Matmul Descriptor Attributes ────────────────────────────────────
 
+    internal const int CUBLASLT_MATMUL_DESC_POINTER_MODE = 2;   // cublasLtPointerMode_t; DEVICE reads alpha AND beta from device memory
+    internal const int CUBLASLT_POINTER_MODE_DEVICE = 1;
     internal const int CUBLASLT_MATMUL_DESC_TRANSA = 3;
     internal const int CUBLASLT_MATMUL_DESC_TRANSB = 4;
     internal const int CUBLASLT_MATMUL_DESC_EPILOGUE = 7;
@@ -84,6 +86,20 @@ internal static partial class CublasLtApi
     internal const int CUBLASLT_MATMUL_DESC_D_SCALE_POINTER = 20;
     internal const int CUBLASLT_MATMUL_DESC_AMAX_D_POINTER = 21;
     internal const int CUBLASLT_MATMUL_DESC_FAST_ACCUM = 25;
+
+    // Block-scaling mode, read from cublasLt.h (CUDA 13.6). Without these the scale POINTER attributes above are
+    // interpreted as a single F32 scalar per matrix, which is the pre-Blackwell meaning — a microscaled FP4 operand
+    // needs the mode set or the scale tensor is misread rather than rejected.
+    internal const int CUBLASLT_MATMUL_DESC_A_SCALE_MODE = 31;
+    internal const int CUBLASLT_MATMUL_DESC_B_SCALE_MODE = 32;
+    internal const int CUBLASLT_MATMUL_DESC_C_SCALE_MODE = 33;
+    internal const int CUBLASLT_MATMUL_DESC_D_SCALE_MODE = 34;
+
+    // cublasLtMatmulMatrixScale_t. VEC16_UE4M3 is NVFP4 (16-element blocks, E4M3 scales); VEC32_UE8M0 is MXFP4
+    // (32-element blocks, exponent-only scales). SCALAR_32F is the per-tensor mode the fp8 path already uses.
+    internal const int CUBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F = 0;
+    internal const int CUBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3 = 1;
+    internal const int CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0 = 2;
 
     // ── Matrix Layout Attributes ────────────────────────────────────────
 

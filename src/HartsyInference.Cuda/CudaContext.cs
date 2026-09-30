@@ -39,6 +39,15 @@ public sealed class CudaContext : IDisposable
     /// <summary>The compute capability minor version.</summary>
     public int ComputeCapabilityMinor { get; }
 
+    /// <summary>Compute capability as one number (<see cref="CudaArch"/>), for every SM gate.</summary>
+    public int Sm => CudaArch.Sm(ComputeCapabilityMajor, ComputeCapabilityMinor);
+
+    /// <summary>Dynamic shared memory a block gets without opting in.</summary>
+    public int MaxSharedMemoryPerBlock { get; }
+
+    /// <summary>The most dynamic shared memory an opt-in (<c>CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES</c>) can raise a block to — 100 KB on Ada and consumer Blackwell, 228 KB on Hopper and datacenter Blackwell.</summary>
+    public int MaxSharedMemoryPerBlockOptin { get; }
+
     /// <summary>Total VRAM in bytes.</summary>
     public nuint TotalMemory { get; }
 
@@ -95,6 +104,14 @@ public sealed class CudaContext : IDisposable
         CudaDriverApi.cuDeviceGetAttribute(
             out int smCount, CudaDriverApi.CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, _deviceHandle).ThrowOnError();
         MultiprocessorCount = smCount;
+
+        CudaDriverApi.cuDeviceGetAttribute(
+            out int sharedDefault, CudaDriverApi.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, _deviceHandle).ThrowOnError();
+        MaxSharedMemoryPerBlock = sharedDefault;
+
+        CudaDriverApi.cuDeviceGetAttribute(
+            out int sharedOptin, CudaDriverApi.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, _deviceHandle).ThrowOnError();
+        MaxSharedMemoryPerBlockOptin = sharedOptin;
 
         DeviceName = QueryDeviceName(_deviceHandle);
     }

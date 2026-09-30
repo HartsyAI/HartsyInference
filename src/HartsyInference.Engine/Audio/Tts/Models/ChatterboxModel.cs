@@ -74,7 +74,7 @@ internal static class ChatterboxModel
 
             // Precomputed default-voice conditionals. The pickle loader materializes into owned memory, so the three
             // tensors stay valid as long as it is kept alive.
-            PytorchPickleLoader condsLoader = new PytorchPickleLoader();
+            AnyFormatCheckpointLoader condsLoader = new AnyFormatCheckpointLoader();
             condsLoader.Load(condsPath, recursiveFlatten: true);
             IReadOnlyDictionary<string, Tensor> conds = condsLoader.GetAllTensors();
             Tensor referenceSpeaker = Flatten(conds["t3.speaker_emb"], config.SpeakerEmbedDim);

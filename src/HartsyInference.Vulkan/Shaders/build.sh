@@ -106,12 +106,15 @@ DTYPE_KERNELS=(
     repeat_kv_heads
     gated_residual_last_dim
     slice_rows
+    fp8_absmax
+    quant_e4m3
 )
 
 SINGLE_KERNELS=(
     chw_f32_to_hwc_u8
     affine_mix
     fill_bias
+    quant_int8_rowwise
     pixel_shuffle2d
     modulation_split4
     affine_broadcast_row_indexed
@@ -125,15 +128,20 @@ SINGLE_KERNELS=(
     cast_f32_bf16
     matmul_coopmat
     matmul_coopmat_partial_m
-    matmul_coopmat_blocked
     matmul_coopmat2
+    sdpa_flash_cm2
     matmul_int8
+    matmul_fp8_coopmat
+    matmul_fp8_coopmat2
     dequant_q4_0
     dequant_q5_0
     dequant_q8_0
+    dequant_q2_k
+    dequant_q3_k
     dequant_q4_k
     dequant_q5_k
     dequant_q6_k
+    dequant_iq4_xs
     embed_gather_decode
     argmax_lastdim
     history_append
@@ -149,6 +157,9 @@ done
 for k in "${SINGLE_KERNELS[@]}"; do
     compile_one "$k" -- ""
 done
+
+# sdpa_flash_cm2 with an F32 [Sq,Skv] additive mask; HAS_MASK adds a binding, so it is its own module.
+compile_one "sdpa_flash_cm2" -DHAS_MASK=1 -- "_mask"
 
 # snake-beta (BigVGAN-v2): USE_BETA gates a #if-compiled binding, not a spec constant, so it
 # needs its own SPIR-V module distinct from the vanilla-snake build above.

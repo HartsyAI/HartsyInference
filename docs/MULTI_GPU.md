@@ -13,6 +13,10 @@ Choose placement by purpose and measure on the actual topology. Engine Placement
 
 DiT sharding, CFG parallelism and context parallelism are mutually exclusive. Explicit settings take priority over ParallelPlanner suggestions (--parallel auto); inspect the logged decision. Confirm ordinal-to-physical-GPU mapping; CUDA_DEVICE_ORDER=PCI_BUS_ID makes it explicit.
 
+## Routing requests across cards
+
+`IInferenceEngine.MemoryEstimation` answers, without loading weights, whether a request fits this engine's card: `AssessAsync(spec, new MemoryEstimateRequest(width, height, frames, Vram: overrides))` returns `Resident`, `Streamed`, `Infeasible` or `Unknown` under the effective VRAM policy, placement and the levers the model wires. Headers are read once per checkpoint per process, so a host can ask every engine about every queued request. Capacity is total VRAM less a 2 GB reserve, not free VRAM. Families that implement `DescribeMemory` (Wan today) are sized with their pipeline's own activation formulas; the rest report `HeaderOnly` accuracy, so route on them but let the engine's pre-flight have the final word. The SwarmUI extension's fit gate is the reference consumer.
+
 ## Contracts and limits
 
 - Layer/block sharding places contiguous ranges using available memory or explicit ratios. It pools weights, but sequential boundaries add transfers. LLM final norm/head/sampler live on the final stage; stage-local KV follows layer placement.
@@ -26,7 +30,7 @@ DiT sharding, CFG parallelism and context parallelism are mutually exclusive. Ex
 - Mesh and most world-model placement remain limited; Oasis VAE overlap is implemented. Frame-paced worlds need latency validation before adding boundary transfers.
 - Precision differences across SM generations require controls. Same-device split parity does not establish cross-device equality; matched-SM physical pairs still need testing.
 
-YuE/CosyVoice use shared LM placement. The historical audio-LM policy chooses Q4_K for single-card fit and unquantized weights when sharded; inspect the resolved family policy and settings before comparing quality. Current knobs/defaults are declared by EngineKnobs; legacy names and disposition are in [ENV_VARS](ENV_VARS.md).
+YuE/CosyVoice use shared LM placement. The historical audio-LM policy chooses Q4_K for single-card fit and unquantized weights when sharded; inspect the resolved family policy and settings before comparing quality. Current settings and defaults are declared by EngineKnobs; see [Settings](SETTINGS.md).
 
 Extension settings historically include GPU_ID, TextEncoderGpuId, VaeGpuId, DitShardGpuId, LmShardGpuId and CfgParallelGpuId. Verify the extension's pinned version for its current surface; do not infer deployment state from this repository.
 
@@ -37,7 +41,7 @@ These are retained August 2026 measurements, not fresh runs. The previously link
 Highlights (RTX 4090 + RTX 3060, PCIe, no P2P — every hand-off host-staged):
 
 - **Qwen3-32B Q4_K_M**: cannot load on the 4090 alone (OOM at 0.3% free) → **runs at 11.8 tok/s** split 16.7 + 10.2 GB (committed regression test).
-- **Qwen-Image 20B fp8**: 13.4 + 6.2 GB pooled. Fidelity gates (2026-08-06): same-device split SSIM **1.0000** (> 0.99 gated), cross-device with matched fp8 regime (`HARTSY_FP8_NATIVE=0`) **0.9929** (> 0.95 gated); the default cross-device SSIM (~0.18) is **informational only** — a per-tensor-fp8 outlier-channel regime difference between SM 8.9/8.6, root-caused as NOT a sharding defect (`QwenImageFp8PrecisionDiagnosticTests`; the previously-recorded 0.9734 was contradicted and withdrawn).
+- **Qwen-Image 20B fp8**: 13.4 + 6.2 GB pooled. Fidelity gates (2026-08-06): same-device split SSIM **1.0000** (> 0.99 gated), cross-device with matched fp8 regime (`numerics.fp8Native=false`) **0.9929** (> 0.95 gated); the default cross-device SSIM (~0.18) is **informational only** — a per-tensor-fp8 outlier-channel regime difference between SM 8.9/8.6, root-caused as NOT a sharding defect (`QwenImageFp8PrecisionDiagnosticTests`; the previously-recorded 0.9734 was contradicted and withdrawn).
 - **MiniMax-H3 fp8**: cross-device sharded mosaic root-caused (scale-blind fp8 fallback dequant in `LinearImpl`) and **fixed** — cross-device SSIM 0.17 → **0.9597** at defaults, a real > 0.90 gate again; same-device 1.0000 throughout; pooling +13,998/+10,086 MiB at no wall-time cost in that run (cross-device sharded 30.7 s vs unsharded 30.8 s warm).
 - **Chroma HD**: sharded run was *faster* than baseline (49.8 → 39.0 s) — the baseline paid other costs.
 - **Wan TI2V-5B** TE placement: **43.7 → 32.7 s**. LTX-1 TE+VAE: **16.4 → 10.2 s**.

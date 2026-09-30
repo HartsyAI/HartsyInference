@@ -116,11 +116,11 @@ public sealed class LensCheckpointConverter
             Vae = vae,
         };
 
-    /// <summary>Converts the ComfyUI DiT file: dequantizes MXFP8 linears to BF16 (no-op on the BF16 file), then applies the standard fused-QKV split + passthrough. Keys have no <c>transformer.</c> prefix.</summary>
+    /// <summary>Converts the ComfyUI DiT file: keeps MXFP8 linears packed with their block scales on <c>QuantInfo</c> (no-op on the BF16 file) — <c>QuantizedWeightPolicy</c> widens them for a backend without a kernel — then applies the standard fused-QKV split + passthrough. Keys have no <c>transformer.</c> prefix.</summary>
     public static Dictionary<string, Tensor> ConvertComfyDit(Dictionary<string, Tensor> dit)
     {
-        int dq = Mxfp8Codec.DequantInPlace(dit);
-        if (dq > 0) Logs.Verbose($"Lens(ComfyUI): dequantized {dq} MXFP8 DiT linears to BF16.");
+        int packed = Mxfp8Codec.AttachResidentInPlace(dit);
+        if (packed > 0) Logs.Verbose($"Lens(ComfyUI): {packed} MXFP8 DiT linears kept packed.");
 
         Dictionary<string, Tensor> transformer = new(dit.Count);
         foreach (KeyValuePair<string, Tensor> kvp in dit)

@@ -65,7 +65,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
         // never attempted an allocation (measured: 1 s, 82 MiB peak), which read as a capacity limit in benchmark
         // results when it was a policy.
         //
-        // The threshold is therefore now only enforced when streaming is unavailable — HARTSY_LOWVRAM=off, or a
+        // The threshold is therefore now only enforced when streaming is unavailable — vram.lowVram=off, or a
         // backend with no streaming cache. Otherwise the planner decides per generation against real free VRAM.
         // Asked of the backend, not of its class: any GPU backend that reports memory can answer this, and the
         // preflight is about how much VRAM there is rather than about which vendor supplies it.
@@ -80,7 +80,7 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
                 throw new InvalidOperationException(
                     $"Ideogram 4 needs >= {MinRequiredVramGb:F0} GB free VRAM to hold both 9.3B transformers resident for asymmetric CFG; " +
                     $"this GPU has {freeGb:F1} GB free of {totalBytes / (1024.0 * 1024.0 * 1024.0):F1} GB total, and weight streaming is " +
-                    $"disabled ({LowVramPolicy.EnvironmentVariable}=off). Unset {LowVramPolicy.EnvironmentVariable} to let the engine " +
+                    $"disabled ({LowVramPolicy.SettingId}=off). Unset {LowVramPolicy.SettingId} to let the engine " +
                     "stream the transformers, or use a higher-VRAM GPU.");
             }
             if (freeGb < MinRequiredVramGb)
@@ -97,19 +97,19 @@ public sealed class Ideogram4Recipe : IArchitectureRecipe
 
         // TODO(E-IMG-4): honor user-picked Qwen3-VL / VAE overrides from ImageRequest.Components (the SwarmUI loader
         // read T2IParamTypes.QwenModel/VAE and header-probed the pick, falling back to the canonical component).
-        string uncondPath = ModelDownloader.EnsureSideModelAsync(SideModels.Ideogram4Unconditional, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string uncondPath = ModelDownloader.EnsureSideModelAsync(SideModels.Ideogram4Unconditional, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string encoderPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.Flux2Vae, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         try
         {
-            // nvfp4ToFp8: the DiTs are ~93% nvfp4. Dequantizing to F16 would need 35.9 GB for the pair; folding the
-            // block scale into an fp8 value (global scale on Fp8ScaleFactor) keeps them at 9.3 GB each.
-            Logs.Info($"[Ideogram4Recipe] Loading conditional transformer (9.3B, nvfp4->fp8): {Path.GetFileName(context.CheckpointPath)}.");
+            // The Comfy-Org fp8_scaled DiTs are per-tensor fp8 and load as-is. nvfp4ToFp8 covers an nvfp4 build: widening
+            // it to F16 would need 35.9 GB for the pair, folding each block scale into fp8 keeps 9.3 GB each.
+            Logs.Info($"[Ideogram4Recipe] Loading conditional transformer (9.3B): {Path.GetFileName(context.CheckpointPath)}.");
             Dictionary<string, Tensor> condWeights = ComponentLoader.Load(context.CheckpointPath, "Ideogram4Recipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, loaders, nvfp4ToFp8: true);
 
-            Logs.Info($"[Ideogram4Recipe] Loading unconditional transformer (9.3B, nvfp4->fp8): {Path.GetFileName(uncondPath)}.");
+            Logs.Info($"[Ideogram4Recipe] Loading unconditional transformer (9.3B): {Path.GetFileName(uncondPath)}.");
             Dictionary<string, Tensor> uncondWeights = ComponentLoader.Load(uncondPath, "Ideogram4Recipe", CheckpointConvertUtils.StripTransformerPrefix, applyFp8Dequant: true, loaders, nvfp4ToFp8: true);
 
             Logs.Info($"[Ideogram4Recipe] Loading Qwen3-VL-8B text encoder: {Path.GetFileName(encoderPath)}.");

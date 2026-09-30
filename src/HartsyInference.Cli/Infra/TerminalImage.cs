@@ -15,7 +15,7 @@ public static class TerminalImage
 
     /// <summary>Whether inline previews should be emitted.</summary>
     /// <remarks>Requires a real (non-redirected) stdout, truecolor not opted out via <c>NO_COLOR</c>, and not disabled via
-    /// <c>HARTSY_NO_IMAGE=1</c>.</remarks>
+    /// <c>diagnostics.noImage=true</c>.</remarks>
     public static bool IsSupported =>
         !Console.IsOutputRedirected && Environment.GetEnvironmentVariable("NO_COLOR") is null
         && !EngineKnobs.NoImage.Value;

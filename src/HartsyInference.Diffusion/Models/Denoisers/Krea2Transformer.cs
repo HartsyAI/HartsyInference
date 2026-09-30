@@ -36,7 +36,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
     private object? _cachedTxtKey;
     private long _ropeSig = long.MinValue;
 
-    // ── Step-graph state (HARTSY_DIT_GRAPH; see ForwardPatched) ──────────────────────────────────────────
+    // ── Step-graph state (numerics.ditGraph; see ForwardPatched) ──────────────────────────────────────────
     // The captured graph bakes device addresses, so every per-step-varying boundary lives in a FIXED buffer
     // owned here: the patchified latent (_latentFixed, updated in-place by the pipeline's CfgEulerStep and
     // refreshed per gen via PrepareGraphLatent), the timestep modulation (_tembFixed/_tembModFixed, refreshed
@@ -48,7 +48,8 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
     private long _graphSig = long.MinValue;   // rope signature ⊕ txt identity the captured graph is valid for
     private int _graphSigCalls;               // calls at the current sig (capture on the 3rd — caches/promotions warm)
     private int _graphSigFlips;               // sig alternation counter (CFG cond/uncond → graph unusable)
-    private bool _graphDead;                  // permanent per-session fallback to eager
+    private bool _graphDead;                  // eager for the rest of the session
+    private readonly StepGraphFailureBudget _captureFailures = new();
     private const int GraphCaptureCall = 3;
 
     private int _disposed;
@@ -359,7 +360,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
             _ropeSig = ropeSig;
         }
 
-        // ── Step-graph mode (HARTSY_DIT_GRAPH): capture the fixed per-step region (img_in → blocks → final
+        // ── Step-graph mode (numerics.ditGraph): capture the fixed per-step region (img_in → blocks → final
         // layer) once and replay it with a single graph launch. Only the fast t2i path qualifies (the pipeline
         // routes the latent through PrepareGraphLatent → patchLatent IS _latentFixed); everything per-step-varying
         // is refreshed into fixed device buffers before the launch. Self-disables on capture failure or a
@@ -436,7 +437,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
             // A capture-illegal op invalidated the recording (nothing executed). Abort the capture, disable
             // graph mode for the session, and re-run this step eagerly so the generation stays correct.
             backend.StepGraphReset();
-            _graphDead = true;
+            _graphDead = _captureFailures.RecordFailure();
             HartsyInference.Core.Logging.Logs.Warning($"[Krea2 graph] capture invalidated — falling back to eager: {ex}");
             Tensor projected = ForwardCore(backend, patchLatent, txt, _tembFixed, _tembModFixed, batch, imgSeq, txtSeq, hidden);
             backend.CopyInto(_graphVelocity, projected);
@@ -455,7 +456,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
                 // Instantiation failed (some op wasn't capturable): the recorded work never executed. Fall back
                 // permanently and re-run this step eagerly so the generation stays correct.
                 backend.StepGraphReset();
-                _graphDead = true;
+                _graphDead = _captureFailures.RecordFailure();
                 HartsyInference.Core.Logging.Logs.Warning($"[Krea2 graph] capture failed — falling back to eager: {ex.Message}");
                 Tensor projected = ForwardCore(backend, patchLatent, txt, _tembFixed, _tembModFixed, batch, imgSeq, txtSeq, hidden);
                 backend.CopyInto(_graphVelocity, projected);
@@ -618,7 +619,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
         backend.Concat(joint, new[] { txt, img }, dim: 1);
         img.Dispose();
 
-        // F16 hot path (HARTSY_DIT_F16): one cast into F16 before the block loop — the blocks and attention
+        // F16 hot path (numerics.ditF16): one cast into F16 before the block loop — the blocks and attention
         // then run entirely in F16 (half the HBM traffic of the bandwidth-bound glue kernels). The once-per-forward
         // text/image/timestep paths stay F32; the tail is cast back after the loop.
         if (DiTBlocks.DitDtype.Act == DType.F16)
@@ -809,7 +810,7 @@ public sealed unsafe class Krea2Transformer : IDisposable, IStreamableDenoiser
 
     // Device-resident tail slice: copy the image rows [start, start+tailLen) of the joint sequence via the backend's
     // SliceRows (a contiguous row-block copy) so the last block's output never leaves the GPU (was a joint.DataPointer
-    // D2H drain + host memcpy at the end of every step). Follows the joint's dtype (F16 on the HARTSY_DIT_F16 path).
+    // D2H drain + host memcpy at the end of every step). Follows the joint's dtype (F16 on the numerics.ditF16 path).
     private static Tensor SliceTail(IBackend backend, Tensor joint, int start, int tailLen, int hidden)
     {
         Tensor output = new Tensor(new TensorShape(1, tailLen, hidden), joint.DType);

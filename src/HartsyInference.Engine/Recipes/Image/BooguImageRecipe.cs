@@ -25,6 +25,10 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
 
 
     /// <inheritdoc/>
+    /// <remarks>The pipeline reads only <c>Img2Img.InitImage</c>.</remarks>
+    public ImageInputLimits InputLimits => ImageInputLimits.SingleInitImage;
+
+    /// <inheritdoc/>
     /// <remarks>Reference editing at text-only guidance. Steerable image guidance needs the Qwen3-VL vision
     /// tower for the text-and-image-dropped embedding, which is still deferred.
     /// <para><see cref="ImageFeatures.Lora"/> added 2026-08-20. <see cref="HartsyInference.Diffusion.Models.Denoisers.BooguImageTransformer"/> names its stacks <c>double_stream_layers.{i}</c>, <c>noise_refiner.{i}</c>, <c>context_refiner.{i}</c> and <c>ref_image_refiner.{i}</c> — none of which the bare-root LoRA detector recognized before the same change.</para></remarks>
@@ -68,8 +72,8 @@ public sealed class BooguImageRecipe : IArchitectureRecipe
 
         // TODO(E-IMG-4): honor user-picked Qwen3-VL / VAE overrides from ImageRequest.Components (the SwarmUI loader
         // header-probed input.Get(T2IParamTypes.QwenModel/VAE) for a 4096-dim Qwen3-VL and a 16-channel FLUX.1 ae).
-        string tePath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string tePath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3VL_8B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         List<IDisposable> loaders = new List<IDisposable>();
         try

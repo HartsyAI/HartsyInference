@@ -25,7 +25,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
     private readonly AuraFlowConfig _config;
     private readonly float _schedulerShift;
 
-    /// <summary>Standard-profile residency (HARTSY_KEEP_MODELS): transformer weights stay GPU-resident across generations. On a prompt-cache miss the Pile-T5-XL encoder is preloaded/freed around the encode as before.</summary>
+    /// <summary>Standard-profile residency (vram.keepModels): transformer weights stay GPU-resident across generations. On a prompt-cache miss the Pile-T5-XL encoder is preloaded/freed around the encode as before.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
     private bool _ditResident;
 
@@ -232,7 +232,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         // ── 4. Denoising loop ────────────────────────────────────────────
         // Bulk-upload transformer weights before the denoise loop (touched every step, every
-        // block). Under HARTSY_KEEP_MODELS they stay resident across generations.
+        // block). Under vram.keepModels they stay resident across generations.
         Stopwatch preloadSw = Stopwatch.StartNew();
         if (!_ditResident)
         {
@@ -248,7 +248,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         // device for the whole loop — patchify once, dual-pass ForwardTokens per step, in-place
         // device CfgEulerStep (flow-match Euler: x += v·(σ[i+1]−σ[i])), unpatchify once at the end.
         // Masked inpaint keeps the reference host loop (per-step blend needs the spatial latent).
-        // HARTSY_AURAFLOW_PACKED=0 is the kill-switch (A/B against the reference loop).
+        // numerics.auraflowPacked=false is the kill-switch (A/B against the reference loop).
         bool fusedLoop = !isMaskedInpaint && EngineKnobs.AuraflowPacked.Value;
 
         // Sampler selection (2026-08-20). AuraFlow is flow-matching, so it had no user-selectable sampler at all
@@ -260,13 +260,13 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
 
         // The host/reference loop below does not consult the sampler at all, so a non-default selection there would
         // be silently dropped — the exact failure this whole change removes. Refuse by name instead. Note this also
-        // covers HARTSY_AURAFLOW_PACKED=0, the packed-path kill-switch: an A/B run against the reference loop cannot
+        // covers numerics.auraflowPacked=false, the packed-path kill-switch: an A/B run against the reference loop cannot
         // honour a sampler either.
         if (!fusedLoop && nonDefaultSampler)
         {
             throw new NotSupportedException(
                 $"Sampler/schedule '{request.Scheduler}' runs only on AuraFlow's packed drain-free path, and this "
-                + "generation fell back to the reference loop (masked inpaint, or HARTSY_AURAFLOW_PACKED=0). Drop the "
+                + "generation fell back to the reference loop (masked inpaint, or numerics.auraflowPacked=false). Drop the "
                 + "sampler selection, or drop the feature that forced the fallback.");
         }
 
@@ -414,7 +414,7 @@ public sealed class AuraFlowPipeline : DiffusionPipelineBase
         AuraFlowTransformer.DumpFinalLatent(latent);
 
         // Free transformer weights before VAE decode unless resident (the banded-conv VAE fits
-        // beside the DiT on 24 GB; smaller cards keep the legacy evict via HARTSY_KEEP_MODELS=0).
+        // beside the DiT on 24 GB; smaller cards keep the legacy evict via vram.keepModels=false).
         Backend.Sync();
         if (KeepModelsResident)
         {

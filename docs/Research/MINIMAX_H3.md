@@ -472,7 +472,7 @@ smears it across every query row with no error raised — the failure that bit L
 documented ~2.7e6 residual made this worth checking directly.
 
 It is not a problem, and the reason is structural: `norm1` precedes the qkv projection, so **V is a
-projection of a normalized tensor, never of the raw residual stream**. Measured with `HARTSY_H3_VPROBE=1`
+projection of a normalized tensor, never of the raw residual stream**. Measured with `diagnostics.h3Vprobe`
 over a full 30-step generation (141f@512x288, 1500 block-probes, zero non-finite):
 
 | | max\|V\| | % of F16 max |
@@ -613,7 +613,7 @@ pre-existing kernel's PTX is byte-identical too (the only delta outside the new 
 > the GPU; with the GPU quiet, four runs across two different builds agreed exactly. Something in the
 > setup path is free-VRAM-dependent. The weight-cast headroom gate (`CacheWeightCasts` →
 > `_castTransientGated` vs `_castCachedNew`) is the obvious candidate since it branches on live free VRAM,
-> but **this is still unconfirmed**: `HARTSY_CAST_STATS=1` alone emits nothing (`DumpCastStats` only logs
+> but **this is still unconfirmed**: `HARTSY_CAST_STATS=1` alone emitted nothing (and that switch no longer exists — the settings rebuild removed it without a knob replacement) (`DumpCastStats` only logs
 > when a caller invokes it, and nothing on the H3 path does), so that probe is inconclusive rather than
 > supporting. Confirming it needs a `DumpCastStats` call added at the end of a generation, or an A/B under
 > deliberate VRAM pressure. Don't repeat the bare env-var probe.

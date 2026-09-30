@@ -119,8 +119,14 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName, EntryPoint = "cuMemsetD8_v2")]
     internal static partial int cuMemsetD8(ulong dst, byte value, nuint count);
 
+    [LibraryImport(LibName, EntryPoint = "cuMemsetD8Async")]
+    internal static partial int cuMemsetD8Async(ulong dst, byte value, nuint count, nint stream);
+
     [LibraryImport(LibName, EntryPoint = "cuMemsetD32_v2")]
     internal static partial int cuMemsetD32(ulong dst, uint value, nuint count);
+
+    [LibraryImport(LibName, EntryPoint = "cuMemsetD32Async")]
+    internal static partial int cuMemsetD32Async(ulong dst, uint value, nuint count, nint stream);
 
     // ── Async Memory (CUDA 11.2+) ───────────────────────────────────────
 
@@ -244,7 +250,7 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuGraphLaunch(nint graphExec, nint stream);
 
-    /// <summary>Enumerates a graph's nodes. Call with nodes = null (nint.Zero array semantics) via the count-query overload first: pass numNodes by ref; when <paramref name="nodes"/> is null the count is returned. Diagnostic use only (HARTSY_GRAPH_DUMP).</summary>
+    /// <summary>Enumerates a graph's nodes. Call with nodes = null (nint.Zero array semantics) via the count-query overload first: pass numNodes by ref; when <paramref name="nodes"/> is null the count is returned. Diagnostic use only (diagnostics.graphDump).</summary>
     [LibraryImport(LibName)]
     internal static partial int cuGraphGetNodes(nint graph, [In, Out] nint[]? nodes, ref nuint numNodes);
 
@@ -271,6 +277,12 @@ internal static partial class CudaDriverApi
     internal const int CU_STREAM_CAPTURE_MODE_GLOBAL = 0;
     internal const int CU_STREAM_CAPTURE_MODE_THREAD_LOCAL = 1;
     internal const int CU_STREAM_CAPTURE_MODE_RELAXED = 2;
+
+    internal const int CU_STREAM_CAPTURE_STATUS_NONE = 0;
+    internal const int CU_STREAM_CAPTURE_STATUS_INVALIDATED = 2;
+
+    /// <summary>A stream's capture was invalidated by an operation not permitted while it captured.</summary>
+    internal const int CUDA_ERROR_STREAM_CAPTURE_INVALIDATED = 901;
 
     // ── Memory Info ─────────────────────────────────────────────────────
 
@@ -333,7 +345,7 @@ internal static partial class CudaDriverApi
     internal const int CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT = 16;
     internal const int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR = 75;
     internal const int CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR = 76;
-    internal const int CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR = 81;
+    internal const int CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97;
 
     // ── P2P Attribute Constants (cuDeviceGetP2PAttribute) ───────────────
 

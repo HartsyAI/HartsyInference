@@ -293,7 +293,7 @@ public sealed unsafe class CsmModel : IDisposable
         // streaming the whole model twice per frame. The LM's per-frame GEMV traffic is at the bandwidth
         // roofline (nsys 2026-07-25: ~11.4 ms per stream-frame on the 4090), so this halves the dominant
         // per-frame cost in CFG runs. The batched step itself is graph-captured when eligible (see below);
-        // otherwise it runs eager. Kill-switch HARTSY_CSM_CFG_BATCH=0 restores two-stream.
+        // otherwise it runs eager. Kill-switch numerics.csmCfgBatch=false restores two-stream.
         if (useCfg && !uncondStandalone && (int)condNewEmbeds.Shape[1] == 1 && (int)uncondNewEmbeds!.Shape[1] == 1
             && EngineKnobs.CsmCfgBatch.Value)
         {
@@ -303,7 +303,7 @@ public sealed unsafe class CsmModel : IDisposable
             // to be position-aligned (they are by construction — the pipeline mirrors upstream CFG, same prefix
             // length, frames appended to both — so one devicePos serves both rows' rope AND kvLen; the equality
             // check is a safety net that falls back to the eager batched path, never wrong math). Kill-switch
-            // HARTSY_CSM_CFG_GRAPH=0 restores the eager batched step below.
+            // numerics.csmCfgGraph=false restores the eager batched step below.
             if (graphEnabled && EngineKnobs.CsmCfgGraph.Value
                 && _backbone.SupportsDualGraphDecode(backend) && session.Backbone.CurrentLength == ucB.CurrentLength)
             {

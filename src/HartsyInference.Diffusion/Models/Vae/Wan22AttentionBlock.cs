@@ -35,7 +35,20 @@ public sealed unsafe class Wan22AttentionBlock
     }
 
     /// <summary>Forward over <c>[B, C, T, H, W]</c> → same shape (residual added).</summary>
+    /// <remarks>Runs in F32 whatever the activation dtype: it fires once per frame at the lowest resolution, and its
+    /// token-layout ops are F32-only.</remarks>
     public Tensor Forward(IBackend backend, Tensor x)
+    {
+        if (x.DType == DType.F32) return ForwardF32(backend, x);
+        using Tensor xF32 = new Tensor(x.Shape, DType.F32);
+        backend.CastToF32(xF32, x);
+        using Tensor outF32 = ForwardF32(backend, xF32);
+        Tensor outT = new Tensor(x.Shape, x.DType);
+        backend.CastToBf16(outT, outF32);
+        return outT;
+    }
+
+    private Tensor ForwardF32(IBackend backend, Tensor x)
     {
         int b = (int)x.Shape[0], c = (int)x.Shape[1], t = (int)x.Shape[2], h = (int)x.Shape[3], w = (int)x.Shape[4];
         int bt = b * t, hw = h * w;

@@ -12,6 +12,15 @@ public interface IBackend : IDisposable
     /// <summary>The device this backend targets.</summary>
     DeviceKind Device { get; }
 
+    /// <summary>Stable identity of the physical device this backend actually bound to, for callers that must tell two
+    /// backends sharing one GPU apart from two backends on two GPUs.</summary>
+    /// <remarks>Deliberately not the selector that was requested. A host composing <c>"vulkan:0"</c> out of its own
+    /// settings names the device it ASKED for, and the two part company whenever selection is left to the engine: a
+    /// bare <c>vulkan</c> or <c>auto</c> ranks the devices rather than taking raw index 0. Keying a sharing map on the
+    /// request instead of on this reads one shared GPU as two, and the VRAM it was meant to protect is gone before
+    /// anything notices.</remarks>
+    string DeviceKey => Device.ToString().ToLowerInvariant();
+
     /// <summary>Count of lazy device-to-host syncs since <see cref="ResetD2hSyncCount"/>; ~0 GPU-resident, 0 with no device sync.</summary>
     long GetD2hSyncCount() => 0;
 
@@ -1412,6 +1421,15 @@ public interface IBackend : IDisposable
             }
     }
 
+    /// <summary>3-D convolution over the frame-major padded buffer <see cref="BuildPaddedFrames"/> writes:
+    /// <paramref name="paddedFrames"/> <c>[T, cIn, H, W]</c> (already padded in time), <paramref name="weight"/>
+    /// <c>[cOut, cIn, kt, kh, kw]</c>, <paramref name="output"/> <c>[1, cOut, (T − kt)/strideT + 1, H', W']</c> with
+    /// symmetric spatial padding and an optional per-channel <paramref name="bias"/>. One kernel with every tap in its
+    /// reduction, instead of a 2-D pass per tap over all T frames. Returns false when the backend does not serve the
+    /// call (the default), and the caller runs its per-tap 2-D decomposition instead.</summary>
+    bool TryConv3DFrameMajor(Tensor output, Tensor paddedFrames, Tensor weight, Tensor? bias,
+        int strideT, int strideH, int strideW, int padH, int padW) => false;
+
     /// <summary>Builds the padded input for BATCHED CausalConv3d: transpose + temporal pad + cache prepend + spatial
     /// pad. <paramref name="reflectSpatial"/> mirrors the H/W borders (<c>F.pad(mode="reflect")</c>, the LTX-2 VAE's
     /// default) instead of edge-clamping them.</summary>
@@ -1791,12 +1809,16 @@ public interface IBackend : IDisposable
         PatchTokenHostShuffle.Unpatchify(output, tokens, geometry, patch, innerChannelFastest);
     }
 
-    /// <summary>Wan2.2 VAE unpatchify: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c>, unpack <c>oc = ci·p² + r·p + q</c>.</summary>
+    /// <summary>Wan2.2 VAE unpatchify: <c>[b, c·p², t, h, w] → [b, c, t, h·p, w·p]</c>, unpack <c>oc = ci·p² + r·p + q</c>.
+    /// Default = host loop, copying by element size so any dtype passes through unchanged.</summary>
     unsafe void UnpatchifyVae(Tensor output, Tensor input, int patchSize)
     {
+        if (output.DType != input.DType)
+            throw new ArgumentException($"UnpatchifyVae output {output.DType} must match input {input.DType}.", nameof(output));
         int b = (int)input.Shape[0], packedC = (int)input.Shape[1], t = (int)input.Shape[2], h = (int)input.Shape[3], w = (int)input.Shape[4];
         int p = patchSize, c = packedC / (p * p), outH = h * p, outW = w * p;
-        float* src = (float*)input.DataPointer, dst = (float*)output.DataPointer;
+        int elem = (int)input.DType.ComputeByteCount(1);
+        byte* src = (byte*)input.DataPointer, dst = (byte*)output.DataPointer;
         for (int bi = 0; bi < b; bi++)
             for (int ci = 0; ci < c; ci++)
                 for (int ti = 0; ti < t; ti++)
@@ -1808,8 +1830,42 @@ public interface IBackend : IDisposable
                                     int oc = ci * p * p + r * p + q;
                                     long srcOff = ((((long)bi * packedC + oc) * t + ti) * h + hh) * w + ww;
                                     long dstOff = ((((long)bi * c + ci) * t + ti) * outH + (hh * p + q)) * outW + (ww * p + r);
-                                    dst[dstOff] = src[srcOff];
+                                    Buffer.MemoryCopy(src + srcOff * elem, dst + dstOff * elem, elem, elem);
                                 }
+    }
+
+    /// <summary>Wan2.2 VAE duplicating up-sampler (<c>DupUp3D</c>): <c>[b, inC, t, h, w] → [b, outC, t·fT − dropT, h·fS, w·fS]</c>,
+    /// output cell <c>(oc, t·fT+tt, h·fS+s1, w·fS+s2)</c> reading input channel <c>(((oc·fT + tt)·fS + s1)·fS + s2) / repeats</c>.
+    /// Default = host loop.</summary>
+    unsafe void DupUp3dVae(Tensor output, Tensor input, int factorT, int factorS, int dropT)
+    {
+        int b = (int)input.Shape[0], inC = (int)input.Shape[1], t = (int)input.Shape[2];
+        int h = (int)input.Shape[3], w = (int)input.Shape[4], outC = (int)output.Shape[1];
+        int keepT = t * factorT - dropT, outH = h * factorS, outW = w * factorS;
+        int repeats = outC * factorT * factorS * factorS / inC;
+        int elem = (int)input.DType.ComputeByteCount(1);
+        byte* src = (byte*)input.DataPointer, dst = (byte*)output.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+            for (int oc = 0; oc < outC; oc++)
+                for (int tt = 0; tt < factorT; tt++)
+                    for (int s1 = 0; s1 < factorS; s1++)
+                        for (int s2 = 0; s2 < factorS; s2++)
+                        {
+                            int srcC = (((oc * factorT + tt) * factorS + s1) * factorS + s2) / repeats;
+                            for (int ti = 0; ti < t; ti++)
+                            {
+                                int oTime = ti * factorT + tt - dropT;
+                                if (oTime < 0) continue;
+                                for (int hi = 0; hi < h; hi++)
+                                    for (int wi = 0; wi < w; wi++)
+                                    {
+                                        long srcOff = ((((long)bi * inC + srcC) * t + ti) * h + hi) * w + wi;
+                                        long dstOff = ((((long)bi * outC + oc) * keepT + oTime) * outH + (hi * factorS + s1))
+                                            * outW + (wi * factorS + s2);
+                                        Buffer.MemoryCopy(src + srcOff * elem, dst + dstOff * elem, elem, elem);
+                                    }
+                            }
+                        }
     }
 
     /// <summary>Wan2.2 VAE attention qkv split: <c>src [bt, 3c, h, w] → q,k,v each [bt, 1, hw, c]</c>. Default = host loop.</summary>
@@ -2391,6 +2447,17 @@ public interface IBackend : IDisposable
         int heads, int headDim, float scale, bool allowF16 = false)
         => throw new NotSupportedException($"{GetType().Name} does not serve token-major attention; check SupportsTokenMajorAttention first.");
 
+    /// <summary>Whether the grouped-query overload of <see cref="ScaledDotProductAttentionTokenMajor(Tensor, Tensor, Tensor, Tensor, Tensor?, int, int, int, float, bool)"/>
+    /// is served, reading K/V with fewer heads than Q without repeating them.</summary>
+    bool SupportsTokenMajorGqaAttention => false;
+
+    /// <summary>Token-major SDPA with <paramref name="kvHeads"/> K/V heads shared across <paramref name="heads"/> query
+    /// heads: Q/output are <c>[S, heads*headDim]</c>, K/V are <c>[Skv, kvHeads*headDim]</c>, and query head h reads
+    /// kv head <c>h / (heads/kvHeads)</c>.</summary>
+    void ScaledDotProductAttentionTokenMajor(Tensor output, Tensor query, Tensor key, Tensor value, Tensor? mask,
+        int heads, int kvHeads, int headDim, float scale, bool allowF16 = false)
+        => throw new NotSupportedException($"{GetType().Name} does not serve grouped-query token-major attention; check SupportsTokenMajorGqaAttention first.");
+
     /// <summary>LTX-2 attention QK path in one pass: full-row RMS norm over <c>heads*headDim</c>, then optional
     /// SPLIT RoPE, then a head-major emit — <c>input [seq, heads*headDim]</c> to <c>output [1, heads, seq, headDim]</c>.
     /// Pass <paramref name="cos"/>/<paramref name="sin"/> null to skip the rotation (text cross-attention).
@@ -2498,6 +2565,9 @@ public interface IBackend : IDisposable
     /// reaches a GEMM that cannot read it and the model dies mid-generation rather than at load.</para>
     /// <para>The default is the honest one for a backend with no packed-weight kernels at all.</para></remarks>
     bool SupportsResidentQuant(DType dtype) => false;
+
+    /// <summary>The same question for a specific weight, for formats the dtype alone cannot name: an MXFP8 weight is plain F8E4M3 with its block scales on <see cref="Tensor.QuantInfo"/>. The default defers to the dtype answer.</summary>
+    bool SupportsResidentQuant(Tensor weight) => SupportsResidentQuant(weight.DType);
 
     /// <summary>Marks a tensor's activation as surviving <see cref="FreeActivations()"/>, for cross-step state living only on-device.</summary>
     void PinActivation(Tensor tensor) { }
@@ -2821,6 +2891,30 @@ public interface IBackend : IDisposable
 
     /// <summary>Nearest-neighbor 2D upsample by the given scale factor.</summary>
     void UpsampleNearest2D(Tensor output, Tensor input, int scaleH, int scaleW);
+
+    /// <summary>Nearest-neighbour ×2 upsample of NCHW <paramref name="input"/> into <paramref name="output"/>, whose height
+    /// and width are each either twice the input's or one less. Output row <c>oh</c> reads input row <c>oh / 2</c>, which
+    /// is exactly <c>interpolate(size=…, mode="nearest")</c> for those sizes — what a UNet up path needs when its stride-2
+    /// down path rounded an odd size up (diffusers passes the skip's size as <c>upsample_size</c>). Only ×2: at larger
+    /// factors a short output no longer reads the same rows as the nearest-neighbour rule. Default: the full upsample into
+    /// scratch, then two <see cref="SliceLastDim"/> prefix slices — device-resident on any backend that serves those.</summary>
+    unsafe void UpsampleNearest2DToSize(Tensor output, Tensor input)
+    {
+        (int outH, int outW) = UpsampleNearestExtent.Validate(output, input);
+        long n = input.Shape[0], c = input.Shape[1], fullH = 2 * input.Shape[2], fullW = 2 * input.Shape[3];
+        if (outH == fullH && outW == fullW)
+        {
+            UpsampleNearest2D(output, input, 2, 2);
+            return;
+        }
+        using Tensor full = new(new TensorShape(n, c, fullH, fullW), input.DType);
+        UpsampleNearest2D(full, input, 2, 2);
+        // Keep the leading outW of every row; each plane is then [fullH, outW], so its leading outH rows are one
+        // contiguous prefix — a second last-dim slice over [planes, fullH·outW]. Both stay on the device.
+        using Tensor narrow = new(new TensorShape(n * c, fullH * outW), input.DType);
+        SliceLastDim(narrow, full, 0);
+        SliceLastDim(output, narrow, 0);
+    }
 
     /// <summary>Bilinear 2D upsample by the given scale factor.</summary>
     void UpsampleBilinear2D(Tensor output, Tensor input, int scaleH, int scaleW);

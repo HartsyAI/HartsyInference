@@ -1,3 +1,4 @@
+using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.Audio.Models.Codecs.Vocos;
 using HartsyInference.Audio.Models.Codecs.XCodec;
 using HartsyInference.Audio.Models.Music;
@@ -323,7 +324,8 @@ internal static class YueMusicModel
         {
             PickleCheckpointRepacker.Repack(checkpoint, temp,
                 key => YueCheckpointConverter.MapXCodecKey(key, forEncode: true) is not null ? key : null,
-                recursiveFlatten: true);
+                recursiveFlatten: true,
+                metadata: ComponentMetadata("yue", "codec", checkpoint));
             File.Move(temp, outputPath, overwrite: true);
         }
         finally
@@ -388,7 +390,8 @@ internal static class YueMusicModel
             string outputPath = Path.Combine(parent, targetName);
             Logs.Info($"[Audio][YuE] Converting Vocos vocoder '{Path.GetFileName(checkpoint)}' → {targetName} (one-time)...");
             // Torch keys already match VocosDecoder's layout, so this is a pure format conversion.
-            PickleCheckpointRepacker.Repack(checkpoint, outputPath, recursiveFlatten: true);
+            PickleCheckpointRepacker.Repack(checkpoint, outputPath, recursiveFlatten: true,
+                metadata: ComponentMetadata("yue", "vocoder", checkpoint));
         }
         catch (Exception ex)
         {
@@ -452,5 +455,18 @@ internal static class YueMusicModel
                 yield return sibling;
             }
         }
+    }
+
+    /// <summary>Identity for a converted component. A codec or vocoder gets provenance but no architecture — it is
+    /// part of a model, not one, and a classifiable component would be offered in the model list as something a user
+    /// can select and generate nothing with.</summary>
+    private static IReadOnlyDictionary<string, string>? ComponentMetadata(string engineId, string component,
+        string sourcePath, string? sourceRepo = null)
+    {
+        ArtifactIdentity? identity = ModelIdentityCatalog.Find(engineId);
+        return identity is null
+            ? null
+            : ArtifactMetadata.ForRepack(identity, ArtifactProvenance.FromSourceFile(
+                "HartsyInference.PickleCheckpointRepacker", component, sourcePath, sourceRepo));
     }
 }

@@ -66,6 +66,16 @@ public sealed class CudaKernels : IDisposable
     // Optional: NVFP4 packed-weight dequant (dequant_nvfp4_to_f16.ptx, src/HartsyInference.Cuda/Kernels/dequant) — the
     // per-GEMM unpack that lets a ComfyUI nvfp4 checkpoint stay resident at 0.5 byte/param. Null when not compiled.
     private readonly CudaModule? _nvfp4Module;
+    private readonly CudaModule? _blockQuantModule;
+    private readonly nint _blockQuantFinalizeNvfp4;
+    private readonly nint _blockQuantNvfp4F32;
+    private readonly nint _blockQuantNvfp4F16;
+    private readonly nint _blockQuantFinalizeMx;
+    private readonly nint _blockQuantMxfp8F32;
+    private readonly nint _blockQuantMxfp8F16;
+    private readonly CudaModule? _mxfp8Module;
+    private readonly nint _mxfp8DequantF16;
+    private readonly nint _mxfp8DequantBf16;
     private readonly nint _nvfp4DequantF16;
     private readonly nint _nvfp4DequantBf16;
 
@@ -82,7 +92,7 @@ public sealed class CudaKernels : IDisposable
 
     // Optional: the register-resident mma.sync rewrite of the flash stage (sage_attn_int8_v1.ptx) — no
     // Sq%32 restriction (fully row-guarded) and the perf-viable implementation. Preferred over the wmma v0
-    // when present; HARTSY_SAGE_V0=1 forces the old kernel for debugging.
+    // when present; numerics.sageV0=true forces the old kernel for debugging.
     private readonly CudaModule? _sageAttnV1Module;
     private readonly nint _sageAttnV1D128;
     private readonly nint _sageAttnV1D64;
@@ -185,6 +195,17 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _flashAttnF32SplitF16Kv;
     private readonly CudaModule _flashV2Module;
     private readonly nint _flashV2Tf32;
+    // Optional: tiled batched transpose (channels_last.ptx), the layout step around cuDNN's channels-last conv engines.
+    private readonly CudaModule? _channelsLastModule;
+    private readonly nint _transposeTiledB16;
+    private readonly nint _transposeTiledB32;
+
+    // Optional: F16-I/O fused attention with F32 accumulation (flash_attn_f16.ptx), strided so it reads head-major,
+    // token-major and fused-projection layouts alike. Absent PTX ⇒ HasFlashAttnF16 is false and callers keep cuDNN.
+    private readonly CudaModule? _flashF16Module;
+    private readonly nint _flashF16D64;
+    private readonly nint _flashF16D128;
+    private readonly nint _flashF16D256;
     private readonly nint _flashAttnF32Combine;
 
     // ── Elementwise F32 function handles ─────────────────────────────────
@@ -267,6 +288,8 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _wanVaeRmsNormChannelBf16;
     private readonly nint _wanVaeUnpatchify;
     private readonly nint _wanVaeUnpatchifyBf16;
+    private readonly nint _wanVaeDupUp3d;
+    private readonly nint _wanVaeDupUp3dBf16;
     private readonly nint _wanVaeSplitQkv;
     private readonly nint _wanVaeTokensToFrame;
 
@@ -409,22 +432,6 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _castF16ToF8E4M3;
 
     // ── GGUF Dequant Modules + Handles ───────────────────────────────────
-    private readonly CudaModule _dequantQ8_0Module;
-    private readonly nint _dequantQ8_0ToF16;
-    private readonly CudaModule _dequantQ4_0Module;
-    private readonly nint _dequantQ4_0ToF16;
-    private readonly CudaModule _dequantQ5_0Module;
-    private readonly nint _dequantQ5_0ToF16;
-    private readonly CudaModule _dequantQ2_KModule;
-    private readonly nint _dequantQ2_KToF16;
-    private readonly CudaModule _dequantQ3_KModule;
-    private readonly nint _dequantQ3_KToF16;
-    private readonly CudaModule _dequantQ4_KModule;
-    private readonly nint _dequantQ4_KToF16;
-    private readonly CudaModule _dequantQ5_KModule;
-    private readonly nint _dequantQ5_KToF16;
-    private readonly CudaModule _dequantQ6_KModule;
-    private readonly nint _dequantQ6_KToF16;
 
     // ── Fused quantized GEMV (decode M=1) ────────────────────────────────
     private readonly CudaModule _mulMatVecQ4KModule;
@@ -453,6 +460,10 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ4_0F32;
     private readonly CudaModule _mulMatVecQ5KModule;
     private readonly nint _mulMatVecQ5KF32;
+    private readonly CudaModule _mulMatVecQ2KModule;
+    private readonly nint _mulMatVecQ2KF32;
+    private readonly CudaModule _mulMatVecQ3KModule;
+    private readonly nint _mulMatVecQ3KF32;
     private readonly CudaModule _quantActQ8_1Module;
     private readonly nint _quantActQ8_1F32;
     private readonly CudaModule _mulMatVecQ4KQ8_1Module;
@@ -464,6 +475,12 @@ public sealed class CudaKernels : IDisposable
     private readonly CudaModule _mulMatVecQ6KQ8_1Module;
     private readonly nint _mulMatVecQ6KQ8_1;
     private readonly nint _mulMatVecQ6KQ8_1Ksplit;
+    private readonly CudaModule _mulMatVecQ2KQ8_1Module;
+    private readonly nint _mulMatVecQ2KQ8_1;
+    private readonly nint _mulMatVecQ2KQ8_1Ksplit;
+    private readonly CudaModule _mulMatVecQ3KQ8_1Module;
+    private readonly nint _mulMatVecQ3KQ8_1;
+    private readonly nint _mulMatVecQ3KQ8_1Ksplit;
     private readonly CudaModule _mulMatVecQ4_0Q8_1Module;
     private readonly nint _mulMatVecQ4_0Q8_1;
     private readonly CudaModule _mulMatVecQ5_0Q8_1Module;
@@ -473,8 +490,43 @@ public sealed class CudaKernels : IDisposable
     private readonly nint _mulMatVecQ5KQ8_1;
 
     private const uint BlockSize = 256;
+    /// <summary>Every GGUF dequant kernel by its dtype: the function, and the threads one launch block runs (one block per quant block). Adding a type is one <see cref="BindGgufDequant"/> line.</summary>
+    private readonly Dictionary<DType, (nint Function, int ThreadsPerBlock)> _ggufDequant = new();
     private readonly List<CudaModule> _ownedModules = [];
     private int _disposed;
+
+    /// <summary>Dynamic shared memory a block gets without opting in, as the device reports it (the Ampere-class 48 KB when constructed without one).</summary>
+    public int DefaultDynamicSharedBytes { get; }
+
+    /// <summary>The most dynamic shared memory an opt-in can raise a block to; a kernel whose tiles exceed it is left unbound rather than failing at launch.</summary>
+    public int MaxDynamicSharedBytes { get; }
+
+    /// <summary>The compute capability the modules were resolved for (<see cref="CudaArch"/>), 0 when constructed without a device.</summary>
+    public int Sm { get; }
+
+    /// <summary>Kernels for which an arch-specific PTX (<c>{kernel}.sm{CC}.ptx</c>) was loaded instead of the baseline.</summary>
+    public IReadOnlyList<string> ArchVariantsLoaded => _archVariants;
+
+    private readonly string _ptxDir;
+    private readonly List<string> _archVariants = [];
+
+    /// <summary>The PTX to load for <paramref name="kernel"/>: the device's own variant, <c>{kernel}.sm{sm}.ptx</c> — built with the family-specific arch, so it may use instructions the baseline cannot — when one ships, else the baseline <c>{kernel}.ptx</c>. Exact compute capability only: arch-specific PTX is not forward-compatible, so a variant for another SM must never be picked.</summary>
+    public static string PtxPath(string ptxDir, string kernel, int sm)
+    {
+        if (sm > 0)
+        {
+            string variant = Path.Combine(ptxDir, $"{kernel}.sm{sm}.ptx");
+            if (File.Exists(variant)) return variant;
+        }
+        return Path.Combine(ptxDir, $"{kernel}.ptx");
+    }
+
+    private string Ptx(string kernel)
+    {
+        string path = PtxPath(_ptxDir, kernel, Sm);
+        if (!path.EndsWith($"{kernel}.ptx", StringComparison.Ordinal)) _archVariants.Add(kernel);
+        return path;
+    }
     private static Func<string, Exception?>? _moduleLoadFailureForTests;
 
     /// <summary>Test-only fault injector invoked with each PTX path immediately before it is loaded.</summary>
@@ -509,15 +561,20 @@ public sealed class CudaKernels : IDisposable
     }
 
     /// <summary>Loads all PTX kernels from the specified directory.</summary>
-    public CudaKernels(string ptxDir)
+    /// <param name="context">The device the modules will run on: its shared-memory limits size the opt-ins, and its compute capability selects an arch-specific PTX where one ships. Null keeps Ampere-class limits and loads baseline PTX only.</param>
+    public CudaKernels(string ptxDir, CudaContext? context = null)
     {
+        _ptxDir = ptxDir;
+        DefaultDynamicSharedBytes = context?.MaxSharedMemoryPerBlock ?? 48 << 10;
+        MaxDynamicSharedBytes = context?.MaxSharedMemoryPerBlockOptin ?? int.MaxValue;
+        Sm = context?.Sm ?? 0;
         try
         {
             if (!Directory.Exists(ptxDir))
                 throw new DirectoryNotFoundException($"PTX directory not found: {ptxDir}");
 
         // ── F32 modules ──────────────────────────────────────────────────
-        _elementwiseModule = LoadOwnedModule(Path.Combine(ptxDir, "elementwise_f32.ptx"));
+        _elementwiseModule = LoadOwnedModule(Ptx("elementwise_f32"));
         _addF32 = _elementwiseModule.GetFunction("elementwise_add_f32");
         _mulF32 = _elementwiseModule.GetFunction("elementwise_mul_f32");
         _scaleF32 = _elementwiseModule.GetFunction("elementwise_scale_f32");
@@ -525,51 +582,51 @@ public sealed class CudaKernels : IDisposable
         _geluF32 = _elementwiseModule.GetFunction("elementwise_gelu_f32");
         _clampF32 = _elementwiseModule.GetFunction("elementwise_clamp_f32");
 
-        _groupnormModule = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_f32.ptx"));
+        _groupnormModule = LoadOwnedModule(Ptx("groupnorm_f32"));
         _groupnormF32 = _groupnormModule.GetFunction("groupnorm_f32");
 
-        _layernormModule = LoadOwnedModule(Path.Combine(ptxDir, "layernorm_f32.ptx"));
+        _layernormModule = LoadOwnedModule(Ptx("layernorm_f32"));
         _layernormF32 = _layernormModule.GetFunction("layernorm_f32");
 
-        _spatialModule = LoadOwnedModule(Path.Combine(ptxDir, "spatial_f32.ptx"));
+        _spatialModule = LoadOwnedModule(Ptx("spatial_f32"));
         _upsampleNearest2dF32 = _spatialModule.GetFunction("upsample_nearest2d_f32");
         _im2colF32 = _spatialModule.GetFunction("im2col_f32");
         _col2biasAddF32 = _spatialModule.GetFunction("col2bias_add_f32");
 
-        _im2colBandedModule = LoadOwnedModule(Path.Combine(ptxDir, "im2col_banded.ptx"));
+        _im2colBandedModule = LoadOwnedModule(Ptx("im2col_banded"));
         _im2colBandedF32 = _im2colBandedModule.GetFunction("im2col_banded_f32");
         _im2colBandedF16 = _im2colBandedModule.GetFunction("im2col_banded_f16");
         _im2colBandedBf16 = _im2colBandedModule.GetFunction("im2col_banded_bf16");
 
-        _maxpool2dModule = LoadOwnedModule(Path.Combine(ptxDir, "maxpool2d.ptx"));
+        _maxpool2dModule = LoadOwnedModule(Ptx("maxpool2d"));
         _maxpool2dF32 = _maxpool2dModule.GetFunction("maxpool2d_f32");
         _maxpool2dF16 = _maxpool2dModule.GetFunction("maxpool2d_f16");
 
-        _depthwiseConv2dModule = LoadOwnedModule(Path.Combine(ptxDir, "depthwise_conv2d.ptx"));
+        _depthwiseConv2dModule = LoadOwnedModule(Ptx("depthwise_conv2d"));
         _depthwiseConv2dF32 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f32");
         _depthwiseConv2dF16 = _depthwiseConv2dModule.GetFunction("depthwise_conv2d_f16");
 
-        _msdaModule = LoadOwnedModule(Path.Combine(ptxDir, "msda.ptx"));
+        _msdaModule = LoadOwnedModule(Ptx("msda"));
         _msdaForwardF32 = _msdaModule.GetFunction("msda_forward_f32");
 
-        _softmaxModule = LoadOwnedModule(Path.Combine(ptxDir, "softmax_f32.ptx"));
+        _softmaxModule = LoadOwnedModule(Ptx("softmax_f32"));
         _softmaxF32 = _softmaxModule.GetFunction("softmax_f32");
 
-        _transposeModule = LoadOwnedModule(Path.Combine(ptxDir, "transpose_f32.ptx"));
+        _transposeModule = LoadOwnedModule(Ptx("transpose_f32"));
         _transpose2dF32 = _transposeModule.GetFunction("transpose_2d_f32");
         _permute0213F32 = _transposeModule.GetFunction("permute_0213_f32");
 
-        _wanRopeModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_rope.ptx"));
+        _wanRopeModule = LoadOwnedModule(Ptx("wan_rope"));
         _wanRopeInterleaved = _wanRopeModule.GetFunction("wan_rope_interleaved");
         _wanRopeInterleavedPerHead = _wanRopeModule.GetFunction("wan_rope_interleaved_perhead");
 
-        _wanVaeFramesModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_vae_frames.ptx"));
+        _wanVaeFramesModule = LoadOwnedModule(Ptx("wan_vae_frames"));
         _wanVaeExtractFrame = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame");
         _wanVaeWriteFrame = _wanVaeFramesModule.GetFunction("wan_vae_write_frame");
         _wanVaeExtractFrameBf16 = _wanVaeFramesModule.GetFunction("wan_vae_extract_frame_bf16");
         _wanVaeWriteFrameBf16 = _wanVaeFramesModule.GetFunction("wan_vae_write_frame_bf16");
 
-        _wanVaeConv3dModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_vae_conv3d.ptx"));
+        _wanVaeConv3dModule = LoadOwnedModule(Ptx("wan_vae_conv3d"));
         _wanVaeBuildPadded = _wanVaeConv3dModule.GetFunction("wan_vae_build_padded");
         _wanVaeFillBias = _wanVaeConv3dModule.GetFunction("wan_vae_fill_bias");
         _wanVaeAccumulateTap = _wanVaeConv3dModule.GetFunction("wan_vae_accumulate_tap");
@@ -581,23 +638,25 @@ public sealed class CudaKernels : IDisposable
         _seedVr2PadBr = _wanVaeConv3dModule.GetFunction("seedvr2_pad_br_f32");
         _seedVr2PadBrBf16 = _wanVaeConv3dModule.GetFunction("seedvr2_pad_br_bf16");
 
-        _wanVaeNormModule = LoadOwnedModule(Path.Combine(ptxDir, "wan_vae_norm.ptx"));
+        _wanVaeNormModule = LoadOwnedModule(Ptx("wan_vae_norm"));
         _wanVaeRmsNormChannel = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel");
         _wanVaeRmsNormChannelBf16 = _wanVaeNormModule.GetFunction("wan_vae_rms_norm_channel_bf16");
         _wanVaeUnpatchify = _wanVaeNormModule.GetFunction("wan_vae_unpatchify");
         _wanVaeUnpatchifyBf16 = _wanVaeNormModule.GetFunction("wan_vae_unpatchify_bf16");
+        _wanVaeDupUp3d = _wanVaeNormModule.GetFunction("wan_vae_dup_up3d");
+        _wanVaeDupUp3dBf16 = _wanVaeNormModule.GetFunction("wan_vae_dup_up3d_bf16");
         _wanVaeSplitQkv = _wanVaeNormModule.GetFunction("wan_vae_split_qkv");
         _wanVaeTokensToFrame = _wanVaeNormModule.GetFunction("wan_vae_tokens_to_frame");
 
-        _gegluModule = LoadOwnedModule(Path.Combine(ptxDir, "geglu_f32.ptx"));
+        _gegluModule = LoadOwnedModule(Ptx("geglu_f32"));
         _gegluF32 = _gegluModule.GetFunction("geglu_f32");
 
-        _broadcastAddModule = LoadOwnedModule(Path.Combine(ptxDir, "broadcast_add_f32.ptx"));
+        _broadcastAddModule = LoadOwnedModule(Ptx("broadcast_add_f32"));
         _broadcastAddF32 = _broadcastAddModule.GetFunction("broadcast_add_f32");
 
         // Optional module: present only after src/HartsyInference.Cuda/Kernels/dit/build.sh has compiled stepcache.cu on a
         // CUDA-toolkit box. Absence is not an error — the step-cache feature reports unsupported instead.
-        string stepCachePath = Path.Combine(ptxDir, "stepcache.ptx");
+        string stepCachePath = Ptx("stepcache");
         if (File.Exists(stepCachePath))
         {
             _stepCacheModule = LoadOwnedModule(stepCachePath);
@@ -607,7 +666,7 @@ public sealed class CudaKernels : IDisposable
 
         // Optional module: LTX-2.5 NA diffusion decoder (src/HartsyInference.Cuda/Kernels/ltx25vae/ltx25_na_decoder.cu).
         // Absence is not an error — the decoder falls back to the managed reference.
-        string ltx25NaPath = Path.Combine(ptxDir, "ltx25_na_decoder.ptx");
+        string ltx25NaPath = Ptx("ltx25_na_decoder");
         if (File.Exists(ltx25NaPath))
         {
             _ltx25NaModule = LoadOwnedModule(ltx25NaPath);
@@ -631,7 +690,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: W8A8 IMMA chain (src/HartsyInference.Cuda/Kernels/dequant/w8a8.cu). Absence is not an error.
-        string w8a8Path = Path.Combine(ptxDir, "w8a8.ptx");
+        string w8a8Path = Ptx("w8a8");
         if (File.Exists(w8a8Path))
         {
             _w8a8Module = LoadOwnedModule(w8a8Path);
@@ -644,7 +703,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: ConvRot rotation (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu). Absence is not an error.
-        string convRotPath = Path.Combine(ptxDir, "convrot.ptx");
+        string convRotPath = Ptx("convrot");
         if (File.Exists(convRotPath))
         {
             _convRotModule = LoadOwnedModule(convRotPath);
@@ -657,8 +716,12 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: fused-dequant int8 mma GEMM (Kernels/dequant/int8_mma_gemm.cu). Absence is not an error.
-        string mmaPath = Path.Combine(ptxDir, "int8_mma_gemm.ptx");
-        if (File.Exists(mmaPath))
+        string mmaPath = Ptx("int8_mma_gemm");
+        if (File.Exists(mmaPath) && Int8MmaSharedBytesPad > (uint)MaxDynamicSharedBytes)
+        {
+            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] int8 mma GEMM needs {Int8MmaSharedBytesPad} B of dynamic shared memory per block; this device allows {MaxDynamicSharedBytes}. Using cuBLASLt + dequant instead.");
+        }
+        else if (File.Exists(mmaPath))
         {
             // No register cap: at 128x256 the accumulator alone is 128 registers and 90 KB of shared already pins
             // the kernel to one block per SM, so capping could only force spills. Verify with NUM_REGS (attribute
@@ -667,21 +730,44 @@ public sealed class CudaKernels : IDisposable
             _int8MmaModule = LoadOwnedModule(mmaPath);
             _int8MmaGemmF16 = _int8MmaModule.GetFunction("int8_mma_gemm_dequant_f16");
             _int8MmaGemmF16Pad = _int8MmaModule.GetFunction("int8_mma_gemm_dequant_f16_pad");
-            // Opt in to EXACTLY the mainloop's shared footprint, and only when it exceeds the 48 KB default —
+            // Opt in to EXACTLY the mainloop's shared footprint, and only when it exceeds the no-opt-in default —
             // never to the SM ceiling. This budget is what the driver uses to decide blocks-per-SM, so asking for
             // 99 KB "to leave room" makes two blocks arithmetically impossible, which silently overrides the
             // kernel's own `.minnctapersm 2` and lets ptxas spend all 256 registers per thread.
             // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8.
             // The two entry points have DIFFERENT footprints (the padded one carries 16 B of pad per row), so
             // each opts in to its own — a shared "max of both" would mis-budget the swizzled kernel's occupancy.
-            if (Int8MmaSharedBytes > 48 * 1024)
+            if (Int8MmaSharedBytes > (uint)DefaultDynamicSharedBytes)
                 CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16, 8, (int)Int8MmaSharedBytes);
-            if (Int8MmaSharedBytesPad > 48 * 1024)
+            if (Int8MmaSharedBytesPad > (uint)DefaultDynamicSharedBytes)
                 CudaDriverApi.cuFuncSetAttribute(_int8MmaGemmF16Pad, 8, (int)Int8MmaSharedBytesPad);
         }
 
+        // Optional module: block-scaled activation quantization for the Blackwell GEMM path
+        // (src/HartsyInference.Cuda/Kernels/dequant/block_quant.cu). Absence is not an error.
+        string blockQuantPath = Ptx("block_quant");
+        if (File.Exists(blockQuantPath))
+        {
+            _blockQuantModule = LoadOwnedModule(blockQuantPath);
+            _blockQuantFinalizeNvfp4 = _blockQuantModule.GetFunction("block_quant_finalize_nvfp4");
+            _blockQuantNvfp4F32 = _blockQuantModule.GetFunction("block_quant_nvfp4_f32");
+            _blockQuantNvfp4F16 = _blockQuantModule.GetFunction("block_quant_nvfp4_f16");
+            _blockQuantFinalizeMx = _blockQuantModule.GetFunction("block_quant_finalize_mx");
+            _blockQuantMxfp8F32 = _blockQuantModule.GetFunction("block_quant_mxfp8_f32");
+            _blockQuantMxfp8F16 = _blockQuantModule.GetFunction("block_quant_mxfp8_f16");
+        }
+
+        // Optional module: MXFP8 unpack (Kernels/dequant/dequant_mxfp8_to_f16.cu). Absence is not an error.
+        string mxfp8Path = Ptx("dequant_mxfp8_to_f16");
+        if (File.Exists(mxfp8Path))
+        {
+            _mxfp8Module = LoadOwnedModule(mxfp8Path);
+            _mxfp8DequantF16 = _mxfp8Module.GetFunction("dequant_mxfp8_to_f16");
+            _mxfp8DequantBf16 = _mxfp8Module.GetFunction("dequant_mxfp8_to_bf16");
+        }
+
         // Optional module: NVFP4 dequant (src/HartsyInference.Cuda/Kernels/dequant/dequant_nvfp4_to_f16.cu). Absence is not an error.
-        string nvfp4Path = Path.Combine(ptxDir, "dequant_nvfp4_to_f16.ptx");
+        string nvfp4Path = Ptx("dequant_nvfp4_to_f16");
         if (File.Exists(nvfp4Path))
         {
             _nvfp4Module = LoadOwnedModule(nvfp4Path);
@@ -690,7 +776,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // Optional module: SageAttention INT8 (src/HartsyInference.Cuda/Kernels/attention/build.sh). Absence is not an error.
-        string sageAttnPath = Path.Combine(ptxDir, "sage_attn_int8.ptx");
+        string sageAttnPath = Ptx("sage_attn_int8");
         if (File.Exists(sageAttnPath))
         {
             _sageAttnModule = LoadOwnedModule(sageAttnPath);
@@ -703,7 +789,7 @@ public sealed class CudaKernels : IDisposable
             _sageQuantKInt8F16H = _sageAttnModule.GetFunction("sage_quant_k_int8_f16h");
 
             // The register-resident v1 flash stage (same prologue kernels) — preferred when present.
-            string sageV1Path = Path.Combine(ptxDir, "sage_attn_int8_v1.ptx");
+            string sageV1Path = Ptx("sage_attn_int8_v1");
             if (File.Exists(sageV1Path))
             {
                 _sageAttnV1Module = LoadOwnedModule(sageV1Path);
@@ -719,7 +805,7 @@ public sealed class CudaKernels : IDisposable
         }
 
         // ── F16 modules ──────────────────────────────────────────────────
-        _elementwiseF16Module = LoadOwnedModule(Path.Combine(ptxDir, "elementwise_f16.ptx"));
+        _elementwiseF16Module = LoadOwnedModule(Ptx("elementwise_f16"));
         _addF16 = _elementwiseF16Module.GetFunction("elementwise_add_f16");
         _mulF16 = _elementwiseF16Module.GetFunction("elementwise_mul_f16");
         _scaleF16 = _elementwiseF16Module.GetFunction("elementwise_scale_f16");
@@ -727,32 +813,32 @@ public sealed class CudaKernels : IDisposable
         _geluF16 = _elementwiseF16Module.GetFunction("elementwise_gelu_f16");
         _clampF16 = _elementwiseF16Module.GetFunction("elementwise_clamp_f16");
 
-        _groupnormF16Module = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_f16.ptx"));
+        _groupnormF16Module = LoadOwnedModule(Ptx("groupnorm_f16"));
         _groupnormF16 = _groupnormF16Module.GetFunction("groupnorm_f16");
 
-        _layernormF16Module = LoadOwnedModule(Path.Combine(ptxDir, "layernorm_f16.ptx"));
+        _layernormF16Module = LoadOwnedModule(Ptx("layernorm_f16"));
         _layernormF16 = _layernormF16Module.GetFunction("layernorm_f16");
 
-        _spatialF16Module = LoadOwnedModule(Path.Combine(ptxDir, "spatial_f16.ptx"));
+        _spatialF16Module = LoadOwnedModule(Ptx("spatial_f16"));
         _upsampleNearest2dF16 = _spatialF16Module.GetFunction("upsample_nearest2d_f16");
         _im2colF16 = _spatialF16Module.GetFunction("im2col_f16");
         _col2biasAddF16 = _spatialF16Module.GetFunction("col2bias_add_f16");
 
-        _softmaxF16Module = LoadOwnedModule(Path.Combine(ptxDir, "softmax_f16.ptx"));
+        _softmaxF16Module = LoadOwnedModule(Ptx("softmax_f16"));
         _softmaxF16 = _softmaxF16Module.GetFunction("softmax_f16");
 
-        _transposeF16Module = LoadOwnedModule(Path.Combine(ptxDir, "transpose_f16.ptx"));
+        _transposeF16Module = LoadOwnedModule(Ptx("transpose_f16"));
         _transpose2dF16 = _transposeF16Module.GetFunction("transpose_2d_f16");
         _permute0213F16 = _transposeF16Module.GetFunction("permute_0213_f16");
 
-        _gegluF16Module = LoadOwnedModule(Path.Combine(ptxDir, "geglu_f16.ptx"));
+        _gegluF16Module = LoadOwnedModule(Ptx("geglu_f16"));
         _gegluF16 = _gegluF16Module.GetFunction("geglu_f16");
 
-        _broadcastAddF16Module = LoadOwnedModule(Path.Combine(ptxDir, "broadcast_add_f16.ptx"));
+        _broadcastAddF16Module = LoadOwnedModule(Ptx("broadcast_add_f16"));
         _broadcastAddF16 = _broadcastAddF16Module.GetFunction("broadcast_add_f16");
 
         // ── BF16 modules (subset VAE needs; SDXL VAE F16 overflows) ──────
-        _elementwiseBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "elementwise_bf16.ptx"));
+        _elementwiseBf16Module = LoadOwnedModule(Ptx("elementwise_bf16"));
         _addBf16 = _elementwiseBf16Module.GetFunction("elementwise_add_bf16");
         _mulBf16 = _elementwiseBf16Module.GetFunction("elementwise_mul_bf16");
         _scaleBf16 = _elementwiseBf16Module.GetFunction("elementwise_scale_bf16");
@@ -760,42 +846,42 @@ public sealed class CudaKernels : IDisposable
         _geluBf16 = _elementwiseBf16Module.GetFunction("elementwise_gelu_bf16");
         _clampBf16 = _elementwiseBf16Module.GetFunction("elementwise_clamp_bf16");
 
-        _groupnormBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_bf16.ptx"));
+        _groupnormBf16Module = LoadOwnedModule(Ptx("groupnorm_bf16"));
         _groupnormBf16 = _groupnormBf16Module.GetFunction("groupnorm_bf16");
 
-        _layernormBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "layernorm_bf16.ptx"));
+        _layernormBf16Module = LoadOwnedModule(Ptx("layernorm_bf16"));
         _layernormBf16 = _layernormBf16Module.GetFunction("layernorm_bf16");
 
-        _spatialBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "spatial_bf16.ptx"));
+        _spatialBf16Module = LoadOwnedModule(Ptx("spatial_bf16"));
         _upsampleNearest2dBf16 = _spatialBf16Module.GetFunction("upsample_nearest2d_bf16");
         _im2colBf16 = _spatialBf16Module.GetFunction("im2col_bf16");
         _col2biasAddBf16 = _spatialBf16Module.GetFunction("col2bias_add_bf16");
 
-        _broadcastAddBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "broadcast_add_bf16.ptx"));
+        _broadcastAddBf16Module = LoadOwnedModule(Ptx("broadcast_add_bf16"));
         _broadcastAddBf16 = _broadcastAddBf16Module.GetFunction("broadcast_add_bf16");
 
-        _groupnormSiluBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_silu_bf16.ptx"));
+        _groupnormSiluBf16Module = LoadOwnedModule(Ptx("groupnorm_silu_bf16"));
         _groupnormSiluBf16 = _groupnormSiluBf16Module.GetFunction("groupnorm_silu_bf16");
 
         // ── Fused GroupNorm+SiLU ─────────────────────────────────────────
-        _groupnormSiluModule = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_silu_f32.ptx"));
+        _groupnormSiluModule = LoadOwnedModule(Ptx("groupnorm_silu_f32"));
         _groupnormSiluF32 = _groupnormSiluModule.GetFunction("groupnorm_silu_f32");
 
-        _groupnormSiluF16Module = LoadOwnedModule(Path.Combine(ptxDir, "groupnorm_silu_f16.ptx"));
+        _groupnormSiluF16Module = LoadOwnedModule(Ptx("groupnorm_silu_f16"));
         _groupnormSiluF16 = _groupnormSiluF16Module.GetFunction("groupnorm_silu_f16");
 
         // ── Cast ─────────────────────────────────────────────────────────
-        _castModule = LoadOwnedModule(Path.Combine(ptxDir, "cast_f32_f16.ptx"));
+        _castModule = LoadOwnedModule(Ptx("cast_f32_f16"));
         _castF32ToF16 = _castModule.GetFunction("cast_f32_to_f16");
         _castF16ToF32 = _castModule.GetFunction("cast_f16_to_f32");
 
         // ── FP8 Cast ─────────────────────────────────────────────────────
-        _castF8Module = LoadOwnedModule(Path.Combine(ptxDir, "cast_f8e4m3_f16.ptx"));
+        _castF8Module = LoadOwnedModule(Ptx("cast_f8e4m3_f16"));
         _castF8E4M3ToF16 = _castF8Module.GetFunction("cast_f8e4m3_to_f16");
         _castF16ToF8E4M3 = _castF8Module.GetFunction("cast_f16_to_f8e4m3");
 
         // ── FP8 Activation Quantization ──────────────────────────────────
-        _fp8QuantModule = LoadOwnedModule(Path.Combine(ptxDir, "fp8_quant.ptx"));
+        _fp8QuantModule = LoadOwnedModule(Ptx("fp8_quant"));
         _fp8AbsMax = _fp8QuantModule.GetFunction("absmax_f32");
         _fp8AbsMaxFinalizeScale = _fp8QuantModule.GetFunction("absmax_finalize_scale");
         _fp8QuantF32ToE4M3 = _fp8QuantModule.GetFunction("quant_f32_e4m3");
@@ -803,12 +889,12 @@ public sealed class CudaKernels : IDisposable
         _fp8QuantF16ToE4M3 = _fp8QuantModule.GetFunction("quant_f16_e4m3");
 
         // ── BF16 <-> F32 Cast ───────────────────────────────────────────
-        _castBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "cast_bf16_f32.ptx"));
+        _castBf16Module = LoadOwnedModule(Ptx("cast_bf16_f32"));
         _castBf16ToF32 = _castBf16Module.GetFunction("cast_bf16_to_f32");
         _castF32ToBf16 = _castBf16Module.GetFunction("cast_f32_to_bf16");
 
         // ── DiT glue (F32) ───────────────────────────────────────────────
-        _ditF32Module = LoadOwnedModule(Path.Combine(ptxDir, "dit_f32.ptx"));
+        _ditF32Module = LoadOwnedModule(Ptx("dit_f32"));
         _ditRmsNormF32 = _ditF32Module.GetFunction("dit_rmsnorm_f32");
         _ditAffineBroadcastF32 = _ditF32Module.GetFunction("dit_affine_broadcast_lastdim_f32");
         _ditGatedResidualF32 = _ditF32Module.GetFunction("dit_gated_residual_lastdim_f32");
@@ -834,14 +920,14 @@ public sealed class CudaKernels : IDisposable
 
         // Separate module so rebuilding it can't perturb dit_f32.ptx's other 40 kernels. Optional:
         // absent PTX just leaves the handle 0 and callers fall back to the v1 kernel above.
-        string ropeV2Path = Path.Combine(ptxDir, "dit_rope.ptx");
+        string ropeV2Path = Ptx("dit_rope");
         if (File.Exists(ropeV2Path))
         {
             _ditRopeModule = LoadOwnedModule(ropeV2Path);
             _ditRopeHeadMajorV2F32 = _ditRopeModule.GetFunction("dit_rope_head_major_v2_f32");
         }
 
-        string fp8EmitPath = Path.Combine(ptxDir, "dit_fp8emit.ptx");
+        string fp8EmitPath = Ptx("dit_fp8emit");
         if (File.Exists(fp8EmitPath))
         {
             _ditFp8EmitModule = LoadOwnedModule(fp8EmitPath);
@@ -886,7 +972,7 @@ public sealed class CudaKernels : IDisposable
         _ditAffineBroadcastRowIndexedF32 = _ditF32Module.GetFunction("dit_affine_broadcast_rowindexed_f32");
         _ditGatedResidualRowIndexedF32 = _ditF32Module.GetFunction("dit_gated_residual_rowindexed_f32");
 
-        _mg3ActionModule = LoadOwnedModule(Path.Combine(ptxDir, "mg3_action.ptx"));
+        _mg3ActionModule = LoadOwnedModule(Ptx("mg3_action"));
         _mg3SplitQkvTemporalF32 = _mg3ActionModule.GetFunction("mg3_split_qkv_temporal_f32");
         _mg3MergeTemporalF32 = _mg3ActionModule.GetFunction("mg3_merge_temporal_f32");
         _mg3RopeBatchedF32 = _mg3ActionModule.GetFunction("mg3_rope_batched_f32");
@@ -894,7 +980,7 @@ public sealed class CudaKernels : IDisposable
         _mg3MouseMlpConcatF32 = _mg3ActionModule.GetFunction("mg3_mouse_mlp_concat_f32");
 
         // ── DiT glue (F16 I/O, F32 accumulate) — DiT F16 activation path ─
-        _ditF16Module = LoadOwnedModule(Path.Combine(ptxDir, "dit_f16.ptx"));
+        _ditF16Module = LoadOwnedModule(Ptx("dit_f16"));
         _ditRmsNormF16 = _ditF16Module.GetFunction("dit_rmsnorm_f16");
         _ditLayerNormNoAffineF16 = _ditF16Module.GetFunction("dit_layernorm_noaffine_f16");
         _ditAffineBroadcastF16 = _ditF16Module.GetFunction("dit_affine_broadcast_lastdim_f16");
@@ -924,7 +1010,7 @@ public sealed class CudaKernels : IDisposable
         _ditGluActF16 = _ditF16Module.GetFunction("dit_glu_act_f16");
 
         // ── DiT glue (BF16 I/O, F32 accumulate) — DiT BF16 activation path ─
-        _ditBf16Module = LoadOwnedModule(Path.Combine(ptxDir, "dit_bf16.ptx"));
+        _ditBf16Module = LoadOwnedModule(Ptx("dit_bf16"));
         _ditRmsNormBf16 = _ditBf16Module.GetFunction("dit_rmsnorm_bf16");
         _ditGluActBf16 = _ditBf16Module.GetFunction("dit_glu_act_bf16");
         _ditGeGluBf16 = _ditBf16Module.GetFunction("dit_geglu_bf16");
@@ -934,11 +1020,11 @@ public sealed class CudaKernels : IDisposable
         _ditGatedResidualBf16 = _ditBf16Module.GetFunction("dit_gated_residual_lastdim_bf16");
 
         // ── Audio conv (codec/TTS Conv1d + ConvTranspose1d, F32) ─────────
-        _audioConvF32Module = LoadOwnedModule(Path.Combine(ptxDir, "conv1d_f32.ptx"));
+        _audioConvF32Module = LoadOwnedModule(Ptx("conv1d_f32"));
         _conv1dF32 = _audioConvF32Module.GetFunction("conv1d_f32");
         _convTranspose1dF32 = _audioConvF32Module.GetFunction("conv_transpose1d_f32");
 
-        _audioActF32Module = LoadOwnedModule(Path.Combine(ptxDir, "audio_activations_f32.ptx"));
+        _audioActF32Module = LoadOwnedModule(Ptx("audio_activations_f32"));
         _audioSigmoidF32 = _audioActF32Module.GetFunction("audio_sigmoid_f32");
         _audioMishF32 = _audioActF32Module.GetFunction("audio_mish_f32");
         _audioEluF32 = _audioActF32Module.GetFunction("audio_elu_f32");
@@ -948,11 +1034,11 @@ public sealed class CudaKernels : IDisposable
         _audioPreluF32 = _audioActF32Module.GetFunction("audio_prelu_f32");
         _audioRepeatTimeF32 = _audioActF32Module.GetFunction("audio_repeat_time_f32");
 
-        _audioAdain1dF32Module = LoadOwnedModule(Path.Combine(ptxDir, "adain1d_f32.ptx"));
+        _audioAdain1dF32Module = LoadOwnedModule(Ptx("adain1d_f32"));
         _audioAdain1dF32 = _audioAdain1dF32Module.GetFunction("audio_adain1d_f32");
 
         // ── Language-model glue (F32) ────────────────────────────────────
-        _lmF32Module = LoadOwnedModule(Path.Combine(ptxDir, "lm_f32.ptx"));
+        _lmF32Module = LoadOwnedModule(Ptx("lm_f32"));
         _lmRepeatKvF32 = _lmF32Module.GetFunction("lm_repeat_kv_f32");
         _lmKvAppendF32 = _lmF32Module.GetFunction("lm_kv_append_f32");
         _lmKvAppendF16 = _lmF32Module.GetFunction("lm_kv_append_f16");
@@ -985,51 +1071,71 @@ public sealed class CudaKernels : IDisposable
         _lmHistoryAppend = _lmF32Module.GetFunction("lm_history_append");
         _lmRepetitionPenaltyF32 = _lmF32Module.GetFunction("lm_repetition_penalty_f32");
         _lmKvSliceTimeF32 = _lmF32Module.GetFunction("lm_kv_slice_time_f32");
-        _flashAttnF32Module = LoadOwnedModule(Path.Combine(ptxDir, "flash_attn_f32.ptx"));
+        _flashAttnF32Module = LoadOwnedModule(Ptx("flash_attn_f32"));
         _flashAttnF32 = _flashAttnF32Module.GetFunction("lm_flash_attn_f32");
         _flashAttnF16Kv = _flashAttnF32Module.GetFunction("lm_flash_attn_f16kv_f32");
-        _flashAttnF32SplitModule = LoadOwnedModule(Path.Combine(ptxDir, "flash_attn_f32_split.ptx"));
+        _flashAttnF32SplitModule = LoadOwnedModule(Ptx("flash_attn_f32_split"));
         _flashAttnF32Split = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_split");
         _flashAttnF32SplitF16Kv = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f16kv_f32_split");
         _flashAttnF32Combine = _flashAttnF32SplitModule.GetFunction("lm_flash_attn_f32_combine");
-        _flashV2Module = LoadOwnedModule(Path.Combine(ptxDir, "flash_attn_v2_tf32.ptx"));
+        _flashV2Module = LoadOwnedModule(Ptx("flash_attn_v2_tf32"));
         _flashV2Tf32 = _flashV2Module.GetFunction("lm_flash_attn_v2_tf32");
         // Opt the fused flash kernel into >48 KB dynamic shared memory (K/V/S/O tiles ≈ 72 KB for D=128).
         // CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8. Ignore failure (kernel launch will surface it).
         CudaDriverApi.cuFuncSetAttribute(_flashV2Tf32, 8, 96 * 1024);
+        string channelsLastPath = Ptx("channels_last");
+        if (File.Exists(channelsLastPath))
+        {
+            _channelsLastModule = LoadOwnedModule(channelsLastPath);
+            _transposeTiledB16 = _channelsLastModule.GetFunction("transpose_tiled_b16");
+            _transposeTiledB32 = _channelsLastModule.GetFunction("transpose_tiled_b32");
+        }
+
+        string flashF16Path = Ptx("flash_attn_f16");
+        if (File.Exists(flashF16Path))
+        {
+            _flashF16Module = LoadOwnedModule(flashF16Path);
+            _flashF16D64 = _flashF16Module.GetFunction("flash_attn_f16_d64");
+            _flashF16D128 = _flashF16Module.GetFunction("flash_attn_f16_d128");
+            _flashF16D256 = _flashF16Module.GetFunction("flash_attn_f16_d256");
+            // The Q, K and V tiles exceed the 48 KB default at D=256 (CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8).
+            CudaDriverApi.cuFuncSetAttribute(_flashF16D128, 8, FlashAttnF16SharedBytes(128));
+            CudaDriverApi.cuFuncSetAttribute(_flashF16D256, 8, FlashAttnF16SharedBytes(256));
+        }
 
         // ── GGUF Dequant ─────────────────────────────────────────────────
-        _dequantQ8_0Module = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q8_0_to_f16.ptx"));
-        _dequantQ8_0ToF16 = _dequantQ8_0Module.GetFunction("dequant_q8_0_to_f16");
-        _dequantQ4_0Module = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q4_0_to_f16.ptx"));
-        _dequantQ4_0ToF16 = _dequantQ4_0Module.GetFunction("dequant_q4_0_to_f16");
-        _dequantQ5_0Module = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q5_0_to_f16.ptx"));
-        _dequantQ5_0ToF16 = _dequantQ5_0Module.GetFunction("dequant_q5_0_to_f16");
-        _dequantQ2_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q2_k_to_f16.ptx"));
-        _dequantQ2_KToF16 = _dequantQ2_KModule.GetFunction("dequant_q2_k_to_f16");
-        _dequantQ3_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q3_k_to_f16.ptx"));
-        _dequantQ3_KToF16 = _dequantQ3_KModule.GetFunction("dequant_q3_k_to_f16");
-        _dequantQ4_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q4_k_to_f16.ptx"));
-        _dequantQ4_KToF16 = _dequantQ4_KModule.GetFunction("dequant_q4_k_to_f16");
-        _dequantQ5_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q5_k_to_f16.ptx"));
-        _dequantQ5_KToF16 = _dequantQ5_KModule.GetFunction("dequant_q5_k_to_f16");
-        _dequantQ6_KModule = LoadOwnedModule(Path.Combine(ptxDir, "dequant_q6_k_to_f16.ptx"));
-        _dequantQ6_KToF16 = _dequantQ6_KModule.GetFunction("dequant_q6_k_to_f16");
+        BindGgufDequant(DType.Q8_0, "dequant_q8_0_to_f16", threadsPerBlock: 32);
+        BindGgufDequant(DType.Q4_0, "dequant_q4_0_to_f16", threadsPerBlock: 32);
+        BindGgufDequant(DType.Q5_0, "dequant_q5_0_to_f16", threadsPerBlock: 32);
+        BindGgufDequant(DType.Q2_K, "dequant_q2_k_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.Q3_K, "dequant_q3_k_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.Q4_K, "dequant_q4_k_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.Q5_K, "dequant_q5_k_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.Q6_K, "dequant_q6_k_to_f16", threadsPerBlock: 64);
+        BindGgufDequant(DType.IQ4_XS, "dequant_iq4_xs_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ4_NL, "dequant_iq4_nl_to_f16", threadsPerBlock: 32);
+        BindGgufDequant(DType.IQ2_XXS, "dequant_iq2_xxs_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ2_XS, "dequant_iq2_xs_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ2_S, "dequant_iq2_s_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ3_XXS, "dequant_iq3_xxs_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ3_S, "dequant_iq3_s_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ1_S, "dequant_iq1_s_to_f16", threadsPerBlock: 256);
+        BindGgufDequant(DType.IQ1_M, "dequant_iq1_m_to_f16", threadsPerBlock: 256);
 
-        _mulMatVecQ4KModule = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q4k_f32.ptx"));
+        _mulMatVecQ4KModule = LoadOwnedModule(Ptx("mul_mat_vec_q4k_f32"));
         _mulMatVecQ4KF32 = _mulMatVecQ4KModule.GetFunction("mul_mat_vec_q4k_f32");
-        _mulMatVecQ6KModule = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q6k_f32.ptx"));
+        _mulMatVecQ6KModule = LoadOwnedModule(Ptx("mul_mat_vec_q6k_f32"));
         _mulMatVecQ6KF32 = _mulMatVecQ6KModule.GetFunction("mul_mat_vec_q6k_f32");
-        _mulMatVecQ8_0Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q8_0_f32.ptx"));
+        _mulMatVecQ8_0Module = LoadOwnedModule(Ptx("mul_mat_vec_q8_0_f32"));
         _mulMatVecQ8_0F32 = _mulMatVecQ8_0Module.GetFunction("mul_mat_vec_q8_0_f32");
-        // On by default (HARTSY_BF16_GEMV=0 disables). The PTX targets sm_80 like the engine's other lm/world
+        // On by default (numerics.bf16Gemv=false disables). The PTX targets sm_80 like the engine's other lm/world
         // kernels, so it JITs on every GPU this engine already runs on; a genuine load failure is caught below
         // and falls back to cuBLAS. This is a large decode win — see the lm_head GEMV note in GenericTransformer.
         if (EngineKnobs.Bf16Gemv.Value)
         {
             try
             {
-                _mulMatVecF16Bf16Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_f16_bf16_f32.ptx"));
+                _mulMatVecF16Bf16Module = LoadOwnedModule(Ptx("mul_mat_vec_f16_bf16_f32"));
                 _mulMatVecBf16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_bf16_f32");
                 _mulMatVecF16F32 = _mulMatVecF16Bf16Module.GetFunction("mul_mat_vec_f16_f32");
                 HasFloatGemv = true;
@@ -1044,35 +1150,45 @@ public sealed class CudaKernels : IDisposable
         }
         // Optional module: the additive causal bias the fused cuDNN prefill path needs
         // (src/HartsyInference.Cuda/Kernels/lm/lm_attn_mask.cu). Absence just means prefill keeps the general kernel.
-        string causalMaskPath = Path.Combine(ptxDir, "lm_attn_mask.ptx");
+        string causalMaskPath = Ptx("lm_attn_mask");
         if (File.Exists(causalMaskPath))
         {
             _causalMaskModule = LoadOwnedModule(causalMaskPath);
             _causalBiasMaskF32 = _causalMaskModule.GetFunction("lm_causal_bias_mask_f32");
         }
-        _mulMatVecQ5_0Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5_0_f32.ptx"));
+        _mulMatVecQ5_0Module = LoadOwnedModule(Ptx("mul_mat_vec_q5_0_f32"));
         _mulMatVecQ5_0F32 = _mulMatVecQ5_0Module.GetFunction("mul_mat_vec_q5_0_f32");
-        _mulMatVecQ4_0Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q4_0_f32.ptx"));
+        _mulMatVecQ4_0Module = LoadOwnedModule(Ptx("mul_mat_vec_q4_0_f32"));
         _mulMatVecQ4_0F32 = _mulMatVecQ4_0Module.GetFunction("mul_mat_vec_q4_0_f32");
-        _mulMatVecQ5KModule = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5k_f32.ptx"));
+        _mulMatVecQ5KModule = LoadOwnedModule(Ptx("mul_mat_vec_q5k_f32"));
         _mulMatVecQ5KF32 = _mulMatVecQ5KModule.GetFunction("mul_mat_vec_q5k_f32");
-        _quantActQ8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "quantize_activation_q8_1_f32.ptx"));
+        _mulMatVecQ2KModule = LoadOwnedModule(Ptx("mul_mat_vec_q2k_f32"));
+        _mulMatVecQ2KF32 = _mulMatVecQ2KModule.GetFunction("mul_mat_vec_q2k_f32");
+        _mulMatVecQ3KModule = LoadOwnedModule(Ptx("mul_mat_vec_q3k_f32"));
+        _mulMatVecQ3KF32 = _mulMatVecQ3KModule.GetFunction("mul_mat_vec_q3k_f32");
+        _quantActQ8_1Module = LoadOwnedModule(Ptx("quantize_activation_q8_1_f32"));
         _quantActQ8_1F32 = _quantActQ8_1Module.GetFunction("quantize_activation_q8_1_f32");
-        _mulMatVecQ4KQ8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q4k_q8_1.ptx"));
+        _mulMatVecQ4KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q4k_q8_1"));
         _mulMatVecQ4KQ8_1 = _mulMatVecQ4KQ8_1Module.GetFunction("mul_mat_vec_q4k_q8_1");
         _mulMatVecQ4KQ8_1Ksplit = _mulMatVecQ4KQ8_1Module.GetFunction("mul_mat_vec_q4k_q8_1_ksplit");
-        _mulMatVecQ8_0Q8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q8_0_q8_1.ptx"));
+        _mulMatVecQ8_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q8_0_q8_1"));
         _mulMatVecQ8_0Q8_1 = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1");
         _mulMatVecQ8_0Q8_1Ksplit = _mulMatVecQ8_0Q8_1Module.GetFunction("mul_mat_vec_q8_0_q8_1_ksplit");
-        _mulMatVecQ6KQ8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q6k_q8_1.ptx"));
+        _mulMatVecQ6KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q6k_q8_1"));
         _mulMatVecQ6KQ8_1 = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1");
         _mulMatVecQ6KQ8_1Ksplit = _mulMatVecQ6KQ8_1Module.GetFunction("mul_mat_vec_q6k_q8_1_ksplit");
-        _mulMatVecQ4_0Q8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q4_0_q8_1.ptx"));
+        _mulMatVecQ2KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q2k_q8_1"));
+        _mulMatVecQ2KQ8_1 = _mulMatVecQ2KQ8_1Module.GetFunction("mul_mat_vec_q2k_q8_1");
+        _mulMatVecQ2KQ8_1Ksplit = _mulMatVecQ2KQ8_1Module.GetFunction("mul_mat_vec_q2k_q8_1_ksplit");
+        _mulMatVecQ3KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q3k_q8_1"));
+        _mulMatVecQ3KQ8_1 = _mulMatVecQ3KQ8_1Module.GetFunction("mul_mat_vec_q3k_q8_1");
+        _mulMatVecQ3KQ8_1Ksplit = _mulMatVecQ3KQ8_1Module.GetFunction("mul_mat_vec_q3k_q8_1_ksplit");
+        _mulMatVecQ4_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q4_0_q8_1"));
         _mulMatVecQ4_0Q8_1 = _mulMatVecQ4_0Q8_1Module.GetFunction("mul_mat_vec_q4_0_q8_1");
-        _mulMatVecQ5_0Q8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5_0_q8_1.ptx"));
+        _mulMatVecQ5_0Q8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q5_0_q8_1"));
         _mulMatVecQ5_0Q8_1 = _mulMatVecQ5_0Q8_1Module.GetFunction("mul_mat_vec_q5_0_q8_1");
         _mulMatVecQ5_0Q8_1Ksplit = _mulMatVecQ5_0Q8_1Module.GetFunction("mul_mat_vec_q5_0_q8_1_ksplit");
-        _mulMatVecQ5KQ8_1Module = LoadOwnedModule(Path.Combine(ptxDir, "mul_mat_vec_q5k_q8_1.ptx"));
+        _mulMatVecQ5KQ8_1Module = LoadOwnedModule(Ptx("mul_mat_vec_q5k_q8_1"));
         _mulMatVecQ5KQ8_1 = _mulMatVecQ5KQ8_1Module.GetFunction("mul_mat_vec_q5k_q8_1");
         }
         catch (Exception constructionFailure)
@@ -2232,6 +2348,16 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Whether the optional convrot.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant/convrot.cu).</summary>
     public bool HasConvRotKernels => _convRotModule is not null;
 
+    /// <summary>Groups the rotate kernel packs into one 256-thread block: 1024 shared floats regardless of group size, so a small group packs more groups and a group past 1024 gets a block to itself.</summary>
+    private static uint ConvRotGroupsPerBlock(int group)
+    {
+        uint quarter = (uint)(group >> 2);
+        return quarter >= 256 ? 1u : Math.Max(1u, 256u / quarter);
+    }
+
+    /// <summary>Dynamic shared bytes one rotate block stages — what decides whether a group fits under the device's no-opt-in limit.</summary>
+    public static uint ConvRotRotateSharedBytes(int group) => group <= 0 ? 0u : (uint)((long)ConvRotGroupsPerBlock(group) * group * sizeof(float));
+
     /// <summary>ConvRot rotation — out = x @ H per contiguous <paramref name="group"/>-wide slice, over <c>count</c> elements (a multiple of <paramref name="group"/>). Out-of-place; <paramref name="output"/> may not alias x.</summary>
     public unsafe void LaunchConvRotRotate(ulong output, ulong x, long count, int group, nint stream, bool srcF16)
     {
@@ -2239,11 +2365,9 @@ public sealed class CudaKernels : IDisposable
         if (group < 4 || count % group != 0)
             throw new ArgumentException($"ConvRot needs count ({count}) to be a multiple of group ({group}).", nameof(count));
 
-        // 1024 shared floats per block regardless of group size, so a small group just packs more groups per block.
-        uint quarter = (uint)(group >> 2);
-        uint groupsPerBlock = quarter >= 256 ? 1u : Math.Max(1u, 256u / quarter);
+        uint groupsPerBlock = ConvRotGroupsPerBlock(group);
         ulong totalGroups = (ulong)(count / group);
-        uint sharedBytes = (uint)((long)groupsPerBlock * group * sizeof(float));
+        uint sharedBytes = ConvRotRotateSharedBytes(group);
 
         ulong xArg = x, oArg = output;
         uint groupArg = (uint)group, gpbArg = groupsPerBlock;
@@ -2265,12 +2389,12 @@ public sealed class CudaKernels : IDisposable
         _convRotModule is not null && cols > 0 && cols <= FusedConvRotMaxCols && group >= 4 && cols % group == 0
         && (group & (group - 1)) == 0 && (group & 0x55555554) != 0;
 
-    /// <summary>Float scratch the wide fused kernel rotates through, and the shared ceiling it must stay inside (48 KB is the per-block dynamic limit without a MAX_DYNAMIC_SHARED_SIZE_BYTES opt-in, which would cost occupancy). The static reduction scratch is counted against the same budget.</summary>
+    /// <summary>Float scratch the wide fused kernel rotates through, and the shared ceiling it must stay inside (the device's per-block dynamic limit without a MAX_DYNAMIC_SHARED_SIZE_BYTES opt-in, which would cost occupancy). The static reduction scratch is counted against the same budget.</summary>
     private const int WideConvRotTileFloats = 2048;
-    private const int WideConvRotSharedCeiling = (48 << 10) - 2048;
+    private int WideConvRotSharedCeiling => DefaultDynamicSharedBytes - 2048;
 
     /// <summary>Shared bytes and float-tile width the wide fused kernel needs for a row, or (0, 0) if it cannot serve the shape. The tile carries the group-local butterflies, so it must be a whole number of groups.</summary>
-    private static (uint SharedBytes, uint Tile) WideConvRotPlan(int cols, int group)
+    private (uint SharedBytes, uint Tile) WideConvRotPlan(int cols, int group)
     {
         long tile = Math.Max(group, WideConvRotTileFloats / group * group);
         if (tile > cols) tile = cols;
@@ -2349,7 +2473,7 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Dynamic shared bytes the PADDED control entry point needs (rows × <c>BK+16</c>). The two kernels must never be launched with each other's budget: over-budgeting the swizzled one throws away exactly the occupancy headroom the unpadded layout buys, and under-budgeting the padded one corrupts its last stage.</summary>
     internal const uint Int8MmaSharedBytesPad = 3u * (128u + 256u) * 80u;
 
-    /// <summary>Selects the swizzled (default) or padded-control operand layout — <c>HARTSY_INT8_MMA_SWIZZLE=0</c> picks the padded kernel the swizzle replaced. This is an A/B control, NOT the feature kill switch; that is <c>HARTSY_INT8_FUSED_MMA=0</c>, which drops to cuBLASLt + a separate dequant entirely.</summary>
+    /// <summary>Selects the swizzled (default) or padded-control operand layout — <c>numerics.int8MmaSwizzle=false</c> picks the padded kernel the swizzle replaced. This is an A/B control, NOT the feature kill switch; that is <c>numerics.int8FusedMma=false</c>, which drops to cuBLASLt + a separate dequant entirely.</summary>
     internal static bool Int8MmaSwizzle => EngineKnobs.Int8MmaSwizzle.Value;
 
     /// <summary>N tile of the fused mma GEMM; N must be a whole multiple (M is predicated, N and K are not).</summary>
@@ -2381,6 +2505,82 @@ public sealed class CudaKernels : IDisposable
         uint shared = swizzle ? Int8MmaSharedBytes : Int8MmaSharedBytesPad;
         uint gridX = (uint)(n / Int8MmaTileN), gridY = (uint)((m + 127) / 128);
         CudaDriverApi.cuLaunchKernel(fn, gridX, gridY, 1, 256, 1, 1, shared, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional block_quant.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
+    public bool HasBlockQuantKernels => _blockQuantModule is not null;
+
+    /// <summary>Scratch floats <see cref="LaunchBlockQuant"/> needs for <paramref name="count"/> elements: three scalars (sf, alpha, beta) then the reduction's per-block maxes.</summary>
+    public static int BlockQuantScratchFloats(int count) => 3 + Fp8AbsMaxBlockCount(count);
+
+    /// <summary>Block-scaled activation quantization for <see cref="BlockScaledGemmExecutor"/>: <c>x[rows, cols]</c> (F32 or F16) → the packed operand at <paramref name="output"/>, block scales in cuBLASLt's blocked layout at <paramref name="blockScale"/> (<paramref name="paddedRows"/> × <paramref name="paddedCols"/> bytes, zeroed here so the padding reads as a defined value), and at <paramref name="scratch"/> the scalars <c>[sf, alpha = weightScale·sf, beta = 0]</c> followed by the reduction's block maxes. Everything stays on <paramref name="stream"/>; the GEMM reads alpha and beta from <c>scratch + 4</c>.</summary>
+    public unsafe void LaunchBlockQuant(BlockScaleFormat format, ulong output, ulong blockScale, ulong scratch,
+        ulong x, DType xType, int rows, int cols, int paddedRows, int paddedCols, float weightScale, nint stream)
+    {
+        if (_blockQuantModule is null) throw new InvalidOperationException("block_quant.ptx not present in the Ptx folder.");
+        if (format == BlockScaleFormat.Mxfp4)
+            throw new NotSupportedException("MXFP4 activation quantization has no kernel yet.");
+        if (xType != DType.F32 && xType != DType.F16)
+            throw new ArgumentException($"Block quantization reads F32 or F16 activations, not {xType}.", nameof(xType));
+        int group = format.GroupSize();
+        if (cols % group != 0)
+            throw new ArgumentException($"cols={cols} is not a multiple of the {format} block size {group}.", nameof(cols));
+
+        int count = rows * cols;
+        ulong xA = x, scA = scratch; float wsA = weightScale;
+        long threads = (long)rows * (cols / group);
+        uint grid = (uint)((threads + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuMemsetD8Async(blockScale, 0, (nuint)((long)paddedRows * paddedCols), stream).ThrowOnError();
+        ulong oA = output, sA = blockScale; uint rA = (uint)rows, cA = (uint)cols, pA = (uint)paddedCols;
+        if (format == BlockScaleFormat.Nvfp4)
+        {
+            uint blocks = (uint)Fp8AbsMaxBlockCount(count);
+            ulong blockMax = scratch + 3 * sizeof(float);
+            ulong bmA = blockMax; uint nA = (uint)count;
+            void** args = stackalloc void*[3];
+            args[0] = &xA; args[1] = &bmA; args[2] = &nA;
+            CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _fp8AbsMaxF16 : _fp8AbsMax,
+                blocks, 1, 1, 256, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+            uint nbA = blocks;
+            void** args2 = stackalloc void*[4];
+            args2[0] = &bmA; args2[1] = &nbA; args2[2] = &wsA; args2[3] = &scA;
+            CudaDriverApi.cuLaunchKernel(_blockQuantFinalizeNvfp4, 1, 1, 1, 256, 1, 1, 0, stream, (nint)args2, 0).ThrowOnError();
+            void** args3 = stackalloc void*[7];
+            args3[0] = &xA; args3[1] = &oA; args3[2] = &sA; args3[3] = &scA; args3[4] = &rA; args3[5] = &cA; args3[6] = &pA;
+            CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _blockQuantNvfp4F16 : _blockQuantNvfp4F32,
+                grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args3, 0).ThrowOnError();
+            return;
+        }
+        // MX formats have no per-tensor pass: the block exponent is the whole scale.
+        void** mxArgs = stackalloc void*[2];
+        mxArgs[0] = &wsA; mxArgs[1] = &scA;
+        CudaDriverApi.cuLaunchKernel(_blockQuantFinalizeMx, 1, 1, 1, 32, 1, 1, 0, stream, (nint)mxArgs, 0).ThrowOnError();
+        void** mxArgs2 = stackalloc void*[6];
+        mxArgs2[0] = &xA; mxArgs2[1] = &oA; mxArgs2[2] = &sA; mxArgs2[3] = &rA; mxArgs2[4] = &cA; mxArgs2[5] = &pA;
+        CudaDriverApi.cuLaunchKernel(xType == DType.F16 ? _blockQuantMxfp8F16 : _blockQuantMxfp8F32,
+            grid, 1, 1, BlockSize, 1, 1, 0, stream, (nint)mxArgs2, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether the optional dequant_mxfp8_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
+    public bool HasMxfp8Kernels => _mxfp8Module is not null;
+
+    /// <summary>MXFP8 unpack — F8E4M3 <c>[rows, cols]</c> × swizzled UE8M0 block scales × the scale tensor's own factor → dense F16 or BF16 <c>[rows, cols]</c>.</summary>
+    /// <param name="paddedCols">Last-dim length of the stored block-scale tensor (its swizzle stride).</param>
+    public unsafe void LaunchMxfp8Dequant(ulong output, ulong weight, ulong blockScale,
+        int rows, int cols, int paddedCols, float scaleFactor, nint stream, bool outBf16)
+    {
+        if (_mxfp8Module is null) throw new InvalidOperationException("dequant_mxfp8_to_f16.ptx not present in the Ptx folder.");
+        ulong wArg = weight, sArg = blockScale, oArg = output;
+        uint rowsArg = (uint)rows, colsArg = (uint)cols, paddedArg = (uint)paddedCols;
+        float sfArg = scaleFactor;
+        void** args = stackalloc void*[7];
+        args[0] = &wArg; args[1] = &sArg; args[2] = &oArg;
+        args[3] = &rowsArg; args[4] = &colsArg; args[5] = &paddedArg; args[6] = &sfArg;
+        const uint BlockSize = 256;
+        uint gridX = (uint)(((long)cols + BlockSize - 1) / BlockSize);
+        uint gridY = (uint)Math.Min(rows, 65535);
+        CudaDriverApi.cuLaunchKernel(outBf16 ? _mxfp8DequantBf16 : _mxfp8DequantF16,
+            gridX, gridY, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Whether the optional dequant_nvfp4_to_f16.ptx module was found and loaded (src/HartsyInference.Cuda/Kernels/dequant).</summary>
@@ -2451,7 +2651,7 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Whether the register-resident v1 flash kernel is available (no Sq%32 restriction).</summary>
     public bool HasSageV1 => _sageAttnV1Module is not null;
 
-    /// <summary>True when the v1 path will actually be dispatched (module present, not forced off via HARTSY_SAGE_V0=1) — the caller must then provide the pre-transposed F16 V workspace.</summary>
+    /// <summary>True when the v1 path will actually be dispatched (module present, not forced off via numerics.sageV0=true) — the caller must then provide the pre-transposed F16 V workspace.</summary>
     public bool UseSageV1 => _sageAttnV1Module is not null && !EngineKnobs.SageV0.Value;
 
     /// <summary>v1 prologue — one-shot V transpose+cast: [B,H,Skv,D] f32 → [B,H,D,skvPad] f16, amortizing per-tile re-transpose.</summary>
@@ -2480,7 +2680,7 @@ public sealed class CudaKernels : IDisposable
         uint bArg = (uint)b, hArg = (uint)h, sqArg = (uint)sq, skvArg = (uint)skv;
         // Register-resident mma.sync v1 (grid ceil(Sq/64)×H×B, block 128, ~24.3 KB SMEM, any Sq) when compiled,
         // else the wmma v0 (grid Sq/32×H×B, block 64 — caller must gate Sq % 32 == 0 for v0).
-        // HARTSY_SAGE_V0=1 forces v0 for debugging.
+        // numerics.sageV0=true forces v0 for debugging.
         if (UseSageV1)
         {
             if (vt16 == 0) throw new ArgumentException("v1 path requires the pre-transposed V workspace (LaunchSageVF16T).");
@@ -2492,11 +2692,11 @@ public sealed class CudaKernels : IDisposable
             // in-kernel (BC=32 keeps d128 at 155 regs / 0 spills / 3 blocks-per-SM; 2 stages ≈ 24.8 KB < 48 KB).
             const int bc = 32;
             uint smemBytes = (uint)(2 * (bc * d + d * bc * 2 + bc * sizeof(float)));
-            // E1 experiment knob: HARTSY_SAGE_PV=f16acc selects the F16-accumulate PV variant (2× PV mma
+            // E1 experiment knob: numerics.sagePv=f16acc selects the F16-accumulate PV variant (2× PV mma
             // rate on GeForce Ampere; P pre-scaled 1/16 in-kernel for overflow headroom to ~349k keys).
             bool f16Acc = EngineKnobs.SagePv.Value == "f16acc";
             if (f16Io && !UseSageV1)
-                throw new InvalidOperationException("F16-ingest Sage requires the v1 module (HARTSY_SAGE_V0=1 is F32-only).");
+                throw new InvalidOperationException("F16-ingest Sage requires the v1 module (numerics.sageV0=true is F32-only).");
             nint func = f16Io
                 ? (d == 128 ? _sageAttnV1D128F16Io : _sageAttnV1D64F16Io)   // native-F16 contract implies f16acc PV
                 : d == 128
@@ -2769,6 +2969,50 @@ public sealed class CudaKernels : IDisposable
         uint smem = (uint)((BC * d + BC * d + BR * BC + BR * d) * sizeof(float));
         CudaDriverApi.cuLaunchKernel(_flashV2Tf32, grid, (uint)hq, (uint)b, 64, 1, 1,
             smem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>Whether flash_attn_f16.ptx is loaded.</summary>
+    public bool HasFlashAttnF16 => _flashF16Module is not null;
+
+    // Must match flash_attn_f16.cu's FA_BR / FA_BC / FA_THREADS.
+    private const int FlashF16QueryRows = 128, FlashF16KeyRows = 32, FlashF16Threads = 256;
+
+    /// <summary>Dynamic shared memory the F16 flash kernel needs at head dim <paramref name="d"/>: the Q tile plus one
+    /// K and one V tile, in halves.</summary>
+    public static int FlashAttnF16SharedBytes(int d) => (FlashF16QueryRows + 2 * FlashF16KeyRows) * d * sizeof(ushort);
+
+    /// <summary>Element strides of one attention operand: consecutive batches, heads and rows.</summary>
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    public readonly record struct FlashStrides(ulong Batch, ulong Head, ulong Row);
+
+    /// <summary>F16 fused attention over strided operands: grid <c>(ceil(sq/128), heads, batch)</c>, 256 threads.
+    /// <paramref name="scaleLog2"/> is the softmax scale times log2(e). Every row must start 16-byte aligned.</summary>
+    public unsafe void LaunchFlashAttnF16(int d, ulong o, ulong q, ulong k, ulong v,
+        FlashStrides so, FlashStrides sq, FlashStrides sk, FlashStrides sv,
+        int batch, int heads, int sqLen, int skvLen, float scaleLog2, nint stream)
+    {
+        if (_flashF16Module is null)
+            throw new InvalidOperationException("flash_attn_f16.ptx is not loaded; gate on HasFlashAttnF16 first.");
+        nint fn = d switch
+        {
+            64 => _flashF16D64,
+            128 => _flashF16D128,
+            256 => _flashF16D256,
+            _ => throw new ArgumentOutOfRangeException(nameof(d), $"F16 flash attention serves head dims 64/128/256, not {d}."),
+        };
+        if (batch <= 0 || batch > 65_535 || heads <= 0 || heads > 65_535 || sqLen <= 0 || skvLen <= 0)
+            throw new ArgumentOutOfRangeException(nameof(batch), $"F16 flash attention dims out of range: B={batch} H={heads} Sq={sqLen} Skv={skvLen}.");
+        ulong oA = o, qA = q, kA = k, vA = v;
+        FlashStrides soA = so, sqA = sq, skA = sk, svA = sv;
+        uint sqN = (uint)sqLen, skvN = (uint)skvLen;
+        float scA = scaleLog2;
+        void** args = stackalloc void*[11];
+        args[0] = &oA; args[1] = &qA; args[2] = &kA; args[3] = &vA;
+        args[4] = &soA; args[5] = &sqA; args[6] = &skA; args[7] = &svA;
+        args[8] = &sqN; args[9] = &skvN; args[10] = &scA;
+        CudaDriverApi.cuLaunchKernel(fn, (uint)((sqLen + FlashF16QueryRows - 1) / FlashF16QueryRows), (uint)heads, (uint)batch,
+            FlashF16Threads, 1, 1,
+            (uint)FlashAttnF16SharedBytes(d), stream, (nint)args, 0).ThrowOnError();
     }
 
     /// <summary>Flash-decoding split phase (plain path: no sink/alibi/softcap/window). Launches <c>batch·hq·tq·splits</c> blocks; each computes the partial online-softmax state (m, l, Σp·V) for its key chunk into the scratch buffers. <paramref name="chunk"/> = ceil(kvLen / splits).</summary>
@@ -3087,7 +3331,7 @@ public sealed class CudaKernels : IDisposable
     // microbenchmark (20.5 vs 55 µs/call — the block-per-row shape's 512-byte blocks can't hide
     // DRAM latency; a plain Add over the same tensors streams at 7.4 µs). An earlier e2e A/B
     // wrongly concluded "no gain": it predated the per-head scalar hoist, whose per-thread
-    // transcendentals were masking the schedule win. Kill-switch HARTSY_SSM_DELTA_WARPROW=0.
+    // transcendentals were masking the schedule win. Kill-switch numerics.ssmDeltaWarprow=0.
     private static bool _ssmDeltaWarpRow => EngineKnobs.SsmDeltaWarprow.Value;
 
     public unsafe void LaunchSsmDeltaStep(ulong output, ulong state, ulong q, ulong k, ulong v, ulong z,
@@ -3098,7 +3342,7 @@ public sealed class CudaKernels : IDisposable
         // block-per-head kernel serializes sv tree-reductions behind block syncs (192 µs/layer on
         // Qwen3.5-0.8B, ~50% of the whole decode step). Bit-identical values; needs the caller's
         // [hv*sv]-float scratch for the pre-norm readout. sk ≤ 1024 = the rows kernel's per-thread
-        // register cache bound (CACHE_COLS·blockDim). Kill-switch HARTSY_SSM_DELTA_V2=0.
+        // register cache bound (CACHE_COLS·blockDim). Kill-switch numerics.ssmDeltaV2=0.
         if (_ssmDeltaRowParallel && oScratch != 0 && sk <= 1024 && hv <= 256)
         {
             // Per-head gate scalars first (one tiny launch): the row kernels then load 2 floats
@@ -4072,6 +4316,30 @@ public sealed class CudaKernels : IDisposable
 
     // ── Transpose/Permute Launches ──────────────────────────────────────
 
+    /// <summary>Whether channels_last.ptx is loaded.</summary>
+    public bool HasTransposeTiled => _channelsLastModule is not null;
+
+    /// <summary>Tiled batched transpose [batch, d1, d2] → [batch, d2, d1] of 2- or 4-byte elements, moved as raw bits.</summary>
+    public unsafe void LaunchTransposeTiled(ulong output, ulong input, int batch, int d1, int d2, int elementBytes, nint stream)
+    {
+        if (_channelsLastModule is null)
+            throw new InvalidOperationException("channels_last.ptx is not loaded; gate on HasTransposeTiled first.");
+        nint fn = elementBytes switch
+        {
+            2 => _transposeTiledB16,
+            4 => _transposeTiledB32,
+            _ => throw new ArgumentOutOfRangeException(nameof(elementBytes), $"Tiled transpose moves 2- or 4-byte elements, not {elementBytes}."),
+        };
+        if (batch <= 0 || batch > 65_535 || d1 <= 0 || d2 <= 0)
+            throw new ArgumentOutOfRangeException(nameof(batch), $"Tiled transpose dims out of range: batch={batch} d1={d1} d2={d2}.");
+        ulong o = output, i = input;
+        uint a = (uint)d1, c = (uint)d2;
+        void** args = stackalloc void*[4];
+        args[0] = &o; args[1] = &i; args[2] = &a; args[3] = &c;
+        CudaDriverApi.cuLaunchKernel(fn, (uint)((d2 + 31) / 32), (uint)((d1 + 31) / 32), (uint)batch, 32, 8, 1,
+            0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Launches batched 2D transpose: [B, D1, D2] -> [B, D2, D1] (F32).</summary>
     public void LaunchTranspose2D(ulong output, ulong input, int d1, int d2, int totalElements, nint stream)
         => LaunchTranspose2DImpl(_transpose2dF32, output, input, d1, d2, totalElements, stream);
@@ -4312,6 +4580,20 @@ public sealed class CudaKernels : IDisposable
         CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeUnpatchifyBf16 : _wanVaeUnpatchify, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
     }
 
+    /// <summary>Wan2.2 VAE DupUp3D shortcut: channel repeat scattered into the temporal/spatial cells, dropping <paramref name="dropT"/> leading frames.</summary>
+    public unsafe void LaunchWanVaeDupUp3d(ulong outp, ulong x, int b, int inC, int t, int h, int w, int outC, int factorT,
+        int factorS, int dropT, long numOut, nint stream, bool bf16)
+    {
+        ulong oA = outp, xA = x;
+        int bA = b, inCA = inC, tA = t, hA = h, wA = w, outCA = outC, fTA = factorT, fSA = factorS, dA = dropT;
+        long nA = numOut;
+        void** args = stackalloc void*[12];
+        args[0] = &oA; args[1] = &xA; args[2] = &bA; args[3] = &inCA; args[4] = &tA; args[5] = &hA; args[6] = &wA;
+        args[7] = &outCA; args[8] = &fTA; args[9] = &fSA; args[10] = &dA; args[11] = &nA;
+        uint gridDim = (uint)((numOut + BlockSize - 1) / BlockSize);
+        CudaDriverApi.cuLaunchKernel(bf16 ? _wanVaeDupUp3dBf16 : _wanVaeDupUp3d, gridDim, 1, 1, BlockSize, 1, 1, 0, stream, (nint)args, 0).ThrowOnError();
+    }
+
     /// <summary>Splits fused attention input [bt, 3c, h, w] into q, k, v, each [bt, 1, hw, c].</summary>
     public unsafe void LaunchWanVaeSplitQkv(ulong q, ulong k, ulong v, ulong src, int bt, int c, int hw, long numEl, nint stream)
     {
@@ -4491,82 +4773,24 @@ public sealed class CudaKernels : IDisposable
 
     // ── GGUF Dequant Launches ────────────────────────────────────────────
 
-    /// <summary>Launches Q8_0 → F16 dequant, one CUDA block (32 threads) per 32-element Q8_0 quant block.</summary>
-    /// <param name="elementCount">Total element count; must be a multiple of 32.</param>
-    public unsafe void LaunchDequantQ8_0ToF16(ulong output, ulong input, int elementCount, nint stream)
+    private void BindGgufDequant(DType dtype, string kernel, int threadsPerBlock)
     {
-        if (elementCount % 32 != 0)
-            throw new ArgumentException($"Q8_0 element count must be a multiple of 32, got {elementCount}.");
-        int superBlockCount = elementCount / 32;
-        LaunchDequantImpl(_dequantQ8_0ToF16, output, input, superBlockCount, threadsPerBlock: 32, stream);
+        CudaModule module = LoadOwnedModule(Ptx(kernel));
+        _ggufDequant[dtype] = (module.GetFunction(kernel), threadsPerBlock);
     }
 
-    /// <summary>Launches Q4_0 → F16 dequant. Legacy 32-element block (18 bytes: fp16 scale + 16 nibble bytes).</summary>
-    public unsafe void LaunchDequantQ4_0ToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 32 != 0)
-            throw new ArgumentException($"Q4_0 element count must be a multiple of 32, got {elementCount}.");
-        int blockCount = elementCount / 32;
-        LaunchDequantImpl(_dequantQ4_0ToF16, output, input, blockCount, threadsPerBlock: 32, stream);
-    }
+    /// <summary>The GGUF dtypes with a resident dequant kernel here — what <c>SupportsResidentQuant</c> answers from.</summary>
+    public IReadOnlyCollection<DType> GgufDequantTypes => _ggufDequant.Keys;
 
-    /// <summary>Launches Q5_0 → F16 dequant. Legacy 32-element block (22 bytes: fp16 scale + uint32 high-bits + 16 nibble bytes).</summary>
-    public unsafe void LaunchDequantQ5_0ToF16(ulong output, ulong input, int elementCount, nint stream)
+    /// <summary>Launches the GGUF → F16 dequant for <paramref name="dtype"/>; one block per quant block, so <paramref name="elementCount"/> must be a multiple of the dtype's block size.</summary>
+    public unsafe void LaunchGgufDequantToF16(DType dtype, ulong output, ulong input, int elementCount, nint stream)
     {
-        if (elementCount % 32 != 0)
-            throw new ArgumentException($"Q5_0 element count must be a multiple of 32, got {elementCount}.");
-        int blockCount = elementCount / 32;
-        LaunchDequantImpl(_dequantQ5_0ToF16, output, input, blockCount, threadsPerBlock: 32, stream);
-    }
-
-    /// <summary>Launches Q2_K → F16 dequant. Element count must be a multiple of 256 (super-block size).</summary>
-    /// <remarks>Q2_K is the smallest K-quant: a 6.7 GB MiniMax-H3 build against 21 GB at Q8_0. Without this the
-    /// loader has to widen it on the host, which at 2.6 bits per weight means roughly a sixfold expansion — enough to
-    /// put a model that would have fit a 12 GB card out of reach of a 24 GB one.</remarks>
-    public unsafe void LaunchDequantQ2_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q2_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        LaunchDequantImpl(_dequantQ2_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
-    }
-
-    /// <summary>Launches Q3_K → F16 dequant. Element count must be a multiple of 256.</summary>
-    public unsafe void LaunchDequantQ3_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q3_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        LaunchDequantImpl(_dequantQ3_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
-    }
-
-    /// <summary>Launches Q4_K → F16 dequant. Element count must be a multiple of 256 (super-block size).</summary>
-    public unsafe void LaunchDequantQ4_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q4_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        LaunchDequantImpl(_dequantQ4_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
-    }
-
-    /// <summary>Launches Q5_K → F16 dequant. Element count must be a multiple of 256.</summary>
-    public unsafe void LaunchDequantQ5_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q5_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        LaunchDequantImpl(_dequantQ5_KToF16, output, input, superBlockCount, threadsPerBlock: 256, stream);
-    }
-
-    /// <summary>Launches Q6_K → F16 dequant. Element count must be a multiple of 256.</summary>
-    public unsafe void LaunchDequantQ6_KToF16(ulong output, ulong input, int elementCount, nint stream)
-    {
-        if (elementCount % 256 != 0)
-            throw new ArgumentException($"Q6_K element count must be a multiple of 256, got {elementCount}.");
-        int superBlockCount = elementCount / 256;
-        // 64 threads per CUDA block, each emitting 4 elements at strides {0, +32, +64, +96}
-        // (2 halves × 32 l-values = 64 threads cover all 256 elements of the super-block).
-        LaunchDequantImpl(_dequantQ6_KToF16, output, input, superBlockCount, threadsPerBlock: 64, stream);
+        if (!_ggufDequant.TryGetValue(dtype, out (nint Function, int ThreadsPerBlock) kernel))
+            throw new NotSupportedException($"GPU dequant for {dtype} is not implemented. Supported: {string.Join(", ", _ggufDequant.Keys)}.");
+        int blockElems = dtype.BlockElementCount;
+        if (elementCount % blockElems != 0)
+            throw new ArgumentException($"{dtype} element count must be a multiple of {blockElems}, got {elementCount}.");
+        LaunchDequantImpl(kernel.Function, output, input, elementCount / blockElems, kernel.ThreadsPerBlock, stream);
     }
 
     /// <summary>Fused Q4_K × F32 matrix-vector product for decode (M small). Computes output[M,N] = input[M,K] × dequant(weight[N,K])^T (+ bias), reading the Q4_K bytes once and dequantizing inline — no F16 weight materialization. K must be a multiple of 256 (guaranteed for Q4_K). One CUDA block (256 threads) per output element; grid = (N, M).</summary>
@@ -4617,6 +4841,14 @@ public sealed class CudaKernels : IDisposable
     public void LaunchMulMatVecQ5KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecImpl(_mulMatVecQ5KF32, output, input, weight, bias, N, K, M, stream);
 
+    /// <summary>Fused Q2_K × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV.</summary>
+    public void LaunchMulMatVecQ2KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ2KF32, output, input, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q3_K × F32 matrix-vector product for decode (M small). Same geometry as the Q4_K GEMV.</summary>
+    public void LaunchMulMatVecQ3KF32(ulong output, ulong input, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecImpl(_mulMatVecQ3KF32, output, input, weight, bias, N, K, M, stream);
+
     /// <summary>Quantizes an F32 activation [M,K] to int8 (Q8_1): xq int8 + per-32-block scale xd + int-sum xs. One warp per 32-block.</summary>
     public unsafe void LaunchQuantizeActivationQ8_1(ulong xq, ulong xd, ulong xs, ulong x, int M, int K, nint stream)
     {
@@ -4652,10 +4884,10 @@ public sealed class CudaKernels : IDisposable
     // (the ffn_down class — DeepSeek-1.5B's 8960×1536 measured 51% of DRAM peak, ~1.1 waves of warps)
     // under-occupied; splitting each row across 4 warps multiplies resident parallelism with a
     // deterministic shared-memory combine. Gated tightly: at N ≥ ~2560 warp-per-row measured equal or
-    // better (2026-07-22 sweep). HARTSY_GEMV_KSPLIT=0 disables, =W forces W warps/row everywhere.
+    // better (2026-07-22 sweep). numerics.gemvKsplit=0 disables, =W forces W warps/row everywhere.
     private static int _ksplitOverride => EngineKnobs.GemvKsplit.Value;
 
-    // Rows-per-block for the warp-per-row GEMV kernels (sweep knob HARTSY_GEMV_WPB). Default 4: the
+    // Rows-per-block for the warp-per-row GEMV kernels (sweep knob numerics.gemvWpb). Default 4: the
     // 2026-07-23 sweep measured WPB=4 equal-or-faster than the original 8 at every production shape class
     // (Q4_K K=4096: N=256 11.4 vs 13.0 µs, N=4096 37.8 vs 38.4, N=27392 197.1 vs 198.1) — finer blocks
     // (128 threads) smooth the launch/drain tail; resident-warp occupancy is unchanged (12 blocks/SM).
@@ -4680,6 +4912,14 @@ public sealed class CudaKernels : IDisposable
     /// <summary>Fused Q6_K × Q8_1 dp4a matrix-vector product for decode (M small). Q6_K scales are signed (symmetric), so only the int8 activation and per-block scale are consumed (no int-sum term).</summary>
     public unsafe void LaunchMulMatVecQ6KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
         => LaunchMulMatVecQ8_1Impl(_mulMatVecQ6KQ8_1, _mulMatVecQ6KQ8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q2_K × Q8_1 int8 GEMV for decode; the k-split entry takes over for long-K/small-N shapes like the other K-quants.</summary>
+    public unsafe void LaunchMulMatVecQ2KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ2KQ8_1, _mulMatVecQ2KQ8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
+
+    /// <summary>Fused Q3_K × Q8_1 int8 GEMV for decode; the k-split entry takes over for long-K/small-N shapes like the other K-quants.</summary>
+    public unsafe void LaunchMulMatVecQ3KQ8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)
+        => LaunchMulMatVecQ8_1Impl(_mulMatVecQ3KQ8_1, _mulMatVecQ3KQ8_1Ksplit, output, xq, xd, weight, bias, N, K, M, stream);
 
     /// <summary>Fused Q4_0 × Q8_1 dp4a matrix-vector product for decode (M small). The fixed −8 offset is folded into the packed weights via <c>__vsub4</c>, so no int-sum term is consumed.</summary>
     public unsafe void LaunchMulMatVecQ4_0Q8_1(ulong output, ulong xq, ulong xd, ulong weight, ulong bias, int N, int K, int M, nint stream)

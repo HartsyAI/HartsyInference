@@ -46,10 +46,12 @@ cd "$REPO"
 # `env` so H3_BENCH_ENV's KEY=VALUE words are parsed as assignments — a bare prefix would take the
 # expanded text as the command name. Same passthrough as h3_bench.sh, so a profile can be taken under
 # the exact config a benchmark ran (without it this defaulted to Sage attention regardless).
-env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_SMI HARTSY_LOG_LEVEL=Info \
+env CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=$GPU_SMI \
     ${H3_BENCH_ENV:-} \
-    HARTSY_PROFILE=1 HARTSY_PROFILE_SYNC=1 HARTSY_PROFILE_FINE=1 HARTSY_PROFILE_OUT=$OUT/${LABEL}.txt \
-    dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -f net10.0 --no-build -- \
+    dotnet run --project src/HartsyInference.Cli/HartsyInference.Cli.csproj -c "${H3_PROF_CONFIG:-Release}" \
+    -f net10.0 --no-build -- \
+    --set diagnostics.logLevel=Info --set diagnostics.profile=true --set diagnostics.profileSync=true \
+    --set diagnostics.profileFine=true --set diagnostics.profileOut=$OUT/${LABEL}.txt \
     video -m minimax-h3 --model-path "$CKPT" --frames 141 --width 512 --height 288 \
     --steps "$STEPS" --seed 1 -o "$OUT/${LABEL}_out" "$PROMPT" > "$OUT/${LABEL}.log" 2>&1
 echo "exit=$?  $(grep -oE "step [0-9]+/$STEPS: [0-9]+ ms" "$OUT/${LABEL}.log" | tail -1)"

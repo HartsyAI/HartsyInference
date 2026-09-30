@@ -10,7 +10,13 @@ public sealed class OutOfVramException : HartsyInferenceException
     public long AvailableBytes { get; }
 
     public OutOfVramException(long requestedBytes, long availableBytes)
-        : base($"Out of VRAM: requested {requestedBytes / (1024 * 1024)} MB but only {availableBytes / (1024 * 1024)} MB available.")
+        : this(requestedBytes, availableBytes, 0) { }
+
+    /// <summary>A driver refusal. Free can exceed the request: near-full, the driver reports memory it will not hand out.</summary>
+    public OutOfVramException(long requestedBytes, long availableBytes, long totalBytes)
+        : base(totalBytes > 0
+            ? $"Out of VRAM: the driver refused a {requestedBytes / (1024 * 1024)} MB allocation; {availableBytes / (1024 * 1024)} MB of {totalBytes / (1024 * 1024)} MB was free."
+            : $"Out of VRAM: the driver refused a {requestedBytes / (1024 * 1024)} MB allocation; {availableBytes / (1024 * 1024)} MB was free.")
     {
         RequestedBytes = requestedBytes;
         AvailableBytes = availableBytes;

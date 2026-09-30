@@ -189,27 +189,47 @@ public sealed class SamplingParamResolverTests
         Assert.Empty(SamplingCapabilities.ForImage("no-such-family").Samplers);
     }
 
-    /// <summary>Every family the capability table names must actually be a registered recipe, so a renamed family
-    /// cannot leave a stale entry advertising samplers for something that no longer exists.</summary>
+    /// <summary>Every image recipe must have its own row in the capability table, and every row must name a real
+    /// recipe.
+    ///
+    /// <para>This assertion used to be vacuous — it read <c>ForImage(family)</c>, whose miss returns
+    /// <see cref="SamplingCapabilities.Unknown"/> (empty samplers), and then accepted "empty samplers" as a pass, so
+    /// the `|| Count == 0` arm made it true for every possible input. Qwen-Image 2.1 shipped with no row through a
+    /// green run of this test: SwarmUI read the miss as "this family takes no sampler", hid the Sampler and
+    /// Scheduler dropdowns, and refused any explicit pick, while the pipeline was calling
+    /// <c>FlowMatchSampling.Resolve</c> the whole time. <see cref="SamplingCapabilities.HasImageEntry"/> asks the
+    /// dictionary instead, which is the only form that can tell a deliberate empty row from a missing one.</para></summary>
     [Fact]
-    public void CapabilityTable_NamesOnlyRealFamilies()
+    public void CapabilityTable_CoversEveryImageRecipe()
     {
-        foreach (string family in ImageFamilyIds())
+        List<string> families = [.. ImageFamilyIds()];
+        Assert.NotEmpty(families);
+        foreach (string family in families)
         {
             Assert.True(
-                SamplingCapabilities.ForImage(family).Samplers.Count > 0
-                    || SamplingCapabilities.ForImage(family) == SamplingCapabilities.Unknown
-                    || SamplingCapabilities.ForImage(family).Samplers.Count == 0,
-                $"{family} is unclassified.");
+                SamplingCapabilities.HasImageEntry(family),
+                $"Image family '{family}' has no entry in SamplingCapabilities. A miss is indistinguishable from "
+                + "a solver-owned family, so SwarmUI would hide its sampler controls and refuse any selection. Add "
+                + "an explicit row — FullSeam if the pipeline calls FlowMatchSampling.Resolve, SolverOwned if not.");
         }
-        // Concretely: the table must cover every image recipe the registry builds.
-        foreach (string family in ImageFamilyIds())
+        // And the reverse: a renamed family must not leave a stale row advertising samplers for a recipe that is gone.
+        foreach (string family in SamplingCapabilities.ImageFamilies)
         {
-            Assert.True(
-                SamplingCapabilities.ForImage(family) != SamplingCapabilities.Unknown
-                    || SamplingCapabilities.ForImage(family).Samplers.Count == 0,
-                $"Image family '{family}' has no entry in SamplingCapabilities.");
+            Assert.Contains(family, families);
         }
+    }
+
+    /// <summary>The negative control for <see cref="CapabilityTable_CoversEveryImageRecipe"/>: a family that is not
+    /// in the table must report no entry. Without this, replacing <c>HasImageEntry</c> with something that always
+    /// returns true would leave the coverage test green again.</summary>
+    [Fact]
+    public void HasImageEntry_IsFalseForAnUnlistedFamily()
+    {
+        Assert.False(SamplingCapabilities.HasImageEntry("no-such-family"));
+        Assert.True(SamplingCapabilities.HasImageEntry("qwen-image-2.1"));
+        // Solver-owned families have a row, and it is empty — the case the old assertion could not distinguish.
+        Assert.True(SamplingCapabilities.HasImageEntry("ideogram4"));
+        Assert.Empty(SamplingCapabilities.ForImage("ideogram4").Samplers);
     }
 
     /// <summary>Image family ids, read from the recipes' own <c>Name</c> properties.</summary>

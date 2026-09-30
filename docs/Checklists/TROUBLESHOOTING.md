@@ -144,11 +144,21 @@ no bug, any more than one bad seed was proof there was one.
   `cache.AdvanceLength()`. Concrete cases: Zonos (interleaved RoPE + MLP half-order + `1/√head_dim` +
   channels-first vs channels-last prefix → instant EOS); Dia (split-half RoPE + scale 1.0 + prefix +
   missing cache advance); Qwen3.5 Gated DeltaNet (missing `q *= 1/√head_dim` before the recurrence).
+- **Flat grey or garbage only at some resolutions (1280×720 but not 1024²) = UNet size bookkeeping.** A 3×3 stride-2,
+  pad-1 conv yields `ceil(n/2)` (45 latent rows → 23), and the up path must resize to the skip it concatenates
+  (`UpsampleNearest2DToSize`), not double (23 → 46 ≠ 45). Check any `h / 2` allocated for a stride-2 conv and any
+  `×2` feeding a skip concat; latents whose size is a multiple of 8 never exercise either.
 - **Un-normalized V + an F16 attention fast path = threshold NaN.** Microsoft Lens RMS-norms Q/K but not
   V; its residual stream is architecturally huge (`max|V|` 18940→71583 across forwards), crossing F16's
   65504 → solid black. SageAttention's INT8 path casts V to F16 and is **default-on regardless of
   `allowF16`** (only the cuDNN branch honors the flag). Fix: scale joint V by 1/256 before SDPA, scale
   output back by 256 (attention is linear in V; power-of-2 = exponent-only).
+- **F16 damp in front of a norm without a matched eps = washed-out image, never a NaN.** A damp `c` on a
+  projection that feeds an RMSNorm is exact only as `RMSNorm(c·x, c²·eps)`; with the plain eps the norm sees
+  `c²·mean(x²) + eps`, so a sublayer with a small output is shrunk instead of normalized and the image goes hazy,
+  low-contrast and loses composition (Ideogram 4 at 1/64). Tell: clean with `numerics.ditF16=false`, no Inf/NaN
+  anywhere. Check that every damp site's consuming norm takes `F16SandwichDamp.NormEps`. A whole-stream damp read
+  through LayerNorm (Chroma/Flux) is the same identity; it is safe only while the stream variance dwarfs `eps/c²`.
 - **YaRN RoPE needs HF's dimension-index ramp + `attention_factor` mscale** (Lens: 1.3466×), not a
   wavelength ramp.
 - **Phi head_dim=96** (non-power-of-two) hit an infinite CUDA fallback recursion; pad the flash-attn
@@ -362,6 +372,17 @@ no bug, any more than one bad seed was proof there was one.
 - **Pass-through helpers that MIGHT allocate are disposal traps.** `PadCaption`/`PadImage` returning the
   input unchanged when already aligned → caller disposes an aliased tensor → `ObjectDisposedException`.
   Guard `if (!ReferenceEquals(result,input)) input.Dispose();` or always allocate.
+- **A step-graph capture that fails with `CUDA_ERROR_STREAM_CAPTURE_INVALIDATED` (901) in a host running
+  several engines usually wasn't caused by the model.** The compute stream is blocking, and while it captures,
+  any use of the legacy stream in the same context invalidates the capture, whichever engine or thread makes
+  the call (SwarmUI loads the image, audio and LLM extensions as separate engine copies on one context per
+  GPU); the offending call itself fails with `CUDA_ERROR_STREAM_CAPTURE_IMPLICIT` (906). The engine's own
+  synchronous transfers (`CudaMemory`) run on the calling backend's stream for this reason, so look for a raw
+  driver call on stream 0 or a context-wide sync. The owner falls back to eager and recaptures
+  (`StepGraphFailureBudget`); the same failure on every attempt means a capture-illegal op in the step itself.
+- **`step-graph capture recorded a FREE of external device ptr` outside a capture step** means a capture window
+  was left open. Look for the earlier failure that should have closed it: a `StepGraphReset` that threw, or a
+  capture whose owner never reached its end.
 - **DeepSeek/large-MoE memory:** expert split must be a zero-copy view over mmap (copying ~7GB → host
   OOM-kill); keep the untied embedding table host-only (not uploaded to GPU) to save ~0.8GB.
 - **`TextService.EnsureRamHeadroomFor` refuses to load a GGUF unless free RAM ≥ 2.5× file size** (dequant
@@ -387,7 +408,7 @@ no bug, any more than one bad seed was proof there was one.
   the glue op to device so activations stay resident. Health assert: ~0 mid-decode D2H syncs; any per-token
   sync is a residency bug (MoE routing readback is a current offender at 2193–3225 syncs/rep).
 - **A step preview must not touch the step-graph's fixed buffer, and must not host-read the loop's packed
-  tokens.** `HARTSY_DIT_GRAPH` is default-off for most models, so that buffer usually does not exist — a
+  tokens.** `numerics.ditGraph` is default-off for most models, so that buffer usually does not exist — a
   `SnapshotGraphLatent` preview hook threw `NullReferenceException` on every Z-Image generation from alpha.42
   to alpha.59. Preview by unpatchifying the loop's tokens with the backend op; a host unpatchify would
   D2H-and-free the device copy each step.
@@ -398,7 +419,12 @@ no bug, any more than one bad seed was proof there was one.
 - **`ConvTranspose2d` silently ran on CPU** (`CudaBackend` never overrode it) — 1549ms for a 32²→64²
   upsample → 3ms with a gather-form kernel. Shared by ClipSeg/YOLO/Demucs/RVC/ResembleEnhance. Grouped
   `ConvTranspose1d` (`groups=768`, BigVGAN) was likewise rejected — add `groups` to the kernel.
-- **F16/CUDA-graph only help when host-launch-bound:** `HARTSY_GEMM_F16=1` moving DiT time 0% proves it's
+- **Large convolutions: cuDNN's NCHW engines are the slow ones.** At VAE-decode sizes (BF16 3×3, 128-1024 channels,
+  ≥ ~100M-element inputs) cuDNN reached ~40 TFLOPS over NCHW and ~155-165 over channels-last on a 4090, and its 3-D
+  NCDHW engines were no better; below ~10M elements the two transposes cost more than they save. The CUDA backend
+  now runs cuDNN convs channels-last above `ChannelsLastMinElements` (`numerics.convChannelsLast`). When a conv-heavy
+  decode trails PyTorch, compare engines at the model's real shapes before touching the model.
+- **F16/CUDA-graph only help when host-launch-bound:** `numerics.gemmF16` moving DiT time 0% proves it's
   per-op-launch-bound, not GEMM-bound; graph capture is then the real lever.
 - **The lm_head dominates decode for large-vocab models.** Orpheus: the tied lm_head (3072→156,940 vocab)
   ran as an F32 GEMM at M=1 = 90% of the step. Fused BF16/F16 M=1 GEMV → 221ms→3.8ms/tok. Same class:
@@ -419,6 +445,10 @@ no bug, any more than one bad seed was proof there was one.
   PTX ISA 9.3; driver 580.x JIT caps at 9.0 → `CUDA error 222: Unsupported .version 9.3`. Fix: pin
   `nvidia-cuda-nvcc==13.0.88` **and** `nvidia-nvvm==13.0.*` (nvvm is the ISA-determining piece, not nvcc)
   into an isolated `pip --target` dir; **verify every emitted PTX starts `.version 9.0` before shipping.**
+- **Which PTX loaded?** `CudaKernels.PtxPath` prefers `<kernel>.sm<CC>.ptx` for the device's exact compute
+  capability and falls back to `<kernel>.ptx`; the backend logs `[Cuda] SM x.y PTX variants: …` at startup when
+  it picked any. A variant built for another SM is never chosen (family-specific PTX does not JIT elsewhere), so
+  a missing log line on a card that should have one means the file is absent from `Ptx/`, not that it was refused.
 - **Integer overflow in im2col at 1024²+.** `channels×kH×kW×outH×outW` exceeds uint32 (512ch/3×3/1024² →
   `CUDA_ERROR_ILLEGAL_ADDRESS`; 256²/512² fit in 32-bit and pass). Cast to `long` before all GPU
   buffer-size multiplications in C#; use `cvt.u64.u32`+`mul.lo.u64`+`setp.ge.u64` in PTX.
@@ -777,6 +807,15 @@ run-by-run history is in git and in `ROADMAP.md` §3.
   constructor) matching `CudaBackend.EnableW8A8`'s existing pattern — tests flip it directly
   (`backend.EnableInt8Linear = true`) with no env var or fresh process needed. Prefer this pattern for any
   new opt-in switch that correctness tests need to exercise both on and off.
+- **Run the whole Vulkan suite against a non-NVIDIA ICD before believing it is vendor-neutral.** Mesa ships a
+  software Vulkan driver, so this costs nothing and needs no AMD or Intel card:
+  `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json HARTSY_REQUIRE_BACKENDS=1 HARTSY_ALLOW_SOFTWARE_GPU=1
+  dotnet test tests/HartsyInference.Vulkan.Tests --filter Category=GpuIntegration`. Two things make it worth the
+  wall-clock: llvmpipe reports **subgroup size 8**, so any reduction that assumes a 32- or 64-wide wave is wrong
+  there and only there (this is how the cross-subgroup fold bug in `VulkanCrossVendorTests` was found), and it
+  advertises no cooperative matrix, so every coopmat path takes its fallback — the branch NVIDIA hardware never
+  exercises. `HARTSY_ALLOW_SOFTWARE_GPU=1` is required or `BackendGate` refuses the device and the tests that use
+  it fail for that reason rather than a real one. It is a correctness oracle only; never read a timing off it.
 - **The Wan-video-scale smoke test (`Backend_FlashAttention_WanVideoScale_CompletesWithoutOom`) takes
   hours on llvmpipe** (measured: killed after 2.85 CPU-hours, still running) — software-rasterized
   scalar execution of 16384×24 = 393,216 workgroups × ~512 serial KV-tile iterations each has no
@@ -869,6 +908,11 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   word salad (not a crash).
 - **nn.Linear GGUF weights need a shape relabel to `[out,in]`, NOT a data transpose** (bytes already
   row-major); only raw params like `mm.input_projection` need an actual transpose. Recurs across every VLM.
+- **A GGUF codec that agrees with its GPU kernel can still be wrong** — a kernel written to mirror the host
+  decode shares its mistake, and block-vs-block tests pass on both. Settle a format against real weights:
+  `GgufRealFileCorrelationTests` dequantizes every tensor of a lower-bit file and correlates it with the Q8_0
+  copy of the same model. Near 0.2 is a layout bug (a permuted scale read, a wrong sign table); 0.95–0.99 is
+  the quantization's own loss. A model that loads and generates fluent garbage in one quant only is this.
 
 ---
 
@@ -899,6 +943,9 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
 
 ## Video-specific bugs
 
+- **An OOM names the component that asked for memory, not the one that took it.** A component's own
+  `… : N tensors` line against the safetensors header is the check — a fold that widens a packed weight
+  halves the count. Info level, via `diagnostics.logLevel`.
 - **LTX-2 `rope_type = "split"` vs interleaved:** the 22B config declares `split` (rotates two halves
   within each head, compact `dim/2` front-padded freqs) but only interleaved was implemented → persistent
   32-px lattice identical at 8 and 30 steps (colors survive because text cross-attn carries no RoPE). Key
@@ -908,10 +955,10 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   padding (unmasked ~120 PAD tokens dilute the caption).
 - See CausalConv3d OOB and Concat-graph bloat under [CUDA kernel pitfalls](#cuda--ptx-kernel-pitfalls--toolchain)
   and [GPU residency](#gpu-residency--throughput-cuda) — both first surfaced on video VAEs.
-- **LTX-2.5 diffusion-VAE symlink footgun:** `HARTSY_LTX2_DIFFUSION_VAE=1` alone is not enough — the model
+- **LTX-2.5 diffusion-VAE symlink footgun:** `numerics.ltx2DiffusionVae` alone is not enough — the model
   folder carries the conv VAE, and `IsDiffusionVideoVae` is one boolean over the *merged* key set, so if both
   VAEs are present it silently falls through to (or corrupts) the conv decoder. You must **swap** the symlink,
-  never add a second one; confirm via the `HARTSY_LTX2_DIFFUSION_VAE set — … (310 tensors)` log line.
+  never add a second one; confirm via the `numerics.ltx2DiffusionVae set — … (310 tensors)` log line.
 - **Deployed SwarmUI extension can refuse a model with a stale error message compiled into it**, while the
   engine itself is already correct — `deploy_extension.sh` only redeploys engine DLLs/PTX, not the extension
   assembly. If the extension's own source checkout doesn't contain the refusal string you're seeing, its

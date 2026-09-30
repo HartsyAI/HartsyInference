@@ -12,7 +12,7 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// bias, output projection with bias. See <c>docs/Research/OASIS_ARCHITECTURE.md</c> § 3.1-3.3.</summary>
 public sealed unsafe class OasisSpatioTemporalBlock
 {
-    // ── Diagnostic phase timers (HARTSY_OASIS_PHASE=1, eager path only) — Sync-bracketed GPU time per phase. ──
+    // ── Diagnostic phase timers (diagnostics.oasisPhase=true, eager path only) — Sync-bracketed GPU time per phase. ──
     internal static bool Prof => EngineKnobs.OasisPhase.Value;
     internal static double TSdpa, TAttnRest, TMlp, TModNorm;
     private static double Now() => System.Diagnostics.Stopwatch.GetTimestamp() * 1000.0 / System.Diagnostics.Stopwatch.Frequency;

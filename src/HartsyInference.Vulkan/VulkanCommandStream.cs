@@ -29,9 +29,6 @@ public sealed class VulkanCommandStream : IDisposable
     // command buffers scheduled for recycling, keyed by the tick at which they become safe to reuse
     private readonly Dictionary<ulong, List<nint>> _cmdRecycle = new();
 
-    public ulong CurrentTick => _value;
-    public ulong LastSubmittedTick => _lastSubmitted;
-
     public VulkanCommandStream(nint device, nint queue, uint queueFamilyIndex)
     {
         _device = device;
@@ -104,43 +101,20 @@ public sealed class VulkanCommandStream : IDisposable
         return cb;
     }
 
-    /// <summary>Records a global compute->compute memory barrier (covers all buffers). Cheap fallback when per-buffer scope is unwieldy.</summary>
+    /// <summary>Global compute→compute barrier over all buffers.</summary>
     public void RecordGlobalComputeBarrier() => RecordGlobalComputeBarrierOn(AcquireRecording());
 
-    /// <summary>Same barrier as <see cref="RecordGlobalComputeBarrier"/>, recorded onto an explicit command buffer instead of this stream's own recording buffer — used by <see cref="VulkanStepGraph"/>, whose captured dispatches record onto a separate, persistent command buffer.</summary>
+    /// <inheritdoc cref="RecordGlobalComputeBarrier"/>
+    /// <remarks>Takes an explicit command buffer so <see cref="VulkanStepGraph"/> can record onto its own.</remarks>
     public static unsafe void RecordGlobalComputeBarrierOn(nint cb)
-    {
-        VkMemoryBarrier2 mb = new()
-        {
-            sType = VkStructureType.MemoryBarrier2,
-            srcStageMask = VkPipelineStageFlags2.ComputeShader,
-            srcAccessMask = VkAccessFlags2.ShaderStorageWrite,
-            dstStageMask = VkPipelineStageFlags2.ComputeShader,
-            // Write as well as read. Two dispatches writing the same buffer — an in-place op following the op
-            // that produced its input — are a write-after-write, and a destination scope naming only reads does
-            // not order them. That pair is what synchronization validation reports once every copy is ordered.
-            dstAccessMask = VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite,
-        };
-        VkDependencyInfo dep = new()
-        {
-            sType = VkStructureType.DependencyInfo,
-            memoryBarrierCount = 1,
-            pMemoryBarriers = (nint)(&mb),
-        };
-        VulkanApi.vkCmdPipelineBarrier2(cb, in dep);
-    }
+        // Writes as well as reads: two dispatches writing one buffer are a write-after-write nothing else orders.
+        => RecordGlobalBarrierOn(cb,
+            VkPipelineStageFlags2.ComputeShader, VkAccessFlags2.ShaderStorageWrite,
+            VkPipelineStageFlags2.ComputeShader, VkAccessFlags2.ShaderStorageRead | VkAccessFlags2.ShaderStorageWrite);
 
-    /// <summary>Barriers for a <c>vkCmdCopyBuffer</c> recorded between compute dispatches: the first makes a
-    /// dispatch's writes visible to the copy, the second makes the copy's writes visible to the next dispatch.</summary>
-    /// <remarks>The compute→compute barrier every dispatch already ends with does NOT cover this. Its destination
-    /// scope is <c>ComputeShader</c>/<c>ShaderStorageRead</c>, so a transfer that reads the same buffer is outside
-    /// it, and a transfer that writes one is outside the source scope of the next dispatch's barrier in the same
-    /// way. Both directions are hazards the spec makes the caller close explicitly, and neither fails loudly — the
-    /// copy reads or is read at whatever point the driver happens to schedule it.
-    ///
-    /// <para>The scopes name transfer on BOTH sides as well as compute. Two copies from different ops land back to
-    /// back with only a dispatch's compute→compute barrier between them, which orders neither, and synchronization
-    /// validation reports exactly that pair as its most common hazard by an order of magnitude.</para></remarks>
+    /// <summary>Makes a dispatch's writes visible to a <c>vkCmdCopyBuffer</c> that follows.</summary>
+    /// <remarks>A dispatch's trailing barrier names only compute on both sides, so a transfer touching the same
+    /// memory is outside it in either direction.</remarks>
     public void RecordComputeToCopyBarrier() => RecordComputeToCopyBarrierOn(AcquireRecording());
 
     /// <inheritdoc cref="RecordComputeToCopyBarrier"/>
@@ -151,11 +125,7 @@ public sealed class VulkanCommandStream : IDisposable
                 | VkAccessFlags2.TransferWrite | VkAccessFlags2.TransferRead,
             VkPipelineStageFlags2.Copy, VkAccessFlags2.TransferRead | VkAccessFlags2.TransferWrite);
 
-    /// <summary>The second half of <see cref="RecordComputeToCopyBarrierOn"/> — a copy's writes made visible to
-    /// the dispatches that follow it.</summary>
-    public void RecordCopyToComputeBarrier() => RecordCopyToComputeBarrierOn(AcquireRecording());
-
-    /// <inheritdoc cref="RecordCopyToComputeBarrier"/>
+    /// <summary>The other half: a copy's writes made visible to the dispatches after it.</summary>
     public static unsafe void RecordCopyToComputeBarrierOn(nint cb)
         => RecordGlobalBarrierOn(cb,
             VkPipelineStageFlags2.Copy, VkAccessFlags2.TransferWrite | VkAccessFlags2.TransferRead,
@@ -270,6 +240,12 @@ public sealed class VulkanCommandStream : IDisposable
         list.Add(cb);
     }
 
+    /// <summary>The tick the next submit will signal — what is recorded from now on completes at it. <see cref="DeferredFree"/> tags with the same value.</summary>
+    public ulong NextSubmitTick => _value + 1;
+
+    /// <summary>The highest tick handed to the queue; anything above it is still recording and cannot be waited on.</summary>
+    public ulong LastSubmitted => _lastSubmitted;
+
     /// <summary>Returns true when the GPU has completed up to <paramref name="tick"/>.</summary>
     public bool TimelineReached(ulong tick)
     {
@@ -291,8 +267,24 @@ public sealed class VulkanCommandStream : IDisposable
             pSemaphores = (nint)(&sem),
             pValues = (nint)(&t),
         };
+        long start = WaitStats is null ? 0 : System.Diagnostics.Stopwatch.GetTimestamp();
         VulkanApi.vkWaitSemaphores(_device, in wi, timeoutNs).ThrowOnError("vkWaitSemaphores");
+        if (WaitStats is not null)
+        {
+            RecordWait(System.Diagnostics.Stopwatch.GetElapsedTime(start).TotalMilliseconds);
+        }
         ReclaimUpTo(GetTimelineNow());
+    }
+
+    /// <summary>Blocking host waits by calling chain, collected when set (<c>diagnostics.vkProfileGpu</c>).</summary>
+    internal Dictionary<string, (long Count, double Ms)>? WaitStats { get; set; }
+
+    private void RecordWait(double ms)
+    {
+        System.Diagnostics.StackFrame[] frames = new System.Diagnostics.StackTrace(2, false).GetFrames();
+        string key = string.Join(" <- ", frames.Take(5).Select(f => f.GetMethod()?.Name ?? "?"));
+        (long count, double total) = WaitStats!.TryGetValue(key, out (long, double) v) ? v : (0L, 0.0);
+        WaitStats[key] = (count + 1, total + ms);
     }
 
     /// <summary>Submits any pending recording, then blocks until the GPU is fully idle on this stream's timeline.</summary>
@@ -315,6 +307,43 @@ public sealed class VulkanCommandStream : IDisposable
         if (!_deferredFrees.TryGetValue(tick, out List<VulkanBuffer>? list))
         { list = new(); _deferredFrees[tick] = list; }
         list.Add(buffer);
+        _pendingFreeBytes[buffer.Allocation.MemoryTypeIndex] += buffer.Size;
+    }
+
+    // Indexed by memory type; VK_MAX_MEMORY_TYPES is 32.
+    private readonly ulong[] _pendingFreeBytes = new ulong[32];
+
+    /// <summary>Bytes of <paramref name="memoryType"/> whose free is still waiting on the timeline.</summary>
+    public ulong PendingFreeBytes(uint memoryType) => _pendingFreeBytes[memoryType];
+
+    /// <summary>Returns whatever the GPU has already finished with, without waiting; true when anything of
+    /// <paramref name="memoryType"/> was freed.</summary>
+    public bool ReclaimCompleted(uint memoryType)
+    {
+        ulong before = _pendingFreeBytes[memoryType];
+        ReclaimUpTo(GetTimelineNow());
+        return _pendingFreeBytes[memoryType] < before;
+    }
+
+    /// <summary>Waits for the oldest tick holding a deferred free of <paramref name="memoryType"/>, submitting it first if
+    /// it is still being recorded, then reclaims. Returns whether anything was pending and whether a submit was made.</summary>
+    public (bool Reclaimed, bool Submitted) ReclaimOldestPending(uint memoryType)
+    {
+        foreach ((ulong tick, List<VulkanBuffer> bufs) in _deferredFrees)
+        {
+            foreach (VulkanBuffer b in bufs)
+            {
+                if (b.Allocation.MemoryTypeIndex != memoryType) continue;
+                ulong before = _lastSubmitted;
+                if (tick > _lastSubmitted) SubmitAndAdvance();
+                // A free tagged while nothing was recording carries a tick no submit will signal; everything that
+                // could reference it is already submitted, so wait for that and release it.
+                WaitTimeline(Math.Min(tick, _lastSubmitted));
+                if (tick > _lastSubmitted) ReclaimUpTo(tick);
+                return (true, _lastSubmitted != before);
+            }
+        }
+        return (false, false);
     }
 
     /// <summary>Releases all deferred-free buffers whose tick has been reached. Also recycles command buffers.</summary>
@@ -324,7 +353,7 @@ public sealed class VulkanCommandStream : IDisposable
         foreach ((ulong tick, List<VulkanBuffer> bufs) in _deferredFrees)
         {
             if (tick > completedTick) break;
-            foreach (VulkanBuffer b in bufs) b.Dispose();
+            foreach (VulkanBuffer b in bufs) { _pendingFreeBytes[b.Allocation.MemoryTypeIndex] -= b.Size; b.Dispose(); }
             done.Add(tick);
         }
         foreach (ulong t in done) _deferredFrees.Remove(t);
@@ -363,6 +392,7 @@ public sealed class VulkanCommandStream : IDisposable
         foreach ((_, List<VulkanBuffer> bufs) in _deferredFrees)
             foreach (VulkanBuffer b in bufs) b.Dispose();
         _deferredFrees.Clear();
+        Array.Clear(_pendingFreeBytes);
         _cmdRecycle.Clear();
 
         if (_allocatedCmds.Count > 0)

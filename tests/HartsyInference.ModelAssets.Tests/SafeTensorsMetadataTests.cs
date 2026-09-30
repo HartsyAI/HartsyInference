@@ -167,4 +167,33 @@ public sealed class SafeTensorsMetadataTests
         fs.Seek(8 + headerLength, SeekOrigin.Begin);
         return Convert.ToHexString(SHA256.HashData(fs)).ToLowerInvariant();
     }
+
+    [Fact]
+    public void RewriteMetadata_KeepsPayloadMergesEntriesAndFillsTheHash()
+    {
+        byte[] payload = [1, 2, 3, 4, 5, 6, 7, 8];
+        string source = WriteFile("{\"__metadata__\":{\"format\":\"pt\"},\"w\":{\"dtype\":\"F32\",\"shape\":[2],\"data_offsets\":[0,8]}}", payload);
+        string output = Path.Combine(Path.GetTempPath(), $"st-meta-{Guid.NewGuid():N}", "nested", "out.safetensors");
+        try
+        {
+            string returned = SafeTensorsWriter.RewriteMetadata(source, output,
+                new Dictionary<string, string> { ["modelspec.title"] = "T", ["modelspec.hash_sha256"] = "" });
+
+            string expected = Convert.ToHexString(SHA256.HashData(payload)).ToLowerInvariant();
+            Assert.Equal(expected, returned);
+            using SafeTensorsLoader loader = new SafeTensorsLoader();
+            loader.Load(output);
+            Assert.Equal("pt", loader.Metadata!["format"]);
+            Assert.Equal("T", loader.Metadata["modelspec.title"]);
+            Assert.Equal("0x" + expected, loader.Metadata["modelspec.hash_sha256"]);
+            byte[] bytes = File.ReadAllBytes(output);
+            Assert.Equal(payload, bytes[^payload.Length..]);
+            Assert.False(File.Exists(output + ".tmp"));
+        }
+        finally
+        {
+            File.Delete(source);
+            Directory.Delete(Path.GetDirectoryName(Path.GetDirectoryName(output))!, recursive: true);
+        }
+    }
 }

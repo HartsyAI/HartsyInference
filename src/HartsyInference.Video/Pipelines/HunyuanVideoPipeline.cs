@@ -178,7 +178,7 @@ public sealed unsafe class HunyuanVideoPipeline(IBackend backend, HunyuanVideoDi
             // GPU-only when this sweep frees the pool without syncing anything back.
             // trimPool:false — steps are identical, so the pool reservation is re-used verbatim; trimming here
             // released + re-mapped multiple GB of driver memory EVERY step.
-            // SKIP on the step-graph path (HARTSY_DIT_GRAPH): the captured graph balances its own allocations and
+            // SKIP on the step-graph path (numerics.ditGraph): the captured graph balances its own allocations and
             // holds the fixed input/output buffers at the addresses the capture bakes — freeing them here would
             // corrupt the replay. Re-checked each step so a mid-gen self-disable re-enables the sweep.
             if (!_dit.StepGraphActive) Backend.FreeActivations(trimPool: false);

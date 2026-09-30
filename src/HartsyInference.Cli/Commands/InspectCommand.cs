@@ -6,6 +6,7 @@ using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Variants;
 using Spectre.Console;
 using Spectre.Console.Cli;
 
@@ -90,6 +91,10 @@ public sealed class InspectCommand : Command<InspectCommand.Settings>
         else
         {
             AnsiConsole.MarkupLine($"[bold]Profile:[/] {Markup.Escape(plan.Profile.Id)} ({Markup.Escape(plan.Profile.DisplayName)})");
+            if (ModelCapabilities.ResolveVariant(spec) is ResolvedModelVariant variant)
+            {
+                AnsiConsole.MarkupLine($"[bold]Variant:[/] {Markup.Escape(variant.ToString())}");
+            }
             AnsiConsole.MarkupLine($"[bold]Task:[/] {plan.Profile.Task}  [bold]Acceleration:[/] {plan.Profile.Acceleration}  [bold]Attention:[/] {plan.Profile.Attention}");
             VideoEffectiveSettings effective = plan.EffectiveSettings;
             string shifts = effective.FlowShift is float videoShift

@@ -14,6 +14,7 @@ using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Video.Pipelines;
 
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes.Video;
 
@@ -37,6 +38,8 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <summary>Models-root-relative folder the shipped workflows keep the latent upsampler in.</summary>
     private const string UpsamplerSubdir = "latent_upscale_models";
     private const string DefaultLatentUpsamplerFile = "ltx-2.5-latent-spatial-upscaler-x2-bf16-1.0.safetensors";
+
+    private static readonly string[] DevFamilyIds = ["ltx-video-2", "ltx-video2", "lightricks-ltx-video-2", "ltx-2", "ltx-2.3", "ltx-2.5"];
 
     private readonly bool _distilled;
 
@@ -65,12 +68,17 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     }
 
     /// <inheritdoc/>
-    public string Name => _distilled ? LtxVideo2DistilledRouting.DistilledFamilyId : "ltx-video-2";
+    public string Name => _distilled ? LtxVideo2Variants.DistilledFamilyId : "ltx-video-2";
 
     /// <inheritdoc/>
     public bool Matches(string familyId) => _distilled
-        ? string.Equals(familyId, LtxVideo2DistilledRouting.DistilledFamilyId, StringComparison.OrdinalIgnoreCase)
-        : LtxVideo2DistilledRouting.IsDevFamilyId(familyId);
+        ? string.Equals(familyId, LtxVideo2Variants.DistilledFamilyId, StringComparison.OrdinalIgnoreCase)
+        : DevFamilyIds.Contains(familyId, StringComparer.OrdinalIgnoreCase);
+
+    /// <inheritdoc/>
+    /// <remarks>Declared by the dev instance only: a distilled checkpoint under a dev id resolves to the distilled
+    /// variant, which routes to the distilled instance.</remarks>
+    public ModelVariantCatalog? Variants => _distilled ? null : LtxVideo2Variants.Catalog;
 
     /// <summary>Dev-family defaults: 20 steps at cfg 4.0, 1280x736, 121 frames @ 24 fps — the geometry Lightricks ships (their template's 0.9 MP ResolutionSelector output and 5 s clip), at the measured recommended profile from MODEL_STATUS_VIDEO.md's LTX-2.5 row (quality parity vs ComfyUI at 1280x736 / 20 steps / cfg 4.0). The distilled 2.5 variant carries the same geometry with its baked 8-step unguided contract (ctor above).</summary>
     public VideoDefaults Defaults { get; private init; } = new VideoDefaults { Steps = 20, CfgScale = 4.0f, Width = 1280, Height = 736, Frames = 121, Fps = 24 };
@@ -148,16 +156,16 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 {
                     Logs.Info("[LtxVideo2Recipe] Split LTX-2.5 model (no bundled VAE) — auto-downloading side files: "
                         + "video VAE, audio VAE (mcmonkey/swarm-vaes ungated repack).");
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25VideoVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25AudioVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25VideoVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25AudioVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
                 }
                 else
                 {
                     Logs.Info("[LtxVideo2Recipe] Split LTX-2.3 model (no bundled VAE) — auto-downloading side files: "
                         + "video VAE, audio VAE, text projection.");
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23VideoVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23AudioVae, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
-                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23TextProjection, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23VideoVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23AudioVae, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
+                    AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Ltx23TextProjection, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
                 }
                 conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
             }
@@ -173,7 +181,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 // discriminate with, so the DiT-variant signal (isV25) picks the side model here instead.
                 Logs.Info("[LtxVideo2Recipe] Split LTX-2.5 model (no bundled Gemma-4 text tower) — auto-downloading "
                     + "side file (mcmonkey/swarm-models ungated repack, avoids the gated Lightricks/LTX-2.5 repo).");
-                AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Gemma4Ltx25, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult(), loaders, merged);
+                AddFile(ModelDownloader.EnsureSideModelAsync(SideModels.Gemma4Ltx25, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult(), loaders, merged);
                 conv = LtxVideo2CheckpointConverter.Convert(merged, residentNvfp4);
             }
 
@@ -219,14 +227,14 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                     ? new LtxVideo25DiffusionDecoder(new LtxVideo25DiffusionDecoderConfig { ChunkWorkspaceBytes = chunkMb << 20 })
                     : new LtxVideo25DiffusionDecoder();
                 diffusionVae.LoadWeights(VaePrecisionHelper.CastVaeWeights(conv.VaeDiffusionDecoder, DType.F32));
-                Logs.Info($"[LtxVideo2Recipe] HARTSY_LTX2_DIFFUSION_VAE set — decoding with the LTX-2.5 diffusion "
+                Logs.Info($"[LtxVideo2Recipe] numerics.ltx2DiffusionVae set — decoding with the LTX-2.5 diffusion "
                     + $"video decoder ({conv.VaeDiffusionDecoder.Count} tensors). Temporally chunked: no geometry "
                     + "ceiling, but ~13 s at 768x512x97f against the conv decoder's ~3 s.");
             }
             else if (conv.VaeDiffusionDecoder.Count > 0 && haveConvDecoder)
             {
                 Logs.Info("[LtxVideo2Recipe] Checkpoint carries the LTX-2.5 diffusion video decoder; using the conv "
-                    + "decoder, which is ~40x faster at matched geometry (HARTSY_LTX2_DIFFUSION_VAE=1 to select "
+                    + "decoder, which is ~40x faster at matched geometry (numerics.ltx2DiffusionVae=true to select "
                     + "the diffusion one).");
             }
             else if (conv.VaeDiffusionDecoder.Count > 0)
@@ -236,7 +244,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                     + $"({conv.VaeDiffusionDecoder.Count} decoder tensors), which decodes correctly but is currently "
                     + "~40x slower at matched geometry. Supply the convolutional VAE "
                     + "(ltx-2.5-video-vae-conv-bf16.safetensors) for the fast path, or set "
-                    + "HARTSY_LTX2_DIFFUSION_VAE=1 to use this one.");
+                    + "numerics.ltx2DiffusionVae=true to use this one.");
             }
             // Gemma 4 (LTX-2.5) vs Gemma 3 (LTX-2.3). `layer_scalar` is the discriminator because it is per-block
             // and Gemma 3 has no counterpart; do NOT probe for a missing v_proj — layer 0 is a sliding layer and
@@ -260,7 +268,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             {
                 throw new InvalidOperationException(
                     $"LTX-2 checkpoint '{context.CheckpointPath}' has no usable video decoder: no conv decoder keys "
-                    + "and no diffusion decoder (or HARTSY_LTX2_DIFFUSION_VAE selected one that is not in the checkpoint).");
+                    + "and no diffusion decoder (or numerics.ltx2DiffusionVae selected one that is not in the checkpoint).");
             }
 
             LtxAudioVaeDecoder? audioVae = null;
@@ -319,7 +327,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 else
                 {
                     Logs.Info("[LtxVideo2Recipe] No bundled Gemma-3 text tower — auto-downloading side file (Comfy-Org/ltx-2).");
-                    gemmaSidePath = ModelDownloader.EnsureSideModelAsync(SideModels.GemmaLtx2, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+                    gemmaSidePath = ModelDownloader.EnsureSideModelAsync(SideModels.GemmaLtx2, downloadIfMissing: true, onProgress: null, context.Cancel).GetAwaiter().GetResult();
                     SafeTensorsLoader gemmaLoader = new SafeTensorsLoader();
                     gemmaLoader.Load(gemmaSidePath);
                     loaders.Add(gemmaLoader);
@@ -330,7 +338,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
                 tokenizer = new GemmaTokenizer(LocateGemmaTokenizer(context.CheckpointPath, gemmaSidePath), maxLength: TokenLength);
             }
 
-            LtxLatentUpsampler? latentUpsampler = LoadLatentUpsampler(config, loaders);
+            LtxLatentUpsampler? latentUpsampler = LoadLatentUpsampler(config, loaders, context.Cancel);
 
             LtxVideo2Pipeline pipeline = new LtxVideo2Pipeline(context.Backend, transformer, connectors, vae, gemma, config,
                 audioVae, vocoder, audioMean, audioStd, diffusionVae, videoMean, videoStd)
@@ -373,7 +381,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// and, if missing, auto-downloaded with no confirmation prompt — same "starts, then fetches the refiner"
     /// behavior as SwarmUI's ComfyUI backend. (These knobs are NOT environment variables — the engine stopped
     /// reading its config from the process environment; see <c>KnobStore</c>/<c>KnobFile</c>.)</summary>
-    private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<IDisposable> loaders)
+    private LtxLatentUpsampler? LoadLatentUpsampler(LtxVideo2Config config, List<IDisposable> loaders, CancellationToken cancel)
     {
         if (!(EngineKnobs.Ltx2TwoStage.Value ?? config.TwoStage))
         {
@@ -402,7 +410,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         {
             Logs.Info("[LtxVideo2Recipe] Two-stage enabled, latent upsampler not found locally — auto-downloading "
                 + $"{SideModels.Ltx25LatentUpsampler.Repo}/{SideModels.Ltx25LatentUpsampler.RepoPath}.");
-            path = ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25LatentUpsampler, downloadIfMissing: true, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+            path = ModelDownloader.EnsureSideModelAsync(SideModels.Ltx25LatentUpsampler, downloadIfMissing: true, onProgress: null, cancel).GetAwaiter().GetResult();
         }
 
         SafeTensorsLoader loader = new SafeTensorsLoader();

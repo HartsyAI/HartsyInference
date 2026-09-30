@@ -20,7 +20,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 {
     private readonly LlamaStyleEncoder _textEncoder;
     private readonly Krea2Transformer _transformer;
-    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~1.8 s re-upload). The TE is still freed each gen — its VRAM is needed by the VAE decode (see the call site). Requires DiT + VAE-decode peak to fit VRAM (fp8 Krea2 on 24 GB: yes). Standard-profile default ON (HARTSY_KEEP_MODELS=0 disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
+    /// <summary>Keeps the DiT weights GPU-resident across generations (skips the post-loop FreeWeights + next-gen ~1.8 s re-upload). The TE is still freed each gen — its VRAM is needed by the VAE decode (see the call site). Requires DiT + VAE-decode peak to fit VRAM (fp8 Krea2 on 24 GB: yes). Standard-profile default ON (vram.keepModels=false disables) — the miss-path eviction above is what keeps smaller cards viable even with residency on.</summary>
     private bool KeepModelsResident => VramLevers.KeepResident(Backend);
 
     /// <summary>Whether the DiT's weights are currently ALL on the device from a previous generation (<see cref="KeepModelsResident"/>). Fed to <see cref="VramPlanner.PlanPhase"/> as <c>alreadyResident</c> — the availability query cannot see past weights that are themselves occupying the space it measures, so without this a warm generation reports "does not fit" and flips between resident and streamed on alternate runs.</summary>
@@ -176,7 +176,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             ? null : Prompting.CondTokenWeights.Apply(Backend, uncondHidden, null, negativeWeights).Cond;
         if (weightedUncond is not null) uncondHidden = weightedUncond;
 
-        // The TE is ALWAYS freed after encode, even under HARTSY_KEEP_MODELS: its ~4-8 GB is exactly the
+        // The TE is ALWAYS freed after encode, even under vram.keepModels: its ~4-8 GB is exactly the
         // headroom the VAE decode's im2col needs at 1024² (keeping TE+DiT+VAE resident OOM'd: the decode
         // requested 6.9 GB with 69 MB free). Re-encoding costs ~1 s/gen; keeping the 13 GB DiT saves ~2 s.
         if (!(condHit && uncondHit))
@@ -361,7 +361,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         // DataPointer, so the host queues all steps without the per-step D2H pipeline drain that serialized host
         // dispatch against GPU execution (the dominant host-bound cost). Img2img / inpaint keep the pixel-space path.
         bool fastPath = !isImg2Img && !isMaskedInpaint;
-        // Default-off across-step First-Block cache (HARTSY_STEP_CACHE + optional HARTSY_STEP_CACHE_LATE —
+        // Default-off across-step First-Block cache (vram.stepCache + optional vram.stepCacheLate —
         // reference wiring QwenImagePipeline / Ideogram4Pipeline; INFERENCE_ACCEL_GRIND §H1.5). An armed cache
         // is per-step-variable topology, so it forces the eager path (no step-graph capture).
         // Calibrated ship point (Turbo only — Base is unmeasured, so it gets no profile and =1 stays the
@@ -377,7 +377,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
         {
             if (DitShardBackend is not null)
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but DiT sharding is active — step-cache's block-0-indicator " +
+                Logs.Warning("vram.stepCache set but DiT sharding is active — step-cache's block-0-indicator " +
                     "shape doesn't compose with a fixed block-range boundary (see ForwardPatchedSharded); running uncached.");
             }
             else if (Backend.SupportsDeviceStepCacheGate)
@@ -389,11 +389,11 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             }
             else
             {
-                Logs.Warning("HARTSY_STEP_CACHE set but the backend lacks a device-side gate " +
+                Logs.Warning("vram.stepCache set but the backend lacks a device-side gate " +
                     "(stepcache.ptx not compiled?) — running uncached.");
             }
         }
-        // Step-graph mode (HARTSY_DIT_GRAPH, fast path only, no CFG): route the latent through the
+        // Step-graph mode (numerics.ditGraph, fast path only, no CFG): route the latent through the
         // transformer's FIXED buffer so the captured graph's baked address stays valid across steps and gens.
         // The fixed tensor is transformer-owned: never disposed here, never DataPointer-read (snapshot instead).
         // NEVER on the streamed path: the transformer refuses to capture while BeforeBlockForward is hooked (a graph
@@ -447,7 +447,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
             Stopwatch stepSw = Stopwatch.StartNew();
             float t = timesteps[i] / 1000.0f; // scheduler stores sigma·1000; transformer takes t∈[0,1]
 
-            // Late-window cache gate (HARTSY_STEP_CACHE_LATE): reuse eligible only in the schedule tail —
+            // Late-window cache gate (vram.stepCacheLate): reuse eligible only in the schedule tail —
             // early-schedule reuse is where quality damage concentrates (Ideogram 4 results doc).
             bool cacheEligible = stepCacheLate <= 0f || (i + 1) > steps * (1f - stepCacheLate);
             DeviceFeatureCache? stepCondCache = cacheEligible ? condCache : null;
@@ -780,7 +780,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
     }
 
     /// <summary>Streamed path only: returns the stream-ordered pool's reservations to the driver once per step.</summary>
-    /// <remarks><c>retainBehind: 0</c> frees every block via <c>cuMemFreeAsync</c>, and <c>HARTSY_MEMPOOL_KEEP</c> (on
+    /// <remarks><c>retainBehind: 0</c> frees every block via <c>cuMemFreeAsync</c>, and <c>vram.mempoolKeep</c> (on
     /// by default) raises the pool's release threshold so those bytes stay reserved. That is a pure win when the DiT
     /// is resident (the same buffers get reused), but on the streamed path the pool grows by roughly a block per step.
     /// Measured on Ideogram 4: 4.1 → 11.6 GiB — the entire card — by step 17, versus a flat 5.1 GiB with this trim,
@@ -796,7 +796,7 @@ public sealed class Krea2Pipeline : DiffusionPipelineBase
 
     /// <summary>Per-forward activation/workspace estimate for one Krea 2 pass over the joint <c>[text, image]</c> sequence.</summary>
     /// <remarks>Single-stream: text and image share one sequence through all 28 blocks, so every term is counted once
-    /// over the combined length at the block activation dtype (F16 on the default <c>HARTSY_DIT_F16</c> path). The
+    /// over the combined length at the block activation dtype (F16 on the default <c>numerics.ditF16</c> path). The
     /// SwiGLU term dominates — inner 16384 is 2.7× hidden. The flat 1 GB tail covers cuBLAS workspace, the fp8 GEMM
     /// dequant scratch and the RoPE tables. Deliberately generous: over-estimating costs a smaller prefetch window,
     /// under-estimating costs an OOM.</remarks>

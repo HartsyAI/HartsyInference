@@ -41,7 +41,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting =>
         Diffusion.Prompting.PromptWeightingMode.ComfyBlend;
 
-    /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width per stage until the post-downsample resnet). 0.9.5/13B use a different config (timestep-conditioned VAE, different block widths) the encoder has never been constructed against — declaring <c>InitImage</c> there would be exactly the "advertises conditioning it silently drops or crashes on" class of bug 0.2 fixed for Wan's <c>EndFrame</c> over-claim. Cheap header-only peek (<see cref="VideoRecipeUtils.PeekCheckpointKeys"/>) mirrors the SAME detection <see cref="Construct"/> runs against the real converted weights, so this stays in sync without a full weight load on every capability check.</summary>
+    /// <summary>Tier 3.4: <see cref="Models.Vae.LtxVideoVaeEncoder"/> was built and real-weight verified ONLY against the base 0.9 VAE config (encoder_causal=true, plain-strided downsamplers, unchanged channel width per stage until the post-downsample resnet). 0.9.5/13B use a different config (timestep-conditioned VAE, different block widths) the encoder has never been constructed against — declaring <c>InitImage</c> there would be exactly the "advertises conditioning it silently drops or crashes on" class of bug 0.2 fixed for Wan's <c>EndFrame</c> over-claim. Cheap header-only peek (<see cref="CheckpointProbe"/>) mirrors the SAME detection <see cref="Construct"/> runs against the real converted weights, so this stays in sync without a full weight load on every capability check.</summary>
     public VideoFeatures SupportsFor(string? checkpointPath)
     {
         if (string.IsNullOrWhiteSpace(checkpointPath))
@@ -50,7 +50,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
         }
         try
         {
-            IReadOnlySet<string> keys = VideoRecipeUtils.PeekCheckpointKeys(checkpointPath);
+            IReadOnlySet<string> keys = CheckpointProbe.Read(checkpointPath).Keys;
             if (keys.Count == 0)
             {
                 return Supports;
@@ -77,7 +77,7 @@ public sealed class LtxVideoRecipe : IVideoRecipe
     {
         // TODO(E-IMG-4/5): LoRA, image-to-video conditioning, and a VideoRequest.Components T5 override are deferred —
         // this is the vanilla single-file text-to-video path with the canonical T5-XXL side model.
-        string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string t5Path = ModelDownloader.EnsureSideModelAsync(SideModels.T5XxlEnconly, onProgress: null, context.Cancel).GetAwaiter().GetResult();
         // One container for either format, folding fp8/int8 companions before the converter sees them.
         // IDisposable rather than SafeTensorsLoader because the container owns the mapping whatever the format.
         CheckpointSource ckptSource = CheckpointSource.Open(context.CheckpointPath);

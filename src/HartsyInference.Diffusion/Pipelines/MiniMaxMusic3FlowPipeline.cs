@@ -126,7 +126,7 @@ public sealed unsafe class MiniMaxMusic3FlowPipeline : DiffusionPipelineBase
             throw new ArgumentOutOfRangeException(nameof(frames), frames, "frames must be positive.");
         }
         int stepCount = Math.Max(1, steps);
-        // HARTSY_MM3_FLOW_CFG_BATCH=0 restores the two-forward shape. Worth 3.7% of the flow stage, and the
+        // numerics.mm3FlowCfgBatch=false restores the two-forward shape. Worth 3.7% of the flow stage, and the
         // diffusers flow-parity gate passes against the batched path.
         bool batched = EngineKnobs.Mm3FlowCfgBatch.Value;
         int[] starts = ChunkStarts(frames);

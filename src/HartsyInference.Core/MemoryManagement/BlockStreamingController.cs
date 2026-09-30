@@ -119,7 +119,7 @@ public sealed class BlockStreamingController : IDisposable
     }
 
     /// <summary>Returns the stream-ordered pool's reservations to the driver; call once at the end of every denoise step of a streamed loop.</summary>
-    /// <remarks><c>retainBehind: 0</c> frees every block via <c>cuMemFreeAsync</c>, and <c>HARTSY_MEMPOOL_KEEP</c> (on by default) raises the
+    /// <remarks><c>retainBehind: 0</c> frees every block via <c>cuMemFreeAsync</c>, and <c>vram.mempoolKeep</c> (on by default) raises the
     /// pool's release threshold so those bytes stay reserved. On a resident pipeline that is a pure win — the same buffers get reused. On the
     /// streamed path the pool instead grows by roughly a block per step: measured on Ideogram 4 (3060, 1024²/20 steps) VRAM climbed 4.1 → 11.6 GiB
     /// (the entire card) by step 17, versus a flat 5.1 GiB with this trim, for +1.4 % wall-clock. See

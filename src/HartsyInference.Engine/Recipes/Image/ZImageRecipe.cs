@@ -13,6 +13,8 @@ using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
 using HartsyInference.Engine.Features;
+using HartsyInference.Engine.Variants;
+
 namespace HartsyInference.Engine.Recipes.Image;
 
 /// <summary>Z-Image recipe (Tongyi Lab NextDiT): the checkpoint carries the transformer only; the Qwen3-4B text encoder and the Flux VAE are resolved as side models. Lifted from the SwarmUI backend's <c>ZImageLoader</c>; constructs the components and drives generation through <see cref="ZImageRecipePipeline"/>.</summary>
@@ -53,6 +55,13 @@ public sealed class ZImageRecipe : IArchitectureRecipe
     public ImageDefaults Defaults => FamilyDefaults;
 
     /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => ZImageVariants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && !variant.Is(ZImageVariants.Turbo) ? BaseDefaults : FamilyDefaults;
+
+    /// <inheritdoc/>
     /// <inheritdoc/>
     public MemoryCapabilities MemorySupports => MemoryCapabilities.ComponentPlacement;
 
@@ -61,8 +70,8 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         // Resolve the two side models synchronously (Construct is a sync seam): Qwen3-4B text encoder + Flux VAE.
         // TODO(E-IMG-4): honor a user-picked Qwen/VAE override from ImageRequest.Components/Extra instead of always
         // taking the canonical SideModels entry (the SwarmUI loader read input.Get(T2IParamTypes.QwenModel/VAE)).
-        string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3_4B, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
-        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, CancellationToken.None).GetAwaiter().GetResult();
+        string qwenPath = ModelDownloader.EnsureSideModelAsync(SideModels.Qwen3_4B, onProgress: null, context.Cancel).GetAwaiter().GetResult();
+        string vaePath = ModelDownloader.EnsureSideModelAsync(SideModels.FluxAe, onProgress: null, context.Cancel).GetAwaiter().GetResult();
 
         IDisposable? checkpoint = null;
         SafeTensorsLoader? qwenLoader = null;
@@ -78,10 +87,12 @@ public sealed class ZImageRecipe : IArchitectureRecipe
         {
             // 1. Load + convert the Z-Image transformer (checkpoint carries only these weights). One container for
             // either format: the FP8Mix repack, a BF16 file and a GGUF all reach the converter as one dict.
-            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            // An nvfp4 build's groups stay packed only where the native block-scaled GEMM can consume them; anywhere
+            // else they unpack to F16 at open exactly as before, which is why the Blackwell knob alone moved nothing.
+            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath,
+                CheckpointOpenOptions.ForNativeNvfp4Gemm(context.Backend));
             checkpoint = source;
-            ZImageCheckpointConverter.ConvertedWeights zConv = ZImageCheckpointConverter.Convert(
-                source.Weights, ZImageCheckpointConverter.DetectVariantFromFileName(context.CheckpointPath));
+            ZImageCheckpointConverter.ConvertedWeights zConv = ZImageCheckpointConverter.Convert(source.Weights);
             if (zConv.Transformer.Count == 0)
                 throw new InvalidOperationException("Z-Image checkpoint has no transformer weights.");
             // Any quant this run's devices have no packed-weight kernel for widens here rather than failing inside
@@ -90,20 +101,18 @@ public sealed class ZImageRecipe : IArchitectureRecipe
                 QuantizedWeightPolicy.PrepareForBackends(zConv.Transformer, context.TransformerBackends);
             checkpoint = new CompositeDisposable(source, prepared);
 
-            bool isBase = zConv.Variant != ZImageCheckpointConverter.CheckpointVariant.Turbo;
-            if (zConv.Variant == ZImageCheckpointConverter.CheckpointVariant.Unknown)
+            ResolvedModelVariant variant = context.ResolveVariant(ZImageVariants.Catalog);
+            bool isBase = !variant.Is(ZImageVariants.Turbo);
+            if (variant.Source == ModelVariantSource.Default)
             {
-                // Tensor shapes cannot distinguish distilled Turbo from Base. Default ambiguous files to the Base
-                // policy: it is numerically safe on both weight sets (Base weights under Turbo's F16 attention
-                // produce Inf — a silently corrupted image), while Turbo under Base's F32 policy merely runs
-                // slower with a shifted schedule.
-                Logs.Warning($"[ZImageRecipe] Checkpoint filename '{Path.GetFileName(context.CheckpointPath)}' " +
-                    "contains neither an unambiguous 'base' nor 'turbo' token; defaulting to the safe Base policy " +
-                    "(F32 attention, shift=6). A Turbo checkpoint will run slower than necessary — rename the " +
-                    "file with its variant token to select the correct schedule.");
+                // Base weights under Turbo's F16 attention produce Inf — a silently corrupted image — while Turbo under
+                // Base's F32 policy merely runs slower with a shifted schedule, so an unknown file takes Base.
+                Logs.Warning($"[ZImageRecipe] Nothing identifies '{Path.GetFileName(context.CheckpointPath)}' as Base or "
+                    + "Turbo; using the safe Base policy (F32 attention, shift=6). A Turbo checkpoint will run slower than "
+                    + "necessary — pass -m zimage:turbo or stamp modelspec/hartsy.model_id to select its schedule.");
             }
             ZImageConfig zConfig = ZImageConfig.FromWeights(zConv.Transformer, isBase);
-            Logs.Info($"[ZImageRecipe] Building {zConv.Variant} transformer " +
+            Logs.Info($"[ZImageRecipe] Building {variant.Variant.DisplayName} transformer " +
                 $"(SchedulerShift={zConfig.SchedulerShift}).");
             transformer = new ZImageTransformer(zConfig);
             // Merge any requested LoRAs BEFORE LoadWeights — device caches are identity-keyed, so merging

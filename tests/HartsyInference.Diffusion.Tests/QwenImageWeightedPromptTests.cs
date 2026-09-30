@@ -74,7 +74,7 @@ public sealed class QwenImageWeightedPromptTests
     {
         using Qwen3Tokenizer tokenizer = new Qwen3Tokenizer();
         (WeightedTokenSequence sequence, int dropIndex) =
-            QwenImageEditConditioning.BuildTokens(tokenizer, "(make it red:1.5)", [4]);
+            QwenImageEditConditioning.BuildTokens(tokenizer, "(make it red:1.5)", [4], QwenImageEditTemplate.EditPlus);
         for (int i = 0; i < sequence.Tokens.Length; i++)
         {
             if (sequence.Tokens[i] == Qwen25VlMultimodalEncoder.ImageTokenId)

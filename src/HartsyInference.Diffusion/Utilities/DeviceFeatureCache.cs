@@ -22,7 +22,7 @@ namespace HartsyInference.Diffusion.Utilities;
 /// stream's native dtype (F32/F16 — Scale/Add/RelativeL1Distance all dispatch per dtype).</para></summary>
 public sealed class DeviceFeatureCache : IDisposable
 {
-    /// <summary>Last-resort lowvram lever: <c>HARTSY_STEP_CACHE_OFFLOAD=1</c> pages the cross-step residual and
+    /// <summary>Last-resort lowvram lever: <c>vram.stepCacheOffload=true</c> pages the cross-step residual and
     /// indicator snapshot to host as they are produced, trading one PCIe round trip per step for their full device
     /// size. Off by default. Defensible only because both are read at most ONCE PER STEP — the same treatment applied
     /// to a per-block tensor loses outright (docs/Research/MEMORY_SCHEDULING_SERVING.md §9).</summary>
@@ -31,7 +31,7 @@ public sealed class DeviceFeatureCache : IDisposable
     private readonly float _threshold;
     private readonly int _maxConsecutiveReuse;
     private readonly float[]? _polyCoeffs;      // TeaCache-style gate calibration: drift ← Σ cᵢ·relⁱ (c0 first)
-    private readonly string? _calibFile;        // when set (HARTSY_STEP_CACHE_CALIB), logs "indicatorRel,residualRel" pairs
+    private readonly string? _calibFile;        // when set (vram.stepCacheCalib), logs "indicatorRel,residualRel" pairs
     private float _lastIndicatorRel = -1f;
     private float _accumulatedDistance;
     private int _consecutiveReuse;
@@ -140,7 +140,7 @@ public sealed class DeviceFeatureCache : IDisposable
 
         // Calibration mode: before replacing the residual, log (indicator drift → true residual drift) —
         // the pair the TeaCache-style polynomial is fitted on. Costs one extra reduction per compute step,
-        // only when HARTSY_STEP_CACHE_CALIB is set.
+        // only when vram.stepCacheCalib is set.
         if (_calibFile is not null && _cachedResidual is not null && _lastIndicatorRel >= 0f
             && _cachedResidual.Shape.Equals(output.Shape))
         {

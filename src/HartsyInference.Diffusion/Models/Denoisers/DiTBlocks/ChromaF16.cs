@@ -4,7 +4,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 
-/// <summary>F16-activation support for the Chroma block loop (HARTSY_DIT_F16 opt-in).
+/// <summary>F16-activation support for the Chroma block loop (numerics.ditF16 opt-in).
 ///
 /// <para>Chroma is Flux-derived, and Flux's known F16 failure is <b>residual-stream growth</b>: the token
 /// stream accumulated across 19 double + 38 single blocks exceeds F16's 65504 in late blocks. Unlike
@@ -29,7 +29,7 @@ public static unsafe class ChromaF16
     /// precision (power-of-two exponent shift).</summary>
     public const float ResidualDamp = 1.0f / 32.0f;
 
-    /// <summary>HARTSY_CHROMA_F16TRACE=1: logs min/max/nan/inf of key block intermediates for the first few
+    /// <summary>diagnostics.chromaF16trace=true: logs min/max/nan/inf of key block intermediates for the first few
     /// forwards to locate F16 overflow sites. Each probe D2H-drains the tensor (very slow); debug only.</summary>
     private static bool TraceEnabled => EngineKnobs.ChromaF16trace.Value;
     private static int _traceCallsLeft = TraceEnabled ? 2000 : 0;
