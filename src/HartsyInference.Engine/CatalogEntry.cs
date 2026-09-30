@@ -30,4 +30,8 @@ public sealed record CatalogEntry
     /// model is selected but not present, the CLI offers to download exactly these into their target folders. Empty
     /// when no preset download is defined.</summary>
     public IReadOnlyList<ModelAsset> Assets { get; init; } = Array.Empty<ModelAsset>();
+
+    /// <summary>Derivatives of this model (different quantizations or conversions), each with its own pinned download and
+    /// the components it ships. Empty for a model with a single form; such a model's files are <see cref="Assets"/>.</summary>
+    public IReadOnlyList<CatalogVariant> Variants { get; init; } = Array.Empty<CatalogVariant>();
 }

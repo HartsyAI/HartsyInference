@@ -31,6 +31,11 @@
     <None Include="Qwen3EmbeddingReference.txt">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- Pinned DeepSeek-V4.1-Flash config.json (deepseek-ai @ dba1be0a), the MLX conversion's flat config, and every
+         distinct tensor header of the 48 official shards folded into templates (see DeepSeekV41HeaderTemplates). -->
+    <None Include="DeepSeekV41\Fixtures\*.json">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
 
 </Project>

@@ -16,6 +16,10 @@ public sealed record MemoryEstimate
     /// <summary>Where the activation numbers came from.</summary>
     public required MemoryEstimateAccuracy Accuracy { get; init; }
 
+    /// <summary>Header bytes per weight class (dense, expert, Engram, embed, head, vision, draft) for a text checkpoint,
+    /// so a planner can decide what to stream or pin; null for diffusion models, whose phases already say it.</summary>
+    public IReadOnlyDictionary<string, long>? WeightBytesByClass { get; init; }
+
     /// <summary>The peak with every phase resident and phases unloading between each other: the single number to quote
     /// when no device is in view.</summary>
     public long PeakResidentBytes => PeakBytes(unloadBetweenPhases: true, _ => true);

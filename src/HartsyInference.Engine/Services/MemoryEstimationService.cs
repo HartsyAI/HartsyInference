@@ -39,6 +39,10 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         CancellationToken cancel = default)
     {
         cancel.ThrowIfCancellationRequested();
+        if (spec.Modality == Modality.Text && TextMemoryProfile.Handles(spec.LocalPath))
+        {
+            return Task.FromResult(TextMemoryProfile.Estimate(spec.LocalPath!));
+        }
         return Task.FromResult(CheckpointMemoryProfile.For(spec).Estimate(request, static _ => true));
     }
 
@@ -48,6 +52,17 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         cancel.ThrowIfCancellationRequested();
         IBackend backend = _engine.Backend;
         VramPolicy policy = VramPolicyRegistry.Resolve(backend, request.Vram);
+        if (spec.Modality == Modality.Text && TextMemoryProfile.Handles(spec.LocalPath))
+        {
+            // The judge assumes a denoiser; a language model's residency plan (experts, Engram, KV) is PR 14's job.
+            return Task.FromResult(new MemoryFit
+            {
+                Verdict = MemoryFitVerdict.Unknown,
+                Estimate = TextMemoryProfile.Estimate(spec.LocalPath!),
+                EffectiveTier = policy.Tier,
+                Reason = "Text models have no fit verdict yet; the residency planner that judges them arrives with the DeepSeek-V4.1 planner PR.",
+            });
+        }
         long totalBytes = TotalBytes(backend);
         if (totalBytes <= 0)
         {

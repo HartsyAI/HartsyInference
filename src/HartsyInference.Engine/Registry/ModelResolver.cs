@@ -1,4 +1,6 @@
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.ModelAssets.Checkpoints;
 
 namespace HartsyInference.Engine.Registry;
 
@@ -81,19 +83,32 @@ public static class ModelResolver
             return Path.GetFullPath(candidate);
         if (Directory.Exists(candidate))
         {
-            // TextService.LoadInto needs a direct .gguf file path — unlike the folder-checkpoint diffusion/music
-            // families, a Text catalog id's Models/LLM/<id>/ directory is never itself a valid LocalPath. Auto-
-            // discover the single .gguf inside it (same convention TextService.FindMmproj uses for its sidecar
-            // scan); ambiguous (0 or 2+) falls through to null so an Assets-based download or an explicit
-            // --model-path resolves it instead, rather than handing the loader a directory it can't open.
+            // TextService.LoadInto takes a .gguf file or a Hugging Face checkpoint directory. Auto-discover the single
+            // .gguf inside (same convention TextService.FindMmproj uses for its sidecar scan); a directory that
+            // probes as a Hugging Face checkpoint is itself the LocalPath. Anything else (0 or 2+ ggufs) falls
+            // through to null so an Assets-based download or an explicit --model-path resolves it instead.
             if (modality == Modality.Text)
-            {
-                string[] ggufs = Directory.GetFiles(candidate, "*.gguf");
-                return ggufs.Length == 1 ? Path.GetFullPath(ggufs[0]) : null;
-            }
+                return ResolveTextDirectory(candidate);
             return Path.GetFullPath(candidate);
         }
 
         return null;
+    }
+
+    /// <summary>A Text model directory: the single .gguf inside it, else the directory itself when it is a Hugging Face checkpoint, else null.</summary>
+    /// <exception cref="HartsyInferenceException">The directory holds both a .gguf and a safetensors index, so which one to load is ambiguous.</exception>
+    internal static string? ResolveTextDirectory(string directory)
+    {
+        string[] ggufs = Directory.GetFiles(directory, "*.gguf");
+        HfCheckpointInfo? hf = HfCheckpointDirectory.TryProbe(directory);
+        if (hf?.IndexPath is not null && ggufs.Length > 0)
+        {
+            throw new HartsyInferenceException(
+                $"'{directory}' holds both a safetensors checkpoint ({Path.GetFileName(hf.IndexPath)}) and {ggufs.Length} "
+                + $".gguf file(s); pass --model-path with the .gguf file or with a directory containing only the safetensors checkpoint.");
+        }
+        if (ggufs.Length == 1)
+            return Path.GetFullPath(ggufs[0]);
+        return hf is not null && ggufs.Length == 0 ? Path.GetFullPath(directory) : null;
     }
 }
