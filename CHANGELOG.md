@@ -17,7 +17,10 @@ stable release will require. Dates are UTC.
   loop waited for an EOT (50257) the model never emits. `WhisperTokenizer` now resolves every id (`EotId`, `SotId`,
   `FirstLanguageId`, task, no-speech, no-timestamps, first timestamp) from the checkpoint's `added_tokens.json` and
   `vocab.json`, exposes `IsMultilingual` (OpenAI's `n_vocab >= 51865` rule) and builds the English-only prompt from it;
-  `WhisperPipeline` stops on the checkpoint's EOT and suppresses from its SOT, and exposes `IsMultilingual`.
+  `WhisperPipeline` stops on the checkpoint's EOT and suppresses from its SOT, and exposes `IsMultilingual`. The v2 and
+  `.en` HF files name the no-speech token `<|nocaptions|>`, so the old `<|nospeech|>` lookup fell back to 50362 for
+  them: right for the v2 layout, `<|notimestamps|>` on `.en`; the v3 files name it `<|nospeech|>` and resolved
+  correctly before. Multilingual decodes (v2 and v3 layouts) are unchanged.
 - `WhisperConfig.IsMultilingual` drives the config's special-token ids; the `.en` presets and the two distil `.en`
   presets carry `VocabSize` 51864 and pad 50256. `WhisperPipeline.LoadAsync` takes `vocab_size` from the checkpoint's
   `config.json` for an inferred preset, and `WhisperDecoder.LoadWeights` refuses an embedding or `proj_out` whose

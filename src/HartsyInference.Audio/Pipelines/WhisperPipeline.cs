@@ -88,10 +88,13 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         WhisperConfig? cfg = null,
         CancellationToken ct = default)
     {
+        // Infer before fetching so an unknown repo fails without downloading anything.
+        WhisperConfig resolvedCfg = cfg ?? InferConfig(hfRepoId);
+
         string repoDir = AudioModelCache.GetRepoDirectory(hfRepoId, "stt");
         IReadOnlyDictionary<string, string> fetched = await AudioModelCache
             .FetchAllAsync(hfRepoId, ModelFiles, category: "stt", ct: ct).ConfigureAwait(false);
-        WhisperConfig resolvedCfg = cfg ?? ApplyCheckpointVocab(InferConfig(hfRepoId), fetched["config.json"]);
+        if (cfg is null) resolvedCfg = ApplyCheckpointVocab(resolvedCfg, fetched["config.json"]);
 
         SafeTensorsLoader loader = new();
         loader.Load(fetched["model.safetensors"]);
