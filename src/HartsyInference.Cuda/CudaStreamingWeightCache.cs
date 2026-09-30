@@ -19,13 +19,29 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     // copy whose source straddles pinned/unpinned pages fails with INVALID_VALUE. Staging sidesteps all of it and
     // pins only ring-size host memory instead of the whole checkpoint. 3 slots cover prefetchAhead=2 + the in-flight
     // upload; each slot's event gates reuse.
-    private const int StagingSlots = 3;
-    private readonly nint[] _stagingPtrs = new nint[StagingSlots];
-    private readonly nint[] _stagingEvents = new nint[StagingSlots];
-    private readonly bool[] _stagingUsed = new bool[StagingSlots];
+    private const int DefaultStagingSlots = 3;
+    private nint[] _stagingPtrs = new nint[DefaultStagingSlots];
+    private nint[] _stagingEvents = new nint[DefaultStagingSlots];
+    private bool[] _stagingUsed = new bool[DefaultStagingSlots];
     private nuint _stagingBytes;
     private int _stagingIdx;
     private bool _stagingDead;   // allocation failed once — fall back to pageable direct uploads for the session
+
+    /// <summary>Pinned staging slots in the ring (default 3); each holds one <see cref="BeginUploadAsync"/> call's bytes and its reuse waits on that slot's last upload. Deeper prefetch wants more.</summary>
+    public int StagingSlotCount
+    {
+        get => _stagingPtrs.Length;
+        set
+        {
+            ArgumentOutOfRangeException.ThrowIfLessThan(value, 1);
+            if (value == _stagingPtrs.Length) return;
+            Enter();
+            ReleaseStaging();
+            _stagingPtrs = new nint[value];
+            _stagingEvents = new nint[value];
+            _stagingUsed = new bool[value];
+        }
+    }
 
     /// <summary>Opt-in: page-lock each weight's host source before uploading so <c>cuMemcpyHtoDAsync</c> is genuinely asynchronous and overlaps with compute (pageable sources silently force a synchronous staging copy that overlaps with nothing). Defaults to <c>false</c>.</summary>
     /// <remarks>Only beneficial when weights are re-uploaded across steps (block-swap); for a one-shot preload the
@@ -95,40 +111,35 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
 
         nint staging = PinUploadSource && !_stagingDead ? AcquireStagingSlot(totalBytes) : 0;
         nuint stagingOffset = 0;
-        foreach (Tensor weight in pending)
+        List<Tensor> registered = new(pending.Count);
+        ulong unregistered = 0;
+        try
         {
-            nuint byteSize = GpuTransferHelper.ByteSize(weight);
-            // Use cuMemAllocAsync on the upload stream so the alloc and the eventual
-            // cuMemFreeAsync (on the compute stream during eviction) round-trip through
-            // the same stream-ordered mempool. The previous mix (sync cuMemAlloc + async
-            // cuMemFreeAsync) routed memory in the front door but out the back: freed
-            // bytes ended up in the pool while subsequent sync cuMemAlloc calls couldn't
-            // see them, manifesting as OOM-despite-free. With consistent async use, the
-            // pool's release policy (owned by DeviceMempoolPolicy) governs when bytes
-            // return to the driver and DrainAndReleasePool's trim is meaningful.
-            ulong dptr = CudaMemory.AllocateAsync(byteSize, _uploadStream);
-            unsafe
+            foreach (Tensor weight in pending)
             {
-                nint hostSrc = (nint)weight.DataPointer;
-                if (staging != 0)
-                {
-                    // memcpy into the pinned slot, upload from there: the H2D is then genuinely async and
-                    // overlaps compute; the memcpy itself overlaps the GPU's work on earlier blocks (prefetch).
-                    Buffer.MemoryCopy((void*)hostSrc, (void*)(staging + (nint)stagingOffset), byteSize, byteSize);
-                    CudaDriverApi.cuMemcpyHtoDAsync(dptr, staging + (nint)stagingOffset, byteSize, _uploadStream).ThrowOnError();
-                    stagingOffset += byteSize;
-                }
-                else
-                {
-                    CudaDriverApi.cuMemcpyHtoDAsync(dptr, hostSrc, byteSize, _uploadStream).ThrowOnError();
-                }
+                nuint byteSize = GpuTransferHelper.ByteSize(weight);
+                // Allocate on the upload stream so this and the eventual cuMemFreeAsync (compute stream, on eviction)
+                // round-trip through the same stream-ordered pool; DeviceMempoolPolicy owns when it returns to the driver.
+                unregistered = CudaMemory.AllocateAsync(byteSize, _uploadStream);
+                UploadOne(weight, unregistered, byteSize, staging, ref stagingOffset);
+                // Register while the copy is in flight: ops only read it after AwaitWeights gates the compute
+                // stream, and a parallel BeginUploadAsync for the same tensor then sees a free hit.
+                GpuTransferHelper.RegisterCachedWeight(weight, unregistered, byteSize);
+                registered.Add(weight);
+                unregistered = 0;
             }
-            // Register immediately even though the upload is in flight: ops won't
-            // read these tensors until AwaitWeights gates the compute stream on
-            // the completion event below, at which point the data is guaranteed
-            // visible. Registering up front means a parallel BeginUploadAsync
-            // call for the same tensor sees it as cached and skips re-upload.
-            GpuTransferHelper.RegisterCachedWeight(weight, dptr, byteSize);
+        }
+        catch
+        {
+            // Drain first: queued copies still read the staging slot and write the buffers freed below.
+            CudaDriverApi.cuStreamSynchronize(_uploadStream);
+            if (unregistered != 0) CudaDriverApi.cuMemFreeAsync(unregistered, _uploadStream);
+            foreach (Tensor weight in registered)
+            {
+                if (GpuTransferHelper.TryUnregisterCachedWeight(weight, out ulong dptr))
+                    CudaDriverApi.cuMemFreeAsync(dptr, _uploadStream);
+            }
+            throw;
         }
 
         if (staging != 0)
@@ -136,7 +147,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
             // Slot guard: reuse of this staging buffer must wait for these uploads to drain.
             CudaDriverApi.cuEventRecord(_stagingEvents[_stagingIdx], _uploadStream).ThrowOnError();
             _stagingUsed[_stagingIdx] = true;
-            _stagingIdx = (_stagingIdx + 1) % StagingSlots;
+            _stagingIdx = (_stagingIdx + 1) % _stagingPtrs.Length;
         }
 
         // Record a completion event after all the queued copies. Disabling timing
@@ -146,13 +157,29 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         return new StreamingUploadToken(evt, this);
     }
 
+    private unsafe void UploadOne(Tensor weight, ulong dptr, nuint byteSize, nint staging, ref nuint stagingOffset)
+    {
+        nint hostSrc = (nint)weight.DataPointer;
+        if (staging != 0)
+        {
+            // memcpy into the pinned slot, upload from there: the H2D is then genuinely async and overlaps compute.
+            Buffer.MemoryCopy((void*)hostSrc, (void*)(staging + (nint)stagingOffset), byteSize, byteSize);
+            CudaDriverApi.cuMemcpyHtoDAsync(dptr, staging + (nint)stagingOffset, byteSize, _uploadStream).ThrowOnError();
+            stagingOffset += byteSize;
+        }
+        else
+        {
+            CudaDriverApi.cuMemcpyHtoDAsync(dptr, hostSrc, byteSize, _uploadStream).ThrowOnError();
+        }
+    }
+
     /// <summary>Returns the current ring slot's pinned pointer (host-waiting on its prior uploads if still in flight), growing the ring buffers if <paramref name="totalBytes"/> exceeds the slot size. Returns 0 (and disables staging for the session) if pinned allocation fails — callers fall back to pageable uploads.</summary>
     private nint AcquireStagingSlot(nuint totalBytes)
     {
         if (totalBytes > _stagingBytes)
         {
             ReleaseStaging();
-            for (int i = 0; i < StagingSlots; i++)
+            for (int i = 0; i < _stagingPtrs.Length; i++)
             {
                 int rc = CudaDriverApi.cuMemHostAlloc(out _stagingPtrs[i], totalBytes, CudaDriverApi.CU_MEMHOSTALLOC_PORTABLE);
                 if (rc != 0)
@@ -165,7 +192,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
                 CudaDriverApi.cuEventCreate(out _stagingEvents[i], CudaDriverApi.CU_EVENT_DISABLE_TIMING).ThrowOnError();
             }
             _stagingBytes = totalBytes;
-            for (int i = 0; i < StagingSlots; i++) _stagingUsed[i] = false;
+            for (int i = 0; i < _stagingPtrs.Length; i++) _stagingUsed[i] = false;
             _stagingIdx = 0;
         }
         if (_stagingUsed[_stagingIdx])
@@ -179,7 +206,7 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
     private void ReleaseStaging()
     {
         List<Exception>? failures = null;
-        for (int i = 0; i < StagingSlots; i++)
+        for (int i = 0; i < _stagingPtrs.Length; i++)
         {
             nint stagingEvent = _stagingEvents[i];
             nint stagingPtr = _stagingPtrs[i];
@@ -250,6 +277,65 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
                 CudaDriverApi.cuMemFreeAsync(dptr, _computeStream).ThrowOnError();
             }
         }
+    }
+
+    /// <summary>The compute stream the uploads are ordered against.</summary>
+    internal nint ComputeStreamHandle => _computeStream;
+
+    /// <summary>Keeps these tensors out of the ≥1 MB auto-promotion for the owning backend, so an evicted expert is never silently resurrected as a permanent weight.</summary>
+    internal void ExcludeFromAutoPromotion(IEnumerable<Tensor> tensors)
+    {
+        Enter();
+        foreach (Tensor tensor in tensors) GpuTransferHelper.ExcludeFromAutoPromotion(tensor);
+    }
+
+    /// <summary>The device pointer of a tensor this cache uploaded, without uploading anything.</summary>
+    internal bool TryGetDevicePointer(Tensor tensor, out ulong dptr)
+    {
+        Enter();
+        return GpuTransferHelper.TryGetCachedDevice(tensor, out dptr);
+    }
+
+    /// <summary>Records an event on the compute stream after all work queued so far.</summary>
+    internal nint RecordComputeFence()
+    {
+        Enter();
+        CudaDriverApi.cuEventCreate(out nint evt, CudaDriverApi.CU_EVENT_DISABLE_TIMING).ThrowOnError();
+        try
+        {
+            CudaDriverApi.cuEventRecord(evt, _computeStream).ThrowOnError();
+        }
+        catch
+        {
+            CudaDriverApi.cuEventDestroy(evt);
+            throw;
+        }
+        return evt;
+    }
+
+    /// <summary>True once the compute stream has passed a fence from <see cref="RecordComputeFence"/>.</summary>
+    internal bool IsFenceDone(nint fence)
+    {
+        Enter();
+        int rc = CudaDriverApi.cuEventQuery(fence);
+        if (rc == 0) return true;
+        if (rc == CudaDriverApi.CUDA_ERROR_NOT_READY) return false;
+        rc.ThrowOnError();
+        return false;
+    }
+
+    /// <summary>Blocks the host until the compute stream has passed a fence.</summary>
+    internal void WaitFence(nint fence)
+    {
+        Enter();
+        CudaDriverApi.cuEventSynchronize(fence).ThrowOnError();
+    }
+
+    /// <summary>Destroys a fence.</summary>
+    internal void DestroyFence(nint fence)
+    {
+        Enter();
+        CudaDriverApi.cuEventDestroy(fence).ThrowOnError();
     }
 
     /// <summary>Releases pinned host resources (the staging ring). Call before tearing down the backend so page-locked memory is returned to the OS.</summary>
