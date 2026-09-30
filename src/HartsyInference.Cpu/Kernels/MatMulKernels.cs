@@ -159,7 +159,48 @@ public static class MatMulKernels
                         float* rowA = pIn + i * K;
                         float* rowOut = pOut + i * N;
 
-                        for (int j = jj; j < jEnd; j++)
+                        int j = jj;
+                        if (Avx2.IsSupported)
+                        {
+                            // Four weight rows at a time. One row's sum is a dependent chain that leaves the core
+                            // mostly idle; four independent ones overlap. Each row still runs exactly the
+                            // single-row sequence below — same products, horizontal sum and scalar tail, in the
+                            // same order — so the output is bit-identical, only faster.
+                            for (; j + 4 <= jEnd; j += 4)
+                            {
+                                float* w0 = pW + j * K;
+                                float* w1 = w0 + K;
+                                float* w2 = w1 + K;
+                                float* w3 = w2 + K;
+                                Vector256<float> s0 = Vector256<float>.Zero, s1 = s0, s2 = s0, s3 = s0;
+                                int k = kk;
+                                int vectorEnd = kEnd - Vector256<float>.Count + 1;
+                                for (; k < vectorEnd; k += Vector256<float>.Count)
+                                {
+                                    Vector256<float> vA = Avx.LoadVector256(rowA + k);
+                                    s0 = MultiplyAccumulate(vA, Avx.LoadVector256(w0 + k), s0);
+                                    s1 = MultiplyAccumulate(vA, Avx.LoadVector256(w1 + k), s1);
+                                    s2 = MultiplyAccumulate(vA, Avx.LoadVector256(w2 + k), s2);
+                                    s3 = MultiplyAccumulate(vA, Avx.LoadVector256(w3 + k), s3);
+                                }
+                                float sum0 = HorizontalSum(s0), sum1 = HorizontalSum(s1);
+                                float sum2 = HorizontalSum(s2), sum3 = HorizontalSum(s3);
+                                for (; k < kEnd; k++)
+                                {
+                                    float a = rowA[k];
+                                    sum0 += a * w0[k];
+                                    sum1 += a * w1[k];
+                                    sum2 += a * w2[k];
+                                    sum3 += a * w3[k];
+                                }
+                                rowOut[j] += sum0;
+                                rowOut[j + 1] += sum1;
+                                rowOut[j + 2] += sum2;
+                                rowOut[j + 3] += sum3;
+                            }
+                        }
+
+                        for (; j < jEnd; j++)
                         {
                             float* rowW = pW + j * K;
                             float sum = 0f;
@@ -173,16 +214,9 @@ public static class MatMulKernels
                                 {
                                     Vector256<float> vA = Avx.LoadVector256(rowA + k);
                                     Vector256<float> vW = Avx.LoadVector256(rowW + k);
-                                    vSum = Fma.IsSupported ? Fma.MultiplyAdd(vA, vW, vSum)
-                                        : Avx.Add(vSum, Avx.Multiply(vA, vW));
+                                    vSum = MultiplyAccumulate(vA, vW, vSum);
                                 }
-                                // Horizontal sum
-                                Vector128<float> hi = Avx.ExtractVector128(vSum, 1);
-                                Vector128<float> lo = vSum.GetLower();
-                                Vector128<float> v4 = Sse.Add(lo, hi);
-                                Vector128<float> v2 = Sse.Add(v4, Sse.MoveHighToLow(v4, v4));
-                                Vector128<float> v1 = Sse.AddScalar(v2, Sse.Shuffle(v2, v2, 1));
-                                sum = v1.ToScalar();
+                                sum = HorizontalSum(vSum);
                             }
 
                             for (; k < kEnd; k++)
@@ -214,6 +248,21 @@ public static class MatMulKernels
         {
             weightF32?.Dispose();
         }
+    }
+
+    /// <summary><c>acc + a·b</c>, fused where the CPU has FMA. Shared by every <see cref="LinearTransB"/> row path so
+    /// the single-row and four-row loops round identically.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static Vector256<float> MultiplyAccumulate(Vector256<float> a, Vector256<float> b, Vector256<float> acc) =>
+        Fma.IsSupported ? Fma.MultiplyAdd(a, b, acc) : Avx.Add(acc, Avx.Multiply(a, b));
+
+    /// <summary>Sums the eight lanes in <see cref="LinearTransB"/>'s fixed order: halves, then pairs, then the last two.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float HorizontalSum(Vector256<float> v)
+    {
+        Vector128<float> v4 = Sse.Add(v.GetLower(), Avx.ExtractVector128(v, 1));
+        Vector128<float> v2 = Sse.Add(v4, Sse.MoveHighToLow(v4, v4));
+        return Sse.AddScalar(v2, Sse.Shuffle(v2, v2, 1)).ToScalar();
     }
 
     /// <summary>Performs 3D batched matrix multiplication: output[B,M,N] = a[B,M,K] @ b[K,N] or b[B,K,N]. When b is 2D, it is broadcast across the batch dimension. Iterates over the batch dimension and delegates each slice to <see cref="MatMul"/>.</summary>
