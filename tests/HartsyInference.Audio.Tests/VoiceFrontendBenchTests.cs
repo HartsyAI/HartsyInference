@@ -29,7 +29,12 @@ namespace HartsyInference.Audio.Tests;
 /// <c>HARTSY_VOICE_FRONTEND_BENCH=1</c>. The core is the one whose hyperthread pair was idlest while the weights
 /// loaded, unless <c>HARTSY_VOICE_FRONTEND_BENCH_CPU</c> names one. Needs the RNNoise and Silero weights under the
 /// wake model root, or <c>HARTSYINFERENCE_RNNOISE_WEIGHTS</c> and <c>HARTSYINFERENCE_SILERO_WEIGHTS</c>. Run it
-/// alone: any other benchmark or test run on the box moves it.</para></summary>
+/// alone: any other benchmark or test run on the box moves it.</para>
+///
+/// <para>The p99 budget is an open gate that this box does not meet yet: at alpha.227, three runs gave p50
+/// 1.55–1.56 ms and p99 3.81–3.93 ms (see CHANGELOG). Until the GRU weight precision or the SCHED_FIFO measurement
+/// settles it, a p99 failure here is that open gate. A regression shows up instead as a higher p50, or as any
+/// allocation or GC while timed.</para></summary>
 public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
 {
     private const int Rate = 16_000;

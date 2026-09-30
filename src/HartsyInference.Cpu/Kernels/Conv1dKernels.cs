@@ -74,7 +74,8 @@ public static class Conv1dKernels
     }
 
     /// <summary>One (batch, out-channel, time-slice) task of <see cref="Conv1d"/>. A static method over passed-in state
-    /// rather than a capturing lambda, so the delegate is cached and an inline call allocates nothing.</summary>
+    /// rather than a capturing lambda, so its delegate is built once, in a static field, and an inline call allocates
+    /// nothing.</summary>
     private static unsafe void Conv1dTask(int task, Conv1dTasks s)
     {
         float* ip = s.Input;

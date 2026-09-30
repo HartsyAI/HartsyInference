@@ -8,8 +8,9 @@ public static class MatMulKernels
 {
     private const int TileSize = 32;
 
-    // Held in a field: a method-group conversion is not reliably cached, and a fresh delegate per call is exactly
-    // the per-call allocation the stateful CpuParallel.For exists to avoid.
+    // Held in a field so an inline call allocates no delegate by construction. The C# 11+ compiler also caches a
+    // static method-group conversion, but the language permits that rather than requiring it.
+    // VoiceFrontendAllocationTests is what checks the whole path allocates nothing.
     private static readonly unsafe Action<int, LinearTiles> LinearTileBody = LinearTile;
 
     /// <summary>These kernels read tensor data as <c>float*</c>. A non-F32 tensor (e.g. bf16/f16 weights loaded
@@ -121,46 +122,46 @@ public static class MatMulKernels
         Tensor w = weightF32 ?? weight;
         try
         {
-        RequireF32(output, input, w, bias, nameof(LinearTransB));
-        int N = (int)w.Shape[0]; // outDim
-        int K = (int)w.Shape[1]; // inDim
-        int M = (int)(input.ElementCount / K); // batch*seqLen
+            RequireF32(output, input, w, bias, nameof(LinearTransB));
+            int N = (int)w.Shape[0]; // outDim
+            int K = (int)w.Shape[1]; // inDim
+            int M = (int)(input.ElementCount / K); // batch*seqLen
 
-        // Fail fast on a weight/output mismatch: the tiled loop below writes M·N floats derived from the
-        // WEIGHT's outDim, so an undersized output buffer is silent native heap corruption, not an exception.
-        if (output.ElementCount != (long)M * N)
-            throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
-                $"LinearTransB shape mismatch: output has {output.ElementCount} elements but input rows {M} × weight outDim {N} = {(long)M * N} (weight {w.Shape}, input {input.Shape}).");
+            // Fail fast on a weight/output mismatch: the tiled loop below writes M·N floats derived from the
+            // WEIGHT's outDim, so an undersized output buffer is silent native heap corruption, not an exception.
+            if (output.ElementCount != (long)M * N)
+                throw new HartsyInference.Core.Exceptions.HartsyInferenceException(
+                    $"LinearTransB shape mismatch: output has {output.ElementCount} elements but input rows {M} × weight outDim {N} = {(long)M * N} (weight {w.Shape}, input {input.Shape}).");
 
-        float* pIn = (float*)input.DataPointer;
-        float* pW = (float*)w.DataPointer;
-        float* pOut = (float*)output.DataPointer;
+            float* pIn = (float*)input.DataPointer;
+            float* pW = (float*)w.DataPointer;
+            float* pOut = (float*)output.DataPointer;
 
-        NativeMemory.Clear(pOut, (nuint)(M * N * sizeof(float)));
+            NativeMemory.Clear(pOut, (nuint)(M * N * sizeof(float)));
 
-        // Tiled GEMM: C[M,N] = A[M,K] × B^T[K,N] where B is stored as [N, K]
-        // Access pattern: for each (i, j), sum_k A[i,k] * B[j,k]
-        //
-        // Fanned out over (row tile x column tile) for the reason spelled out in MatMul: token-by-token decode
-        // calls this with M = 1, so a row-only split would leave every projection and the vocabulary
-        // projection running on a single core.
-        int iTiles = (M + TileSize - 1) / TileSize;
-        int jTiles = (N + TileSize - 1) / TileSize;
-        CpuParallel.For(iTiles * jTiles, (long)M * N * K, new LinearTiles(pIn, pW, pOut, M, N, K, jTiles),
-            LinearTileBody);
+            // Tiled GEMM: C[M,N] = A[M,K] × B^T[K,N] where B is stored as [N, K]
+            // Access pattern: for each (i, j), sum_k A[i,k] * B[j,k]
+            //
+            // Fanned out over (row tile x column tile) for the reason spelled out in MatMul: token-by-token decode
+            // calls this with M = 1, so a row-only split would leave every projection and the vocabulary
+            // projection running on a single core.
+            int iTiles = (M + TileSize - 1) / TileSize;
+            int jTiles = (N + TileSize - 1) / TileSize;
+            CpuParallel.For(iTiles * jTiles, (long)M * N * K, new LinearTiles(pIn, pW, pOut, M, N, K, jTiles),
+                LinearTileBody);
 
-        if (bias is not null)
-        {
-            float* bPtr = (float*)bias.DataPointer;
-            for (int m = 0; m < M; m++)
+            if (bias is not null)
             {
-                int rowOffset = m * N;
-                for (int n = 0; n < N; n++)
+                float* bPtr = (float*)bias.DataPointer;
+                for (int m = 0; m < M; m++)
                 {
-                    pOut[rowOffset + n] += bPtr[n];
+                    int rowOffset = m * N;
+                    for (int n = 0; n < N; n++)
+                    {
+                        pOut[rowOffset + n] += bPtr[n];
+                    }
                 }
             }
-        }
         }
         finally
         {
@@ -169,7 +170,8 @@ public static class MatMulKernels
     }
 
     /// <summary>One (row tile, column tile) of <see cref="LinearTransB"/>. A static method over passed-in state
-    /// rather than a capturing lambda, so the delegate is cached and an inline call allocates nothing.</summary>
+    /// rather than a capturing lambda, so its delegate is built once, in a static field, and an inline call allocates
+    /// nothing.</summary>
     private static unsafe void LinearTile(int tile, LinearTiles s)
     {
         float* pIn = s.Input;
@@ -181,83 +183,81 @@ public static class MatMulKernels
         int jj = tile % jTiles * TileSize;
         int jEnd = Math.Min(jj + TileSize, N);
 
+        for (int kk = 0; kk < K; kk += TileSize)
         {
-            for (int kk = 0; kk < K; kk += TileSize)
+            int kEnd = Math.Min(kk + TileSize, K);
+
+            for (int i = ii; i < iEnd; i++)
             {
-                int kEnd = Math.Min(kk + TileSize, K);
+                float* rowA = pIn + i * K;
+                float* rowOut = pOut + i * N;
 
-                for (int i = ii; i < iEnd; i++)
+                int j = jj;
+                if (Avx2.IsSupported)
                 {
-                    float* rowA = pIn + i * K;
-                    float* rowOut = pOut + i * N;
-
-                    int j = jj;
-                    if (Avx2.IsSupported)
+                    // Four weight rows at a time. One row's sum is a dependent chain that leaves the core
+                    // mostly idle; four independent ones overlap. Each row still runs exactly the
+                    // single-row sequence below — same products, horizontal sum and scalar tail, in the
+                    // same order — so the output is bit-identical, only faster.
+                    for (; j + 4 <= jEnd; j += 4)
                     {
-                        // Four weight rows at a time. One row's sum is a dependent chain that leaves the core
-                        // mostly idle; four independent ones overlap. Each row still runs exactly the
-                        // single-row sequence below — same products, horizontal sum and scalar tail, in the
-                        // same order — so the output is bit-identical, only faster.
-                        for (; j + 4 <= jEnd; j += 4)
-                        {
-                            float* w0 = pW + j * K;
-                            float* w1 = w0 + K;
-                            float* w2 = w1 + K;
-                            float* w3 = w2 + K;
-                            Vector256<float> s0 = Vector256<float>.Zero, s1 = s0, s2 = s0, s3 = s0;
-                            int k = kk;
-                            int vectorEnd = kEnd - Vector256<float>.Count + 1;
-                            for (; k < vectorEnd; k += Vector256<float>.Count)
-                            {
-                                Vector256<float> vA = Avx.LoadVector256(rowA + k);
-                                s0 = MultiplyAccumulate(vA, Avx.LoadVector256(w0 + k), s0);
-                                s1 = MultiplyAccumulate(vA, Avx.LoadVector256(w1 + k), s1);
-                                s2 = MultiplyAccumulate(vA, Avx.LoadVector256(w2 + k), s2);
-                                s3 = MultiplyAccumulate(vA, Avx.LoadVector256(w3 + k), s3);
-                            }
-                            float sum0 = HorizontalSum(s0), sum1 = HorizontalSum(s1);
-                            float sum2 = HorizontalSum(s2), sum3 = HorizontalSum(s3);
-                            for (; k < kEnd; k++)
-                            {
-                                float a = rowA[k];
-                                sum0 += a * w0[k];
-                                sum1 += a * w1[k];
-                                sum2 += a * w2[k];
-                                sum3 += a * w3[k];
-                            }
-                            rowOut[j] += sum0;
-                            rowOut[j + 1] += sum1;
-                            rowOut[j + 2] += sum2;
-                            rowOut[j + 3] += sum3;
-                        }
-                    }
-
-                    for (; j < jEnd; j++)
-                    {
-                        float* rowW = pW + j * K;
-                        float sum = 0f;
-
+                        float* w0 = pW + j * K;
+                        float* w1 = w0 + K;
+                        float* w2 = w1 + K;
+                        float* w3 = w2 + K;
+                        Vector256<float> s0 = Vector256<float>.Zero, s1 = s0, s2 = s0, s3 = s0;
                         int k = kk;
-                        if (Avx2.IsSupported)
+                        int vectorEnd = kEnd - Vector256<float>.Count + 1;
+                        for (; k < vectorEnd; k += Vector256<float>.Count)
                         {
-                            Vector256<float> vSum = Vector256<float>.Zero;
-                            int vectorEnd = kEnd - Vector256<float>.Count + 1;
-                            for (; k < vectorEnd; k += Vector256<float>.Count)
-                            {
-                                Vector256<float> vA = Avx.LoadVector256(rowA + k);
-                                Vector256<float> vW = Avx.LoadVector256(rowW + k);
-                                vSum = MultiplyAccumulate(vA, vW, vSum);
-                            }
-                            sum = HorizontalSum(vSum);
+                            Vector256<float> vA = Avx.LoadVector256(rowA + k);
+                            s0 = MultiplyAccumulate(vA, Avx.LoadVector256(w0 + k), s0);
+                            s1 = MultiplyAccumulate(vA, Avx.LoadVector256(w1 + k), s1);
+                            s2 = MultiplyAccumulate(vA, Avx.LoadVector256(w2 + k), s2);
+                            s3 = MultiplyAccumulate(vA, Avx.LoadVector256(w3 + k), s3);
                         }
-
+                        float sum0 = HorizontalSum(s0), sum1 = HorizontalSum(s1);
+                        float sum2 = HorizontalSum(s2), sum3 = HorizontalSum(s3);
                         for (; k < kEnd; k++)
                         {
-                            sum += rowA[k] * rowW[k];
+                            float a = rowA[k];
+                            sum0 += a * w0[k];
+                            sum1 += a * w1[k];
+                            sum2 += a * w2[k];
+                            sum3 += a * w3[k];
                         }
-
-                        rowOut[j] += sum;
+                        rowOut[j] += sum0;
+                        rowOut[j + 1] += sum1;
+                        rowOut[j + 2] += sum2;
+                        rowOut[j + 3] += sum3;
                     }
+                }
+
+                for (; j < jEnd; j++)
+                {
+                    float* rowW = pW + j * K;
+                    float sum = 0f;
+
+                    int k = kk;
+                    if (Avx2.IsSupported)
+                    {
+                        Vector256<float> vSum = Vector256<float>.Zero;
+                        int vectorEnd = kEnd - Vector256<float>.Count + 1;
+                        for (; k < vectorEnd; k += Vector256<float>.Count)
+                        {
+                            Vector256<float> vA = Avx.LoadVector256(rowA + k);
+                            Vector256<float> vW = Avx.LoadVector256(rowW + k);
+                            vSum = MultiplyAccumulate(vA, vW, vSum);
+                        }
+                        sum = HorizontalSum(vSum);
+                    }
+
+                    for (; k < kEnd; k++)
+                    {
+                        sum += rowA[k] * rowW[k];
+                    }
+
+                    rowOut[j] += sum;
                 }
             }
         }

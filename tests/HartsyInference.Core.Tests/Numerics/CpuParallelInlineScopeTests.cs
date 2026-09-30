@@ -72,6 +72,22 @@ public sealed class CpuParallelInlineScopeTests
     }
 
     [Fact]
+    public void StatefulFor_Inline_ThrowsTheBodysExceptionAsItself()
+    {
+        int[] ran = new int[Items];
+        using CpuParallel.InlineScope scope = CpuParallel.EnterInline();
+        ArgumentException thrown = Assert.Throws<ArgumentException>(() =>
+            CpuParallel.For(Items, WorkAboveThreshold, ran, static (i, r) =>
+            {
+                if (i == 7) throw new ArgumentException("item 7");
+                r[i] = 1;
+            }));
+        Assert.Equal("item 7", thrown.Message);
+        // Serial: the items before the throw ran, none after it did.
+        Assert.Equal(7, ran.Sum());
+    }
+
+    [Fact]
     public void StatefulFor_FansOut_AndRethrowsAWorkerExceptionUnwrapped()
     {
         ConcurrentBag<int> seen = [];
