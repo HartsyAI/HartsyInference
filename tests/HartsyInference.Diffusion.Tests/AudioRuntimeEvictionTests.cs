@@ -10,7 +10,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>The audio memory-pressure sweep must keep the model about to run and any pinned model. It used to compare the prefixed job key against the caches' bare keys, so under pressure every STT↔TTS switch evicted the incoming runner and reloaded it. Pressure is forced through <c>vram.audioEvictBelowGb</c>; the host floor only fires where <c>/proc/meminfo</c> exists, so the eviction assertions are conditional on that while the keep assertions never are.</summary>
 public sealed class AudioRuntimeEvictionTests
 {
-    private static readonly bool HostPressureObservable = File.Exists("/proc/meminfo");
+    private static bool HostPressureObservable => AudioEvictionPressure.HostPressureObservable;
 
     [Fact]
     public async Task Switch_UnderHostPressure_KeepsIncomingModel()
@@ -139,29 +139,7 @@ public sealed class AudioRuntimeEvictionTests
         Assert.Equal("fx:demucs:htdemucs", new AudioJob(runtime.Demucs, "htdemucs").ModelKey);
     }
 
-    /// <summary>Raises the host-RAM eviction floor far above any real machine so the next model switch takes the pressure path; restores the knob on dispose.</summary>
-    private static IDisposable ForceHostPressure()
-    {
-        bool hadOverride = KnobStore.HasOverride(EngineKnobs.AudioEvictBelowGb);
-        long previous = EngineKnobs.AudioEvictBelowGb.Value;
-        KnobStore.Set(EngineKnobs.AudioEvictBelowGb, 1_000_000_000L);
-        return new KnobRestore(hadOverride, previous);
-    }
-
-    private sealed class KnobRestore(bool hadOverride, long previous) : IDisposable
-    {
-        public void Dispose()
-        {
-            if (hadOverride)
-            {
-                KnobStore.Set(EngineKnobs.AudioEvictBelowGb, previous);
-            }
-            else
-            {
-                KnobStore.Clear(EngineKnobs.AudioEvictBelowGb);
-            }
-        }
-    }
+    private static IDisposable ForceHostPressure() => AudioEvictionPressure.Force();
 
     private sealed class FakeTtsRunner : ITtsRunner
     {

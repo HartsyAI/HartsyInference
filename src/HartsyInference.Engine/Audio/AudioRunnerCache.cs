@@ -37,6 +37,9 @@ internal sealed class AudioRunnerCache<TRunner>(string category) : IAudioRunnerC
     /// <summary>Whether a runner for <paramref name="key"/> is currently resident. Diagnostics and test seam; callers that need the runner use <see cref="GetOrLoadAsync"/>.</summary>
     internal bool IsResident(string key) => _entries.ContainsKey(key);
 
+    /// <summary>Keys of every resident runner, in no particular order. Diagnostics and test seam.</summary>
+    internal IReadOnlyCollection<string> ResidentKeys => [.. _entries.Keys];
+
     /// <inheritdoc/>
     public IDisposable Pin(string key)
     {
