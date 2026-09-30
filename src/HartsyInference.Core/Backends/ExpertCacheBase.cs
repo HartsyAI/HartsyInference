@@ -4,7 +4,8 @@ namespace HartsyInference.Core.Backends;
 
 /// <summary>Device-independent expert residency: in-flight dedup, pinning, a segmented LRU with per-layer frequency, and fence-gated eviction. A backend supplies the five transfer hooks.</summary>
 /// <remarks><para>Replacement scans probation before the protected segment, then colder layers before hotter ones, then oldest use first;
-/// pinned experts and the ones being requested are never victims, and a prefetch never evicts from the layers it targets or the layer last acquired. Every hook runs under the cache lock.</para></remarks>
+/// pinned experts and the ones being requested are never victims. A prefetch also never evicts from the layers it targets or the layer last acquired;
+/// <see cref="Acquire"/> does not protect its own layer, since a layer's unpinned experts must be replaceable by that layer's next request. Every hook runs under the cache lock.</para></remarks>
 public abstract class ExpertCacheBase : IExpertCache
 {
     private const double ProtectedFraction = 0.8;
@@ -101,6 +102,7 @@ public abstract class ExpertCacheBase : IExpertCache
             ThrowIfDisposed();
             HashSet<ExpertKey> requested = [.. unique];
             List<ExpertWeights> missing = [];
+            HashSet<ExpertKey> missingKeys = [];
             long missingBytes = 0;
             int hits = 0, inFlight = 0;
             foreach (ExpertKey key in unique)
@@ -113,6 +115,7 @@ public abstract class ExpertCacheBase : IExpertCache
                 }
                 ExpertWeights weights = Resolve(key);
                 missing.Add(weights);
+                missingKeys.Add(key);
                 missingBytes += weights.Bytes;
             }
 
@@ -132,7 +135,7 @@ public abstract class ExpertCacheBase : IExpertCache
             {
                 ExpertCacheEntry entry = _entries[key];
                 entry.PinCount++;
-                Touch(entry, resident: !missing.Any(w => w.Key == key));
+                Touch(entry, resident: !missingKeys.Contains(key));
             }
             _hits += hits;
             _inFlightHits += inFlight;
@@ -180,18 +183,25 @@ public abstract class ExpertCacheBase : IExpertCache
         if (!ReferenceEquals(lease.Owner, this)) throw new InvalidOperationException("Lease belongs to a different expert cache.");
         lock (_gate)
         {
-            if (!lease.TryMarkReleased()) return;
+            if (lease.IsReleased) return;
+            if (_disposed)
+            {
+                lease.TryMarkReleased();
+                _live.Remove(lease);
+                return;
+            }
+            // Recorded before the lease is marked or any pin drops, so a failure leaves it releasable again.
+            ExpertFence fence = new(RecordFence(), 0);
+            lease.TryMarkReleased();
             _live.Remove(lease);
-            if (_disposed) return;
-            ExpertFence? fence = null;
             foreach (ExpertWeights weights in lease.Weights)
             {
                 if (!_entries.TryGetValue(weights.Key, out ExpertCacheEntry? entry)) continue;
                 entry.PinCount--;
-                fence ??= new ExpertFence(RecordFence(), 0);
                 fence.References++;
                 entry.Fences.Add(fence);
             }
+            if (fence.References == 0) DestroyFence(fence.Handle);
         }
     }
 
@@ -235,7 +245,6 @@ public abstract class ExpertCacheBase : IExpertCache
             try { Drain(); }
             catch (Exception error) { (failures ??= []).Add(error); }
         }
-        GC.SuppressFinalize(this);
         if (failures is not null) throw new AggregateException("Expert cache teardown failed.", failures);
     }
 
@@ -264,7 +273,14 @@ public abstract class ExpertCacheBase : IExpertCache
         if (entry.Pending is null) return;
         object pending = entry.Pending;
         entry.Pending = null;
-        AwaitUpload(pending);
+        try { AwaitUpload(pending); }
+        catch
+        {
+            // The copy was never ordered before compute; a later hit must not see this entry as ready.
+            try { RemoveEntry(entry, countEviction: false); }
+            catch { /* the original failure is the one to report */ }
+            throw;
+        }
     }
 
     private void Touch(ExpertCacheEntry entry, bool resident)
@@ -391,6 +407,11 @@ public abstract class ExpertCacheBase : IExpertCache
     private void EvictEntry(ExpertCacheEntry entry, bool countEviction = true)
     {
         AwaitPending(entry);
+        RemoveEntry(entry, countEviction);
+    }
+
+    private void RemoveEntry(ExpertCacheEntry entry, bool countEviction)
+    {
         foreach (ExpertFence fence in entry.Fences.ToList())
         {
             if (!IsFenceDone(fence.Handle)) WaitFence(fence.Handle);

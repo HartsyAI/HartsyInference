@@ -12,6 +12,8 @@ internal sealed class FakeExpertCache : ExpertCacheBase
     public int LiveFences { get; private set; }
     public bool Drained { get; private set; }
     public ExpertKey? FailUploadOf { get; set; }
+    public ExpertKey? FailAwaitOf { get; set; }
+    public bool FailRecordFence { get; set; }
 
     protected override object? BeginUpload(ExpertWeights weights)
     {
@@ -20,12 +22,17 @@ internal sealed class FakeExpertCache : ExpertCacheBase
         return weights.Key;
     }
 
-    protected override void AwaitUpload(object pending) => Events.Add("await " + pending);
+    protected override void AwaitUpload(object pending)
+    {
+        if (FailAwaitOf is { } key && Equals(pending, key)) throw new InvalidOperationException("await failed");
+        Events.Add("await " + pending);
+    }
 
     protected override void Evict(ExpertWeights weights) => Events.Add("evict " + weights.Key);
 
     protected override object RecordFence()
     {
+        if (FailRecordFence) throw new InvalidOperationException("fence failed");
         LiveFences++;
         return new FenceBox { Done = FencesComplete };
     }

@@ -124,7 +124,7 @@ public sealed unsafe class CudaQuantWorkspaceTests
         ExpertMatrix[] matrices = [weights.W1, weights.W2, weights.W3];
         for (int m = 0; m < matrices.Length; m++)
         {
-            using QuantWorkspaceLease dense = backend.QuantWorkspace.Dequantize(matrices[m]);
+            using QuantWorkspaceLease dense = backend.QuantWorkspace.Dequantize(lease, matrices[m]);
             AssertBitExact($"w{m + 1} {c}", HostReference(matrices[m]), ReadBack(backend, dense));
         }
     }
@@ -153,6 +153,8 @@ public sealed unsafe class CudaQuantWorkspaceTests
         AssertBitExact("second", expected, ReadBack(backend, second));
         AssertBitExact("third", expected, ReadBack(backend, third));
 
+        lease.Dispose();
+        cache.Dispose();
         Case big = new(QuantEncoding.Fp8E4M3BlockE8M0, 32, 32, 4096, 4096, 0);
         Assert.True(big.Rows * big.Cols * 2L > CudaQuantWorkspace.DefaultSlotBytes);
         ExpertMatrix oversize = Build(big, 6);
@@ -167,8 +169,16 @@ public sealed unsafe class CudaQuantWorkspaceTests
         if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: no CUDA device"); return; }
         using CudaBackend backend = new(0, PtxDir());
         ExpertMatrix cold = Build(new Case(QuantEncoding.Mxfp4E8M0, 1, 32, 8, 96, 0), 7);
+        ExpertMatrix dense0 = new(new Tensor(new TensorShape(4, 4), DType.F32));
         Assert.Throws<InvalidOperationException>(() => backend.QuantWorkspace.Dequantize(cold));
-        ExpertMatrix dense = new(new Tensor(new TensorShape(4, 4), DType.F32));
+        using CudaExpertCache cache = new(backend, 64L << 20, [BankOf(cold, cold, cold)]);
+        ExpertLease lease = cache.Acquire([new ExpertKey(0, 0)]);
+        ExpertMatrix held = lease.Get(new ExpertKey(0, 0)).W1;
+        Assert.Throws<ArgumentException>(() => backend.QuantWorkspace.Dequantize(lease, dense0));
+        lease.Dispose();
+        Assert.Throws<InvalidOperationException>(() => backend.QuantWorkspace.Dequantize(lease, held));
+        Assert.Throws<InvalidOperationException>(() => new CudaExpertCache(backend, 1L << 20));
+        ExpertMatrix dense = dense0;
         Assert.Throws<NotSupportedException>(() => backend.QuantWorkspace.Dequantize(dense));
     }
 }

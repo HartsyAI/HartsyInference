@@ -78,7 +78,7 @@ public sealed unsafe class CudaExpertM1FixtureTests
             {
                 string name = $"layers.0.ffn.experts.{Experts[e]}.{Projections[p]}@0";
                 float[] expected = MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(Path.Combine(FixtureDir, name + ".w.f32"))).ToArray();
-                using QuantWorkspaceLease dense = backend.QuantWorkspace.Dequantize(matrices[p]);
+                using QuantWorkspaceLease dense = backend.QuantWorkspace.Dequantize(lease, matrices[p]);
                 ushort[] want = expected.Select(CudaQuantWorkspaceTests.ToBf16).ToArray();
                 CudaQuantWorkspaceTests.AssertBitExact(name, want, CudaQuantWorkspaceTests.ReadBack(backend, dense));
                 checkedMatrices++;

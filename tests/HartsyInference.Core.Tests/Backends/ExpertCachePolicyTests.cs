@@ -69,6 +69,37 @@ public sealed class ExpertCachePolicyTests
     }
 
     [Fact]
+    public void Acquire_AwaitFailureDropsTheEntryInsteadOfLeavingAReadyLookingHit()
+    {
+        using FakeExpertCache cache = MakeCache(4, 0);
+        cache.FailAwaitOf = K(0, 1);
+        Assert.Throws<InvalidOperationException>(() => cache.Acquire([K(0, 1)]));
+        Assert.Equal(0, cache.Stats.ResidentExperts);
+
+        cache.FailAwaitOf = null;
+        using ExpertLease lease = cache.Acquire([K(0, 1)]);
+        Assert.Equal(2, cache.Events.Count(e => e == "upload " + K(0, 1)));
+        Assert.Equal(0, cache.Stats.Hits);
+    }
+
+    [Fact]
+    public void Release_FenceFailureLeavesTheLeasePinnedAndReleasableAgain()
+    {
+        using FakeExpertCache cache = MakeCache(2, 0);
+        ExpertLease lease = cache.Acquire([K(0, 0), K(0, 1)]);
+        cache.FailRecordFence = true;
+        Assert.Throws<InvalidOperationException>(() => cache.Release(lease));
+        Assert.False(lease.IsReleased);
+        Assert.Throws<OutOfVramException>(() => cache.Acquire([K(0, 2)]));
+
+        cache.FailRecordFence = false;
+        cache.Release(lease);
+        Assert.True(lease.IsReleased);
+        using ExpertLease next = cache.Acquire([K(0, 2), K(0, 3)]);
+        Assert.Equal(2, next.Weights.Count);
+    }
+
+    [Fact]
     public void Release_UnpinsAndIsIdempotent()
     {
         using FakeExpertCache cache = MakeCache(4, 0);

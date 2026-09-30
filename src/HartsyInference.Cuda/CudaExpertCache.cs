@@ -5,11 +5,15 @@ namespace HartsyInference.Cuda;
 /// <summary>Expert cache on the backend's <see cref="CudaStreamingWeightCache"/>: one expert is one <c>BeginUploadAsync</c> of its weights and scales through the pinned staging ring, on the upload stream.</summary>
 /// <remarks>Source pinning stays off: experts are mmap-backed and must reach the device through the pinned staging ring, never host-registration.
 /// Expert tensors are excluded from the ≥1 MB auto-promotion, so an evicted expert is never resurrected as a permanent weight.
-/// Disposing drains both streams, evicts every expert and returns the staging ring.</remarks>
+/// One cache per backend: it changes streaming-cache settings that it restores on dispose. Disposing drains both streams, evicts every expert and returns the staging ring.</remarks>
 public sealed class CudaExpertCache : ExpertCacheBase
 {
     private readonly CudaStreamingWeightCache _streaming;
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<CudaStreamingWeightCache, object> Active = [];
+
     private readonly bool _previousPinUploadSource;
+    private readonly int _previousStagingSlots;
+    private readonly bool _registered;
 
     /// <summary>Creates a cache of at most <paramref name="budgetBytes"/> resident expert bytes on <paramref name="backend"/>'s device.</summary>
     /// <param name="stagingSlots">Pinned staging slots, one per upload that can be in flight before the host waits; at least the prefetch depth.</param>
@@ -19,7 +23,11 @@ public sealed class CudaExpertCache : ExpertCacheBase
         ArgumentNullException.ThrowIfNull(backend);
         _streaming = backend.StreamingCache as CudaStreamingWeightCache
             ?? throw new InvalidOperationException("The backend has no CUDA streaming weight cache.");
+        if (!Active.TryAdd(_streaming, this))
+            throw new InvalidOperationException("A CudaExpertCache is already active on this backend; the streaming cache settings it changes are not shareable.");
+        _registered = true;
         _previousPinUploadSource = _streaming.PinUploadSource;
+        _previousStagingSlots = _streaming.StagingSlotCount;
         _streaming.PinUploadSource = false;
         _streaming.StagingSlotCount = Math.Max(_streaming.StagingSlotCount, stagingSlots);
     }
@@ -55,5 +63,7 @@ public sealed class CudaExpertCache : ExpertCacheBase
     {
         _streaming.DrainAndReleasePool();
         _streaming.PinUploadSource = _previousPinUploadSource;
+        _streaming.StagingSlotCount = _previousStagingSlots;
+        if (_registered) Active.Remove(_streaming);
     }
 }

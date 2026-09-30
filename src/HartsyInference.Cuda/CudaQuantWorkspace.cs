@@ -46,7 +46,18 @@ public sealed class CudaQuantWorkspace : IDisposable
         }
     }
 
-    /// <summary>Unpacks <paramref name="matrix"/> to BF16 into the next free slot. The matrix's weight and scale must already be device resident (uploaded by the expert cache).</summary>
+    /// <summary>Unpacks one matrix of a live <paramref name="lease"/>, so the weight and scale are pinned for the duration of the call and the queued kernel.</summary>
+    public QuantWorkspaceLease Dequantize(ExpertLease lease, ExpertMatrix matrix)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        ArgumentNullException.ThrowIfNull(matrix);
+        if (lease.IsReleased) throw new InvalidOperationException("The expert lease was released; its weights may be evicted.");
+        bool owned = lease.Weights.Any(w => ReferenceEquals(w.W1, matrix) || ReferenceEquals(w.W2, matrix) || ReferenceEquals(w.W3, matrix));
+        if (!owned) throw new ArgumentException("The matrix is not part of the lease.", nameof(matrix));
+        return Dequantize(matrix);
+    }
+
+    /// <summary>Unpacks <paramref name="matrix"/> to BF16 into the next free slot. The caller must keep the owning expert pinned; prefer the lease overload.</summary>
     public QuantWorkspaceLease Dequantize(ExpertMatrix matrix)
     {
         ArgumentNullException.ThrowIfNull(matrix);
