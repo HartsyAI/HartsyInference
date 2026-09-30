@@ -229,6 +229,12 @@ no bug, any more than one bad seed was proof there was one.
   NaN, no error.
 - **pos_embed / norm weights read as F32 via `(float*)ptr` when the checkpoint stores F16** → auto-cast
   to F32 at load.
+- **Some fp8 repacks cast EVERY tensor to F8, biases and norm affines included.** The Comfy-Org
+  HunyuanImage 2.1 file is 856/856 F8_E4M3 with no scale companions. `CudaBackend.LayerNorm`'s F32 path
+  upcasts only F16/BF16 affine, so the token refiner's F8 `norm1`/`norm2` were read as floats → prompt-free
+  2×2 blobs. ComfyUI hides this by casting weight and bias per op. Fix: `CheckpointConvertUtils.WidenFp8Vectors`
+  at conversion. Before blaming a new layout's key mapping, dequantize its converted tensors and compare them
+  against a known-good file (e.g. the GGUF) by cosine; a clean table means the fault is dtype, not names.
 
 ---
 

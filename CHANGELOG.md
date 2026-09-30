@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.202
+
+- **The Comfy-Org HunyuanImage 2.1 repack loads and renders** (`hunyuanimage21-fp8-1_0-hunyuan-image-21-base-fp8.safetensors`,
+  the `split_files/diffusion_models` file). Its ComfyUI module names (`img_attn.qkv`, `img_mod.lin`, `norm.query_norm.scale`,
+  `in_layer`/`out_layer`, `model.model.` prefix) are renamed to the original-Tencent layout the converter already maps
+  to diffusers. The repack also casts every bias and norm affine to raw F8_E4M3; those rank-0/1 tensors are now widened
+  to F32 at conversion (`CheckpointConvertUtils.WidenFp8Vectors`). Left as fp8, the CUDA F32 `LayerNorm` read the token
+  refiner's affine bytes as floats, and the output was prompt-free blobs.
+
 ## alpha.201
 
 - Native CUDA 3-D convolution declines transient VRAM allocation failures without disabling the route for the session.
