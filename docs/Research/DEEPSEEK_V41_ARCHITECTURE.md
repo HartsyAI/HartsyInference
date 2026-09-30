@@ -70,7 +70,7 @@ Short derivative pins are the revisions inspected; resolve them to full hashes b
   gray 127, normalize (x−0.5)/0.5, at most 1024 tokens. Span layout `IMAGE_START + (IMAGE×w + NEWLINE)×h + IMAGE_END`; every span position carries id 129264; learned
   `image_start/end/newline` embeddings; image tokens use `bias_vl` routing and are DEAD for Engram.
 - **Tokenizer.** HF byte-level BPE (128000 + 1283 added tokens); a three-stage `Split` pre-tokenizer (`\p{N}{1,3}`, CJK run, DeepSeek-V3 regex) + ByteLevel. `add_bos_token=false`
-  (the encoder writes BOS as text). BOS 0, EOS 1, pad 2, image 129264. The engine's `HfTokenizerJson` honours only the first `Split`, so ids cannot match HF until PR 10.
+  (the encoder writes BOS as text). BOS 0, EOS 1, pad 2, image 129264. `HfTokenizerJson` builds a `PreTokenizerPipeline` that runs every `Split` stage in order (behavior and invert honoured) before ByteLevel; ids match HF `tokenizers` on the committed stress corpus (PR 10).
 - **Conversation protocol** (`encoding/encoding.py`). Role markers `<｜System｜>`, `<｜User｜>`, `<｜Assistant｜>`, `<｜latest_reminder｜>`; `<think>`/`</think>` (chat mode writes
   `</think>` immediately); `Reasoning Effort: N` (1..100; low = 50, high = 75, max = 100) rendered only at index 0 in thinking mode; tools rendered as JSON schemas with the
   `<｜DSML｜ calls>` / `<｜DSML｜ invoke name=..>` / `<｜DSML｜ parameter name=.. string="true|false">` template (**leading space in tag names**, `namespace::tool` names); tool results are
@@ -115,7 +115,7 @@ Dense weights per layer are about 170 MB (6.8 GB for 40 layers). One expert is a
 - The engine's `ApplyFp8ScaledDequant` folds only scalar `.weight_scale`; a rank-2 scale is dropped silently and `weight_scale_inv` survives unused, so block-FP8 would load and run at scale 1.0.
 - The reference `act_quant` uses an amax floor of 1e-4 and, with `scale_fmt`, a power-of-two ceiling taken from the fp32 exponent bits. `fp4_act_quant` floors amax at 6·2^-126 on the e8m0 path and 6·2^-9 on the e4m3 path (scale = e4m3(amax/6)).
 - Engram constants (multipliers, primes, compressed token map) come from NumPy PCG64 and the Rust `unicode_normalization` pipeline. They are pinned as Python-dumped fixtures; .NET normalization is not assumed identical.
-- The `tokenizer.json` CJK split regex uses classes from the HF regex crate; the .NET translation needs a proof against a dumped id list, not inspection.
+- The `tokenizer.json` CJK split regex uses classes from the HF regex crate; the .NET translation is proved against the dumped HF id list (`encoder_reference.json` stress corpus), and astral code points go through a same-category BMP proxy because .NET regex works on UTF-16.
 
 ## Reference gaps
 

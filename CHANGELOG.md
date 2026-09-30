@@ -6,13 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.204
+## alpha.205
 
 - **LLM generation goes through one model contract.** `IGenerationModel` and `ISequenceState` (with cursor-only
   `Checkpoint`/`Rollback`) sit between the generation pipeline and the transformer, and `GenericTransformerModel` adapts
   the existing `GenericTransformer` to it. `TextGenerationPipeline` and `DynamicBatchScheduler` gain `IGenerationModel`
   constructors; the old constructors build the adapter, so public signatures are unchanged. Projection, RoPE-table and
   gated-FFN helpers moved into shared internal statics that `GenericTransformer` delegates to. No behaviour change is intended.
+
+## alpha.204
+
+- **Multi-stage pre-tokenizer and a structured conversation encoder (DeepSeek-V4.1 PR 10).** `HfTokenizerJson` read only the
+  first `Split` of a `Sequence` pre-tokenizer; the new `PreTokenizerPipeline` runs every `Split` stage in order with HF
+  behavior/invert semantics, then ByteLevel. Astral code points now tokenize correctly (the old single regex mangled surrogate
+  pairs), and an unknown pre-tokenizer stage type or non-Regex `Split` pattern throws `NotSupportedException`
+  instead of being ignored. `ChatMessage` gains blocks, tool calls, reasoning content, task and the `tool`/`latest_reminder`
+  roles; `IConversationEncoder` returns `EncodedConversation` (ids, image spans, dead/vision-route masks, initial parser
+  state). `DeepSeekV41Encoder` ports the upstream `encoding.py` render half; rendered text is byte-equal to the five
+  upstream fixtures and ids equal HF `tokenizers`. It is not registered in the catalog yet.
 
 ## alpha.203
 
