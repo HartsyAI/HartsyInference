@@ -303,8 +303,10 @@ public sealed class KokoroPipeline : IDisposable
 
     /// <summary>Uploads every submodule weight to the backend once. Without this the small tensors (AdaIN
     /// projections, biases, Snake alphas — each under the auto-promotion floor) re-upload on every op of every call.
-    /// Unsynchronized like the rest of the pipeline (one synthesis at a time, the voice-pack cache's contract); a
-    /// repeated preload is a no-op for already-resident weights, and the device copies live and die with the backend.</summary>
+    /// Unsynchronized like the rest of the pipeline (one synthesis at a time, the voice-pack cache's contract). A
+    /// repeated preload is a no-op for already-resident weights, and the backend is recorded only after the preload
+    /// succeeds, so one that throws part-way is retried by the next call. The device copies live and die with the
+    /// backend.</summary>
     private void EnsureWeightsResident(IBackend backend)
     {
         if (ReferenceEquals(_residentBackend, backend)) return;
@@ -313,7 +315,7 @@ public sealed class KokoroPipeline : IDisposable
     }
 
     /// <summary>Every device-side weight of the four submodules.</summary>
-    public IEnumerable<Tensor> EnumerateWeights()
+    internal IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor t in _plBert.EnumerateWeights()) yield return t;
         foreach (Tensor t in _textEncoder.EnumerateWeights()) yield return t;

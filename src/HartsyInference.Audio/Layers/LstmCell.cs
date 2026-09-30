@@ -1,5 +1,7 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -174,25 +176,43 @@ internal static unsafe class LstmOps
         }
     }
 
-    /// <summary>Four independent accumulators: a single chain is bound by FMA latency, not throughput.</summary>
+    /// <summary>Four independent accumulators: a single chain is bound by FMA latency, not throughput. The x86 FMA
+    /// intrinsics and an explicit lane reduction are used on every target framework — <c>Vector.FusedMultiplyAdd</c>
+    /// does not exist on net8.0, and a framework-specific reduction order would make the net8.0 and net10.0 builds
+    /// disagree in the last bit on the same machine.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static float Dot(float* a, float* b, int n)
     {
-        int width = Vector<float>.Count;
-        Vector<float> acc0 = Vector<float>.Zero, acc1 = Vector<float>.Zero, acc2 = Vector<float>.Zero, acc3 = Vector<float>.Zero;
         int i = 0;
-        for (; i <= n - 4 * width; i += 4 * width)
+        float sum = 0f;
+        if (Fma.IsSupported)
         {
-            acc0 = Vector.FusedMultiplyAdd(Vector.Load(a + i), Vector.Load(b + i), acc0);
-            acc1 = Vector.FusedMultiplyAdd(Vector.Load(a + i + width), Vector.Load(b + i + width), acc1);
-            acc2 = Vector.FusedMultiplyAdd(Vector.Load(a + i + 2 * width), Vector.Load(b + i + 2 * width), acc2);
-            acc3 = Vector.FusedMultiplyAdd(Vector.Load(a + i + 3 * width), Vector.Load(b + i + 3 * width), acc3);
+            Vector256<float> acc0 = Vector256<float>.Zero, acc1 = acc0, acc2 = acc0, acc3 = acc0;
+            for (; i <= n - 32; i += 32)
+            {
+                acc0 = Fma.MultiplyAdd(Avx.LoadVector256(a + i), Avx.LoadVector256(b + i), acc0);
+                acc1 = Fma.MultiplyAdd(Avx.LoadVector256(a + i + 8), Avx.LoadVector256(b + i + 8), acc1);
+                acc2 = Fma.MultiplyAdd(Avx.LoadVector256(a + i + 16), Avx.LoadVector256(b + i + 16), acc2);
+                acc3 = Fma.MultiplyAdd(Avx.LoadVector256(a + i + 24), Avx.LoadVector256(b + i + 24), acc3);
+            }
+            for (; i <= n - 8; i += 8)
+            {
+                acc0 = Fma.MultiplyAdd(Avx.LoadVector256(a + i), Avx.LoadVector256(b + i), acc0);
+            }
+            Vector256<float> total = Avx.Add(Avx.Add(acc0, acc1), Avx.Add(acc2, acc3));
+            Vector128<float> half = Sse.Add(total.GetLower(), total.GetUpper());
+            sum = (half.GetElement(0) + half.GetElement(2)) + (half.GetElement(1) + half.GetElement(3));
         }
-        for (; i <= n - width; i += width)
+        else if (Vector.IsHardwareAccelerated)
         {
-            acc0 = Vector.FusedMultiplyAdd(Vector.Load(a + i), Vector.Load(b + i), acc0);
+            int width = Vector<float>.Count;
+            Vector<float> acc = Vector<float>.Zero;
+            for (; i <= n - width; i += width)
+            {
+                acc += Vector.Load(a + i) * Vector.Load(b + i);
+            }
+            sum = Vector.Sum(acc);
         }
-        float sum = Vector.Sum((acc0 + acc1) + (acc2 + acc3));
         for (; i < n; i++) sum += a[i] * b[i];
         return sum;
     }
