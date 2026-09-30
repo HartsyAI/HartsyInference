@@ -968,12 +968,24 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   computed `Math.Cos/Sin` inline for every `k·t` — 2·n² transcendentals per frame — and an iSTFT vocoder at
   n_fft = 20 runs ~27 k frames per sentence each way. A cached per-size `[n, n]` twiddle table holding exactly the
   inline values (so the transform stays bit-identical, `DirectDftTests`) is the whole fix; the per-frame transforms
-  and the NSF harmonic source then split across cores (the source by jumping the
-  phase sum and the xorshift noise state to each worker's start, `DeterministicRng.Advance`, so the sequence stays
+  and the NSF harmonic source then fan out over fixed frame blocks (the source records each block's starting phases
+  in a sequential additions-only pass and jumps the xorshift noise state with `DeterministicRng.Advance`, so it stays
   bit-identical). A `diagnostics.profile` stage timer (`KokoroStageTimer`) is what exposed it: the per-op table only
   labels backend ops, so host DSP between them is invisible there. Waveform correlation is the wrong parity metric
   for an NSF vocoder — a sub-cent F0 change drifts the harmonic phase and sinks it while the log-spectrum and the
   transcript are unchanged; compare log-magnitude STFTs.
+- **Host fan-out in an audio kernel goes through `CpuParallel`, never raw TPL, and its partition must not depend on the
+  core count.** A bare `Parallel.For` ignores `numerics.cpuThreads` (which the voice host lowers to keep cores for its
+  RTP and audio threads), ignores `CpuParallel.EnterInline()` (which a real-time audio thread enters) and floods the
+  shared thread pool that async continuations run on. Size blocks by per-frame cost (`FramePartition`), rent scratch
+  from `ArrayPool`, and pin "same bytes under the default fan-out, a cap of 1 and inline" in a test.
+- **A default-precision A/B can sit below its floor on TF32 rounding alone — run a full-F32 arm before calling it a
+  regression.** StyleTTS 2's prosody predictor is recurrent, so moving one GEMV from TF32 to exact F32 moved a
+  15-word clone to log-spectral correlation 0.976 against the old build (identical length and transcripts); the old
+  build against its own full-F32 output scores 0.973 and flips a duration on 30 words. With every TF32 path off on both
+  arms (`numerics.highPrecisionGemm=true`, `numerics.noTf32=true`, `numerics.audioConvCudnn=false`) the two builds
+  were waveform-identical (correlation 1.000000). Measure the model's own TF32-vs-F32 band first; a floor inside it
+  cannot tell a regression from rounding.
 - **Audio models reloading on every STT↔TTS switch** (fixed alpha.218): the memory-pressure sweep compared the
   prefixed job key (`tts:…`) against the caches' bare keys, so once free host RAM dropped under
   `vram.audioEvictBelowGb` (default 14 GB) it evicted the model it was about to run. Symptom: an
