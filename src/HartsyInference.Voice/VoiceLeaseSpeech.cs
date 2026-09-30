@@ -89,6 +89,13 @@ internal sealed class VoiceLeaseSpeech : IVoiceSpeech
             tts.Dispose();
             throw;
         }
+        if (_sampleRate != 0 && tts.SampleRate != _sampleRate)
+        {
+            // Sessions size their resamplers from the first rate; a reopened model must be the same model.
+            DisposeReplaced(tts);
+            DisposeReplaced(stt);
+            throw new InvalidOperationException($"The reopened synthesizer runs at {tts.SampleRate} Hz, not {_sampleRate} Hz.");
+        }
         _sampleRate = tts.SampleRate;
         ISynthesizerLease? oldTts = Interlocked.Exchange(ref _tts, tts);
         ITranscriberLease? oldStt = Interlocked.Exchange(ref _stt, stt);

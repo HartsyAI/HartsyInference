@@ -157,6 +157,23 @@ public sealed class VoiceBargeInTests
     }
 
     [Fact]
+    public void AQuickAnswerAfterTheReplyIsAnswered()
+    {
+        using Rig rig = new(Options());
+        rig.Speak();
+        rig.Push(0.5, 0f);
+        rig.StopSpeaking();
+        // A caller answering 200 ms after the reply, inside its echo tail, with a short "yes": the speech ends past the
+        // tail, so it is an answer, not echo.
+        rig.Push(0.2, 0f);
+        rig.Push(0.3, VoiceHarness.SpeechLevel);
+        rig.Push(1.0, 0f);
+
+        Assert.Single(rig.Sink.Utterances);
+        Assert.Empty(rig.Sink.Discarded);
+    }
+
+    [Fact]
     public void SpeechThatOutlastsTheReplyIsAnswered()
     {
         using Rig rig = new(Options(enabled: false));

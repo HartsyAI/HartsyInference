@@ -146,7 +146,8 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
     public bool Denoising => _audio.Frontend.Denoising;
 
     /// <summary>Starts the audio thread, warms its per-frame path and begins listening. A start that fails or is
-    /// cancelled ends the session.</summary>
+    /// cancelled ends the session and rethrows; if <see cref="EndAsync"/> is called while it warms, it returns without
+    /// starting and <see cref="State"/> reads <see cref="VoiceAgentState.Ended"/>.</summary>
     public async Task StartAsync(CancellationToken cancel = default)
     {
         lock (_stateLock)
