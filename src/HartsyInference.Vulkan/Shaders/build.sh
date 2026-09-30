@@ -155,6 +155,12 @@ SINGLE_KERNELS=(
     hc_split_sinkhorn
     hc_pre_mix
     hc_post_mix
+    sparse_latent_attention
+    indexer_scores
+    quantize_latent_rows
+    act_quant_dequant
+    build_window_indices
+    rope_interleaved_offset
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do
