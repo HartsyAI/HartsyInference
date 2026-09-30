@@ -7,7 +7,7 @@ using HartsyInference.ModelAssets.Mxfp4;
 namespace HartsyInference.ModelAssets.BlockScale;
 
 /// <summary>Host dequantizer for ModelOpt NVFP4: <c>w = e2m1(nibble) * (e4m3(scale) * weight_scale_2)</c>, low nibble first, one E4M3 scale per 16.</summary>
-/// <remarks>Not <see cref="Nvfp4.Nvfp4Codec"/>, which reads the Comfy layout. Nibble 8 decodes to +0.0; the recipe's input scale is not read.</remarks>
+/// <remarks>Not <see cref="Nvfp4.Nvfp4Codec"/>, which reads the Comfy layout. Nibble 8 decodes to +0.0; the input scale is not read and a zero, NaN or inf global scale decodes as written.</remarks>
 public static unsafe class ModelOptNvfp4Codec
 {
     private static readonly DType[] ScaleTypes = [DType.F8E4M3];

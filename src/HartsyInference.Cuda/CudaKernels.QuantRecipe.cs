@@ -63,6 +63,8 @@ public sealed partial class CudaKernels
         long scaleStride, int scaleColOffset, int blockRows, int group, int bits, nint stream)
     {
         if (_affineToBf16 == 0) throw new InvalidOperationException("dequant_recipe_to_bf16.ptx not present in the Ptx folder.");
+        if (bits != 4 && bits != 8) throw new ArgumentOutOfRangeException(nameof(bits), bits, "Affine dequant reads 4- or 8-bit fields.");
+        if (bits == 4 && cols % 2 != 0) throw new ArgumentException($"4-bit affine dequant needs an even column count; got {cols}.", nameof(cols));
         ulong pArg = packed, sArg = scale, bArg = bias, oArg = output;
         uint rowsArg = (uint)rows, colsArg = (uint)cols, offsetArg = (uint)scaleColOffset;
         uint blockRowsArg = (uint)blockRows, groupArg = (uint)group, bitsArg = (uint)bits;
