@@ -66,10 +66,10 @@ public sealed class VoiceTurnBenchTests
 
     private static readonly (int Words, string Text)[] Sentences =
     [
-        (5, "Please hold while I check that."),
-        (15, "Thanks for calling, I can see your appointment is booked for Tuesday at three in the afternoon."),
+        (5, "Please hold while I check."),
+        (15, "Thanks for calling, I can see your appointment is booked for Tuesday afternoon at three."),
         (30, "I have updated the delivery address on your order, the driver will call you when they are ten minutes "
-            + "away, and you will receive a text message with the tracking link shortly."),
+            + "away, and you will receive a message with the tracking link."),
     ];
 
     private static readonly HashSet<string> StopWords = new(StringComparer.Ordinal)

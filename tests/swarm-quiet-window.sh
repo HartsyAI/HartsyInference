@@ -135,6 +135,8 @@ printf '%s\n' "${TARGET_DESC}"
 # ---- resume state ----------------------------------------------------------------------------------------
 NOW=$(date +%s)
 START=${NOW}
+# --max-minutes caps THIS invocation; START (restored from --state) only reports the total wait.
+INVOCATION_START=${NOW}
 QUIET_SINCE=""
 POLLS=0
 if [[ -n "${STATE}" && -f "${STATE}" ]]; then
@@ -260,8 +262,8 @@ for line in sys.stdin:
         exit 0
     fi
 
-    if [[ -n "${MAX_S}" ]] && (( NOW - START >= MAX_S )); then
-        log "NO WINDOW: waited $(( NOW - START ))s (cap ${MAX_S}s); quiet held ${HELD}s of ${WINDOW_S}s.${STATE:+ State kept in ${STATE}; re-run to continue the window.}"
+    if [[ -n "${MAX_S}" ]] && (( NOW - INVOCATION_START >= MAX_S )); then
+        log "NO WINDOW: this invocation waited $(( NOW - INVOCATION_START ))s (cap ${MAX_S}s), $(( NOW - START ))s in total; quiet held ${HELD}s of ${WINDOW_S}s.${STATE:+ State kept in ${STATE}; re-run to continue the window.}"
         exit 3
     fi
 

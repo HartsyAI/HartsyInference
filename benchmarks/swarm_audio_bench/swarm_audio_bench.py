@@ -53,10 +53,10 @@ VOICE_WARM = 2
 VOICE_TIMED = 5
 VOICE_STT_SECONDS = [2, 5, 10]
 VOICE_TTS_SENTENCES = {
-    5: "Please hold while I check that.",
-    15: "Thanks for calling, I can see your appointment is booked for Tuesday at three in the afternoon.",
+    5: "Please hold while I check.",
+    15: "Thanks for calling, I can see your appointment is booked for Tuesday afternoon at three.",
     30: ("I have updated the delivery address on your order, the driver will call you when they are ten minutes "
-         "away, and you will receive a text message with the tracking link shortly."),
+         "away, and you will receive a message with the tracking link."),
 }
 VOICE_STT_PROVIDER = "whisper_stt"
 VOICE_TTS_PROVIDER = "kokoro_tts"

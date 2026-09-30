@@ -379,6 +379,9 @@ async def run_voice_qwen3(args):
     for i in range(VOICE_WARMUP + VOICE_REPS):
         phase = "warm" if i < VOICE_WARMUP else "timed"
         assert_swarm_idle(sid, f"before call {i + 1}")
+        # A fresh thread per call: the WS path re-sends the whole thread history, so reusing one thread
+        # would grow the prefill by ~550 tokens + a reply every rep (measured: TTFT 9 -> 35 s over 5 reps).
+        tid = create_thread(sid)
         with GpuSampler(spid) as sampler:
             r = await one_generation(sid, tid, VOICE_MODEL, prompt=prompt, max_tokens=VOICE_MAX_TOKENS)
         if sampler.foreign:
@@ -396,8 +399,12 @@ async def run_voice_qwen3(args):
             cards.append(uuid or "unattributed")
 
     tok = count_tokens(sid, VOICE_MODEL, reps[-1]["full_text"])
-    think_empty = reps[-1]["full_text"].lstrip().startswith("<think>") and "</think>" in reps[-1]["full_text"] and \
-        reps[-1]["full_text"].split("</think>", 1)[0].replace("<think>", "").strip() == ""
+    # The extension strips <think>...</think> from full_text (an empty block leaves only its newlines), so
+    # "no reasoning" is judged by absence of reasoning text, plus the chunk-vs-max_tokens gap the empty block
+    # costs; the raw head is kept so a reader can see it.
+    full = reps[-1]["full_text"]
+    reasoning = full.split("</think>", 1)[0].replace("<think>", "").strip() if "</think>" in full else ""
+    think_empty = reasoning == ""
     result = {
         "mode": "voice-qwen3", "model": VOICE_MODEL, "host": BASE_HTTP, "started_utc": start_utc.isoformat(),
         "gpus": gpus, "swarm_pid": spid, "swarm_status_start": status0, "swarm_status_end": swarm_status(sid),
