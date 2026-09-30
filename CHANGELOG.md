@@ -18,7 +18,9 @@ stable release will require. Dates are UTC.
   across shards, or tensor bytes that do not sum to `metadata.total_size`.
 - `SafeTensorHeaderReader` is the shared header validator (`SafeTensorsLoader.Load` and `CheckpointHeader` use it): oversized
   or truncated headers, overlapping or out-of-file tensors, and a `data_offsets` span that disagrees with dtype x shape are
-  rejected up front. Offsets are 64-bit throughout (tested past 4 GiB with a sparse file).
+  rejected up front. Offsets are 64-bit throughout (tested past 4 GiB with a sparse file). `SafeTensorsLoader.Load` is
+  therefore stricter than before about a header that is truncated, overlaps or has a tensor outside the file; it keeps
+  accepting data-less header stubs because it skips only the dtype x shape span check.
 - New safetensors dtypes: `F8_E8M0`, `U16`, `U32`, `U64`, and `F8_E4M3FNUZ`/`F8_E5M2FNUZ`. The FNUZ pair parses (so an
   inventory can list it) but is refused with a clear error when a tensor is materialised, since decoding it as OCP fp8
   would halve every value.

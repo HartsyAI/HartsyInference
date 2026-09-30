@@ -100,6 +100,7 @@ public static class SafeTensorHeaderReader
             }
         }
 
+        // Touching ranges and zero-length tensors at a boundary are fine; a zero-length tensor strictly inside another's span is not.
         extents.Sort(static (a, b) => a.Start != b.Start ? a.Start.CompareTo(b.Start) : a.End.CompareTo(b.End));
         for (int i = 1; i < extents.Count; i++)
         {

@@ -9,6 +9,7 @@ public sealed class SafeTensorShard
     private readonly object _gate = new object();
     private MmapHandle? _map;
     private PreadByteSource? _source;
+    private bool _released;
 
     internal SafeTensorShard(int index, string path, SafeTensorHeader header, bool preadOnly)
     {
@@ -47,6 +48,7 @@ public sealed class SafeTensorShard
     {
         lock (_gate)
         {
+            ObjectDisposedException.ThrowIf(_released, this);
             if (_map is not null)
                 return _map;
             MmapHandle handle = MmapHandle.OpenRead(Path);
@@ -67,13 +69,17 @@ public sealed class SafeTensorShard
     internal PreadByteSource Source()
     {
         lock (_gate)
+        {
+            ObjectDisposedException.ThrowIf(_released, this);
             return _source ??= new PreadByteSource(Path);
+        }
     }
 
     internal void Release()
     {
         lock (_gate)
         {
+            _released = true;
             _map?.Dispose();
             _map = null;
             _source?.Dispose();

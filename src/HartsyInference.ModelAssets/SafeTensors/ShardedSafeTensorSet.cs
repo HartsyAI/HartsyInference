@@ -55,6 +55,8 @@ public sealed class ShardedSafeTensorSet : IDisposable
             throw new FileNotFoundException($"'{directory}' has no {IndexFileName}; pass the shard files to OpenFiles instead.", indexPath);
 
         (Dictionary<string, string> weightMap, long? totalSize) = ReadIndex(indexPath);
+        if (weightMap.Count == 0)
+            throw new HartsyInferenceException($"'{indexPath}' has an empty weight_map; it lists no tensors.");
         List<string> fileNames = weightMap.Values.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToList();
         List<string> missing = fileNames.Where(name => !File.Exists(Path.Combine(directory, name))).ToList();
         if (missing.Count > 0)
@@ -77,6 +79,10 @@ public sealed class ShardedSafeTensorSet : IDisposable
         HashSet<string> distinct = new HashSet<string>(paths, StringComparer.Ordinal);
         if (distinct.Count != paths.Count)
             throw new ArgumentException("The same shard file is listed twice.", nameof(files));
+        List<string> clashes = paths.GroupBy(Path.GetFileName, StringComparer.Ordinal).Where(group => group.Count() > 1)
+            .Select(group => group.Key ?? string.Empty).ToList();
+        if (clashes.Count > 0)
+            throw new ArgumentException($"Shard file names must be unique across directories; repeated: {Examples(clashes)}.", nameof(files));
         List<string> missing = paths.Where(path => !File.Exists(path)).ToList();
         if (missing.Count > 0)
             throw new HartsyInferenceException($"{missing.Count} shard file(s) are missing on disk: {Examples(missing)}.");

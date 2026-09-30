@@ -82,4 +82,15 @@ public sealed class PreadByteSourceTests : IDisposable
         await Assert.ThrowsAsync<HartsyInferenceException>(
             () => source.ReadBatchAsync([new ByteRange(4000, 200)], new byte[200]));
     }
+
+    [Fact]
+    public async Task ReadBatchAsync_ReadFailsMidBatch_ThrowsAfterAllReadsSettled()
+    {
+        using PreadByteSource source = new PreadByteSource(_path);
+        using (FileStream truncate = new FileStream(_path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite))
+            truncate.SetLength(1024);
+        List<ByteRange> ranges = Enumerable.Range(0, 200).Select(i => new ByteRange(i * 16, 16)).ToList();
+
+        await Assert.ThrowsAsync<HartsyInferenceException>(() => source.ReadBatchAsync(ranges, new byte[200 * 16]));
+    }
 }

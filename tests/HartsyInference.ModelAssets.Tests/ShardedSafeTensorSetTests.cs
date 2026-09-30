@@ -291,4 +291,54 @@ public sealed class ShardedSafeTensorSetTests : IDisposable
         Assert.Equal(0, set.MappedShardCount);
         Assert.Throws<ObjectDisposedException>(() => set.GetTensor("a.0"));
     }
+
+    [Fact]
+    public void OpenIndex_EmptyWeightMap_IsRejected()
+    {
+        ShardTestFiles.WriteIndex(_dir, new Dictionary<string, string>(), totalSize: 0);
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => ShardedSafeTensorSet.OpenIndex(_dir));
+
+        Assert.Contains("empty weight_map", error.Message);
+    }
+
+    [Fact]
+    public void GetTensor_AfterDispose_Throws()
+    {
+        ShardTestFiles.WriteThreeShardSet(_dir, out _);
+        ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir);
+        SafeTensorShard shard = set.Shards[0];
+        set.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => set.GetTensor("a.0"));
+        Assert.Throws<ObjectDisposedException>(() => set.GetByteSource(shard));
+        Assert.Equal(0, set.MappedShardCount);
+    }
+
+    [Fact]
+    public void ReleasedShard_DoesNotRemapOrReopen()
+    {
+        ShardTestFiles.WriteThreeShardSet(_dir, out _);
+        ShardedSafeTensorSet set = ShardedSafeTensorSet.OpenIndex(_dir);
+        SafeTensorShard shard = set.Shards[0];
+        set.Dispose();
+
+        Assert.Throws<ObjectDisposedException>(() => shard.Map(adviseRandom: true));
+        Assert.Throws<ObjectDisposedException>(() => shard.Source());
+        Assert.False(shard.IsMapped);
+    }
+
+    [Fact]
+    public void OpenFiles_SameFileNameInTwoDirectories_IsRejected()
+    {
+        string other = Path.Combine(_dir, "other");
+        Directory.CreateDirectory(other);
+        ShardTestFiles.WriteShard(PathOf("s.safetensors"), ShardTestFiles.F32("a", 1f));
+        ShardTestFiles.WriteShard(Path.Combine(other, "s.safetensors"), ShardTestFiles.F32("b", 2f));
+
+        ArgumentException error = Assert.Throws<ArgumentException>(
+            () => ShardedSafeTensorSet.OpenFiles([PathOf("s.safetensors"), Path.Combine(other, "s.safetensors")]));
+
+        Assert.Contains("s.safetensors", error.Message);
+    }
 }

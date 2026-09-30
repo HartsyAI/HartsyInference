@@ -97,6 +97,7 @@ public sealed unsafe class MmapHandle : IDisposable
         }
         catch (EntryPointNotFoundException) { return false; }
         catch (DllNotFoundException) { return false; }
+        catch (BadImageFormatException) { return false; }
     }
 
     [DllImport("libc", EntryPoint = "madvise")]

@@ -58,18 +58,28 @@ public sealed class PreadByteSource : IWeightByteSource
 
         List<Task> inFlight = new List<Task>(Math.Min(ranges.Count, MaxReadsInFlight));
         long written = 0;
-        foreach (ByteRange range in ranges)
+        try
         {
-            if (inFlight.Count == MaxReadsInFlight)
+            foreach (ByteRange range in ranges)
             {
-                Task finished = await Task.WhenAny(inFlight).ConfigureAwait(false);
-                inFlight.Remove(finished);
-                await finished.ConfigureAwait(false);
+                if (inFlight.Count == MaxReadsInFlight)
+                {
+                    Task finished = await Task.WhenAny(inFlight).ConfigureAwait(false);
+                    inFlight.Remove(finished);
+                    await finished.ConfigureAwait(false);
+                }
+                inFlight.Add(ReadRangeAsync(range, destination.Slice((int)written, range.Length), cancellationToken));
+                written += range.Length;
             }
-            inFlight.Add(ReadRangeAsync(range, destination.Slice((int)written, range.Length), cancellationToken));
-            written += range.Length;
+            await Task.WhenAll(inFlight).ConfigureAwait(false);
         }
-        await Task.WhenAll(inFlight).ConfigureAwait(false);
+        catch
+        {
+            // Reads still in flight write into the caller's buffer, so none may outlive this call.
+            try { await Task.WhenAll(inFlight).ConfigureAwait(false); }
+            catch { }
+            throw;
+        }
     }
 
     private async Task ReadRangeAsync(ByteRange range, Memory<byte> destination, CancellationToken cancellationToken)
