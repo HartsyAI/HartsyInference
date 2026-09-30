@@ -16,7 +16,7 @@ stable release will require. Dates are UTC.
   cuBLASLt path.
 - `QuantCompanionBinder.Bind(inventory, QuantFlavor)` pairs each weight with its scale companions from headers alone
   (Official `.scale`/`.weight_scale_inv`, NVFP4, Quark, MLX affine gs64, EXL3) and infers a unique block geometry from the scale
-  shape. One aggregated error lists unpaired weights, orphan companions, ambiguous or unmatched geometry and bad scale dtypes.
+  shape. One aggregated error lists unpaired weights, orphan companions, ambiguous or unmatched geometry and bad scale dtypes (the Official flavor decodes only F8_E8M0 or raw U8 scales).
 - Host codecs `Fp8BlockE8M0Codec` (FP8 E4M3, 32x32 or 1x32 E8M0 scales) and `Mxfp4E8M0Codec` (E2M1, low nibble = even element)
   expose `DequantRows(packed, recipe, rowOffset, rowCount, dest)`; the scale is a multiplier `2^(e - 127)`, byte 255 is NaN.
 - **Fix:** `ApplyFp8ScaledDequant` silently dropped a rank-2 fp8 `.weight_scale`, leaving the raw fp8 weight unscaled. It now

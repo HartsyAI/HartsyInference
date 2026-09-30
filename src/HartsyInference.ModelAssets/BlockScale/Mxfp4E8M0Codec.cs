@@ -35,6 +35,7 @@ public static unsafe class Mxfp4E8M0Codec
         int blockCols = recipe.Geometry.BlockCols;
         if (blockCols % 2 != 0 || cols % 2 != 0)
             throw new NotSupportedException($"Mxfp4 needs even block width and columns; got {recipe.Geometry} over {cols} columns.");
+        long bytesPerBlock = blockCols / 2;
         int blockRows = recipe.Geometry.BlockRows;
         long scaleColOffset = recipe.ScaleColOffset;
         float[] lut = Lut;
@@ -51,12 +52,16 @@ public static unsafe class Mxfp4E8M0Codec
                 byte* rowSrc = (byte*)srcAddr + row * rowBytes;
                 float* rowDst = (float*)dstAddr + (long)r * cols;
                 byte* rowScale = (byte*)scaleAddr + (row / blockRows) * scaleStride + scaleColOffset;
-                for (long j = 0; j < rowBytes; j++)
+                for (long blk = 0, j0 = 0; j0 < rowBytes; blk++, j0 += bytesPerBlock)
                 {
-                    float scale = e8m0[rowScale[(2 * j) / blockCols]];
-                    byte b = rowSrc[j];
-                    rowDst[2 * j] = lut[b & 0x0F] * scale;
-                    rowDst[2 * j + 1] = lut[b >> 4] * scale;
+                    float scale = e8m0[rowScale[blk]];
+                    long end = Math.Min(j0 + bytesPerBlock, rowBytes);
+                    for (long j = j0; j < end; j++)
+                    {
+                        byte b = rowSrc[j];
+                        rowDst[2 * j] = lut[b & 0x0F] * scale;
+                        rowDst[2 * j + 1] = lut[b >> 4] * scale;
+                    }
                 }
             });
         }

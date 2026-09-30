@@ -15,6 +15,7 @@ public static class QuantCompanionBinder
     private static readonly BlockGeometry[] Fp8Geometries = [new(32, 32), new(128, 128), new(1, 32), new(1, 16)];
     private static readonly BlockGeometry[] Fp4Geometries = [new(1, 32), new(1, 16)];
     private static readonly BlockGeometry[] Nvfp4Geometries = [new(1, 16)];
+    private static readonly string[] GenericSuffixes = [".scale", ".scales", ".biases"];
 
     /// <summary>Binds every block-scaled weight in <paramref name="inventory"/> for the given producer's naming.</summary>
     /// <exception cref="HartsyInferenceException">Any weight lacks a companion, a companion has no weight, or geometry/dtype does not fit.</exception>
@@ -95,9 +96,9 @@ public static class QuantCompanionBinder
     private static void BindBlockScaled(BindingRun run, string key, TensorLocation weight, string scaleKey,
         TensorLocation scale, QuantEncoding encoding, BlockGeometry[] candidates)
     {
-        if (!IsBlockScaleDType(scale.DType))
+        if (scale.DType != DType.F8E8M0 && scale.DType != DType.U8)
         {
-            run.Problems.Add($"'{scaleKey}' is {scale.DType.Name}; scale dtype must be one of F8_E8M0, U8, F8_E4M3, F32");
+            run.Problems.Add($"'{scaleKey}' is {scale.DType.Name}; the E8M0 codecs decode only F8_E8M0 or raw U8 scales");
             return;
         }
         if (!TryLogicalShape(run, key, weight, encoding, out long rows, out long cols)) return;
@@ -129,6 +130,7 @@ public static class QuantCompanionBinder
             {
                 run.Claimed.Add(scaleKey);
                 if (hasInput) run.Claimed.Add(inputKey);
+                if (scale2 is not null) run.Claimed.Add(scale2Key);
                 run.PerTensorFp8.Add(key);
             }
             return;
@@ -213,6 +215,7 @@ public static class QuantCompanionBinder
             run.Problems.Add($"EXL3 '{key}' has trellis shape {trellis.Shape}; expected [in/16, out/16, 16*bits]");
             return;
         }
+        // Unverified against real EXL3 files: rows/cols are taken from the svh/suh element counts.
         long rows = run.Inventory[names[1]].Shape.ElementCount, cols = run.Inventory[names[0]].Shape.ElementCount;
         run.Bindings[key] = new QuantBinding(key, QuantEncoding.Exl3Trellis, new BlockGeometry(16, 16), trellis.DType, rows, cols, null,
             Exl3: new Exl3Keys(names[0], names[1], names[2], (int)(trellis.Shape[2] / 16)));
@@ -241,7 +244,7 @@ public static class QuantCompanionBinder
             return false;
         }
         List<BlockGeometry> fits = candidates.Where(g => g.ScaleShape(rows, cols) == (scale.Shape[0], scale.Shape[1])).ToList();
-        if (fits.Count == 1)
+        if (fits.Count >= 1 && fits.All(g => SamePartition(g, fits[0], rows, cols)))
         {
             geometry = fits[0];
             return true;
@@ -253,14 +256,20 @@ public static class QuantCompanionBinder
         return false;
     }
 
-    private static bool IsBlockScaleDType(DType dtype) =>
-        dtype == DType.F8E8M0 || dtype == DType.U8 || dtype == DType.F8E4M3 || dtype == DType.F32;
+    // Geometries that clamp to the same block on this matrix tile it identically, so the first candidate is as good as any.
+    private static bool SamePartition(BlockGeometry a, BlockGeometry b, long rows, long cols) =>
+        Math.Min(a.BlockRows, rows) == Math.Min(b.BlockRows, rows) && Math.Min(a.BlockCols, cols) == Math.Min(b.BlockCols, cols);
+
+    private static bool HasSiblingWeight(BindingRun run, string key) =>
+        run.Inventory.ContainsKey(key[..key.LastIndexOf('.')] + ".weight");
 
     private static void FindOrphans(BindingRun run, string[] suffixes)
     {
         foreach (string key in run.Inventory.Keys.Order(StringComparer.Ordinal))
         {
             if (run.Claimed.Contains(key) || !suffixes.Any(s => key.EndsWith(s, StringComparison.Ordinal))) continue;
+            // Generic names (.scale, .scales, .biases) also belong to norms and unquantized layers; flag them only beside a weight.
+            if (GenericSuffixes.Any(s => key.EndsWith(s, StringComparison.Ordinal)) && !HasSiblingWeight(run, key)) continue;
             run.Problems.Add($"companion '{key}' has no quantized weight to pair with");
         }
     }

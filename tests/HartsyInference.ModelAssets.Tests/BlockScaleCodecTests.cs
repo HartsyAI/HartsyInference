@@ -195,6 +195,28 @@ public sealed class BlockScaleCodecTests
     }
 
     [Fact]
+    public void Mxfp4_SliceCols_DecodesAColumnContiguousCopyWithTheBorrowedScale()
+    {
+        Random rng = new Random(17);
+        const int rows = 8, cols = 128, sliceStart = 64, sliceCols = 64;
+        using Tensor scale = ScaleTensor(rows, cols / 32, rng);
+        byte[] packed = RandomBytes(rows * cols / 2, rng);
+        QuantRecipe recipe = Recipe(QuantEncoding.Mxfp4E8M0, new BlockGeometry(1, 32), rows, cols, scale);
+        float[] full = new float[rows * cols];
+        Mxfp4E8M0Codec.DequantRows(packed, recipe, 0, rows, full);
+
+        QuantRecipe sliced = recipe.SliceCols(sliceStart, sliceCols, "w");
+        byte[] slicedPacked = new byte[rows * sliceCols / 2];
+        for (int r = 0; r < rows; r++)
+            Array.Copy(packed, r * cols / 2 + sliceStart / 2, slicedPacked, r * sliceCols / 2, sliceCols / 2);
+        float[] window = new float[rows * sliceCols];
+        Mxfp4E8M0Codec.DequantRows(slicedPacked, sliced, 0, rows, window);
+
+        for (int r = 0; r < rows; r++)
+            Assert.Equal(full.AsSpan(r * cols + sliceStart, sliceCols).ToArray(), window.AsSpan(r * sliceCols, sliceCols).ToArray());
+    }
+
+    [Fact]
     public void SliceRows_ThroughQuantWeightInfo_NarrowsTheRecipeAndItsScale()
     {
         using Tensor scale = ScaleTensor(4, 2, new Random(16));

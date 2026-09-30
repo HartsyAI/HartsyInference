@@ -45,28 +45,61 @@ public sealed class QuantCompanionBinderTests
     }
 
     [Fact]
-    public void Official_V3WeightScaleInv_Binds128x128()
+    public void Official_V3F32ScaleInv_IsRefusedBecauseTheCodecsDecodeE8M0Only()
     {
         using QuantTestShard shard = new QuantTestShard()
             .Add("m.weight", "F8_E4M3", 256, 384).Add("m.weight_scale_inv", "F32", 2, 3);
 
+        HartsyInferenceException ex = BindFails(shard, QuantFlavor.Official);
+
+        Assert.Contains("F8_E8M0 or raw U8", ex.Message);
+        Assert.Contains("m.weight_scale_inv", ex.Message);
+    }
+
+    [Fact]
+    public void Official_V3StyleE8M0ScaleInv_Binds128x128()
+    {
+        using QuantTestShard shard = new QuantTestShard()
+            .Add("m.weight", "F8_E4M3", 256, 384).Add("m.weight_scale_inv", "F8_E8M0", 2, 3);
+
         QuantBinding binding = Bind(shard, QuantFlavor.Official).Bindings["m.weight"];
 
         Assert.Equal(new BlockGeometry(128, 128), binding.Geometry);
-        Assert.Equal(DType.F32, binding.ScaleDType);
         Assert.Equal("m.weight_scale_inv", binding.ScaleKey);
     }
 
     [Fact]
-    public void Official_AmbiguousGeometry_Throws()
+    public void Official_TileEquivalentGeometries_PickTheCanonical32x32()
     {
-        // A 32x32 weight with a [1,1] scale fits both the 32x32 and 128x128 geometries.
+        // A 32x32 weight with a [1,1] scale fits 32x32 and 128x128, which tile it identically.
         using QuantTestShard shard = new QuantTestShard().Add("m.weight", "F8_E4M3", 32, 32).Add("m.scale", "F8_E8M0", 1, 1);
 
-        HartsyInferenceException ex = BindFails(shard, QuantFlavor.Official);
+        Assert.Equal(new BlockGeometry(32, 32), Bind(shard, QuantFlavor.Official).Bindings["m.weight"].Geometry);
+    }
 
-        Assert.Contains("ambiguous", ex.Message);
-        Assert.Contains("m.scale", ex.Message);
+    [Fact]
+    public void Official_SingleRowWeight_PicksTheCanonicalGeometry()
+    {
+        using QuantTestShard shard = new QuantTestShard().Add("m.weight", "F8_E4M3", 1, 64).Add("m.scale", "F8_E8M0", 1, 2);
+
+        Assert.Equal(new BlockGeometry(32, 32), Bind(shard, QuantFlavor.Official).Bindings["m.weight"].Geometry);
+    }
+
+    [Fact]
+    public void Official_NormScaleWithoutASiblingWeight_IsNotAnOrphan()
+    {
+        using QuantTestShard shard = new QuantTestShard().Add("ls.scale", "F32", 8).Add("m.weight", "BF16", 4, 4);
+
+        Assert.Empty(Bind(shard, QuantFlavor.Official).Bindings);
+    }
+
+    [Fact]
+    public void Nvfp4_PerTensorFp8WithGlobalScale_ClaimsItsCompanions()
+    {
+        using QuantTestShard shard = new QuantTestShard().Add("m.weight", "F8_E4M3", 16, 16)
+            .Add("m.weight_scale", "F32", 1).Add("m.weight_scale_2", "F32", 1);
+
+        Assert.Equal(["m.weight"], Bind(shard, QuantFlavor.NvidiaNvfp4).PerTensorFp8);
     }
 
     [Fact]
@@ -89,14 +122,21 @@ public sealed class QuantCompanionBinderTests
     }
 
     [Fact]
-    public void Official_ScaleWithoutWeight_Throws()
+    public void Official_ScaleBesideAnUnquantizedWeight_Throws()
     {
-        using QuantTestShard shard = new QuantTestShard().Add("gone.scale", "F8_E8M0", 2, 2).Add("n.weight", "BF16", 4, 4).Add("n.scale", "F8_E8M0", 1, 1);
+        using QuantTestShard shard = new QuantTestShard().Add("n.weight", "BF16", 4, 4).Add("n.scale", "F8_E8M0", 1, 1);
 
         HartsyInferenceException ex = BindFails(shard, QuantFlavor.Official);
 
-        Assert.Contains("'gone.scale'", ex.Message);
         Assert.Contains("'n.scale'", ex.Message);
+    }
+
+    [Fact]
+    public void Official_WeightScaleInvWithoutWeight_Throws()
+    {
+        using QuantTestShard shard = new QuantTestShard().Add("gone.weight_scale_inv", "F8_E8M0", 2, 2);
+
+        Assert.Contains("'gone.weight_scale_inv'", BindFails(shard, QuantFlavor.Official).Message);
     }
 
     [Fact]
@@ -113,14 +153,14 @@ public sealed class QuantCompanionBinderTests
     {
         using QuantTestShard shard = new QuantTestShard().Add("m.weight", "F8_E4M3", 32, 64).Add("m.scale", "BF16", 1, 2);
 
-        Assert.Contains("scale dtype must be one of", BindFails(shard, QuantFlavor.Official).Message);
+        Assert.Contains("decode only F8_E8M0 or raw U8", BindFails(shard, QuantFlavor.Official).Message);
     }
 
     [Fact]
     public void Official_ReportsEveryProblemInOneException()
     {
         using QuantTestShard shard = new QuantTestShard().Add("a.weight", "F8_E4M3", 32, 32).Add("b.weight", "I8", 8, 16)
-            .Add("c.scale", "F8_E8M0", 1, 1);
+            .Add("c.weight_scale_inv", "F8_E8M0", 1, 1);
 
         HartsyInferenceException ex = BindFails(shard, QuantFlavor.Official);
 

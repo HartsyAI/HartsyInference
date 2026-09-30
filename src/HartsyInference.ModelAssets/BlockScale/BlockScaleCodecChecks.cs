@@ -33,7 +33,8 @@ internal static class BlockScaleCodecChecks
         long expectedPacked = recipe.LogicalRows * recipe.LogicalCols / recipe.ElementsPerByte;
         if (packedLength != expectedPacked)
             throw new ArgumentException(
-                $"Packed weight is {packedLength} bytes; a {recipe.LogicalRows}x{recipe.LogicalCols} {expected} matrix is {expectedPacked}.", "packed");
+                $"Packed weight is {packedLength} bytes; a {recipe.LogicalRows}x{recipe.LogicalCols} {expected} matrix is {expectedPacked}.",
+                "packed");
         if (destLength != rowCount * recipe.LogicalCols)
             throw new ArgumentException(
                 $"Destination holds {destLength} floats; {rowCount} rows of {recipe.LogicalCols} need {rowCount * recipe.LogicalCols}.", "dest");
