@@ -17,6 +17,8 @@ public sealed class SideModelLegacyPathTests : IDisposable
 
     public SideModelLegacyPathTests()
     {
+        // Load the settings file first: its first load would overwrite the override set below.
+        _ = EngineKnobs.ModelsRoot.Value;
         Directory.CreateDirectory(_tempModelsRoot);
         KnobStore.Set(EngineKnobs.ModelsRoot, _tempModelsRoot);
     }
