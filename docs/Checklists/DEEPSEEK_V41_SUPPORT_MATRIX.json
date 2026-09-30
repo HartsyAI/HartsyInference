@@ -153,8 +153,8 @@
       "feature": "Sparse latent attention, indexer, hc Sinkhorn, latent quantizers",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -170,13 +170,14 @@
         "engine"
       ],
       "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a kernel.py (kernel_ports.py)",
-      "plannedLocation": "src/HartsyInference.Core + Kernels/lm",
+      "plannedLocation": "src/HartsyInference.Core (Backends/*Reference) + Kernels/latent/",
       "dependsOn": [
         "core.moe.route"
       ],
       "acceptanceTest": "CPU refs vs Python dumps; CUDA vs ref 1e-5",
       "pr": 6,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "SparseLatentAttention, IndexerScores, HcSplitSinkhorn/HcPreMix/HcPostMix, QuantizeLatentRows, ActQuantDequantInPlace and BuildWindowIndices: CPU refs match torch dumps (quant bytes exact, attention 1e-5, Sinkhorn 1e-6); CUDA matches the CPU refs (attention/indexer 1e-5, quant/act-quant/hc-mix/window bit-exact); Vulkan throws NotSupported until PR 24b; not checkpoint-verified, nothing here is wired into a model"
     },
     {
       "id": "core.block",
@@ -215,8 +216,8 @@
       "feature": "Interleaved RoPE with inverse on attention output",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -238,7 +239,8 @@
       ],
       "acceptanceTest": "parity with dumped rope outputs; MlaForward untouched",
       "pr": 6,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "ApplyRopeInterleaved(x, cos, sin, rotaryDim, dimOffset) overload: CPU matches torch view_as_complex forward and inverse; CUDA bit-identical to the CPU reference; Vulkan throws NotSupported; MlaForward untouched"
     },
     {
       "id": "core.model",

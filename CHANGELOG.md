@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.208
+
+- **Single-latent sparse attention, indexer, hyper-connection, latent-quantization and window primitives are backend
+  primitives** (`IBackend.SparseLatentAttention`, `IndexerScores`, `HcSplitSinkhorn`, `HcPreMix`, `HcPostMix`,
+  `QuantizeLatentRows`, `ActQuantDequantInPlace`, `BuildWindowIndices`, and an `ApplyRopeInterleaved` overload with a
+  `dimOffset`), DeepSeek-V4.1-Flash program PR 6. A `LatentSource` describes a row cache in F32, FP8 e4m3 + ue8m0/32,
+  FP4 e2m1 + e4m3/16 or FP4 e2m1 + e8m0/32; attention treats one latent as both key and value, addresses a window ring
+  then a main cache through one index space (-1 skipped), adds a per-head fp32 sink to the softmax denominator only, and
+  dequantizes in-kernel. The CPU references live in Core and were checked against pure-torch dumps (quant bytes and
+  act-quant results exact, attention within 1e-5, Sinkhorn within 1e-6). CUDA adds `latent_attention.ptx`,
+  `latent_quant.ptx`, `hc_mix.ptx` and `latent_positions.ptx` (sm_80 baseline, F32 accumulation, drift-checked): attention
+  and indexer agree with the CPU reference within 1e-5, quantization, act-quant, hyper-connection mixes, window indices and
+  rope are bit-identical. Limits: attention needs k <= 12288, the indexer dim <= 512, hyper-connections hc <= 8, and
+  `QuantizeLatentRows` skips (instead of throwing on) a destination row past the cache. Vulkan reports
+  `NotSupportedException`. `MlaForward` and `MoeFeedForward` are unchanged; no model uses these yet.
+
 ## alpha.205
 
 - **Header-first sharded safetensors** (`ShardedSafeTensorSet`, DeepSeek-V4.1-Flash program PR 4). `OpenIndex` (driven by
