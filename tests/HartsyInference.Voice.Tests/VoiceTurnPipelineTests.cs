@@ -44,6 +44,7 @@ public sealed class VoiceTurnPipelineTests
             Assert.All(played.AsSpan(sentence * Sentence, Sentence).ToArray(), sample => Assert.Equal(marker, sample));
         }
         Assert.Equal("[DTMF 5]", Assert.Single(text.Requests).Messages[^1].Content);
+        Assert.All(harness.Reader.Turns, turn => Assert.Equal(1, turn));
     }
 
     [Fact]
@@ -443,6 +444,10 @@ public sealed class VoiceTurnPipelineTests
         int turnTwoStart = Array.IndexOf(played, firstOfTurnTwo);
         Assert.True(turnTwoStart >= 0);
         Assert.All(played.AsSpan(turnTwoStart).ToArray(), sample => Assert.Equal(firstOfTurnTwo, sample));
+        // The tagged read labels every sample with the turn that produced it, so a remote player can drop turn 1 by id.
+        int[] turns = harness.Reader.Turns;
+        Assert.All(turns.AsSpan(0, turnTwoStart).ToArray(), turn => Assert.Equal(1, turn));
+        Assert.All(turns.AsSpan(turnTwoStart).ToArray(), turn => Assert.Equal(2, turn));
     }
 
     [Fact]

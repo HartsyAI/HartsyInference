@@ -8,7 +8,7 @@ namespace HartsyInference.Voice;
 /// <remarks>Monotonic-clock times except <see cref="EndpointMs"/> and <see cref="UtteranceMs"/>, which are counted in
 /// inbound samples, so they hold when audio arrives faster than real time. <see cref="TotalMs"/> therefore adds the
 /// sample-clock hangover to the wall time from the endpoint to the first reply audio queued for
-/// <see cref="VoiceAgentSession.ReadOutbound"/>. The gateway-side stages (jitter buffer, RTP pacing) are measured by
+/// <see cref="VoiceAgentSession.ReadOutbound(Span{float})"/>. The gateway-side stages (jitter buffer, RTP pacing) are measured by
 /// the phone gateway, not here.</remarks>
 public readonly record struct VoiceTurnMetrics
 {

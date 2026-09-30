@@ -284,7 +284,7 @@ public sealed partial class VoiceAgentSession
         private async Task PlayAsync(IAsyncEnumerable<string> reply)
         {
             VoiceModelSet models = session._models;
-            _output = new VoiceTurnOutput(session._outbound, models.SynthesisSampleRate, session._options.OutboundSampleRate);
+            _output = new VoiceTurnOutput(session._outbound, id, models.SynthesisSampleRate, session._options.OutboundSampleRate);
             IAsyncEnumerable<AudioChunk> audio = SentenceChunkedSynthesis.StreamFromDeltas(reply, models.SynthesisSampleRate, Synthesize, RunOnGpu,
                 session._options.FirstSentenceMinChars, session._options.MaxSentenceChars, MaxSynthesisInFlight, token);
             await foreach (AudioChunk chunk in audio.ConfigureAwait(false))

@@ -5,7 +5,7 @@ namespace HartsyInference.Voice.Turns;
 
 /// <summary>One turn's path from synthesized chunks to the outbound queue: fixed 20 ms frames through a
 /// <see cref="StreamingResampler"/> when the synthesizer's rate differs from the outbound rate, then
-/// <see cref="VoiceOutbound.WriteAsync"/> under the turn's flush epoch.</summary>
+/// <see cref="VoiceOutbound.WriteAsync"/> under the turn's flush epoch and turn mark.</summary>
 /// <remarks>The resampler carries its filter context across sentences, so a reply is one continuous signal; it is
 /// built per turn, so one turn's tail never bleeds into the next. Its output trails its input by one frame, so
 /// <see cref="CompleteAsync"/> pads the last partial frame and pushes one frame of silence to emit the reply's final
@@ -15,6 +15,7 @@ internal sealed class VoiceTurnOutput
     private const int FramesPerSecond = 50;
 
     private readonly VoiceOutbound _outbound;
+    private readonly int _turnId;
     private readonly StreamingResampler? _resampler;
     private readonly float[] _input;
     private readonly float[] _output;
@@ -23,10 +24,12 @@ internal sealed class VoiceTurnOutput
     private bool _started;
     private bool _superseded;
 
-    public VoiceTurnOutput(VoiceOutbound outbound, int sourceRate, int outputRate)
+    public VoiceTurnOutput(VoiceOutbound outbound, int turnId, int sourceRate, int outputRate)
     {
         ArgumentNullException.ThrowIfNull(outbound);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(turnId);
         _outbound = outbound;
+        _turnId = turnId;
         _resampler = CreateResampler(sourceRate, outputRate);
         _input = _resampler is null ? [] : new float[_resampler.InputFrameSize];
         _output = _resampler is null ? [] : new float[_resampler.OutputFrameSize];
@@ -99,7 +102,7 @@ internal sealed class VoiceTurnOutput
     {
         if (!_started)
         {
-            _epoch = await _outbound.WaitFlushesAppliedAsync(cancel).ConfigureAwait(false);
+            _epoch = await _outbound.BeginTurnAsync(_turnId, cancel).ConfigureAwait(false);
             _started = true;
         }
         return !_superseded;

@@ -30,7 +30,7 @@ public sealed record VoiceAgentOptions
     /// <summary>Speech synthesizer and its voice.</summary>
     public string TtsModel { get; init; } = "kokoro:af_heart";
 
-    /// <summary>Rate of the audio <see cref="VoiceAgentSession.ReadOutbound"/> returns.</summary>
+    /// <summary>Rate of the audio <see cref="VoiceAgentSession.ReadOutbound(Span{float})"/> returns.</summary>
     public int OutboundSampleRate { get; init; } = 16_000;
 
     /// <summary>Silence after speech that ends the caller's turn.</summary>
