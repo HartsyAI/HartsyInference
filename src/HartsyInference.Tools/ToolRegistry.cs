@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Requests;
@@ -69,17 +68,12 @@ public sealed class ToolRegistry
     }
 
     /// <summary>An <c>{"error": message}</c> JSON result.</summary>
-    public static string ErrorJson(string message)
+    public static string ErrorJson(string message) => JsonText.Write(writer =>
     {
-        using MemoryStream buffer = new();
-        using (Utf8JsonWriter writer = new(buffer))
-        {
-            writer.WriteStartObject();
-            writer.WriteString("error", message);
-            writer.WriteEndObject();
-        }
-        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
-    }
+        writer.WriteStartObject();
+        writer.WriteString("error", message);
+        writer.WriteEndObject();
+    });
 
     private sealed class FunctionToolHandler(string name, string description, string jsonSchema, Func<string, CancellationToken, Task<string>> invoke) : IToolHandler
     {

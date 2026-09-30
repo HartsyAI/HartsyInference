@@ -29,6 +29,7 @@ public sealed class ToolCallParser
     private bool _holdLineStart;
     private bool _holdIsIdentifier;
     private ToolCallMarker? _holdSingle;
+    private bool _closeSeen;
     private JsonBalance _json;
     private GemmaBalance _gemma;
     private int _completed;
@@ -383,7 +384,8 @@ public sealed class ToolCallParser
         _presetName = null;
         _phase = Phase.Prefix;
         _lineStart = true;
-        _state = _rules.CloseMarker is null ? State.Text : State.AfterCall;
+        _closeSeen = false;
+        _state = State.AfterCall;
     }
 
     private bool TryConvertGemma(string block, List<NativeToolCall> into)
@@ -405,14 +407,14 @@ public sealed class ToolCallParser
         Forward(text);
     }
 
-    /// <summary>After a call: whitespace and the closing marker are consumed; anything else resumes plain scanning.</summary>
+    /// <summary>After a call: the whitespace around it and the format's closing marker (once) are consumed; anything else resumes plain scanning at line-start.</summary>
     private void FeedAfterCall(char c)
     {
-        string close = _rules.CloseMarker!;
+        string? close = _closeSeen ? null : _rules.CloseMarker;
         if (_hold.Length == 0)
         {
             if (char.IsWhiteSpace(c)) return;
-            if (c != close[0])
+            if (close is null || c != close[0])
             {
                 _state = State.Text;
                 FeedText(c);
@@ -420,7 +422,7 @@ public sealed class ToolCallParser
             }
             if (close.Length == 1)
             {
-                _state = State.Text;
+                _closeSeen = true;
                 return;
             }
             _holdIsIdentifier = false;
@@ -430,7 +432,7 @@ public sealed class ToolCallParser
             return;
         }
         _hold.Append(c);
-        if (!StartsWith(close, _hold))
+        if (!StartsWith(close!, _hold))
         {
             string held = _hold.ToString();
             _hold.Clear();
@@ -438,11 +440,10 @@ public sealed class ToolCallParser
             for (int i = 0; i < held.Length; i++) Feed(held[i]);
             return;
         }
-        if (_hold.Length == close.Length)
+        if (_hold.Length == close!.Length)
         {
             _hold.Clear();
-            _state = State.Text;
-            _lineStart = true;
+            _closeSeen = true;
         }
     }
 

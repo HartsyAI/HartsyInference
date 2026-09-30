@@ -6,6 +6,36 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.222
+
+- **`HartsyInference.Tools`: opt-in LLM tool calling.** New packable library (references Engine only; not part of the
+  `HartsyInference` meta package). `Parsing/ToolCallFormat` + `ToolCallFormats.RulesFor/Detect` hold the per-family
+  wire formats: Hermes/Qwen `<tool_call>{…}</tool_call>` (closing tag optional, the call ends at the balanced object),
+  Llama-3 `<|python_tag|>` + JSON and the bare `{"name": …, "parameters": …}` object, Gemma 4's
+  `<|tool_call>call:name{k:v,s:<|"|>…<|"|>}<tool_call|>` block (converted to a JSON arguments object), and Mistral's
+  `[TOOL_CALLS][{…}]` array, single object and `name{…}` forms. `ToolCallParser` is incremental (one `StringBuilder`
+  per span, no allocation on the plain-text path), reads markers split across deltas, completes several calls per turn
+  with ids `call_<n>`, consumes the whitespace and closing marker around a call, and forwards anything that does not
+  resolve into a call (invalid JSON, no `name`, a closing tag before the value balanced, a span past 64 KiB, an
+  unterminated span at end) as plain text. Because every local GGUF types the markers as CONTROL/USER_DEFINED tokens
+  that the passthrough detokenizer drops, the bare forms (`{` at line start, `{"name"` anywhere, `[` at line start,
+  `name{` at line start, `call:` anywhere) are first-class rules, not fallbacks. `ToolCallStreamFilter : ITextStreamFilter`
+  emits each call as `TextChunkKind.NativeToolCall` and stops after the first by default (`StopAfterFirstCall`);
+  `ToolCalling.Install(EngineOptions, format?)` sets `TextStreamFilterFactory` for requests that offer `Tools` and
+  returns null for every other request. `ToolRegistry` / `IToolHandler` dispatch a `NativeToolCall`, returning an
+  `{"error": …}` result for an unknown tool or a throwing handler; `ToolSchema.FromDelegate` builds the JSON schema
+  from a C# delegate (`[Description]`, string/integer/number/boolean/enum, defaults and nullable types optional,
+  `CancellationToken` skipped) and `ToolRegistry.Add(name, delegate)` binds the model's arguments to it by name.
+  `ToolLoop.RunAsync(ITextService, ModelSpec, TextRequest, ToolRegistry, maxRounds, ct)` streams a turn, dispatches its
+  calls, appends the assistant turn (`ToolCalls`) and one `TextRole.Tool` message per result (`ToolCallId`, `Name`), and
+  re-runs; each round's `Result`/`ToolCall` stop is suppressed in favour of one final `Result` and stop. Tool results
+  travel as `TextChunkKind.Status` chunks (`Text` = `tool_result:` + result, phase `tool_result`, `ToolCall` set) since
+  no existing kind fits and Engine gains none; the round limit yields a `tool_loop:max_rounds=N` status, the result and
+  `StopReason.ToolCall` without dispatching the last call. Engine's only change is `InternalsVisibleTo` for the new
+  tests. Real-weight gate `Qwen3ToolCallEndToEndTests` (Qwen3-4B Q4_K_M on CUDA, `hang_up`, `EnableThinking=false`)
+  asserts the checkpoint's template compiles to `JinjaChatTemplate`, renders `<tools>`, and streams a parsed call ending
+  as `StopReason.ToolCall`.
+
 ## alpha.221
 
 - **English-only Whisper checkpoints transcribe.** `openai/whisper-{tiny,base,small,medium}.en` and

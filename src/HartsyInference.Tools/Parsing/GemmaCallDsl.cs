@@ -16,7 +16,7 @@ internal static class GemmaCallDsl
     public static bool TryConvert(string block, out string json)
     {
         using MemoryStream buffer = new();
-        using (Utf8JsonWriter writer = new(buffer))
+        using (Utf8JsonWriter writer = new(buffer, JsonText.WriterOptions))
         {
             int pos = 0;
             SkipWhitespace(block, ref pos);

@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using System.Reflection;
-using System.Text;
 using System.Text.Json;
 using HartsyInference.Engine.Requests;
 
@@ -26,8 +25,7 @@ public static class ToolSchema
     public static string ParametersSchema(MethodInfo method)
     {
         ArgumentNullException.ThrowIfNull(method);
-        using MemoryStream buffer = new();
-        using (Utf8JsonWriter writer = new(buffer))
+        return JsonText.Write(writer =>
         {
             writer.WriteStartObject();
             writer.WriteString("type", "object");
@@ -49,8 +47,7 @@ public static class ToolSchema
             foreach (string item in required) writer.WriteStringValue(item);
             writer.WriteEndArray();
             writer.WriteEndObject();
-        }
-        return Encoding.UTF8.GetString(buffer.GetBuffer(), 0, (int)buffer.Length);
+        });
     }
 
     /// <summary>True for parameters that never come from the model.</summary>
