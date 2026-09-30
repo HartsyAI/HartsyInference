@@ -8,22 +8,25 @@ stable release will require. Dates are UTC.
 
 ## alpha.224
 
-- **Kokoro synthesis 6.9× faster on the 3060** (15-word sentence 1145 → 165 ms median in-process, 5 words 778 → 101 ms,
-  30 words 2076 → 267 ms; 1552 → 9 device→host syncs per call). The synthesis graph stays device-resident: the AdaIN /
+- **Kokoro synthesis 6× faster on the 3060** (15-word sentence 1145 → 191 ms median in-process, 165–191 across six runs;
+  5 words 778 → 99 ms, 30 words 2076 → 269 ms; 1552 → 9 device→host syncs per call). The synthesis graph stays device-resident: the AdaIN /
   AdaLN style splits, the length regulator, the style broadcast and channel concats, reflection pads, residual adds and
   the PLBERT head permutes are backend ops (`SliceLastDim`, `LayerNormModulate`, `RepeatTime`, grouped
   `ConvTranspose1d`, `Concat`, `GatherRows`, `Permute0213`, `Add`/`Scale`), `KokoroPipeline` preloads its weights once
   per backend and keeps the two style halves resident for the call, and `KokoroPipeline.EnumerateWeights` is public.
   Bounded, not bit-identical (batched TF32 GEMM grouping and an exact-F32 host recurrence): log-magnitude-STFT
-  correlation vs alpha.218 0.996 / 0.994 / 0.988 for 5 / 15 / 30 words, Whisper transcripts identical. Evidence and the
-  remaining levers in `benchmarks/results/2026-09-30_kokoro_3060_perf.md`.
+  correlation vs alpha.218 0.997 / 0.995 / 0.989 for 5 / 15 / 30 words, Whisper transcripts identical. StyleTTS 2, which
+  shares the predictor, decoder blocks and `BiLstm`, moves by the same bounded amount (log-spectral correlation
+  0.984–0.987, identical lengths) and runs ~2.5× faster; CosyVoice 2, which shares the NSF DSP, is unchanged to
+  waveform correlation 1.000000. Evidence and the remaining levers in `benchmarks/results/2026-09-30_kokoro_3060_perf.md`.
 - **`BiLstm` runs its recurrence on the host.** Both directions' input projections are one GEMM over the whole sequence
   (the two `W_ih` stacked at load), read back once; the sequential `h·W_hhᵀ` step is a SIMD dot per gate row
   (`LstmOps.RunSequence`), the two directions in parallel. `LstmCell.Step` and `LstmOps.GateAndUpdate` are unchanged for
   `UnidirectionalLstm` and `SileroVad`. Pinned to the per-step cell in `BiLstmTests`.
 - **Small-size direct DFT no longer recomputes its twiddles per element.** `Fft.DirectDft` (n < 64) read `Math.Cos/Sin`
   for every `k·t` — 2·n² transcendentals per frame, 650 ms of a Kokoro sentence at n_fft = 20 — and now indexes a cached
-  per-size table. `IStft.Apply` runs its per-frame inverse transforms in parallel blocks ahead of the sequential
+  per-size `[n, n]` table of exactly those values, so its output is bit-identical to before (`DirectDftTests`, n = 16 /
+  20 / 24 / 40 against the inline loop). `IStft.Apply` runs its per-frame inverse transforms in parallel blocks ahead of the sequential
   overlap-add, `NsfVocoderDsp` runs its STFT and iSTFT-head frames in parallel, and the NSF harmonic source splits its
   frames across workers by jumping the phase sum and the noise generator to each worker's start
   (`DeterministicRng.Advance`, the xorshift step as a GF(2) matrix power), so the noise sequence is bit-identical to the

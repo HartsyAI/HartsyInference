@@ -140,10 +140,11 @@ public static class Fft
 
     /// <summary>Direct O(n²) forward DFT for the tiny non-power-of-two sizes (n &lt; 64), in place, double
     /// accumulation. Uses the same <c>e^{-2πi kn/N}</c> sign convention as the radix-2 path so the iSTFT inverse
-    /// trick (<c>conj(FFT(conj(X)))/N</c>) remains valid. The twiddles come from a per-size table indexed by
-    /// <c>(k·t) mod n</c>: an iSTFT vocoder calls this once per frame, so the 2·n² transcendentals an inline
-    /// <c>Math.Cos/Sin</c> would cost are the whole transform's budget.</summary>
-    private static void DirectDft(Span<float> re, Span<float> im, int n)
+    /// trick (<c>conj(FFT(conj(X)))/N</c>) remains valid. The twiddles come from a per-size <c>[n, n]</c> table
+    /// holding exactly the <c>Math.Cos/Sin(2π·k·t/n)</c> values an inline evaluation would produce, so the output
+    /// is bit-for-bit that evaluation's; an iSTFT vocoder calls this once per frame, and the 2·n² transcendentals
+    /// per call were the whole transform's budget.</summary>
+    internal static void DirectDft(Span<float> re, Span<float> im, int n)
     {
         (double[] cosTab, double[] sinTab) = GetDirectTwiddles(n);
         Span<float> outRe = stackalloc float[n];
@@ -151,14 +152,12 @@ public static class Fft
         for (int k = 0; k < n; k++)
         {
             double sumRe = 0, sumIm = 0;
-            int idx = 0;
+            int row = k * n;
             for (int t = 0; t < n; t++)
             {
-                double c = cosTab[idx], s = sinTab[idx];
+                double c = cosTab[row + t], s = sinTab[row + t];
                 sumRe += re[t] * c + im[t] * s;
                 sumIm += im[t] * c - re[t] * s;
-                idx += k;
-                if (idx >= n) idx -= n;
             }
             outRe[k] = (float)sumRe;
             outIm[k] = (float)sumIm;
@@ -172,13 +171,17 @@ public static class Fft
         lock (_twiddleLock)
         {
             if (_directTwiddleCache.TryGetValue(n, out (double[] Cos, double[] Sin) cached)) return cached;
-            double[] cos = new double[n];
-            double[] sin = new double[n];
+            double[] cos = new double[n * n];
+            double[] sin = new double[n * n];
             double twoPiOverN = 2.0 * Math.PI / n;
-            for (int i = 0; i < n; i++)
+            for (int k = 0; k < n; k++)
             {
-                cos[i] = Math.Cos(twoPiOverN * i);
-                sin[i] = Math.Sin(twoPiOverN * i);
+                for (int t = 0; t < n; t++)
+                {
+                    double ang = twoPiOverN * k * t;
+                    cos[k * n + t] = Math.Cos(ang);
+                    sin[k * n + t] = Math.Sin(ang);
+                }
             }
             _directTwiddleCache[n] = (cos, sin);
             return (cos, sin);

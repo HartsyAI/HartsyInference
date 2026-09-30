@@ -961,13 +961,14 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   of audio, and `nvidia-smi` near idle. The shape (hidden 256, a 1 MB `W_hh` against a 1 KB state) is wrong for
   per-step launches in either direction; the fix is one GEMM for all timesteps' input projections (both directions'
   `W_ih` stacked), one readback, and the recurrence itself on the host with a SIMD dot per gate row — 9 syncs per
-  synthesis, 165 ms. StyleTTS 2 shares the layer; `UnidirectionalLstm`/`Gru` (EnCodec, Chatterbox, OpenVoice, RVC)
+  synthesis, 165–191 ms. StyleTTS 2 shares the layer; `UnidirectionalLstm`/`Gru` (EnCodec, Chatterbox, OpenVoice, RVC)
   still step per frame. Watch for: `Linear` call counts in the thousands with `avg_ms` ≈ 0.05 in a
   `diagnostics.profile` dump.
 - **Host DSP that "runs in milliseconds" was 650 ms of a 1.1 s synthesis.** `Fft.DirectDft` (the n < 64 path)
   computed `Math.Cos/Sin` inline for every `k·t` — 2·n² transcendentals per frame — and an iSTFT vocoder at
-  n_fft = 20 runs ~27 k frames per sentence each way. A cached per-size twiddle table (indexed `k·t mod n`) is the
-  whole fix; the per-frame transforms and the NSF harmonic source then split across cores (the source by jumping the
+  n_fft = 20 runs ~27 k frames per sentence each way. A cached per-size `[n, n]` twiddle table holding exactly the
+  inline values (so the transform stays bit-identical, `DirectDftTests`) is the whole fix; the per-frame transforms
+  and the NSF harmonic source then split across cores (the source by jumping the
   phase sum and the xorshift noise state to each worker's start, `DeterministicRng.Advance`, so the sequence stays
   bit-identical). A `diagnostics.profile` stage timer (`KokoroStageTimer`) is what exposed it: the per-op table only
   labels backend ops, so host DSP between them is invisible there. Waveform correlation is the wrong parity metric
