@@ -1,6 +1,7 @@
 namespace HartsyInference.PhoneLink;
 
-/// <summary>Single-byte payload of <see cref="LinkMessageType.CallEnd"/>. Unknown values are preserved, not rejected, so a newer peer can add reasons.</summary>
+/// <summary>Single-byte payload of <see cref="LinkMessageType.CallEnd"/>. Unknown values are preserved, not rejected, so a
+/// newer peer can add reasons.</summary>
 public enum LinkCallEndReason : byte
 {
     /// <summary>The call ran to completion and was hung up by the agent.</summary>

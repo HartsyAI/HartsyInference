@@ -1,11 +1,12 @@
 namespace HartsyInference.PhoneLink;
 
-/// <summary>Frame type byte at header offset 4. Values are the wire encoding and never change meaning; new types take unused values.</summary>
+/// <summary>Frame type byte at header offset 4. Values are the wire encoding and never change meaning; new types take unused
+/// values.</summary>
 public enum LinkMessageType : byte
 {
     /// <summary>Gateway → host, first frame of every connection: version, inbound rate and the shared token.</summary>
     Hello = 0x01,
-    /// <summary>Host → gateway, reply to <see cref="Hello"/>: outbound rate and the largest outbound frame the host will send.</summary>
+    /// <summary>Host → gateway, reply to <see cref="Hello"/>: outbound rate and the largest frame the host will send.</summary>
     HelloAck = 0x02,
     /// <summary>Gateway → host: a call has been answered or placed; JSON payload.</summary>
     CallStart = 0x10,
@@ -25,7 +26,7 @@ public enum LinkMessageType : byte
     Event = 0x30,
     /// <summary>Gateway → host: a DTMF digit was received from the caller.</summary>
     DtmfEvent = 0x31,
-    /// <summary>Host → gateway: run a telephony tool (hang up, send DTMF, transfer, hold, play prompt); requestId then JSON.</summary>
+    /// <summary>Host → gateway: run a telephony tool (hang up, DTMF, transfer, hold, play prompt); requestId then JSON.</summary>
     ToolRequest = 0x40,
     /// <summary>Gateway → host: outcome of a <see cref="ToolRequest"/>; requestId then JSON.</summary>
     ToolResult = 0x41,

@@ -5,6 +5,6 @@ namespace HartsyInference.PhoneLink;
 public enum LinkFrameFlags : byte
 {
     None = 0,
-    /// <summary>On <see cref="LinkMessageType.InboundAudio"/>: the samples were synthesized by packet-loss concealment, not received.</summary>
+    /// <summary>On <see cref="LinkMessageType.InboundAudio"/>: the samples came from packet-loss concealment, not the wire.</summary>
     Concealed = 1,
 }

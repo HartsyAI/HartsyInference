@@ -2,9 +2,11 @@ using System.Buffers.Binary;
 
 namespace HartsyInference.PhoneLink;
 
-/// <summary>The fixed 16-byte little-endian frame header: <c>u32 payloadLength | u8 type | u8 flags | u16 reserved | u32 callId | u32 sequence</c>.
-/// The reserved halfword is written as zero and ignored on read.</summary>
-public readonly record struct LinkFrameHeader(uint PayloadLength, LinkMessageType Type, LinkFrameFlags Flags, uint CallId, uint Sequence)
+/// <summary>The fixed 16-byte little-endian frame header:
+/// <c>u32 payloadLength | u8 type | u8 flags | u16 reserved | u32 callId | u32 sequence</c>. The reserved halfword is written as
+/// zero and ignored on read.</summary>
+public readonly record struct LinkFrameHeader(
+    uint PayloadLength, LinkMessageType Type, LinkFrameFlags Flags, uint CallId, uint Sequence)
 {
     /// <summary>Header size in bytes; the payload starts at this offset.</summary>
     public const int Size = 16;
@@ -22,7 +24,8 @@ public readonly record struct LinkFrameHeader(uint PayloadLength, LinkMessageTyp
         BinaryPrimitives.WriteUInt32LittleEndian(destination.Slice(12), Sequence);
     }
 
-    /// <summary>Parses a header from the first <see cref="Size"/> bytes of <paramref name="source"/>; false when fewer bytes are available. Does not validate the payload length against <see cref="LinkProtocol.MaxPayloadBytes"/>.</summary>
+    /// <summary>Parses a header from the first <see cref="Size"/> bytes of <paramref name="source"/>; false when fewer bytes are
+    /// available. Does not validate the payload length against <see cref="LinkProtocol.MaxPayloadBytes"/>.</summary>
     public static bool TryRead(ReadOnlySpan<byte> source, out LinkFrameHeader header)
     {
         if (source.Length < Size)
