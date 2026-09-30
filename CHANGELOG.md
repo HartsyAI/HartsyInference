@@ -6,6 +6,22 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.217
+
+- **New package `HartsyInference.PhoneLink`** (phone-call voice agent PR4): the gateway-to-host wire protocol, depending on Core only and
+  not part of the `HartsyInference` meta package. Unix-domain-socket transport, host listens and the gateway dials; 16-byte little-endian
+  frame header (`u32 payloadLength | u8 type | u8 flags | u16 reserved | u32 callId | u32 sequence`) with a 1 MB payload cap rejected from
+  the header alone. Audio is raw PCM16 (`InboundAudio` 320 samples at 16 kHz, `OutboundAudio` tagged with a turnId); handshake, call end,
+  DTMF, ping/pong and the turn/request prefixes are binary; `CallStart`, `Event`, `ToolRequest`, `ToolResult` and `Error` bodies are JSON
+  through a source-generated context. Spec with the flush/turnId epoch rule in `docs/Research/PHONE_LINK_PROTOCOL.md`.
+- `LinkFrameWriter` stages header and payload in one pooled buffer and writes each frame with a single stream write; audio frames allocate
+  nothing and a synchronously completed write never enters an async state machine. `LinkFrameReader` reassembles frames across any read
+  boundary in one pooled buffer; `LinkFrame` exposes typed decoders that validate frame type and payload size. Single writer and single
+  reader per direction, enforced.
+- Tests (`tests/HartsyInference.PhoneLink.Tests`, unit lane): byte-exact header golden, a round trip for every message type, a two-frame
+  stream reassembled at every chunk size and every split boundary, oversize rejected and the exact cap accepted, truncated versus clean end
+  of stream, pinned JSON wire shapes, and zero allocation over 1000 audio writes and reads.
+
 ## alpha.216
 
 - **LLM generation goes through one model contract.** `IGenerationModel` and `ISequenceState` (with cursor-only
