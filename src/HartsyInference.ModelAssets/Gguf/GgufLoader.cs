@@ -64,6 +64,7 @@ public sealed class GgufLoader : IDisposable
             metadata.Add(key, value);
             offset += bytesRead;
         }
+        GgufSplitDetector.ThrowIfSplit(metadata, filePath);
         Metadata = metadata;
 
         // Parse tensor infos

@@ -57,13 +57,14 @@ public sealed record CheckpointHeader(
 
     private static CheckpointHeader ReadSafeTensors(string path)
     {
-        using SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(path);
+        // Planners inspect header-only stubs whose tensors carry no data, so the span check is off here.
+        SafeTensorHeader header = SafeTensorHeaderReader.Read(
+            path, SafeTensorHeaderReader.DefaultMaxHeaderBytes, verifyByteLength: false);
         Dictionary<string, SafeTensorDescriptor> descriptors =
-            new Dictionary<string, SafeTensorDescriptor>(loader.Descriptors, StringComparer.Ordinal);
-        Dictionary<string, string> metadata = loader.Metadata is null
+            new Dictionary<string, SafeTensorDescriptor>(header.Tensors, StringComparer.Ordinal);
+        Dictionary<string, string> metadata = header.Metadata is null
             ? new Dictionary<string, string>(StringComparer.Ordinal)
-            : new Dictionary<string, string>(loader.Metadata, StringComparer.Ordinal);
+            : new Dictionary<string, string>(header.Metadata, StringComparer.Ordinal);
         return new CheckpointHeader(ModelFormat.SafeTensors, descriptors, metadata);
     }
 

@@ -1,4 +1,3 @@
-using System.Text.Json;
 using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 
@@ -34,18 +33,14 @@ public sealed class SafeTensorsLoader : IDisposable
         if (fileLength < 8)
             throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"Safetensors file too small: {fileLength} bytes.");
 
-        // Read 8-byte LE header length
-        long headerLength = *(long*)basePtr;
-        if (headerLength <= 0 || headerLength > fileLength - 8)
-            throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"Invalid safetensors header length: {headerLength}.");
-
-        long dataOffset = 8 + headerLength;
-
-        // Parse JSON header
-        ReadOnlySpan<byte> headerJson = new ReadOnlySpan<byte>(basePtr + 8, (int)headerLength);
-        Dictionary<string, SafeTensorDescriptor> descriptors = ParseHeader(headerJson, dataOffset, out Dictionary<string, string>? metadata);
-        Descriptors = descriptors;
-        Metadata = metadata;
+        long headerLength = SafeTensorHeaderReader.CheckHeaderLength(
+            *(ulong*)basePtr, fileLength, SafeTensorHeaderReader.DefaultMaxHeaderBytes, filePath);
+        byte[] headerJson = new ReadOnlySpan<byte>(basePtr + 8, (int)headerLength).ToArray();
+        // Loading stays lenient on span-vs-shape: converters and planners open data-less header stubs.
+        SafeTensorHeader header = SafeTensorHeaderReader.Parse(
+            headerJson, headerLength, fileLength, filePath, verifyByteLength: false);
+        Descriptors = header.Tensors;
+        Metadata = header.Metadata;
     }
 
     /// <summary>Returns a tensor backed by memory-mapped data for the given tensor name. The returned tensor borrows memory from the mmap — do not dispose the loader while using it.</summary>
@@ -59,6 +54,7 @@ public sealed class SafeTensorsLoader : IDisposable
         if (!Descriptors.TryGetValue(name, out SafeTensorDescriptor? descriptor))
             throw new KeyNotFoundException($"Tensor '{name}' not found in safetensors file '{FilePath}'.");
 
+        SafeTensorDTypes.ThrowIfNotMaterialisable(descriptor.DType, name, FilePath);
         void* dataPtr = _handle.PointerAt(descriptor.DataOffset);
         Tensor tensor = new Tensor(dataPtr, descriptor.Shape, descriptor.DType);
         // Root the mmap so the borrowed pointer can't dangle if the caller keeps the tensor but drops the loader
@@ -80,80 +76,6 @@ public sealed class SafeTensorsLoader : IDisposable
         }
         return tensors;
     }
-
-    private static Dictionary<string, SafeTensorDescriptor> ParseHeader(ReadOnlySpan<byte> headerJson, long dataBaseOffset, out Dictionary<string, string>? metadata)
-    {
-        Dictionary<string, SafeTensorDescriptor> descriptors = [];
-        metadata = null;
-        using JsonDocument doc = JsonDocument.Parse(headerJson.ToArray());
-
-        foreach (JsonProperty prop in doc.RootElement.EnumerateObject())
-        {
-            if (prop.Name == "__metadata__")
-            {
-                // The spec restricts __metadata__ to string values; ignore anything else rather than fail the load.
-                metadata = [];
-                foreach (JsonProperty entry in prop.Value.EnumerateObject())
-                {
-                    if (entry.Value.ValueKind == JsonValueKind.String)
-                        metadata[entry.Name] = entry.Value.GetString()!;
-                }
-                continue;
-            }
-
-            JsonElement value = prop.Value;
-
-            // Parse dtype
-            string dtypeStr = value.GetProperty("dtype").GetString()!;
-            DType dtype = ParseDType(dtypeStr);
-
-            // Parse shape
-            JsonElement shapeArray = value.GetProperty("shape");
-            long[] dims = new long[shapeArray.GetArrayLength()];
-            int idx = 0;
-            foreach (JsonElement dim in shapeArray.EnumerateArray())
-            {
-                dims[idx++] = dim.GetInt64();
-            }
-            TensorShape shape = new TensorShape(dims.AsSpan());
-
-            // Parse data offsets [start, end]
-            JsonElement offsets = value.GetProperty("data_offsets");
-            long start = offsets[0].GetInt64();
-            long end = offsets[1].GetInt64();
-
-            descriptors[prop.Name] = new SafeTensorDescriptor
-            {
-                Name = prop.Name,
-                DType = dtype,
-                Shape = shape,
-                DataOffset = dataBaseOffset + start,
-                ByteLength = end - start,
-            };
-        }
-
-        return descriptors;
-    }
-
-    private static DType ParseDType(string dtype) => dtype switch
-    {
-        "F64" => DType.F64,
-        "F32" => DType.F32,
-        "F16" => DType.F16,
-        "BF16" => DType.BF16,
-        "F8_E4M3" => DType.F8E4M3,
-        "F8_E5M2" => DType.F8E5M2,
-        // No checkpoint we consume declares this: ComfyUI ships NVFP4 as U8 with companion scales, and the
-        // relabel to F4_E2M1 happens in Nvfp4Codec. Mapped anyway so a file that does declare it loads rather
-        // than dying here with "Unsupported safetensors dtype" — the packing is identical either way.
-        "F4_E2M1" => DType.F4E2M1,
-        "I64" => DType.I64,
-        "I32" => DType.I32,
-        "I8" => DType.I8,
-        "U8" => DType.U8,
-        "BOOL" => DType.Bool,
-        _ => throw new HartsyInference.Core.Exceptions.HartsyInferenceException($"Unsupported safetensors dtype: {dtype}"),
-    };
 
     public void Dispose()
     {
