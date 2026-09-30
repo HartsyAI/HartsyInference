@@ -122,8 +122,8 @@ internal static class TinyDeepSeekV41Checkpoint
                 tensors.Add(new Tensor($"{name}.weight", "U32", [2, 8], new byte[64]));
                 if (full)
                 {
-                    tensors.Add(new Tensor($"{name}.scales", "BF16", [2, 1], new byte[4]));
-                    tensors.Add(new Tensor($"{name}.biases", "BF16", [2, 1], new byte[4]));
+                    tensors.Add(new Tensor($"{name}.scales", "F32", [2, 1], new byte[8]));
+                    tensors.Add(new Tensor($"{name}.biases", "F32", [2, 1], new byte[8]));
                 }
             }
             else
