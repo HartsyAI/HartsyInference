@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Globalization;
 using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Io;
@@ -10,7 +11,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Text-to-speech service: picks a descriptor from the model spec, materializes the optional voice reference, and runs the synthesis on the shared audio device under the generation lock.</summary>
+/// <summary>Text-to-speech service: picks a descriptor from the model spec, materializes the optional voice reference, and runs the synthesis on the shared audio device under the generation lock. A lease hands the same resident runner to a caller that gates the device itself.</summary>
 public sealed class SpeechService : ISpeechService
 {
     /// <summary>Voice references are decoded at 24 kHz — the rate the cloning models expect.</summary>
@@ -29,29 +30,19 @@ public sealed class SpeechService : ISpeechService
         {
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
-        AudioModelSelector selector = AudioModelSelector.Parse(spec);
-        TtsModelDescriptor descriptor = TtsCatalog.Resolve(selector.Id);
-        // A descriptor whose weights ARE the voice (Piper ships one .onnx per voice) needs the voice in the
-        // variant, or every voice would share the first-loaded pipeline.
-        string variant = descriptor.VoiceSelectsWeights && !string.IsNullOrWhiteSpace(request.Voice)
-            && !request.Voice.Equals("default", StringComparison.OrdinalIgnoreCase) ? request.Voice : selector.Variant;
-        string repo = descriptor.ResolveRepo(variant);
-        IBackend backend = _engine.Backend;
-        TtsLoadContext loadContext = BuildLoadContext(backend);
-        string key = repo + (descriptor.VoiceSelectsWeights ? "|" + variant : "") + loadContext.CacheSuffix();
-
-        IReadOnlyList<IBackend>? stageBackends = loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null;
-        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Tts, key), async ct =>
+        TtsTarget target = ResolveTarget(spec, request.Voice);
+        return _engine.AudioRuntime.RunAsync(target.Backend, new AudioJob(_engine.AudioRuntime.Tts, target.Key), async ct =>
         {
             (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
             try
             {
                 ct.ThrowIfCancellationRequested();
                 ITtsRunner runner = await _engine.AudioRuntime.Tts
-                    .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, variant, token), ct).ConfigureAwait(false);
-                TtsJob job = BuildJob(request, referenceMono, referenceWavPath);
+                    .GetOrLoadAsync(target.Key, token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token), ct)
+                    .ConfigureAwait(false);
+                TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath);
                 long started = Environment.TickCount64;
-                float[] samples = runner.Synthesize(backend, job);
+                float[] samples = runner.Synthesize(target.Backend, job);
                 if (samples is null || samples.Length == 0)
                 {
                     throw new InvalidOperationException("The text-to-speech model produced no audio.");
@@ -66,7 +57,7 @@ public sealed class SpeechService : ISpeechService
                     SampleRate = runner.SampleRate,
                     Meta = new Dictionary<string, string>(StringComparer.Ordinal)
                     {
-                        ["model"] = key,
+                        ["model"] = target.Key,
                         ["seed"] = request.Seed.ToString(CultureInfo.InvariantCulture),
                     },
                 };
@@ -75,7 +66,7 @@ public sealed class SpeechService : ISpeechService
             {
                 DeleteTempReference(referenceWavPath);
             }
-        }, cancel, stageBackends: stageBackends);
+        }, cancel, stageBackends: target.StageBackends);
     }
 
     /// <inheritdoc/>
@@ -86,17 +77,45 @@ public sealed class SpeechService : ISpeechService
         {
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
+        TtsTarget target = ResolveTarget(spec, request.Voice);
+        return StreamCore(target.Backend, target.Key, target.Descriptor, target.LoadContext, target.Variant, request,
+            target.StageBackends, cancel);
+    }
+
+    /// <inheritdoc/>
+    public async Task<ISynthesizerLease> OpenSynthesizerAsync(ModelSpec spec, CancellationToken cancel = default)
+    {
+        TtsTarget target = ResolveTarget(spec, voice: null);
+        AudioRuntime runtime = _engine.AudioRuntime;
+        string? weightsVoice = target.Descriptor.VoiceSelectsWeights ? target.Variant : null;
+        return await runtime.OpenLeaseAsync(target.Backend, runtime.Tts, target.Key,
+            token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token),
+            runner => new SynthesizerLease(runtime, target.Key, runner, target.Backend, weightsVoice),
+            cancel, target.StageBackends).ConfigureAwait(false);
+    }
+
+    /// <summary>Resolves the runner a request names: descriptor, load variant, backend, load context and cache key. The
+    /// one formula the service calls and the leases share, so a lease and a service call on one spec meet in one cache
+    /// entry.</summary>
+    private TtsTarget ResolveTarget(ModelSpec spec, string? voice)
+    {
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         TtsModelDescriptor descriptor = TtsCatalog.Resolve(selector.Id);
-        string variant = descriptor.VoiceSelectsWeights && !string.IsNullOrWhiteSpace(request.Voice)
-            && !request.Voice.Equals("default", StringComparison.OrdinalIgnoreCase) ? request.Voice : selector.Variant;
+        // A descriptor whose weights ARE the voice (Piper ships one .onnx per voice) needs the voice in the
+        // variant, or every voice would share the first-loaded pipeline.
+        string variant = descriptor.VoiceSelectsWeights && IsNamedVoice(voice) ? voice : selector.Variant;
         string repo = descriptor.ResolveRepo(variant);
         IBackend backend = _engine.Backend;
         TtsLoadContext loadContext = BuildLoadContext(backend);
         string key = repo + (descriptor.VoiceSelectsWeights ? "|" + variant : "") + loadContext.CacheSuffix();
         IReadOnlyList<IBackend>? stageBackends = loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null;
-        return StreamCore(backend, key, descriptor, loadContext, variant, request, stageBackends, cancel);
+        return new TtsTarget(descriptor, variant, backend, loadContext, key, stageBackends);
     }
+
+    /// <summary>Whether <paramref name="voice"/> names a voice rather than the model default; "default" is a placeholder
+    /// some callers send.</summary>
+    internal static bool IsNamedVoice([NotNullWhen(true)] string? voice) =>
+        !string.IsNullOrWhiteSpace(voice) && !voice.Equals("default", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Owns reference-file materialization/cleanup around the streamed run, exactly mirroring <see cref="SynthesizeAsync"/>'s non-streaming <c>finally</c>.</summary>
     private async IAsyncEnumerable<AudioChunk> StreamCore(IBackend backend, string key, TtsModelDescriptor descriptor,
@@ -106,7 +125,7 @@ public sealed class SpeechService : ISpeechService
         (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
         try
         {
-            TtsJob job = BuildJob(request, referenceMono, referenceWavPath);
+            TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath);
             await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(backend, new AudioJob(_engine.AudioRuntime.Tts, key),
                 ct => StreamWork(backend, key, descriptor, loadContext, variant, job, ct), cancel, stageBackends).ConfigureAwait(false))
             {
@@ -147,8 +166,8 @@ public sealed class SpeechService : ISpeechService
         }
     }
 
-    /// <summary>Decodes a voice reference to mono 24 kHz samples plus a temp WAV for pipelines that take a file path. Returns <c>(null, null)</c> when no reference was supplied. Shared by both the batch and streaming synthesis paths.</summary>
-    private static (float[]? Mono, string? WavPath) MaterializeReference(AudioClip? reference)
+    /// <summary>Decodes a voice reference to mono 24 kHz samples plus a temp WAV for pipelines that take a file path. Returns <c>(null, null)</c> when no reference was supplied. Shared by the batch and streaming synthesis paths and the synthesizer lease.</summary>
+    internal static (float[]? Mono, string? WavPath) MaterializeReference(AudioClip? reference)
     {
         if (reference is null || reference.Data.Length == 0)
         {
@@ -163,10 +182,10 @@ public sealed class SpeechService : ISpeechService
         return (mono, wavPath);
     }
 
-    /// <summary>Builds the per-model job from the request plus the already-materialized reference. Shared by both the batch and streaming synthesis paths so their knob-mapping never drifts apart.</summary>
-    private static TtsJob BuildJob(SpeechRequest request, float[]? referenceMono, string? referenceWavPath) => new TtsJob
+    /// <summary>Builds the per-model job for <paramref name="text"/> from the request's knobs plus the already-materialized reference. Shared by the batch and streaming synthesis paths and the synthesizer lease so their knob-mapping never drifts apart.</summary>
+    internal static TtsJob BuildJob(string text, SpeechRequest request, float[]? referenceMono, string? referenceWavPath) => new TtsJob
     {
-        Text = request.Text,
+        Text = text,
         RefText = request.RefText,
         Reference = request.Reference,
         ReferenceMono24k = referenceMono,
@@ -213,7 +232,8 @@ public sealed class SpeechService : ISpeechService
         };
     }
 
-    private static void DeleteTempReference(string? path)
+    /// <summary>Deletes the temp WAV <see cref="MaterializeReference"/> wrote, logging rather than throwing on failure.</summary>
+    internal static void DeleteTempReference(string? path)
     {
         if (path is null)
         {
@@ -231,4 +251,9 @@ public sealed class SpeechService : ISpeechService
             Logs.Warning($"[Audio][TTS] Failed to delete the temp voice reference '{path}': {ex.Message}");
         }
     }
+
+    /// <summary>What <see cref="ResolveTarget"/> resolved: the runner's descriptor, load variant, backend, load context,
+    /// cache key and, for a layer-split load, the stage backends to gate.</summary>
+    private readonly record struct TtsTarget(TtsModelDescriptor Descriptor, string Variant, IBackend Backend,
+        TtsLoadContext LoadContext, string Key, IReadOnlyList<IBackend>? StageBackends);
 }

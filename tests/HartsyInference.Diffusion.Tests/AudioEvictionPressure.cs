@@ -9,11 +9,17 @@ internal static class AudioEvictionPressure
     public static bool HostPressureObservable { get; } = File.Exists("/proc/meminfo");
 
     /// <summary>Raises the floor; dispose restores the knob.</summary>
-    public static IDisposable Force()
+    public static IDisposable Force() => SetFloor(1_000_000_000L);
+
+    /// <summary>Drops the floor to 1 GB (the knob coerces zero back to its default) so a box genuinely short of RAM
+    /// cannot evict a test's fake runners; dispose restores the knob.</summary>
+    public static IDisposable Relax() => SetFloor(1L);
+
+    private static IDisposable SetFloor(long floorGb)
     {
         bool hadOverride = KnobStore.HasOverride(EngineKnobs.AudioEvictBelowGb);
         long previous = EngineKnobs.AudioEvictBelowGb.Value;
-        KnobStore.Set(EngineKnobs.AudioEvictBelowGb, 1_000_000_000L);
+        KnobStore.Set(EngineKnobs.AudioEvictBelowGb, floorGb);
         return new Restore(hadOverride, previous);
     }
 

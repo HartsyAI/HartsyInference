@@ -10,6 +10,7 @@ Choose placement by purpose and measure on the actual topology. Engine Placement
 | Run CFG branches concurrently | CfgParallelDevice | --cfg-parallel-gpu |
 | Split attention context | ContextParallelDevices (primary first) | --cp-gpu |
 | Serve independent requests | One InferenceEngine per ordinal | Separate processes or library routing |
+| Audio on one card, LLM on another, one engine | Engine on the audio card; TextRequest.Device on every LLM request | --device (text) |
 
 DiT sharding, CFG parallelism and context parallelism are mutually exclusive. Explicit settings take priority over ParallelPlanner suggestions (--parallel auto); inspect the logged decision. Confirm ordinal-to-physical-GPU mapping; CUDA_DEVICE_ORDER=PCI_BUS_ID makes it explicit.
 
@@ -25,6 +26,7 @@ DiT sharding, CFG parallelism and context parallelism are mutually exclusive. Ex
 - CFG replicas must fit both cards with operating headroom. Exception-only preload success can still leave the secondary thrashing; an active log alone does not prove a speed benefit.
 - Wan context parallelism has two-rank/no-dual-expert/no-step-cache restrictions. Qwen-Image CP exists, but the documented unequal-VRAM pair verified fallback, not active two-card execution. LLM tensor parallelism has exact-token correctness coverage; expert parallelism remains open.
 - Transfers can use peer/NCCL transport or host staging depending on operation/topology. Missing NCCL has a fallback; do not extrapolate PCIe measurements to NVLink.
+- An engine built on the audio card serves an LLM on another card through `TextRequest.Device`. Text slots build their own backend per device and gate only that ordinal, so the LLM loads nothing on the engine's card. A generate or stream request without `Device` lands on the engine's card. `CountTokens` takes no device and loads nothing: it uses an idle loaded slot's tokenizer or an estimate. Audio runner leases (`OpenSynthesizerAsync`/`OpenTranscriberAsync`) always use the engine's backend, and their caller gates that device (`DeviceGate.Acquire(engine.ComputeBackend)`) around each call.
 - One engine per card keeps independent requests local; this is a consumer routing pattern, not an automatic API fleet scheduler. DataParallelServingEngineTests records 1.71× for four requests in the August 7 campaign; the old “skeleton only” claim was obsolete.
 - Same-GPU engines serialize by default. Concurrent mode is opt-in pending soak; the historical capture-abort allocation leak was fixed. Re-run capacity/cancellation tests for changes.
 - Mesh and most world-model placement remain limited; Oasis VAE overlap is implemented. Frame-paced worlds need latency validation before adding boundary transfers.

@@ -16,6 +16,14 @@ internal sealed class AudioRuntime
     /// <summary>Model that ran most recently — switches trigger the memory-pressure eviction check.</summary>
     private string? _lastKey;
 
+    /// <summary>Open runner leases; <see cref="UnloadAll"/> revokes them before it drops their runners.</summary>
+    private readonly List<AudioRunnerLease> _leases = [];
+    private readonly object _leaseLock = new();
+
+    /// <summary>Bumped by every <see cref="UnloadAll"/>, so a lease whose open straddled a release is refused instead of
+    /// holding a dropped runner or a disposed backend.</summary>
+    private int _releaseEpoch;
+
     /// <summary>Free-host-RAM floor (KiB) below which switching models evicts every OTHER resident audio pipeline first. Runners otherwise accumulate (each holds multi-GB weight copies) until the kernel OOM-kills the process — observed at 21.8 GB RSS on a 32 GB box, and again at 11.5 GB with a desktop session sharing the machine, so the floor is generous. Override via vram.audioEvictBelowGb. Host RAM is process-wide, so with several engines each judges the floor independently — acceptable: the floor is generous and the VRAM floor below is genuinely per-device.</summary>
     private static long EvictBelowAvailableKb =>
         EngineKnobs.AudioEvictBelowGb.Value * 1024 * 1024;
@@ -52,16 +60,19 @@ internal sealed class AudioRuntime
         _caches = [Tts, Stt, Music, Vc, Demucs, Enhance];
     }
 
-    /// <summary>Drops every resident audio pipeline of THIS engine, pinned ones included. Called when the engine releases its backend or frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one — a pin protects a runner from memory pressure, not from losing its device. Waits up to <paramref name="waitSeconds"/> for an in-flight generation so the release does not dispose a pipeline out from under it; on timeout it proceeds anyway — teardown must never hang.</summary>
+    /// <summary>Drops every resident audio pipeline of THIS engine, pinned ones included, and revokes every open lease. Called when the engine releases its backend or frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one — a pin protects a runner from memory pressure, not from losing its device. Waits up to <paramref name="waitSeconds"/> in total for an in-flight generation and for lease calls in flight, so the release does not dispose a pipeline out from under either; on timeout it proceeds anyway — teardown must never hang.</summary>
     internal void UnloadAll(int waitSeconds = 0)
     {
-        bool held = _genLock.Wait(TimeSpan.FromSeconds(Math.Max(0, waitSeconds)));
+        TimeSpan budget = TimeSpan.FromSeconds(Math.Max(0, waitSeconds));
+        long deadline = Environment.TickCount64 + (long)budget.TotalMilliseconds;
+        bool held = _genLock.Wait(budget);
         if (!held)
         {
             Logs.Warning($"[Audio] Unloading with a generation still in flight after {waitSeconds}s — proceeding anyway.");
         }
         try
         {
+            RevokeLeases(deadline);
             UnloadAllCore();
         }
         finally
@@ -80,6 +91,26 @@ internal sealed class AudioRuntime
             cache.UnloadAllExcept(null, includePinned: true);
         }
         _lastKey = null;
+    }
+
+    /// <summary>Closes every open lease, each waiting what is left of the release budget for its call in flight.</summary>
+    private void RevokeLeases(long deadline)
+    {
+        AudioRunnerLease[] open;
+        lock (_leaseLock)
+        {
+            _releaseEpoch++;
+            open = [.. _leases];
+            _leases.Clear();
+        }
+        foreach (AudioRunnerLease lease in open)
+        {
+            TimeSpan wait = TimeSpan.FromMilliseconds(Math.Max(0, deadline - Environment.TickCount64));
+            if (!lease.Revoke(wait))
+            {
+                Logs.Warning($"[Audio] Unloading '{lease.ModelKey}' with a lease call still in flight — proceeding anyway.");
+            }
+        }
     }
 
     /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when memory is tight, then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing behind. <paramref name="job"/> names the cache and bare key the work is about to load through <c>GetOrLoadAsync</c>, so the eviction sweep can keep exactly that runner.</summary>
@@ -162,6 +193,52 @@ internal sealed class AudioRuntime
             gate.Dispose();
             _genLock.Release();
         }
+    }
+
+    /// <summary>Opens a lease on the runner for <paramref name="key"/>: loads or reuses it through <see cref="RunAsync{T}"/>, the same locked, gated and eviction-checked path a service call takes, then builds the lease, which pins the key, and registers it for revocation. Pinning inside the generation lock means no sweep can run between the load and the pin.</summary>
+    internal Task<TLease> OpenLeaseAsync<TRunner, TLease>(IBackend backend, AudioRunnerCache<TRunner> cache, string key,
+        Func<CancellationToken, Task<TRunner>> load, Func<TRunner, TLease> create, CancellationToken cancel,
+        IReadOnlyList<IBackend>? stageBackends = null)
+        where TRunner : class, IDisposable
+        where TLease : AudioRunnerLease
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentNullException.ThrowIfNull(load);
+        ArgumentNullException.ThrowIfNull(create);
+        int epoch = Volatile.Read(ref _releaseEpoch);
+        return RunAsync(backend, new AudioJob(cache, key), async ct =>
+        {
+            ct.ThrowIfCancellationRequested();
+            TRunner runner = await cache.GetOrLoadAsync(key, load, ct).ConfigureAwait(false);
+            TLease lease = create(runner);
+            Register(lease, epoch);
+            return lease;
+        }, cancel, stageBackends);
+    }
+
+    /// <summary>Forgets a disposed lease; a no-op for one a release already revoked.</summary>
+    internal void Unregister(AudioRunnerLease lease)
+    {
+        lock (_leaseLock)
+        {
+            _leases.Remove(lease);
+        }
+    }
+
+    /// <summary>Tracks <paramref name="lease"/> for revocation, or disposes it and throws when a release ran after its open began.</summary>
+    private void Register(AudioRunnerLease lease, int epoch)
+    {
+        lock (_leaseLock)
+        {
+            if (_releaseEpoch == epoch)
+            {
+                _leases.Add(lease);
+                return;
+            }
+        }
+        lease.Dispose();
+        throw new ObjectDisposedException(lease.GetType().Name,
+            $"The engine released its audio models while the lease on '{lease.ModelKey}' was opening.");
     }
 
     /// <summary>When switching to a different model with low free host RAM or VRAM, drops every other resident pipeline (runner disposal also releases their auto-promoted GPU weights), keeping the incoming runner by asking ITS cache for the bare key and every pinned runner. Same-model repeat requests never evict, so warm generation stays warm. The keep decision has to go through <see cref="AudioJob.Cache"/>: the caches store bare keys, and handing them the prefixed <see cref="AudioJob.ModelKey"/> used to match nothing, so under pressure every switch evicted the model about to run and reloaded it.</summary>

@@ -40,6 +40,10 @@ public sealed record TextRequest
     public bool? EnableThinking { get; init; }
 
     /// <summary>Target device key (e.g. "cpu", "cuda:0"); null uses the backend's primary device.</summary>
+    /// <remarks>The slot builds its own backend for this key and gates only that ordinal, so an engine built on one card
+    /// can serve its LLM on another. On such an engine every generate and stream request must set this, or the model
+    /// loads on the engine's own card. <see cref="Services.ITextService.CountTokens"/> takes no device and loads
+    /// nothing.</remarks>
     public string? Device { get; init; }
 
     /// <summary>Tool definitions offered to the model; null/empty disables tool calling.</summary>

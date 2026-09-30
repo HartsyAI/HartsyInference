@@ -961,6 +961,11 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   `[Audio] Memory pressure … unloading other resident audio models` line before every request, each followed by a
   full load. Jobs now carry an `AudioJob` (cache + bare key); `AudioRunnerCache.Pin` keeps a runner through
   pressure, and only engine release/backend switch still unloads pinned runners.
+- **A runner lease throws `ObjectDisposedException` after `FreeMemory`:** by design. Synthesizer and transcriber
+  leases hold such a pin, and every engine release (`Dispose`, `FreeMemory`, `SetBackend`, `SetPlacement`) revokes
+  them after waiting for the call in flight. A host that frees memory reopens its leases. An open that never
+  returns means the caller awaited it while holding `DeviceGate` (opening takes the gate itself); open without the
+  gate, then hold it around each call.
 
 ---
 

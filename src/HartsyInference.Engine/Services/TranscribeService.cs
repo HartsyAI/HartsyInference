@@ -6,7 +6,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the shared audio device under the generation lock. Timestamps come from Whisper's native <c>&lt;|t|&gt;</c> tokens (segment granularity — see <see cref="BuildWords"/>) and diarization from <see cref="SpeakerDiarizer"/>.</summary>
+/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the shared audio device under the generation lock; a lease hands the same resident runner to a caller that passes PCM and gates the device itself. Timestamps come from Whisper's native <c>&lt;|t|&gt;</c> tokens (segment granularity — see <see cref="BuildWords"/>) and diarization from <see cref="SpeakerDiarizer"/>.</summary>
 public sealed class TranscribeService : ITranscribeService
 {
     private readonly InferenceEngine _engine;
@@ -18,9 +18,7 @@ public sealed class TranscribeService : ITranscribeService
     public Task<TranscriptResult> RunAsync(ModelSpec spec, AudioRequest request, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        AudioModelSelector selector = AudioModelSelector.Parse(spec);
-        SttModelDescriptor descriptor = SttCatalog.Resolve(selector.Id);
-        string repo = descriptor.ResolveRepo(selector.Variant);
+        (SttModelDescriptor descriptor, string repo) = ResolveTarget(spec);
         IBackend backend = _engine.Backend;
 
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Stt, repo), async ct =>
@@ -82,9 +80,7 @@ public sealed class TranscribeService : ITranscribeService
     public Task<ScoreTranscriptResult> RunScoreAsync(ModelSpec spec, AudioRequest request, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        AudioModelSelector selector = AudioModelSelector.Parse(spec);
-        SttModelDescriptor descriptor = SttCatalog.Resolve(selector.Id);
-        string repo = descriptor.ResolveRepo(selector.Variant);
+        (SttModelDescriptor descriptor, string repo) = ResolveTarget(spec);
         IBackend backend = _engine.Backend;
 
         return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Stt, repo), async ct =>
@@ -106,6 +102,26 @@ public sealed class TranscribeService : ITranscribeService
                 + $"via {repo} in {Environment.TickCount64 - started}ms ({result.WindowCount} window(s)).");
             return result;
         }, cancel);
+    }
+
+    /// <inheritdoc/>
+    public async Task<ITranscriberLease> OpenTranscriberAsync(ModelSpec spec, CancellationToken cancel = default)
+    {
+        (SttModelDescriptor descriptor, string repo) = ResolveTarget(spec);
+        IBackend backend = _engine.Backend;
+        AudioRuntime runtime = _engine.AudioRuntime;
+        return await runtime.OpenLeaseAsync(backend, runtime.Stt, repo, token => descriptor.LoadAsync(repo, token),
+            runner => new TranscriberLease(runtime, repo, runner, backend, descriptor.InputSampleRate), cancel)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>The descriptor and resolved repo (the cache key) a spec names; the one resolution the service calls and
+    /// the lease share.</summary>
+    private static (SttModelDescriptor Descriptor, string Repo) ResolveTarget(ModelSpec spec)
+    {
+        AudioModelSelector selector = AudioModelSelector.Parse(spec);
+        SttModelDescriptor descriptor = SttCatalog.Resolve(selector.Id);
+        return (descriptor, descriptor.ResolveRepo(selector.Variant));
     }
 
     /// <summary>Projects the model's timestamp spans onto <see cref="WordSegment"/>s. <b>These are segment-level, not word-level:</b> Whisper's <c>&lt;|t|&gt;</c> tokens delimit phrases, and true word alignment would need cross-attention DTW, which the decoder does not expose — so <see cref="WordSegment.Word"/> carries the whole span's text. Speaker indices are filled from the diarized span with the largest time overlap.</summary>
