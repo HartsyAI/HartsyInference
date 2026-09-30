@@ -760,12 +760,12 @@ public static unsafe class CheckpointConvertUtils
             Tensor t = weights[key];
             if (t.Shape.Rank > 1 || (t.DType != DType.F8E4M3 && t.DType != DType.F8E5M2) || t.QuantInfo is not null)
                 continue;
+            // CastTo folds Fp8ScaleFactor into the values, so the widened vector carries the 1.0 factor.
             weights[key] = t.CastTo(DType.F32);
             replaced.Add(t);
         }
         return replaced;
     }
-
 
     /// <summary>Folds per-tensor FP8 scale companions into <see cref="Tensor.Fp8ScaleFactor"/> on the matching weight tensors and drops the companions. Supports three companion formats:
     /// <list type="bullet">
