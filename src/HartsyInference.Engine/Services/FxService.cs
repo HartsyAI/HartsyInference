@@ -27,9 +27,13 @@ public sealed class FxService : IFxService
         ArgumentNullException.ThrowIfNull(request);
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         string modelName = string.IsNullOrWhiteSpace(request.Model) ? selector.Variant : request.Model;
+        // The runner is cached by what identifies its weights: an explicit local checkpoint, else the model name
+        // (EnsureDemucsPathAsync resolves the same path for the same pair). The job carries the same key so the
+        // memory-pressure sweep can keep this runner.
+        string cacheKey = selector.LocalPath ?? modelName;
         IBackend backend = _cpuBackend.Value;
 
-        return _engine.AudioRuntime.RunAsync(backend, $"fx:demucs:{modelName}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Demucs, cacheKey), async ct =>
         {
             (float[] left, float[] right) = AudioClipCodec.DecodeStereo(request.Audio, FxCatalog.DemucsSampleRate);
             if (left.Length == 0)
@@ -40,7 +44,7 @@ public sealed class FxService : IFxService
 
             string path = await FxCatalog.EnsureDemucsPathAsync(modelName, selector.LocalPath, ct).ConfigureAwait(false);
             DemucsRunner runner = await _engine.AudioRuntime.Demucs
-                .GetOrLoadAsync(path, _ => Task.FromResult(FxCatalog.LoadDemucs(path, modelName)), ct).ConfigureAwait(false);
+                .GetOrLoadAsync(cacheKey, _ => Task.FromResult(FxCatalog.LoadDemucs(path, modelName)), ct).ConfigureAwait(false);
             long started = Environment.TickCount64;
             (float[] Left, float[] Right)[] stems = runner.Separate(backend, left, right,
                 request.Shifts, request.Overlap, request.Segment, request.Seed);
@@ -75,7 +79,7 @@ public sealed class FxService : IFxService
         // none of which this change touches), not the neural compute this moves to GPU. Root cause still open.
         IBackend backend = _engine.Backend;
 
-        return _engine.AudioRuntime.RunAsync(backend, $"fx:enhance:{FxCatalog.EnhanceRepo}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Enhance, FxCatalog.EnhanceRepo), async ct =>
         {
             float[] mono = AudioClipCodec.DecodeMono(request.Audio, FxCatalog.EnhanceSampleRate);
             if (mono.Length == 0)

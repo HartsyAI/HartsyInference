@@ -46,7 +46,7 @@ public sealed class MusicService : IMusicService
         MusicLoadContext loadContext = BuildLoadContext(backend, request);
         string key = descriptor.CacheKey(selector) + loadContext.CacheSuffix();
 
-        return _engine.AudioRuntime.RunAsync(backend, $"music:{key}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Music, key), async ct =>
         {
             IMusicRunner runner = await _engine.AudioRuntime.Music
                 .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, selector, token), ct).ConfigureAwait(false);
@@ -109,7 +109,7 @@ public sealed class MusicService : IMusicService
         MusicLoadContext loadContext = BuildLoadContext(backend, request);
         string key = descriptor.CacheKey(selector) + loadContext.CacheSuffix();
 
-        return _engine.AudioRuntime.RunAsync(backend, $"music:{key}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Music, key), async ct =>
         {
             IMusicRunner runner = await _engine.AudioRuntime.Music
                 .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, selector, token), ct).ConfigureAwait(false);

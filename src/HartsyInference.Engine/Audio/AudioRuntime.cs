@@ -43,16 +43,16 @@ internal sealed class AudioRuntime
 
     internal AudioRuntime()
     {
-        Tts = new AudioRunnerCache<ITtsRunner>();
-        Stt = new AudioRunnerCache<ISttRunner>();
-        Music = new AudioRunnerCache<IMusicRunner>();
-        Vc = new AudioRunnerCache<IVcRunner>();
-        Demucs = new AudioRunnerCache<DemucsRunner>();
-        Enhance = new AudioRunnerCache<EnhanceRunner>();
+        Tts = new AudioRunnerCache<ITtsRunner>("tts");
+        Stt = new AudioRunnerCache<ISttRunner>("stt");
+        Music = new AudioRunnerCache<IMusicRunner>("music");
+        Vc = new AudioRunnerCache<IVcRunner>("vc");
+        Demucs = new AudioRunnerCache<DemucsRunner>("fx:demucs");
+        Enhance = new AudioRunnerCache<EnhanceRunner>("fx:enhance");
         _caches = [Tts, Stt, Music, Vc, Demucs, Enhance];
     }
 
-    /// <summary>Drops every resident audio pipeline of THIS engine. Called when the engine releases its backend or frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one. Waits up to <paramref name="waitSeconds"/> for an in-flight generation so the release does not dispose a pipeline out from under it; on timeout it proceeds anyway — teardown must never hang.</summary>
+    /// <summary>Drops every resident audio pipeline of THIS engine, pinned ones included. Called when the engine releases its backend or frees memory, since a pipeline that bound to the old device (ACE-Step) must not survive into the next one — a pin protects a runner from memory pressure, not from losing its device. Waits up to <paramref name="waitSeconds"/> for an in-flight generation so the release does not dispose a pipeline out from under it; on timeout it proceeds anyway — teardown must never hang.</summary>
     internal void UnloadAll(int waitSeconds = 0)
     {
         bool held = _genLock.Wait(TimeSpan.FromSeconds(Math.Max(0, waitSeconds)));
@@ -77,13 +77,13 @@ internal sealed class AudioRuntime
     {
         foreach (IAudioRunnerCache cache in _caches)
         {
-            cache.UnloadAllExcept(null);
+            cache.UnloadAllExcept(null, includePinned: true);
         }
         _lastKey = null;
     }
 
-    /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when memory is tight, then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing behind.</summary>
-    internal async Task<T> RunAsync<T>(IBackend backend, string modelKey, Func<CancellationToken, Task<T>> work, CancellationToken cancel,
+    /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when memory is tight, then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing behind. <paramref name="job"/> names the cache and bare key the work is about to load through <c>GetOrLoadAsync</c>, so the eviction sweep can keep exactly that runner.</summary>
+    internal async Task<T> RunAsync<T>(IBackend backend, AudioJob job, Func<CancellationToken, Task<T>> work, CancellationToken cancel,
         IReadOnlyList<IBackend>? stageBackends = null)
     {
         ArgumentNullException.ThrowIfNull(backend);
@@ -96,17 +96,17 @@ internal sealed class AudioRuntime
             : await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
         try
         {
-            EvictOthersUnderMemoryPressure(backend, modelKey);
+            EvictOthersUnderMemoryPressure(backend, job);
             return await work(cancel).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
-            Logs.Debug($"[Audio] '{modelKey}' was cancelled.");
+            Logs.Debug($"[Audio] '{job.ModelKey}' was cancelled.");
             throw;
         }
         catch (Exception ex)
         {
-            Logs.Error($"[Audio] '{modelKey}' failed: {ex.Message}", ex);
+            Logs.Error($"[Audio] '{job.ModelKey}' failed: {ex.Message}", ex);
             throw;
         }
         finally
@@ -129,7 +129,7 @@ internal sealed class AudioRuntime
     }
 
     /// <summary>Streaming counterpart to <see cref="RunAsync{T}"/>: holds this engine's generation lock and device gate for the ENTIRE consumption of the returned stream, not just until <paramref name="work"/> returns — the underlying generation loop keeps running on the device until every item has been yielded. Releases when the consumer finishes draining, breaks early, or cancels; the async-iterator's <c>finally</c> below runs exactly once either way. (C# forbids <c>yield return</c> inside a <c>try</c> with a <c>catch</c> clause, so unlike <see cref="RunAsync{T}"/> this does not itself log-and-rethrow — exceptions still propagate to the caller, they just aren't logged at this layer.)</summary>
-    internal async IAsyncEnumerable<T> RunStreamAsync<T>(IBackend backend, string modelKey,
+    internal async IAsyncEnumerable<T> RunStreamAsync<T>(IBackend backend, AudioJob job,
         Func<CancellationToken, IAsyncEnumerable<T>> work, [EnumeratorCancellation] CancellationToken cancel,
         IReadOnlyList<IBackend>? stageBackends = null)
     {
@@ -141,7 +141,7 @@ internal sealed class AudioRuntime
             : await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
         try
         {
-            EvictOthersUnderMemoryPressure(backend, modelKey);
+            EvictOthersUnderMemoryPressure(backend, job);
             await foreach (T item in work(cancel).WithCancellation(cancel).ConfigureAwait(false))
             {
                 yield return item;
@@ -164,9 +164,10 @@ internal sealed class AudioRuntime
         }
     }
 
-    /// <summary>When switching to a different model with low free host RAM or VRAM, drops every other resident pipeline (runner disposal also releases their auto-promoted GPU weights). Same-model repeat requests never evict, so warm generation stays warm.</summary>
-    private void EvictOthersUnderMemoryPressure(IBackend backend, string modelKey)
+    /// <summary>When switching to a different model with low free host RAM or VRAM, drops every other resident pipeline (runner disposal also releases their auto-promoted GPU weights), keeping the incoming runner by asking ITS cache for the bare key and every pinned runner. Same-model repeat requests never evict, so warm generation stays warm. The keep decision has to go through <see cref="AudioJob.Cache"/>: the caches store bare keys, and handing them the prefixed <see cref="AudioJob.ModelKey"/> used to match nothing, so under pressure every switch evicted the model about to run and reloaded it.</summary>
+    private void EvictOthersUnderMemoryPressure(IBackend backend, AudioJob job)
     {
+        string modelKey = job.ModelKey;
         if (string.Equals(_lastKey, modelKey, StringComparison.Ordinal))
         {
             return;
@@ -183,7 +184,7 @@ internal sealed class AudioRuntime
                 + $"{freeVramBytes / 1024.0 / 1024 / 1024:0.0} GB free) — unloading other resident audio models before '{modelKey}'.");
             foreach (IAudioRunnerCache cache in _caches)
             {
-                cache.UnloadAllExcept(modelKey);
+                cache.UnloadAllExcept(ReferenceEquals(cache, job.Cache) ? job.Key : null);
             }
             // Disposal only drops host references; the finalizer queue that frees the promoted GPU copies is drained
             // lazily on the compute thread, so without forcing it here the card stays full across a model switch and

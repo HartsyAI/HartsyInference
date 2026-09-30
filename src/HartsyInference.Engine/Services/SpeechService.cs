@@ -41,7 +41,7 @@ public sealed class SpeechService : ISpeechService
         string key = repo + (descriptor.VoiceSelectsWeights ? "|" + variant : "") + loadContext.CacheSuffix();
 
         IReadOnlyList<IBackend>? stageBackends = loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null;
-        return _engine.AudioRuntime.RunAsync(backend, $"tts:{key}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Tts, key), async ct =>
         {
             (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
             try
@@ -107,7 +107,7 @@ public sealed class SpeechService : ISpeechService
         try
         {
             TtsJob job = BuildJob(request, referenceMono, referenceWavPath);
-            await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(backend, $"tts:{key}",
+            await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(backend, new AudioJob(_engine.AudioRuntime.Tts, key),
                 ct => StreamWork(backend, key, descriptor, loadContext, variant, job, ct), cancel, stageBackends).ConfigureAwait(false))
             {
                 yield return chunk;
