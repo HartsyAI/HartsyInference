@@ -6,6 +6,32 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.224
+
+- **Kokoro synthesis 6.6× faster on the 3060** (15-word sentence 1145 → 173 ms median in-process, 5 words 778 → 118 ms,
+  30 words 2076 → 283 ms; 1552 → 9 device→host syncs per call). The synthesis graph stays device-resident: the AdaIN /
+  AdaLN style splits, the length regulator, the style broadcast and channel concats, reflection pads, residual adds and
+  the PLBERT head permutes are backend ops (`SliceLastDim`, `LayerNormModulate`, `RepeatTime`, grouped
+  `ConvTranspose1d`, `Concat`, `GatherRows`, `Permute0213`, `Add`/`Scale`), `KokoroPipeline` preloads its weights once
+  per backend and keeps the two style halves resident for the call, and `KokoroPipeline.EnumerateWeights` is public.
+  Bounded, not bit-identical (batched TF32 GEMM grouping and an exact-F32 host recurrence): log-magnitude-STFT
+  correlation vs alpha.219 0.996 / 0.994 / 0.988 for 5 / 15 / 30 words, Whisper transcripts identical. Evidence and the
+  remaining levers in `benchmarks/results/2026-09-30_kokoro_3060_perf.md`.
+- **`BiLstm` runs its recurrence on the host.** Both directions' input projections are one GEMM over the whole sequence
+  (the two `W_ih` stacked at load), read back once; the sequential `h·W_hhᵀ` step is a SIMD dot per gate row
+  (`LstmOps.RunSequence`), the two directions in parallel. `LstmCell.Step` and `LstmOps.GateAndUpdate` are unchanged for
+  `UnidirectionalLstm` and `SileroVad`. Pinned to the per-step cell in `BiLstmTests`.
+- **Small-size direct DFT no longer recomputes its twiddles per element.** `Fft.DirectDft` (n < 64) read `Math.Cos/Sin`
+  for every `k·t` — 2·n² transcendentals per frame, 650 ms of a Kokoro sentence at n_fft = 20 — and now indexes a cached
+  per-size table. `IStft.Apply` runs its per-frame inverse transforms in parallel blocks ahead of the sequential
+  overlap-add, `NsfVocoderDsp` runs its STFT and iSTFT-head frames in parallel, and the NSF harmonic source splits its
+  frames across workers by jumping the phase sum and the noise generator to each worker's start
+  (`DeterministicRng.Advance`, the xorshift step as a GF(2) matrix power), so the noise sequence is bit-identical to the
+  sequential walk (`NsfVocoderDspTests`).
+- `KokoroBenchTests` (opt-in, `HARTSY_KOKORO_BENCH=1`, GpuIntegration): 5 / 15 / 30-word Kokoro latency on the 3060 with
+  sync counts, PCM dumps, a reference comparison (max-abs, waveform and log-spectral correlation) and Whisper-tiny
+  recall; `KokoroStageTimer` reports per-stage wall time under `diagnostics.profile`.
+
 ## alpha.223
 
 - **Runner leases on the speech services.** `ISpeechService.OpenSynthesizerAsync(spec)` and
