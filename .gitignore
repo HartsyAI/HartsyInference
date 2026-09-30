@@ -133,3 +133,6 @@ src/HartsyInference.Cuda/Kernels/**/*.ptx
 /benchmarks/generated/*
 !/benchmarks/generated/overview.svg
 !/benchmarks/generated/summary.json
+
+# Pinned Engram hash constants (dumped from upstream engram.py; embedded into HartsyInference.LLM)
+!/src/HartsyInference.LLM/DeepSeekV41/Engram/Constants/*.bin
