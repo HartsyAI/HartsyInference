@@ -38,7 +38,7 @@ phone-gateway process
        OutboundAudioPath (resample hostRate→8k, producer lock) → SpscRing; Flush → FlushAck; ToolRequest; CallEnd
    phone-link-writer (EngineLink)
        control lane (64 deep, never dropped while up) before audio lane (10 deep, drop-oldest) → LinkFrameWriter
-       Ping every 5 s; closes a connection silent for 20 s
+       Ping every 5 s; a timer watchdog closes a connection that received nothing, or had one write stuck, for 20 s
    LinkOutageGuard  host gone mid-call → "one moment" prompt (repeat) → reconnect: CallStart(resume) │
                     after outageHangupSeconds → "goodbye" prompt → hang up
    AdminEndpoint    HttpListener on 127.0.0.1: GET /health, GET /metrics, POST /calls (bearer token)
@@ -49,7 +49,7 @@ Queues and who touches them:
 | Queue | Producer | Consumer | Full behaviour |
 |---|---|---|---|
 | outbound `SpscRing<short>` (2^18 samples ≈ 32 s @ 8 kHz) | link reader (host audio) or prompt player, serialized by a producer lock | tick thread, lock-free | drop newest, counted |
-| `RtpJitterBuffer` (8 × 20 ms, target depth 3) | sipsorcery receive thread | pump thread | reset on a packet beyond the window |
+| `RtpJitterBuffer` (8 × 20 ms, target depth 3) | sipsorcery receive thread | pump thread | reset on a packet beyond the window (a new SSRC is caught by its timestamp jump, not by comparing SSRCs; one stream per call) |
 | link audio lane (10 frames) | pump thread | link writer | drop oldest, counted |
 | link control lane (64) | SIP/tool threads, link reader (acks, pongs) | link writer | sender waits, 5 s then `TimeoutException` |
 
@@ -125,7 +125,7 @@ never in the environment: the `*File` fields name secret files, read once at sta
 | `sip.rtpPortStart/End` | RTP port range (shuffled). Forward it, and `sip.port`, on the router for a provider; nothing to do on a LAN. |
 | `sip.codec` | `Any` (PCMU then PCMA), `Pcmu`, `Pcma`. Only G.711 at 8 kHz is ever negotiated. |
 | `sip.inboundPolicy` | `AllowAll`, `Allowlist` (caller user part in `allowlist`, else 603), `Reject` (always 603). The allowlist matches the `From` header, which anyone who can reach `sip.port` can set: on a trunk, firewall `sip.port` and the RTP range to the provider's addresses. |
-| `sip.destinationPrefixes` | Number prefixes (e.g. `+1555`) that outbound calls and the `transfer` tool may dial, matched against the number or a SIP URI's user part; empty allows any. The agent can be talked into dialling by its caller, so set this on a real trunk to rule out premium-rate toll fraud. |
+| `sip.destinationPrefixes` | Number prefixes (e.g. `+1555`) that outbound calls and the `transfer` tool may dial; needs `sip.registrar`. A bare number is dialled as `sip:<number>@<registrar>`, and a SIP URI must name the registrar's host (a matching number at another host would take the call, and the account's digest answer, elsewhere). Empty allows any destination. The agent can be talked into dialling by its caller, so set this on a real trunk to rule out premium-rate toll fraud. |
 | `sip.greetingPromptFile` | Raw 8 kHz PCM16 file played to every answered inbound call before the host speaks. |
 | `link.outageHangupSeconds` | How long a live call waits for the host before "goodbye" and hang-up. |
 | `link.tokenFile` | Absolute path of the file holding the shared PhoneLink token sent in `Hello`; empty sends no token. |
