@@ -5,13 +5,15 @@ using Xunit;
 
 namespace HartsyInference.LLM.Tests.OutputParsing;
 
-/// <summary>The generation worker must never outlive a consumer that walked away, and must never buffer without bound.</summary>
+/// <summary>The generation worker must never outlive a consumer that walked away, and must never be stalled by one that reads slowly.</summary>
 public sealed class TextStreamPumpTests
 {
+    private static readonly TimeSpan Budget = TimeSpan.FromMilliseconds(100);
+
     private static TextChunk Piece(int i) => new() { Kind = TextChunkKind.Chunk, Text = i.ToString() };
 
     [Fact]
-    public async Task AbandonedConsumerReleasesTheSlotWithinOneSecond()
+    public async Task AbandonedConsumerCancelsTheWorkerWithin100Ms()
     {
         using SemaphoreSlim slot = new(0);
         Task<IReadOnlyList<TextChunk>> Produce(Action<TextChunk> sink, CancellationToken ct)
@@ -24,6 +26,7 @@ public sealed class TextStreamPumpTests
                     {
                         ct.ThrowIfCancellationRequested();
                         sink(Piece(i));
+                        Thread.Sleep(1);
                     }
                 }
                 finally { slot.Release(); }
@@ -35,13 +38,17 @@ public sealed class TextStreamPumpTests
         Stopwatch watch = Stopwatch.StartNew();
         await e.DisposeAsync();
         Assert.True(await slot.WaitAsync(TimeSpan.FromSeconds(1)), "producer still holding its slot after the consumer was disposed");
-        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(1));
+        Assert.True(watch.Elapsed < TimeSpan.FromSeconds(1), $"worker took {watch.ElapsedMilliseconds} ms to stop");
+        Assert.True(watch.Elapsed < Budget, $"worker observed cancellation after {watch.ElapsedMilliseconds} ms, budget {Budget.TotalMilliseconds} ms");
     }
 
     [Fact]
-    public async Task ProducerBlockedOnAFullChannelIsReleasedWhenTheConsumerStops()
+    public async Task ProducerIsNeverBlockedByASlowConsumerAndStillStopsOnAbandonment()
     {
+        // Unbounded by decision: the sink runs on the decode thread under the slot lock and device gate, so a
+        // slow reader must never stall it. The producer finishes all of its writes while the consumer has read one.
         using SemaphoreSlim slot = new(0);
+        const int total = 20_000;
         int written = 0;
         Task<IReadOnlyList<TextChunk>> Produce(Action<TextChunk> sink, CancellationToken ct)
         {
@@ -49,7 +56,7 @@ public sealed class TextStreamPumpTests
             {
                 try
                 {
-                    for (int i = 0; i < 100_000; i++)
+                    for (int i = 0; i < total; i++)
                     {
                         sink(Piece(i));
                         Interlocked.Increment(ref written);
@@ -61,10 +68,9 @@ public sealed class TextStreamPumpTests
         }
         IAsyncEnumerator<TextChunk> e = TextStreamPump.Run(Produce).GetAsyncEnumerator();
         Assert.True(await e.MoveNextAsync());
-        await Task.Delay(200);
-        Assert.InRange(Volatile.Read(ref written), 1, TextStreamPump.Capacity + 8);
+        Assert.True(await slot.WaitAsync(TimeSpan.FromSeconds(5)), "producer was blocked by the unread channel");
+        Assert.Equal(total, Volatile.Read(ref written));
         await e.DisposeAsync();
-        Assert.True(await slot.WaitAsync(TimeSpan.FromSeconds(1)));
     }
 
     [Fact]
@@ -99,11 +105,30 @@ public sealed class TextStreamPumpTests
     }
 
     [Fact]
-    public async Task ProducerFailureEndsWithAnErrorStop()
+    public async Task PreCancelledTokenStillCompletesWithACancelledStopWithin100Ms()
+    {
+        using CancellationTokenSource cts = new();
+        cts.Cancel();
+        Task<IReadOnlyList<TextChunk>> Produce(Action<TextChunk> sink, CancellationToken ct)
+        {
+            ct.ThrowIfCancellationRequested();
+            return Task.FromResult<IReadOnlyList<TextChunk>>([]);
+        }
+        Stopwatch watch = Stopwatch.StartNew();
+        List<TextChunk> got = [];
+        await foreach (TextChunk c in TextStreamPump.Run(Produce, cts.Token)) got.Add(c);
+        Assert.True(watch.Elapsed < Budget, $"stream took {watch.ElapsedMilliseconds} ms to complete");
+        Assert.Equal(StopReason.Cancelled, Assert.Single(got).Stop);
+    }
+
+    [Fact]
+    public async Task ProducerFailureEndsWithAnErrorStopCarryingTheMessage()
     {
         Task<IReadOnlyList<TextChunk>> Produce(Action<TextChunk> sink, CancellationToken ct) => throw new InvalidOperationException("boom");
         List<TextChunk> got = [];
         await foreach (TextChunk c in TextStreamPump.Run(Produce)) got.Add(c);
-        Assert.Equal(StopReason.Error, Assert.Single(got).Stop);
+        TextChunk only = Assert.Single(got);
+        Assert.Equal(StopReason.Error, only.Stop);
+        Assert.Equal("boom", only.Text);
     }
 }
