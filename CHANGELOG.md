@@ -24,7 +24,8 @@ stable release will require. Dates are UTC.
 - `WhisperConfig.IsMultilingual` drives the config's special-token ids; the `.en` presets and the two distil `.en`
   presets carry `VocabSize` 51864 and pad 50256. `WhisperPipeline.LoadAsync` takes `vocab_size` from the checkpoint's
   `config.json` for an inferred preset, and `WhisperDecoder.LoadWeights` refuses an embedding or `proj_out` whose
-  shape disagrees with the config — the old 51865 assumption read the tensor after the embedding as a phantom logit.
+  shape disagrees with the config — the old 51865 assumption read the tensor after the embedding as a phantom logit —
+  and `LoadAsync` refuses a directory whose `config.json` and tokenizer files disagree about the layout.
 - STT catalog: `whisper:tiny.en` / `base.en` / `small.en` / `medium.en` resolve to the English-only releases, and the
   catalog drops language and task for an English-only pipeline, so callers no longer need the `Language=""` trick
   (which still works).

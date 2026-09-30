@@ -143,6 +143,8 @@ public sealed class WhisperTokenizer : IDisposable
 
         // Every id comes from the checkpoint: v3 pushed the post-language specials up by one, and the English-only
         // layout sits one lower throughout. The constants only fill in for a name the files do not declare.
+        // EOT alone lives in vocab.json in every HF release (the other specials in added_tokens.json), so it is
+        // read from there first and from the added-tokens table only when vocab.json lacks it.
         (int vocabEntries, int vocabMaxId, int vocabEot) = ScanVocab(vocabPath);
         EotId = vocabEot >= 0 ? vocabEot : SpecialId("<|endoftext|>", EndOfTextId);
         SotId = SpecialId("<|startoftranscript|>", StartOfTranscriptId);

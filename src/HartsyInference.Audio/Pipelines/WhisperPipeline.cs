@@ -106,6 +106,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         decoder.LoadWeights(weights);
 
         WhisperTokenizer tokenizer = new(repoDir);
+        RequireSameLayout(resolvedCfg, tokenizer, repoDir);
         return new WhisperPipeline(hfRepoId, resolvedCfg, encoder, decoder, tokenizer, loader);
     }
 
@@ -340,7 +341,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         };
     }
 
-    /// <summary>Replaces the preset's vocabulary size with the checkpoint's own <c>vocab_size</c> when the two differ: the embedding row count is a checkpoint fact (51864 English-only, 51865 multilingual, 51866 v3+), and the decoder refuses to load a mismatch.</summary>
+    /// <summary>Replaces the preset's vocabulary size with the checkpoint's own <c>vocab_size</c> when the two differ: the embedding row count is a checkpoint fact (51864 English-only, 51865 multilingual, 51866 v3+), and the decoder refuses to load a mismatch. Only the vocabulary facts (<see cref="WhisperConfig.VocabSize"/> and <see cref="WhisperConfig.IsMultilingual"/>) come from disk; the layer shape and <see cref="WhisperConfig.LanguageCount"/> stay with the preset.</summary>
     private static WhisperConfig ApplyCheckpointVocab(WhisperConfig cfg, string configJsonPath)
     {
         using FileStream fs = File.OpenRead(configJsonPath);
@@ -351,6 +352,15 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             return cfg;
         }
         return cfg with { VocabSize = vocabSize, IsMultilingual = vocabSize >= WhisperTokenizer.MultilingualVocabSize };
+    }
+
+    /// <summary>The config and the tokenizer decide the layout from different files (<c>config.json</c> versus <c>vocab.json</c> + <c>added_tokens.json</c>); the prompt follows the tokenizer, so a directory whose files disagree is refused rather than decoded with a prompt the weights were not trained on.</summary>
+    private static void RequireSameLayout(WhisperConfig cfg, WhisperTokenizer tokenizer, string repoDir)
+    {
+        if (cfg.IsMultilingual == tokenizer.IsMultilingual) return;
+        throw new InvalidOperationException(
+            $"'{repoDir}': config.json says {(cfg.IsMultilingual ? "multilingual" : "English-only")} (vocab {cfg.VocabSize}) " +
+            $"but the tokenizer files resolve to {(tokenizer.IsMultilingual ? "multilingual" : "English-only")} (vocab {tokenizer.VocabSize}).");
     }
 
     private void ThrowIfDisposed()

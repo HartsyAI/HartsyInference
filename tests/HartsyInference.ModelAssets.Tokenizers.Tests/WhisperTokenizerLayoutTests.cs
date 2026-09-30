@@ -96,6 +96,11 @@ public sealed class WhisperTokenizerLayoutTests
         Assert.Equal([50_258, 50_259, 50_359, 50_363], tok.BuildPromptIds());
         Assert.Equal(50_364, tok.FirstTimestampId);
         Assert.Equal("<|0.02|>", tok.DecodeOne(50_365));
+        Assert.Equal("<|startoflm|>", tok.DecodeOne(50_360));
+        Assert.Equal("<|startofprev|>", tok.DecodeOne(50_361));
+        Assert.Equal("<|nospeech|>", tok.DecodeOne(50_362));
+        Assert.Equal("<|su|>", tok.DecodeOne(50_357));
+        Assert.Equal("<|30.00|>", tok.DecodeOne(51_864));
     }
 
     /// <summary>A temp directory holding a three-token BPE vocab, one merge and the special-token table of one
