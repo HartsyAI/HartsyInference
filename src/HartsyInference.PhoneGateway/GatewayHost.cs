@@ -60,7 +60,7 @@ public sealed class GatewayHost : IDisposable
                 Codec = config.Sip.Codec,
             },
             Outage = new LinkOutageGuardOptions { OutageHangupMs = config.Link.OutageHangupSeconds * 1000 },
-            Recording = config.Recording,
+            Recording = new RecordingOptions { Enabled = config.Recording.Enabled, Directory = config.Recording.Directory },
         }, new PromptPlayer(), _metrics);
         _metrics.LinkProbe = () => new LinkSnapshot(
             _link.IsConnected, _link.OutboundRate, _link.Reconnects, _link.LastRttNs / 1_000_000.0,

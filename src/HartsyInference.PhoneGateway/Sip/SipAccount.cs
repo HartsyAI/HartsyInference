@@ -24,9 +24,9 @@ public sealed class SipAccount : IDisposable
         {
             throw new ArgumentException($"sip.listenAddress '{options.ListenAddress}' is not an IP address.", nameof(options));
         }
-        if (options.Port is < 1 or > 65535)
+        if (options.Port is < 0 or > 65535)
         {
-            throw new ArgumentException($"sip.port {options.Port} is out of range.", nameof(options));
+            throw new ArgumentException($"sip.port {options.Port} is out of range (0 picks an ephemeral port).", nameof(options));
         }
         if (options.Transport is not ("udp" or "tcp"))
         {
@@ -40,6 +40,9 @@ public sealed class SipAccount : IDisposable
     }
 
     public SIPTransport Transport => _transport;
+
+    /// <summary>The port the SIP channel actually listens on (the configured one, or the ephemeral pick for port 0).</summary>
+    public int ListeningPort => _transport.GetSIPChannels().FirstOrDefault()?.ListeningEndPoint.Port ?? _options.Port;
 
     public PublicAddressResolver PublicAddress => _options.PublicAddress;
 

@@ -36,6 +36,8 @@ public sealed class CallController : IDisposable
     private ActiveCall? _current;
     private uint _nextCallId;
     private LinkCallEndReason? _pendingEndReason;
+    private bool _pendingTellHost = true;
+    private string? _ringingSipCallId;
     private string _lastCallFailure = "";
 
     public CallController(SipAccount account, EngineLink link, CallControllerOptions options, PromptPlayer prompts, GatewayMetrics metrics)
@@ -107,6 +109,8 @@ public sealed class CallController : IDisposable
             agent.ClientCallFailed += (_, message, _) => Volatile.Write(ref _lastCallFailure, message ?? "");
             _agent = agent;
         }
+        // sipsorcery's user agent ignores a new INVITE while it has a call, so the busy answer is given at the transport.
+        _account.Transport.SIPTransportRequestReceived += OnTransportRequest;
         _link.Connected = OnLinkConnected;
         _link.Disconnected = _ => _guard.LinkDisconnected();
         _link.OutboundAudio = OnOutboundAudio;
@@ -178,6 +182,7 @@ public sealed class CallController : IDisposable
                 return;
             }
             _pendingEndReason = reason;
+            _pendingTellHost = tellHost;
             agent = _agent;
         }
         try
@@ -198,6 +203,28 @@ public sealed class CallController : IDisposable
         EndCall(reason, tellHost);
     }
 
+    /// <summary>Answers a new INVITE with 486 while a call is up or being set up. Re-INVITEs (with a To tag) and the
+    /// INVITE currently being answered are left to the user agent.</summary>
+    private Task OnTransportRequest(SIPEndPoint localEndPoint, SIPEndPoint remoteEndPoint, SIPRequest request)
+    {
+        if (request.Method != SIPMethodsEnum.INVITE || !string.IsNullOrEmpty(request.Header.To?.ToTag))
+        {
+            return Task.CompletedTask;
+        }
+        string? callId = request.Header.CallId;
+        lock (_stateLock)
+        {
+            if (_state == CallState.Idle || callId == _ringingSipCallId || (_current is not null && callId == _current.SipCallId))
+            {
+                return Task.CompletedTask;
+            }
+        }
+        Logs.Info($"[PhoneGateway] INVITE from {request.Header.From?.FromURI?.User} while busy: 486 Busy Here.");
+        _metrics.RejectedBusy();
+        SIPResponse busy = SIPResponse.GetResponse(request, SIPResponseStatusCodesEnum.BusyHere, null);
+        return _account.Transport.SendResponseAsync(busy);
+    }
+
     private void OnIncomingCall(SIPUserAgent agent, SIPRequest request)
     {
         string? caller = request.Header.From?.FromURI?.User;
@@ -206,7 +233,7 @@ public sealed class CallController : IDisposable
         {
             if (_state != CallState.Idle)
             {
-                Logs.Info($"[PhoneGateway] INVITE from {caller} while {_state}: 486 Busy Here.");
+                // Normally answered by OnTransportRequest before the user agent sees it.
                 _metrics.RejectedBusy();
                 Reject(agent, request, SIPResponseStatusCodesEnum.BusyHere, "Busy Here");
                 return;
@@ -226,6 +253,7 @@ public sealed class CallController : IDisposable
                 return;
             }
             _state = CallState.Ringing;
+            _ringingSipCallId = request.Header.CallId;
         }
         _ = AnswerAsync(agent, request, caller, called);
     }
@@ -299,6 +327,8 @@ public sealed class CallController : IDisposable
             _current = call;
             _state = CallState.Active;
             _pendingEndReason = null;
+            _pendingTellHost = true;
+            _ringingSipCallId = null;
         }
         call.Inbound.Start();
         if (_link.IsConnected)
@@ -329,6 +359,7 @@ public sealed class CallController : IDisposable
         {
             _state = CallState.Idle;
             _current = null;
+            _ringingSipCallId = null;
         }
         call.Session.OnRtpPacketReceived -= call.Inbound.HandleRtpPacket;
         call.Session.Close("not answered");
@@ -338,11 +369,13 @@ public sealed class CallController : IDisposable
     private void OnCallHungup(SIPDialogue dialogue)
     {
         LinkCallEndReason reason;
+        bool tellHost;
         lock (_stateLock)
         {
             reason = _pendingEndReason ?? LinkCallEndReason.RemoteHangup;
+            tellHost = _pendingTellHost;
         }
-        EndCall(reason, tellHost: reason != LinkCallEndReason.Completed);
+        EndCall(reason, tellHost);
     }
 
     /// <summary>Tears the live call down exactly once and reports it.</summary>
@@ -383,6 +416,7 @@ public sealed class CallController : IDisposable
             _current = null;
             _state = CallState.Idle;
             _pendingEndReason = null;
+            _pendingTellHost = true;
         }
     }
 
@@ -642,6 +676,7 @@ public sealed class CallController : IDisposable
     public void Dispose()
     {
         HangUp(LinkCallEndReason.LocalHangup);
+        _account.Transport.SIPTransportRequestReceived -= OnTransportRequest;
         _guard.Dispose();
         SIPUserAgent? agent;
         lock (_stateLock)
