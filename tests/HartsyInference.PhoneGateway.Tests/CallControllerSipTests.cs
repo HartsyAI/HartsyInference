@@ -179,6 +179,18 @@ public sealed class CallControllerSipTests
         Assert.Equal(0, phone.IncomingCalls);
         Assert.Equal(0, gateway.Metrics.CallsOutbound);
 
+        // A bare number with no registrar (this gateway has none) is refused for the dial plan too, not as malformed.
+        using HttpRequestMessage bare = new(HttpMethod.Post, admin.Prefix + "calls")
+        {
+            Content = new StringContent("{\"destination\":\"+19005551234\"}", System.Text.Encoding.UTF8, "application/json"),
+        };
+        bare.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", token);
+        using HttpResponseMessage bareAnswer = await http.SendAsync(bare);
+        string bareBody = await bareAnswer.Content.ReadAsStringAsync();
+        Assert.Equal(System.Net.HttpStatusCode.Forbidden, bareAnswer.StatusCode);
+        Assert.Contains("sip.destinationPrefixes", bareBody, StringComparison.Ordinal);
+        Assert.Contains("sip.allowAnyDestination", bareBody, StringComparison.Ordinal);
+
         Assert.True(await phone.CallAsync(gateway.Port), $"call failed: {phone.LastFailure}");
         Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Active, WaitMs));
         uint callId = gateway.Controller.Current!.CallId;

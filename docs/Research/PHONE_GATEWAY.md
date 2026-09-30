@@ -169,11 +169,11 @@ Admin endpoint (loopback only): `GET /health` (JSON, 200 when the link is up and
 (`calls_media_fault_total`), link state and RTT, audio and control lane drops, and for the live call the tick
 lateness histogram, jitter-buffer counters and pump counters), `POST /calls` with `Authorization: Bearer <token>`
 and `{"destination":"sip:user@host"}` (or `user@host`, or a bare or `tel:` number, dialled through the registrar):
-202 placed, 409 busy, 503 host down, 403 refused by the dial plan (outside `sip.destinationPrefixes`, or no prefixes
-with `sip.allowAnyDestination` off, the default), 400 not a SIP destination or a number with no registrar, 502 not
-answered or media setup failed. The same dial plan governs the host's `transfer` tool: one rule, so a leaked admin
-token cannot dial premium numbers either. A failed media setup (no free RTP port, for one) answers an INVITE with
-500 and leaves the gateway idle, ready for the next call.
+202 placed, 409 busy, 503 host down, 403 refused by the dial plan (outside `sip.destinationPrefixes`; with no
+prefixes and `sip.allowAnyDestination` off, the default, every destination whatever its shape), 400 not a SIP
+destination or a number with no registrar, 502 not answered or media setup failed. The same dial plan governs the
+host's `transfer` tool: one rule, so a leaked admin token cannot dial premium numbers either. A failed media setup
+(no free RTP port, for one) answers an INVITE with 500 and leaves the gateway idle, ready for the next call.
 
 Telephony tools the host may request over the link: `hangup`, `send_dtmf` (`digits`, optional `gapMs`),
 `transfer` (`target`, blind, under the same dial plan as `POST /calls`), `hold`, `unhold`, `play_prompt` (`file` = raw 8 kHz PCM16 path, or `name` =

@@ -244,8 +244,9 @@ public sealed class CallController : IDisposable
     /// <summary>The URI to dial for <paramref name="destination"/>, or null with <paramref name="refusal"/> saying why:
     /// <see cref="CallPlacementStatus.Invalid"/> when it is not a SIP destination (or is a number with no registrar),
     /// <see cref="CallPlacementStatus.NotAllowed"/> when the dial plan refuses it.</summary>
-    /// <remarks>The dial plan fails closed. With no <paramref name="prefixes"/> every destination is refused, unless
-    /// <paramref name="allowAnyDestination"/> (a LAN or development) lets any parseable one through as
+    /// <remarks>The dial plan fails closed. With no <paramref name="prefixes"/> every destination is refused as
+    /// <see cref="CallPlacementStatus.NotAllowed"/> whatever its shape, so the reason always points at the dial plan,
+    /// unless <paramref name="allowAnyDestination"/> (a LAN or development) lets any parseable one through as
     /// <see cref="DialString"/> gives it; prefixes win if both are set. With prefixes, only a number through
     /// <paramref name="registrar"/> is dialled: a bare number, <c>tel:&lt;number&gt;</c>,
     /// or <c>&lt;number&gt;@&lt;registrar host&gt;</c> with or without a <c>sip:</c>/<c>sips:</c> scheme, where the number
@@ -257,6 +258,11 @@ public sealed class CallController : IDisposable
     /// open dial plan is toll fraud waiting to happen.</remarks>
     internal static string? AuthorizeDestination(string destination, IReadOnlyList<string> prefixes, string registrar, bool allowAnyDestination, out CallPlacementStatus refusal)
     {
+        if (prefixes.Count == 0 && !allowAnyDestination)
+        {
+            refusal = CallPlacementStatus.NotAllowed;
+            return null;
+        }
         refusal = CallPlacementStatus.Invalid;
         string? dial = DialString(destination, registrar);
         if (dial is null || !SIPURI.TryParse(dial, out SIPURI target) || target is null)
@@ -266,7 +272,7 @@ public sealed class CallController : IDisposable
         refusal = CallPlacementStatus.NotAllowed;
         if (prefixes.Count == 0)
         {
-            return allowAnyDestination ? dial : null;
+            return dial;
         }
         if (!TryPlainNumber(destination, registrar, out string number, out bool secure)
             || !prefixes.Any(prefix => number.StartsWith(prefix, StringComparison.Ordinal)))

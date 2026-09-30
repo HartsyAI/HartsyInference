@@ -86,7 +86,7 @@ public sealed class DestinationPolicyTests
         Assert.Equal(CallPlacementStatus.NotAllowed, policy);
         Assert.Null(CallController.AuthorizeDestination("+15551234", _usPrefix, "", out CallPlacementStatus noRegistrar));
         Assert.Equal(CallPlacementStatus.Invalid, noRegistrar);
-        Assert.Null(CallController.AuthorizeDestination("+15551234", [], "", out CallPlacementStatus open));
+        Assert.Null(CallController.AuthorizeDestination("+15551234", [], "", allowAnyDestination: true, out CallPlacementStatus open));
         Assert.Equal(CallPlacementStatus.Invalid, open);
     }
 
@@ -117,6 +117,19 @@ public sealed class DestinationPolicyTests
     {
         Assert.False(CallController.IsDestinationAllowed(destination, [], Trunk));
         Assert.Null(CallController.AuthorizeDestination(destination, [], Trunk, allowAnyDestination: false, out CallPlacementStatus refusal));
+        Assert.Equal(CallPlacementStatus.NotAllowed, refusal);
+    }
+
+    /// <summary>A closed dial plan answers the same whatever the destination looks like, so the reason always points at
+    /// the dial plan and never at <c>sip.registrar</c> or the destination's syntax.</summary>
+    [Theory]
+    [InlineData("+15551234", "")]
+    [InlineData("tel:+15551234", "")]
+    [InlineData("not a uri:::", Trunk)]
+    [InlineData("tel:", Trunk)]
+    public void NoPrefixes_RefuseEvenAMalformedOrRegistrarlessDestinationAsNotAllowed(string destination, string registrar)
+    {
+        Assert.Null(CallController.AuthorizeDestination(destination, [], registrar, allowAnyDestination: false, out CallPlacementStatus refusal));
         Assert.Equal(CallPlacementStatus.NotAllowed, refusal);
     }
 
