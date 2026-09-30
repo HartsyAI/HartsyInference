@@ -14,7 +14,7 @@ stable release will require. Dates are UTC.
   and the 5-argument `ApplyRopeInterleaved`. Integer outputs, quantizer bytes, window indices, rope and the HC mixes are exact; router
   weights are within 5e-6 relative, attention and indexer within 1e-5, Sinkhorn within 1e-6.
 - Behaviour to know: `MoeCombine` and `QuantizeLatentRows` skip an out-of-range slot or destination row instead of throwing;
-  `SparseLatentAttention` throws `NotSupportedException` for k above 4096 and `QuantizeLatentRows` for destination tensors that are not
+  `SparseLatentAttention` throws `NotSupportedException` for k above 3800 and `QuantizeLatentRows` for destination tensors that are not
   whole 32-bit words.
 - `VulkanBackend.DequantRecipeToBf16` (shader `dequant_recipe_bf16`) widens MXFP4-E8M0 and block-FP8-E8M0 recipe weights to BF16,
   bit-identical to `Mxfp4E8M0Codec` and `Fp8BlockE8M0Codec` on synthetic layouts. It forms subnormal results on the BF16 grid directly because

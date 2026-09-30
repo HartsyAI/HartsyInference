@@ -8,8 +8,8 @@ namespace HartsyInference.Vulkan;
 // caches as 32-bit words, so a byte tensor whose size is not a multiple of four is staged through a padded temporary.
 public sealed partial class VulkanBackend
 {
-    /// <summary>Largest k the attention kernel keeps as probabilities in shared memory (the 16 KB every device has).</summary>
-    private const int LatentAttentionMaxK = 4096;
+    /// <summary>Largest k the attention kernel keeps as probabilities in shared memory: 3800 floats plus the 256-float reduction scratch fit the 16 KB every device guarantees.</summary>
+    private const int LatentAttentionMaxK = 3800;
 
     /// <inheritdoc/>
     public void SparseLatentAttention(Tensor output, Tensor query, in LatentSource window, in LatentSource main,

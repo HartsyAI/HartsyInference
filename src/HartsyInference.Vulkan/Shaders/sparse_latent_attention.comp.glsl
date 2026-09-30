@@ -4,14 +4,14 @@
 // main cache after it; -1 and anything past both sources are skipped.
 //
 // Each dot and each output sum is accumulated serially in the reference's order with fusing disabled, so only exp differs
-// from the reference. Shared memory holds the k probabilities (MAX_K x 4 bytes, the 16 KB every device guarantees).
+// from the reference. Shared memory holds the k probabilities (MAX_K x 4 bytes; with the reduction scratch that stays under the 16 KB every device guarantees).
 // WGSIZE must equal the dispatch's local_size_x.
 
 #version 460
 #extension GL_GOOGLE_include_directive : require
 
 #define WGSIZE 256
-#define MAX_K 4096
+#define MAX_K 3800
 
 layout(local_size_x_id = 0, local_size_y_id = 1, local_size_z_id = 2) in;
 

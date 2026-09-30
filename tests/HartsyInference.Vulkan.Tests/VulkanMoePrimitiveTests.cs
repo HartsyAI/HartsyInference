@@ -302,4 +302,15 @@ public sealed class VulkanMoePrimitiveTests(ITestOutputHelper log)
                 Assert.True(Math.Abs(cpu[i] - gpu[i]) <= 1e-6 * Math.Abs(cpu[i]) + 1e-30, $"softplus {i}: x={x[i]} cpu {cpu[i]:R} vk {gpu[i]:R}");
         }
     }
+
+    [Fact]
+    public void MoeRoute_ZeroTokens_AreRejectedByTheSharedValidation()
+    {
+        using VulkanBackend? vk = TryCreateBackend(out string? skip);
+        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
+        MoeRouteArgs args = new(32, 4, MoeRouteScoring.SqrtSoftplus, Renormalize: true, RenormEpsilon: 1e-20f, Scale: 1.5f);
+        using Tensor logits = new(new TensorShape(0, 32), DType.F32);
+        using Tensor idx = new(new TensorShape(0, 4), DType.I32), w = new(new TensorShape(0, 4), DType.F32);
+        Assert.Throws<ArgumentException>(() => vk.MoeRoute(idx, w, logits, args));
+    }
 }

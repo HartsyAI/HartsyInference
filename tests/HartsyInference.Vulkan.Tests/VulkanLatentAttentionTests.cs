@@ -63,6 +63,17 @@ public sealed class VulkanLatentAttentionTests(ITestOutputHelper log)
     }
 
     [Fact]
+    public void Attention_AtTheLargestSupportedK_MatchesCpu()
+    {
+        using VulkanBackend? vk = TryCreateBackend(out string? skip);
+        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
+        const int K = 3800;
+        float[] cpu = RunAttention(new CpuBackend(), 2, 2, 64, K, 128, LatentEncoding.F32, LatentEncoding.F32, 512, 21);
+        float[] gpu = RunAttention(vk, 2, 2, 64, K, 128, LatentEncoding.F32, LatentEncoding.F32, 512, 21);
+        Assert.True(MaxAbsDiff(cpu, gpu) < Tolerance);
+    }
+
+    [Fact]
     public void Attention_EmptyMainSource_MatchesCpu()
     {
         using VulkanBackend? vk = TryCreateBackend(out string? skip);
@@ -109,7 +120,7 @@ public sealed class VulkanLatentAttentionTests(ITestOutputHelper log)
             using Tensor q = F32(new float[Dim], 1, 1, Dim), sink = F32(new float[1], 1), o = EmptyF32(1, 1, Dim);
             using Tensor idx = I32(new[] { 0 }, 1, 1);
             Assert.Throws<ArgumentException>(() => vk.SparseLatentAttention(o, q, window, LatentSource.Empty, idx, 3, sink, 1f));
-            const int K = 4097;
+            const int K = 3801;
             using Tensor bigIdx = I32(new int[K], 1, K);
             Assert.Throws<NotSupportedException>(() => vk.SparseLatentAttention(o, q, window, LatentSource.Empty, bigIdx, 2, sink, 1f));
         }

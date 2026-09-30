@@ -84,4 +84,16 @@ public sealed class VulkanHcMixTests(ITestOutputHelper log)
         using Tensor pre = EmptyF32(1, Hc), post = EmptyF32(1, Hc), comb = EmptyF32(1, Hc, Hc);
         Assert.Throws<ArgumentOutOfRangeException>(() => vk.HcSplitSinkhorn(pre, post, comb, mixes, scale, bias, Hc, 20, 1e-6f));
     }
+
+    [Fact]
+    public void ZeroTokens_AreRejectedByTheSharedValidation()
+    {
+        using VulkanBackend? vk = TryCreateBackend(out string? skip);
+        if (vk is null) { log.WriteLine($"SKIPPED: {skip}"); return; }
+        const int Hc = 4, Width = (2 + Hc) * Hc;
+        using Tensor mixes = new(new TensorShape(0, Width), DType.F32), scale = F32(new float[3], 3), bias = F32(new float[Width], Width);
+        using Tensor pre = new(new TensorShape(0, Hc), DType.F32), post = new(new TensorShape(0, Hc), DType.F32);
+        using Tensor comb = new(new TensorShape(0, Hc, Hc), DType.F32);
+        Assert.Throws<ArgumentException>(() => vk.HcSplitSinkhorn(pre, post, comb, mixes, scale, bias, Hc, 20, 1e-6f));
+    }
 }
