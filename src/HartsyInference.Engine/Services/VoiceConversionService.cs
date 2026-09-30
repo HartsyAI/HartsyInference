@@ -24,7 +24,7 @@ public sealed class VoiceConversionService : IVoiceConversionService
         string key = descriptor.CacheKey(selector);
         IBackend backend = _engine.Backend;
 
-        return _engine.AudioRuntime.RunAsync(backend, $"vc:{key}", async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Vc, key), async ct =>
         {
             float[] source = AudioClipCodec.DecodeMono(request.Source, descriptor.InputSampleRate);
             if (source.Length == 0)

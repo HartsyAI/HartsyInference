@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.218
+
+- **Audio eviction keeps the incoming model.** `AudioRuntime`'s memory-pressure sweep compared the prefixed job key
+  (`tts:…`) against the caches' bare keys, so once free host RAM dipped under `vram.audioEvictBelowGb` (default 14 GB)
+  every STT↔TTS switch evicted the runner about to run and reloaded it. Jobs now carry an `AudioJob` (cache + bare key)
+  and the sweep keeps that key through its own cache. Demucs runners are keyed by the explicit local path or model name
+  instead of the resolved on-disk path, which is the same identity.
+- `AudioRunnerCache.Pin(key)` holds a runner resident through memory pressure (refcounted, name-level); engine release
+  and backend switches still unload pinned runners. Groundwork for the voice-agent session and an always-resident setting.
+
 ## alpha.217
 
 - **New package `HartsyInference.PhoneLink`** (phone-call voice agent PR4): the gateway-to-host wire protocol, depending on Core only and

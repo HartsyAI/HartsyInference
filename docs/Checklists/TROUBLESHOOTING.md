@@ -944,6 +944,12 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   request look "hung." Dia's real "hang" was 1152 unbatched `cublasGemmEx` launches/decode-step (16 heads
   × 2 CFG × 18 layers × 2), each a GEMV-as-GEMM at Sq=1; fixed via `cublasGemmStridedBatchedEx` (~32× fewer
   launches): 350–800s → 44–66s.
+- **Audio models reloading on every STT↔TTS switch** (fixed alpha.218): the memory-pressure sweep compared the
+  prefixed job key (`tts:…`) against the caches' bare keys, so once free host RAM dropped under
+  `vram.audioEvictBelowGb` (default 14 GB) it evicted the model it was about to run. Symptom: an
+  `[Audio] Memory pressure … unloading other resident audio models` line before every request, each followed by a
+  full load. Jobs now carry an `AudioJob` (cache + bare key); `AudioRunnerCache.Pin` keeps a runner through
+  pressure, and only engine release/backend switch still unloads pinned runners.
 
 ---
 
