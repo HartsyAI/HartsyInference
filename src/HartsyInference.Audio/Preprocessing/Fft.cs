@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Numerics;
 
 namespace HartsyInference.Audio.Preprocessing;
@@ -19,7 +20,7 @@ public static class Fft
     private static readonly Dictionary<int, (float[] Cos, float[] Sin)> _twiddleCache = new();
     private static readonly object _twiddleLock = new();
     private static readonly Dictionary<int, BluesteinPlan> _bluesteinCache = new();
-    private static readonly Dictionary<int, (double[] Cos, double[] Sin)> _directTwiddleCache = new();
+    private static readonly ConcurrentDictionary<int, (double[] Cos, double[] Sin)> _directTwiddleCache = new();
 
     /// <summary>Rounds <paramref name="n"/> up to a power of two, the size the radix-2 path needs.</summary>
     public static int NextPow2(int n)
@@ -166,27 +167,25 @@ public static class Fft
         outIm.CopyTo(im);
     }
 
-    private static (double[] Cos, double[] Sin) GetDirectTwiddles(int n)
-    {
-        lock (_twiddleLock)
+    /// <summary>Lock-free after the first build: the direct DFT runs once per frame on every worker of a parallel
+    /// STFT, so a shared lock on the lookup would serialize them.</summary>
+    private static (double[] Cos, double[] Sin) GetDirectTwiddles(int n) =>
+        _directTwiddleCache.GetOrAdd(n, static size =>
         {
-            if (_directTwiddleCache.TryGetValue(n, out (double[] Cos, double[] Sin) cached)) return cached;
-            double[] cos = new double[n * n];
-            double[] sin = new double[n * n];
-            double twoPiOverN = 2.0 * Math.PI / n;
-            for (int k = 0; k < n; k++)
+            double[] cos = new double[size * size];
+            double[] sin = new double[size * size];
+            double twoPiOverN = 2.0 * Math.PI / size;
+            for (int k = 0; k < size; k++)
             {
-                for (int t = 0; t < n; t++)
+                for (int t = 0; t < size; t++)
                 {
                     double ang = twoPiOverN * k * t;
-                    cos[k * n + t] = Math.Cos(ang);
-                    sin[k * n + t] = Math.Sin(ang);
+                    cos[k * size + t] = Math.Cos(ang);
+                    sin[k * size + t] = Math.Sin(ang);
                 }
             }
-            _directTwiddleCache[n] = (cos, sin);
             return (cos, sin);
-        }
-    }
+        });
 
     /// <summary>Cached Bluestein plan for one non-power-of-two size: the chirp <c>w[n]=e^{-iπn²/N}</c> and the
     /// precomputed FFT of the convolution kernel (both constant per N).</summary>

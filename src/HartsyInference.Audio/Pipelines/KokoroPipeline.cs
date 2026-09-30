@@ -3,6 +3,7 @@ using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.Kokoro;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Metadata;
 using HartsyInference.ModelAssets.PyTorch;
@@ -262,9 +263,9 @@ public sealed class KokoroPipeline : IDisposable
             durFeatures.Dispose();
             timer?.Mark("durations");
 
+            // Every predicted duration is clamped to ≥ 1 frame, so T_total ≥ T and the alignment is total.
             int tTotal = 0;
             for (int i = 0; i < durations.Length; i++) tTotal += durations[i];
-            if (tTotal == 0) tTotal = durations.Length;
 
             // Length-regulate d_bert + text_features → channels-first [1, 512, T_total].
             int[] frameToPhoneme = AlignmentIndices(durations, tTotal);
@@ -301,7 +302,9 @@ public sealed class KokoroPipeline : IDisposable
     }
 
     /// <summary>Uploads every submodule weight to the backend once. Without this the small tensors (AdaIN
-    /// projections, biases, Snake alphas — each under the auto-promotion floor) re-upload on every op of every call.</summary>
+    /// projections, biases, Snake alphas — each under the auto-promotion floor) re-upload on every op of every call.
+    /// Unsynchronized like the rest of the pipeline (one synthesis at a time, the voice-pack cache's contract); a
+    /// repeated preload is a no-op for already-resident weights, and the device copies live and die with the backend.</summary>
     private void EnsureWeightsResident(IBackend backend)
     {
         if (ReferenceEquals(_residentBackend, backend)) return;
@@ -323,12 +326,12 @@ public sealed class KokoroPipeline : IDisposable
     {
         int[] indices = new int[tTotal];
         int frame = 0;
-        for (int i = 0; i < durations.Length && frame < tTotal; i++)
+        for (int i = 0; i < durations.Length; i++)
         {
-            for (int j = 0; j < durations[i] && frame < tTotal; j++) indices[frame++] = i;
+            for (int j = 0; j < durations[i]; j++) indices[frame++] = i;
         }
-        // Only reachable when every duration is zero (tTotal falls back to T): frame f maps to phoneme f.
-        for (; frame < tTotal; frame++) indices[frame] = Math.Min(frame, durations.Length - 1);
+        if (frame != tTotal)
+            throw new HartsyInferenceException($"Kokoro alignment covers {frame} frames but T_total is {tTotal}.");
         return indices;
     }
 

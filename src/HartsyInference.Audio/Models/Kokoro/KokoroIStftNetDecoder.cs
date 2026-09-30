@@ -2,6 +2,7 @@ using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Layers;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Kokoro;
@@ -292,6 +293,7 @@ public sealed class KokoroIStftNetDecoder
         {
             return KokoroOps.Add(backend, a, b);
         }
+        Logs.Debug($"[Kokoro] generator branches differ in shape ({a.Shape} vs {b.Shape}); cropped add on the host.");
         Tensor sum = new(a.Shape, DType.F32);
         backend.CopyTo(sum, a);
         NsfVocoderDsp.AddInPlaceCropped(sum, b);
