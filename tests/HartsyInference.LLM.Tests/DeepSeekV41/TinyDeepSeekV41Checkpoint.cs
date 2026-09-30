@@ -91,7 +91,7 @@ internal static class TinyDeepSeekV41Checkpoint
 
     private sealed record Tensor(string Name, string DType, long[] Shape, byte[] Data);
 
-    private static int ShardOf(string name) => name.Contains(".engram.embed.", StringComparison.Ordinal) ? 2
+    private static int ShardOf(string name) => name.Contains(".engram.", StringComparison.Ordinal) ? 2
         : name.Contains(".ffn.experts.", StringComparison.Ordinal) ? 1 : 0;
 
     private static void AddDense(List<Tensor> tensors, bool includeDraft)
@@ -104,7 +104,6 @@ internal static class TinyDeepSeekV41Checkpoint
         tensors.Add(Bf16("aligner.w1.weight", 2, 2));
         for (int layer = 0; layer < BackboneLayers; layer++)
             tensors.Add(Bf16($"layers.{layer}.attn.wq_a.weight", 2, 2));
-        tensors.Add(Bf16($"layers.{EngramLayer}.engram.wkv.weight", 2, 2));
         if (includeDraft)
         {
             tensors.Add(Bf16("mtp.0.main_proj.weight", 2, 2));
@@ -139,6 +138,13 @@ internal static class TinyDeepSeekV41Checkpoint
         string prefix = $"layers.{EngramLayer}.engram.embed";
         tensors.Add(new Tensor($"{prefix}.weight", "F8_E4M3", [EngramRows, 256], new byte[EngramRows * 256]));
         tensors.Add(new Tensor($"{prefix}.scale", "F8_E8M0", [EngramRows, 8], new byte[EngramRows * 8]));
+        // As in the real checkpoint, the small Engram weights share the table's shard.
+        string engram = $"layers.{EngramLayer}.engram";
+        tensors.Add(Bf16($"{engram}.q_weight", 4, 2));
+        tensors.Add(Bf16($"{engram}.k_weight", 4, 2));
+        byte[] wkv = Enumerable.Range(0, 1024).Select(static i => (byte)i).ToArray();
+        tensors.Add(new Tensor($"{engram}.wkv.weight", "F8_E4M3", [32, 32], wkv));
+        tensors.Add(new Tensor($"{engram}.wkv.scale", "F8_E8M0", [1, 1], [127]));
     }
 
     private static Tensor Bf16(string name, params long[] shape) =>

@@ -12,6 +12,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- Engram hash constants dumped from upstream engram.py at a pinned checkpoint revision; see DeepSeekV41/Engram/Constants/manifest.json. -->
+    <EmbeddedResource Include="DeepSeekV41\Engram\Constants\*.bin;DeepSeekV41\Engram\Constants\manifest.json"
+                      LogicalName="HartsyInference.LLM.Engram.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.LLM.Tests" />
     <InternalsVisibleTo Include="HartsyInference.Cuda.Tests" />
   </ItemGroup>

@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.211
+## alpha.213
 
 - **Derivative quant formats** (DeepSeek-V4.1-Flash program PR 23). `ModelOptNvfp4Codec` decodes NVIDIA NVFP4 (low nibble first, E4M3 scale per 16,
   scalar F32 `weight_scale_2` multiplied into the scale first) and `AffineIntCodec` decodes MLX affine `q*scale + bias` per 64 at 4 or 8 bits
@@ -19,6 +19,34 @@ stable release will require. Dates are UTC.
   dequantizes NVFP4, Quark and MLX expert matrices to BF16 bit-exactly against the host codecs. `QuantExecutionPolicy` plans the BF16 dequant and
   labels NVFP4 as W4A16 (`input_scale` is left unread; no W4A4 is claimed).
 - Deferred: EXL3 trellis decode (PR 23b), the 32x32 block-FP8 native GEMM, native NVFP4/MXFP4 block-scaled GEMM on Blackwell, DwarfStar GGUF Engram row264.
+
+## alpha.212
+
+- **Fix: DeepSeek-V4.1 checkpoint refused the real official Engram shards** (DeepSeek-V4.1-Flash program). Shards 47 and 48 hold each
+  layer's embedding tables (`[rows,256]` F8_E4M3 + `[rows,8]` F8_E8M0) together with `engram.q_weight`, `engram.k_weight` and
+  `engram.wkv.{weight,scale}` (verified against the `dba1be0a` index and shard 47 header), and `DeepSeekV41Checkpoint.Open` threw "Engram
+  tables share shards with other weights". The tables stay pread-only and never mapped; the small Engram weights in the same shard are now
+  pread into owned tensors by the new `ShardedSafeTensorSet.ReadTensor`, which `GetWeight` and `GetQuant` use for them. Any other weight
+  sharing a table's shard is still refused. The tiny test checkpoint now mirrors the real shard layout.
+
+## alpha.211
+
+- **Engram constants, hasher and row store** (DeepSeek-V4.1-Flash program PR 13, minus the in-model module). The constants (compressed token
+  map, multipliers, offsets, primes) are dumped from the unmodified upstream `engram.py` at checkpoint revision `dba1be0a`, committed under
+  `DeepSeekV41/Engram/Constants/` (gitignore exception for `*.bin`), embedded, and SHA-256 checked on load; C# never re-derives them.
+  `dump_engram_constants.py --cross-check` also compares them with the DwarfStar GGUF metadata (token map, primes, multipliers) and the MLX
+  `engram_token_map.json`, recorded in the manifest.
+- `EngramHasher` (XOR of compressed ids times multipliers over the lookbacks, modulo the per-head prime plus the cumulative offset; DEAD
+  tokens and sequence-start lookbacks map to the pad id; history carries across prefill and decode) equals the upstream `NgramHashState`
+  exactly on 15 cases.
+- `EngramTableStore` in Core: `IEngramRowLayout` with the official FP8/E8M0, GGUF row264 and MLX affine layouts; `PrefetchAsync`, `Gather`,
+  `Stats`; per-batch dedup and sort, reads merged per 4 KB page over `IWeightByteSource`, LRU slab row cache, owned-row range check,
+  `Storage` and `HostResident` backings (`Device` throws `NotSupportedException`). `EngramTableStores.Open` builds one from a checkpoint table.
+- Tests: layout decode vs Python dequant on edge, seeded synthetic and range-fetched real rows; store behavior on a synthetic shard file.
+  A guarded Integration test gathers 10,000 random real rows from shard 47 and skips without the checkpoint; it did not run here, and
+  neither did an RSS-bound or cold-latency measurement. `EngramModule` waits for PR 8.
+- Known issue found, not fixed here: `DeepSeekV41Checkpoint.Open` rejects the real official checkpoint because shards 47 and 48 also hold
+  `engram.q_weight`, `engram.k_weight` and `engram.wkv.*`, and pread-only shards cannot serve those tensors.
 
 ## alpha.210
 
