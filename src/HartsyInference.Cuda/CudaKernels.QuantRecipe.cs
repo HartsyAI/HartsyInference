@@ -13,7 +13,10 @@ public sealed partial class CudaKernels
 
     /// <summary>True when dequant_recipe_to_bf16.ptx loaded with every recipe kernel.</summary>
     public bool HasRecipeDequantKernels =>
-        _mxfp4E8m0ToBf16 != 0 && _fp8BlockE8m0ToBf16 != 0 && _nvfp4ModelOptToBf16 != 0 && _affineToBf16 != 0 && _exl3ToBf16 != 0;
+        _mxfp4E8m0ToBf16 != 0 && _fp8BlockE8m0ToBf16 != 0 && _nvfp4ModelOptToBf16 != 0 && _affineToBf16 != 0;
+
+    /// <summary>True when the EXL3 decode kernel loaded and the device allows its 66,048 bytes of dynamic shared memory; the other recipe kernels do not depend on it.</summary>
+    public bool HasExl3DequantKernel => _exl3ToBf16 != 0;
 
     // Optional module: absence leaves recipe dequant unsupported instead of failing construction.
     private void LoadRecipeDequantKernels()
@@ -28,7 +31,8 @@ public sealed partial class CudaKernels
         _exl3ToBf16 = _recipeDequantModule.GetFunction("dequant_exl3_2bit_to_bf16");
         // 66,048 bytes of dynamic shared memory: past the 48 KB default, so the opt-in attribute (CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8) is required.
         int attributeResult = CudaDriverApi.cuFuncSetAttribute(_exl3ToBf16, 8, Exl3SharedBytes);
-        if (attributeResult != 0) throw new InvalidOperationException($"cuFuncSetAttribute for the EXL3 dequant kernel failed with CUDA error {attributeResult}.");
+        // A device capped at 48 KB of shared memory loses only the EXL3 path; the other recipe kernels stay usable.
+        if (attributeResult != 0) _exl3ToBf16 = 0;
     }
 
     /// <summary>E2M1 nibbles times F8E8M0 scales to BF16 <c>[rows, 2 * packedCols]</c>; one thread per packed byte.</summary>
@@ -90,7 +94,7 @@ public sealed partial class CudaKernels
     /// <param name="cols">Input width, a multiple of 128.</param>
     public unsafe void LaunchExl3Dequant(ulong output, ulong trellis, ulong suh, ulong svh, int outTiles, int firstOutBlock, int rowBlocks, int cols, nint stream)
     {
-        if (_exl3ToBf16 == 0) throw new InvalidOperationException("dequant_recipe_to_bf16.ptx not present in the Ptx folder.");
+        if (_exl3ToBf16 == 0) throw new NotSupportedException("The EXL3 dequant kernel is not loaded: dequant_recipe_to_bf16.ptx is missing it, or the device cannot opt in to 66,048 bytes of dynamic shared memory.");
         if (cols <= 0 || cols % 128 != 0) throw new ArgumentOutOfRangeException(nameof(cols), cols, "EXL3 dequant needs a positive multiple of 128 input columns.");
         ulong tArg = trellis, uArg = suh, vArg = svh, oArg = output;
         uint outTilesArg = (uint)outTiles, firstArg = (uint)firstOutBlock, colsArg = (uint)cols;

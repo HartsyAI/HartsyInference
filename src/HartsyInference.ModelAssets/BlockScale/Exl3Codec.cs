@@ -86,7 +86,7 @@ public static class Exl3Codec
         {
             for (int oa = 0; oa < outTiles; oa++)
             {
-                DecodeTile(packed.Slice((ia * outTiles + oa) * TileBytes, TileBytes), tile);
+                DecodeTile(packed.Slice(checked((int)(((long)ia * outTiles + oa) * TileBytes)), TileBytes), tile);
                 for (int p = 0; p < Tile * Tile; p++)
                 {
                     (int r, int c) = TilePosition(p);
