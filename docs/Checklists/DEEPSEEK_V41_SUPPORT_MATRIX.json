@@ -1,0 +1,1276 @@
+{
+  "schemaVersion": 1,
+  "sourceSnapshot": "2026-09-30",
+  "note": "Status is one of Unimplemented, InProgress, Implemented, Verified, Unsupported. A row is Verified only with real-checkpoint evidence recorded in PARITY_VERIFICATION.md; compilation, synthetic tests, coherent output and skipped tests never flip a row. Per-backend values use the same vocabulary.",
+  "research": "docs/Research/DEEPSEEK_V41_ARCHITECTURE.md",
+  "dimensions": {
+    "backends": [
+      "CPU",
+      "CUDA",
+      "Vulkan"
+    ],
+    "placement": [
+      "resident",
+      "offloaded",
+      "multi-gpu",
+      "multi-node",
+      "n/a"
+    ],
+    "consumer": [
+      "engine",
+      "llmassistant"
+    ],
+    "formats": [
+      "official",
+      "nvfp4",
+      "quark",
+      "mlx",
+      "dwarfstar",
+      "exl3",
+      "all"
+    ]
+  },
+  "rows": [
+    {
+      "id": "core.spec",
+      "feature": "Reference harness and pinned facts",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "cpu"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a inference/model.py",
+      "plannedLocation": "tests/python-reference/deepseek_v41",
+      "dependsOn": [],
+      "acceptanceTest": "kernel_ports tests; small-config dumps repeatable",
+      "pr": 0,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "core.contract",
+      "feature": "IGenerationModel and ISequenceState",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "plan D1/D4",
+      "plannedLocation": "src/HartsyInference.LLM/Generation/",
+      "dependsOn": [
+        "core.spec"
+      ],
+      "acceptanceTest": "GenericTransformerModelTests; unchanged LLM parity and sharding suites",
+      "pr": 1,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "core.moe.route",
+      "feature": "MoE routing: sqrtsoftplus, bias/bias_vl, top-6, tie rule",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a Gate",
+      "plannedLocation": "src/HartsyInference.Core (MoeRoute) + Kernels/moe/",
+      "dependsOn": [
+        "core.spec"
+      ],
+      "acceptanceTest": "MoeReferenceTests vs Python; exact-tie CPU==CUDA",
+      "pr": 2,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "core.moe.exec",
+      "feature": "Grouped expert execution",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a MoE",
+      "plannedLocation": "src/HartsyInference.LLM/Transformer/Moe/",
+      "dependsOn": [
+        "core.moe.route",
+        "core.contract"
+      ],
+      "acceptanceTest": "MoeTests byte-identical; DeepSeekV41MoeParityTests",
+      "pr": 3,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "core.attn.prims",
+      "feature": "Sparse latent attention, indexer, hc Sinkhorn, latent quantizers",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a kernel.py (kernel_ports.py)",
+      "plannedLocation": "src/HartsyInference.Core + Kernels/lm",
+      "dependsOn": [
+        "core.moe.route"
+      ],
+      "acceptanceTest": "CPU refs vs Python dumps; CUDA vs ref 1e-5",
+      "pr": 6,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "core.block",
+      "feature": "Block, CSA attention, compressor, indexer, mHC, sequence state",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a model.py",
+      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/Block and DeepSeekV41SequenceState",
+      "dependsOn": [
+        "core.contract",
+        "core.attn.prims",
+        "core.moe.exec"
+      ],
+      "acceptanceTest": "DeepSeekV41SyntheticParityTests vs small-config dumps; chunked==one-shot; Truncate replay",
+      "pr": 8,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "core.rope.interleaved",
+      "feature": "Interleaved RoPE with inverse on attention output",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a apply_rotary_emb (view_as_complex)",
+      "plannedLocation": "IBackend ApplyRopeInterleaved",
+      "dependsOn": [
+        "core.spec"
+      ],
+      "acceptanceTest": "parity with dumped rope outputs; MlaForward untouched",
+      "pr": 6,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "core.model",
+      "feature": "DeepSeekV41Model batch decode and scheduler chunked prefill",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "plan D1 item 6",
+      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/DeepSeekV41Model.cs",
+      "dependsOn": [
+        "core.block"
+      ],
+      "acceptanceTest": "B=3 ragged batch == 3 single runs",
+      "pr": 9,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "load.shards",
+      "feature": "Header-first sharded safetensors",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "docs/Research/SAFETENSORS_FORMAT.md",
+      "plannedLocation": "src/HartsyInference.ModelAssets/SafeTensors/",
+      "dependsOn": [
+        "core.spec"
+      ],
+      "acceptanceTest": "synthetic error matrix; header-only on staged checkpoint (96085 tensors, 510286023000 B)",
+      "pr": 4,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "load.binder",
+      "feature": "Quant companion binder and block codecs",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a convert.py",
+      "plannedLocation": "src/HartsyInference.ModelAssets/Quant/",
+      "dependsOn": [
+        "load.shards"
+      ],
+      "acceptanceTest": "DeepSeekV41Shard3ParityTests (milestone M1)",
+      "pr": 5,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "load.config",
+      "feature": "Config, HF directory probe, resolver, catalog",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a config.json",
+      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/DeepSeekV41Config.cs",
+      "dependsOn": [
+        "load.shards",
+        "load.binder"
+      ],
+      "acceptanceTest": "config parse of pinned config.json; resolver cases",
+      "pr": 7,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "quant.official.dequant",
+      "feature": "Weight decode/dequant (Official FP8 e4m3 32x32 e8m0 dense + MXFP4 experts)",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "docs/Research/DEEPSEEK_V41_ARCHITECTURE.md#quantization-inventory",
+      "plannedLocation": "src/HartsyInference.ModelAssets/BlockScale/",
+      "dependsOn": [
+        "load.binder"
+      ],
+      "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
+      "pr": 5,
+      "status": "Unimplemented",
+      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM"
+    },
+    {
+      "id": "quant.nvfp4.dequant",
+      "feature": "Weight decode/dequant (NVIDIA NVFP4 (W4A4 Blackwell, W4A16 elsewhere))",
+      "format": "nvfp4",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "docs/Research/DEEPSEEK_V41_ARCHITECTURE.md#quantization-inventory",
+      "plannedLocation": "src/HartsyInference.ModelAssets/BlockScale/",
+      "dependsOn": [
+        "load.binder"
+      ],
+      "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
+      "pr": 23,
+      "status": "Unimplemented",
+      "note": "W4A16 is a different numeric recipe with its own tolerance"
+    },
+    {
+      "id": "quant.quark.dequant",
+      "feature": "Weight decode/dequant (AMD Quark MXFP4 + MXFP8 attention)",
+      "format": "quark",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "docs/Research/DEEPSEEK_V41_ARCHITECTURE.md#quantization-inventory",
+      "plannedLocation": "src/HartsyInference.ModelAssets/BlockScale/",
+      "dependsOn": [
+        "load.binder"
+      ],
+      "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
+      "pr": 23,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "quant.mlx.dequant",
+      "feature": "Weight decode/dequant (MLX affine 4-bit gs64)",
+      "format": "mlx",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "docs/Research/DEEPSEEK_V41_ARCHITECTURE.md#quantization-inventory",
+      "plannedLocation": "src/HartsyInference.ModelAssets/BlockScale/",
+      "dependsOn": [
+        "load.binder"
+      ],
+      "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
+      "pr": 23,
+      "status": "Unimplemented",
+      "note": "mtp.2 lacks 13 experts; DSpark refused with the list"
+    },
+    {
+      "id": "quant.dwarfstar.dequant",
+      "feature": "Weight decode/dequant (DwarfStar GGUF (component-stripped))",
+      "format": "dwarfstar",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "docs/Research/DEEPSEEK_V41_ARCHITECTURE.md#quantization-inventory",
+      "plannedLocation": "src/HartsyInference.ModelAssets/BlockScale/",
+      "dependsOn": [
+        "load.binder"
+      ],
+      "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
+      "pr": 23,
+      "status": "Unimplemented",
+      "note": "no mtp; vision in a separate GGUF; not llama.cpp"
+    },
+    {
+      "id": "quant.exl3.dequant",
+      "feature": "Weight decode/dequant (EXL3 2 bpw MCG trellis)",
+      "format": "exl3",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "docs/Research/DEEPSEEK_V41_ARCHITECTURE.md#quantization-inventory",
+      "plannedLocation": "src/HartsyInference.ModelAssets/BlockScale/",
+      "dependsOn": [
+        "load.binder"
+      ],
+      "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
+      "pr": 23,
+      "status": "Unimplemented",
+      "note": "tile shape unconfirmed; read exllamav3 before implementing"
+    },
+    {
+      "id": "quant.official.native",
+      "feature": "Native block-scaled GEMM",
+      "format": "official",
+      "backends": {
+        "CPU": "Unsupported",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu"
+      ],
+      "hardware": [
+        "Hopper/Ada FP8; Blackwell FP4"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "cuBLASLt block-scaled paths",
+      "plannedLocation": "src/HartsyInference.Cuda",
+      "dependsOn": [
+        "quant.official.dequant"
+      ],
+      "acceptanceTest": "native vs dequant path agreement; rented hardware",
+      "pr": 24,
+      "status": "Unimplemented",
+      "note": "Vulkan native block-scaled GEMM is Unsupported; Vulkan uses dequant paths only"
+    },
+    {
+      "id": "quant.nvfp4.native",
+      "feature": "Native block-scaled GEMM",
+      "format": "nvfp4",
+      "backends": {
+        "CPU": "Unsupported",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu"
+      ],
+      "hardware": [
+        "Blackwell"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "cuBLASLt block-scaled paths",
+      "plannedLocation": "src/HartsyInference.Cuda",
+      "dependsOn": [
+        "quant.nvfp4.dequant"
+      ],
+      "acceptanceTest": "native vs dequant path agreement; rented hardware",
+      "pr": 24,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "quant.quark.native",
+      "feature": "Native block-scaled GEMM",
+      "format": "quark",
+      "backends": {
+        "CPU": "Unsupported",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu"
+      ],
+      "hardware": [
+        "Blackwell"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "cuBLASLt block-scaled paths",
+      "plannedLocation": "src/HartsyInference.Cuda",
+      "dependsOn": [
+        "quant.quark.dequant"
+      ],
+      "acceptanceTest": "native vs dequant path agreement; rented hardware",
+      "pr": 24,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "engram.store",
+      "feature": "Engram row store (storage / host / device)",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a engram.py",
+      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/Engram/",
+      "dependsOn": [
+        "load.shards",
+        "core.block"
+      ],
+      "acceptanceTest": "10k random rows bit-exact vs Python; RSS bounded",
+      "pr": 13,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "engram.constants",
+      "feature": "Engram constants as pinned fixtures",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "cpu"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "tests/python-reference/deepseek_v41/dump_engram_constants.py",
+      "plannedLocation": "tests fixtures",
+      "dependsOn": [
+        "core.spec"
+      ],
+      "acceptanceTest": "equal to Python dump, DwarfStar metadata and MLX engram_token_map.json",
+      "pr": 13,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "vision.tower",
+      "feature": "ViT + aligner + preprocessing + span splice",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a vision.py, image_processor.py",
+      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/DeepSeekVit*.cs",
+      "dependsOn": [
+        "core.model"
+      ],
+      "acceptanceTest": "tower parity corr >= 0.9999; span layout; late image in long prompt",
+      "pr": 15,
+      "status": "Unimplemented",
+      "note": "aligner, tower and preprocessing are Python-reference only until PR 15"
+    },
+    {
+      "id": "protocol.encoder",
+      "feature": "Conversation encoder and multi-stage tokenizer",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "cpu"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a encoding/encoding.py",
+      "plannedLocation": "src/HartsyInference.LLM/ChatTemplates/",
+      "dependsOn": [
+        "core.spec"
+      ],
+      "acceptanceTest": "render byte-equal to test_output_1..5; ids equal to HF tokenizers dump",
+      "pr": 10,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "protocol.parser",
+      "feature": "Streaming output parser (reasoning, DSML tool calls)",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "cpu"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "deepseek-recipe@8cadfede stream/state_machine.rs; vLLM deepseek_dsml@be68b6d2",
+      "plannedLocation": "src/HartsyInference.LLM/ChatTemplates/",
+      "dependsOn": [
+        "protocol.encoder"
+      ],
+      "acceptanceTest": "every split point == one-shot parse; abandoned consumer releases slot < 1 s",
+      "pr": 11,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "spec.contract",
+      "feature": "Speculation contract and exact rejection sampling",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "DSpark paper arXiv 2607.05147",
+      "plannedLocation": "src/HartsyInference.LLM/Generation/Speculative/",
+      "dependsOn": [
+        "protocol.parser"
+      ],
+      "acceptanceTest": "chi-square test, T=1 histogram equivalence",
+      "pr": 16,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "spec.dspark",
+      "feature": "DSpark draft module, scheduler and rollback",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "arXiv 2607.05147 Alg. 1; SGLang dspark_verify@43099c9f",
+      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/DSpark*.cs",
+      "dependsOn": [
+        "spec.contract",
+        "core.model"
+      ],
+      "acceptanceTest": "T=0 spec on/off identical; rollback fuzz; mtp.2-incomplete MLX refuses",
+      "pr": 17,
+      "status": "Unimplemented",
+      "note": "absent from DwarfStar and incomplete in MLX; Speculation=false with reason"
+    },
+    {
+      "id": "mem.experts",
+      "feature": "Expert bank and cache over IStreamingWeightCache",
+      "format": "official",
+      "backends": {
+        "CPU": "Unsupported",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "resident",
+        "offloaded"
+      ],
+      "hardware": [
+        "24GB class GPU + RAID"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "docs/Research/MEMORY_SCHEDULING_SERVING.md",
+      "plannedLocation": "src/HartsyInference.Cuda/CudaExpertCache.cs",
+      "dependsOn": [
+        "load.binder",
+        "load.config"
+      ],
+      "acceptanceTest": "hit/miss/dedup/pin; 1000 cancel cycles leak-free",
+      "pr": 12,
+      "status": "Unimplemented",
+      "note": "Vulkan has no streaming cache; host-staged uploads only (PR 24b)"
+    },
+    {
+      "id": "mem.planner",
+      "feature": "Residency ledger and planner; CPU expert executor",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "4090+3060 lane"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "plan D2 residency",
+      "plannedLocation": "src/HartsyInference.Engine/Placement/",
+      "dependsOn": [
+        "mem.experts",
+        "engram.store",
+        "core.model"
+      ],
+      "acceptanceTest": "planner fit matrix; M2 first real-weight token",
+      "pr": 14,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "serve.batching",
+      "feature": "Continuous batching, admission, exact prefix cache",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "vLLM model_state@30b287db (secondary)",
+      "plannedLocation": "src/HartsyInference.LLM/Generation/DynamicBatchScheduler",
+      "dependsOn": [
+        "core.model",
+        "protocol.parser"
+      ],
+      "acceptanceTest": "in-memory prefix hit == miss byte-identical; chunk invariance incl. image spans",
+      "pr": 18,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "serve.api",
+      "feature": "API surface: content parts, reasoning, tool deltas, capacity, deployments",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine",
+        "llmassistant"
+      ],
+      "reference": "plan D3 API",
+      "plannedLocation": "src/HartsyInference.API",
+      "dependsOn": [
+        "serve.batching"
+      ],
+      "acceptanceTest": "golden SSE transcript; /ready state machine",
+      "pr": 19,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "dist.collectives",
+      "feature": "Collectives, rendezvous, PP and TP placement",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "multi-gpu"
+      ],
+      "hardware": [
+        "NVLink node"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "docs/Research/MULTI_GPU_PARALLELISM.md",
+      "plannedLocation": "src/HartsyInference.Engine/Distributed/",
+      "dependsOn": [
+        "core.model"
+      ],
+      "acceptanceTest": "exact-token parity with single device; real transport on rented hardware",
+      "pr": 20,
+      "status": "Unimplemented",
+      "note": "local same-process ranks are a test rig only"
+    },
+    {
+      "id": "dist.ep",
+      "feature": "Expert parallel AllToAllV and topology",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "multi-gpu"
+      ],
+      "hardware": [
+        "NVLink node"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "docs/Research/MULTI_GPU_PARALLELISM.md",
+      "plannedLocation": "src/HartsyInference.Engine/Distributed/",
+      "dependsOn": [
+        "core.model"
+      ],
+      "acceptanceTest": "exact-token parity with single device; real transport on rented hardware",
+      "pr": 21,
+      "status": "Unimplemented",
+      "note": "local same-process ranks are a test rig only"
+    },
+    {
+      "id": "dist.multinode",
+      "feature": "Multi-process multi-node runner",
+      "format": "official",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "multi-node"
+      ],
+      "hardware": [
+        "two datacenter nodes"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "docs/Research/MULTI_GPU_PARALLELISM.md",
+      "plannedLocation": "src/HartsyInference.Engine/Distributed/",
+      "dependsOn": [
+        "core.model"
+      ],
+      "acceptanceTest": "exact-token parity with single device; real transport on rented hardware",
+      "pr": 22,
+      "status": "Unimplemented",
+      "note": "local same-process ranks are a test rig only"
+    },
+    {
+      "id": "vulkan.paths",
+      "feature": "Vulkan execution of attention, MoE routing and dequant paths",
+      "format": "official",
+      "backends": {
+        "CPU": "Unsupported",
+        "CUDA": "Unsupported",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "AMD GPU"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "plan PR 24b",
+      "plannedLocation": "src/HartsyInference.Vulkan/",
+      "dependsOn": [
+        "core.attn.prims",
+        "mem.experts"
+      ],
+      "acceptanceTest": "CPU-reference parity per shader; certification only on real AMD hardware",
+      "pr": 24,
+      "status": "Unimplemented",
+      "note": "native block-scaled GEMM on Vulkan is Unsupported"
+    },
+    {
+      "id": "perf.kernels",
+      "feature": "Measured kernel optimisations",
+      "format": "official",
+      "backends": {
+        "CPU": "Unsupported",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "resident",
+        "offloaded",
+        "multi-gpu",
+        "multi-node"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "plan D7",
+      "plannedLocation": "src/HartsyInference.Cuda",
+      "dependsOn": [
+        "core.model"
+      ],
+      "acceptanceTest": "before/after profile; regression-ab identical output; flagship regression check",
+      "pr": 24,
+      "status": "Unimplemented"
+    },
+    {
+      "id": "ext.pin",
+      "feature": "Engine pin, packaging, update doc",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "llmassistant"
+      ],
+      "reference": "plan D5",
+      "plannedLocation": "SwarmUI-LLMAssistant repo",
+      "dependsOn": [
+        "serve.api"
+      ],
+      "acceptanceTest": "extension unit tests + scenarios S1-S20",
+      "pr": "X1",
+      "status": "Unimplemented"
+    },
+    {
+      "id": "ext.lifecycle",
+      "feature": "Cancellation, lifecycle frames, streaming timeouts",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "llmassistant"
+      ],
+      "reference": "plan D5",
+      "plannedLocation": "SwarmUI-LLMAssistant repo",
+      "dependsOn": [
+        "serve.api"
+      ],
+      "acceptanceTest": "extension unit tests + scenarios S1-S20",
+      "pr": "X2",
+      "status": "Unimplemented"
+    },
+    {
+      "id": "ext.messages",
+      "feature": "Structured messages, reasoning, tools, multi-image",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "llmassistant"
+      ],
+      "reference": "plan D5",
+      "plannedLocation": "SwarmUI-LLMAssistant repo",
+      "dependsOn": [
+        "serve.api"
+      ],
+      "acceptanceTest": "extension unit tests + scenarios S1-S20",
+      "pr": "X3",
+      "status": "Unimplemented"
+    },
+    {
+      "id": "ext.discovery",
+      "feature": "Package discovery and deployment profiles",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "llmassistant"
+      ],
+      "reference": "plan D5",
+      "plannedLocation": "SwarmUI-LLMAssistant repo",
+      "dependsOn": [
+        "serve.api"
+      ],
+      "acceptanceTest": "extension unit tests + scenarios S1-S20",
+      "pr": "X4",
+      "status": "Unimplemented"
+    },
+    {
+      "id": "ext.gpulease",
+      "feature": "Cross-extension GPU lease",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "llmassistant"
+      ],
+      "reference": "plan D5",
+      "plannedLocation": "SwarmUI-LLMAssistant repo",
+      "dependsOn": [
+        "serve.api"
+      ],
+      "acceptanceTest": "extension unit tests + scenarios S1-S20",
+      "pr": "X5",
+      "status": "Unimplemented"
+    },
+    {
+      "id": "ext.ui",
+      "feature": "Capability-driven UI",
+      "format": "all",
+      "backends": {
+        "CPU": "Unimplemented",
+        "CUDA": "Unimplemented",
+        "Vulkan": "Unimplemented"
+      },
+      "placement": [
+        "n/a"
+      ],
+      "hardware": [
+        "any"
+      ],
+      "consumer": [
+        "llmassistant"
+      ],
+      "reference": "plan D5",
+      "plannedLocation": "SwarmUI-LLMAssistant repo",
+      "dependsOn": [
+        "serve.api"
+      ],
+      "acceptanceTest": "extension unit tests + scenarios S1-S20",
+      "pr": "X6",
+      "status": "Unimplemented"
+    }
+  ]
+}
