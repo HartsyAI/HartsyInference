@@ -73,4 +73,22 @@ internal static unsafe class Dsv41TestData
         for (int i = 0; i < r.Length; i++) r[i] = ((float)rng.NextDouble() * 2f - 1f) * scale;
         return r;
     }
+
+    public static float MaxAbsDiff(float[] a, float[] b)
+    {
+        Xunit.Assert.Equal(a.Length, b.Length);
+        float m = 0f;
+        for (int i = 0; i < a.Length; i++) m = MathF.Max(m, MathF.Abs(a[i] - b[i]));
+        return m;
+    }
+
+    /// <summary>Bit-for-bit equality; every NaN counts as equal since its sign and payload carry no information.</summary>
+    public static void AssertBitsEqual(float[] cpu, float[] vk, string what)
+    {
+        Xunit.Assert.Equal(cpu.Length, vk.Length);
+        for (int i = 0; i < cpu.Length; i++)
+            Xunit.Assert.True((float.IsNaN(cpu[i]) && float.IsNaN(vk[i])) ||
+                BitConverter.SingleToInt32Bits(cpu[i]) == BitConverter.SingleToInt32Bits(vk[i]),
+                $"{what} element {i}: cpu {cpu[i]:R} vk {vk[i]:R}");
+    }
 }

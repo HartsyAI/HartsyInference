@@ -152,6 +152,9 @@ SINGLE_KERNELS=(
     moe_route
     moe_build_dispatch
     moe_combine
+    hc_split_sinkhorn
+    hc_pre_mix
+    hc_post_mix
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do
