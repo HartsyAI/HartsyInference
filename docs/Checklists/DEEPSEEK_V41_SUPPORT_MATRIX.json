@@ -307,9 +307,9 @@
       "feature": "Quant companion binder and block codecs",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -330,7 +330,7 @@
       ],
       "acceptanceTest": "DeepSeekV41Shard3ParityTests (milestone M1)",
       "pr": 5,
-      "status": "Unimplemented"
+      "status": "Implemented"
     },
     {
       "id": "load.config",
@@ -366,7 +366,7 @@
       "feature": "Weight decode/dequant (Official FP8 e4m3 32x32 e8m0 dense + MXFP4 experts)",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
+        "CPU": "Implemented",
         "CUDA": "Unimplemented",
         "Vulkan": "Unimplemented"
       },
@@ -390,8 +390,8 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 5,
-      "status": "Unimplemented",
-      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM"
+      "status": "InProgress",
+      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM; PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); device dequant is later. M1 matched the official dequant bit-exactly on 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); not Verified until the staged shard runs it"
     },
     {
       "id": "quant.nvfp4.dequant",
