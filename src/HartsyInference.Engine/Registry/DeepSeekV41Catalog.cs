@@ -13,7 +13,7 @@ internal static class DeepSeekV41Catalog
 
     /// <summary>The refusal the MLX variant carries; a test pins it to what the checkpoint scan reports for the real repo's gaps.</summary>
     internal const string MlxDraftRefusal =
-        "DSpark speculative decoding refused: mtp.2 lacks 14 of 128 routed experts (9, 87, 88-99).";
+        "DSpark speculative decoding refused: mtp.2 lacks 14 of 128 routed experts (9, 87-99).";
 
     /// <summary>Builds the entry. It has no <see cref="CatalogEntry.Assets"/>, so the CLI never offers a ~475 GiB download for it.</summary>
     internal static CatalogEntry Build() => new()

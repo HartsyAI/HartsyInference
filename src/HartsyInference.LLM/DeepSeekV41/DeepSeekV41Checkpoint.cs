@@ -8,8 +8,10 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
-/// <summary>An opened DeepSeek-V4.1 checkpoint directory: the shard set, the key mapper and the bound quant recipes; it hands out borrowed views and never copies weights.</summary>
-/// <remarks>Opening reads headers only. Engram shards are opened pread-only and never mapped. A draft with missing routed experts (the MLX conversion's <c>mtp.2</c>) is reported, its partial experts are kept out of companion binding, and <see cref="RequireDraft"/> refuses it.</remarks>
+/// <summary>An opened DeepSeek-V4.1 checkpoint directory: the shard set, key mapper and bound quant recipes.</summary>
+/// <remarks>Opening reads headers only and views are borrowed, never copied. Engram shards are opened pread-only and never mapped.
+/// A draft with missing routed experts (the MLX conversion's <c>mtp.2</c>) is reported, its partial experts are kept out of
+/// companion binding, and <see cref="RequireDraft"/> refuses it.</remarks>
 public sealed class DeepSeekV41Checkpoint : IDisposable
 {
     private const int MaxListedProblems = 12;
@@ -59,15 +61,17 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
     public DeepSeekV41WeightInventory Weights { get; }
 
     /// <summary>Opens the checkpoint at <paramref name="directory"/> from headers alone.</summary>
-    /// <exception cref="HartsyInferenceException">The directory is not a DeepSeek-V4.1 checkpoint, is unsharded, has unmapped or colliding keys, or its companions do not bind.</exception>
+    /// <exception cref="HartsyInferenceException">Not a DeepSeek-V4.1 checkpoint, unsharded, or its keys or companions do not bind.</exception>
     public static DeepSeekV41Checkpoint Open(string directory)
     {
         HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(directory)
-            ?? throw new HartsyInferenceException($"'{directory}' is not a Hugging Face checkpoint directory (no config.json with model_type, or no safetensors).");
+            ?? throw new HartsyInferenceException(
+                $"'{directory}' is not a Hugging Face checkpoint directory (no config.json with model_type, or no safetensors).");
         if (!string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal))
             throw new HartsyInferenceException($"'{directory}' has model_type '{info.ModelType}', not '{DeepSeekV41Config.ModelType}'.");
         if (info.IndexPath is null)
-            throw new HartsyInferenceException($"'{directory}' has no {HfCheckpointDirectory.IndexFileName}; a DeepSeek-V4.1 checkpoint is always sharded.");
+            throw new HartsyInferenceException(
+                $"'{directory}' has no {HfCheckpointDirectory.IndexFileName}; a DeepSeek-V4.1 checkpoint is always sharded.");
         QuantFlavor flavor = info.Flavor
             ?? throw new HartsyInferenceException($"'{info.ConfigPath}' has no recognisable quantization_config; cannot choose companion naming.");
         DeepSeekV41Config config = DeepSeekV41Config.Load(info.ConfigPath);
@@ -109,7 +113,7 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
     /// <summary>A tensor as a borrowed view of its mapped shard; throws for Engram tables, which are pread-only.</summary>
     public Tensor GetWeight(string canonicalKey) => Shards.GetTensor(Resolve(canonicalKey));
 
-    /// <summary>The weight's quantization recipe, or null when the weight is stored unquantized.</summary>
+    /// <summary>The weight's quant recipe, or null when unquantized; throws for Engram tables (use <see cref="EngramTable"/>).</summary>
     public QuantWeightInfo? GetQuant(string canonicalKey)
     {
         string source = Resolve(canonicalKey);
@@ -131,7 +135,8 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
     public DeepSeekV41EngramTable EngramTable(int layer)
     {
         if (!Config.EngramLayerIds.Contains(layer))
-            throw new ArgumentException($"Layer {layer} has no Engram table (Engram layers: {string.Join(", ", Config.EngramLayerIds)}).", nameof(layer));
+            throw new ArgumentException(
+                $"Layer {layer} has no Engram table (Engram layers: {string.Join(", ", Config.EngramLayerIds)}).", nameof(layer));
         string prefix = LayerPrefix(Config, layer);
         TensorLocation embed = GetLocation($"{prefix}.engram.embed.weight");
         TensorLocation? scale = HasWeight($"{prefix}.engram.embed.scale") ? GetLocation($"{prefix}.engram.embed.scale") : null;
@@ -148,7 +153,8 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
             case DeepSeekV41DraftStatus.Complete:
                 return;
             case DeepSeekV41DraftStatus.Absent:
-                throw new HartsyInferenceException($"This {Flavor} checkpoint carries no draft (mtp) layers, so DSpark speculative decoding is unavailable.");
+                throw new HartsyInferenceException(
+                    $"This {Flavor} checkpoint carries no draft (mtp) layers, so DSpark speculative decoding is unavailable.");
             default:
                 throw new HartsyInferenceException(
                     $"This {Flavor} checkpoint's draft is incomplete, so DSpark speculative decoding is refused: {Draft.DescribeMissing()}.");
