@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.IO;
 using HartsyInference.Engine.HuggingFace;
 
 namespace HartsyInference.Engine;
@@ -14,10 +15,13 @@ public static class ModelDownloader
     /// <summary>One gate per target path — the async equivalent of the extension's per-canonical-name lock set.</summary>
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The on-disk path an asset resolves to under the models root.</summary>
+    /// <summary>The on-disk path an asset resolves to under the models root. A folder spelled in another case on a
+    /// case-sensitive filesystem (SwarmUI's <c>llm/</c> for the catalog's <c>LLM/</c>) is matched, so a download lands
+    /// in the folder that already exists instead of a second one beside it.</summary>
     public static string TargetPath(ModelAsset asset)
     {
-        string canonical = Path.Combine(RepoPaths.ModelsRoot(), asset.TargetSubdir, asset.FileName);
+        string root = RepoPaths.ModelsRoot();
+        string canonical = CaseInsensitivePath.ResolveFile(root, Path.Combine(asset.TargetSubdir, asset.FileName));
         if (File.Exists(canonical) || asset.LegacyTargetNames.Count == 0)
         {
             return canonical;
@@ -27,7 +31,7 @@ public static class ModelDownloader
         // keeps the strict no-download callers (MageFlowRecipe and friends) from reporting it missing.
         foreach (string legacy in asset.LegacyTargetNames)
         {
-            string candidate = Path.Combine(RepoPaths.ModelsRoot(), asset.TargetSubdir, legacy);
+            string candidate = CaseInsensitivePath.ResolveFile(root, Path.Combine(asset.TargetSubdir, legacy));
             if (File.Exists(candidate))
             {
                 return candidate;
@@ -86,7 +90,7 @@ public static class ModelDownloader
             // Re-check under the lock: a concurrent request may have finished the download while we waited.
             if (File.Exists(target))
                 return;
-            string audioRoot = Path.Combine(RepoPaths.ModelsRoot(), "audio");
+            string audioRoot = Audio.AudioModelRoot.Location();
             if (target.StartsWith(audioRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
             {
                 // A converted checkpoint may stand in for this asset; linking it beats downloading the original.

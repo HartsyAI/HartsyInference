@@ -1,4 +1,5 @@
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.IO;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.ModelAssets.Checkpoints;
 
@@ -78,7 +79,8 @@ public static class ModelResolver
         {
             return null;
         }
-        string candidate = Path.Combine(RepoPaths.ModelsRoot(), subdir, id);
+        // The store may spell these folders in another case: SwarmUI's root has llm/ and audio/ for LLM/ and Audio/.
+        string candidate = CaseInsensitivePath.ResolveEntry(RepoPaths.ModelsRoot(), Path.Combine(subdir, id));
         if (File.Exists(candidate))
             return Path.GetFullPath(candidate);
         if (Directory.Exists(candidate))
