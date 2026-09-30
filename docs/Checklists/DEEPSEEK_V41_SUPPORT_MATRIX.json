@@ -276,9 +276,9 @@
       "feature": "Header-first sharded safetensors",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -299,7 +299,7 @@
       ],
       "acceptanceTest": "synthetic error matrix; header-only on staged checkpoint (96085 tensors, 510286023000 B)",
       "pr": 4,
-      "status": "Unimplemented"
+      "status": "Implemented"
     },
     {
       "id": "load.binder",
