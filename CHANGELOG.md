@@ -6,6 +6,26 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.225
+
+- **Phone gateway exe (`src/HartsyInference.PhoneGateway`, not packaged).** The SIP/RTP leg of the phone-call
+  voice agent, on sipsorcery 10.0.16 (pinned with its license note) plus the repo's own media path:
+  `ClockedAudioSource` is the RTP clock (one foreground thread per call on absolute `MonotonicClock` deadlines,
+  `SCHED_FIFO` when `LimitRTPRIO` allows it and a 150 µs spin tail otherwise, `SpscRing` drain → G.711 encode →
+  `SendAudio`, comfort silence on every tick, up to five catch-up frames then a resync, `Flush` applied on the next
+  tick, zero allocation after its on-thread warm-up); `RtpJitterBuffer` (eight 20 ms slots, three-frame pre-buffer,
+  repeat-once-then-silence concealment, reorder/late/duplicate/reset counters, depth trimming) is fed from
+  `OnRtpPacketReceived` with one copy and drained by a pump thread that decodes, resamples 8→16 kHz and queues on
+  the link; `EngineLink` dials the voice host's Unix socket (backoff with full jitter, Hello/HelloAck, ping and
+  liveness, control lane never dropped, audio lane drop-oldest, flush-epoch drop rule); `LinkOutageGuard` holds a
+  caller through a host outage with an embedded prompt, re-announces the call on reconnect and hangs up after a
+  timeout; `CallController` is the one-call state machine (486 on a second INVITE, 603 by policy, 503 with the host
+  down, greeting, RFC 4733 DTMF both ways, `hangup`/`send_dtmf`/`transfer`/`hold`/`unhold`/`play_prompt` tools);
+  `PhoneMediaSession` advertises the STUN/literal public address and latches on the first packet. Config is a
+  JSON file with secrets by environment-variable name only; `/health`, `/metrics` (Prometheus) and token-gated
+  `POST /calls` on loopback; recording off by default. `HartsyInference.Phone.slnf` builds it without the GPU
+  packages. Docs: `docs/Research/PHONE_GATEWAY.md`.
+
 ## alpha.224
 
 - **Kokoro synthesis 6.7× faster on the 3060** (15-word sentence 1145 → 170 ms median in-process, 165–191 across nine
