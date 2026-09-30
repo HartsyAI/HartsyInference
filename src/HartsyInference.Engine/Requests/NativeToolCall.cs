@@ -9,6 +9,9 @@ public sealed record NativeToolCall
     /// <summary>The invoked tool's name.</summary>
     public required string Name { get; init; }
 
+    /// <summary>Tool namespace when the model called a qualified <c>namespace::name</c> tool; null otherwise.</summary>
+    public string? Namespace { get; init; }
+
     /// <summary>Raw JSON arguments string.</summary>
     public string Arguments { get; init; } = "{}";
 }

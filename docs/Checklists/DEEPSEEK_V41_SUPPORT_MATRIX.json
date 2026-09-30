@@ -154,8 +154,8 @@
       "feature": "Sparse latent attention, indexer, hc Sinkhorn, latent quantizers",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -171,13 +171,14 @@
         "engine"
       ],
       "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a kernel.py (kernel_ports.py)",
-      "plannedLocation": "src/HartsyInference.Core + Kernels/lm",
+      "plannedLocation": "src/HartsyInference.Core (Backends/*Reference) + Kernels/latent/",
       "dependsOn": [
         "core.moe.route"
       ],
       "acceptanceTest": "CPU refs vs Python dumps; CUDA vs ref 1e-5",
       "pr": 6,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "SparseLatentAttention, IndexerScores, HcSplitSinkhorn/HcPreMix/HcPostMix, QuantizeLatentRows, ActQuantDequantInPlace and BuildWindowIndices: CPU refs match torch dumps (quant bytes exact, attention 1e-5, Sinkhorn 1e-6); CUDA matches the CPU refs (attention/indexer 1e-5, quant/act-quant/hc-mix/window bit-exact); Vulkan throws NotSupported until PR 24b; not checkpoint-verified, nothing here is wired into a model"
     },
     {
       "id": "core.block",
@@ -216,8 +217,8 @@
       "feature": "Interleaved RoPE with inverse on attention output",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -239,7 +240,8 @@
       ],
       "acceptanceTest": "parity with dumped rope outputs; MlaForward untouched",
       "pr": 6,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "ApplyRopeInterleaved(x, cos, sin, rotaryDim, dimOffset) overload: CPU matches torch view_as_complex forward and inverse; CUDA bit-identical to the CPU reference; Vulkan throws NotSupported; MlaForward untouched"
     },
     {
       "id": "core.model",
@@ -306,9 +308,9 @@
       "feature": "Quant companion binder and block codecs",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -329,7 +331,7 @@
       ],
       "acceptanceTest": "DeepSeekV41Shard3ParityTests (milestone M1)",
       "pr": 5,
-      "status": "Unimplemented"
+      "status": "Implemented"
     },
     {
       "id": "load.config",
@@ -365,7 +367,7 @@
       "feature": "Weight decode/dequant (Official FP8 e4m3 32x32 e8m0 dense + MXFP4 experts)",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
+        "CPU": "Implemented",
         "CUDA": "Unimplemented",
         "Vulkan": "Unimplemented"
       },
@@ -389,8 +391,8 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 5,
-      "status": "Unimplemented",
-      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM"
+      "status": "InProgress",
+      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM; PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); device dequant is later. M1 matched the official dequant bit-exactly on 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); not Verified until the staged shard runs it"
     },
     {
       "id": "quant.nvfp4.dequant",
@@ -758,9 +760,9 @@
       "feature": "Streaming output parser (reasoning, DSML tool calls)",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Unsupported",
+        "Vulkan": "Unsupported"
       },
       "placement": [
         "n/a"
@@ -779,7 +781,8 @@
       ],
       "acceptanceTest": "every split point == one-shot parse; abandoned consumer releases slot < 1 s",
       "pr": 11,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "DeepSeekV41OutputParser + IncrementalDetokenizer + TextStreamPump: every split point equals encoding.py (26 ok + 15 malformed cases, also on the real tokenizer); TextService streams Reasoning/ToolCallDelta chunks; Usage/Status chunks are declared but not emitted yet; no model template maps to the encoder adapter yet, so the parser is dormant in production"
     },
     {
       "id": "spec.contract",
