@@ -43,8 +43,9 @@ namespace HartsyInference.Audio.Tests;
 /// <c>HARTSY_WHISPER_BENCH_PROFILE=1</c> adds stage-timer runs (<c>diagnostics.profile</c>: stage wall and D2H syncs,
 /// each stage closed by a device sync) and per-op runs (<c>diagnostics.profile</c> + <c>profileSync</c>) of small.en;
 /// <c>HARTSY_WHISPER_BENCH_EXACT=1</c> runs everything at full F32 (no TF32 GEMMs). <c>HARTSY_WHISPER_BENCH_BACKEND=cpu</c>
-/// runs every model through the regression protocol on the CPU backend (token evidence without a GPU), and
-/// <c>HARTSY_WHISPER_BENCH_RUNS=warm,timed</c> overrides that protocol's call counts. Tables go to the test output
+/// runs on the CPU backend instead (token evidence without a GPU), <c>HARTSY_WHISPER_BENCH_GATE_MODEL</c> names the
+/// model that gets the gate protocol, and <c>HARTSY_WHISPER_BENCH_RUNS=warm,timed</c> overrides the regression
+/// protocol's call counts. Tables go to the test output
 /// and, when <c>HARTSY_WHISPER_BENCH_OUT</c> names a file, are appended there.</para></summary>
 [Trait("Category", "GpuIntegration")]
 [Trait("Category", "RealWeights")]
@@ -60,6 +61,7 @@ public sealed class WhisperBenchTests
     private const string ExactEnvVar = "HARTSY_WHISPER_BENCH_EXACT";
     private const string BackendEnvVar = "HARTSY_WHISPER_BENCH_BACKEND";
     private const string RunsEnvVar = "HARTSY_WHISPER_BENCH_RUNS";
+    private const string GateModelEnvVar = "HARTSY_WHISPER_BENCH_GATE_MODEL";
     private const string RequiredDeviceSubstring = "3060";
     private const string GateModel = "openai/whisper-small.en";
     private const int SampleRate = 16_000;
@@ -129,7 +131,7 @@ public sealed class WhisperBenchTests
                 Stopwatch load = Stopwatch.StartNew();
                 using WhisperPipeline whisper = await WhisperPipeline.LoadAsync(repo);
                 _out.WriteLine($"{repo} loaded in {load.Elapsed.TotalSeconds:F1}s (excluded from every row)");
-                if (repo == GateModel && !cpu)
+                if (repo == (Environment.GetEnvironmentVariable(GateModelEnvVar) ?? GateModel))
                 {
                     RunGate(backend, whisper, audio16k, narrowband, exact);
                     if (Environment.GetEnvironmentVariable(ProfileEnvVar) == "1")
