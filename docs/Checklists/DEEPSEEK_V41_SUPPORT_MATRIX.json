@@ -645,9 +645,9 @@
       "feature": "Engram row store (storage / host / device)",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Unsupported",
+        "Vulkan": "Unsupported"
       },
       "placement": [
         "resident",
@@ -667,14 +667,15 @@
       ],
       "acceptanceTest": "10k random rows bit-exact vs Python; RSS bounded",
       "pr": 13,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "EngramTableStore (Storage and HostResident backings, dedup + sort + 4 KB page-merged preads, LRU slab cache, owned-range check) with official FP8/E8M0, DwarfStar GGUF row264 and MLX affine row layouts; row decode is bit-exact vs Python dequant on synthetic, edge and range-fetched real rows. Device backing throws NotSupported and EngramModule is deferred to PR 8. The 10k-random-row real-shard test, RSS bound and cold-latency measurement did not run (checkpoint not staged); DeepSeekV41Checkpoint cannot open the real official checkpoint yet because shards 47/48 also hold non-table engram tensors"
     },
     {
       "id": "engram.constants",
       "feature": "Engram constants as pinned fixtures",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
+        "CPU": "Implemented",
         "CUDA": "Unimplemented",
         "Vulkan": "Unimplemented"
       },
@@ -694,7 +695,8 @@
       ],
       "acceptanceTest": "equal to Python dump, DwarfStar metadata and MLX engram_token_map.json",
       "pr": 13,
-      "status": "Unimplemented"
+      "status": "Implemented",
+      "note": "Token map, multipliers, offsets and primes dumped from upstream engram.py at dba1be0a, embedded and SHA-256 checked; token map, primes and multipliers equal the DwarfStar GGUF metadata and the token map equals the MLX engram_token_map.json (recorded in the manifest). EngramHasher equals the upstream NgramHashState on 15 cases including DEAD tokens, sequence start and prefill-to-decode carry. Not Verified: no PARITY_VERIFICATION.md entry yet; the 15 hash cases are CPU-only"
     },
     {
       "id": "vision.tower",
