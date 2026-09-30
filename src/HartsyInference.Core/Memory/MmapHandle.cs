@@ -1,4 +1,5 @@
 using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 
 namespace HartsyInference.Core.Memory;
 
@@ -74,6 +75,32 @@ public sealed unsafe class MmapHandle : IDisposable
 
         return (byte*)ptr + byteOffset;
     }
+
+    /// <summary>Hints the kernel about access to a byte range; false where madvise is unavailable or refuses, and never load-bearing.</summary>
+    public bool Advise(long offset, long length, MmapAdvice advice)
+    {
+        nint ptr = _basePointer;
+        if (ptr == 0)
+            throw new ObjectDisposedException(nameof(MmapHandle));
+        if (offset < 0 || length < 0 || offset > ByteLength - length)
+            throw new ArgumentOutOfRangeException(nameof(length), $"Range [{offset}, {offset + length}) is outside the {ByteLength}-byte mapping.");
+        if (length == 0 || !OperatingSystem.IsLinux())
+            return false;
+
+        // madvise wants a page-aligned start; widening downward keeps the requested range covered.
+        long page = Environment.SystemPageSize;
+        long start = offset / page * page;
+        long span = offset + length - start;
+        try
+        {
+            return Madvise(ptr + (nint)start, (nuint)span, (int)advice) == 0;
+        }
+        catch (EntryPointNotFoundException) { return false; }
+        catch (DllNotFoundException) { return false; }
+    }
+
+    [DllImport("libc", EntryPoint = "madvise")]
+    private static extern int Madvise(nint address, nuint length, int advice);
 
     /// <summary>Releases the memory-mapped view and file via atomic pointer exchange.</summary>
     public void Dispose()

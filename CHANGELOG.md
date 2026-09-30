@@ -6,6 +6,25 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.203
+
+- **Header-first sharded safetensors** (`ShardedSafeTensorSet`, DeepSeek-V4.1-Flash program PR 4). `OpenIndex` (driven by
+  `model.safetensors.index.json`) and `OpenFiles` (odd names such as MLX's) read only each shard's 8+N header bytes with
+  `RandomAccess.Read` and build a complete `name -> TensorLocation` inventory before anything is mapped: opening the
+  official 475 GiB, 48-shard, 96,085-tensor checkpoint maps nothing. A shard is `mmap`ed on the first `GetTensor`, advised
+  `MADV_RANDOM` (`MmapHandle.Advise`); shards listed in `PreadOnlyShards` are never mapped and are read through
+  `IWeightByteSource` (`PreadByteSource`, batched async preads). The open fails with one aggregated, actionable error for
+  a shard missing on disk, a key in the index but not its header (or the reverse or in another shard), a key duplicated
+  across shards, or tensor bytes that do not sum to `metadata.total_size`.
+- `SafeTensorHeaderReader` is the shared header validator (`SafeTensorsLoader.Load` and `CheckpointHeader` use it): oversized
+  or truncated headers, overlapping or out-of-file tensors, and a `data_offsets` span that disagrees with dtype x shape are
+  rejected up front. Offsets are 64-bit throughout (tested past 4 GiB with a sparse file).
+- New safetensors dtypes: `F8_E8M0`, `U16`, `U32`, `U64`, and `F8_E4M3FNUZ`/`F8_E5M2FNUZ`. The FNUZ pair parses (so an
+  inventory can list it) but is refused with a clear error when a tensor is materialised, since decoding it as OCP fp8
+  would halve every value.
+- A split GGUF (`split.count` > 1) is detected on load and refused with a `llama-gguf-split --merge` hint instead of
+  loading one part with tensors missing.
+
 ## alpha.202
 
 - **The Comfy-Org HunyuanImage 2.1 repack loads and renders** (`hunyuanimage21-fp8-1_0-hunyuan-image-21-base-fp8.safetensors`,

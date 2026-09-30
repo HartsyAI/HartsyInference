@@ -22,6 +22,15 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>8-bit floating point E5M2 (5-bit exponent, 2-bit mantissa). Wider range, lower precision than E4M3.</summary>
     public static readonly DType F8E5M2 = new("F8_E5M2", 1, false);
 
+    /// <summary>8-bit exponent-only OCP MX scale: value is <c>2^(byte - 127)</c>, 0xFF is NaN.</summary>
+    public static readonly DType F8E8M0 = new("F8_E8M0", 1, false);
+
+    /// <summary>8-bit E4M3 FNUZ (AMD encoding); parsed from headers, refused where a tensor is materialised.</summary>
+    public static readonly DType F8E4M3Fnuz = new("F8_E4M3FNUZ", 1, false);
+
+    /// <summary>8-bit E5M2 FNUZ; parsed from headers, refused where a tensor is materialised.</summary>
+    public static readonly DType F8E5M2Fnuz = new("F8_E5M2FNUZ", 1, false);
+
     /// <summary>4-bit floating point E2M1 (1 sign, 2 exponent, 1 mantissa), packed 2 elements per byte with a separate block-scale tensor. The resident format for native tensor-core FP4 GEMM on Blackwell (cuBLASLt <c>CUDA_R_4F_E2M1</c>). Block byte size 1 covers 2 elements; scales are stored separately.</summary>
     public static readonly DType F4E2M1 = new("F4_E2M1", 0, true, 1, 2);
 
@@ -111,6 +120,15 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>Unsigned 8-bit integer.</summary>
     public static readonly DType U8 = new("U8", 1, false);
 
+    /// <summary>Unsigned 16-bit integer.</summary>
+    public static readonly DType U16 = new("U16", 2, false);
+
+    /// <summary>Unsigned 32-bit integer; MLX stores packed 4-bit affine weights in it.</summary>
+    public static readonly DType U32 = new("U32", 4, false);
+
+    /// <summary>Unsigned 64-bit integer.</summary>
+    public static readonly DType U64 = new("U64", 8, false);
+
     /// <summary>Signed 32-bit integer.</summary>
     public static readonly DType I32 = new("I32", 4, false);
 
@@ -128,6 +146,9 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
 
     /// <summary>Whether this dtype is an FP8 format.</summary>
     public bool IsFp8 => this == F8E4M3 || this == F8E5M2;
+
+    /// <summary>Whether this is an FNUZ FP8 encoding that no engine kernel decodes.</summary>
+    public bool IsFnuz => this == F8E4M3Fnuz || this == F8E5M2Fnuz;
 
     /// <summary>Whether this dtype is the FP4 (e2m1) tensor-core format.</summary>
     public bool IsFp4 => this == F4E2M1;
