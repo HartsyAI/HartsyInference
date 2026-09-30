@@ -6,6 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.211
+
+- **Vulkan paths for the DeepSeek-V4.1-Flash primitives** (program PR 24b). New compute shaders, each parity-tested against the CPU reference
+  on an NVIDIA RTX 3060 through Vulkan: `MoeRoute`, `MoeBuildDispatch`, `MoeCombine`, `TopKLastDim`, `Softplus`; `HcSplitSinkhorn`,
+  `HcPreMix`, `HcPostMix`; `SparseLatentAttention`, `IndexerScores`, `BuildWindowIndices`, `QuantizeLatentRows`, `ActQuantDequantInPlace`
+  and the 5-argument `ApplyRopeInterleaved`. Integer outputs, quantizer bytes, window indices, rope and the HC mixes are exact; router
+  weights are within 5e-6 relative, attention and indexer within 1e-5, Sinkhorn within 1e-6.
+- Behaviour to know: `MoeCombine` and `QuantizeLatentRows` skip an out-of-range slot or destination row instead of throwing;
+  `SparseLatentAttention` throws `NotSupportedException` for k above 4096 and `QuantizeLatentRows` for destination tensors that are not
+  whole 32-bit words.
+- `VulkanBackend.DequantRecipeToBf16` (shader `dequant_recipe_bf16`) widens MXFP4-E8M0 and block-FP8-E8M0 recipe weights to BF16,
+  bit-identical to `Mxfp4E8M0Codec` and `Fp8BlockE8M0Codec` on synthetic layouts. It forms subnormal results on the BF16 grid directly because
+  Vulkan devices flush float subnormals. `SupportsRecipeDequant` reports what it can decode. `SupportsResidentQuant(Tensor)` stays false on
+  Vulkan: there is no block-scaled GEMM, so recipe weights are widened, not kept packed.
+- The Vulkan expert cache is not implemented; experts are host-staged uploads. Native block-scaled GEMM on Vulkan stays `Unsupported`.
+  No AMD hardware evidence has been collected; the NVIDIA-via-Vulkan runs are plumbing evidence only. Nothing here is wired into a model.
+
 ## alpha.210
 
 - **Expert bank, expert cache and device dequant** (DeepSeek-V4.1-Flash program PR 12). `ExpertBank` builds each `ExpertWeights(W1, W2, W3)`
