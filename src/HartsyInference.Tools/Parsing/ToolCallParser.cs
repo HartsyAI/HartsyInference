@@ -3,7 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Tools.Parsing;
 
-/// <summary>Incremental tool-call parser over decoded text deltas for one <see cref="ToolCallFormat"/>. Text outside a call span is forwarded as it arrives, holding back only the characters that may still begin a marker; a span is read until its JSON (or Gemma block) value balances, then becomes one or more <see cref="NativeToolCall"/>s with ids <c>call_0</c>, <c>call_1</c>, … per parser. Anything that does not resolve into a call (invalid JSON, no <c>name</c>, a closing tag before the value balanced, a span past the cap, an unterminated span at <see cref="Flush"/>) is forwarded as plain text, so model output never throws.</summary>
+/// <summary>Incremental tool-call parser over decoded text deltas for one <see cref="ToolCallFormat"/>. Text outside a call span is forwarded as it arrives, holding back only the characters that may still begin a marker; a span is read until its JSON (or Gemma block) value balances, then becomes one or more <see cref="NativeToolCall"/>s with ids <c>call_0</c>, <c>call_1</c>, … per parser. Anything that does not resolve into a call (invalid JSON, no <c>name</c>, a closing tag before the value balanced, a span past the cap, an unterminated span at <see cref="Flush"/>) is forwarded as plain text, so model output never throws. The bare forms (<see cref="ToolCallMarker.Strict"/>) are held back only while they can still be a call: a JSON span must open with <c>"name"</c> and, when the parser knows the offered tool names, the call must name one of them; the tagged forms stay permissive so a mistyped tool name reaches the host as a call it can answer with an error.</summary>
 /// <remarks>Runs on the decode thread inside the engine's slot lock: every operation is bounded by the delta length plus the marker length, with one string per call span and no allocation on the plain-text path when nothing is held.</remarks>
 public sealed class ToolCallParser
 {
@@ -12,6 +12,8 @@ public sealed class ToolCallParser
 
     private const int MaxIdentifierChars = 64;
     private const string GemmaCallPrefix = "call:";
+    private const string ObjectProbe = "{\"name\"";
+    private const string ArrayProbe = "[{\"name\"";
 
     private readonly ToolCallFormatRules _rules;
     private readonly int _maxSpanChars;
@@ -19,6 +21,8 @@ public sealed class ToolCallParser
     private readonly StringBuilder _hold = new();
     private readonly StringBuilder _span = new();
     private readonly StringBuilder _name = new();
+    private readonly HashSet<string>? _knownNames;
+    private readonly string[]? _knownNameList;
     private List<NativeToolCall>? _calls;
     private State _state;
     private Phase _phase;
@@ -30,18 +34,21 @@ public sealed class ToolCallParser
     private bool _holdIsIdentifier;
     private ToolCallMarker? _holdSingle;
     private bool _closeSeen;
+    private bool _strictSpan;
+    private string? _probe;
+    private int _probeIndex;
     private JsonBalance _json;
     private GemmaBalance _gemma;
     private int _completed;
 
-    /// <summary>Creates a parser for <paramref name="format"/>.</summary>
-    public ToolCallParser(ToolCallFormat format, int maxSpanChars = DefaultMaxSpanChars)
-        : this(ToolCallFormats.RulesFor(format), maxSpanChars)
+    /// <summary>Creates a parser for <paramref name="format"/>; <paramref name="knownTools"/> (the offered tool names) makes the bare forms resolve only to those names, null keeps them permissive.</summary>
+    public ToolCallParser(ToolCallFormat format, int maxSpanChars = DefaultMaxSpanChars, IEnumerable<string>? knownTools = null)
+        : this(ToolCallFormats.RulesFor(format), maxSpanChars, knownTools)
     {
     }
 
-    /// <summary>Creates a parser over custom <paramref name="rules"/>.</summary>
-    public ToolCallParser(ToolCallFormatRules rules, int maxSpanChars = DefaultMaxSpanChars)
+    /// <summary>Creates a parser over custom <paramref name="rules"/>; see the format overload for <paramref name="knownTools"/>.</summary>
+    public ToolCallParser(ToolCallFormatRules rules, int maxSpanChars = DefaultMaxSpanChars, IEnumerable<string>? knownTools = null)
     {
         ArgumentNullException.ThrowIfNull(rules);
         ArgumentOutOfRangeException.ThrowIfLessThan(maxSpanChars, 16);
@@ -52,6 +59,11 @@ public sealed class ToolCallParser
         }
         _rules = rules;
         _maxSpanChars = maxSpanChars;
+        if (knownTools is not null)
+        {
+            _knownNames = new HashSet<string>(knownTools, StringComparer.Ordinal);
+            _knownNameList = [.. _knownNames];
+        }
     }
 
     /// <summary>The format being parsed.</summary>
@@ -62,6 +74,9 @@ public sealed class ToolCallParser
 
     /// <summary>True while a call span is being read (its text is held, not forwarded).</summary>
     public bool InCall => _state == State.Call;
+
+    /// <summary>The offered tool names the bare forms are restricted to, or null when every name is accepted.</summary>
+    public IReadOnlyCollection<string>? KnownTools => _knownNames;
 
     /// <summary>Feeds one delta and returns the text to forward plus any calls it completed.</summary>
     public ToolCallParseResult Push(string delta)
@@ -147,11 +162,15 @@ public sealed class ToolCallParser
     {
         if (_rules.NamedFormAtLineStart && _lineStart && IsIdentifierStart(c))
         {
-            _holdIsIdentifier = true;
-            _holdLineStart = _lineStart;
-            _holdSingle = null;
             _hold.Append(c);
-            return true;
+            if (_knownNameList is null || PrefixesKnownName())
+            {
+                _holdIsIdentifier = true;
+                _holdLineStart = _lineStart;
+                _holdSingle = null;
+                return true;
+            }
+            _hold.Clear();
         }
         ToolCallMarker? single = null;
         bool longer = false;
@@ -194,6 +213,8 @@ public sealed class ToolCallParser
             if (IsIdentifierChar(c) && _hold.Length < MaxIdentifierChars)
             {
                 _hold.Append(c);
+                if (_knownNameList is null || PrefixesKnownName()) return;
+                ReleaseHold();
                 return;
             }
             ReleaseHold();
@@ -236,6 +257,11 @@ public sealed class ToolCallParser
     private void StartCall(ToolCallMarker marker)
     {
         BeginSpan(marker.Payload, presetName: null);
+        _strictSpan = marker.Strict;
+        // A bare JSON span is only worth holding while it still opens with "name": code and JSON answers are released
+        // at their first key instead of at the balancing brace.
+        if (marker.Strict && marker.Payload == ToolCallPayload.JsonObject) _probe = ObjectProbe;
+        else if (marker.Strict && marker.Payload == ToolCallPayload.JsonArray) _probe = ArrayProbe;
         if (marker.TextIsPayload)
         {
             for (int i = 0; i < marker.Text.Length; i++) FeedCall(marker.Text[i]);
@@ -249,6 +275,7 @@ public sealed class ToolCallParser
     private void StartNamedCall(string name, ToolCallPayload payload)
     {
         BeginSpan(payload, name);
+        _strictSpan = true;
         _span.Append(name);
     }
 
@@ -258,6 +285,9 @@ public sealed class ToolCallParser
         _phase = Phase.Prefix;
         _payload = payload;
         _presetName = presetName;
+        _strictSpan = false;
+        _probe = null;
+        _probeIndex = 0;
         _span.Clear();
         _name.Clear();
         _json = default;
@@ -275,6 +305,11 @@ public sealed class ToolCallParser
         if (_phase == Phase.Prefix)
         {
             FeedPrefix(c);
+            return;
+        }
+        if (_probe is not null && !ProbeChar(c))
+        {
+            Abort();
             return;
         }
         bool inString;
@@ -361,8 +396,41 @@ public sealed class ToolCallParser
     {
         _phase = Phase.Value;
         _payloadStart = _span.Length - 1;
+        if (_probe is not null && !ProbeChar(first))
+        {
+            Abort();
+            return;
+        }
         if (_payload == ToolCallPayload.GemmaCall) _gemma.Feed(first);
         else _json.Feed(first);
+    }
+
+    /// <summary>Advances the opening-key probe; whitespace is skipped, a mismatch means the span is not a call.</summary>
+    private bool ProbeChar(char c)
+    {
+        if (char.IsWhiteSpace(c)) return true;
+        if (c != _probe![_probeIndex]) return false;
+        if (++_probeIndex == _probe.Length) _probe = null;
+        return true;
+    }
+
+    private bool PrefixesKnownName()
+    {
+        foreach (string name in _knownNameList!)
+        {
+            if (name.Length >= _hold.Length && StartsWith(name, _hold)) return true;
+        }
+        return false;
+    }
+
+    private bool AllKnown(List<NativeToolCall> calls)
+    {
+        if (_knownNames is null || !_strictSpan) return true;
+        foreach (NativeToolCall call in calls)
+        {
+            if (!_knownNames.Contains(call.Name)) return false;
+        }
+        return true;
     }
 
     private void Complete()
@@ -372,7 +440,7 @@ public sealed class ToolCallParser
         bool ok = _payload == ToolCallPayload.GemmaCall
             ? TryConvertGemma(value, found)
             : ToolCallJson.TryParse(value, _rules.ArgumentKeys, _presetName, found, _completed);
-        if (!ok || found.Count == 0)
+        if (!ok || found.Count == 0 || !AllKnown(found))
         {
             Abort();
             return;

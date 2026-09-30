@@ -46,7 +46,7 @@ public sealed class ToolRegistry
     /// <summary>Looks up a handler by exact name.</summary>
     public bool TryGet(string name, out IToolHandler handler) => _handlers.TryGetValue(name, out handler!);
 
-    /// <summary>Runs the handler for <paramref name="call"/> and returns the tool result text; unknown tools and handler failures come back as an error result.</summary>
+    /// <summary>Runs the handler for <paramref name="call"/> and returns the tool result text; unknown tools and handler failures come back as an error result carrying the exception type and message, which is meant for the model and the host, not for a remote end user.</summary>
     public async Task<string> InvokeAsync(NativeToolCall call, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(call);

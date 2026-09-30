@@ -124,4 +124,15 @@ public sealed class ToolSchemaTests
         Assert.True(registry.TryGet("t", out IToolHandler handler));
         Assert.Equal("t", handler.Name);
     }
+
+
+    [Fact]
+    public async Task ValueTaskResultsAreUnwrapped()
+    {
+        ToolRegistry registry = new ToolRegistry()
+            .Add("count", (int n) => new ValueTask<int>(n + 1))
+            .Add("nothing", static () => ValueTask.CompletedTask);
+        Assert.Equal("5", await registry.InvokeAsync(new NativeToolCall { Name = "count", Arguments = "{\"n\": 4}" }));
+        Assert.Equal("", await registry.InvokeAsync(new NativeToolCall { Name = "nothing", Arguments = "{}" }));
+    }
 }

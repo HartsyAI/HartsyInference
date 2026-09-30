@@ -7,8 +7,9 @@ namespace HartsyInference.Tools.Tests.Parsing;
 /// <summary>Feeds a completion to a <see cref="ToolCallParser"/> in pieces (random 1..<c>maxPiece</c> chars from a seed, or fixed split points) and collects the forwarded text and completed calls, ending with <see cref="ToolCallParser.Flush"/>.</summary>
 internal static class ParserDriver
 {
-    public static (string Forwarded, List<NativeToolCall> Calls) Drive(ToolCallFormat format, string completion, int seed, int maxPiece = 4, int maxSpanChars = ToolCallParser.DefaultMaxSpanChars)
-        => Drive(new ToolCallParser(format, maxSpanChars), Pieces(completion, new Random(seed), maxPiece));
+    public static (string Forwarded, List<NativeToolCall> Calls) Drive(ToolCallFormat format, string completion, int seed, int maxPiece = 4,
+        int maxSpanChars = ToolCallParser.DefaultMaxSpanChars, IEnumerable<string>? knownTools = null)
+        => Drive(new ToolCallParser(format, maxSpanChars, knownTools), Pieces(completion, new Random(seed), maxPiece));
 
     public static (string Forwarded, List<NativeToolCall> Calls) Drive(ToolCallFormat format, params string[] pieces)
         => Drive(new ToolCallParser(format), pieces);

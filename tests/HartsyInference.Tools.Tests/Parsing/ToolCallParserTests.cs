@@ -320,4 +320,67 @@ public sealed class ToolCallParserTests
     [InlineData("phi-4", ToolCallFormat.Hermes)]
     public void DetectPicksTheFamilyFormat(string? hint, ToolCallFormat expected)
         => Assert.Equal(expected, ToolCallFormats.Detect(hint));
+
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void BareObjectNamingAnUnknownToolIsTextWhenTheOfferedToolsAreKnown(int seed)
+    {
+        const string text = "Here is the record:\n{\"name\": \"Bob\", \"age\": 3}\nand {\"name\": \"hang_up\", \"arguments\": {}}";
+        (string forwarded, List<NativeToolCall> calls) = ParserDriver.Drive(ToolCallFormat.Hermes, text, seed, knownTools: ["hang_up"]);
+        Assert.Equal("Here is the record:\n{\"name\": \"Bob\", \"age\": 3}\nand ", forwarded);
+        Assert.Equal("hang_up", Assert.Single(calls).Name);
+    }
+
+    [Fact]
+    public void TaggedCallNamingAnUnknownToolStillCompletesSoTheHostCanAnswerIt()
+    {
+        (string forwarded, List<NativeToolCall> calls) = ParserDriver.Drive(ToolCallFormat.Hermes, "<tool_call>{\"name\": \"typo\", \"arguments\": {}}</tool_call>", 3, knownTools: ["hang_up"]);
+        Assert.Equal("", forwarded);
+        Assert.Equal("typo", Assert.Single(calls).Name);
+    }
+
+    [Fact]
+    public void MistralBareArrayWithAnUnknownElementIsText()
+    {
+        const string text = "[{\"name\": \"a\", \"arguments\": {}}, {\"name\": \"zzz\", \"arguments\": {}}]";
+        (string forwarded, List<NativeToolCall> calls) = ParserDriver.Drive(ToolCallFormat.Mistral, text, 2, knownTools: ["a", "b"]);
+        Assert.Empty(calls);
+        Assert.Equal(text, forwarded);
+    }
+
+    [Fact]
+    public void LineStartObjectNotOpeningWithNameIsReleasedAtItsFirstKey()
+    {
+        ToolCallParser parser = new(ToolCallFormat.Hermes);
+        const string json = "{\"answer\": 42, \"unit\":";
+        Assert.Equal(json, parser.Push(json).ForwardText);
+        Assert.False(parser.InCall);
+        const string code = "\n{\n  int x = 1;\n";
+        Assert.Equal(code, parser.Push(code).ForwardText);
+        Assert.False(parser.InCall);
+        Assert.Equal("}", parser.Push("}").ForwardText);
+    }
+
+    [Fact]
+    public void BareObjectOpeningWithNameAfterWhitespaceIsStillHeld()
+    {
+        ToolCallParser parser = new(ToolCallFormat.Hermes);
+        Assert.Equal("", parser.Push("{ \"name\"").ForwardText);
+        Assert.True(parser.InCall);
+        ToolCallParseResult done = parser.Push(": \"hang_up\", \"arguments\": {} }");
+        Assert.Equal("hang_up", done.Call!.Name);
+    }
+
+    [Fact]
+    public void MistralIdentifierHoldReleasesAsSoonAsNoToolNameMatches()
+    {
+        ToolCallParser parser = new(ToolCallFormat.Mistral, knownTools: ["get_weather"]);
+        Assert.Equal("Paris", parser.Push("Paris").ForwardText);
+        Assert.Equal("\n", parser.Push("\nget_").ForwardText);
+        Assert.Equal("get_wx", parser.Push("wx").ForwardText);
+        Assert.Equal("\n", parser.Push("\nget_weather").ForwardText);
+        Assert.Equal("get_weather", parser.Push("{\"city\": \"Rome\"}").Call!.Name);
+    }
 }

@@ -16,7 +16,13 @@ public static class ToolCalling
         options.TextStreamFilterFactory = request => CreateFilter(request, resolved, stopAfterFirstCall);
     }
 
-    /// <summary>The filter for <paramref name="request"/>: a <see cref="ToolCallStreamFilter"/> when it offers tools, else null.</summary>
+    /// <summary>The filter for <paramref name="request"/>: a <see cref="ToolCallStreamFilter"/> restricted to the offered tool names when it offers tools, else null.</summary>
     public static ITextStreamFilter? CreateFilter(TextRequest request, ToolCallFormat format = ToolCallFormat.Hermes, bool stopAfterFirstCall = true)
-        => request.Tools is { Count: > 0 } ? new ToolCallStreamFilter(format, stopAfterFirstCall) : null;
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (request.Tools is not { Count: > 0 } tools) return null;
+        string[] names = new string[tools.Count];
+        for (int i = 0; i < names.Length; i++) names[i] = tools[i].Name;
+        return new ToolCallStreamFilter(format, stopAfterFirstCall, names);
+    }
 }

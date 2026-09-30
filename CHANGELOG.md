@@ -19,10 +19,13 @@ stable release will require. Dates are UTC.
   resolve into a call (invalid JSON, no `name`, a closing tag before the value balanced, a span past 64 KiB, an
   unterminated span at end) as plain text. Because every local GGUF types the markers as CONTROL/USER_DEFINED tokens
   that the passthrough detokenizer drops, the bare forms (`{` at line start, `{"name"` anywhere, `[` at line start,
-  `name{` at line start, `call:` anywhere) are first-class rules, not fallbacks. `ToolCallStreamFilter : ITextStreamFilter`
-  emits each call as `TextChunkKind.NativeToolCall` and stops after the first by default (`StopAfterFirstCall`);
-  `ToolCalling.Install(EngineOptions, format?)` sets `TextStreamFilterFactory` for requests that offer `Tools` and
-  returns null for every other request. `ToolRegistry` / `IToolHandler` dispatch a `NativeToolCall`, returning an
+  `name{` at line start, `call:` anywhere) are first-class rules, not fallbacks; they are strict, though: a bare JSON
+  span is released at its first key unless it is `"name"`, and with the offered tool names known (the installed
+  filter passes `request.Tools`) a bare span naming any other tool is text, while the tagged forms stay permissive.
+  `ToolCallStreamFilter : ITextStreamFilter` emits each call as `TextChunkKind.NativeToolCall` and stops after the
+  first by default (`StopAfterFirstCall`), deferring the stop until every call closed by the same delta has been
+  emitted; `ToolCalling.Install(EngineOptions, format?)` sets `TextStreamFilterFactory` for requests that offer
+  `Tools` and returns null for every other request. `ToolRegistry` / `IToolHandler` dispatch a `NativeToolCall`, returning an
   `{"error": …}` result for an unknown tool or a throwing handler; `ToolSchema.FromDelegate` builds the JSON schema
   from a C# delegate (`[Description]`, string/integer/number/boolean/enum, defaults and nullable types optional,
   `CancellationToken` skipped) and `ToolRegistry.Add(name, delegate)` binds the model's arguments to it by name.

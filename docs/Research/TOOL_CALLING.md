@@ -46,6 +46,13 @@ Rules that hold for every format:
 
 - A span ends when its JSON (or Gemma block) value balances; a Hermes/Gemma closing marker after it, and the
   whitespace around the span, are consumed. Multiple spans per turn are allowed and numbered `call_0`, `call_1`, …
+- The bare forms are *strict*: a bare JSON span is released at its first key unless that key is `"name"` (a code
+  block or a JSON answer with tools on streams normally instead of stalling until its braces balance), and when the
+  parser knows the offered tool names (`ToolCalling.Install` passes `request.Tools`; `ToolCallParser`/
+  `ToolCallStreamFilter` take `knownTools`) a bare span naming anything else is text. The tagged forms
+  (`<tool_call>`, `<|python_tag|>`, `[TOOL_CALLS]`, `<|tool_call>`) stay permissive so a mistyped tool name reaches
+  the host as a call it can answer with an error result. Without a known-name list every bare `{"name": …}` object
+  is a call.
 - Anything that does not resolve into a call is forwarded as plain text: invalid JSON, an object without a string
   `name`, a closing marker before the value balanced, a span longer than `ToolCallParser.DefaultMaxSpanChars`
   (64 KiB), an unterminated span at `Flush`. The parser never throws on model output.
@@ -71,8 +78,9 @@ these checkpoints (found while building this package; the engine side is unchang
 ## Seam limits
 
 `TextFilterResult` carries one `ToolCall`. When one delta closes several calls (a Mistral array), the filter emits the
-first and queues the rest for the following deltas and `OnEnd`; `ToolCallStreamFilter.Calls` lists all of them, but
-a call still queued after `OnEnd` is not surfaced through the seam. With `StopAfterFirstCall` only the first matters.
+first and queues the rest for the following deltas and `OnEnd`, and with `StopAfterFirstCall` it requests the stop
+only once the queue has drained (one extra decode step per queued call), so every completed call reaches the host;
+`ToolCallStreamFilter.Calls` lists all of them.
 
 ## Loop message shapes
 
@@ -97,7 +105,9 @@ tool, the loop yields `Status` `tool_loop:max_rounds=N` (phase `tool_loop`), the
 that last call is not dispatched. `Error`/`Cancelled` stops are relayed and end the loop.
 
 Dispatch errors are results, not exceptions: an unknown tool or a throwing handler yields
-`{"error": "…"}` for the model to read; cancellation propagates.
+`{"error": "…"}` (exception type and message) for the model to read; cancellation propagates. That text is meant
+for the model and the host; a host relaying tool results to a remote end user should rewrite it. An `Error` or
+`Cancelled` stop from the service ends the loop without a final `Result` chunk.
 
 ## Open
 

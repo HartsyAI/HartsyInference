@@ -12,8 +12,8 @@ public static class ToolCallFormats
         Markers =
         [
             new ToolCallMarker("<tool_call>", ToolCallPayload.JsonObject),
-            new ToolCallMarker("{\"name\"", ToolCallPayload.JsonObject, TextIsPayload: true),
-            new ToolCallMarker("{", ToolCallPayload.JsonObject, TextIsPayload: true, LineStartOnly: true),
+            new ToolCallMarker("{\"name\"", ToolCallPayload.JsonObject, TextIsPayload: true, Strict: true),
+            new ToolCallMarker("{", ToolCallPayload.JsonObject, TextIsPayload: true, LineStartOnly: true, Strict: true),
         ],
         CloseMarker = "</tool_call>",
         ArgumentKeys = HermesArgumentKeys,
@@ -25,8 +25,8 @@ public static class ToolCallFormats
         Markers =
         [
             new ToolCallMarker("<|python_tag|>", ToolCallPayload.JsonObject),
-            new ToolCallMarker("{\"name\"", ToolCallPayload.JsonObject, TextIsPayload: true),
-            new ToolCallMarker("{", ToolCallPayload.JsonObject, TextIsPayload: true, LineStartOnly: true),
+            new ToolCallMarker("{\"name\"", ToolCallPayload.JsonObject, TextIsPayload: true, Strict: true),
+            new ToolCallMarker("{", ToolCallPayload.JsonObject, TextIsPayload: true, LineStartOnly: true, Strict: true),
         ],
         ArgumentKeys = LlamaArgumentKeys,
     };
@@ -37,7 +37,7 @@ public static class ToolCallFormats
         Markers =
         [
             new ToolCallMarker("<|tool_call>", ToolCallPayload.GemmaCall),
-            new ToolCallMarker("call:", ToolCallPayload.GemmaCall),
+            new ToolCallMarker("call:", ToolCallPayload.GemmaCall, Strict: true),
         ],
         CloseMarker = "<tool_call|>",
         ArgumentKeys = HermesArgumentKeys,
@@ -49,9 +49,9 @@ public static class ToolCallFormats
         Markers =
         [
             new ToolCallMarker("[TOOL_CALLS]", ToolCallPayload.JsonAny),
-            new ToolCallMarker("[", ToolCallPayload.JsonArray, TextIsPayload: true, LineStartOnly: true),
-            new ToolCallMarker("{\"name\"", ToolCallPayload.JsonObject, TextIsPayload: true),
-            new ToolCallMarker("{", ToolCallPayload.JsonObject, TextIsPayload: true, LineStartOnly: true),
+            new ToolCallMarker("[", ToolCallPayload.JsonArray, TextIsPayload: true, LineStartOnly: true, Strict: true),
+            new ToolCallMarker("{\"name\"", ToolCallPayload.JsonObject, TextIsPayload: true, Strict: true),
+            new ToolCallMarker("{", ToolCallPayload.JsonObject, TextIsPayload: true, LineStartOnly: true, Strict: true),
         ],
         NamedFormAtLineStart = true,
         ArgumentKeys = HermesArgumentKeys,

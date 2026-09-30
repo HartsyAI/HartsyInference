@@ -118,4 +118,54 @@ public sealed class ToolCallStreamFilterTests
         Assert.True(filter.StopAfterFirstCall);
         Assert.NotSame(filter, options.TextStreamFilterFactory(withTools));
     }
+
+
+    [Fact]
+    public void DefaultStopWaitsUntilEveryCallClosedByOneDeltaHasBeenEmitted()
+    {
+        ToolCallStreamFilter filter = new(ToolCallFormat.Mistral);
+        List<TextChunk> chunks = [];
+        bool stopRequested = false;
+        TextFilterSink sink = new(filter, chunks.Add, () => stopRequested = true);
+        sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "[{\"name\": \"a\", \"arguments\": {}}, {\"name\": \"b\", \"arguments\": {}}]" });
+        Assert.Equal(["a"], chunks.Where(c => c.Kind == TextChunkKind.NativeToolCall).Select(c => c.ToolCall!.Name));
+        Assert.False(sink.Stopped);
+        sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "\n" });
+        Assert.Equal(["a", "b"], chunks.Where(c => c.Kind == TextChunkKind.NativeToolCall).Select(c => c.ToolCall!.Name));
+        Assert.True(sink.Stopped);
+        Assert.True(stopRequested);
+    }
+
+    [Fact]
+    public void DefaultStopAlsoDrainsThroughEndWhenNoDeltaFollows()
+    {
+        ToolCallStreamFilter filter = new(ToolCallFormat.Mistral);
+        List<TextChunk> chunks = [];
+        TextFilterSink sink = new(filter, chunks.Add, static () => { });
+        sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "[{\"name\": \"a\", \"arguments\": {}}, {\"name\": \"b\", \"arguments\": {}}]" });
+        sink.End();
+        Assert.Equal(["a", "b"], chunks.Where(c => c.Kind == TextChunkKind.NativeToolCall).Select(c => c.ToolCall!.Name));
+        Assert.True(sink.Stopped);
+    }
+
+    [Fact]
+    public void InstalledFilterRestrictsBareFormsToTheOfferedTools()
+    {
+        EngineOptions options = new();
+        ToolCalling.Install(options);
+        TextRequest request = new()
+        {
+            Messages = [new TextMessage { Role = TextRole.User, Content = "hi" }],
+            Tools = [new ToolDefinition { Name = "hang_up" }],
+        };
+        ToolCallStreamFilter filter = Assert.IsType<ToolCallStreamFilter>(options.TextStreamFilterFactory!(request));
+        List<TextChunk> chunks = [];
+        TextFilterSink sink = new(filter, chunks.Add, static () => { });
+        sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "{\"name\": \"Bob\", \"age\": 3}\n" });
+        Assert.False(sink.Stopped);
+        Assert.Equal("{\"name\": \"Bob\", \"age\": 3}\n", sink.Text);
+        sink.Handle(new TextChunk { Kind = TextChunkKind.Chunk, Text = "{\"name\": \"hang_up\", \"arguments\": {}}" });
+        Assert.True(sink.Stopped);
+        Assert.Equal("hang_up", sink.ToolCall!.Name);
+    }
 }

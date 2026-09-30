@@ -143,12 +143,28 @@ internal sealed class DelegateToolHandler : IToolHandler
                 return await textTask.ConfigureAwait(false);
             case ValueTask<string> textValueTask:
                 return await textValueTask.ConfigureAwait(false);
+            case ValueTask valueTask:
+                await valueTask.ConfigureAwait(false);
+                return "";
             case Task task:
                 await task.ConfigureAwait(false);
                 return Render(TaskResult(task));
             default:
+                if (AsTask(result) is { } boxed)
+                {
+                    await boxed.ConfigureAwait(false);
+                    return Render(TaskResult(boxed));
+                }
                 return Render(result);
         }
+    }
+
+    /// <summary>A <c>ValueTask&lt;T&gt;</c> result as its <see cref="Task"/>, or null for any other value.</summary>
+    private static Task? AsTask(object value)
+    {
+        Type type = value.GetType();
+        if (!type.IsGenericType || type.GetGenericTypeDefinition() != typeof(ValueTask<>)) return null;
+        return (Task?)type.GetMethod("AsTask", Type.EmptyTypes)?.Invoke(value, null);
     }
 
     /// <summary>The <c>Result</c> of a completed <c>Task&lt;T&gt;</c>, or null for a plain <see cref="Task"/> (whose runtime box is a <c>Task&lt;VoidTaskResult&gt;</c>).</summary>
