@@ -11,7 +11,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Text-to-speech service: picks a descriptor from the model spec, materializes the optional voice reference, and runs the synthesis on the shared audio device under the generation lock.</summary>
+/// <summary>Text-to-speech service: picks a descriptor from the model spec, materializes the optional voice reference, and runs the synthesis on the shared audio device under the generation lock. A lease hands the same resident runner to a caller that gates the device itself.</summary>
 public sealed class SpeechService : ISpeechService
 {
     /// <summary>Voice references are decoded at 24 kHz — the rate the cloning models expect.</summary>

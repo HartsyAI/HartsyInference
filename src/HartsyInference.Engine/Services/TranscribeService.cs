@@ -6,7 +6,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Services;
 
-/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the shared audio device under the generation lock. Timestamps come from Whisper's native <c>&lt;|t|&gt;</c> tokens (segment granularity — see <see cref="BuildWords"/>) and diarization from <see cref="SpeakerDiarizer"/>.</summary>
+/// <summary>Speech-to-text service: decodes the clip to the descriptor's input rate and runs the transcription on the shared audio device under the generation lock; a lease hands the same resident runner to a caller that passes PCM and gates the device itself. Timestamps come from Whisper's native <c>&lt;|t|&gt;</c> tokens (segment granularity — see <see cref="BuildWords"/>) and diarization from <see cref="SpeakerDiarizer"/>.</summary>
 public sealed class TranscribeService : ITranscribeService
 {
     private readonly InferenceEngine _engine;

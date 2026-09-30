@@ -6,6 +6,49 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.226
+
+- **Runner leases on the speech services.** `ISpeechService.OpenSynthesizerAsync(spec)` and
+  `ITranscribeService.OpenTranscriberAsync(spec)` load a model exactly as `SynthesizeAsync`/`RunAsync` do (same catalog,
+  cache key and download) and return a lease that pins the runner on the engine's own audio backend until disposed:
+  - `ISynthesizerLease`: `SampleRate`, `Synthesize(text, SpeechRequest options) → float[]`;
+  - `ITranscriberLease`: `Transcribe(ReadOnlySpan<float> pcm, int sampleRate, AudioRequest options) → string`.
+- Lease calls run synchronously on the caller's thread. They take neither the engine's audio generation lock nor the
+  device gate: the caller holds `DeviceGate` for `InferenceEngine.ComputeBackend` around each call. The transcriber
+  takes PCM with no WAV round trip and resamples only when the rate differs from the model's, through the resampler
+  the service's decode uses. It refuses word timestamps and diarization, because the service answers those from a
+  different decode. A Piper lease refuses a voice other than the one its weights were loaded for.
+- Opening runs the service path (generation lock, device gate, memory-pressure sweep), so it waits for a generation in
+  flight; never await it while holding the gate. Any engine release (`Dispose`, `FreeMemory`, `SetBackend`,
+  `SetPlacement`) revokes open leases:
+  - it first waits, within the existing 120 s release budget, for a lease call in flight;
+  - later calls throw `ObjectDisposedException`;
+  - an open that straddles a release is refused.
+- `Dispose` releases the pin, is idempotent and waits for a call in flight. Both new service members default to
+  `NotSupportedException`, so other implementations of the interfaces keep compiling.
+- Consumers: the voice session (Whisper small.en and Kokoro resident on one card for a call) and AudioLab's
+  keep-resident setting.
+- A host with the LLM on one card and audio on another builds the engine on the audio card and sends each LLM request
+  with `TextRequest.Device`. Text slots build their own backend and gate only their own ordinal, so the LLM loads
+  nothing on the engine's device. Documented in `docs/MULTI_GPU.md`.
+- `SpeechService` and `TranscribeService` now resolve descriptor, variant and cache key through one helper each, shared
+  with the leases. The evaluation order is unchanged, so the service paths behave as before when no lease is open.
+- Tests (`Diffusion.Tests`):
+  - `AudioRunnerLeaseTests` (unit; fake runners seeded into a CPU engine's caches) cover:
+    - pin and unpin;
+    - ten forced-pressure STT↔TTS switches with pinned runners kept and an unpinned one evicted;
+    - service calls on the leased runner;
+    - lease calls proceeding while a service generation holds the lock;
+    - revocation by `Dispose`, `FreeMemory` and `SetBackend`;
+    - engine and lease Dispose waiting for a call in flight;
+    - concurrent and double Dispose;
+    - no pin left after a failed open;
+    - an open that straddles a release.
+  - `AudioRunnerLeaseRealWeightTests` (Integration, CPU): a Kokoro lease encodes to the service's exact WAV bytes, and
+    Whisper-tiny gives the service's exact JFK transcript at 16 kHz and through a 24 kHz clip.
+  - `AudioRunnerLeaseGpuTests` (GpuIntegration): Kokoro and Whisper small.en leases driven under `DeviceGate`.
+  - `AudioEvictionPressure.Relax()` keeps a box that is genuinely short of RAM from evicting fake runners.
+
 ## alpha.222
 
 - **`HartsyInference.Tools`: opt-in LLM tool calling.** New packable library (references Engine only; not part of the
