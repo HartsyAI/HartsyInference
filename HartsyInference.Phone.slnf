@@ -1,0 +1,15 @@
+{
+  "solution": {
+    "path": "HartsyInference.sln",
+    "projects": [
+      "src\\HartsyInference.Audio\\HartsyInference.Audio.csproj",
+      "src\\HartsyInference.Core\\HartsyInference.Core.csproj",
+      "src\\HartsyInference.LLM\\HartsyInference.LLM.csproj",
+      "src\\HartsyInference.ModelAssets\\HartsyInference.ModelAssets.csproj",
+      "src\\HartsyInference.PhoneGateway\\HartsyInference.PhoneGateway.csproj",
+      "src\\HartsyInference.PhoneLink\\HartsyInference.PhoneLink.csproj",
+      "tests\\HartsyInference.PhoneGateway.Tests\\HartsyInference.PhoneGateway.Tests.csproj",
+      "tests\\HartsyInference.PhoneLink.Tests\\HartsyInference.PhoneLink.Tests.csproj"
+    ]
+  }
+}

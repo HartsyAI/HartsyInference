@@ -1,0 +1,41 @@
+{
+  "sip": {
+    "listenAddress": "0.0.0.0",
+    "port": 5060,
+    "transport": "udp",
+    "registrar": "",
+    "username": "hartsy",
+    "passwordEnv": "HARTSY_SIP_PASSWORD",
+    "registrationExpirySeconds": 60,
+    "publicAddress": "none",
+    "rtpPortStart": 20000,
+    "rtpPortEnd": 20100,
+    "codec": "Any",
+    "inboundPolicy": "AllowAll",
+    "allowlist": [],
+    "greetingPromptFile": null,
+    "ringTimeoutSeconds": 45
+  },
+  "link": {
+    "socketPath": "/run/hartsyinference/phone.sock",
+    "tokenEnv": "HARTSY_PHONE_LINK_TOKEN",
+    "outageHangupSeconds": 20
+  },
+  "admin": {
+    "port": 9280,
+    "tokenEnv": "HARTSY_PHONE_ADMIN_TOKEN"
+  },
+  "media": {
+    "fifoPriority": 50,
+    "tickCpu": -1,
+    "warmUpTicks": 200
+  },
+  "recording": {
+    "enabled": false,
+    "directory": "/var/lib/hartsyinference/phone-recordings"
+  },
+  "logging": {
+    "level": "Info",
+    "sipDebug": false
+  }
+}
