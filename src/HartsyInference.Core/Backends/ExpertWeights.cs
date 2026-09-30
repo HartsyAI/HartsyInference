@@ -11,11 +11,11 @@ public sealed class ExpertWeights
         W1 = w1 ?? throw new ArgumentNullException(nameof(w1));
         W2 = w2 ?? throw new ArgumentNullException(nameof(w2));
         W3 = w3 ?? throw new ArgumentNullException(nameof(w3));
-        List<Tensor> tensors = new(6);
+        List<Tensor> tensors = new(9);
         foreach (ExpertMatrix matrix in new[] { w1, w2, w3 })
         {
             AddDistinct(tensors, matrix.Weight);
-            if (matrix.Scale is not null) AddDistinct(tensors, matrix.Scale);
+            foreach (Tensor companion in matrix.Companions) AddDistinct(tensors, companion);
         }
         Tensors = tensors;
         long bytes = 0;
@@ -35,7 +35,7 @@ public sealed class ExpertWeights
     /// <summary>Up projection.</summary>
     public ExpertMatrix W3 { get; }
 
-    /// <summary>Every tensor that has to be resident for this expert to run: three weights and their scales.</summary>
+    /// <summary>Every tensor that has to be resident for this expert to run: three weights and their scales, global scales and biases.</summary>
     public IReadOnlyList<Tensor> Tensors { get; }
 
     /// <summary>Total device bytes of <see cref="Tensors"/>.</summary>

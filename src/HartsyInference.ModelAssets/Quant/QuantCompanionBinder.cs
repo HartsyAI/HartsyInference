@@ -15,6 +15,7 @@ public static class QuantCompanionBinder
     private static readonly BlockGeometry[] Fp8Geometries = [new(32, 32), new(128, 128), new(1, 32), new(1, 16)];
     private static readonly BlockGeometry[] Fp4Geometries = [new(1, 32), new(1, 16)];
     private static readonly BlockGeometry[] Nvfp4Geometries = [new(1, 16)];
+    private static readonly (int Bits, QuantEncoding Encoding)[] MlxWidths = [(4, QuantEncoding.AffineInt4), (8, QuantEncoding.AffineInt8)];
     private static readonly string[] GenericSuffixes = [".scale", ".scales", ".biases"];
 
     /// <summary>Binds every block-scaled weight in <paramref name="inventory"/> for the given producer's naming.</summary>
@@ -58,7 +59,7 @@ public static class QuantCompanionBinder
     {
         QuantFlavor.Official => [".scale", ".weight_scale_inv"],
         QuantFlavor.AmdQuark => [".weight_scale"],
-        QuantFlavor.NvidiaNvfp4 => [".weight_scale", ".weight_scale_2", ".input_scale"],
+        QuantFlavor.NvidiaNvfp4 => [".scale", ".weight_scale", ".weight_scale_2", ".input_scale"],
         QuantFlavor.Mlx => [".scales", ".biases"],
         _ => [".suh", ".svh", ".mcg"],
     };
@@ -84,7 +85,8 @@ public static class QuantCompanionBinder
 
         TensorLocation scale = run.Inventory[present[0]];
         run.Claimed.Add(present[0]);
-        if (flavor == QuantFlavor.AmdQuark && scale.DType != DType.U8)
+        // Quark's FP8 attention scales are F8_E8M0; only its packed FP4 weights carry raw U8 E8M0 bytes.
+        if (flavor == QuantFlavor.AmdQuark && isFp4 && scale.DType != DType.U8)
         {
             run.Problems.Add($"'{present[0]}' is {scale.DType.Name}; Quark stores E8M0 scales as raw U8");
             return;
@@ -116,13 +118,10 @@ public static class QuantCompanionBinder
         run.Inventory.TryGetValue(scale2Key, out TensorLocation? scale2);
         bool hasInput = run.Inventory.TryGetValue(inputKey, out TensorLocation? input);
 
-        if (weight.DType == DType.F8E4M3)
+        // A scalar '.weight_scale' marks a per-tensor FP8 weight; without one the FP8 weight is official-layout.
+        if (weight.DType == DType.F8E4M3 && scale is not null)
         {
-            if (scale is null)
-            {
-                run.Problems.Add($"fp8 weight '{key}' has no '{scaleKey}'");
-            }
-            else if (scale.Shape.ElementCount != 1)
+            if (scale.Shape.ElementCount != 1)
             {
                 run.Problems.Add($"fp8 weight '{key}' has a non-scalar scale {scale.Shape}; per-tensor only");
             }
@@ -135,7 +134,12 @@ public static class QuantCompanionBinder
             }
             return;
         }
-        if (weight.DType != DType.U8) return;
+        // The NVFP4 checkpoint keeps everything but the routed experts in the official layout.
+        if (weight.DType != DType.U8)
+        {
+            BindScaledWeight(run, key, QuantFlavor.Official);
+            return;
+        }
 
         if (scale is null)
         {
@@ -187,14 +191,24 @@ public static class QuantCompanionBinder
                 $"MLX '{key}' {weight.Shape} needs rank-2 scales and biases of one shape and dtype; got {scales!.Shape} and {biases!.Shape}");
             return;
         }
-        long rows = weight.Shape[0], cols = weight.Shape[1] * 8;
-        if (scales.Shape[0] != rows || scales.Shape[1] * MlxGroupSize != cols)
+        if (scales.DType != DType.F32)
         {
-            run.Problems.Add($"MLX '{key}' packed width {weight.Shape[1]} (in={cols}) with scales {scales.Shape} is not group size {MlxGroupSize}");
+            run.Problems.Add($"MLX '{scalesKey}' is {scales.DType.Name}; the affine codecs read F32 scales and biases");
             return;
         }
-        run.Bindings[key] = new QuantBinding(key, QuantEncoding.AffineInt4, new BlockGeometry(1, MlxGroupSize), scales.DType,
-            rows, cols, scalesKey, BiasKey: biasesKey);
+        // The conversion is mixed precision with no per-tensor bits in config.json, so read the width off the shapes.
+        long rows = weight.Shape[0], packedWidth = weight.Shape[1];
+        foreach ((int bits, QuantEncoding encoding) in MlxWidths)
+        {
+            long cols = packedWidth * 32 / bits;
+            if (scales.Shape[0] != rows || scales.Shape[1] * MlxGroupSize != cols) continue;
+            run.Bindings[key] = new QuantBinding(key, encoding, new BlockGeometry(1, MlxGroupSize), scales.DType, rows, cols, scalesKey,
+                BiasKey: biasesKey);
+            return;
+        }
+        run.Problems.Add(
+            $"MLX '{key}' packed width {packedWidth} with scales {scales.Shape} is not group size {MlxGroupSize} at 4 bits "
+            + $"(in={packedWidth * 8}) or 8 bits (in={packedWidth * 4})");
     }
 
     private static void BindExl3(BindingRun run, string key)

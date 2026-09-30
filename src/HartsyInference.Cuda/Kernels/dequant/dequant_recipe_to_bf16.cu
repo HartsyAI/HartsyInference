@@ -1,4 +1,4 @@
-// DeepSeek-V4.1 checkpoint recipes -> BF16: routed experts (E2M1 nibbles, one F8E8M0 scale per 32 inputs) and dense/shared
+// DeepSeek-V4.1 checkpoint recipes -> BF16 (plus the NVIDIA NVFP4 and MLX affine derivative formats): routed experts (E2M1 nibbles, one F8E8M0 scale per 32 inputs) and dense/shared
 // weights (E4M3 bytes, F8E8M0 scale per 32x32 block). Same decode as ModelAssets Mxfp4E8M0Codec and Fp8BlockE8M0Codec:
 // value = table[q] * scale in float, then one round-to-nearest-even BF16 store. A power-of-two scale times an e2m1 or e4m3
 // value is exact in BF16 except below 2^-133, so the store rounds only for scale bytes near 0. Scale byte 0 is the float
@@ -74,5 +74,53 @@ extern "C" __global__ void dequant_fp8_block_e8m0_to_bf16(
         unsigned long long scaleIndex = (unsigned long long)(row / blockRows) * scaleStride + scaleColOffset + col / blockCols;
         unsigned long long i = (unsigned long long)row * cols + col;
         out[i] = recipe_float_to_bf16(recipe_e4m3_decode(packed[i]) * recipe_e8m0_scale(scale[scaleIndex]));
+    }
+}
+
+// ModelOpt NVFP4: E2M1 pairs (low nibble = even column), one E4M3 scale per blockCols inputs and a scalar F32 global scale.
+// The two scales multiply first in F32, then the e2m1 value, as ModelOptNvfp4Codec does; __fmul_rn keeps the products unfused.
+extern "C" __global__ void dequant_nvfp4_modelopt_to_bf16(
+    const unsigned char* __restrict__ packed, const unsigned char* __restrict__ scale, unsigned short* __restrict__ out,
+    unsigned int rows, unsigned int packedCols, unsigned long long scaleStride, unsigned int scaleColOffset,
+    unsigned int blockRows, unsigned int blockCols, const float* __restrict__ globalScale)
+{
+    unsigned int j = blockIdx.x * blockDim.x + threadIdx.x;
+    if (j >= packedCols) return;
+    float g = globalScale[0];
+    for (unsigned int row = blockIdx.y; row < rows; row += gridDim.y)
+    {
+        unsigned long long scaleIndex = (unsigned long long)(row / blockRows) * scaleStride + scaleColOffset + (2u * j) / blockCols;
+        float s = __fmul_rn(recipe_e4m3_decode(scale[scaleIndex]), g);
+        unsigned int b = packed[(unsigned long long)row * packedCols + j];
+        unsigned long long o = ((unsigned long long)row * packedCols + j) * 2ull;
+        out[o] = recipe_float_to_bf16(__fmul_rn(recipe_e2m1_decode(b & 0xFu), s));
+        out[o + 1] = recipe_float_to_bf16(__fmul_rn(recipe_e2m1_decode(b >> 4), s));
+    }
+}
+
+// MLX affine: q * scale + bias per group, q a 4- or 8-bit unsigned field (lowest field first). The product rounds to F32
+// before the bias add, matching the host AffineIntCodec and mx.dequantize; __fmul_rn/__fadd_rn stop nvcc fusing them.
+extern "C" __global__ void dequant_affine_to_bf16(
+    const unsigned char* __restrict__ packed, const float* __restrict__ scale, const float* __restrict__ bias,
+    unsigned short* __restrict__ out, unsigned int rows, unsigned int cols, unsigned long long scaleStride,
+    unsigned int scaleColOffset, unsigned int blockRows, unsigned int group, unsigned int bits)
+{
+    unsigned int col = blockIdx.x * blockDim.x + threadIdx.x;
+    if (col >= cols) return;
+    for (unsigned int row = blockIdx.y; row < rows; row += gridDim.y)
+    {
+        unsigned long long groupIndex = (unsigned long long)(row / blockRows) * scaleStride + scaleColOffset + col / group;
+        unsigned int q;
+        if (bits == 4u)
+        {
+            unsigned int b = packed[(unsigned long long)row * (cols / 2u) + (col >> 1)];
+            q = (col & 1u) ? (b >> 4) : (b & 0xFu);
+        }
+        else
+        {
+            q = packed[(unsigned long long)row * cols + col];
+        }
+        float product = __fmul_rn((float)q, scale[groupIndex]);
+        out[(unsigned long long)row * cols + col] = recipe_float_to_bf16(__fadd_rn(product, bias[groupIndex]));
     }
 }

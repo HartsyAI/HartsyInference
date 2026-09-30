@@ -6,6 +6,20 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.214
+
+- **Derivative quant formats** (DeepSeek-V4.1-Flash program PR 23). `ModelOptNvfp4Codec` decodes NVIDIA NVFP4 (low nibble first, E4M3 scale per 16,
+  scalar F32 `weight_scale_2` multiplied into the scale first) and `AffineIntCodec` decodes MLX affine `q*scale + bias` per 64 at 4 or 8 bits
+  (new `QuantEncoding.AffineInt8`; the V4.1 MLX checkpoint mixes both). AMD Quark MXFP4 reuses `Mxfp4E8M0Codec` with U8 scales. Codecs match an independent
+  numpy decoder and `mx.dequantize` bit-exactly (`tests/python-reference/deepseek_v41/fixtures/derivative_quant_codecs.json`).
+- `QuantCompanionBinder` binds the hybrid NVFP4 layout (FP8 attention with F8_E8M0 `.scale`), Quark FP8 attention scales and MLX 4/8-bit inferred from
+  the scale shape, and refuses experts without `weight_scale_2`, non-U8 Quark scales, wrong packed widths, group sizes other than 64 and non-F32 MLX scales.
+  `QuantRecipe`/`ExpertMatrix`/`ExpertWeights` carry the bias and global-scale companions so the expert cache uploads them.
+- **CUDA.** `dequant_recipe_to_bf16` gains `dequant_nvfp4_modelopt_to_bf16` and `dequant_affine_to_bf16` (sm_80 PTX regenerated), and `CudaQuantWorkspace`
+  dequantizes NVFP4, Quark and MLX expert matrices to BF16 bit-exactly against the host codecs. `QuantExecutionPolicy` plans the BF16 dequant and
+  labels NVFP4 as W4A16 (`input_scale` is left unread; no W4A4 is claimed).
+- Deferred: EXL3 trellis decode (PR 23b), the 32x32 block-FP8 native GEMM, native NVFP4/MXFP4 block-scaled GEMM on Blackwell, DwarfStar GGUF Engram row264.
+
 ## alpha.213
 
 - **Vulkan paths for the DeepSeek-V4.1-Flash primitives** (program PR 24b). New compute shaders, each parity-tested against the CPU reference
