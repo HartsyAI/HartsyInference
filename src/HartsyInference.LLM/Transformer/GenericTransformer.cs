@@ -54,9 +54,9 @@ public sealed unsafe class GenericTransformer : IDisposable
     // (rare for norms; possible for the embed table) so loading never throws on a quant dtype.
     /// <summary>Projection dispatch: float weights always take cuBLAS <see cref="IBackend.Linear"/>; quantized weights take the low-VRAM <see cref="IBackend.QuantizedMatMul"/> when <paramref name="lowVram"/> is set (weight stays compressed, transient dequant), else the faster <see cref="IBackend.Linear"/> path (dequants + caches an F16 weight).</summary>
     internal static void Project(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias, bool lowVram)
+    
     {
-        if (weight.DType.IsQuantized && lowVram) backend.QuantizedMatMul(output, input, weight, bias);
-        else backend.Linear(output, input, weight, bias);
+        ProjectionOps.Project(backend, output, input, weight, bias, lowVram);
     }
 
     /// <summary>F32 view-or-copy: dequantizes quantized tensors, casts 16-bit floats, returns the SAME reference when already F32 (callers check <c>ReferenceEquals</c> before disposing).</summary>
@@ -64,15 +64,9 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// lives on <see cref="Tensor.QuantInfo"/>, so it is not <c>IsQuantized</c> and a cast would read a different
     /// weight rather than refuse. The embedding table of an int8 checkpoint reaches here, and it is host-gathered.</remarks>
     internal static Tensor EnsureF32(Tensor t)
+    
     {
-        if (t.DType == DType.F32) return t;
-        if (t.DType.IsQuantized) return HartsyInference.ModelAssets.Gguf.GgufDequantizer.Dequantize(t, DType.F32);
-        if (t.DType == DType.I8 && t.QuantInfo is { RowScale: not null } int8)
-        {
-            using Tensor bf16 = Int8ConvRotCodec.DequantToBf16(t, int8.RowScale, int8.ConvRotGroupSize);
-            return bf16.CastTo(DType.F32);
-        }
-        return t.CastTo(DType.F32);
+        return ProjectionOps.EnsureF32(t);
     }
 
     /// <summary>True when every part can be byte-concatenated without losing a quantization companion.</summary>
@@ -158,9 +152,9 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Normalizes <paramref name="input"/> with <paramref name="weight"/> using LayerNorm (mean-centered, Cohere) or RMSNorm (everything else).</summary>
     private static void Normalize(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias, bool layerNorm, float eps)
+    
     {
-        if (layerNorm) backend.LayerNorm(output, input, weight, bias!, eps);
-        else backend.RmsNorm(output, input, weight, eps);
+        ProjectionOps.Normalize(backend, output, input, weight, bias, layerNorm, eps);
     }
 
     /// <summary>Loads weights from an HF-style key dict; <paramref name="prefix"/> is everything up to (not including) <c>embed_tokens</c> (e.g. <c>"model"</c> for a standalone checkpoint).</summary>
@@ -794,27 +788,9 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Per-row RoPE table for a ragged decode batch: row b uses absolute position <paramref name="positions"/>[b] (same split-half layout as <see cref="BuildRope"/>, so both RoPE styles consume it identically).</summary>
     private static void BuildRopeBatched(Tensor cos, Tensor sin, ReadOnlySpan<int> positions, int headDim, int rotaryDim, float theta, RopeScaling scaling)
+    
     {
-        int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
-        int half = rdim / 2;
-        int maxPos = 0;
-        for (int s = 0; s < positions.Length; s++) maxPos = Math.Max(maxPos, positions[s]);
-        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, scaling, maxPos + 1);
-        float* pc = (float*)cos.DataPointer;
-        float* ps = (float*)sin.DataPointer;
-        for (int s = 0; s < positions.Length; s++)
-        {
-            int pos = positions[s];
-            long baseOff = (long)s * headDim;
-            for (int i = 0; i < half; i++)
-            {
-                double angle = pos * invFreq[i];
-                float c = (float)(Math.Cos(angle) * mscale);
-                float si = (float)(Math.Sin(angle) * mscale);
-                pc[baseOff + i] = c; pc[baseOff + i + half] = c;
-                ps[baseOff + i] = si; ps[baseOff + i + half] = si;
-            }
-        }
+        RopeTables.BuildRopeBatched(cos, sin, positions, headDim, rotaryDim, theta, scaling);
     }
 
     /// <summary>Projects hidden <c>[1, T, hidden]</c> → logits <c>[1, T, vocab]</c> via the (tied) lm_head.</summary>
@@ -892,27 +868,9 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>, <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2/Qwen3/Llama).</summary>
     internal static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta, RopeScaling scaling)
+    
     {
-        // Partial rotary: build the table for the first rotaryDim dims (half = rotaryDim/2 duplicated), leaving the
-        // rest of each headDim-strided row untouched (the kernel never reads it). 0/full → the whole head.
-        int rdim = rotaryDim > 0 && rotaryDim < headDim ? rotaryDim : headDim;
-        int half = rdim / 2;
-        (double[] invFreq, double mscale) = RopeFrequencyBuilder.Build(rdim, theta, scaling, posStart + t);
-        float* pc = (float*)cos.DataPointer;
-        float* ps = (float*)sin.DataPointer;
-        for (int s = 0; s < t; s++)
-        {
-            int pos = posStart + s;
-            long baseOff = (long)s * headDim;
-            for (int i = 0; i < half; i++)
-            {
-                double angle = pos * invFreq[i];
-                float c = (float)(Math.Cos(angle) * mscale);
-                float si = (float)(Math.Sin(angle) * mscale);
-                pc[baseOff + i] = c; pc[baseOff + i + half] = c;
-                ps[baseOff + i] = si; ps[baseOff + i + half] = si;
-            }
-        }
+        RopeTables.BuildRope(cos, sin, t, posStart, headDim, rotaryDim, theta, scaling);
     }
 
     private void ThrowIfDisposed()
@@ -1193,17 +1151,9 @@ public sealed unsafe class GenericTransformer : IDisposable
 
         /// <summary>Applies the configured FFN activation to <paramref name="inp"/> into <paramref name="outp"/> (same shape): SiLU (SwiGLU), tanh-GELU (GeGLU/GPT-2-lineage), ReLU, or ReLU² (Nemotron).</summary>
         private void Activate(IBackend backend, Tensor outp, Tensor inp)
+        
         {
-            switch (_cfg.Activation)
-            {
-                case ActivationKind.GeluTanh: backend.Gelu(outp, inp); break;
-                case ActivationKind.Relu: backend.Clamp(outp, inp, 0f, float.PositiveInfinity); break;
-                case ActivationKind.ReluSquared:
-                    backend.Clamp(outp, inp, 0f, float.PositiveInfinity);
-                    backend.Mul(outp, outp, outp);   // relu(x)² (elementwise, alias-safe)
-                    break;
-                default: backend.Silu(outp, inp); break;   // SiLU / SwiGLU
-            }
+            GatedFfn.Activate(backend, _cfg.Activation, outp, inp);
         }
 
         /// <summary>FFN: routes to the dense SwiGLU/GeGLU, the non-gated MLP, or the MoE block. Consumes (disposes) <paramref name="preMlp"/> and returns the FFN output. On a Gemma-4 <see cref="TransformerConfig.ParallelDenseMoeBranch"/> layer this is still the MoE block ONLY (the parallel dense branch is handled separately by <see cref="GemmaMoeFfn"/>, which calls <see cref="DenseFfn"/> directly instead of going through here).</summary>
@@ -1251,12 +1201,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 {
                     Tensor gate = new(ff, DType.F32);
                     ProjectGateUp(backend, gate, up, preMlp, n, _cfg.LowVramQuant);
-                    Tensor gateAct = new(ff, DType.F32);
-                    Activate(backend, gateAct, gate);
-                    gate.Dispose();
-                    comb = new(ff, DType.F32);
-                    backend.Mul(comb, gateAct, up);
-                    gateAct.Dispose(); up.Dispose();
+                    comb = GatedFfn.SwiGlu(backend, _cfg.Activation, gate, up);
                 }
             }
             else

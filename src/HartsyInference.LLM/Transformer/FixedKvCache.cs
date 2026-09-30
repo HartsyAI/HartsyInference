@@ -29,6 +29,11 @@ public sealed class FixedKvCache : IKvCache, IDisposable
 
     public int CurrentLength { get { ThrowIfDisposed(); return _currentLength; } }
 
+    /// <inheritdoc cref="ISequenceState.Capacity"/>
+    public int Capacity => MaxSequenceLength;
+
+    /// <summary>Every committed token can be rolled back: <see cref="Truncate"/> only moves the cursor.</summary>
+    public int MaxRollback => CurrentLength;
 
     /// <summary>Tokens layer <paramref name="layer"/> currently has room for; equals <see cref="MaxSequenceLength"/> unless the cache grows on demand.</summary>
     public int LayerCapacity(int layer) { ThrowIfDisposed(); return _capacity[layer]; }

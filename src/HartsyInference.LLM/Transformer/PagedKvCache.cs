@@ -23,6 +23,12 @@ public sealed class PagedKvCache : IKvCache
     public int NumLayers => _pool.NumLayers;
     public int CurrentLength { get { ThrowIfDisposed(); return _currentLength; } }
 
+    /// <summary>Upper bound: every pool page assigned to this one sequence.</summary>
+    public int Capacity => _pool.MaxPages * _pool.PageSize;
+
+    /// <summary>Every committed token can be rolled back; <see cref="Truncate"/> also returns the freed pages to the pool.</summary>
+    public int MaxRollback => CurrentLength;
+
     /// <summary>Pages currently held by this sequence (for observability/logging).</summary>
     public int PagesHeld { get { ThrowIfDisposed(); return _blockTable.Count; } }
 
