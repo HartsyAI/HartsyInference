@@ -1,7 +1,7 @@
 namespace HartsyInference.ModelAssets.Checkpoints;
 
 /// <summary>DeepSeek's own release, whose names are the canonical ones, so every key maps to itself.</summary>
-/// <remarks>The NVIDIA, Quark and EXL3 derivatives keep these names too; they differ only in companion tensors, which the quant binder owns.</remarks>
+/// <remarks>The NVIDIA and Quark derivatives keep these names too (EXL3 renames only the head, see <see cref="Exl3V41KeyMapper"/>); they differ only in companion tensors, which the quant binder owns.</remarks>
 public sealed class OfficialV41KeyMapper : IHfKeyMapper
 {
     /// <inheritdoc/>

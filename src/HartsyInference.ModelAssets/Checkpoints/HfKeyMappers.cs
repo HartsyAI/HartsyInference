@@ -6,6 +6,10 @@ namespace HartsyInference.ModelAssets.Checkpoints;
 public static class HfKeyMappers
 {
     /// <summary>The mapper for <paramref name="flavor"/>; a config with no quantization block is the official naming.</summary>
-    public static IHfKeyMapper ForSafeTensors(QuantFlavor? flavor) =>
-        flavor == QuantFlavor.Mlx ? new MlxV41KeyMapper() : new OfficialV41KeyMapper();
+    public static IHfKeyMapper ForSafeTensors(QuantFlavor? flavor) => flavor switch
+    {
+        QuantFlavor.Mlx => new MlxV41KeyMapper(),
+        QuantFlavor.Exl3 => new Exl3V41KeyMapper(),
+        _ => new OfficialV41KeyMapper(),
+    };
 }

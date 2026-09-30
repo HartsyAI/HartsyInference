@@ -73,7 +73,13 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
         DeepSeekV41Config config = DeepSeekV41Config.Load(info.ConfigPath);
         IHfKeyMapper mapper = HfKeyMappers.ForSafeTensors(flavor);
 
-        ShardSetOptions options = new() { PreadOnlyShards = EngramShardNames(info.IndexPath, mapper) };
+        // Only the official index's total_size is trusted: the NVIDIA index copies it though its shards are larger, the MLX
+        // index still counts four stale shards, and the EXL3 index declares 0 (all read from the real repos).
+        ShardSetOptions options = new()
+        {
+            PreadOnlyShards = EngramShardNames(info.IndexPath, mapper),
+            RequireTotalSizeMatch = flavor == QuantFlavor.Official,
+        };
         ShardedSafeTensorSet shards = ShardedSafeTensorSet.OpenIndex(info.Root, options);
         try
         {
