@@ -6,6 +6,38 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.228
+
+- **Whisper transcription is GPU-resident; small.en meets the phone-agent STT gate on the RTX 3060.** Per utterance
+  (in-process, warm): 2 / 5 / 10 s in 130 / 121 / 200 ms median at 16 kHz (narrowband 8 k → 16 k: 123 / 117 / 200 ms),
+  from 1410 / 980 / 1737 ms; device→host syncs per call 658 / 877 / 2045 → 8 / 11 / 27, one per generated token.
+  The output is unchanged: the same tokens as before on the 3060 for small.en (the JFK slices, the full clip at 16 kHz
+  and narrowband, timestamped and streaming decodes) and for tiny, small, medium, distil-large-v3 and v3.5, and on the
+  CPU backend for tiny, base and small.en.
+  - Decoder: the logits were a scalar host loop over the whole vocabulary (51 864 × 768 multiply-adds per token for
+    small.en, 37 ms a step, 61 % of a 10 s transcription). They are one backend `Linear` at full F32 for that call
+    (`WhisperOps.LinearFullPrecision`), so only the summation order changed. The head split and merge, the
+    self-attention cache append and its prefix copy, and the last-row slice are backend ops (`Permute0213`,
+    `KvCacheAppend` into a device-allocated cache, `SliceTimeRange`, `SliceRows`) instead of host loops that read every
+    activation back; attention sees the same contiguous prefix through the same kernel. One causal mask serves all
+    layers of a step.
+  - Encoder: head split and merge on `Permute0213`; the stem transposes the conv output directly (a `Reshape` view read
+    it back to the host); the positional add is a backend `Add` against a row view of the table.
+  - Weights: the encoder and decoder preload what their device ops read on every call (idempotent, and it undoes an
+    eviction), so biases and norms no longer upload on every op. The token table, which is also the tied logits
+    weight, is read on the host through a pointer taken at load, so the per-step embedding lookup never drops its
+    device copy.
+  - `MelSpectrogramExtractor` (every preset): each mel filter sums only its nonzero bins. `ComputeZeroPadded` computes
+    a zero-padded window without building the pad and fills frames that lie wholly in the padding with their constant.
+    Whisper's 30 s window for a 2 s utterance went from ~155 ms to 4 ms (10 s: 17 ms). Bit-exact:
+    `MelSpectrogramExactnessTests` compare every preset against the dense form, and the zero-padded path against
+    `Compute` on the padded buffer at the window boundaries.
+- `WhisperStageTimer` under `diagnostics.profile`: wall time and D2H syncs per stage (mel, encoder stem and layers,
+  cross K/V, prompt, and per step embed / layers / logits / argmax) and the smallest top-1/top-2 logit margin.
+- `WhisperBenchTests` (GpuIntegration, opt-in `HARTSY_WHISPER_BENCH=1`, asserts a 3060): the Probe A/C cases of
+  `VoiceTurnBenchTests`, per-case token dumps for comparing builds, a model list for regression rows, stage and per-op
+  profiles, and a CPU mode. Results: `benchmarks/results/2026-09-30_whisper_3060_perf.md`.
+
 ## alpha.226
 
 - **RNNoise installs from xiph's own release.** The wake stack and the voice front end load
