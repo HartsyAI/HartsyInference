@@ -33,6 +33,7 @@ public static class PrometheusTextWriter
             Counter(sb, "link_reconnects_total", "Connections established after the first.", link.Reconnects);
             Gauge(sb, "link_rtt_ms", "Round trip of the latest ping.", link.RttMs);
             Counter(sb, "link_audio_lane_dropped_total", "Inbound frames dropped from the audio lane.", link.AudioLaneDropped);
+            Counter(sb, "link_control_lane_dropped_total", "Control frames dropped because the lane stayed full; each restarted the link.", link.ControlLaneDropped);
             Counter(sb, "link_inbound_dropped_down_total", "Inbound frames dropped while the link was down.", link.InboundDroppedWhileDown);
             Counter(sb, "link_stale_outbound_dropped_total", "Outbound frames dropped by the flush epoch.", link.StaleOutboundDropped);
             Counter(sb, "link_frames_sent_total", "Frames written to the host.", link.FramesSent);

@@ -12,9 +12,10 @@ namespace HartsyInference.PhoneGateway.Transport;
 /// on itself. The writer thread drains <see cref="LinkSendQueue"/> (control first, then audio) and sends a <c>Ping</c>
 /// every <see cref="EngineLinkOptions.PingIntervalMs"/>; a timer watchdog closes a connection that has received nothing,
 /// or has had one write stuck, for <see cref="EngineLinkOptions.LivenessTimeoutMs"/>. Callbacks that throw are logged,
-/// never allowed to end a link thread, and a wedged control lane restarts the connection instead of throwing into the
-/// caller. A failed connection empties both lanes: their frames belonged
-/// to a session the host no longer has, and the controller re-sends <c>CallStart(resume)</c> from
+/// never allowed to end a link thread, and a wedged control lane drops the frame, counts it and restarts the
+/// connection instead of throwing into the caller; the reader thread never waits for room at all, since a reader that
+/// stops reading can deadlock against a host blocked writing to it. A failed connection empties both lanes: their
+/// frames belonged to a session the host no longer has, and the controller re-sends <c>CallStart(resume)</c> from
 /// <see cref="Connected"/>. The flush epoch lives here because the spec makes it the reader's job: once
 /// <c>Flush(T)</c> has been seen, every <c>OutboundAudio</c> or <c>OutboundEnd</c> with a turn at or below T is dropped
 /// on arrival. Callbacks run on the reader thread and must return quickly; none of them may block on the link.</remarks>
@@ -52,6 +53,8 @@ public sealed class EngineLink : IDisposable
     private long _inboundDroppedWhileDown;
     private long _framesReceived;
     private long _framesSent;
+    private long _controlDropped;
+    private int _readerThreadId;
     private int _unknownTypeLogged;
 
     public EngineLink(EngineLinkOptions options)
@@ -107,6 +110,10 @@ public sealed class EngineLink : IDisposable
 
     /// <summary>Inbound frames dropped from the audio lane because the writer fell behind.</summary>
     public long AudioLaneDropped => _queue.AudioDropped;
+
+    /// <summary>Control frames dropped because the lane had no room (after the wait, or at once on the reader thread);
+    /// each one also restarted the connection.</summary>
+    public long ControlLaneDropped => Volatile.Read(ref _controlDropped);
 
     /// <summary>Inbound frames refused because no connection was up.</summary>
     public long InboundDroppedWhileDown => Volatile.Read(ref _inboundDroppedWhileDown);
@@ -189,19 +196,25 @@ public sealed class EngineLink : IDisposable
     }
 
     /// <summary>Queues a control frame; silently dropped when no connection is up (its session is gone). Never throws:
-    /// a lane the writer has not drained for the whole wait means the link is wedged, so the frame is dropped and the
-    /// connection forced to restart, rather than failing a caller that may be in the middle of tearing a call down.</summary>
+    /// a lane the writer has not drained for the whole wait means the link is wedged, so the frame is dropped, counted
+    /// and the connection forced to restart, rather than failing a caller that may be in the middle of tearing a call
+    /// down. On the reader thread (its own <c>Pong</c> and <c>FlushAck</c>, and whatever the callbacks it raises send)
+    /// there is no wait: a reader parked on a full lane stops reading, and a host blocked writing to it then stops
+    /// reading in turn, so neither writer ever drains.</summary>
     private void Control(in LinkControlItem item)
     {
         if (!_connected)
         {
             return;
         }
-        if (!_queue.TryEnqueueControl(item))
+        bool onReader = Environment.CurrentManagedThreadId == Volatile.Read(ref _readerThreadId);
+        if (onReader ? _queue.TryEnqueueControl(item, 0) : _queue.TryEnqueueControl(item))
         {
-            Logs.Warning($"[PhoneGateway] PhoneLink control lane stayed full; dropping {item.Type} and reconnecting.");
-            ForceReconnect();
+            return;
         }
+        Interlocked.Increment(ref _controlDropped);
+        Logs.Warning($"[PhoneGateway] PhoneLink control lane {(onReader ? "full on the reader thread" : "stayed full")}; dropping {item.Type} and reconnecting.");
+        ForceReconnect();
     }
 
     /// <summary>Closes the current socket, which fails the reader and the writer and restarts the connection.</summary>
@@ -220,6 +233,7 @@ public sealed class EngineLink : IDisposable
 
     private void ReaderMain()
     {
+        Volatile.Write(ref _readerThreadId, Environment.CurrentManagedThreadId);
         int attempt = 0;
         bool loggedFailure = false;
         while (!_stopping)

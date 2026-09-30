@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.PhoneGateway.Media;
+using HartsyInference.PhoneGateway.Metrics;
 using HartsyInference.PhoneGateway.Tests.Support;
 using HartsyInference.PhoneGateway.Transport;
 using HartsyInference.PhoneLink;
@@ -414,6 +415,132 @@ public sealed class EngineLinkTests
         Assert.True(queue.TryEnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null)));
         Assert.False(queue.TryEnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null)));
         Assert.Equal(2, queue.ControlCount);
+    }
+
+    [Fact]
+    public void ControlLane_AZeroTimeoutNeverWaits()
+    {
+        LinkSendQueue queue = new(audioDepth: 2, controlDepth: 1, controlTimeoutMs: 30_000);
+        LinkControlItem item = new(LinkMessageType.CallEnd, 1, 0, 0, 0, null);
+        Assert.True(queue.TryEnqueueControl(item, 0));
+        long start = Environment.TickCount64;
+        Assert.False(queue.TryEnqueueControl(item, 0));
+        Assert.InRange(Environment.TickCount64 - start, 0, 1000);
+    }
+
+    [Fact]
+    public void ControlLane_AWedgedLaneDropsTheFrameCountsItAndReconnects()
+    {
+        using FakeLinkHost host = new();
+        host.Start();
+        // Liveness far beyond the test, so only the control lane can be what restarts the connection.
+        using EngineLink link = new(Options(host) with { LivenessTimeoutMs = 60_000, ControlLaneDepth = 2, ControlEnqueueTimeoutMs = 100 });
+        using ManualResetEventSlim dropped = new(false);
+        link.Disconnected = _ => dropped.Set();
+        link.Start();
+        Assert.True(host.WaitUntil(() => link.IsConnected, WaitMs));
+        host.ReadGate.Reset();
+        Assert.True(BlockTheWriter(link), "the writer never blocked on the host that stopped reading");
+
+        link.SendDtmf(1, new LinkDtmf('1', 100));
+        link.SendDtmf(1, new LinkDtmf('2', 100));
+        Assert.Equal(0, link.ControlLaneDropped);
+        Assert.False(dropped.IsSet);
+        link.SendDtmf(1, new LinkDtmf('3', 100));
+        Assert.Equal(1, link.ControlLaneDropped);
+        Assert.True(dropped.Wait(WaitMs), "a wedged control lane never restarted the connection");
+        GatewayMetrics metrics = new()
+        {
+            LinkProbe = () => new LinkSnapshot(link.IsConnected, link.OutboundRate, link.Reconnects, 0, link.AudioLaneDropped,
+                link.ControlLaneDropped, link.InboundDroppedWhileDown, link.StaleOutboundDropped, link.FramesSent, link.FramesReceived),
+        };
+        Assert.Contains("hartsy_phone_link_control_lane_dropped_total 1\n", PrometheusTextWriter.Render(metrics), StringComparison.Ordinal);
+
+        host.ReadGate.Set();
+        Assert.True(host.WaitForConnections(2, WaitMs));
+        Assert.True(host.WaitUntil(() => link.IsConnected, WaitMs));
+        Assert.Equal(1, link.Reconnects);
+    }
+
+    [Fact]
+    public void ControlLane_TheReaderThreadNeverWaitsForRoom()
+    {
+        using FakeLinkHost host = new();
+        host.Start();
+        // A reader that waited for room would sit out the whole minute; liveness is longer still, so the watchdog
+        // cannot be what ends the connection either.
+        using EngineLink link = new(Options(host) with { LivenessTimeoutMs = 120_000, ControlLaneDepth = 2, ControlEnqueueTimeoutMs = 60_000 });
+        using ManualResetEventSlim dropped = new(false);
+        link.Disconnected = _ => dropped.Set();
+        link.Start();
+        Assert.True(host.WaitUntil(() => link.IsConnected, WaitMs));
+        host.ReadGate.Reset();
+        Assert.True(BlockTheWriter(link), "the writer never blocked on the host that stopped reading");
+        link.SendDtmf(1, new LinkDtmf('1', 100));
+        link.SendDtmf(1, new LinkDtmf('2', 100));
+
+        long pingAt = Environment.TickCount64;
+        host.Send(w => w.WritePingAsync(42, CancellationToken.None));
+        Assert.True(dropped.Wait(WaitMs), "the reader waited for room instead of dropping its Pong");
+        _output.WriteLine($"the reader dropped its Pong; link restarted after {Environment.TickCount64 - pingAt} ms");
+        Assert.Equal(1, link.ControlLaneDropped);
+
+        host.ReadGate.Set();
+        Assert.True(host.WaitForConnections(2, WaitMs));
+    }
+
+    [Fact]
+    public void Connected_ACallbackThatThrowsLeavesTheLinkUp()
+    {
+        using FakeLinkHost host = new();
+        host.Start();
+        using EngineLink link = new(Options(host));
+        int connectedCalls = 0;
+        int disconnects = 0;
+        link.Connected = _ =>
+        {
+            Interlocked.Increment(ref connectedCalls);
+            throw new InvalidOperationException("injected Connected failure");
+        };
+        link.Disconnected = _ => Interlocked.Increment(ref disconnects);
+        link.ToolRequest = (callId, requestId, request) =>
+            link.SendToolResult(callId, requestId, new ToolResultMessage { Status = LinkToolStatus.Ok, Message = request.Name });
+        link.Start();
+        Assert.True(host.WaitUntil(() => Volatile.Read(ref connectedCalls) == 1, WaitMs));
+
+        // The connection whose Connected callback threw still carries frames both ways.
+        host.SendToolRequest(3, 7, new ToolRequestMessage { Name = "still-up" });
+        Assert.True(host.WaitUntil(() => host.FramesOf(LinkMessageType.ToolResult).Count == 1, WaitMs), "the link stopped working after Connected threw");
+        Assert.Equal("still-up", host.FramesOf(LinkMessageType.ToolResult)[0].AsFrame().ReadToolResult(out _).Message);
+        Assert.True(link.IsConnected);
+        Assert.Equal(1, host.Connections);
+        Assert.Equal(0, link.Reconnects);
+        Assert.Equal(0, Volatile.Read(ref disconnects));
+    }
+
+    /// <summary>Floods the audio lane until the writer has finished no frame for 500 ms while frames keep coming: with
+    /// the host no longer reading, the socket is full and the writer is parked inside a write.</summary>
+    private static bool BlockTheWriter(EngineLink link)
+    {
+        short[] frame = new short[LinkProtocol.InboundFrameSamples];
+        long lastSent = -1;
+        long unchangedSince = Environment.TickCount64;
+        long deadline = Environment.TickCount64 + WaitMs;
+        while (Environment.TickCount64 < deadline)
+        {
+            link.TryEnqueueInboundAudio(1, frame, concealed: false);
+            long sent = link.FramesSent;
+            if (sent != lastSent)
+            {
+                lastSent = sent;
+                unchangedSince = Environment.TickCount64;
+            }
+            else if (Environment.TickCount64 - unchangedSince > 500)
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static EngineLinkOptions Options(FakeLinkHost host, string token = "") => new()

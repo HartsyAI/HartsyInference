@@ -21,7 +21,9 @@ public sealed record EngineLinkOptions
     /// <summary>Inbound audio frames queued for the writer; the oldest is dropped when the lane is full.</summary>
     public int AudioLaneDepth { get; init; } = 10;
 
-    /// <summary>Control frames queued for the writer; a full lane makes the sender wait, never drops.</summary>
+    /// <summary>Control frames queued for the writer. A full lane makes a sender wait up to
+    /// <see cref="ControlEnqueueTimeoutMs"/> (the link's reader thread not at all); a frame that still finds no room is
+    /// dropped, counted in <see cref="EngineLink.ControlLaneDropped"/>, and the connection restarted.</summary>
     public int ControlLaneDepth { get; init; } = 64;
 
     /// <summary>How long a control sender waits for room before the link is declared wedged.</summary>

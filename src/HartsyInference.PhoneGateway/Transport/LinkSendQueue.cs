@@ -4,7 +4,8 @@ namespace HartsyInference.PhoneGateway.Transport;
 
 /// <summary>The two send lanes in front of the link writer thread. Audio is a fixed ring of 20 ms frames that drops its
 /// oldest entry when full, so the pump thread never blocks on a slow socket; control is a bounded queue whose senders
-/// wait for room, so a call event is never lost while the link is up. Every caller is an ordinary thread, so one
+/// wait for room up to a timeout, so a call event is not lost to a burst while the link is up (a lane still full after
+/// the wait means the link is wedged, and the caller decides what to do). Every caller is an ordinary thread, so one
 /// short lock serves both lanes.</summary>
 internal sealed class LinkSendQueue
 {
@@ -90,15 +91,21 @@ internal sealed class LinkSendQueue
         }
     }
 
-    /// <summary>Queues a control frame, waiting for room when the lane is full.</summary>
+    /// <summary>Queues a control frame, waiting up to the configured timeout for room when the lane is full.</summary>
     /// <returns>False when the lane stayed full for the configured timeout: the link is wedged and the frame was not
     /// queued.</returns>
-    public bool TryEnqueueControl(in LinkControlItem item)
+    public bool TryEnqueueControl(in LinkControlItem item) => TryEnqueueControl(item, _controlTimeoutMs);
+
+    /// <summary>Queues a control frame, waiting up to <paramref name="timeoutMs"/> for room when the lane is full; zero
+    /// does not wait at all.</summary>
+    /// <returns>False when the lane stayed full for <paramref name="timeoutMs"/>; the frame was not queued.</returns>
+    public bool TryEnqueueControl(in LinkControlItem item, int timeoutMs)
     {
+        ArgumentOutOfRangeException.ThrowIfNegative(timeoutMs);
         lock (_lock)
         {
             int capacity = _control.Length;
-            long deadline = Environment.TickCount64 + _controlTimeoutMs;
+            long deadline = Environment.TickCount64 + timeoutMs;
             while (_controlCount == capacity)
             {
                 long remaining = deadline - Environment.TickCount64;

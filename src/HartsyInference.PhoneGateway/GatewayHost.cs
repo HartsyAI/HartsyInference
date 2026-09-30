@@ -65,7 +65,8 @@ public sealed class GatewayHost : IDisposable
         }, new PromptPlayer(), _metrics);
         _metrics.LinkProbe = () => new LinkSnapshot(
             _link.IsConnected, _link.OutboundRate, _link.Reconnects, _link.LastRttNs / 1_000_000.0,
-            _link.AudioLaneDropped, _link.InboundDroppedWhileDown, _link.StaleOutboundDropped, _link.FramesSent, _link.FramesReceived);
+            _link.AudioLaneDropped, _link.ControlLaneDropped, _link.InboundDroppedWhileDown, _link.StaleOutboundDropped,
+            _link.FramesSent, _link.FramesReceived);
         _metrics.RegisteredProbe = () => _account.Registrar.Length == 0 || _account.IsRegistered;
         if (config.Admin.Port > 0)
         {
