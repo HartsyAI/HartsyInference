@@ -83,7 +83,10 @@ public sealed unsafe class WhisperEncoder : IDisposable
     }
 
     /// <summary>Forward pass: <c>mel [B, n_mels, n_frames]</c> → <c>features [B, n_frames/2, d_model]</c>; <paramref name="mel"/> typically has <c>n_frames = 3000</c> (Whisper's 30-second chunk) but the encoder runs on any frame count for ablations / unit tests.</summary>
-    public Tensor Forward(IBackend backend, Tensor mel)
+    public Tensor Forward(IBackend backend, Tensor mel) => Forward(backend, mel, timer: null);
+
+    /// <summary><see cref="Forward(IBackend, Tensor)"/> with the stem and each layer attributed to <paramref name="timer"/>.</summary>
+    internal Tensor Forward(IBackend backend, Tensor mel, WhisperStageTimer? timer)
     {
         ThrowIfDisposed();
         if (!_weightsLoaded) throw new InvalidOperationException("Call LoadWeights before Forward.");
@@ -122,6 +125,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
         // Stage 4: add sinusoidal positional embedding [n_frames2, d], broadcast over batch.
         // The HF checkpoint stores 1500 positions; we slice the leading nFrames2 rows.
         AddSinusoidalPosBroadcast(transposed, _embedPositions!, batch, nFrames2, d);
+        timer?.Accumulate("enc.stem");
 
         // Stage 5: N residual attention blocks.
         Tensor hidden = transposed;
@@ -130,6 +134,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
             Tensor next = _layers[i].Forward(backend, hidden);
             hidden.Dispose();
             hidden = next;
+            timer?.Accumulate("enc.layer");
         }
 
         // Stage 6: final layer norm.

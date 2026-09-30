@@ -88,6 +88,9 @@ public sealed unsafe class WhisperDecoder : IDisposable
         /// <summary>Number of tokens written into the self-attention cache so far.</summary>
         public int CurrentPos { get; set; }
 
+        /// <summary>Stage attribution for each step's embed / layers / logits parts; null unless profiling.</summary>
+        internal WhisperStageTimer? Timer { get; set; }
+
         public DecodeState(WhisperConfig cfg, int encoderSeqLen)
         {
             _cfg = cfg;
@@ -147,6 +150,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
         // Embed the new tokens. hidden shape: [1, newCount, d_model].
         Tensor hidden = new(new TensorShape(1, newCount, d), DType.F32);
         EmbedAndAddPos(hidden, tokenIds, posStart, d);
+        state.Timer?.Accumulate("step.embed");
 
         // Run through decoder layers.
         for (int i = 0; i < _layers.Length; i++)
@@ -158,6 +162,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
             hidden.Dispose();
             hidden = next;
         }
+        state.Timer?.Accumulate("step.layers");
 
         // Final LN.
         Tensor normed = new(hidden.Shape, DType.F32);
@@ -177,6 +182,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
         Tensor logits = new(new TensorShape(1, _cfg.VocabSize), DType.F32);
         ComputeLogits(lastHidden, logits, _cfg.VocabSize, d);
         lastHidden.Dispose();
+        state.Timer?.Accumulate("step.logits");
 
         state.CurrentPos += newCount;
         return logits;

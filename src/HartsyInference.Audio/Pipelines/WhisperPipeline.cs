@@ -124,10 +124,22 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     public string TranscribeAudio(IBackend backend, float[] audio, int sampleRate, WhisperOptions? options = null)
     {
         ThrowIfDisposed();
-        WhisperOptions opts = options ?? new WhisperOptions();
-        (float[,] mel, double _) = PrepareMel(audio, sampleRate);
-        return TranscribeFromMel(backend, mel, opts);
+        return _tokenizer.Decode(TranscribeTokenIds(backend, audio, sampleRate, options ?? new WhisperOptions()).ToArray());
     }
+
+    /// <summary>The ids <see cref="TranscribeAudio"/> decodes (timestamp tokens included when
+    /// <see cref="WhisperOptions.WithTimestamps"/> is set), for token-level comparisons across builds.</summary>
+    internal List<int> TranscribeTokenIds(IBackend backend, float[] audio, int sampleRate, WhisperOptions options)
+    {
+        ThrowIfDisposed();
+        WhisperStageTimer? timer = WhisperStageTimer.Start(backend);
+        (float[,] mel, double _) = PrepareMel(audio, sampleRate);
+        timer?.Mark("mel");
+        return DecodeTokens(backend, mel, options, timer);
+    }
+
+    /// <summary>The text <see cref="TranscribeAudio"/> returns for <paramref name="ids"/>.</summary>
+    internal string DecodeText(List<int> ids) => _tokenizer.Decode(ids.ToArray());
 
     /// <summary>Transcribes with Whisper's native <c>&lt;|t|&gt;</c> timestamp tokens enabled and returns the decoded
     /// spans. <b>Segment granularity, not word granularity</b> — see <see cref="WhisperSegment"/>. Like
@@ -138,8 +150,10 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     {
         ThrowIfDisposed();
         WhisperOptions opts = options ?? new WhisperOptions();
+        WhisperStageTimer? timer = WhisperStageTimer.Start(backend);
         (float[,] mel, double seconds) = PrepareMel(audio, sampleRate);
-        return SegmentFromMel(backend, mel, seconds, opts);
+        timer?.Mark("mel");
+        return ParseSegments(DecodeTokens(backend, mel, opts with { WithTimestamps = true }, timer), seconds);
     }
 
     /// <summary>Timestamped decode from a pre-computed mel; <paramref name="audioSeconds"/> only closes a span the
@@ -147,7 +161,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     public IReadOnlyList<WhisperSegment> SegmentFromMel(IBackend backend, float[,] mel, double audioSeconds, WhisperOptions options)
     {
         ThrowIfDisposed();
-        List<int> tokens = DecodeTokens(backend, mel, options with { WithTimestamps = true });
+        List<int> tokens = DecodeTokens(backend, mel, options with { WithTimestamps = true }, WhisperStageTimer.Start(backend));
         return ParseSegments(tokens, audioSeconds);
     }
 
@@ -175,12 +189,12 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     public string TranscribeFromMel(IBackend backend, float[,] mel, WhisperOptions options)
     {
         ThrowIfDisposed();
-        return _tokenizer.Decode(DecodeTokens(backend, mel, options).ToArray());
+        return _tokenizer.Decode(DecodeTokens(backend, mel, options, WhisperStageTimer.Start(backend)).ToArray());
     }
 
     /// <summary>Encoder forward + greedy decode, returning the raw generated ids (timestamp tokens included when
     /// <see cref="WhisperOptions.WithTimestamps"/> is set).</summary>
-    private List<int> DecodeTokens(IBackend backend, float[,] mel, WhisperOptions options)
+    private List<int> DecodeTokens(IBackend backend, float[,] mel, WhisperOptions options, WhisperStageTimer? timer)
     {
         int nMels = mel.GetLength(0);
         int nFrames = mel.GetLength(1);
@@ -192,14 +206,19 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         Tensor encoded;
         try
         {
-            encoded = _encoder.Forward(backend, melTensor);
+            encoded = _encoder.Forward(backend, melTensor, timer);
         }
         finally { melTensor.Dispose(); }
+        timer?.Mark("encoder");
 
         try
         {
             using WhisperDecoder.DecodeState state = _decoder.StartDecode(backend, encoded);
-            return GreedyDecode(backend, state, options);
+            timer?.Mark("crossKv");
+            state.Timer = timer;
+            List<int> tokens = GreedyDecode(backend, state, options, timer);
+            timer?.Report($"frames={nFrames} tokens={tokens.Count}");
+            return tokens;
         }
         finally { encoded.Dispose(); }
     }
@@ -244,7 +263,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         }
     }
 
-    private List<int> GreedyDecode(IBackend backend, WhisperDecoder.DecodeState state, WhisperOptions opts)
+    private List<int> GreedyDecode(IBackend backend, WhisperDecoder.DecodeState state, WhisperOptions opts, WhisperStageTimer? timer)
     {
         // Prompt: [SOT, <|lang|>, transcribe|translate, <|notimestamps|>?] — or [SOT, <|notimestamps|>?] English-only.
         int[] prompt = _tokenizer.BuildPromptIds(opts.Language, opts.Translate, opts.WithTimestamps);
@@ -252,8 +271,10 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         // Run the prompt through the decoder in a single pass — the logits at the last
         // prompt position are the distribution we sample our first text token from.
         Tensor logits = _decoder.DecodeStep(backend, prompt, state);
-        int nextToken = ArgMaxIgnoringSpecial(logits, _tokenizer);
+        int nextToken = ArgMaxIgnoringSpecial(logits, _tokenizer, timer);
         logits.Dispose();
+        timer?.Accumulate("step.argmax");
+        timer?.Mark("prompt");
 
         List<int> generated = new(opts.MaxNewTokens);
         int[] singleBuf = new int[1];
@@ -265,9 +286,11 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             // Feed only the new token forward; the cache holds everything prior.
             singleBuf[0] = nextToken;
             Tensor stepLogits = _decoder.DecodeStep(backend, singleBuf, state);
-            nextToken = ArgMaxIgnoringSpecial(stepLogits, _tokenizer);
+            nextToken = ArgMaxIgnoringSpecial(stepLogits, _tokenizer, timer);
             stepLogits.Dispose();
+            timer?.Accumulate("step.argmax");
         }
+        timer?.Mark($"decode[{generated.Count} steps]");
 
         return generated;
     }
@@ -279,7 +302,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     /// list (~99 entries including punctuation heuristics) lands with temperature
     /// fallback later. Ids come from the tokenizer, not the config — only it knows
     /// whether this checkpoint uses the v3 (100-language) or the English-only layout.</summary>
-    private static unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperTokenizer tokenizer)
+    private static unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperTokenizer tokenizer, WhisperStageTimer? timer)
     {
         int vocab = (int)logits.Shape[logits.Shape.Rank - 1];
         float* p = (float*)logits.DataPointer;
@@ -296,6 +319,15 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         {
             float val = p[v];
             if (val > bestV) { bestV = val; best = v; }
+        }
+        if (timer is not null)
+        {
+            float second = float.NegativeInfinity;
+            for (int v = 0; v < vocab; v++)
+            {
+                if (v != best && p[v] > second) second = p[v];
+            }
+            timer.NoteMargin(bestV - second);
         }
         return best;
     }
