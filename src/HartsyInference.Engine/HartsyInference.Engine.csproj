@@ -8,6 +8,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Diffusion.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.LLM.Tests" />
   </ItemGroup>
 
   <ItemGroup>

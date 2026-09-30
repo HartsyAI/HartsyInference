@@ -6,6 +6,26 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.206
+
+- **Streaming output parser** (DeepSeek-V4.1-Flash program PR 11). `IOutputParser` (`Push(tokenId)` / `Finish`) turns generated
+  ids into `ParsedEvent`s (reasoning, content, tool-call begin/args/end/abort, stop, malformed). `DeepSeekV41OutputParser` matches
+  `</think>`, EOS and the `\n\n<｜DSML｜ calls>` marker on the detokenized text with longest-suffix holdback, so a marker split
+  across any token or UTF-8 boundary is still found, and streams each call's JSON arguments as they arrive with the reference
+  grammar (`namespace::tool`, leading-space tags, `string="true|false"`). Every split point equals one-shot parsing and the
+  upstream `encoding.py` parse on a committed 41-case fixture (also on the real tokenizer); malformed output raises
+  `Malformed` events and never throws; `encode(parse(x))` reproduces the prompt. `PassthroughOutputParser` keeps every other
+  template byte-identical.
+- `IncrementalDetokenizer` replaces the O(n^2) re-decode for tokenizers that report `ILlmTokenizer.TokenBytes` (`GgufTokenizer`):
+  bytes go through a stateful UTF-8 decoder that holds back an incomplete character. Other tokenizers keep the full re-decode.
+- `TextChunkKind` gains `Reasoning`, `ToolCallDelta`, `ToolCallAbort` (a faulted call's deltas must be discarded) and `Usage`; `TextChunk` gains `ToolCallIndex`, `Status` and `Usage`
+  (`TextStatus`, `TextUsage`, declared only: no Usage/Status chunk is emitted yet). A complete `NativeToolCall`
+  (`call_{requestId}_{index}`, plus `Namespace`) still fires per call. `IConversationEncoder.CreateParser` wires the parser to
+  the DeepSeek-V4.1 encoder.
+- **`TextService.StreamAsync` lifetime fix** (`TextStreamPump`): a linked cancellation source, a bounded (256) channel and a
+  `finally` that cancels and awaits the generation worker, so a consumer that stops early releases its slot in under a second
+  instead of leaving generation running.
+
 ## alpha.205
 
 - **Header-first sharded safetensors** (`ShardedSafeTensorSet`, DeepSeek-V4.1-Flash program PR 4). `OpenIndex` (driven by
