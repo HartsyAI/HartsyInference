@@ -41,6 +41,7 @@ public sealed class StreamingIstft
     private readonly float[] _fullIm;
     private readonly float[] _accum;
     private readonly float[] _windowSq;
+    private readonly FftPlan? _plan;
     private readonly int _nFft;
     private readonly int _hopLength;
     private int _accumHead;
@@ -82,6 +83,8 @@ public sealed class StreamingIstft
         _fullIm = new float[nFft];
         _accum = new float[nFft];
         _windowSq = new float[nFft];
+        // Planned where the size allows it: Fft.Transform allocates for sizes that are not powers of two.
+        _plan = FftPlan.IsSupported(nFft) ? new FftPlan(nFft) : null;
     }
 
     /// <summary>Overlap-adds one frame and writes the <see cref="HopLength"/> samples that this frame completed.
@@ -108,7 +111,8 @@ public sealed class StreamingIstft
             _fullIm[_nFft - k] = inIm[k];
         }
 
-        Fft.Transform(_fullRe, _fullIm, _nFft);
+        if (_plan is not null) _plan.Forward(_fullRe, _fullIm, _fullRe, _fullIm);
+        else Fft.Transform(_fullRe, _fullIm, _nFft);
 
         float invN = 1f / _nFft;
         for (int i = 0; i < _nFft; i++)

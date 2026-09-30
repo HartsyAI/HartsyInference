@@ -6,6 +6,52 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.229
+
+- **The voice front end is 3.3× faster at p50 and allocation-free, and still misses its p99 budget on this box.**
+  Silero VAD plus RNNoise per 20 ms frame on one pinned core (`VoiceFrontendBenchTests`, three runs with no other
+  test running): p50 1.55–1.56 ms, p99 3.81–3.93 ms, max 4.6–5.6 ms. In alpha.226 it was p50 5.1 ms, p99 7.0 ms and max
+  10.9 ms; the voice plan allows 2 ms. The thread's own CPU time matches wall time within 0.01 ms, so the slow frames
+  are not preemption. They arrive in bursts that do not follow the audio, which points at cache and memory contention
+  from other work on the shared machine. Allocation fell from 102 KB per frame to none, and no GC ran while timed.
+  Most of what remains is RNNoise's six F32 GRU products per 10 ms (1152×384 each), about 0.7 ms of every 20 ms and
+  bound by memory bandwidth. F16 weights would halve that and int8 would quarter it; that is a precision decision,
+  and it is left open here.
+- `FftPlan` (Audio, `Preprocessing`): a planned mixed-radix complex FFT ported from the kiss_fft RNNoise vendors —
+  radix 2, 3, 4 and 5, twiddles and input permutation computed once, nothing allocated per call, upstream's
+  operation order and twiddle table. `StreamingStft`, `StreamingIstft` and RNNoise's pitch transform use it for every
+  size it supports; at RNNoise's 960 points it replaces Bluestein, which ran two padded 2048-point transforms and
+  allocated 16 KB per call. It matches a double-precision DFT to 1e-6 relative at fourteen sizes.
+- RNNoise's two convolutions each produce a single step, so they now run as `Linear` over flattened views of the same
+  weights rather than through the generic `Conv1d` kernel, whose per-tap bookkeeping dominated at that length.
+- `SileroVad` runs its STFT as one matrix product over the four hop-spaced windows, and each encoder convolution as
+  an unfold followed by a matrix product, with activations kept time-major and the weights only viewed. Against the
+  onnxruntime reference its per-chunk probabilities now differ by at most 8.9e-7 over 343 chunks of jfk.wav (4.77e-6
+  before); against the previous forward, by at most 4.35e-6 over 686 chunks clean and noisy, with the same 233 chunks
+  scoring as speech.
+- `Resampler.ResampleRange` computes only the requested slice of outputs, running the interior ones as a vector dot
+  product over reversed taps, which matches `Resample` to float rounding. `StreamingResampler` uses it and no longer
+  resamples the context padding it throws away. `Resample` itself is unchanged.
+- `RnnoisePitchAnalyzer`'s coarse lag sweep runs a vector of lags at once. Each lane sums its own lag in the original
+  order, so the denoiser's output is bit-identical (all 528,000 samples of a 48 kHz test clip).
+- **The front end no longer allocates.** `CpuParallel.For` captured its body in a closure, and C# builds a captured
+  parameter's closure on entry to the method, so every `LinearTransB` and `Conv1d` call allocated 64 B and 104 B even
+  when it then ran inline. The new `CpuParallel.For<TState>` takes the loop state explicitly and keeps its fan-out
+  lambda in a separate method; those two kernels pass their tile state and a delegate held in a static field. The loop
+  bodies moved without changing. `RnnoiseStream` at 16 kHz and `SileroVad` now allocate nothing per frame inside
+  `CpuParallel.EnterInline()`. Other `CpuParallel.For` callers are untouched.
+- `LinearTransB` runs four weight rows at a time. Each row still performs exactly the single-row sequence (products,
+  horizontal sum, scalar tail and per-tile accumulation), so every CPU `Linear` output is bit-identical. It is faster
+  because one row's dependent FMA chain left the core mostly idle: a 1152×384 product went from ≈ 75 µs to ≈ 58 µs on
+  one core. `LinearTransBIdentityTests` compares against the previous loop byte for byte.
+- RNNoise parity with upstream's float build is unchanged: median 0.017 % clean and 0.019 % with noise, with the
+  same p99 and max against all four references.
+- Tests: `FftPlanTests` (including a bit-for-bit pin to upstream kiss_fft at 960 points and a comparison with the
+  Bluestein path at 960 and 480), `ResamplerTests.ResampleRange_MatchesTheSameSliceOfResample`,
+  `VoiceFrontendAllocationTests` (zero bytes over 1000 frames), `LinearTransBIdentityTests`, and two stateful-`For`
+  cases in `CpuParallelInlineScopeTests`. `VoiceFrontendBenchTests` now reports thread CPU time per frame beside wall
+  time, and picks the core whose hyperthread pair is idlest. `SileroVadParityTests` logs its maximum difference.
+
 ## alpha.228
 
 - **Folders under the models root are matched ignoring case when the engine's spelling is missing.** On a

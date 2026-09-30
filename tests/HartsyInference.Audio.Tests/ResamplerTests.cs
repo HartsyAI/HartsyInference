@@ -23,6 +23,31 @@ public sealed class ResamplerTests
         Assert.Equal(16_000, r.OutputLength(48_000));
     }
 
+    /// <summary>A slice from <c>ResampleRange</c> is the same slice of <c>Resample</c>, to float rounding: interior
+    /// outputs take the vector path (reversed taps, forward dot), and the ends — where some taps fall outside the
+    /// input — the scalar one. A wrong phase or reversal shifts the slice by a sample and reads as a large error.</summary>
+    [Theory]
+    [InlineData(16_000, 48_000)]
+    [InlineData(48_000, 16_000)]
+    [InlineData(44_100, 16_000)]
+    public void ResampleRange_MatchesTheSameSliceOfResample(int inRate, int outRate)
+    {
+        Random rng = new(inRate + outRate);
+        float[] x = new float[2_000];
+        for (int i = 0; i < x.Length; i++) x[i] = (float)(rng.NextDouble() * 2 - 1);
+        Resampler r = Resampler.Create(inRate, outRate);
+        float[] whole = r.Resample(x);
+        foreach ((int first, int count) in new[] { (0, 50), (100, 300), (whole.Length - 60, 60) })
+        {
+            float[] slice = new float[count];
+            r.ResampleRange(x, first, slice);
+            for (int i = 0; i < count; i++)
+                Assert.True(MathF.Abs(slice[i] - whole[first + i]) < 1e-5f,
+                    $"output {first + i}: range {slice[i]}, whole {whole[first + i]}");
+        }
+        Assert.Throws<ArgumentOutOfRangeException>(() => r.ResampleRange(x, whole.Length - 1, new float[2]));
+    }
+
     [Fact]
     public void DcInput_StaysDc_After_Resample()
     {
