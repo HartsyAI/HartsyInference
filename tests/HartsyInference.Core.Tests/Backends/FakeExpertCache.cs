@@ -28,6 +28,8 @@ internal sealed class FakeExpertCache : ExpertCacheBase
         Events.Add("await " + pending);
     }
 
+    protected override void AbandonUpload(object pending) => Events.Add("abandon " + pending);
+
     protected override void Evict(ExpertWeights weights) => Events.Add("evict " + weights.Key);
 
     protected override object RecordFence()

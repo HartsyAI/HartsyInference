@@ -13,7 +13,6 @@ public sealed class CudaExpertCache : ExpertCacheBase
 
     private readonly bool _previousPinUploadSource;
     private readonly int _previousStagingSlots;
-    private readonly bool _registered;
 
     /// <summary>Creates a cache of at most <paramref name="budgetBytes"/> resident expert bytes on <paramref name="backend"/>'s device.</summary>
     /// <param name="stagingSlots">Pinned staging slots, one per upload that can be in flight before the host waits; at least the prefetch depth.</param>
@@ -25,11 +24,18 @@ public sealed class CudaExpertCache : ExpertCacheBase
             ?? throw new InvalidOperationException("The backend has no CUDA streaming weight cache.");
         if (!Active.TryAdd(_streaming, this))
             throw new InvalidOperationException("A CudaExpertCache is already active on this backend; the streaming cache settings it changes are not shareable.");
-        _registered = true;
         _previousPinUploadSource = _streaming.PinUploadSource;
         _previousStagingSlots = _streaming.StagingSlotCount;
-        _streaming.PinUploadSource = false;
-        _streaming.StagingSlotCount = Math.Max(_streaming.StagingSlotCount, stagingSlots);
+        try
+        {
+            _streaming.PinUploadSource = false;
+            _streaming.StagingSlotCount = Math.Max(_streaming.StagingSlotCount, stagingSlots);
+        }
+        catch
+        {
+            RestoreStreamingSettings();
+            throw;
+        }
     }
 
     /// <inheritdoc/>
@@ -42,6 +48,9 @@ public sealed class CudaExpertCache : ExpertCacheBase
 
     /// <inheritdoc/>
     protected override void AwaitUpload(object pending) => _streaming.AwaitWeights((StreamingUploadToken)pending);
+
+    /// <inheritdoc/>
+    protected override void AbandonUpload(object pending) => _streaming.SynchronizeUploads();
 
     /// <inheritdoc/>
     protected override void Evict(ExpertWeights weights) => _streaming.EvictAsync(weights.Tensors);
@@ -61,9 +70,17 @@ public sealed class CudaExpertCache : ExpertCacheBase
     /// <inheritdoc/>
     protected override void Drain()
     {
-        _streaming.DrainAndReleasePool();
-        _streaming.PinUploadSource = _previousPinUploadSource;
-        _streaming.StagingSlotCount = _previousStagingSlots;
-        if (_registered) Active.Remove(_streaming);
+        try { _streaming.DrainAndReleasePool(); }
+        finally { RestoreStreamingSettings(); }
+    }
+
+    private void RestoreStreamingSettings()
+    {
+        try
+        {
+            _streaming.PinUploadSource = _previousPinUploadSource;
+            _streaming.StagingSlotCount = _previousStagingSlots;
+        }
+        finally { Active.Remove(_streaming); }
     }
 }

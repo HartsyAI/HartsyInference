@@ -75,6 +75,7 @@ public sealed class ExpertCachePolicyTests
         cache.FailAwaitOf = K(0, 1);
         Assert.Throws<InvalidOperationException>(() => cache.Acquire([K(0, 1)]));
         Assert.Equal(0, cache.Stats.ResidentExperts);
+        Assert.True(cache.Events.IndexOf("abandon " + K(0, 1)) < cache.Events.IndexOf("evict " + K(0, 1)));
 
         cache.FailAwaitOf = null;
         using ExpertLease lease = cache.Acquire([K(0, 1)]);

@@ -331,6 +331,13 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         CudaDriverApi.cuEventSynchronize(fence).ThrowOnError();
     }
 
+    /// <summary>Blocks the host until every queued upload has finished.</summary>
+    internal void SynchronizeUploads()
+    {
+        Enter();
+        CudaDriverApi.cuStreamSynchronize(_uploadStream).ThrowOnError();
+    }
+
     /// <summary>Destroys a fence.</summary>
     internal void DestroyFence(nint fence)
     {

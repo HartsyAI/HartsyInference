@@ -63,6 +63,9 @@ public abstract class ExpertCacheBase : IExpertCache
     /// <summary>Orders the compute stream after an upload started by <see cref="BeginUpload"/>; consumes the handle.</summary>
     protected abstract void AwaitUpload(object pending);
 
+    /// <summary>Makes an upload that failed to await safe to evict: no copy may still be writing the memory that is freed next.</summary>
+    protected virtual void AbandonUpload(object pending) { }
+
     /// <summary>Frees the expert's device memory ordered after the compute stream's queued work; the upload must already be awaited.</summary>
     protected abstract void Evict(ExpertWeights weights);
 
@@ -105,6 +108,7 @@ public abstract class ExpertCacheBase : IExpertCache
             HashSet<ExpertKey> missingKeys = [];
             long missingBytes = 0;
             int hits = 0, inFlight = 0;
+            if (unique.Count > 0) _currentLayer = unique[0].Layer;
             foreach (ExpertKey key in unique)
             {
                 if (_entries.TryGetValue(key, out ExpertCacheEntry? entry))
@@ -121,7 +125,6 @@ public abstract class ExpertCacheBase : IExpertCache
 
             MakeRoom(missingBytes, requested, protectedLayers: null, mustSucceed: true);
             UploadMissing(missing, prefetch: false);
-            if (unique.Count > 0) _currentLayer = unique[0].Layer;
 
             // Awaiting can throw; do it before any pin so a failure leaves nothing held.
             ExpertWeights[] leased = new ExpertWeights[unique.Count];
@@ -277,7 +280,11 @@ public abstract class ExpertCacheBase : IExpertCache
         catch
         {
             // The copy was never ordered before compute; a later hit must not see this entry as ready.
-            try { RemoveEntry(entry, countEviction: false); }
+            try
+            {
+                AbandonUpload(pending);
+                RemoveEntry(entry, countEviction: false);
+            }
             catch { /* the original failure is the one to report */ }
             throw;
         }
