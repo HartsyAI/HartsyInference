@@ -1,0 +1,264 @@
+{
+  "mode": "voice",
+  "protocol": {
+    "warm": 2,
+    "timed": 5,
+    "stt_seconds": [
+      2,
+      5,
+      10
+    ],
+    "tts_words": [
+      5,
+      15,
+      30
+    ],
+    "wall_includes": "HTTP round trip + JSON/base64 parse",
+    "narrowband": "pure-Python 63-tap Hamming sinc, 4 kHz cutoff, x2 decimate/zero-stuff"
+  },
+  "host": "http://192.168.10.188:7801",
+  "started_utc": "2026-09-30T16:14:15.560764+00:00",
+  "gpus": [
+    {
+      "uuid": "GPU-b2198524-73ad-f200-16ef-6fc368d0599f",
+      "name": "NVIDIA GeForce RTX 3060",
+      "index": 0,
+      "driver": "595.91.07"
+    },
+    {
+      "uuid": "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+      "name": "NVIDIA GeForce RTX 4090",
+      "index": 1,
+      "driver": "595.91.07"
+    }
+  ],
+  "swarm_pid": "144195",
+  "swarm_status_start": {
+    "waiting_gens": 0,
+    "loading_models": 0,
+    "waiting_backends": 0,
+    "live_gens": 0
+  },
+  "stt": [
+    {
+      "seconds": 2,
+      "variant": "16k",
+      "requested_model": "small",
+      "wall_s": {
+        "median": 2.1049790382385254,
+        "p95": 2.6225884914398194,
+        "min": 1.6096575260162354,
+        "n": 5
+      },
+      "server_processing_s": {
+        "median": 2.1,
+        "p95": 2.6166,
+        "min": 1.602,
+        "n": 5
+      },
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ],
+      "transcription": "And so my fellow Americans"
+    },
+    {
+      "seconds": 2,
+      "variant": "narrowband 8k->16k",
+      "requested_model": "small",
+      "wall_s": {
+        "median": 1.1685526371002197,
+        "p95": 1.2298025131225585,
+        "min": 0.724240779876709,
+        "n": 5
+      },
+      "server_processing_s": {
+        "median": 1.165,
+        "p95": 1.2254,
+        "min": 0.721,
+        "n": 5
+      },
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ],
+      "transcription": "And so my fellow Americans"
+    },
+    {
+      "seconds": 5,
+      "variant": "16k",
+      "requested_model": "small",
+      "wall_s": {
+        "median": 2.2028069496154785,
+        "p95": 2.872446632385254,
+        "min": 1.1479198932647705,
+        "n": 5
+      },
+      "server_processing_s": {
+        "median": 2.171,
+        "p95": 2.8649999999999998,
+        "min": 1.144,
+        "n": 5
+      },
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ],
+      "transcription": "And so, my fellow Americans, ask not!"
+    },
+    {
+      "seconds": 5,
+      "variant": "narrowband 8k->16k",
+      "requested_model": "small",
+      "wall_s": {
+        "median": 2.7058780193328857,
+        "p95": 3.052551603317261,
+        "min": 2.6152520179748535,
+        "n": 5
+      },
+      "server_processing_s": {
+        "median": 2.697,
+        "p95": 3.0406,
+        "min": 2.607,
+        "n": 5
+      },
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ],
+      "transcription": "And so, my fellow Americans, ask not."
+    },
+    {
+      "seconds": 10,
+      "variant": "16k",
+      "requested_model": "small",
+      "wall_s": {
+        "median": 3.1861138343811035,
+        "p95": 4.012932920455933,
+        "min": 2.272794723510742,
+        "n": 5
+      },
+      "server_processing_s": {
+        "median": 3.177,
+        "p95": 4.0006,
+        "min": 2.267,
+        "n": 5
+      },
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ],
+      "transcription": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    },
+    {
+      "seconds": 10,
+      "variant": "narrowband 8k->16k",
+      "requested_model": "small",
+      "wall_s": {
+        "median": 3.9344546794891357,
+        "p95": 4.012448978424072,
+        "min": 3.606273651123047,
+        "n": 5
+      },
+      "server_processing_s": {
+        "median": 3.917,
+        "p95": 3.9947999999999997,
+        "min": 3.596,
+        "n": 5
+      },
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ],
+      "transcription": "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country."
+    }
+  ],
+  "tts": [
+    {
+      "words": 5,
+      "text": "Please hold while I check.",
+      "voice": "af_heart",
+      "wall_s": {
+        "median": 0.6715242862701416,
+        "p95": 0.8480867385864258,
+        "min": 0.5185518264770508,
+        "n": 5
+      },
+      "audio_seconds": 2.1002083333333332,
+      "rtf_median": 0.3197417492408174,
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ]
+    },
+    {
+      "words": 15,
+      "text": "Thanks for calling, I can see your appointment is booked for Tuesday afternoon at three.",
+      "voice": "af_heart",
+      "wall_s": {
+        "median": 2.916745185852051,
+        "p95": 3.0944410800933837,
+        "min": 1.5667176246643066,
+        "n": 5
+      },
+      "audio_seconds": 5.600208333333334,
+      "rtf_median": 0.520827978575568,
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ]
+    },
+    {
+      "words": 30,
+      "text": "I have updated the delivery address on your order, the driver will call you when they are ten minutes away, and you will receive a message with the tracking link.",
+      "voice": "af_heart",
+      "wall_s": {
+        "median": 3.7319695949554443,
+        "p95": 3.868547773361206,
+        "min": 3.4744017124176025,
+        "n": 5
+      },
+      "audio_seconds": 10.175208333333334,
+      "rtf_median": 0.36677082893032764,
+      "cards": [
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+        "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d"
+      ]
+    }
+  ],
+  "whisper_resolved": "unknown",
+  "whisper_log_lines": [],
+  "swarm_status_end": {
+    "waiting_gens": 0,
+    "loading_models": 0,
+    "waiting_backends": 0,
+    "live_gens": 0
+  }
+}

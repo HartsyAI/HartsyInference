@@ -1,0 +1,70 @@
+{
+  "mode": "voice-qwen3",
+  "model": "Qwen3-4B-Q4_K_M.gguf",
+  "host": "http://192.168.10.188:7801",
+  "started_utc": "2026-09-30T16:21:24.056901+00:00",
+  "gpus": [
+    {
+      "uuid": "GPU-b2198524-73ad-f200-16ef-6fc368d0599f",
+      "name": "NVIDIA GeForce RTX 3060",
+      "index": 0,
+      "driver": "595.91.07"
+    },
+    {
+      "uuid": "GPU-03eac124-76d8-22a2-1ff1-2be8e2fa098d",
+      "name": "NVIDIA GeForce RTX 4090",
+      "index": 1,
+      "driver": "595.91.07"
+    }
+  ],
+  "swarm_pid": "144195",
+  "swarm_status_start": {
+    "waiting_gens": 0,
+    "loading_models": 0,
+    "waiting_backends": 0,
+    "live_gens": 0
+  },
+  "swarm_status_end": {
+    "waiting_gens": 0,
+    "loading_models": 0,
+    "waiting_backends": 0,
+    "live_gens": 0
+  },
+  "protocol": {
+    "warm": 2,
+    "timed": 5,
+    "max_tokens": 64,
+    "greedy": true,
+    "thinking": "off via /no_think soft switch (no WS field)",
+    "prompt_tokens": 553,
+    "prompt_tokens_estimated": false
+  },
+  "ttft_s": {
+    "median": 3.9437025880324654,
+    "p95": 3.951797082205303,
+    "min": 3.9255796700017527,
+    "n": 5
+  },
+  "decode_chunks_per_s": {
+    "median": 22.36441247874823,
+    "p95": 22.488721624715037,
+    "min": 22.285076739886733,
+    "n": 5
+  },
+  "n_chunks_last": 55,
+  "counted_reply_tokens": 55,
+  "cards": [
+    "unattributed",
+    "GPU-b2198524-73ad-f200-16ef-6fc368d0599f",
+    "unattributed",
+    "unattributed",
+    "unattributed"
+  ],
+  "think_block_empty": true,
+  "reply_head": "\n\n\n\nThe caller wants to change the delivery address for an order placed last week and is asking if the courier can call ahead. They also need confirmation that a refund on a returned item has been iss",
+  "card_names": [
+    "NVIDIA GeForce RTX 3060",
+    "unattributed"
+  ],
+  "served_on_4090": false
+}

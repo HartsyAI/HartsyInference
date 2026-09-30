@@ -9,7 +9,7 @@ real-weight, named-checkpoint measurement on the card the plan assigns, and is t
 
 | Field | Value |
 |---|---|
-| Branch / scripts commit | `bench/voice-turn-latency`; Phase 0 produced by the scripts in this PR (STT/TTS numbers from the run after the sentence-count fix, LLM numbers from the run after the fresh-thread-per-call fix; both fixes are in the PR) |
+| Scripts / results commit | `0c62b9bf` on `bench/voice-turn-latency` — the bench scripts exactly as they produced every number below (sentence-count fix, fresh-thread-per-call fix and the quiet-window `--max-minutes` fix included). Raw per-trial JSON: `benchmarks/swarm_audio_bench/swarm_voice_results.json` (STT/TTS) and `benchmarks/results/2026-09-30_voice_turn_latency_llm.json` (LLM) |
 | Repo `main` this branch is based on | `79209dc5` (`origin/main`, engine `VersionSuffix` alpha.216 — NOT what Swarm runs, see next row) |
 | Engine actually serving Phase 0 | the live install's extension NuGet pins: AudioLab `2.0.0-alpha.183`, LLMAssistant `2.0.0-alpha.130`, HartsyInference-Backend `2.0.0-alpha.202-local.2` (`/home/hartsy/Desktop/Swarm/SwarmUI.not too old`, user unit `swarmui.service`, MainPID 144195) |
 | Driver | 595.91.07 (`nvidia-smi`) |
@@ -160,8 +160,11 @@ t_first).
 
 ## Gates
 
-Copied from the plan ("Model bring-up gates"). Evaluated on Phase 1 only; any miss stops the plan at that gate
-and the named task lands before any PR that touches that model.
+From the plan's "Model bring-up gates" table, restricted to the rows PR3 evaluates; each compound gate is split
+into one row per measured quantity so the Measured column holds one number. The plan's other rows (Qwen3 tool
+template — PR6; Silero + RNNoise ≤ 2 ms per frame — PR8; Piper digest-identical — PR5) are checked in those PRs
+and are not evaluated here. Evaluated on Phase 1 only; any miss stops the plan at that gate and the named task
+lands before any PR that touches that model.
 
 | Gate | Where checked | Measured (Phase 1) | Status |
 |---|---|---|---|
