@@ -7,7 +7,7 @@ namespace HartsyInference.Core.Backends;
 public readonly record struct LinearOp(Tensor Output, Tensor Weight, Tensor? Bias);
 
 /// <summary>Backend interface all model code programs against (CPU SIMD, CUDA PTX/cuBLAS); operations are eager, returning when complete.</summary>
-public interface IBackend : IDisposable
+public partial interface IBackend : IDisposable
 {
     /// <summary>The device this backend targets.</summary>
     DeviceKind Device { get; }

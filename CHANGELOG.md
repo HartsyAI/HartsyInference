@@ -6,13 +6,23 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.203
+## alpha.204
 
 - **LLM generation goes through one model contract.** `IGenerationModel` and `ISequenceState` (with cursor-only
   `Checkpoint`/`Rollback`) sit between the generation pipeline and the transformer, and `GenericTransformerModel` adapts
   the existing `GenericTransformer` to it. `TextGenerationPipeline` and `DynamicBatchScheduler` gain `IGenerationModel`
   constructors; the old constructors build the adapter, so public signatures are unchanged. Projection, RoPE-table and
   gated-FFN helpers moved into shared internal statics that `GenericTransformer` delegates to. No behaviour change is intended.
+
+## alpha.203
+
+- **MoE routing, dispatch, combine, top-k and softplus are backend primitives** (`IBackend.MoeRoute`, `MoeBuildDispatch`,
+  `MoeCombine`, `TopKLastDim`, `Softplus`). Routing covers softmax, sigmoid and sqrtsoftplus scoring with bias, per-token
+  alternate bias, group-limited selection (including the HF masked-fill quirk), renormalization, scale and a logit divisor;
+  ties take the lowest index. The CPU reference lives in Core and the CPU backend delegates to it. CUDA adds
+  `moe_route.ptx`, `moe_dispatch.ptx` and `lm_topk_f32.ptx` (radix-select top-k up to k=2048 over vocab-sized rows), all
+  deterministic with no global atomics. Vulkan reports `NotSupportedException`. `MoeFeedForward` is unchanged; the
+  DeepSeek-V4.1-Flash executor adopts these in a later PR.
 
 ## alpha.202
 
