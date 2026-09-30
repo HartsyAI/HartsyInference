@@ -1,8 +1,44 @@
 {
+ "tokenizers_version": "0.23.2",
+ "pre_tokenizer": {
+  "type": "Sequence",
+  "pretokenizers": [
+   {
+    "type": "Split",
+    "pattern": {
+     "Regex": "\\p{N}{1,3}"
+    },
+    "behavior": "Isolated",
+    "invert": false
+   },
+   {
+    "type": "Split",
+    "pattern": {
+     "Regex": "[一-龥぀-ゟ゠-ヿ]+"
+    },
+    "behavior": "Isolated",
+    "invert": false
+   },
+   {
+    "type": "Split",
+    "pattern": {
+     "Regex": "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+"
+    },
+    "behavior": "Isolated",
+    "invert": false
+   },
+   {
+    "type": "ByteLevel",
+    "add_prefix_space": false,
+    "trim_offsets": true,
+    "use_regex": false
+   }
+  ]
+ },
  "golden": [
   {
-   "grids": [],
    "id": 1,
+   "grids": [],
    "ids": [
     0,
     128799,
@@ -555,8 +591,8 @@
    ]
   },
   {
-   "grids": [],
    "id": 2,
+   "grids": [],
    "ids": [
     0,
     128799,
@@ -601,8 +637,8 @@
    ]
   },
   {
-   "grids": [],
    "id": 3,
+   "grids": [],
    "ids": [
     0,
     128799,
@@ -1186,8 +1222,8 @@
    ]
   },
   {
-   "grids": [],
    "id": 4,
+   "grids": [],
    "ids": [
     0,
     128799,
@@ -1293,6 +1329,7 @@
    ]
   },
   {
+   "id": 5,
    "grids": [
     [
      3,
@@ -1303,7 +1340,6 @@
      4
     ]
    ],
-   "id": 5,
    "ids": [
     0,
     128799,
@@ -1406,6 +1442,67 @@
  ],
  "own": [
   {
+   "name": "multi_image_chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Vision assistant."
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "Compare"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "img/a.png"
+       }
+      },
+      {
+       "type": "text",
+       "text": "with"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "img/b.png"
+       }
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "img/c.png"
+       }
+      },
+      {
+       "type": "text",
+       "text": "please"
+      }
+     ]
+    },
+    {
+     "role": "assistant",
+     "content": "They differ."
+    },
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "img/d.png"
+       }
+      },
+      {
+       "type": "text",
+       "text": "and this one?"
+      }
+     ]
+    }
+   ],
    "grids": [
     [
      2,
@@ -1424,6 +1521,8 @@
      3
     ]
    ],
+   "thinking_mode": "chat",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Vision assistant.<｜User｜>Compare\n\n<｜deepseek_image｜>\n\nwith\n\n<｜deepseek_image｜>\n\n<｜deepseek_image｜>\n\nplease<｜Assistant｜></think>They differ.<｜end▁of▁sentence｜><｜User｜><｜deepseek_image｜>\n\nand this one?<｜Assistant｜></think>",
    "ids": [
     0,
     128799,
@@ -1490,78 +1589,40 @@
     33,
     128804,
     128822
-   ],
-   "messages": [
-    {
-     "content": "Vision assistant.",
-     "role": "system"
-    },
-    {
-     "content": [
-      {
-       "text": "Compare",
-       "type": "text"
-      },
-      {
-       "image_url": {
-        "url": "img/a.png"
-       },
-       "type": "image_url"
-      },
-      {
-       "text": "with",
-       "type": "text"
-      },
-      {
-       "image_url": {
-        "url": "img/b.png"
-       },
-       "type": "image_url"
-      },
-      {
-       "image_url": {
-        "url": "img/c.png"
-       },
-       "type": "image_url"
-      },
-      {
-       "text": "please",
-       "type": "text"
-      }
-     ],
-     "role": "user"
-    },
-    {
-     "content": "They differ.",
-     "role": "assistant"
-    },
-    {
-     "content": [
-      {
-       "image_url": {
-        "url": "img/d.png"
-       },
-       "type": "image_url"
-      },
-      {
-       "text": "and this one?",
-       "type": "text"
-      }
-     ],
-     "role": "user"
-    }
-   ],
-   "name": "multi_image_chat",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Vision assistant.<｜User｜>Compare\n\n<｜deepseek_image｜>\n\nwith\n\n<｜deepseek_image｜>\n\n<｜deepseek_image｜>\n\nplease<｜Assistant｜></think>They differ.<｜end▁of▁sentence｜><｜User｜><｜deepseek_image｜>\n\nand this one?<｜Assistant｜></think>",
-   "thinking_mode": "chat"
+   ]
   },
   {
+   "name": "multi_image_thinking",
+   "messages": [
+    {
+     "role": "user",
+     "content": [
+      {
+       "type": "text",
+       "text": "What is"
+      },
+      {
+       "type": "image_url",
+       "image_url": {
+        "url": "img/a.png"
+       }
+      },
+      {
+       "type": "text",
+       "text": "?"
+      }
+     ]
+    }
+   ],
    "grids": [
     [
      5,
      4
     ]
    ],
+   "thinking_mode": "thinking",
+   "reasoning_effort": 60,
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 60 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>What is\n\n<｜deepseek_image｜>\n\n?<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -1624,35 +1685,32 @@
     33,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": [
-      {
-       "text": "What is",
-       "type": "text"
-      },
-      {
-       "image_url": {
-        "url": "img/a.png"
-       },
-       "type": "image_url"
-      },
-      {
-       "text": "?",
-       "type": "text"
-      }
-     ],
-     "role": "user"
-    }
-   ],
-   "name": "multi_image_thinking",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 60 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>What is\n\n<｜deepseek_image｜>\n\n?<｜Assistant｜><think>",
-   "reasoning_effort": 60,
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "mid_conversation_system_thinking",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Base system."
+    },
+    {
+     "role": "user",
+     "content": "First question"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "hidden thought",
+     "content": "First answer"
+    },
+    {
+     "role": "system",
+     "content": "New instruction mid conversation."
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nBase system.<｜User｜>First question<｜Assistant｜></think>First answer<｜end▁of▁sentence｜><｜System｜>New instruction mid conversation.<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -1700,32 +1758,41 @@
     16,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Base system.",
-     "role": "system"
-    },
-    {
-     "content": "First question",
-     "role": "user"
-    },
-    {
-     "content": "First answer",
-     "reasoning_content": "hidden thought",
-     "role": "assistant"
-    },
-    {
-     "content": "New instruction mid conversation.",
-     "role": "system"
-    }
-   ],
-   "name": "mid_conversation_system_thinking",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nBase system.<｜User｜>First question<｜Assistant｜></think>First answer<｜end▁of▁sentence｜><｜System｜>New instruction mid conversation.<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "mid_conversation_system_then_assistant",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Base system."
+    },
+    {
+     "role": "user",
+     "content": "Q1"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "r1",
+     "content": "A1"
+    },
+    {
+     "role": "system",
+     "content": "Mid system."
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "r2",
+     "content": "A2"
+    },
+    {
+     "role": "user",
+     "content": "Q2"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nBase system.<｜User｜>Q1<｜Assistant｜></think>A1<｜end▁of▁sentence｜><｜System｜>Mid system.<｜Assistant｜></think>A2<｜end▁of▁sentence｜><｜User｜>Q2<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -1779,41 +1846,27 @@
     20,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Base system.",
-     "role": "system"
-    },
-    {
-     "content": "Q1",
-     "role": "user"
-    },
-    {
-     "content": "A1",
-     "reasoning_content": "r1",
-     "role": "assistant"
-    },
-    {
-     "content": "Mid system.",
-     "role": "system"
-    },
-    {
-     "content": "A2",
-     "reasoning_content": "r2",
-     "role": "assistant"
-    },
-    {
-     "content": "Q2",
-     "role": "user"
-    }
-   ],
-   "name": "mid_conversation_system_then_assistant",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nBase system.<｜User｜>Q1<｜Assistant｜></think>A1<｜end▁of▁sentence｜><｜System｜>Mid system.<｜Assistant｜></think>A2<｜end▁of▁sentence｜><｜User｜>Q2<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "mid_conversation_system_chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Q1"
+    },
+    {
+     "role": "assistant",
+     "content": "A1"
+    },
+    {
+     "role": "system",
+     "content": "Mid system."
+    }
+   ],
    "grids": [],
+   "thinking_mode": "chat",
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>Q1<｜Assistant｜></think>A1<｜end▁of▁sentence｜><｜System｜>Mid system.<｜Assistant｜></think>",
    "ids": [
     0,
     128803,
@@ -1830,27 +1883,24 @@
     16,
     128804,
     128822
-   ],
-   "messages": [
-    {
-     "content": "Q1",
-     "role": "user"
-    },
-    {
-     "content": "A1",
-     "role": "assistant"
-    },
-    {
-     "content": "Mid system.",
-     "role": "system"
-    }
-   ],
-   "name": "mid_conversation_system_chat",
-   "prompt": "<｜begin▁of▁sentence｜><｜User｜>Q1<｜Assistant｜></think>A1<｜end▁of▁sentence｜><｜System｜>Mid system.<｜Assistant｜></think>",
-   "thinking_mode": "chat"
+   ]
   },
   {
+   "name": "task_action_chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "action"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "chat",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Sys.<｜User｜>Find things<｜Assistant｜></think><｜action｜>",
    "ids": [
     0,
     128799,
@@ -1862,24 +1912,24 @@
     128804,
     128822,
     128829
-   ],
+   ]
+  },
+  {
+   "name": "task_action_thinking",
    "messages": [
     {
-     "content": "Sys.",
-     "role": "system"
+     "role": "system",
+     "content": "Sys."
     },
     {
-     "content": "Find things",
      "role": "user",
+     "content": "Find things",
      "task": "action"
     }
    ],
-   "name": "task_action_chat",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Sys.<｜User｜>Find things<｜Assistant｜></think><｜action｜>",
-   "thinking_mode": "chat"
-  },
-  {
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜Assistant｜><think><｜action｜>",
    "ids": [
     0,
     128799,
@@ -1916,51 +1966,51 @@
     128804,
     128821,
     128829
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "action"
-    }
-   ],
-   "name": "task_action_thinking",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜Assistant｜><think><｜action｜>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
-   "grids": [],
-   "ids": [
-    0,
-    128799,
-    117908,
-    16,
-    128803,
-    14965,
-    2924,
-    128830
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "query"
-    }
-   ],
    "name": "task_query_chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "query"
+    }
+   ],
+   "grids": [],
+   "thinking_mode": "chat",
    "prompt": "<｜begin▁of▁sentence｜><｜System｜>Sys.<｜User｜>Find things<｜query｜>",
-   "thinking_mode": "chat"
+   "ids": [
+    0,
+    128799,
+    117908,
+    16,
+    128803,
+    14965,
+    2924,
+    128830
+   ]
   },
   {
+   "name": "task_query_thinking",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "query"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜query｜>",
    "ids": [
     0,
     128799,
@@ -1995,51 +2045,51 @@
     14965,
     2924,
     128830
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "query"
-    }
-   ],
-   "name": "task_query_thinking",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜query｜>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
-   "grids": [],
-   "ids": [
-    0,
-    128799,
-    117908,
-    16,
-    128803,
-    14965,
-    2924,
-    128831
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "authority"
-    }
-   ],
    "name": "task_authority_chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "authority"
+    }
+   ],
+   "grids": [],
+   "thinking_mode": "chat",
    "prompt": "<｜begin▁of▁sentence｜><｜System｜>Sys.<｜User｜>Find things<｜authority｜>",
-   "thinking_mode": "chat"
+   "ids": [
+    0,
+    128799,
+    117908,
+    16,
+    128803,
+    14965,
+    2924,
+    128831
+   ]
   },
   {
+   "name": "task_authority_thinking",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "authority"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜authority｜>",
    "ids": [
     0,
     128799,
@@ -2074,51 +2124,51 @@
     14965,
     2924,
     128831
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "authority"
-    }
-   ],
-   "name": "task_authority_thinking",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜authority｜>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
-   "grids": [],
-   "ids": [
-    0,
-    128799,
-    117908,
-    16,
-    128803,
-    14965,
-    2924,
-    128832
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "domain"
-    }
-   ],
    "name": "task_domain_chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "domain"
+    }
+   ],
+   "grids": [],
+   "thinking_mode": "chat",
    "prompt": "<｜begin▁of▁sentence｜><｜System｜>Sys.<｜User｜>Find things<｜domain｜>",
-   "thinking_mode": "chat"
+   "ids": [
+    0,
+    128799,
+    117908,
+    16,
+    128803,
+    14965,
+    2924,
+    128832
+   ]
   },
   {
+   "name": "task_domain_thinking",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "domain"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜domain｜>",
    "ids": [
     0,
     128799,
@@ -2153,51 +2203,51 @@
     14965,
     2924,
     128832
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "domain"
-    }
-   ],
-   "name": "task_domain_thinking",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜domain｜>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
-   "grids": [],
-   "ids": [
-    0,
-    128799,
-    117908,
-    16,
-    128803,
-    14965,
-    2924,
-    128836
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "title"
-    }
-   ],
    "name": "task_title_chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "title"
+    }
+   ],
+   "grids": [],
+   "thinking_mode": "chat",
    "prompt": "<｜begin▁of▁sentence｜><｜System｜>Sys.<｜User｜>Find things<｜title｜>",
-   "thinking_mode": "chat"
+   "ids": [
+    0,
+    128799,
+    117908,
+    16,
+    128803,
+    14965,
+    2924,
+    128836
+   ]
   },
   {
+   "name": "task_title_thinking",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "title"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜title｜>",
    "ids": [
     0,
     128799,
@@ -2232,24 +2282,24 @@
     14965,
     2924,
     128836
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "title"
-    }
-   ],
-   "name": "task_title_thinking",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜title｜>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "task_read_url_chat",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "read_url"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "chat",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Sys.<｜User｜>Find things<｜read_url｜>",
    "ids": [
     0,
     128799,
@@ -2259,24 +2309,24 @@
     14965,
     2924,
     128845
-   ],
+   ]
+  },
+  {
+   "name": "task_read_url_thinking",
    "messages": [
     {
-     "content": "Sys.",
-     "role": "system"
+     "role": "system",
+     "content": "Sys."
     },
     {
-     "content": "Find things",
      "role": "user",
+     "content": "Find things",
      "task": "read_url"
     }
    ],
-   "name": "task_read_url_chat",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Sys.<｜User｜>Find things<｜read_url｜>",
-   "thinking_mode": "chat"
-  },
-  {
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜read_url｜>",
    "ids": [
     0,
     128799,
@@ -2311,24 +2361,29 @@
     14965,
     2924,
     128845
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "read_url"
-    }
-   ],
-   "name": "task_read_url_thinking",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Find things<｜read_url｜>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "task_output_after_task",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Find things",
+     "task": "query"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "unused",
+     "content": "the query"
+    },
+    {
+     "role": "user",
+     "content": "Next"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Find things<｜query｜>the query<｜end▁of▁sentence｜><｜User｜>Next<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -2368,29 +2423,59 @@
     11534,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Find things",
-     "role": "user",
-     "task": "query"
-    },
-    {
-     "content": "the query",
-     "reasoning_content": "unused",
-     "role": "assistant"
-    },
-    {
-     "content": "Next",
-     "role": "user"
-    }
-   ],
-   "name": "task_output_after_task",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Find things<｜query｜>the query<｜end▁of▁sentence｜><｜User｜>Next<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "namespaced_string",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s",
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "description": "Look up a value",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          },
+          "limit": {
+           "type": "integer"
+          }
+         }
+        }
+       },
+       "namespace": "search"
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "q"
+    },
+    {
+     "role": "assistant",
+     "content": "ok",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "{\"query\":\"v\"}"
+       },
+       "namespace": "search"
+      }
+     ]
+    }
+   ],
    "grids": [],
+   "thinking_mode": "chat",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>s\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"search::lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜></think>ok\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"search::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">v</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
    "ids": [
     0,
     128799,
@@ -2702,59 +2787,47 @@
     10699,
     32,
     1
-   ],
-   "messages": [
-    {
-     "content": "s",
-     "role": "system",
-     "tools": [
-      {
-       "function": {
-        "description": "Look up a value",
-        "name": "lookup",
-        "parameters": {
-         "properties": {
-          "limit": {
-           "type": "integer"
-          },
-          "query": {
-           "type": "string"
-          }
-         },
-         "type": "object"
-        }
-       },
-       "namespace": "search",
-       "type": "function"
-      }
-     ]
-    },
-    {
-     "content": "q",
-     "role": "user"
-    },
-    {
-     "content": "ok",
-     "role": "assistant",
-     "tool_calls": [
-      {
-       "function": {
-        "arguments": "{\"query\":\"v\"}",
-        "name": "lookup"
-       },
-       "id": "c1",
-       "namespace": "search",
-       "type": "function"
-      }
-     ]
-    }
-   ],
-   "name": "namespaced_string",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>s\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"search::lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜></think>ok\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"search::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">v</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
-   "thinking_mode": "chat"
+   ]
   },
   {
+   "name": "namespaced_dict_description",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s",
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "description": "Look up a value",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          },
+          "limit": {
+           "type": "integer"
+          }
+         }
+        }
+       },
+       "namespace": {
+        "name": "search",
+        "description": "Search tools."
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "q"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\ns\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"search::lookup\", \"description\": \"Search tools.\\nLook up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -3054,47 +3127,85 @@
     83,
     128804,
     128821
-   ],
+   ]
+  },
+  {
+   "name": "namespaced_function_level_and_qualified",
    "messages": [
     {
-     "content": "s",
      "role": "system",
+     "content": "s",
      "tools": [
       {
+       "type": "function",
        "function": {
-        "description": "Look up a value",
         "name": "lookup",
+        "description": "Look up a value",
         "parameters": {
+         "type": "object",
          "properties": {
-          "limit": {
-           "type": "integer"
-          },
           "query": {
            "type": "string"
+          },
+          "limit": {
+           "type": "integer"
           }
-         },
-         "type": "object"
+         }
+        },
+        "namespace": "files"
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "search::grep",
+        "description": "Look up a value",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          },
+          "limit": {
+           "type": "integer"
+          }
+         }
         }
-       },
-       "namespace": {
-        "description": "Search tools.",
-        "name": "search"
-       },
-       "type": "function"
+       }
       }
      ]
     },
     {
-     "content": "q",
-     "role": "user"
+     "role": "user",
+     "content": "q"
+    },
+    {
+     "role": "assistant",
+     "content": "ok",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "files::lookup",
+        "arguments": "{\"query\":\"a\"}"
+       }
+      },
+      {
+       "id": "c2",
+       "type": "function",
+       "function": {
+        "name": "grep",
+        "arguments": "{\"query\":\"b\"}",
+        "namespace": "search"
+       }
+      }
+     ]
     }
    ],
-   "name": "namespaced_dict_description",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\ns\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"search::lookup\", \"description\": \"Search tools.\\nLook up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
-  },
-  {
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\ns\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"files::lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n{\"name\": \"search::grep\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜><think></think>ok\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"files::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">a</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"search::grep\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">b</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
    "ids": [
     0,
     128799,
@@ -3512,85 +3623,117 @@
     10699,
     32,
     1
-   ],
+   ]
+  },
+  {
+   "name": "same_name_three_namespaces",
    "messages": [
     {
-     "content": "s",
      "role": "system",
+     "content": "s",
      "tools": [
       {
+       "type": "function",
        "function": {
-        "description": "Look up a value",
         "name": "lookup",
-        "namespace": "files",
+        "description": "Look up a value",
         "parameters": {
+         "type": "object",
          "properties": {
-          "limit": {
-           "type": "integer"
-          },
           "query": {
            "type": "string"
+          },
+          "limit": {
+           "type": "integer"
           }
-         },
-         "type": "object"
+         }
         }
-       },
-       "type": "function"
+       }
       },
       {
+       "type": "function",
        "function": {
+        "name": "lookup",
         "description": "Look up a value",
-        "name": "search::grep",
         "parameters": {
+         "type": "object",
          "properties": {
-          "limit": {
-           "type": "integer"
-          },
           "query": {
            "type": "string"
+          },
+          "limit": {
+           "type": "integer"
           }
-         },
-         "type": "object"
+         }
         }
        },
-       "type": "function"
+       "namespace": {
+        "name": "search"
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "description": "Look up a value",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          },
+          "limit": {
+           "type": "integer"
+          }
+         }
+        }
+       },
+       "namespace": {
+        "name": "files"
+       }
       }
      ]
     },
     {
-     "content": "q",
-     "role": "user"
+     "role": "user",
+     "content": "q"
     },
     {
-     "content": "ok",
      "role": "assistant",
+     "content": "summary",
      "tool_calls": [
       {
+       "id": "a",
+       "type": "function",
        "function": {
-        "arguments": "{\"query\":\"a\"}",
-        "name": "files::lookup"
-       },
-       "id": "c1",
-       "type": "function"
+        "name": "lookup",
+        "arguments": "{\"query\":\"value\"}"
+       }
       },
       {
+       "id": "b",
+       "type": "function",
        "function": {
-        "arguments": "{\"query\":\"b\"}",
-        "name": "grep",
-        "namespace": "search"
+        "name": "lookup",
+        "arguments": "{\"query\":\"value\"}"
        },
-       "id": "c2",
-       "type": "function"
+       "namespace": "search"
+      },
+      {
+       "id": "c",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "{\"query\":\"value\"}"
+       },
+       "namespace": "files"
       }
      ]
     }
    ],
-   "name": "namespaced_function_level_and_qualified",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\ns\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"files::lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n{\"name\": \"search::grep\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜><think></think>ok\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"files::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">a</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"search::grep\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">b</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
-   "thinking_mode": "thinking"
-  },
-  {
    "grids": [],
+   "thinking_mode": "chat",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>s\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n{\"name\": \"search::lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n{\"name\": \"files::lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜></think>summary\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">value</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"search::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">value</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"files::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">value</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
    "ids": [
     0,
     128799,
@@ -4058,169 +4201,24 @@
     10699,
     32,
     1
-   ],
-   "messages": [
-    {
-     "content": "s",
-     "role": "system",
-     "tools": [
-      {
-       "function": {
-        "description": "Look up a value",
-        "name": "lookup",
-        "parameters": {
-         "properties": {
-          "limit": {
-           "type": "integer"
-          },
-          "query": {
-           "type": "string"
-          }
-         },
-         "type": "object"
-        }
-       },
-       "type": "function"
-      },
-      {
-       "function": {
-        "description": "Look up a value",
-        "name": "lookup",
-        "parameters": {
-         "properties": {
-          "limit": {
-           "type": "integer"
-          },
-          "query": {
-           "type": "string"
-          }
-         },
-         "type": "object"
-        }
-       },
-       "namespace": {
-        "name": "search"
-       },
-       "type": "function"
-      },
-      {
-       "function": {
-        "description": "Look up a value",
-        "name": "lookup",
-        "parameters": {
-         "properties": {
-          "limit": {
-           "type": "integer"
-          },
-          "query": {
-           "type": "string"
-          }
-         },
-         "type": "object"
-        }
-       },
-       "namespace": {
-        "name": "files"
-       },
-       "type": "function"
-      }
-     ]
-    },
-    {
-     "content": "q",
-     "role": "user"
-    },
-    {
-     "content": "summary",
-     "role": "assistant",
-     "tool_calls": [
-      {
-       "function": {
-        "arguments": "{\"query\":\"value\"}",
-        "name": "lookup"
-       },
-       "id": "a",
-       "type": "function"
-      },
-      {
-       "function": {
-        "arguments": "{\"query\":\"value\"}",
-        "name": "lookup"
-       },
-       "id": "b",
-       "namespace": "search",
-       "type": "function"
-      },
-      {
-       "function": {
-        "arguments": "{\"query\":\"value\"}",
-        "name": "lookup"
-       },
-       "id": "c",
-       "namespace": "files",
-       "type": "function"
-      }
-     ]
-    }
-   ],
-   "name": "same_name_three_namespaces",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>s\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n{\"name\": \"search::lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n{\"name\": \"files::lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜></think>summary\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">value</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"search::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">value</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"files::lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">value</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
-   "thinking_mode": "chat"
+   ]
   },
   {
-   "grids": [],
-   "ids": [
-    0,
-    128799,
-    77666,
-    288,
-    9504,
-    482,
-    28,
-    223,
-    19,
-    343,
-    16801,
-    223,
-    19,
-    15,
-    1457,
-    14,
-    270,
-    4077,
-    270,
-    1990,
-    14,
-    270,
-    850,
-    15146,
-    270,
-    22805,
-    868,
-    117908,
-    16,
-    128803,
-    23166,
-    128804,
-    128821
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Hi",
-     "role": "user"
-    }
-   ],
    "name": "effort_1",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 1 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "grids": [],
+   "thinking_mode": "thinking",
    "reasoning_effort": 1,
-   "thinking_mode": "thinking"
-  },
-  {
-   "grids": [],
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 1 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -4230,7 +4228,7 @@
     482,
     28,
     223,
-    1328,
+    19,
     343,
     16801,
     223,
@@ -4255,76 +4253,24 @@
     23166,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Hi",
-     "role": "user"
-    }
-   ],
+   ]
+  },
+  {
    "name": "effort_50",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
-   "reasoning_effort": 50,
-   "thinking_mode": "thinking"
-  },
-  {
-   "grids": [],
-   "ids": [
-    0,
-    128799,
-    77666,
-    288,
-    9504,
-    482,
-    28,
-    223,
-    1457,
-    343,
-    16801,
-    223,
-    19,
-    15,
-    1457,
-    14,
-    270,
-    4077,
-    270,
-    1990,
-    14,
-    270,
-    850,
-    15146,
-    270,
-    22805,
-    868,
-    117908,
-    16,
-    128803,
-    23166,
-    128804,
-    128821
-   ],
    "messages": [
     {
-     "content": "Sys.",
-     "role": "system"
+     "role": "system",
+     "content": "Sys."
     },
     {
-     "content": "Hi",
-     "role": "user"
+     "role": "user",
+     "content": "Hi"
     }
    ],
-   "name": "effort_100",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 100 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
-   "reasoning_effort": 100,
-   "thinking_mode": "thinking"
-  },
-  {
    "grids": [],
+   "thinking_mode": "thinking",
+   "reasoning_effort": 50,
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -4359,128 +4305,227 @@
     23166,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Hi",
-     "role": "user"
-    }
-   ],
-   "name": "effort_low",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
-   "reasoning_effort": "low",
-   "thinking_mode": "thinking"
+   ]
   },
   {
-   "grids": [],
-   "ids": [
-    0,
-    128799,
-    77666,
-    288,
-    9504,
-    482,
-    28,
-    223,
-    2402,
-    343,
-    16801,
-    223,
-    19,
-    15,
-    1457,
-    14,
-    270,
-    4077,
-    270,
-    1990,
-    14,
-    270,
-    850,
-    15146,
-    270,
-    22805,
-    868,
-    117908,
-    16,
-    128803,
-    23166,
-    128804,
-    128821
-   ],
+   "name": "effort_100",
    "messages": [
     {
-     "content": "Sys.",
-     "role": "system"
+     "role": "system",
+     "content": "Sys."
     },
     {
-     "content": "Hi",
-     "role": "user"
+     "role": "user",
+     "content": "Hi"
     }
    ],
-   "name": "effort_high",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
-   "reasoning_effort": "high",
-   "thinking_mode": "thinking"
-  },
-  {
    "grids": [],
-   "ids": [
-    0,
-    128799,
-    77666,
-    288,
-    9504,
-    482,
-    28,
-    223,
-    1457,
-    343,
-    16801,
-    223,
-    19,
-    15,
-    1457,
-    14,
-    270,
-    4077,
-    270,
-    1990,
-    14,
-    270,
-    850,
-    15146,
-    270,
-    22805,
-    868,
-    117908,
-    16,
-    128803,
-    23166,
-    128804,
-    128821
-   ],
-   "messages": [
-    {
-     "content": "Sys.",
-     "role": "system"
-    },
-    {
-     "content": "Hi",
-     "role": "user"
-    }
-   ],
-   "name": "effort_max",
+   "thinking_mode": "thinking",
+   "reasoning_effort": 100,
    "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 100 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
-   "reasoning_effort": "max",
-   "thinking_mode": "thinking"
+   "ids": [
+    0,
+    128799,
+    77666,
+    288,
+    9504,
+    482,
+    28,
+    223,
+    1457,
+    343,
+    16801,
+    223,
+    19,
+    15,
+    1457,
+    14,
+    270,
+    4077,
+    270,
+    1990,
+    14,
+    270,
+    850,
+    15146,
+    270,
+    22805,
+    868,
+    117908,
+    16,
+    128803,
+    23166,
+    128804,
+    128821
+   ]
   },
   {
+   "name": "effort_low",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "reasoning_effort": "low",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
+   "ids": [
+    0,
+    128799,
+    77666,
+    288,
+    9504,
+    482,
+    28,
+    223,
+    1328,
+    343,
+    16801,
+    223,
+    19,
+    15,
+    1457,
+    14,
+    270,
+    4077,
+    270,
+    1990,
+    14,
+    270,
+    850,
+    15146,
+    270,
+    22805,
+    868,
+    117908,
+    16,
+    128803,
+    23166,
+    128804,
+    128821
+   ]
+  },
+  {
+   "name": "effort_high",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "grids": [],
+   "thinking_mode": "thinking",
+   "reasoning_effort": "high",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
+   "ids": [
+    0,
+    128799,
+    77666,
+    288,
+    9504,
+    482,
+    28,
+    223,
+    2402,
+    343,
+    16801,
+    223,
+    19,
+    15,
+    1457,
+    14,
+    270,
+    4077,
+    270,
+    1990,
+    14,
+    270,
+    850,
+    15146,
+    270,
+    22805,
+    868,
+    117908,
+    16,
+    128803,
+    23166,
+    128804,
+    128821
+   ]
+  },
+  {
+   "name": "effort_max",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys."
+    },
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "grids": [],
+   "thinking_mode": "thinking",
+   "reasoning_effort": "max",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 100 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys.<｜User｜>Hi<｜Assistant｜><think>",
+   "ids": [
+    0,
+    128799,
+    77666,
+    288,
+    9504,
+    482,
+    28,
+    223,
+    1457,
+    343,
+    16801,
+    223,
+    19,
+    15,
+    1457,
+    14,
+    270,
+    4077,
+    270,
+    1990,
+    14,
+    270,
+    850,
+    15146,
+    270,
+    22805,
+    868,
+    117908,
+    16,
+    128803,
+    23166,
+    128804,
+    128821
+   ]
+  },
+  {
+   "name": "effort_default_no_system",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
+   "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -4513,39 +4558,49 @@
     23166,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Hi",
-     "role": "user"
-    }
-   ],
-   "name": "effort_default_no_system",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "effort_ignored_in_chat",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "chat",
+   "reasoning_effort": 100,
+   "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hi<｜Assistant｜></think>",
    "ids": [
     0,
     128803,
     23166,
     128804,
     128822
-   ],
-   "messages": [
-    {
-     "content": "Hi",
-     "role": "user"
-    }
-   ],
-   "name": "effort_ignored_in_chat",
-   "prompt": "<｜begin▁of▁sentence｜><｜User｜>Hi<｜Assistant｜></think>",
-   "reasoning_effort": 100,
-   "thinking_mode": "chat"
+   ]
   },
   {
+   "name": "effort_only_first_message",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hi"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "r",
+     "content": "yo"
+    },
+    {
+     "role": "user",
+     "content": "Again"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "reasoning_effort": "low",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜></think>yo<｜end▁of▁sentence｜><｜User｜>Again<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -4584,29 +4639,116 @@
     40544,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Hi",
-     "role": "user"
-    },
-    {
-     "content": "yo",
-     "reasoning_content": "r",
-     "role": "assistant"
-    },
-    {
-     "content": "Again",
-     "role": "user"
-    }
-   ],
-   "name": "effort_only_first_message",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 50 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Hi<｜Assistant｜></think>yo<｜end▁of▁sentence｜><｜User｜>Again<｜Assistant｜><think>",
-   "reasoning_effort": "low",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "parallel_tool_results_reordered",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s",
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "description": "Look up a value",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          },
+          "limit": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      },
+      {
+       "type": "function",
+       "function": {
+        "name": "other",
+        "description": "Look up a value",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          },
+          "limit": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "q"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "plan",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "a",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "{\"query\":\"1\"}"
+       }
+      },
+      {
+       "id": "b",
+       "type": "function",
+       "function": {
+        "name": "other",
+        "arguments": "{\"query\":\"2\"}"
+       }
+      },
+      {
+       "id": "c",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "{\"query\":\"3\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c",
+     "content": "third"
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "a",
+     "content": "first"
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "b",
+     "content": "second"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "done",
+     "content": "final"
+    },
+    {
+     "role": "user",
+     "content": "thanks"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\ns\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n{\"name\": \"other\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜><think>plan</think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">1</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"other\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">2</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">3</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>first</tool_result>\n\n<tool_result>second</tool_result>\n\n<tool_result>third</tool_result><｜Assistant｜><think>done</think>final<｜end▁of▁sentence｜><｜User｜>thanks<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -5080,116 +5222,70 @@
     78349,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "s",
-     "role": "system",
-     "tools": [
-      {
-       "function": {
-        "description": "Look up a value",
-        "name": "lookup",
-        "parameters": {
-         "properties": {
-          "limit": {
-           "type": "integer"
-          },
-          "query": {
-           "type": "string"
-          }
-         },
-         "type": "object"
-        }
-       },
-       "type": "function"
-      },
-      {
-       "function": {
-        "description": "Look up a value",
-        "name": "other",
-        "parameters": {
-         "properties": {
-          "limit": {
-           "type": "integer"
-          },
-          "query": {
-           "type": "string"
-          }
-         },
-         "type": "object"
-        }
-       },
-       "type": "function"
-      }
-     ]
-    },
-    {
-     "content": "q",
-     "role": "user"
-    },
-    {
-     "content": "",
-     "reasoning_content": "plan",
-     "role": "assistant",
-     "tool_calls": [
-      {
-       "function": {
-        "arguments": "{\"query\":\"1\"}",
-        "name": "lookup"
-       },
-       "id": "a",
-       "type": "function"
-      },
-      {
-       "function": {
-        "arguments": "{\"query\":\"2\"}",
-        "name": "other"
-       },
-       "id": "b",
-       "type": "function"
-      },
-      {
-       "function": {
-        "arguments": "{\"query\":\"3\"}",
-        "name": "lookup"
-       },
-       "id": "c",
-       "type": "function"
-      }
-     ]
-    },
-    {
-     "content": "third",
-     "role": "tool",
-     "tool_call_id": "c"
-    },
-    {
-     "content": "first",
-     "role": "tool",
-     "tool_call_id": "a"
-    },
-    {
-     "content": "second",
-     "role": "tool",
-     "tool_call_id": "b"
-    },
-    {
-     "content": "final",
-     "reasoning_content": "done",
-     "role": "assistant"
-    },
-    {
-     "content": "thanks",
-     "role": "user"
-    }
-   ],
-   "name": "parallel_tool_results_reordered",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\ns\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n{\"name\": \"other\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜><think>plan</think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">1</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"other\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">2</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">3</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>first</tool_result>\n\n<tool_result>second</tool_result>\n\n<tool_result>third</tool_result><｜Assistant｜><think>done</think>final<｜end▁of▁sentence｜><｜User｜>thanks<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "tool_result_unknown_id_and_user_merge",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s",
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "description": "Look up a value",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          },
+          "limit": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "q"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "a",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "{\"query\":\"1\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "zzz",
+     "content": "orphan"
+    },
+    {
+     "role": "user",
+     "content": "extra text"
+    },
+    {
+     "role": "user",
+     "content": "more text"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "chat",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>s\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜></think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">1</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>orphan</tool_result>\n\nextra text\n\nmore text<｜Assistant｜></think>",
    "ids": [
     0,
     128799,
@@ -5514,70 +5610,41 @@
     3051,
     128804,
     128822
-   ],
-   "messages": [
-    {
-     "content": "s",
-     "role": "system",
-     "tools": [
-      {
-       "function": {
-        "description": "Look up a value",
-        "name": "lookup",
-        "parameters": {
-         "properties": {
-          "limit": {
-           "type": "integer"
-          },
-          "query": {
-           "type": "string"
-          }
-         },
-         "type": "object"
-        }
-       },
-       "type": "function"
-      }
-     ]
-    },
-    {
-     "content": "q",
-     "role": "user"
-    },
-    {
-     "content": "",
-     "role": "assistant",
-     "tool_calls": [
-      {
-       "function": {
-        "arguments": "{\"query\":\"1\"}",
-        "name": "lookup"
-       },
-       "id": "a",
-       "type": "function"
-      }
-     ]
-    },
-    {
-     "content": "orphan",
-     "role": "tool",
-     "tool_call_id": "zzz"
-    },
-    {
-     "content": "extra text",
-     "role": "user"
-    },
-    {
-     "content": "more text",
-     "role": "user"
-    }
-   ],
-   "name": "tool_result_unknown_id_and_user_merge",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>s\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜></think>\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">1</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>orphan</tool_result>\n\nextra text\n\nmore text<｜Assistant｜></think>",
-   "thinking_mode": "chat"
+   ]
   },
   {
+   "name": "drop_thinking_default",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Q1"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "secret1",
+     "content": "A1"
+    },
+    {
+     "role": "user",
+     "content": "Q2"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "secret2",
+     "content": "A2"
+    },
+    {
+     "role": "latest_reminder",
+     "content": "reminder"
+    },
+    {
+     "role": "user",
+     "content": "Q3"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Q1<｜Assistant｜></think>A1<｜end▁of▁sentence｜><｜User｜>Q2<｜Assistant｜></think>A2<｜end▁of▁sentence｜><｜latest_reminder｜>reminder<｜User｜>Q3<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -5630,42 +5697,29 @@
     21,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Q1",
-     "role": "user"
-    },
-    {
-     "content": "A1",
-     "reasoning_content": "secret1",
-     "role": "assistant"
-    },
-    {
-     "content": "Q2",
-     "role": "user"
-    },
-    {
-     "content": "A2",
-     "reasoning_content": "secret2",
-     "role": "assistant"
-    },
-    {
-     "content": "reminder",
-     "role": "latest_reminder"
-    },
-    {
-     "content": "Q3",
-     "role": "user"
-    }
-   ],
-   "name": "drop_thinking_default",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Q1<｜Assistant｜></think>A1<｜end▁of▁sentence｜><｜User｜>Q2<｜Assistant｜></think>A2<｜end▁of▁sentence｜><｜latest_reminder｜>reminder<｜User｜>Q3<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
-   "drop_thinking": false,
+   "name": "drop_thinking_disabled",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Q1"
+    },
+    {
+     "role": "assistant",
+     "reasoning_content": "secret1",
+     "content": "A1"
+    },
+    {
+     "role": "user",
+     "content": "Q2"
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "drop_thinking": false,
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Q1<｜Assistant｜><think>secret1</think>A1<｜end▁of▁sentence｜><｜User｜>Q2<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -5710,28 +5764,84 @@
     20,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Q1",
-     "role": "user"
-    },
-    {
-     "content": "A1",
-     "reasoning_content": "secret1",
-     "role": "assistant"
-    },
-    {
-     "content": "Q2",
-     "role": "user"
-    }
-   ],
-   "name": "drop_thinking_disabled",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n<｜User｜>Q1<｜Assistant｜><think>secret1</think>A1<｜end▁of▁sentence｜><｜User｜>Q2<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "argument_forms",
+   "messages": [
+    {
+     "role": "system",
+     "content": "s",
+     "tools": [
+      {
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "description": "Look up a value",
+        "parameters": {
+         "type": "object",
+         "properties": {
+          "query": {
+           "type": "string"
+          },
+          "limit": {
+           "type": "integer"
+          }
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "user",
+     "content": "q"
+    },
+    {
+     "role": "assistant",
+     "content": "x",
+     "tool_calls": [
+      {
+       "id": "a",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "{\"query\":\"café 中文\",\"limit\":3,\"ratio\":0.1,\"big\":1e20,\"flag\":true,\"none\":null,\"list\":[1,2.50,\"s\"],\"obj\":{\"b\":1,\"a\":{\"c\":[]}}}"
+       }
+      },
+      {
+       "id": "b",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "\"{\\\"query\\\":\\\"double\\\"}\""
+       }
+      },
+      {
+       "id": "c",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": "not json at all"
+       }
+      },
+      {
+       "id": "d",
+       "type": "function",
+       "function": {
+        "name": "lookup",
+        "arguments": {
+         "query": "dict-args",
+         "limit": 2
+        }
+       }
+      }
+     ]
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\ns\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜><think></think>x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">café 中文</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"limit\" string=\"false\">3</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"ratio\" string=\"false\">0.1</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"big\" string=\"false\">1e+20</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"flag\" string=\"false\">true</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"none\" string=\"false\">null</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"list\" string=\"false\">[1, 2.5, \"s\"]</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"obj\" string=\"false\">{\"b\": 1, \"a\": {\"c\": []}}</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">double</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"arguments\" string=\"true\">not json at all</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">dict-args</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"limit\" string=\"false\">2</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
    "ids": [
     0,
     128799,
@@ -6313,84 +6423,36 @@
     10699,
     32,
     1
-   ],
-   "messages": [
-    {
-     "content": "s",
-     "role": "system",
-     "tools": [
-      {
-       "function": {
-        "description": "Look up a value",
-        "name": "lookup",
-        "parameters": {
-         "properties": {
-          "limit": {
-           "type": "integer"
-          },
-          "query": {
-           "type": "string"
-          }
-         },
-         "type": "object"
-        }
-       },
-       "type": "function"
-      }
-     ]
-    },
-    {
-     "content": "q",
-     "role": "user"
-    },
-    {
-     "content": "x",
-     "role": "assistant",
-     "tool_calls": [
-      {
-       "function": {
-        "arguments": "{\"query\":\"café 中文\",\"limit\":3,\"ratio\":0.1,\"big\":1e20,\"flag\":true,\"none\":null,\"list\":[1,2.50,\"s\"],\"obj\":{\"b\":1,\"a\":{\"c\":[]}}}",
-        "name": "lookup"
-       },
-       "id": "a",
-       "type": "function"
-      },
-      {
-       "function": {
-        "arguments": "\"{\\\"query\\\":\\\"double\\\"}\"",
-        "name": "lookup"
-       },
-       "id": "b",
-       "type": "function"
-      },
-      {
-       "function": {
-        "arguments": "not json at all",
-        "name": "lookup"
-       },
-       "id": "c",
-       "type": "function"
-      },
-      {
-       "function": {
-        "arguments": {
-         "limit": 2,
-         "query": "dict-args"
-        },
-        "name": "lookup"
-       },
-       "id": "d",
-       "type": "function"
-      }
-     ]
-    }
-   ],
-   "name": "argument_forms",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\ns\n\n## Tools\n\nYou have access to a set of tools to help answer the user's question. You can invoke tools by writing a \"<｜DSML｜ calls>\" block like the following:\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"$TOOL_NAME\">\n<｜DSML｜ parameter name=\"$PARAMETER_NAME\" string=\"true|false\">$PARAMETER_VALUE</｜DSML｜ parameter>\n...\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"$TOOL_NAME2\">\n...\n</｜DSML｜ invoke>\n</｜DSML｜ calls>\n\nString parameters should be specified as is and set `string=\"true\"`. For all other types (numbers, booleans, arrays, objects), pass the value in JSON format and set `string=\"false\"`.\n\nIf thinking_mode is enabled (triggered by <think>), you MUST output your complete reasoning inside <think>...</think> BEFORE any tool calls or final response.\n\nOtherwise, output directly after </think> with tool calls or final response.\n\n### Available Tool Schemas\n\n{\"name\": \"lookup\", \"description\": \"Look up a value\", \"parameters\": {\"type\": \"object\", \"properties\": {\"query\": {\"type\": \"string\"}, \"limit\": {\"type\": \"integer\"}}}}\n\nYou MUST strictly follow the above defined tool name and parameter schemas to invoke tool calls.\n<｜User｜>q<｜Assistant｜><think></think>x\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">café 中文</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"limit\" string=\"false\">3</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"ratio\" string=\"false\">0.1</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"big\" string=\"false\">1e+20</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"flag\" string=\"false\">true</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"none\" string=\"false\">null</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"list\" string=\"false\">[1, 2.5, \"s\"]</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"obj\" string=\"false\">{\"b\": 1, \"a\": {\"c\": []}}</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">double</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"arguments\" string=\"true\">not json at all</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n<｜DSML｜ invoke name=\"lookup\">\n<｜DSML｜ parameter name=\"query\" string=\"true\">dict-args</｜DSML｜ parameter>\n<｜DSML｜ parameter name=\"limit\" string=\"false\">2</｜DSML｜ parameter>\n</｜DSML｜ invoke>\n</｜DSML｜ calls><｜end▁of▁sentence｜>",
-   "thinking_mode": "thinking"
+   ]
   },
   {
+   "name": "response_format_and_wo_eos",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Answer in JSON.",
+     "response_format": {
+      "type": "object",
+      "properties": {
+       "a": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    {
+     "role": "user",
+     "content": "q"
+    },
+    {
+     "role": "assistant",
+     "content": "{\"a\":",
+     "wo_eos": true
+    }
+   ],
    "grids": [],
+   "thinking_mode": "chat",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Answer in JSON.\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"string\"}}}<｜User｜>q<｜Assistant｜></think>{\"a\":",
    "ids": [
     0,
     128799,
@@ -6439,36 +6501,23 @@
     24313,
     67,
     3362
-   ],
-   "messages": [
-    {
-     "content": "Answer in JSON.",
-     "response_format": {
-      "properties": {
-       "a": {
-        "type": "string"
-       }
-      },
-      "type": "object"
-     },
-     "role": "system"
-    },
-    {
-     "content": "q",
-     "role": "user"
-    },
-    {
-     "content": "{\"a\":",
-     "role": "assistant",
-     "wo_eos": true
-    }
-   ],
-   "name": "response_format_and_wo_eos",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Answer in JSON.\n\n## Response Format:\n\nYou MUST strictly adhere to the following schema to reply:\n{\"type\": \"object\", \"properties\": {\"a\": {\"type\": \"string\"}}}<｜User｜>q<｜Assistant｜></think>{\"a\":",
-   "thinking_mode": "chat"
+   ]
   },
   {
+   "name": "special_literals_in_user_text",
+   "messages": [
+    {
+     "role": "system",
+     "content": "Sys <｜User｜> literal."
+    },
+    {
+     "role": "user",
+     "content": "Text with <｜Assistant｜> and </think> and <｜end▁of▁sentence｜> and <｜DSML｜ calls>."
+    }
+   ],
    "grids": [],
+   "thinking_mode": "thinking",
+   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys <｜User｜> literal.<｜User｜>Text with <｜Assistant｜> and </think> and <｜end▁of▁sentence｜> and <｜DSML｜ calls>.<｜Assistant｜><think>",
    "ids": [
     0,
     128799,
@@ -6520,73 +6569,26 @@
     43386,
     128804,
     128821
-   ],
-   "messages": [
-    {
-     "content": "Sys <｜User｜> literal.",
-     "role": "system"
-    },
-    {
-     "content": "Text with <｜Assistant｜> and </think> and <｜end▁of▁sentence｜> and <｜DSML｜ calls>.",
-     "role": "user"
-    }
-   ],
-   "name": "special_literals_in_user_text",
-   "prompt": "<｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\nSys <｜User｜> literal.<｜User｜>Text with <｜Assistant｜> and </think> and <｜end▁of▁sentence｜> and <｜DSML｜ calls>.<｜Assistant｜><think>",
-   "thinking_mode": "thinking"
+   ]
   }
  ],
- "pre_tokenizer": {
-  "pretokenizers": [
-   {
-    "behavior": "Isolated",
-    "invert": false,
-    "pattern": {
-     "Regex": "\\p{N}{1,3}"
-    },
-    "type": "Split"
-   },
-   {
-    "behavior": "Isolated",
-    "invert": false,
-    "pattern": {
-     "Regex": "[一-龥぀-ゟ゠-ヿ]+"
-    },
-    "type": "Split"
-   },
-   {
-    "behavior": "Isolated",
-    "invert": false,
-    "pattern": {
-     "Regex": "[!\"#$%&'()*+,\\-./:;<=>?@\\[\\\\\\]^_`{|}~][A-Za-z]+|[^\r\n\\p{L}\\p{P}\\p{S}]?[\\p{L}\\p{M}]+| ?[\\p{P}\\p{S}]+[\r\n]*|\\s*[\r\n]+|\\s+(?!\\S)|\\s+"
-    },
-    "type": "Split"
-   },
-   {
-    "add_prefix_space": false,
-    "trim_offsets": true,
-    "type": "ByteLevel",
-    "use_regex": false
-   }
-  ],
-  "type": "Sequence"
- },
  "stress": [
   {
+   "text": "",
    "ids": [],
-   "pieces": [],
-   "text": ""
+   "pieces": []
   },
   {
+   "text": " ",
    "ids": [
     223
    ],
    "pieces": [
     "Ġ"
-   ],
-   "text": " "
+   ]
   },
   {
+   "text": "Hello, world!",
    "ids": [
     19923,
     14,
@@ -6598,10 +6600,10 @@
     ",",
     "Ġworld",
     "!"
-   ],
-   "text": "Hello, world!"
+   ]
   },
   {
+   "text": "The quick brown fox jumps over the lazy dog.",
    "ids": [
     671,
     4787,
@@ -6625,10 +6627,10 @@
     "Ġlazy",
     "Ġdog",
     "."
-   ],
-   "text": "The quick brown fox jumps over the lazy dog."
+   ]
   },
   {
+   "text": "don't can't we'll they've I'm you're she'd",
    "ids": [
     20385,
     1664,
@@ -6660,10 +6662,10 @@
     "'re",
     "Ġshe",
     "'d"
-   ],
-   "text": "don't can't we'll they've I'm you're she'd"
+   ]
   },
   {
+   "text": "1234567890",
    "ids": [
     6895,
     18009,
@@ -6675,10 +6677,10 @@
     "456",
     "789",
     "0"
-   ],
-   "text": "1234567890"
+   ]
   },
   {
+   "text": "3.14159 2.71828 1,000,000 0.000123",
    "ids": [
     21,
     16,
@@ -6722,10 +6724,10 @@
     ".",
     "000",
     "123"
-   ],
-   "text": "3.14159 2.71828 1,000,000 0.000123"
+   ]
   },
   {
+   "text": "1 22 333 4444 55555 666666 7777777",
    "ids": [
     19,
     223,
@@ -6765,10 +6767,10 @@
     "777",
     "777",
     "7"
-   ],
-   "text": "1 22 333 4444 55555 666666 7777777"
+   ]
   },
   {
+   "text": "abc123def456ghi789",
    "ids": [
     32372,
     6895,
@@ -6784,10 +6786,10 @@
     "456",
     "ghi",
     "789"
-   ],
-   "text": "abc123def456ghi789"
+   ]
   },
   {
+   "text": "Room 101, Floor 2, Zip 90210-1234",
    "ids": [
     52603,
     223,
@@ -6821,10 +6823,10 @@
     "-",
     "123",
     "4"
-   ],
-   "text": "Room 101, Floor 2, Zip 90210-1234"
+   ]
   },
   {
+   "text": "٥٦٧ २३ １２３ ①② ½ ²³",
    "ids": [
     152,
     101,
@@ -6858,10 +6860,10 @@
     "Â½",
     "Ġ",
     "Â²Â³"
-   ],
-   "text": "٥٦٧ २३ １２３ ①② ½ ²³"
+   ]
   },
   {
+   "text": "你好，世界！这是一个测试。",
    "ids": [
     30594,
     303,
@@ -6878,10 +6880,10 @@
     "ï¼ģ",
     "è¿Ļæĺ¯ä¸Ģä¸ªæµĭè¯ķ",
     "ãĢĤ"
-   ],
-   "text": "你好，世界！这是一个测试。"
+   ]
   },
   {
+   "text": "今天天气真好，我们一起去公园玩吧",
    "ids": [
     5237,
     16652,
@@ -6897,10 +6899,10 @@
     "ä»Ĭå¤©å¤©æ°ĶçľŁå¥½",
     "ï¼Į",
     "æĪĳä»¬ä¸Ģèµ·åİ»åħ¬åĽŃçİ©åĲ§"
-   ],
-   "text": "今天天气真好，我们一起去公园玩吧"
+   ]
   },
   {
+   "text": "こんにちは、世界。カタカナとひらがなと漢字",
    "ids": [
     4549,
     7245,
@@ -6929,10 +6931,10 @@
     "ä¸ĸçķĮ",
     "ãĢĤ",
     "ãĤ«ãĤ¿ãĤ«ãĥĬãģ¨ãģ²ãĤīãģĮãģªãģ¨æ¼¢åŃĹ"
-   ],
-   "text": "こんにちは、世界。カタカナとひらがなと漢字"
+   ]
   },
   {
+   "text": "안녕하세요 세계",
    "ids": [
     31404,
     11939,
@@ -6944,10 +6946,10 @@
    "pieces": [
     "ìķĪëħķíķĺìĦ¸ìļĶ",
     "ĠìĦ¸ê³Ħ"
-   ],
-   "text": "안녕하세요 세계"
+   ]
   },
   {
+   "text": "Mixed中文English混合text日本語123数字",
    "ids": [
     113685,
     21134,
@@ -6967,10 +6969,10 @@
     "æĹ¥æľ¬èªŀ",
     "123",
     "æķ°åŃĹ"
-   ],
-   "text": "Mixed中文English混合text日本語123数字"
+   ]
   },
   {
+   "text": "カタカナーを・を。",
    "ids": [
     15961,
     11767,
@@ -6986,10 +6988,10 @@
     "ãĥ»",
     "ãĤĴ",
     "ãĢĤ"
-   ],
-   "text": "カタカナーを・を。"
+   ]
   },
   {
+   "text": "一龥龥龦龥䷿一",
    "ids": [
     378,
     2715,
@@ -7011,10 +7013,10 @@
     "é¾¥",
     "ä·¿",
     "ä¸Ģ"
-   ],
-   "text": "一龥龥龦龥䷿一"
+   ]
   },
   {
+   "text": "぀ぁゟ゠ヿ㄀⿰",
    "ids": [
     415,
     225,
@@ -7038,10 +7040,10 @@
     "ãĥ¿",
     "ãĦĢ",
     "â¿°"
-   ],
-   "text": "぀ぁゟ゠ヿ㄀⿰"
+   ]
   },
   {
+   "text": "　全角空格　文字　",
    "ids": [
     18524,
     984,
@@ -7057,10 +7059,10 @@
     "ãĢĢ",
     "æĸĩåŃĹ",
     "ãĢĢ"
-   ],
-   "text": "　全角空格　文字　"
+   ]
   },
   {
+   "text": "【引用】†L1(-L5)?「」『』",
    "ids": [
     3216,
     21764,
@@ -7087,10 +7089,10 @@
     "L",
     "5",
     ")?ãĢĮãĢįãĢİãĢı"
-   ],
-   "text": "【引用】†L1(-L5)?「」『』"
+   ]
   },
   {
+   "text": "def f(x):\n    return x * 2 + 1  # comment\n",
    "ids": [
     3465,
     285,
@@ -7128,10 +7130,10 @@
     "Ġ#",
     "Ġcomment",
     "Ċ"
-   ],
-   "text": "def f(x):\n    return x * 2 + 1  # comment\n"
+   ]
   },
   {
+   "text": "int main() { printf(\"%d\\n\", 42); return 0; }",
    "ids": [
     650,
     1840,
@@ -7169,10 +7171,10 @@
     "0",
     ";",
     "Ġ}"
-   ],
-   "text": "int main() { printf(\"%d\\n\", 42); return 0; }"
+   ]
   },
   {
+   "text": "public static void Main(string[] args)\n{\n    var x = new List<int>();\n}",
    "ids": [
     3978,
     4911,
@@ -7212,10 +7214,10 @@
     "<int",
     ">();Ċ",
     "}"
-   ],
-   "text": "public static void Main(string[] args)\n{\n    var x = new List<int>();\n}"
+   ]
   },
   {
+   "text": "{\"key\": \"value\", \"n\": [1, 2, 3], \"nested\": {\"a\": null, \"b\": true}}",
    "ids": [
     24313,
     4989,
@@ -7282,10 +7284,10 @@
     "\":",
     "Ġtrue",
     "}}"
-   ],
-   "text": "{\"key\": \"value\", \"n\": [1, 2, 3], \"nested\": {\"a\": null, \"b\": true}}"
+   ]
   },
   {
+   "text": "https://example.com/path?q=1&r=2#frag user@example.org",
    "ids": [
     5395,
     2272,
@@ -7325,10 +7327,10 @@
     "Ġuser",
     "@example",
     ".org"
-   ],
-   "text": "https://example.com/path?q=1&r=2#frag user@example.org"
+   ]
   },
   {
+   "text": "a  b   c    d",
    "ids": [
     67,
     223,
@@ -7346,10 +7348,10 @@
     "Ġc",
     "ĠĠĠ",
     "Ġd"
-   ],
-   "text": "a  b   c    d"
+   ]
   },
   {
+   "text": "    leading spaces",
    "ids": [
     361,
     6646,
@@ -7359,10 +7361,10 @@
     "ĠĠĠ",
     "Ġleading",
     "Ġspaces"
-   ],
-   "text": "    leading spaces"
+   ]
   },
   {
+   "text": "trailing spaces    ",
    "ids": [
     19660,
     7400,
@@ -7373,10 +7375,10 @@
     "trailing",
     "Ġspaces",
     "ĠĠĠĠ"
-   ],
-   "text": "trailing spaces    "
+   ]
   },
   {
+   "text": "tab\tseparated\tvalues",
    "ids": [
     14278,
     200,
@@ -7389,10 +7391,10 @@
     "tab",
     "ĉseparated",
     "ĉvalues"
-   ],
-   "text": "tab\tseparated\tvalues"
+   ]
   },
   {
+   "text": "line1\nline2\n\nline4\n\n\n\nline8",
    "ids": [
     1836,
     19,
@@ -7418,10 +7420,10 @@
     "ĊĊĊĊ",
     "line",
     "8"
-   ],
-   "text": "line1\nline2\n\nline4\n\n\n\nline8"
+   ]
   },
   {
+   "text": "windows\r\nline\r\nendings\r\n",
    "ids": [
     83906,
     204,
@@ -7441,28 +7443,28 @@
     "čĊ",
     "endings",
     "čĊ"
-   ],
-   "text": "windows\r\nline\r\nendings\r\n"
+   ]
   },
   {
+   "text": "\n",
    "ids": [
     201
    ],
    "pieces": [
     "Ċ"
-   ],
-   "text": "\n"
+   ]
   },
   {
+   "text": "\n\n",
    "ids": [
     271
    ],
    "pieces": [
     "ĊĊ"
-   ],
-   "text": "\n\n"
+   ]
   },
   {
+   "text": " \n ",
    "ids": [
     539,
     223
@@ -7470,10 +7472,10 @@
    "pieces": [
     "ĠĊ",
     "Ġ"
-   ],
-   "text": " \n "
+   ]
   },
   {
+   "text": "x \n y",
    "ids": [
     90,
     539,
@@ -7483,10 +7485,10 @@
     "x",
     "ĠĊ",
     "Ġy"
-   ],
-   "text": "x \n y"
+   ]
   },
   {
+   "text": "  \n  \n  ",
    "ids": [
     36320,
     262
@@ -7494,10 +7496,10 @@
    "pieces": [
     "ĠĠĊĠĠĊ",
     "ĠĠ"
-   ],
-   "text": "  \n  \n  "
+   ]
   },
   {
+   "text": "word nbsp emspace thin​zwsp　ideographic",
    "ids": [
     3899,
     2162,
@@ -7521,19 +7523,19 @@
     "âĢīthin",
     "âĢĭzwsp",
     "ãĢĢideographic"
-   ],
-   "text": "word nbsp emspace thin​zwsp　ideographic"
+   ]
   },
   {
+   "text": "\t\t\t",
    "ids": [
     4564
    ],
    "pieces": [
     "ĉĉĉ"
-   ],
-   "text": "\t\t\t"
+   ]
   },
   {
+   "text": "a\u000bb\fcd e f",
    "ids": [
     67,
     202,
@@ -7557,29 +7559,29 @@
     "Âħd",
     "âĢ¨e",
     "âĢ©f"
-   ],
-   "text": "a\u000bb\fcd e f"
+   ]
   },
   {
+   "text": "!!!",
    "ids": [
     34513
    ],
    "pieces": [
     "!!!"
-   ],
-   "text": "!!!"
+   ]
   },
   {
+   "text": "...???",
    "ids": [
     1613,
     50640
    ],
    "pieces": [
     "...???"
-   ],
-   "text": "...???"
+   ]
   },
   {
+   "text": "(a)[b]{c}<d>",
    "ids": [
     6036,
     12696,
@@ -7599,10 +7601,10 @@
     "}<",
     "d",
     ">"
-   ],
-   "text": "(a)[b]{c}<d>"
+   ]
   },
   {
+   "text": "$100 + €50 = £? #hashtag @mention",
    "ids": [
     6,
     1457,
@@ -7631,10 +7633,10 @@
     "hashtag",
     "Ġ@",
     "mention"
-   ],
-   "text": "$100 + €50 = £? #hashtag @mention"
+   ]
   },
   {
+   "text": "a_b-c.d:e;f,g",
    "ids": [
     67,
     9181,
@@ -7653,10 +7655,10 @@
     ":e",
     ";f",
     ",g"
-   ],
-   "text": "a_b-c.d:e;f,g"
+   ]
   },
   {
+   "text": "éèê ñ üöä ß é ä ẞ",
    "ids": [
     619,
     2666,
@@ -7683,10 +7685,10 @@
     "ĠeÌģ",
     "ĠaÌĪ",
     "Ġáºŀ"
-   ],
-   "text": "éèê ñ üöä ß é ä ẞ"
+   ]
   },
   {
+   "text": "مرحبا بالعالم",
    "ids": [
     10393,
     2212,
@@ -7698,10 +7700,10 @@
    "pieces": [
     "ÙħØ±ØŃØ¨Ø§",
     "ĠØ¨Ø§ÙĦØ¹Ø§ÙĦÙħ"
-   ],
-   "text": "مرحبا بالعالم"
+   ]
   },
   {
+   "text": "שלום עולם",
    "ids": [
     8793,
     2328,
@@ -7712,10 +7714,10 @@
    "pieces": [
     "×©×ľ×ķ×Ŀ",
     "Ġ×¢×ķ×ľ×Ŀ"
-   ],
-   "text": "שלום עולם"
+   ]
   },
   {
+   "text": "สวัสดีชาวโลก",
    "ids": [
     2952,
     34189,
@@ -7726,10 +7728,10 @@
    ],
    "pieces": [
     "à¸ªà¸§à¸±à¸ªà¸Ķà¸µà¸Ĭà¸²à¸§à¹Ĥà¸¥à¸ģ"
-   ],
-   "text": "สวัสดีชาวโลก"
+   ]
   },
   {
+   "text": "Привет, мир! Γεια σου κόσμε",
    "ids": [
     24797,
     8919,
@@ -7752,10 +7754,10 @@
     "ĠÎĵÎµÎ¹Î±",
     "ĠÏĥÎ¿Ïħ",
     "ĠÎºÏĮÏĥÎ¼Îµ"
-   ],
-   "text": "Привет, мир! Γεια σου κόσμε"
+   ]
   },
   {
+   "text": "∑∫√∞ ≠≤≥ →⇒ αβγ ∀x∈ℝ",
    "ids": [
     25951,
     36705,
@@ -7783,10 +7785,10 @@
     "x",
     "âĪĪ",
     "âĦĿ"
-   ],
-   "text": "∑∫√∞ ≠≤≥ →⇒ αβγ ∀x∈ℝ"
+   ]
   },
   {
+   "text": "ＡＢＣａｂｃ ！？",
    "ids": [
     65503,
     102530,
@@ -7803,10 +7805,10 @@
    "pieces": [
     "ï¼¡ï¼¢ï¼£ï½ģï½Ĥï½ĥ",
     "Ġï¼ģï¼Ł"
-   ],
-   "text": "ＡＢＣａｂｃ ！？"
+   ]
   },
   {
+   "text": "👍 😀😁 🚀🌍",
    "ids": [
     92526,
     53769,
@@ -7823,10 +7825,10 @@
     "ðŁĳį",
     "ĠðŁĺĢðŁĺģ",
     "ĠðŁļĢðŁĮį"
-   ],
-   "text": "👍 😀😁 🚀🌍"
+   ]
   },
   {
+   "text": "👨‍👩‍👧‍👦 family",
    "ids": [
     25730,
     104,
@@ -7850,10 +7852,10 @@
     "âĢį",
     "ðŁĳ¦",
     "Ġfamily"
-   ],
-   "text": "👨‍👩‍👧‍👦 family"
+   ]
   },
   {
+   "text": "🇺🇸🇨🇳 flags",
    "ids": [
     43754,
     121,
@@ -7868,10 +7870,10 @@
    "pieces": [
     "ðŁĩºðŁĩ¸ðŁĩ¨ðŁĩ³",
     "Ġflags"
-   ],
-   "text": "🇺🇸🇨🇳 flags"
+   ]
   },
   {
+   "text": "👍🏽 skin tone ❤️ ❤ ☀️",
    "ids": [
     92526,
     40965,
@@ -7896,10 +7898,10 @@
     "ĠâĿ¤",
     "ĠâĺĢ",
     "ï¸ı"
-   ],
-   "text": "👍🏽 skin tone ❤️ ❤ ☀️"
+   ]
   },
   {
+   "text": "emoji between😀words🚀here",
    "ids": [
     18872,
     7063,
@@ -7918,10 +7920,10 @@
     "words",
     "ðŁļĢ",
     "here"
-   ],
-   "text": "emoji between😀words🚀here"
+   ]
   },
   {
+   "text": "𠀀𠀁 ext-B 引𠀂引",
    "ids": [
     175,
     257,
@@ -7949,10 +7951,10 @@
     "å¼ķ",
     "ðłĢĤ",
     "å¼ķ"
-   ],
-   "text": "𠀀𠀁 ext-B 引𠀂引"
+   ]
   },
   {
+   "text": "𝔸𝔹 math alnum 𝟘",
    "ids": [
     3128,
     245,
@@ -7973,10 +7975,10 @@
     "Ġalnum",
     "Ġ",
     "ðĿŁĺ"
-   ],
-   "text": "𝔸𝔹 math alnum 𝟘"
+   ]
   },
   {
+   "text": "𐍈 gothic 😀中",
    "ids": [
     120577,
     238,
@@ -7992,10 +7994,10 @@
     "Ġgothic",
     "ĠðŁĺĢ",
     "ä¸Ń"
-   ],
-   "text": "𐍈 gothic 😀中"
+   ]
   },
   {
+   "text": "😀\n😀 😀",
    "ids": [
     28927,
     225,
@@ -8009,10 +8011,10 @@
     "ðŁĺĢĊ",
     "ðŁĺĢ",
     "ĠðŁĺĢ"
-   ],
-   "text": "😀\n😀 😀"
+   ]
   },
   {
+   "text": "퟿￯",
    "ids": [
     172,
     256,
@@ -8024,10 +8026,10 @@
    ],
    "pieces": [
     "íŁ¿îĢĢï¿¯"
-   ],
-   "text": "퟿￯"
+   ]
   },
   {
+   "text": "\u0000\u0001\u0002",
    "ids": [
     191,
     192,
@@ -8036,10 +8038,10 @@
    ],
    "pieces": [
     "ĀāĂġ"
-   ],
-   "text": "\u0000\u0001\u0002"
+   ]
   },
   {
+   "text": "̀́ lone combining",
    "ids": [
     45345,
     17793,
@@ -8050,10 +8052,10 @@
     "ÌĢÌģ",
     "Ġlone",
     "Ġcombining"
-   ],
-   "text": "̀́ lone combining"
+   ]
   },
   {
+   "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
    "ids": [
     89086,
     89086,
@@ -8063,10 +8065,10 @@
    ],
    "pieces": [
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-   ],
-   "text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+   ]
   },
   {
+   "text": "中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中",
    "ids": [
     525,
     525,
@@ -8111,10 +8113,10 @@
    ],
    "pieces": [
     "ä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ńä¸Ń"
-   ],
-   "text": "中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中中"
+   ]
   },
   {
+   "text": "1111111111111111111111111",
    "ids": [
     5822,
     5822,
@@ -8136,10 +8138,10 @@
     "111",
     "111",
     "1"
-   ],
-   "text": "1111111111111111111111111"
+   ]
   },
   {
+   "text": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!",
    "ids": [
     67692,
     67692,
@@ -8149,19 +8151,19 @@
    ],
    "pieces": [
     "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
-   ],
-   "text": "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
+   ]
   },
   {
+   "text": "                                        ",
    "ids": [
     71406
    ],
    "pieces": [
     "ĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠĠ"
-   ],
-   "text": "                                        "
+   ]
   },
   {
+   "text": "-----=====_____",
    "ids": [
     54615,
     2802,
@@ -8170,10 +8172,10 @@
    ],
    "pieces": [
     "-----=====_____"
-   ],
-   "text": "-----=====_____"
+   ]
   },
   {
+   "text": "<｜User｜>hi<｜Assistant｜>",
    "ids": [
     128803,
     6366,
@@ -8187,10 +8189,10 @@
     "<ï½ľ",
     "Assistant",
     "ï½ľ>"
-   ],
-   "text": "<｜User｜>hi<｜Assistant｜>"
+   ]
   },
   {
+   "text": "<think>reasoning</think>answer",
    "ids": [
     128821,
     86512,
@@ -8204,10 +8206,10 @@
     "</",
     "think",
     ">answer"
-   ],
-   "text": "<think>reasoning</think>answer"
+   ]
   },
   {
+   "text": "<｜end▁of▁sentence｜>",
    "ids": [
     1
    ],
@@ -8219,10 +8221,10 @@
     "âĸģ",
     "sentence",
     "ï½ľ>"
-   ],
-   "text": "<｜end▁of▁sentence｜>"
+   ]
   },
   {
+   "text": "<｜begin▁of▁sentence｜>text",
    "ids": [
     0,
     2067
@@ -8236,10 +8238,10 @@
     "sentence",
     "ï½ľ>",
     "text"
-   ],
-   "text": "<｜begin▁of▁sentence｜>text"
+   ]
   },
   {
+   "text": "<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"x\">",
    "ids": [
     30,
     128825,
@@ -8267,10 +8269,10 @@
     "=\"",
     "x",
     "\">"
-   ],
-   "text": "<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"x\">"
+   ]
   },
   {
+   "text": "<｜deepseek_image｜><｜deepseek_image｜>",
    "ids": [
     129264,
     129264
@@ -8283,10 +8285,10 @@
     "deepseek",
     "_image",
     "ï½ľ>"
-   ],
-   "text": "<｜deepseek_image｜><｜deepseek_image｜>"
+   ]
   },
   {
+   "text": "<｜User｜",
    "ids": [
     30,
     28217,
@@ -8297,10 +8299,10 @@
     "<ï½ľ",
     "User",
     "ï½ľ"
-   ],
-   "text": "<｜User｜"
+   ]
   },
   {
+   "text": "<｜User",
    "ids": [
     30,
     28217,
@@ -8309,10 +8311,10 @@
    "pieces": [
     "<ï½ľ",
     "User"
-   ],
-   "text": "<｜User"
+   ]
   },
   {
+   "text": "｜User｜>",
    "ids": [
     28217,
     6756,
@@ -8323,10 +8325,10 @@
     "ï½ľ",
     "User",
     "ï½ľ>"
-   ],
-   "text": "｜User｜>"
+   ]
   },
   {
+   "text": "<|place_holder_mm_span_0374|> literal",
    "ids": [
     129200,
     39248
@@ -8342,10 +8344,10 @@
     "4",
     "|>",
     "Ġliteral"
-   ],
-   "text": "<|place_holder_mm_span_0374|> literal"
+   ]
   },
   {
+   "text": "<｜fim▁begin｜>x<｜fim▁hole｜>y<｜fim▁end｜>",
    "ids": [
     128801,
     90,
@@ -8371,10 +8373,10 @@
     "âĸģ",
     "end",
     "ï½ľ>"
-   ],
-   "text": "<｜fim▁begin｜>x<｜fim▁hole｜>y<｜fim▁end｜>"
+   ]
   },
   {
+   "text": "<｜User｜><｜User｜>",
    "ids": [
     128803,
     128803
@@ -8385,10 +8387,10 @@
     "ï½ľ><ï½ľ",
     "User",
     "ï½ľ>"
-   ],
-   "text": "<｜User｜><｜User｜>"
+   ]
   },
   {
+   "text": "text<think>text</think>text<think>",
    "ids": [
     2067,
     128821,
@@ -8406,10 +8408,10 @@
     ">text",
     "<think",
     ">"
-   ],
-   "text": "text<think>text</think>text<think>"
+   ]
   },
   {
+   "text": "<｜latest_reminder｜>a<｜action｜>b<｜query｜>",
    "ids": [
     128828,
     67,
@@ -8430,10 +8432,10 @@
     "<ï½ľ",
     "query",
     "ï½ľ>"
-   ],
-   "text": "<｜latest_reminder｜>a<｜action｜>b<｜query｜>"
+   ]
   },
   {
+   "text": "The year 2024 had 366 days, i.e. 8784 hours and 527040 minutes.",
    "ids": [
     671,
     1141,
@@ -8483,10 +8485,10 @@
     "040",
     "Ġminutes",
     "."
-   ],
-   "text": "The year 2024 had 366 days, i.e. 8784 hours and 527040 minutes."
+   ]
   },
   {
+   "text": "x=1;y=22;z=333;w=4444",
    "ids": [
     90,
     31,
@@ -8519,10 +8521,10 @@
     "=",
     "444",
     "4"
-   ],
-   "text": "x=1;y=22;z=333;w=4444"
+   ]
   },
   {
+   "text": "こんにちは123世界456",
    "ids": [
     4549,
     7245,
@@ -8538,10 +8540,10 @@
     "123",
     "ä¸ĸçķĮ",
     "456"
-   ],
-   "text": "こんにちは123世界456"
+   ]
   },
   {
+   "text": "中文,中文.中文!中文?",
    "ids": [
     21134,
     14,
@@ -8561,10 +8563,10 @@
     "!",
     "ä¸Ńæĸĩ",
     "?"
-   ],
-   "text": "中文,中文.中文!中文?"
+   ]
   },
   {
+   "text": "v1.2.3-rc.4+build.5",
    "ids": [
     88,
     19,
@@ -8594,10 +8596,10 @@
     "+build",
     ".",
     "5"
-   ],
-   "text": "v1.2.3-rc.4+build.5"
+   ]
   },
   {
+   "text": "C:\\Users\\name\\file.txt /usr/local/bin/x",
    "ids": [
     37,
     19804,
@@ -8625,10 +8627,10 @@
     "/local",
     "/bin",
     "/x"
-   ],
-   "text": "C:\\Users\\name\\file.txt /usr/local/bin/x"
+   ]
   },
   {
+   "text": "Hello\n\n世界\n\n123\n\n!!!",
    "ids": [
     19923,
     271,
@@ -8646,10 +8648,10 @@
     "123",
     "ĊĊ",
     "!!!"
-   ],
-   "text": "Hello\n\n世界\n\n123\n\n!!!"
+   ]
   },
   {
+   "text": " 中文 ",
    "ids": [
     223,
     21134,
@@ -8659,10 +8661,10 @@
     "Ġ",
     "ä¸Ńæĸĩ",
     "Ġ"
-   ],
-   "text": " 中文 "
+   ]
   },
   {
+   "text": "\t中",
    "ids": [
     200,
     525
@@ -8670,10 +8672,10 @@
    "pieces": [
     "ĉ",
     "ä¸Ń"
-   ],
-   "text": "\t中"
+   ]
   },
   {
+   "text": "中\n",
    "ids": [
     525,
     201
@@ -8681,10 +8683,10 @@
    "pieces": [
     "ä¸Ń",
     "Ċ"
-   ],
-   "text": "中\n"
+   ]
   },
   {
+   "text": "中文abc中文 abc 中文",
    "ids": [
     21134,
     32372,
@@ -8700,9 +8702,7 @@
     "Ġabc",
     "Ġ",
     "ä¸Ńæĸĩ"
-   ],
-   "text": "中文abc中文 abc 中文"
+   ]
   }
- ],
- "tokenizers_version": "0.23.2"
+ ]
 }

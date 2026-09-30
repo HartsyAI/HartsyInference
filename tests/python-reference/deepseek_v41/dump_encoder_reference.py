@@ -291,7 +291,7 @@ def main():
         "stress": stress,
     }
     (OUT / "encoder_reference.json").write_text(
-        json.dumps(reference, ensure_ascii=False, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+        json.dumps(reference, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     print(f"golden={len(golden)} own={len(own)} stress={len(stress)}")
 
 

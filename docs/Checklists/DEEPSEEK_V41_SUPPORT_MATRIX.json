@@ -728,9 +728,9 @@
       "feature": "Conversation encoder and multi-stage tokenizer",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Unsupported",
+        "Vulkan": "Unsupported"
       },
       "placement": [
         "n/a"
@@ -749,7 +749,7 @@
       ],
       "acceptanceTest": "render byte-equal to test_output_1..5; ids equal to HF tokenizers dump",
       "pr": 10,
-      "status": "Unimplemented"
+      "status": "Implemented"
     },
     {
       "id": "protocol.parser",
