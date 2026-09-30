@@ -254,11 +254,17 @@ public sealed class CudaStreamingWeightCache : IStreamingWeightCache
         // Compute stream waits until the upload event is recorded — i.e. the H2D
         // copies are visible to any kernel queued after this point. Host thread
         // does not block; only the GPU compute stream is gated.
-        CudaDriverApi.cuStreamWaitEvent(_computeStream, token.Handle, CudaDriverApi.CU_EVENT_WAIT_DEFAULT).ThrowOnError();
-        // Event is single-use. Destroying it now is safe even though the wait it
-        // triggered may not have fired yet — the driver retains the reference
-        // internally until the wait is satisfied.
-        CudaDriverApi.cuEventDestroy(token.Handle).ThrowOnError();
+        try
+        {
+            CudaDriverApi.cuStreamWaitEvent(_computeStream, token.Handle, CudaDriverApi.CU_EVENT_WAIT_DEFAULT).ThrowOnError();
+        }
+        finally
+        {
+            // Event is single-use. Destroying it now is safe even though the wait it
+            // triggered may not have fired yet — the driver retains the reference
+            // internally until the wait is satisfied.
+            CudaDriverApi.cuEventDestroy(token.Handle).ThrowOnError();
+        }
     }
 
     /// <inheritdoc/>
