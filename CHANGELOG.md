@@ -24,7 +24,8 @@ stable release will require. Dates are UTC.
   schemas to the template. `JinjaChatTemplate` builds the OpenAI-shaped context (`tools` parsed from each schema, or
   null when none; per-message `tool_calls[].function.{name,arguments}`, `tool_call_id`, `name`, `reasoning_content`);
   `ChatMlTemplate` renders Qwen2.5's `# Tools` block, `<tool_call>` turns and `<tool_response>` results byte for byte
-  with the real template, and is unchanged without tools. New `ITextStreamFilter` seam
+  with the real template; a conversation without tools or tool turns renders exactly as before, while a `tool`-role
+  message now lands inside a user turn as `<tool_response>` (Qwen's format) instead of a bare `tool` turn. New `ITextStreamFilter` seam
   (`OnDelta`/`OnEnd` → `TextFilterResult{ForwardText, ToolCall, Stop}`) installed per request through
   `EngineOptions.TextStreamFilterFactory`: `RunText` routes every content delta through it, emits
   `TextChunkKind.NativeToolCall`, and a stop ends generation as `StopReason.ToolCall` with `TextResult.ToolCall`
