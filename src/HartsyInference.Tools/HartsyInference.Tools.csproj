@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Tools</PackageId>
+    <Description>Opt-in LLM tool calling for HartsyInference: incremental tool-call parsers per model format (Hermes/Qwen, Llama-3, Gemma, Mistral), the ITextStreamFilter that plugs them into the engine, a tool registry with delegate-derived JSON schemas, and the run-dispatch-rerun agent loop. The engine itself carries no format knowledge; install this package to parse calls.</Description>
+    <RootNamespace>HartsyInference.Tools</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Tools.Tests" />
+  </ItemGroup>
+
+</Project>
