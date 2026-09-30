@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Layers;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using Xunit;
@@ -72,6 +73,46 @@ public sealed unsafe class BiLstmTests
         {
             x.Dispose();
             foreach (Tensor w in weights.Values) w.Dispose();
+        }
+    }
+
+    /// <summary>The two directions fan out through <see cref="CpuParallel"/>; running them inline (a real-time
+    /// audio thread's scope) must give the same bytes.</summary>
+    [Fact]
+    public void Forward_SameBytesInlineAndFannedOut()
+    {
+        const int batch = 2, t = 40, inputDim = 24, hidden = 32;
+        Random rng = new(77);
+        Dictionary<string, Tensor> weights = new(StringComparer.Ordinal);
+        foreach (string dir in new[] { "", "_reverse" })
+        {
+            weights[$"lstm.weight_ih_l0{dir}"] = RandomTensor(rng, 4 * hidden, inputDim);
+            weights[$"lstm.weight_hh_l0{dir}"] = RandomTensor(rng, 4 * hidden, hidden);
+            weights[$"lstm.bias_ih_l0{dir}"] = RandomTensor(rng, 4 * hidden);
+            weights[$"lstm.bias_hh_l0{dir}"] = RandomTensor(rng, 4 * hidden);
+        }
+        Tensor x = RandomTensor(rng, batch, t, inputDim);
+        using CpuBackend backend = new();
+        try
+        {
+            BiLstm lstm = new(inputDim, hidden);
+            lstm.LoadWeights(weights, "lstm");
+            using Tensor fanned = lstm.Forward(backend, x, batch, t);
+            using Tensor inline = RunInline(() => lstm.Forward(backend, x, batch, t));
+            Assert.True(fanned.AsSpan<byte>().SequenceEqual(inline.AsSpan<byte>()), "inline and fanned-out BiLSTM outputs differ");
+        }
+        finally
+        {
+            x.Dispose();
+            foreach (Tensor w in weights.Values) w.Dispose();
+        }
+    }
+
+    private static Tensor RunInline(Func<Tensor> run)
+    {
+        using (CpuParallel.EnterInline())
+        {
+            return run();
         }
     }
 

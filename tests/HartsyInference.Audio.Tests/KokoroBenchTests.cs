@@ -31,9 +31,10 @@ namespace HartsyInference.Audio.Tests;
 /// Every case's float PCM is written to <c>HARTSY_KOKORO_BENCH_OUT_DIR</c> (raw <c>.f32</c> + 16-bit WAV) so a
 /// later run can gate itself against it: with <c>HARTSY_KOKORO_BENCH_REF_DIR</c> set, the same-named <c>.f32</c>
 /// there is compared (max-abs, waveform and log-spectral correlation, length; see <see cref="AudioParityMetrics"/>).
-/// Whisper-verify uses the multilingual <c>openai/whisper-tiny</c> (the <c>.en</c> checkpoints are being fixed on
-/// another branch). <c>HARTSY_KOKORO_BENCH_PROFILE=1</c> additionally runs profiled 15-word synths with the per-op
-/// profiler (<c>diagnostics.profile</c> + <c>profileSync</c>) and dumps the table beside the PCM.
+/// Whisper-verify uses the multilingual <c>openai/whisper-tiny</c>. <c>HARTSY_KOKORO_BENCH_PROFILE=1</c> additionally
+/// runs profiled 15-word synths with the per-op profiler (<c>diagnostics.profile</c> + <c>profileSync</c>) and dumps
+/// the table beside the PCM; <c>HARTSY_KOKORO_BENCH_EXACT=1</c> runs everything at full F32 (no TF32 GEMMs, direct
+/// F32 convs) so two builds can be compared where only an algorithmic change moves the output.
 /// Tables go to the test output and, when <c>HARTSY_KOKORO_BENCH_OUT</c> names a file, are appended there.</para></summary>
 [Trait("Category", "GpuIntegration")]
 [Trait("Category", "RealWeights")]
@@ -45,6 +46,7 @@ public sealed class KokoroBenchTests
     private const string OutDirEnvVar = "HARTSY_KOKORO_BENCH_OUT_DIR";
     private const string RefDirEnvVar = "HARTSY_KOKORO_BENCH_REF_DIR";
     private const string ProfileEnvVar = "HARTSY_KOKORO_BENCH_PROFILE";
+    private const string ExactEnvVar = "HARTSY_KOKORO_BENCH_EXACT";
     private const string RequiredDeviceSubstring = "3060";
     private const int WarmRuns = 2;
     private const int TimedRuns = 5;
@@ -85,6 +87,32 @@ public sealed class KokoroBenchTests
         {
             Directory.CreateDirectory(outDir);
         }
+        // Full-F32 mode: no TF32 GEMMs and the direct F32 conv kernels instead of cuDNN's TF32 engines, so two builds can
+        // be compared at full precision, where only an algorithmic change can move the output.
+        bool exact = Environment.GetEnvironmentVariable(ExactEnvVar) == "1";
+        if (exact)
+        {
+            KnobStore.Set(EngineKnobs.HighPrecisionGemm, true);
+            KnobStore.Set(EngineKnobs.NoTf32, true);
+            KnobStore.Set(EngineKnobs.AudioConvCudnn, false);
+        }
+        try
+        {
+            await RunAsync(cmudict, outDir, refDir, exact);
+        }
+        finally
+        {
+            if (exact)
+            {
+                KnobStore.Clear(EngineKnobs.HighPrecisionGemm);
+                KnobStore.Clear(EngineKnobs.NoTf32);
+                KnobStore.Clear(EngineKnobs.AudioConvCudnn);
+            }
+        }
+    }
+
+    private async Task RunAsync(string cmudict, string? outDir, string? refDir, bool exact)
+    {
         using IBackend backend = OpenBackend();
 
         EnglishG2P g2p = new EnglishG2P(cmudict);
@@ -97,9 +125,11 @@ public sealed class KokoroBenchTests
         WhisperOptions options = new WhisperOptions { Language = "en" };
 
         StringBuilder table = new StringBuilder();
-        table.AppendLine($"### Kokoro af_heart per sentence — {backend.Capabilities.DeviceName}, in-process, G2P outside the timer");
+        string precision = exact ? ", full F32" : "";
+        table.AppendLine($"### Kokoro af_heart per sentence — {backend.Capabilities.DeviceName}, in-process, G2P outside the timer{precision}");
         table.AppendLine();
-        table.AppendLine("| Words | median ms | p95 ms | min ms | audio s | RTF | D2H syncs/call | sha256[:12] | vs ref max-abs | vs ref wave corr | vs ref log-spec corr | verify recall | transcript |");
+        table.AppendLine("| Words | median ms | p95 ms | min ms | audio s | RTF | D2H syncs/call | sha256[:12] | vs ref max-abs "
+            + "| vs ref wave corr | vs ref log-spec corr | verify recall | transcript |");
         table.AppendLine("|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---:|---|");
 
         foreach ((int words, string text) in Sentences)
@@ -144,7 +174,8 @@ public sealed class KokoroBenchTests
             string heard = verify.TranscribeAudio(backend, toWhisper.Resample(wave), WhisperRate, options);
             double recall = AudioParityMetrics.ContentWordRecall(text, heard);
             table.AppendLine($"| {words} | {Ms(stats.Median)} | {Ms(stats.P95)} | {Ms(stats.Min)} | {audioSeconds:F2} | "
-                + $"{stats.Median / audioSeconds:F3} | {syncs} | `{digest}` | {maxAbs} | {corr} | {specCorr} | {recall:P0} | {AudioParityMetrics.Cell(heard)} |");
+                + $"{stats.Median / audioSeconds:F3} | {syncs} | `{digest}` | {maxAbs} | {corr} | {specCorr} | {recall:P0} | "
+                + $"{AudioParityMetrics.Cell(heard)} |");
             _out.WriteLine($"Kokoro {words}w: median {Ms(stats.Median)} ms p95 {Ms(stats.P95)} min {Ms(stats.Min)} | "
                 + $"{audioSeconds:F2}s audio | {syncs} D2H syncs | sha {digest} | ref max-abs {maxAbs} corr {corr} log-spec corr {specCorr} | "
                 + $"recall {recall:P0} | {heard.Trim()}");

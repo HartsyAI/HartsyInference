@@ -1,5 +1,7 @@
+using System.Buffers;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Audio.Models.Vocoders;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Dsp;
@@ -10,13 +12,18 @@ namespace HartsyInference.Audio.Dsp;
 /// only in parameters (upsample scale, n_fft, hop, harmonic count), passed as arguments here.
 ///
 /// <para>Everything here is host DSP over <c>(float*)DataPointer</c>: the F0 read and the final spectrogram read
-/// are the two device→host syncs of an iSTFT vocoder, and the work between them is spread over the cores
-/// (frames are independent for the transforms; the harmonic source is split by jumping the phase and the noise
-/// generator to each worker's start, so its output is bit-for-bit the sequential walk).</para></summary>
+/// are the two device→host syncs of an iSTFT vocoder. The work between them fans out through
+/// <see cref="CpuParallel"/> over a <see cref="FramePartition"/> fixed by the input size, and every block
+/// computes exactly what the sequential loop computes for its frames, so the output is bit-for-bit the
+/// single-threaded result at any core count, any <c>numerics.cpuThreads</c> cap and inside
+/// <see cref="CpuParallel.EnterInline"/>.</para></summary>
 public static unsafe class NsfVocoderDsp
 {
-    /// <summary>Frames per worker below which a parallel split costs more than it saves.</summary>
-    private const int MinFramesPerWorker = 64;
+    /// <summary>Per-block budget of the harmonic source, in synthesized sample-harmonics.</summary>
+    private const int HarmonicBlockBudget = 32768;
+
+    /// <summary>Rough scalar cost of one sample-harmonic (a sine, a Box-Muller draw, the merge), for the serial threshold.</summary>
+    private const int HarmonicWork = 32;
 
     /// <summary>SourceModuleHnNSF harmonic-plus-noise source: nearest-upsamples F0 by
     /// <paramref name="scale"/> to audio rate, sums <paramref name="harmonics"/> phase-accumulated sines
@@ -47,74 +54,93 @@ public static unsafe class NsfVocoderDsp
     /// with successive F0 chunks reproduces bit-identical results to one monolithic
     /// <see cref="GenerateHarmonicSource"/> call over the concatenation of all chunks — this is what makes the
     /// NSF source safe to stream (see <c>CosyVoice.HiFTStreamState</c>'s doc comment for why recompute-with-margin
-    /// alone is NOT safe for this specific piece of the vocoder).</summary>
+    /// alone is NOT safe for this specific piece of the vocoder).
+    ///
+    /// <para>Blocks of frames run in parallel. A sequential pass first walks the phase accumulators through every
+    /// sample with the synthesis loop's own arithmetic and records each block's starting phases — additions and
+    /// floors only, a small fraction of the sines and Gaussian draws — and each block's noise state is jumped to
+    /// with <see cref="DeterministicRng.Advance"/>, so every block reproduces the sequential loop exactly.</para></summary>
     public static float[] GenerateHarmonicSourceChunk(float[] f0Chunk, double[] phase, ref uint rngState,
         int scale, int sampleRate, int harmonics, Tensor mergeW, Tensor mergeB, float sineAmp, float noiseStd,
         float voicedThreshold, bool addNoise)
-        => GenerateHarmonicSourceChunk(f0Chunk, phase, ref rngState, scale, sampleRate, harmonics, mergeW, mergeB,
-            sineAmp, noiseStd, voicedThreshold, addNoise, Environment.ProcessorCount);
-
-    /// <summary>The worker-count-explicit body of <see cref="GenerateHarmonicSourceChunk(float[], double[], ref uint, int, int, int, Tensor, Tensor, float, float, float, bool)"/>.
-    /// Frames are split across workers; each starts from the phase the sequential walk would have reached
-    /// (the per-harmonic sum is <c>(h+1)</c> times one cumulative F0 sum, taken mod 1) and from the noise state
-    /// <see cref="DeterministicRng.Advance"/> jumps to, so every worker reproduces exactly the samples the
-    /// sequential loop would have written there. <paramref name="maxWorkers"/> = 1 is that sequential loop.</summary>
-    internal static float[] GenerateHarmonicSourceChunk(float[] f0Chunk, double[] phase, ref uint rngState,
-        int scale, int sampleRate, int harmonics, Tensor mergeW, Tensor mergeB, float sineAmp, float noiseStd,
-        float voicedThreshold, bool addNoise, int maxWorkers)
     {
         if (phase.Length < harmonics) throw new ArgumentException($"phase holds {phase.Length} accumulators, need {harmonics}.");
         int frames = f0Chunk.Length;
         float* mW = (float*)mergeW.DataPointer;
         float mB = ((float*)mergeB.DataPointer)[0];
         float[] merged = new float[(long)frames * scale];
-        int workers = Math.Clamp(Math.Min(maxWorkers, frames / MinFramesPerWorker), 1, Math.Max(1, frames));
-        if (workers == 1)
+        int framesPerBlock = FramePartition.FramesPerBlock(scale * harmonics, HarmonicBlockBudget);
+        int blocks = FramePartition.BlockCount(frames, framesPerBlock);
+        if (blocks <= 1)
         {
             uint rng = rngState;
-            RunHarmonicFrames(f0Chunk, 0, frames, phase, ref rng, scale, sampleRate, harmonics, mW, mB, sineAmp, noiseStd,
-                voicedThreshold, addNoise, merged);
+            RunHarmonicFrames(f0Chunk, 0, frames, phase.AsSpan(0, harmonics), ref rng, scale, sampleRate, harmonics, mW, mB,
+                sineAmp, noiseStd, voicedThreshold, addNoise, merged);
             rngState = rng;
             return merged;
         }
 
-        // Cumulative F0 sum (in cycles at the fundamental) at each worker's first frame, sequential and cheap.
-        int framesPerWorker = (frames + workers - 1) / workers;
-        double[] startCycles = new double[workers];
-        double cycles = 0;
-        for (int w = 0, frame = 0; w < workers; w++)
+        double[] blockPhase = ArrayPool<double>.Shared.Rent(blocks * harmonics);
+        try
         {
-            startCycles[w] = cycles;
-            int end = Math.Min(frames, frame + framesPerWorker);
-            for (; frame < end; frame++) cycles += (double)f0Chunk[frame] * scale / sampleRate;
-        }
-        double[] initialPhase = new double[harmonics];
-        Array.Copy(phase, initialPhase, harmonics);
-        uint initialRng = rngState;
-        double[][] finalPhase = new double[workers][];
-        Parallel.For(0, workers, w =>
-        {
-            int start = w * framesPerWorker;
-            int end = Math.Min(frames, start + framesPerWorker);
-            double[] localPhase = new double[harmonics];
-            for (int h = 0; h < harmonics; h++)
+            WalkPhases(f0Chunk, phase, blockPhase, framesPerBlock, blocks, scale, sampleRate, harmonics);
+            uint initialRng = rngState;
+            CpuParallel.For(blocks, (long)frames * scale * harmonics * HarmonicWork, b =>
             {
-                double p = initialPhase[h] + (h + 1) * startCycles[w];
-                localPhase[h] = p - Math.Floor(p);
-            }
-            uint localRng = addNoise ? DeterministicRng.Advance(initialRng, 2L * start * scale * harmonics) : initialRng;
-            RunHarmonicFrames(f0Chunk, start, end, localPhase, ref localRng, scale, sampleRate, harmonics, mW, mB, sineAmp,
-                noiseStd, voicedThreshold, addNoise, merged);
-            finalPhase[w] = localPhase;
-        });
-        Array.Copy(finalPhase[workers - 1], phase, harmonics);
-        if (addNoise) rngState = DeterministicRng.Advance(initialRng, 2L * frames * scale * harmonics);
+                int start = b * framesPerBlock;
+                int end = Math.Min(frames, start + framesPerBlock);
+                uint localRng = addNoise ? DeterministicRng.Advance(initialRng, 2L * start * scale * harmonics) : initialRng;
+                RunHarmonicFrames(f0Chunk, start, end, blockPhase.AsSpan(b * harmonics, harmonics), ref localRng, scale,
+                    sampleRate, harmonics, mW, mB, sineAmp, noiseStd, voicedThreshold, addNoise, merged);
+            });
+            if (addNoise) rngState = DeterministicRng.Advance(initialRng, 2L * frames * scale * harmonics);
+        }
+        finally
+        {
+            ArrayPool<double>.Shared.Return(blockPhase);
+        }
         return merged;
+    }
+
+    /// <summary>Advances <paramref name="phase"/> through every sample of <paramref name="f0Chunk"/> exactly as
+    /// <see cref="RunHarmonicFrames"/> does, copying the accumulators into <paramref name="blockPhase"/> at the
+    /// first frame of each block.</summary>
+    private static void WalkPhases(float[] f0Chunk, double[] phase, double[] blockPhase, int framesPerBlock, int blocks,
+        int scale, int sampleRate, int harmonics)
+    {
+        double[] increment = ArrayPool<double>.Shared.Rent(harmonics);
+        try
+        {
+            for (int b = 0; b < blocks; b++)
+            {
+                Array.Copy(phase, 0, blockPhase, b * harmonics, harmonics);
+                int end = Math.Min(f0Chunk.Length, (b + 1) * framesPerBlock);
+                for (int i = b * framesPerBlock; i < end; i++)
+                {
+                    float hz = f0Chunk[i];
+                    // The synthesis loop's own expression, evaluated once per frame: the same IEEE operations on the
+                    // same operands, so the same doubles.
+                    for (int h = 0; h < harmonics; h++) increment[h] = (double)hz * (h + 1) / sampleRate;
+                    for (int rep = 0; rep < scale; rep++)
+                    {
+                        for (int h = 0; h < harmonics; h++)
+                        {
+                            phase[h] += increment[h];
+                            phase[h] -= Math.Floor(phase[h]);
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<double>.Shared.Return(increment);
+        }
     }
 
     /// <summary>The per-frame harmonic-source loop over frames <c>[start, end)</c>, writing samples
     /// <c>[start·scale, end·scale)</c> of <paramref name="merged"/>.</summary>
-    private static void RunHarmonicFrames(float[] f0Chunk, int start, int end, double[] phase, ref uint rng, int scale,
+    private static void RunHarmonicFrames(float[] f0Chunk, int start, int end, Span<double> phase, ref uint rng, int scale,
         int sampleRate, int harmonics, float* mW, float mB, float sineAmp, float noiseStd, float voicedThreshold,
         bool addNoise, float[] merged)
     {
@@ -161,50 +187,67 @@ public static unsafe class NsfVocoderDsp
         int numBins = half + 1;
         int pad = half;
         int paddedLen = signal.Length + 2 * pad;
-        float[] padded = new float[paddedLen];
-        // center=True reflection padding (torch default).
-        for (int i = 0; i < pad; i++)
+        float[] padded = ArrayPool<float>.Shared.Rent(paddedLen);
+        try
         {
-            padded[i] = signal[Math.Min(pad - i, signal.Length - 1)];
-            padded[paddedLen - 1 - i] = signal[Math.Max(signal.Length - 2 - i, 0)];
-        }
-        Array.Copy(signal, 0, padded, pad, signal.Length);
-        int frames = 1 + (paddedLen - nFft) / hop;
-        if (frames < 1) frames = 1;
-        float[] window = HannWindow.Get(nFft);
-        Tensor outT = new(new TensorShape(1, nFft + 2, frames), DType.F32);
-        float* op = (float*)outT.DataPointer;
-        // Frames are independent and each writes its own column, so they split across the cores.
-        Parallel.ForEach(FrameBlocks(frames), () => (Frame: new float[nFft], Re: new float[numBins], Im: new float[numBins]),
-            (block, _, scratch) =>
+            // center=True reflection padding (torch default). Every element of [0, paddedLen) is written below.
+            for (int i = 0; i < pad; i++)
             {
-                for (int f = block.Start; f < block.End; f++)
+                padded[i] = signal[Math.Min(pad - i, signal.Length - 1)];
+                padded[paddedLen - 1 - i] = signal[Math.Max(signal.Length - 2 - i, 0)];
+            }
+            Array.Copy(signal, 0, padded, pad, signal.Length);
+            int frames = 1 + (paddedLen - nFft) / hop;
+            if (frames < 1) frames = 1;
+            float[] window = HannWindow.Get(nFft);
+            Tensor outT = new(new TensorShape(1, nFft + 2, frames), DType.F32);
+            float* op = (float*)outT.DataPointer;
+            int framesPerBlock = FramePartition.FramesPerBlock(nFft, FramePartition.TransformBudget);
+            int blocks = FramePartition.BlockCount(frames, framesPerBlock);
+            // Frames are independent and each writes its own column.
+            CpuParallel.For(blocks, frames * FramePartition.TransformWork(nFft), b =>
+            {
+                float[] scratch = ArrayPool<float>.Shared.Rent(nFft + 2 * numBins);
+                try
                 {
-                    int start = f * hop;
-                    for (int k = 0; k < nFft; k++) scratch.Frame[k] = padded[start + k] * window[k];
-                    Fft.RealTransform(scratch.Frame, scratch.Re, scratch.Im, nFft);
-                    if (magPhase)
+                    Span<float> frame = scratch.AsSpan(0, nFft);
+                    Span<float> re = scratch.AsSpan(nFft, numBins);
+                    Span<float> im = scratch.AsSpan(nFft + numBins, numBins);
+                    int end = Math.Min(frames, (b + 1) * framesPerBlock);
+                    for (int f = b * framesPerBlock; f < end; f++)
                     {
-                        for (int b = 0; b < numBins; b++)
+                        int start = f * hop;
+                        for (int k = 0; k < nFft; k++) frame[k] = padded[start + k] * window[k];
+                        Fft.RealTransform(frame, re, im, nFft);
+                        if (magPhase)
                         {
-                            float re = scratch.Re[b], im = scratch.Im[b];
-                            op[(long)b * frames + f] = MathF.Sqrt(re * re + im * im);
-                            op[(long)(numBins + b) * frames + f] = MathF.Atan2(im, re);
+                            for (int bin = 0; bin < numBins; bin++)
+                            {
+                                op[(long)bin * frames + f] = MathF.Sqrt(re[bin] * re[bin] + im[bin] * im[bin]);
+                                op[(long)(numBins + bin) * frames + f] = MathF.Atan2(im[bin], re[bin]);
+                            }
                         }
-                    }
-                    else
-                    {
-                        for (int b = 0; b < numBins; b++)
+                        else
                         {
-                            op[(long)b * frames + f] = scratch.Re[b];
-                            op[(long)(numBins + b) * frames + f] = scratch.Im[b];
+                            for (int bin = 0; bin < numBins; bin++)
+                            {
+                                op[(long)bin * frames + f] = re[bin];
+                                op[(long)(numBins + bin) * frames + f] = im[bin];
+                            }
                         }
                     }
                 }
-                return scratch;
-            },
-            _ => { });
-        return outT;
+                finally
+                {
+                    ArrayPool<float>.Shared.Return(scratch);
+                }
+            });
+            return outT;
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(padded);
+        }
     }
 
     /// <summary>iSTFT output head: <c>magnitude = exp(post[0:nFft/2+1])</c>, <c>phase = sin(post[nFft/2+1:])</c>,
@@ -215,20 +258,34 @@ public static unsafe class NsfVocoderDsp
         int numBins = nFft / 2 + 1;
         int frames = (int)post.Shape[2];
         float* pp = (float*)post.DataPointer;
-        float[] real = new float[(long)frames * numBins];
-        float[] imag = new float[(long)frames * numBins];
-        Parallel.ForEach(FrameBlocks(frames), block =>
+        int count = frames * numBins;
+        float[] real = ArrayPool<float>.Shared.Rent(count);
+        float[] imag = ArrayPool<float>.Shared.Rent(count);
+        try
         {
-            for (int f = block.Start; f < block.End; f++)
-                for (int b = 0; b < numBins; b++)
+            int framesPerBlock = FramePartition.FramesPerBlock(nFft, FramePartition.TransformBudget);
+            int blocks = FramePartition.BlockCount(frames, framesPerBlock);
+            CpuParallel.For(blocks, 8L * count, b =>
+            {
+                int end = Math.Min(frames, (b + 1) * framesPerBlock);
+                for (int f = b * framesPerBlock; f < end; f++)
                 {
-                    float mag = MathF.Min(MathF.Exp(pp[(long)b * frames + f]), 1e2f);   // torch _istft clips magnitude to 1e2
-                    float ang = MathF.Sin(pp[(long)(numBins + b) * frames + f]);
-                    real[(long)f * numBins + b] = mag * MathF.Cos(ang);
-                    imag[(long)f * numBins + b] = mag * MathF.Sin(ang);
+                    for (int bin = 0; bin < numBins; bin++)
+                    {
+                        float mag = MathF.Min(MathF.Exp(pp[(long)bin * frames + f]), 1e2f);   // torch _istft clips magnitude to 1e2
+                        float ang = MathF.Sin(pp[(long)(numBins + bin) * frames + f]);
+                        real[f * numBins + bin] = mag * MathF.Cos(ang);
+                        imag[f * numBins + bin] = mag * MathF.Sin(ang);
+                    }
                 }
-        });
-        return IStft.Apply(real, imag, frames, nFft, hop);
+            });
+            return IStft.Apply(real, imag, frames, nFft, hop);
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(real);
+            ArrayPool<float>.Shared.Return(imag);
+        }
     }
 
     /// <summary>ReflectionPad1d((1,0)) on a channels-first <c>[1, C, T]</c>: prepends one left sample by
@@ -273,16 +330,5 @@ public static unsafe class NsfVocoderDsp
         float* p = (float*)x.DataPointer;
         long n = x.ElementCount;
         for (long i = 0; i < n; i++) p[i] *= factor;
-    }
-
-    /// <summary>Splits <c>[0, frames)</c> into contiguous blocks sized for one worker each.</summary>
-    internal static IEnumerable<(int Start, int End)> FrameBlocks(int frames)
-    {
-        int workers = Math.Clamp(frames / MinFramesPerWorker, 1, Environment.ProcessorCount);
-        int perBlock = (frames + workers - 1) / workers;
-        for (int start = 0; start < frames; start += perBlock)
-        {
-            yield return (start, Math.Min(frames, start + perBlock));
-        }
     }
 }

@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Layers;
@@ -19,8 +20,8 @@ namespace HartsyInference.Audio.Layers;
 /// <para>Execution split: the input projection of BOTH directions is one backend GEMM over the whole
 /// sequence (<c>[B, T, in] → [B, T, 8·hidden]</c>, the two <c>W_ih</c> stacked at load time), read back to
 /// the host once; the sequential recurrence then runs on the host (<see cref="LstmOps.RunSequence"/>), the
-/// two directions in parallel, and the result is handed back as one host tensor — one device sync per layer
-/// instead of one per timestep.</para>
+/// two directions through <see cref="CpuParallel"/>, and the result is handed back as one host tensor — one
+/// device sync per layer instead of one per timestep.</para>
 ///
 /// <para>Weight key convention (PyTorch state dict):
 /// <code>
@@ -102,17 +103,19 @@ internal sealed unsafe class BiLstm
             float* scratch = (float*)NativeMemory.AlignedAlloc((nuint)(2 * scratchFloats * sizeof(float)), 64);
             try
             {
-                float* scratchF = scratch;
-                float* scratchB = scratch + scratchFloats;
+                // Two gate rows of hidden multiply-adds per hidden unit per step, both directions.
+                long work = 2L * t * hidden4 * hidden * 2;
                 for (int b = 0; b < batch; b++)
                 {
                     float* gIn = gp + (long)b * t * hidden8;
                     float* outB = op + (long)b * t * 2 * hidden;
-                    Parallel.Invoke(
-                        () => LstmOps.RunSequence(gIn, hidden8, wHhF, bHhF, t, hidden, reverse: false, outB, 2 * hidden, 0,
-                            scratchF, scratchF + hidden, scratchF + 2 * hidden),
-                        () => LstmOps.RunSequence(gIn + hidden4, hidden8, wHhB, bHhB, t, hidden, reverse: true, outB, 2 * hidden, hidden,
-                            scratchB, scratchB + hidden, scratchB + 2 * hidden));
+                    // The directions write disjoint halves of each output row and own their scratch halves.
+                    CpuParallel.For(2, work, d =>
+                    {
+                        float* s = scratch + d * scratchFloats;
+                        LstmOps.RunSequence(gIn + d * hidden4, hidden8, d == 0 ? wHhF : wHhB, d == 0 ? bHhF : bHhB, t, hidden,
+                            reverse: d == 1, outB, 2 * hidden, d * hidden, s, s + hidden, s + 2 * hidden);
+                    });
                 }
             }
             finally
