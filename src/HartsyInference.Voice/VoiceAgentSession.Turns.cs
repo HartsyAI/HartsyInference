@@ -183,7 +183,9 @@ public sealed partial class VoiceAgentSession
                 string heard = input.Kind == VoiceTurnKind.Utterance ? await TranscribeAsync().ConfigureAwait(false) : input.Text!;
                 if (!HasWords(heard))
                 {
-                    session.CountDiscarded(id, heard.Length == 0 ? "the recognizer heard no words" : $"the recognizer heard no words (\"{heard}\")");
+                    string reason = heard.Length == 0 ? "the recognizer heard no words" : $"the recognizer heard no words (\"{heard}\")";
+                    Logs.Debug($"[Voice] Turn {id} not answered: {reason}.");
+                    session.CountDiscarded(id, reason);
                     return;
                 }
                 session.AddUserTurn(id, heard);

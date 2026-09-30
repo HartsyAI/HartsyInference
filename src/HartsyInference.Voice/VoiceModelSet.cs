@@ -19,7 +19,8 @@ namespace HartsyInference.Voice;
 /// <remarks>The set owns the GPU thread (T2), so every session's recognition and synthesis queue behind one another
 /// on the one thread allowed to touch the audio device, and it is disposed on that thread too. When
 /// <see cref="VoiceAgentOptions.CpuThreadCap"/> is positive the engine's CPU kernel threads are capped while the set
-/// is loaded and the previous setting is restored on dispose.</remarks>
+/// is loaded and the setting found at load is restored on dispose. The knob is process-wide, so with two capped sets
+/// alive at once, dispose them in reverse load order or the earlier cap outlives both.</remarks>
 public sealed class VoiceModelSet : IAsyncDisposable
 {
     private readonly IVoiceSpeech _speech;
@@ -50,7 +51,6 @@ public sealed class VoiceModelSet : IAsyncDisposable
         _createVad = createVad;
         _createDenoiser = options.Denoise ? createDenoiser : null;
         _frontEndModels = frontEndModels;
-        Gpu = new VoiceGpuWorker(audioDevice, speech.Reopen);
         if (options.CpuThreadCap > 0)
         {
             // Reading the value first loads the settings file, so a file value cannot later overwrite this override.
@@ -59,6 +59,8 @@ public sealed class VoiceModelSet : IAsyncDisposable
             KnobStore.Set(EngineKnobs.CpuThreads, options.CpuThreadCap);
             _cpuCapApplied = true;
         }
+        // Last, so nothing after it can fail and leave the thread running.
+        Gpu = new VoiceGpuWorker(audioDevice, speech.Reopen);
     }
 
     /// <summary>The options the set was loaded with; sessions on it must carry the same model and device fields.</summary>

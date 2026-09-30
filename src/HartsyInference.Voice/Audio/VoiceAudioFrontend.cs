@@ -16,9 +16,12 @@ namespace HartsyInference.Voice.Audio;
 /// segment <see cref="SileroVadStream"/> reports is copied straight out; the hangover, hold-off and barge-in run are
 /// counted in it too, so the decisions are the same whether audio arrives in real time or in a burst.</para>
 /// <para>An endpoint (the segment the VAD closes after <see cref="VoiceAgentOptions.EndOfTurnSilenceMs"/> of silence,
-/// or the cut at <see cref="VoiceAgentOptions.MaxUtteranceMs"/>) is answered unless it ended while the agent's reply
-/// was still audible and never grew into a barge-in: that is backchannel or the reply's own echo, and answering it
-/// would talk over the reply with a reply to itself.</para></remarks>
+/// or the cut at <see cref="VoiceAgentOptions.MaxUtteranceMs"/>) is answered unless its speech both began and ended
+/// while the agent's reply was audible and never grew into a barge-in: that is backchannel or the reply's own echo,
+/// and answering it would talk over the reply with a reply to itself. Both ends are judged when the speech happens,
+/// not when the endpoint is decided a hangover later, and the reply counts as audible for
+/// <see cref="VoiceAgentOptions.BargeInHoldoffMs"/> after it leaves, because the echo of its last words arrives late.
+/// Speech that began before the reply, or outlasted it, is answered.</para></remarks>
 internal sealed class VoiceAudioFrontend : IDisposable
 {
     /// <summary>Inbound rate; Silero and RNNoise's 16 kHz wrapper both run at it.</summary>
@@ -56,6 +59,9 @@ internal sealed class VoiceAudioFrontend : IDisposable
     private readonly long _speechPadSamples = SpeechPadMs * SamplesPerMs;
     private int _windowFill;
     private bool _wasInSpeech;
+    private long _replyAudibleUntil = -1;
+    private bool _speechStartedInReply;
+    private bool _speechEndedInReply;
     private int _observedTurn;
     private long _speakingSince;
     private long _bargeInRun;
@@ -193,6 +199,9 @@ internal sealed class VoiceAudioFrontend : IDisposable
         _denoiser?.Reset();
         _windowFill = 0;
         _wasInSpeech = false;
+        _replyAudibleUntil = -1;
+        _speechStartedInReply = false;
+        _speechEndedInReply = false;
         _observedTurn = 0;
         _bargeInRun = 0;
         _bargeInTurn = 0;
@@ -208,10 +217,20 @@ internal sealed class VoiceAudioFrontend : IDisposable
         WriteCapture(windowStart);
         bool closed = _vad.Push(_cpu, _window, out SileroVadSegment segment);
         long clock = _vad.ConsumedSamples;
+        if (_signals.SpeakingTurn != 0)
+        {
+            _replyAudibleUntil = clock + _bargeInHoldoffSamples;
+        }
+        bool inReply = windowStart < _replyAudibleUntil;
         VoiceFrameEvents events = VoiceFrameEvents.None;
         if (_vad.InSpeech && !_wasInSpeech)
         {
+            _speechStartedInReply = inReply;
             events |= VoiceFrameEvents.SpeechStarted;
+        }
+        if (_vad.LastChunkWasSpeech)
+        {
+            _speechEndedInReply = inReply;
         }
         events |= CheckBargeIn(windowStart);
         if (closed || (_vad.InSpeech && clock - _vad.SpeechStartSample >= _maxUtteranceSamples && _vad.Flush(out segment)))
@@ -263,7 +282,8 @@ internal sealed class VoiceAudioFrontend : IDisposable
         // A segment ending at the clock was cut mid-speech; any other ends a padded stretch after its last speech.
         _hangover = segment.EndSample >= clock ? 0 : clock - (segment.EndSample - _speechPadSamples);
         bool bargedIn = _bargeInClock >= segment.StartSample;
-        return _signals.SpeakingTurn != 0 && !bargedIn ? VoiceFrameEvents.UtteranceDiscarded : VoiceFrameEvents.Endpoint;
+        bool withinReply = _speechStartedInReply && _speechEndedInReply;
+        return withinReply && !bargedIn ? VoiceFrameEvents.UtteranceDiscarded : VoiceFrameEvents.Endpoint;
     }
 
     private void WriteCapture(long position)

@@ -14,6 +14,9 @@ internal sealed class VoiceLeaseSpeech : IVoiceSpeech
 {
     private static readonly AudioClip NoClip = new() { Data = [] };
 
+    // Reopening reloads both models from the local cache; minutes would mean the open is stuck, not slow.
+    private static readonly TimeSpan ReopenTimeout = TimeSpan.FromMinutes(2);
+
     private readonly Func<CancellationToken, Task<ISynthesizerLease>> _openSynthesizer;
     private readonly Func<CancellationToken, Task<ITranscriberLease>> _openTranscriber;
     private readonly SpeechRequest _speech;
@@ -67,8 +70,10 @@ internal sealed class VoiceLeaseSpeech : IVoiceSpeech
     {
         ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         Logs.Warning("[Voice] The engine released the speech models; reopening them.");
-        // The GPU thread has no synchronization context and holds no gate here, so waiting on the open is safe.
-        OpenLeasesAsync(CancellationToken.None).GetAwaiter().GetResult();
+        // Bounded so a stuck open cannot hold the GPU thread, and with it the model set's shutdown, forever. The GPU
+        // thread has no synchronization context and holds no gate here, so waiting on the open is safe.
+        using CancellationTokenSource timeout = new(ReopenTimeout);
+        OpenLeasesAsync(timeout.Token).GetAwaiter().GetResult();
     }
 
     private async Task OpenLeasesAsync(CancellationToken cancel)
@@ -87,8 +92,21 @@ internal sealed class VoiceLeaseSpeech : IVoiceSpeech
         _sampleRate = tts.SampleRate;
         ISynthesizerLease? oldTts = Interlocked.Exchange(ref _tts, tts);
         ITranscriberLease? oldStt = Interlocked.Exchange(ref _stt, stt);
-        oldTts?.Dispose();
-        oldStt?.Dispose();
+        // The new pair is already in place; a revoked lease that fails to close must not fail the reopen.
+        DisposeReplaced(oldTts);
+        DisposeReplaced(oldStt);
+    }
+
+    private static void DisposeReplaced(IDisposable? lease)
+    {
+        try
+        {
+            lease?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Voice] Closing a replaced speech lease failed: {ex.Message}");
+        }
     }
 
     public void Dispose()

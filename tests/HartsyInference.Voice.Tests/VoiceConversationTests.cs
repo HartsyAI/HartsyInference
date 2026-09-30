@@ -69,6 +69,29 @@ public sealed class VoiceConversationTests
     }
 
     [Fact]
+    public void ConsecutiveMessagesFromTheSameSideMergeSoTurnsAlternate()
+    {
+        VoiceConversation conversation = new("sys");
+        conversation.AddAssistant("Hello, thanks for calling.");
+        conversation.AddAssistant("How can I help?");
+        conversation.AddUser("what time");
+        // A turn cut off before the model said anything leaves no reply between two questions.
+        conversation.AddUser("is it now");
+        NativeToolCall call = new() { Id = "call_0", Name = "get_time" };
+        conversation.AddAssistant("", [call]);
+        conversation.AddToolResult(call, "12:30");
+        conversation.AddAssistant("It is half past twelve.");
+
+        IReadOnlyList<TextMessage> request = conversation.ToRequest(Words, maxTokens: 1_000);
+
+        Assert.Equal([TextRole.System, TextRole.Assistant, TextRole.User, TextRole.Assistant, TextRole.Tool, TextRole.Assistant],
+            request.Select(m => m.Role));
+        Assert.Equal("Hello, thanks for calling. How can I help?", request[1].Content);
+        Assert.Equal("what time is it now", request[2].Content);
+        Assert.Single(request[3].ToolCalls!);
+    }
+
+    [Fact]
     public void TheLastUserMessageIsKeptEvenOverBudget()
     {
         VoiceConversation conversation = new("a system prompt that is long");

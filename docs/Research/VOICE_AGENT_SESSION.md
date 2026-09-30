@@ -56,10 +56,15 @@ no language token at all, which Whisper tiny answered with `S-N-S-N-…` loops o
   speaking turn decides it, so a reply that finished playing cannot be flushed and a barge-in cannot be lost to a
   finishing turn. The turn is cancelled with `CancelAsync`, which flips the token at once and runs its callbacks on
   the pool. Its cancellation source is never disposed, because the audio thread may cancel it while the turn ends.
-- **Rule added here (veto-able):** an utterance that ends while the reply is still audible and never became a
-  barge-in is not answered. It is backchannel or the reply's own echo, and answering it would talk over the reply with
-  a reply to itself. It is counted (`DiscardedUtterances`, `UtteranceDiscarded` event). The interrupting speech of a
-  real barge-in is answered. An utterance the recognizer hears no words in is counted the same way.
+- **Rule added here (accepted by the orchestrator):** an utterance whose speech both began and ended while the reply
+  was audible, and that never became a barge-in, is not answered. It is backchannel or the reply's own echo, and
+  answering it would talk over the reply with a reply to itself. Both ends are judged when the speech happens, not
+  when the endpoint is decided a hangover later. The reply counts as audible for `BargeInHoldoffMs` after it leaves,
+  because the echo of its last words arrives late. Speech that began before the reply (a caller talked over by a
+  prompt) or outlasted it is answered, as is the interrupting speech of a real barge-in. Discards are counted
+  (`DiscardedUtterances`, `UtteranceDiscarded` event), and so is an utterance the recognizer hears no words in.
+- History: two user or two plain assistant messages in a row are merged into one (a turn cut off before the model
+  said anything, two spoken prompts back to back), because templates that enforce alternating turns reject them.
 
 ## Outbound queue and flushes
 

@@ -31,6 +31,7 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
 {
     private const int RingSeconds = 30;
     private const int MaxSynthesisInFlight = 2;
+    private const string OverlapDiscardReason = "speech within the reply that did not barge in";
 
     private readonly VoiceModelSet _models;
     private readonly ITextService _text;
@@ -165,9 +166,22 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         }
         catch
         {
-            // Half-started is not a state a caller can use or retry: stop the audio thread and release the models.
-            await EndAsync().ConfigureAwait(false);
+            // Half-started is not a state a caller can use or retry: stop the audio thread and release the models,
+            // keeping the start's own exception if that cleanup fails too.
+            try
+            {
+                await EndAsync().ConfigureAwait(false);
+            }
+            catch (Exception endError)
+            {
+                Logs.Error("[Voice] Ending a session whose start failed also failed.", endError);
+            }
             throw;
+        }
+        if (Volatile.Read(ref _endRequested) != 0)
+        {
+            // Ended while it was warming; there is nothing left to start.
+            return;
         }
         // A single long-lived loop: turns run one after another, never in parallel.
         _turnLoop = RunTurnsAsync();
@@ -317,10 +331,10 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         }
     }
 
+    // No logging here: the audio thread calls this too.
     private void CountDiscarded(int turnId, string reason)
     {
         Interlocked.Increment(ref _discardedUtterances);
-        Logs.Debug($"[Voice] Utterance not answered: {reason}.");
         Emit(VoiceAgentEventKind.UtteranceDiscarded, turnId, reason);
     }
 
@@ -355,8 +369,7 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
             }
         }
 
-        public void OnUtteranceDiscarded(int samples) =>
-            session.CountDiscarded(0, $"{samples / (VoiceAudioFrontend.SampleRate / 1000)} ms of speech over the reply that did not barge in");
+        public void OnUtteranceDiscarded(int samples) => session.CountDiscarded(0, OverlapDiscardReason);
 
         public void OnBargeIn(int turnId, long detectNs) =>
             session.Emit(new VoiceAgentEvent { Kind = VoiceAgentEventKind.BargeIn, TurnId = turnId, TimestampNs = detectNs });

@@ -124,6 +124,54 @@ public sealed class VoiceBargeInTests
         Assert.Single(rig.Sink.Discarded);
     }
 
+    [Fact]
+    public void SpeechInsideTheReplyIsNotAnsweredEvenWhenTheReplyEndsDuringTheHangover()
+    {
+        using Rig rig = new(Options());
+        rig.Speak();
+        // Inside the hold-off, so no barge-in; the reply then finishes 100 ms after the speech, long before the
+        // 700 ms endpoint, which is decided with nothing audible any more.
+        rig.Push(0.28, VoiceHarness.SpeechLevel);
+        rig.Push(0.1, 0f);
+        rig.StopSpeaking();
+        rig.Push(1.0, 0f);
+
+        Assert.Empty(rig.Sink.BargeIns);
+        Assert.Empty(rig.Sink.Utterances);
+        Assert.Single(rig.Sink.Discarded);
+    }
+
+    [Fact]
+    public void SpeechThatBeganBeforeTheReplyIsAnswered()
+    {
+        using Rig rig = new(Options());
+        // The caller was already talking when a prompt started over them, and stopped inside its hold-off.
+        rig.Push(0.4, VoiceHarness.SpeechLevel);
+        rig.Speak();
+        rig.Push(0.2, VoiceHarness.SpeechLevel);
+        rig.Push(1.0, 0f);
+
+        Assert.Empty(rig.Sink.BargeIns);
+        Assert.Single(rig.Sink.Utterances);
+        Assert.Empty(rig.Sink.Discarded);
+    }
+
+    [Fact]
+    public void SpeechThatOutlastsTheReplyIsAnswered()
+    {
+        using Rig rig = new(Options(enabled: false));
+        rig.Speak();
+        rig.Push(0.3, 0f);
+        rig.Push(0.3, VoiceHarness.SpeechLevel);
+        rig.StopSpeaking();
+        // Well past the reply and its echo tail before the caller stops.
+        rig.Push(0.8, VoiceHarness.SpeechLevel);
+        rig.Push(1.0, 0f);
+
+        Assert.Single(rig.Sink.Utterances);
+        Assert.Empty(rig.Sink.Discarded);
+    }
+
     private static async Task<bool> Cancelled(CancellationToken token)
     {
         try
@@ -177,6 +225,9 @@ public sealed class VoiceBargeInTests
             Signals.BeginSpeaking(TurnId);
             return cancellation;
         }
+
+        /// <summary>The reply finished playing.</summary>
+        public void StopSpeaking() => Signals.EndSpeaking(TurnId);
 
         public void Push(double seconds, float level)
         {

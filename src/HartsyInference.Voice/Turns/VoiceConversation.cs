@@ -6,7 +6,9 @@ namespace HartsyInference.Voice.Turns;
 /// tool turns, trimmed to a token budget by dropping the oldest turns.</summary>
 /// <remarks>Trimming never drops the system message or the last user message, and it never leaves the history
 /// starting on an assistant or tool message: a tool result whose call was dropped, or a reply to a question that was,
-/// confuses a chat template more than the missing context does. Token counts are the model's own
+/// confuses a chat template more than the missing context does. Two user or two plain assistant messages in a row (a
+/// turn that ended before the model said anything, two spoken prompts back to back) are merged into one, because
+/// templates that enforce alternating turns reject them. Token counts are the model's own
 /// (<c>ITextService.CountTokens</c>), counted once per message. Touched only by the turn loop, one turn at a time.</remarks>
 internal sealed class VoiceConversation
 {
@@ -83,7 +85,20 @@ internal sealed class VoiceConversation
         return messages;
     }
 
-    private void Add(TextMessage message) => _entries.Add(new Entry(message, -1));
+    private void Add(TextMessage message)
+    {
+        if (_entries.Count > 0 && message.Role is (TextRole.User or TextRole.Assistant) && message.ToolCalls is null)
+        {
+            TextMessage last = _entries[^1].Message;
+            if (last.Role == message.Role && last.ToolCalls is null)
+            {
+                string merged = last.Content.Length == 0 ? message.Content : last.Content + " " + message.Content;
+                _entries[^1] = new Entry(last with { Content = merged }, -1);
+                return;
+            }
+        }
+        _entries.Add(new Entry(message, -1));
+    }
 
     private int TokensOf(int index, Func<string, int> countTokens)
     {
