@@ -389,7 +389,7 @@
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 5,
       "status": "InProgress",
-      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM; PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); device dequant is later, real-checkpoint parity (M1) is not yet recorded as Verified"
+      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM; PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); device dequant is later. M1 matched the official dequant bit-exactly on 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); not Verified until the staged shard runs it"
     },
     {
       "id": "quant.nvfp4.dequant",

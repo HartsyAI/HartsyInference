@@ -22,7 +22,9 @@ stable release will require. Dates are UTC.
 - **Fix:** `ApplyFp8ScaledDequant` silently dropped a rank-2 fp8 `.weight_scale`, leaving the raw fp8 weight unscaled. It now
   throws for any non-scalar scale on an fp8 weight.
 - Milestone M1 (`DeepSeekV41Shard3ParityTests`, `tests/python-reference/dump_deepseek_v41_shard3_ref.py`) compares the codecs to the
-  official `kernel.py`/`convert.py` dequant on the first shard; it is skipped unless the checkpoint and fixtures exist.
+  official `convert.py` dequant on 64-row windows of shard 3 (`layers.0.*`: dense FP8 32x32, shared experts, routed experts 0/191/383
+  MXFP4) plus a `Linear` check; it is skipped unless the shard and fixtures exist. Run so far against a sparse replica holding the
+  real bytes of those windows only, so the matrix row stays InProgress.
 
 ## alpha.205
 
