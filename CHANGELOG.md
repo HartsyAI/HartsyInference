@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.211
+
+- **Expert bank, expert cache and device dequant** (DeepSeek-V4.1-Flash program PR 12). `ExpertBank` builds each `ExpertWeights(W1, W2, W3)`
+  once so the `Tensor` identities the weight caches key on stay stable. `IExpertCache` (`Acquire`/`Prefetch`/`Release`/`Stats`/`BudgetBytes`)
+  is implemented by `CudaExpertCache` directly on `IStreamingWeightCache` and its pinned staging ring: a slot is one whole expert (one
+  `BeginUploadAsync` of up to six tensors), in-flight uploads are shared, pinned entries are never evicted, victims come from a segmented
+  LRU weighted by per-layer frequency, and `EvictAsync` runs after the last reader's event. The policy lives in `ExpertCacheBase`, is
+  unit-tested on CPU against a fake, and `Dispose` cancels, waits, releases leases, evicts all and returns staging.
+- `GpuTransferHelper.ExcludeFromAutoPromotion` keeps expert tensors out of the weight cache promotion (uploaded twice, at least 1 MB).
+  `CudaExpertCache` forces `PinUploadSource` off so mmap-backed weights are never `cuMemHostRegister`ed. `ExpertRouting` reads
+  the compact `[T, k]` I32 top-k from `MoeRoute`.
+- **CUDA BF16 dequant for official recipes.** `dequant_recipe_to_bf16` (sm_80 PTX) unpacks MXFP4 with E8M0 scales per 32 and FP8 E4M3 with
+  E8M0 blocks; `CudaQuantWorkspace` is a bounded ring of two BF16 slots (23,592,960 B, the largest routed-expert matrix) that bypasses
+  `IBackend.Linear`'s F16 cast cache. `IBackend.Linear` does not use it yet (PR 23/24).
+- Tests: 23 CPU policy tests, GpuIntegration tests on an RTX 3060 (hit/miss/dedup, prefetch sharing, pinning, promotion blocked, 1,000
+  acquire/release cycles leak-free, bit-exact dequant vs the host codecs); an M1 test uploads layers.0 experts 0/191/383 and compares
+  with the official fixtures, and skips without a populated shard 3 (it did not run against real bytes).
+
 ## alpha.209
 
 - **DeepSeek-V4.1-Flash config, HF directory loader and catalog rows** (program PR 7). `HfCheckpointDirectory.TryProbe` recognises a
