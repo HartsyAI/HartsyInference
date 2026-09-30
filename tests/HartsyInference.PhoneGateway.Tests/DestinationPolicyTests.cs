@@ -72,6 +72,8 @@ public sealed class DestinationPolicyTests
     [InlineData("sip:+15551234@TRUNK.example.net", Trunk, "sip:+15551234@trunk.example.net")]
     [InlineData("sips:+15551234@trunk.example.net", Trunk, "sips:+15551234@trunk.example.net")]
     [InlineData("sip:+15551234@trunk.example.net", "trunk.example.net:5070", "sip:+15551234@trunk.example.net:5070")]
+    [InlineData("sip:+15551234@trunk.example.net", "TRUNK.Example.NET", "sip:+15551234@TRUNK.Example.NET")]
+    [InlineData("+15551234", "[2001:db8::1]", "sip:+15551234@[2001:db8::1]")]
     public void Prefixes_DialTheNumberRebuiltAtTheRegistrar(string destination, string registrar, string expected)
     {
         Assert.Equal(expected, CallController.AuthorizeDestination(destination, _usPrefix, registrar, out _));
@@ -86,6 +88,15 @@ public sealed class DestinationPolicyTests
         Assert.Equal(CallPlacementStatus.Invalid, noRegistrar);
         Assert.Null(CallController.AuthorizeDestination("+15551234", [], "", out CallPlacementStatus open));
         Assert.Equal(CallPlacementStatus.Invalid, open);
+    }
+
+    [Fact]
+    public void Prefixes_AnIPv6RegistrarMatchesOnlyTheNumberForms()
+    {
+        const string registrar = "[2001:db8::1]";
+        Assert.Null(CallController.AuthorizeDestination("sip:+15551234@[2001:db8::1]", _usPrefix, registrar, out CallPlacementStatus refusal));
+        Assert.Equal(CallPlacementStatus.NotAllowed, refusal);
+        Assert.Equal("sip:+15551234@[2001:db8::1]", CallController.AuthorizeDestination("tel:+15551234", _usPrefix, registrar, out _));
     }
 
     [Fact]
