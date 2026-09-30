@@ -92,10 +92,24 @@ public sealed partial class VoiceAgentSession
         {
             input.Completion?.TrySetResult();
         }
-        _models.Gpu.RequestTrim();
-        if (!ending.IsCancellationRequested)
+        ReportInboundDrops();
+        // Back to listening only when no input is waiting: a queued one starts the next turn at once, and the pool
+        // trim, a stream synchronization, belongs between turns rather than ahead of that turn's first job.
+        if (!ending.IsCancellationRequested && !_inputs.Reader.TryPeek(out _))
         {
+            _models.Gpu.RequestTrim();
             SetState(VoiceAgentState.Listening, turnId);
+        }
+    }
+
+    /// <summary>Logs caller audio the audio thread dropped since the last report; that thread never logs itself.</summary>
+    private void ReportInboundDrops()
+    {
+        long dropped = _audio.DroppedSamples;
+        if (dropped > _reportedDrops)
+        {
+            Logs.Warning($"[Voice] {(dropped - _reportedDrops) / (double)VoiceAudioFrontend.SampleRate:0.0} s of caller audio was dropped because the audio thread fell behind.");
+            _reportedDrops = dropped;
         }
     }
 

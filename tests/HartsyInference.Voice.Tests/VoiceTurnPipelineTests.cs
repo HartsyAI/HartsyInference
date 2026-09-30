@@ -1,4 +1,5 @@
 using HartsyInference.Core.Logging;
+using HartsyInference.Cpu;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Tools;
 using HartsyInference.Voice.Tests.Fakes;
@@ -346,6 +347,40 @@ public sealed class VoiceTurnPipelineTests
         int turnTwoStart = Array.IndexOf(played, firstOfTurnTwo);
         Assert.True(turnTwoStart >= 0);
         Assert.All(played.AsSpan(turnTwoStart).ToArray(), sample => Assert.Equal(firstOfTurnTwo, sample));
+    }
+
+    [Fact]
+    public async Task TheDevicePoolIsTrimmedOnceWhenTheSessionReturnsToListening()
+    {
+        ScriptedTextService text = new ScriptedTextService().Reply("One short reply.");
+        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text);
+        Assert.Equal(0, harness.Models.Gpu.Trims);
+        harness.Session.PushDtmf('8');
+        await harness.TurnCompletedAsync(1);
+        await harness.WaitForAsync(e => e.Kind == VoiceAgentEventKind.StateChanged && e.State == VoiceAgentState.Listening && e.TurnId == 1);
+
+        // No further GPU job is queued: the trim runs on its own, between turns.
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        while (harness.Models.Gpu.Trims == 0 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(5);
+        }
+        Assert.Equal(1, harness.Models.Gpu.Trims);
+    }
+
+    [Fact]
+    public async Task ACancelledStartEndsTheSession()
+    {
+        using CpuBackend device = new();
+        VoiceAgentOptions options = VoiceHarness.DefaultOptions();
+        await using VoiceModelSet models = new(options, new FakeSpeech(), device, () => new LevelVadModel(), createDenoiser: null);
+        VoiceAgentSession session = new(models, new ScriptedTextService(), new ToolRegistry(), options);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => session.StartAsync(new CancellationToken(canceled: true)));
+
+        Assert.Equal(VoiceAgentState.Ended, session.State);
+        Assert.Throws<InvalidOperationException>(() => session.PushDtmf('1'));
+        await session.EndAsync().WaitAsync(TimeSpan.FromSeconds(10));
     }
 
     [Fact]

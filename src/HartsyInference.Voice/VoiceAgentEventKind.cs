@@ -22,7 +22,8 @@ public enum VoiceAgentEventKind
     ToolResult,
 
     /// <summary>Caller audio was not answered (<see cref="VoiceAgentEvent.Text"/> says why): speech over the reply that
-    /// never became a barge-in, or an utterance the recognizer heard no words in.</summary>
+    /// never became a barge-in (<see cref="VoiceAgentEvent.TurnId"/> 0, as it never started a turn), or an utterance
+    /// the recognizer heard no words in (the id of the turn that transcribed it).</summary>
     UtteranceDiscarded,
 
     /// <summary>Turn <see cref="VoiceAgentEvent.TurnId"/> ended; <see cref="VoiceAgentEvent.Metrics"/> holds its timings.</summary>

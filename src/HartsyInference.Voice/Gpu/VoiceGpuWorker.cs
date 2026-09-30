@@ -6,15 +6,15 @@ using HartsyInference.Engine;
 namespace HartsyInference.Voice.Gpu;
 
 /// <summary>T2, the voice-GPU thread: the only thread that runs the audio device's models. Jobs (recognize one
-/// utterance, synthesize one sentence, warm up, shut down) run one at a time in arrival order.</summary>
+/// utterance, synthesize one sentence, warm up, trim the pool, shut down) run one at a time in arrival order.</summary>
 /// <remarks>Per job: a job whose token is already cancelled is skipped; otherwise the device's
 /// <see cref="DeviceGate"/> slot is taken for that one job only (never across an await, never together with the
 /// language model's device, so the ascending-ordinal rule of <see cref="DeviceGate.AcquireAll"/> can never be broken
 /// from here), the job runs, <see cref="IBackend.FreeActivations()"/> releases its activations, and its completion
 /// is set with continuations forced off this thread. A caller that stops waiting is released at once even while its
-/// job is still running here; the job's result is then dropped. <see cref="RequestTrim"/> returns pool memory to the
-/// driver once the queue is empty, because <see cref="IBackend.TrimMemoryPool"/> synchronizes the stream and must not
-/// sit between two sentences of a reply.
+/// job is still running here; the job's result is then dropped. <see cref="RequestTrim"/> queues a return of pool
+/// memory to the driver that runs only if nothing is queued behind it, because <see cref="IBackend.TrimMemoryPool"/>
+/// synchronizes the stream and must never sit ahead of the next turn's first job or between two sentences.
 /// <para>A job that throws <see cref="ObjectDisposedException"/> found its models released by their owner (an engine
 /// release revokes runner leases). The worker then runs the reopen hook once, outside the gate because reopening
 /// takes the gate itself, and retries the job once; if either fails the job fails, its caller reports it, and the
@@ -26,8 +26,8 @@ internal sealed class VoiceGpuWorker : IDisposable
     private readonly BlockingCollection<Job> _queue = new(new ConcurrentQueue<Job>());
     private readonly Thread _thread;
     private Task? _stopped;
-    private int _trimRequested;
     private long _completed;
+    private long _trims;
     private int _reopens;
     private int _disposed;
 
@@ -54,13 +54,16 @@ internal sealed class VoiceGpuWorker : IDisposable
     /// <summary>Times the models were reopened after a release.</summary>
     public int Reopens => Volatile.Read(ref _reopens);
 
+    /// <summary>Times the device's pool was trimmed.</summary>
+    public long Trims => Interlocked.Read(ref _trims);
+
     /// <summary>Queues <paramref name="work"/> and returns its result once it ran on the GPU thread.</summary>
     public async Task<T> RunAsync<T>(VoiceGpuJobKind kind, Func<T> work, CancellationToken cancel)
     {
         ArgumentNullException.ThrowIfNull(work);
-        if (kind == VoiceGpuJobKind.Shutdown)
+        if (kind is VoiceGpuJobKind.Shutdown or VoiceGpuJobKind.Trim)
         {
-            throw new ArgumentException("Shutdown is queued by StopAsync.", nameof(kind));
+            throw new ArgumentException($"{kind} is queued by the worker's own methods.", nameof(kind));
         }
         cancel.ThrowIfCancellationRequested();
         Job<T> job = new(kind, work, cancel);
@@ -69,8 +72,19 @@ internal sealed class VoiceGpuWorker : IDisposable
         return await job.Completion.Task.ConfigureAwait(false);
     }
 
-    /// <summary>Asks for the device's pool to be trimmed once the queue drains; call once per turn, not per sentence.</summary>
-    public void RequestTrim() => Interlocked.Exchange(ref _trimRequested, 1);
+    /// <summary>Queues a trim of the device's pool behind the work already queued; when its turn comes it runs only if
+    /// nothing is queued behind it. Call once per turn, when the session returns to listening.</summary>
+    public void RequestTrim()
+    {
+        try
+        {
+            _queue.Add(new TrimRequest());
+        }
+        catch (InvalidOperationException)
+        {
+            Logs.Debug("[Voice] A pool trim was requested after the GPU thread stopped; nothing to trim.");
+        }
+    }
 
     /// <summary>Queues the last job, which runs <paramref name="finalWork"/> on the GPU thread under the device gate
     /// (releasing the models there), cancels anything queued after it, and ends the thread.</summary>
@@ -107,6 +121,15 @@ internal sealed class VoiceGpuWorker : IDisposable
     {
         foreach (Job job in _queue.GetConsumingEnumerable())
         {
+            if (job.Kind == VoiceGpuJobKind.Trim)
+            {
+                // Work queued behind the trim means the next turn has already started; its end asks again.
+                if (_queue.Count == 0)
+                {
+                    Trim();
+                }
+                continue;
+            }
             if (job.IsCompleted || job.Cancellation.IsCancellationRequested)
             {
                 job.Cancel();
@@ -116,10 +139,6 @@ internal sealed class VoiceGpuWorker : IDisposable
             if (job.Kind == VoiceGpuJobKind.Shutdown)
             {
                 break;
-            }
-            if (_queue.Count == 0 && Interlocked.Exchange(ref _trimRequested, 0) != 0)
-            {
-                Trim();
             }
         }
         while (_queue.TryTake(out Job? abandoned))
@@ -174,6 +193,7 @@ internal sealed class VoiceGpuWorker : IDisposable
         {
             using IDisposable gate = DeviceGate.Acquire(_device);
             _device.TrimMemoryPool();
+            Interlocked.Increment(ref _trims);
         }
         catch (Exception ex)
         {
@@ -213,6 +233,24 @@ internal sealed class VoiceGpuWorker : IDisposable
         public abstract void Fail(Exception error);
 
         public abstract void Cancel();
+    }
+
+    /// <summary>A queued pool trim: no caller waits on it.</summary>
+    private sealed class TrimRequest() : Job(VoiceGpuJobKind.Trim, CancellationToken.None)
+    {
+        public override bool IsCompleted => false;
+
+        public override void Execute()
+        {
+        }
+
+        public override void Fail(Exception error)
+        {
+        }
+
+        public override void Cancel()
+        {
+        }
     }
 
     private sealed class Job<T>(VoiceGpuJobKind kind, Func<T> work, CancellationToken cancel) : Job(kind, cancel)

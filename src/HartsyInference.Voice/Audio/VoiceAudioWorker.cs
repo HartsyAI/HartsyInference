@@ -202,11 +202,11 @@ internal sealed class VoiceAudioWorker : IDisposable
             }
             dropped += read;
         }
-        // The partial frame and the model state belong to audio that is gone; resume clean on the fresh audio.
+        // The partial frame and the model state belong to audio that is gone; resume clean on the fresh audio. The
+        // turn loop reports the drop, so this thread does no logging.
         _frameFill = 0;
         _frontend.Reset();
         Volatile.Write(ref _droppedOldest, _droppedOldest + dropped);
-        Logs.Warning($"[Voice] The audio thread fell {excess / (VoiceAudioFrontend.SampleRate / 1000)} ms behind; dropped the oldest audio to catch up.");
     }
 
     public void Dispose()

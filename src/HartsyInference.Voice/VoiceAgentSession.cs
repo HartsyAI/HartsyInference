@@ -54,6 +54,7 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
     private int _endRequested;
     private int _turnCounter;
     private int _discardedUtterances;
+    private long _reportedDrops;
 
     /// <summary>Creates a session on <paramref name="models"/>, answering with <paramref name="text"/> and offering the
     /// tools in <paramref name="tools"/>. The model and device fields of <paramref name="options"/> must match the
@@ -143,7 +144,8 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
     /// <summary>Whether the per-frame path runs RNNoise.</summary>
     public bool Denoising => _audio.Frontend.Denoising;
 
-    /// <summary>Starts the audio thread, warms its per-frame path and begins listening.</summary>
+    /// <summary>Starts the audio thread, warms its per-frame path and begins listening. A start that fails or is
+    /// cancelled ends the session.</summary>
     public async Task StartAsync(CancellationToken cancel = default)
     {
         lock (_stateLock)
@@ -154,8 +156,19 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
             }
             SetStateLocked(VoiceAgentState.Warming, 0);
         }
-        _audio.Start();
-        await _audio.Ready.WaitAsync(cancel).ConfigureAwait(false);
+        try
+        {
+            // Checked first: WaitAsync returns a finished warm-up without looking at the token.
+            cancel.ThrowIfCancellationRequested();
+            _audio.Start();
+            await _audio.Ready.WaitAsync(cancel).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Half-started is not a state a caller can use or retry: stop the audio thread and release the models.
+            await EndAsync().ConfigureAwait(false);
+            throw;
+        }
         // A single long-lived loop: turns run one after another, never in parallel.
         _turnLoop = RunTurnsAsync();
         SetState(VoiceAgentState.Listening, 0);

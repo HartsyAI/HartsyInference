@@ -21,7 +21,7 @@ T3 turn loop (async, one turn at a time)
    utterance ─► T2: Whisper lease ─► VoiceConversation (token-trimmed) ─► ToolLoop (thinking off, Device = LlmDevice)
    deltas ─► SentenceChunkedSynthesis (run = post to T2, 2 in flight) ─► StreamingResampler ─► VoiceOutbound
 T2 voice-gpu (dedicated thread, owned by VoiceModelSet): one DeviceGate hold per job, FreeActivations per job,
-   TrimMemoryPool once per turn when the queue is empty
+   TrimMemoryPool queued once per turn on the return to listening, skipped if the next turn's work is behind it
 ReadOutbound (host, one thread) ◄─ VoiceOutbound: SpscRing<float> 30 s, applies flushes, zero-fills, never blocks
 Events: channel ─► one pump task on the pool (never T1 or T2), in order
 ```
@@ -78,7 +78,7 @@ that made progress.
 ## Inbound backlog
 
 The ring drops the newest samples when full, so the audio thread enforces drop-oldest itself: when it is more than
-30 s behind it discards the oldest excess, resets the front-end and counts it (`InboundDroppedSamples`).
+30 s behind it discards the oldest excess, resets the front-end and counts it (`InboundDroppedSamples`); the turn loop logs it, since the audio thread does no logging.
 
 ## Lease revocation
 

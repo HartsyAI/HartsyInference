@@ -95,6 +95,40 @@ public sealed class VoiceGpuWorkerTests
     }
 
     [Fact]
+    public async Task ATrimRequestRunsAsSoonAsTheQueueIsIdle()
+    {
+        using CpuBackend device = new();
+        using VoiceGpuWorker worker = new(device);
+        Assert.Equal(1, await worker.RunAsync(VoiceGpuJobKind.Synthesize, () => 1, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)));
+
+        // No job follows the request: the trim must not wait for one.
+        worker.RequestTrim();
+        DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+        while (worker.Trims == 0 && DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(5);
+        }
+        Assert.Equal(1, worker.Trims);
+    }
+
+    [Fact]
+    public async Task ATrimRequestIsSkippedWhenTheNextTurnsWorkIsQueuedBehindIt()
+    {
+        using CpuBackend device = new();
+        using VoiceGpuWorker worker = new(device);
+        using ManualResetEventSlim release = new(false);
+        Task<bool> blocking = worker.RunAsync(VoiceGpuJobKind.Synthesize, () => release.Wait(TimeSpan.FromSeconds(10)), CancellationToken.None);
+        worker.RequestTrim();
+        Task<int> next = worker.RunAsync(VoiceGpuJobKind.Transcribe, () => 2, CancellationToken.None);
+        release.Set();
+
+        Assert.True(await blocking.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(2, await next.WaitAsync(TimeSpan.FromSeconds(5)));
+        Assert.Equal(0, worker.Trims);
+        await Assert.ThrowsAsync<ArgumentException>(() => worker.RunAsync(VoiceGpuJobKind.Trim, () => 0, CancellationToken.None));
+    }
+
+    [Fact]
     public async Task StopRunsTheFinalWorkOnTheThreadAndRefusesLaterJobs()
     {
         using CpuBackend device = new();
