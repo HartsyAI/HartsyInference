@@ -15,7 +15,7 @@ stable release will require. Dates are UTC.
   `ConvTranspose1d`, `Concat`, `GatherRows`, `Permute0213`, `Add`/`Scale`), `KokoroPipeline` preloads its weights once
   per backend and keeps the two style halves resident for the call, and `KokoroPipeline.EnumerateWeights` is public.
   Bounded, not bit-identical (batched TF32 GEMM grouping and an exact-F32 host recurrence): log-magnitude-STFT
-  correlation vs alpha.219 0.996 / 0.994 / 0.988 for 5 / 15 / 30 words, Whisper transcripts identical. Evidence and the
+  correlation vs alpha.218 0.996 / 0.994 / 0.988 for 5 / 15 / 30 words, Whisper transcripts identical. Evidence and the
   remaining levers in `benchmarks/results/2026-09-30_kokoro_3060_perf.md`.
 - **`BiLstm` runs its recurrence on the host.** Both directions' input projections are one GEMM over the whole sequence
   (the two `W_ih` stacked at load), read back once; the sequential `h·W_hhᵀ` step is a SIMD dot per gate row
