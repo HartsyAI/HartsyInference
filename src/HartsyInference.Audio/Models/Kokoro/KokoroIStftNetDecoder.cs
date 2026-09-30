@@ -27,7 +27,7 @@ namespace HartsyInference.Audio.Models.Kokoro;
 /// accumulation (no random initial phase) and a fixed-seed Gaussian for the noise component, so
 /// output is reproducible; exact-bit parity with the reference is not expected (the reference
 /// randomizes both), but perceptual quality matches.</para></summary>
-public sealed unsafe class KokoroIStftNetDecoder
+public sealed class KokoroIStftNetDecoder
 {
     private readonly KokoroConfig _cfg;
 
@@ -144,14 +144,14 @@ public sealed unsafe class KokoroIStftNetDecoder
         backend.Conv1d(asrRes, asr, _asrResW!, _asrResB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
 
         // encode: AdainResBlk1d on cat([asr(512), F0(1), N(1)]) → [1, 1024, T].
-        Tensor encIn = ConcatChannels(asr, f0Down, nDown);
+        Tensor encIn = KokoroOps.ConcatChannels(backend, [asr, f0Down, nDown]);
         Tensor x = _encode.Forward(backend, encIn, styleDecoder);
         encIn.Dispose();
 
         // decode: each block runs on cat([x, asr_res, F0, N], s). Last block upsamples 2×.
         for (int i = 0; i < 4; i++)
         {
-            Tensor decIn = ConcatChannels(x, asrRes, f0Down, nDown);
+            Tensor decIn = KokoroOps.ConcatChannels(backend, [x, asrRes, f0Down, nDown]);
             x.Dispose();
             x = _decode[i].Forward(backend, decIn, styleDecoder);
             decIn.Dispose();
@@ -178,18 +178,23 @@ public sealed unsafe class KokoroIStftNetDecoder
         int upProd = 1;
         foreach (int u in g.UpsampleRates) upProd *= u;     // 60
         int f0UpScale = upProd * hop;      // 300
+        KokoroStageTimer? timer = KokoroStageTimer.Start(backend);
 
         // 1. Harmonic source at audio rate → forward STFT → [1, n_fft+2, frames].
         float[] harSource = NsfVocoderDsp.GenerateHarmonicSource(f0, f0UpScale, _cfg.SampleRate, harmonics: 9, _mSourceW!, _mSourceB!);
+        timer?.Mark("harmonic");
         Tensor har = NsfVocoderDsp.ForwardStftMagPhase(harSource, nFft, hop);
+        timer?.Mark("stft");
 
-        Tensor x = new(x0.Shape, DType.F32);
-        Buffer.MemoryCopy((void*)x0.DataPointer, (void*)x.DataPointer, x0.ElementCount * 4, x0.ElementCount * 4);
-
+        // x0 is borrowed: the first activation writes into a fresh tensor instead of copying it.
+        Tensor x = x0;
         int numUp = g.UpsampleRates.Length;     // 2
         for (int i = 0; i < numUp; i++)
         {
-            backend.LeakyRelu(x, x, 0.1f);
+            Tensor act = new(x.Shape, DType.F32);
+            backend.LeakyRelu(act, x, 0.1f);
+            if (i > 0) x.Dispose();
+            x = act;
 
             // Source branch: noise_convs[i](har) → noise_res[i](·, s).
             Tensor xSrc = NoiseConv(backend, har, i);
@@ -202,30 +207,35 @@ public sealed unsafe class KokoroIStftNetDecoder
             x = xUp;
             if (i == numUp - 1)
             {
-                Tensor xp = NsfVocoderDsp.ReflectionPadLeft1(x);
+                Tensor xp = KokoroOps.ReflectionPadLeft1(backend, x);
                 x.Dispose();
                 x = xp;
             }
 
-            NsfVocoderDsp.AddInPlaceCropped(x, xSrcRes);
+            Tensor fused = AddCropped(backend, x, xSrcRes);
+            x.Dispose();
             xSrcRes.Dispose();
+            x = fused;
 
             // MRF: average of the 3 resblocks at this level.
             Tensor acc = _resblocks[i * 3].Forward(backend, x, s);
             for (int j = 1; j < 3; j++)
             {
                 Tensor rb = _resblocks[i * 3 + j].Forward(backend, x, s);
-                NsfVocoderDsp.AddInPlaceCropped(acc, rb);
+                Tensor sum = AddCropped(backend, acc, rb);
+                acc.Dispose();
                 rb.Dispose();
+                acc = sum;
             }
             x.Dispose();
-            NsfVocoderDsp.ScaleInPlace(acc, 1f / 3f);
+            backend.Scale(acc, acc, 1f / 3f);
             x = acc;
+            timer?.Mark(i == 0 ? "stage0" : "stage1");
         }
         har.Dispose();
 
         backend.LeakyRelu(x, x, 0.01f);
-        Tensor xpad = NsfVocoderDsp.ReflectionPadLeft1(x);
+        Tensor xpad = KokoroOps.ReflectionPadLeft1(backend, x);
         x.Dispose();
         x = xpad;
 
@@ -233,9 +243,12 @@ public sealed unsafe class KokoroIStftNetDecoder
         Tensor post = new(new TensorShape(1, nFft + 2, frames), DType.F32);
         backend.Conv1d(post, x, _convPostW!, _convPostB, stride: 1, padLeft: 3, padRight: 3, dilation: 1, groups: 1);
         x.Dispose();
+        timer?.Mark("post");
 
         float[] audio = NsfVocoderDsp.IstftHead(post, nFft, hop);
         post.Dispose();
+        timer?.Mark("istft");
+        timer?.Report($"generator frames={frames}");
         return audio;
     }
 
@@ -271,30 +284,18 @@ public sealed unsafe class KokoroIStftNetDecoder
         return outT;
     }
 
-    /// <summary>Concatenates channels-first tensors along the channel dim (all share batch + length).</summary>
-    private static Tensor ConcatChannels(params Tensor[] parts)
+    /// <summary><c>a + b</c> on device when the two branches have the same shape — always the case for Kokoro's
+    /// geometry — else the shared host crop-add (a ±1 conv-length rounding absorber) at the cost of a sync.</summary>
+    private static Tensor AddCropped(IBackend backend, Tensor a, Tensor b)
     {
-        int batch = (int)parts[0].Shape[0];
-        int t = (int)parts[0].Shape[2];
-        int totalCh = 0;
-        foreach (Tensor p in parts) totalCh += (int)p.Shape[1];
-        Tensor outT = new(new TensorShape(batch, totalCh, t), DType.F32);
-        float* op = (float*)outT.DataPointer;
-        int chOffset = 0;
-        foreach (Tensor p in parts)
+        if (a.Shape[1] == b.Shape[1] && a.Shape[2] == b.Shape[2])
         {
-            int c = (int)p.Shape[1];
-            float* ip = (float*)p.DataPointer;
-            for (int b = 0; b < batch; b++)
-                for (int cc = 0; cc < c; cc++)
-                {
-                    long src = ((long)b * c + cc) * t;
-                    long dst = ((long)b * totalCh + chOffset + cc) * t;
-                    for (int j = 0; j < t; j++) op[dst + j] = ip[src + j];
-                }
-            chOffset += c;
+            return KokoroOps.Add(backend, a, b);
         }
-        return outT;
+        Tensor sum = new(a.Shape, DType.F32);
+        backend.CopyTo(sum, a);
+        NsfVocoderDsp.AddInPlaceCropped(sum, b);
+        return sum;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -343,7 +344,7 @@ internal sealed class AdaResLoader
 }
 
 /// <summary>Loader for the HiFi-GAN style <c>AdaINResBlock1</c> used in the generator's <c>resblocks</c> and <c>noise_res</c> — three parallel dilated branches (dilation 1, 3, 5, same kernel size), each <c>AdaIN1d → Snake → Conv1d</c> twice (6 conv layers, 6 AdaIN modules, 6 Snake alphas total).</summary>
-internal sealed unsafe class AdaSnakeResLoader
+internal sealed class AdaSnakeResLoader
 {
     private readonly int _channels;
     private readonly int _kernel;
@@ -395,8 +396,8 @@ internal sealed unsafe class AdaSnakeResLoader
     {
         int batch = (int)x.Shape[0];
         int t = (int)x.Shape[2];
-        Tensor cur = new(x.Shape, DType.F32);
-        Buffer.MemoryCopy((void*)x.DataPointer, (void*)cur.DataPointer, x.ElementCount * 4, x.ElementCount * 4);
+        // x is borrowed; the first residual add produces the first owned tensor.
+        Tensor cur = x;
 
         for (int i = 0; i < 3; i++)
         {
@@ -423,12 +424,11 @@ internal sealed unsafe class AdaSnakeResLoader
             backend.Conv1d(c2, xt2, _convs2W[i]!, _convs2B[i], stride: 1, padLeft: pad2, padRight: pad2, dilation: 1, groups: 1);
             xt2.Dispose();
 
-            // Residual: cur += c2.
-            float* cp = (float*)cur.DataPointer;
-            float* c2p = (float*)c2.DataPointer;
-            long n = cur.ElementCount;
-            for (long k = 0; k < n; k++) cp[k] += c2p[k];
+            // Residual: cur = cur + c2.
+            Tensor next = KokoroOps.Add(backend, cur, c2);
             c2.Dispose();
+            if (i > 0) cur.Dispose();
+            cur = next;
         }
         return cur;
     }

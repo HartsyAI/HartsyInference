@@ -19,6 +19,7 @@ public static class Fft
     private static readonly Dictionary<int, (float[] Cos, float[] Sin)> _twiddleCache = new();
     private static readonly object _twiddleLock = new();
     private static readonly Dictionary<int, BluesteinPlan> _bluesteinCache = new();
+    private static readonly Dictionary<int, (double[] Cos, double[] Sin)> _directTwiddleCache = new();
 
     /// <summary>Rounds <paramref name="n"/> up to a power of two, the size the radix-2 path needs.</summary>
     public static int NextPow2(int n)
@@ -140,25 +141,50 @@ public static class Fft
     /// <summary>Direct O(n²) forward DFT for non-power-of-two sizes, in place via temp buffers.
     /// Uses the same <c>e^{-2πi kn/N}</c> sign convention as the radix-2 path so the iSTFT
     /// inverse trick (<c>conj(FFT(conj(X)))/N</c>) remains valid.</summary>
+    /// <summary>O(n²) DFT for the tiny non-power-of-two sizes (n &lt; 64), double accumulation. The twiddles come
+    /// from a per-size table indexed by <c>(k·t) mod n</c> — the per-element <c>Math.Cos/Sin</c> this used to call
+    /// was 2·n² transcendentals per frame, which at an iSTFT vocoder's n_fft=20 and ~27k frames per sentence
+    /// dominated the whole synthesis.</summary>
     private static void DirectDft(Span<float> re, Span<float> im, int n)
     {
-        float[] outRe = new float[n];
-        float[] outIm = new float[n];
-        double twoPiOverN = 2.0 * Math.PI / n;
+        (double[] cosTab, double[] sinTab) = GetDirectTwiddles(n);
+        Span<float> outRe = stackalloc float[n];
+        Span<float> outIm = stackalloc float[n];
         for (int k = 0; k < n; k++)
         {
             double sumRe = 0, sumIm = 0;
+            int idx = 0;
             for (int t = 0; t < n; t++)
             {
-                double ang = twoPiOverN * k * t;
-                double c = Math.Cos(ang), s = Math.Sin(ang);
+                double c = cosTab[idx], s = sinTab[idx];
                 sumRe += re[t] * c + im[t] * s;
                 sumIm += im[t] * c - re[t] * s;
+                idx += k;
+                if (idx >= n) idx -= n;
             }
             outRe[k] = (float)sumRe;
             outIm[k] = (float)sumIm;
         }
-        for (int i = 0; i < n; i++) { re[i] = outRe[i]; im[i] = outIm[i]; }
+        outRe.CopyTo(re);
+        outIm.CopyTo(im);
+    }
+
+    private static (double[] Cos, double[] Sin) GetDirectTwiddles(int n)
+    {
+        lock (_twiddleLock)
+        {
+            if (_directTwiddleCache.TryGetValue(n, out (double[] Cos, double[] Sin) cached)) return cached;
+            double[] cos = new double[n];
+            double[] sin = new double[n];
+            double twoPiOverN = 2.0 * Math.PI / n;
+            for (int i = 0; i < n; i++)
+            {
+                cos[i] = Math.Cos(twoPiOverN * i);
+                sin[i] = Math.Sin(twoPiOverN * i);
+            }
+            _directTwiddleCache[n] = (cos, sin);
+            return (cos, sin);
+        }
     }
 
     /// <summary>Cached Bluestein plan for one non-power-of-two size: the chirp <c>w[n]=e^{-iπn²/N}</c> and the

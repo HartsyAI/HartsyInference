@@ -32,7 +32,7 @@ namespace HartsyInference.Audio.Models.Kokoro;
 /// <para>The "LayerNorm1d" between conv and LeakyReLU is a custom channel-axis LN with
 /// parameters named <c>gamma</c> / <c>beta</c> (vs. the standard <c>weight</c> /
 /// <c>bias</c>). We implement it as transpose → standard LayerNorm → transpose-back.</para></summary>
-public sealed unsafe class KokoroTextEncoder
+public sealed class KokoroTextEncoder
 {
     private readonly KokoroConfig _cfg;
 
@@ -74,15 +74,9 @@ public sealed unsafe class KokoroTextEncoder
         int k = _cfg.TextEncoderKernelSize;
         int pad = k / 2;
 
-        // 1. Embedding lookup → channels-last [1, T, 512], then transpose to [1, 512, T].
+        // 1. Embedding lookup (a row gather on the resident table) → channels-last [1, T, 512], then transpose to [1, 512, T].
         Tensor embCL = new(new TensorShape(1, t, c), DType.F32);
-        float* embPtr = (float*)_emb!.DataPointer;
-        float* ep = (float*)embCL.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            int id = tokenIds[i];
-            for (int d = 0; d < c; d++) ep[i * c + d] = embPtr[(long)id * c + d];
-        }
+        backend.GatherRows(embCL, _emb!, tokenIds);
 
         Tensor xCF = new(new TensorShape(1, c, t), DType.F32);
         backend.Transpose2D(xCF, embCL, t, c);

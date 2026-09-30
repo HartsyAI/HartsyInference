@@ -1,3 +1,5 @@
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -40,6 +42,18 @@ internal sealed class LstmCell
         InputDim = inputDim;
         HiddenDim = hiddenDim;
     }
+
+    /// <summary>Input-to-hidden weight <c>[4*hidden, input]</c>; null until <see cref="BindWeights"/>.</summary>
+    public Tensor? WeightIh => _wIh;
+
+    /// <summary>Hidden-to-hidden weight <c>[4*hidden, hidden]</c>; null until <see cref="BindWeights"/>.</summary>
+    public Tensor? WeightHh => _wHh;
+
+    /// <summary>Input bias <c>[4*hidden]</c>; null until <see cref="BindWeights"/>.</summary>
+    public Tensor? BiasIh => _bIh;
+
+    /// <summary>Hidden bias <c>[4*hidden]</c>; null until <see cref="BindWeights"/>.</summary>
+    public Tensor? BiasHh => _bHh;
 
     /// <summary>Hands the cell its four weight tensors (already F32). Caller resolves
     /// the PyTorch state-dict key paths — typically via <see cref="BiLstm.LoadWeights"/>
@@ -109,17 +123,78 @@ internal static unsafe class LstmOps
         {
             int gateRow = b * hidden4;
             int outRow = b * hidden;
-            for (int k = 0; k < hidden; k++)
-            {
-                float iGate = Activations.SigmoidS(g[gateRow + k]);
-                float fGate = Activations.SigmoidS(g[gateRow + hidden + k]);
-                float gGate = MathF.Tanh(g[gateRow + 2 * hidden + k]);
-                float oGate = Activations.SigmoidS(g[gateRow + 3 * hidden + k]);
-
-                float cNext = fGate * c0[outRow + k] + iGate * gGate;
-                cOut[outRow + k] = cNext;
-                hOut[outRow + k] = oGate * MathF.Tanh(cNext);
-            }
+            GateAndUpdateRow(g + gateRow, c0 + outRow, hOut + outRow, cOut + outRow, hidden);
         }
+    }
+
+    /// <summary>Runs one direction of a single-layer LSTM over a whole sequence on the host, from input
+    /// projections computed up front: <paramref name="gatesIn"/> holds <c>x·W_ihᵀ + b_ih</c> for every
+    /// timestep (row <c>t</c> at <c>gatesIn + t·gatesInStride</c>, <c>4·hidden</c> wide). Each step adds
+    /// <c>h·W_hhᵀ + b_hh</c> and applies the gate math; <c>h</c> lands in <paramref name="output"/> at
+    /// <c>t·outputStride + outputOffset</c>. The recurrence is the only sequential part of an LSTM, and at
+    /// hidden 256 it is a 1 MB weight against a 1 KB state — a host SIMD dot per gate row is faster than any
+    /// per-step device launch, and it never touches the backend, so the surrounding graph stays resident.</summary>
+    /// <param name="reverse">Walks <c>t = T-1 … 0</c> (the backward direction of a BiLSTM).</param>
+    /// <param name="h">Scratch <c>[hidden]</c>, zeroed here (PyTorch's zero initial state).</param>
+    /// <param name="c">Scratch <c>[hidden]</c>, zeroed here.</param>
+    /// <param name="gates">Scratch <c>[4·hidden]</c>.</param>
+    public static void RunSequence(float* gatesIn, int gatesInStride, float* wHh, float* bHh, int t, int hidden,
+        bool reverse, float* output, int outputStride, int outputOffset, float* h, float* c, float* gates)
+    {
+        int hidden4 = 4 * hidden;
+        new Span<float>(h, hidden).Clear();
+        new Span<float>(c, hidden).Clear();
+        for (int i = 0; i < t; i++)
+        {
+            int step = reverse ? t - 1 - i : i;
+            float* inRow = gatesIn + (long)step * gatesInStride;
+            for (int k = 0; k < hidden4; k++)
+            {
+                gates[k] = inRow[k] + bHh[k] + Dot(wHh + (long)k * hidden, h, hidden);
+            }
+            // c is updated in place; h is read by every gate row above, so it is written only after the sweep.
+            GateAndUpdateRow(gates, c, h, c, hidden);
+            new ReadOnlySpan<float>(h, hidden).CopyTo(new Span<float>(output + (long)step * outputStride + outputOffset, hidden));
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void GateAndUpdateRow(float* g, float* c0, float* hOut, float* cOut, int hidden)
+    {
+        for (int k = 0; k < hidden; k++)
+        {
+            float iGate = Activations.SigmoidS(g[k]);
+            float fGate = Activations.SigmoidS(g[hidden + k]);
+            float gGate = MathF.Tanh(g[2 * hidden + k]);
+            float oGate = Activations.SigmoidS(g[3 * hidden + k]);
+
+            float cNext = fGate * c0[k] + iGate * gGate;
+            cOut[k] = cNext;
+            hOut[k] = oGate * MathF.Tanh(cNext);
+        }
+    }
+
+    /// <summary>Four independent accumulators: a single chain is bound by FMA latency, not throughput, and at
+    /// hidden 256 that alone made the recurrence four times slower than the arithmetic allows.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float Dot(float* a, float* b, int n)
+    {
+        int width = Vector<float>.Count;
+        Vector<float> acc0 = Vector<float>.Zero, acc1 = Vector<float>.Zero, acc2 = Vector<float>.Zero, acc3 = Vector<float>.Zero;
+        int i = 0;
+        for (; i <= n - 4 * width; i += 4 * width)
+        {
+            acc0 = Vector.FusedMultiplyAdd(Vector.Load(a + i), Vector.Load(b + i), acc0);
+            acc1 = Vector.FusedMultiplyAdd(Vector.Load(a + i + width), Vector.Load(b + i + width), acc1);
+            acc2 = Vector.FusedMultiplyAdd(Vector.Load(a + i + 2 * width), Vector.Load(b + i + 2 * width), acc2);
+            acc3 = Vector.FusedMultiplyAdd(Vector.Load(a + i + 3 * width), Vector.Load(b + i + 3 * width), acc3);
+        }
+        for (; i <= n - width; i += width)
+        {
+            acc0 = Vector.FusedMultiplyAdd(Vector.Load(a + i), Vector.Load(b + i), acc0);
+        }
+        float sum = Vector.Sum((acc0 + acc1) + (acc2 + acc3));
+        for (; i < n; i++) sum += a[i] * b[i];
+        return sum;
     }
 }

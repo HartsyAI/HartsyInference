@@ -40,44 +40,31 @@ public static class IStft
         float[] outRaw = new float[rawLen];
         float[] winSq = new float[rawLen];
 
-        // Scratch buffers reused across frames.
-        float[] frameRe = new float[nFft];
-        float[] frameIm = new float[nFft];
-
-        for (int f = 0; f < frames; f++)
+        // The per-frame inverse transforms are independent, so a block of frames runs across the cores into a
+        // [block, nFft] scratch; the overlap-add that follows stays sequential in frame order, so the result is
+        // exactly the single-threaded sum. The block bound keeps the scratch small for long, wide spectrograms.
+        int blockFrames = Math.Max(1, Math.Min(frames, (1 << 22) / nFft));
+        float[] block = new float[(long)blockFrames * nFft];
+        for (int blockStart = 0; blockStart < frames; blockStart += blockFrames)
         {
-            // Reconstruct the full-length conjugate-symmetric spectrum.
-            int rowOff = f * numBins;
-            for (int k = 0; k < numBins; k++)
+            int blockEnd = Math.Min(frames, blockStart + blockFrames);
+            Parallel.For(blockStart, blockEnd, () => (Re: new float[nFft], Im: new float[nFft]), (f, _, scratch) =>
             {
-                frameRe[k] = spectReal[rowOff + k];
-                frameIm[k] = spectImag[rowOff + k];
-            }
-            for (int k = 1; k < half; k++)
-            {
-                frameRe[nFft - k] = spectReal[rowOff + k];
-                frameIm[nFft - k] = -spectImag[rowOff + k];  // conjugate
-            }
-            // The DC (k=0) and Nyquist (k=half) bins are real-valued; their imaginary
-            // parts are already 0 by construction.
+                InverseFrame(spectReal, spectImag, f, nFft, numBins, half, scratch.Re, scratch.Im);
+                Array.Copy(scratch.Re, 0, block, (long)(f - blockStart) * nFft, nFft);
+                return scratch;
+            }, _ => { });
 
-            // Inverse FFT: trick — IFFT(X) = conj(FFT(conj(X))) / N. We negate the
-            // imaginary part, run the forward FFT, negate again, and divide by N.
-            for (int i = 0; i < nFft; i++) frameIm[i] = -frameIm[i];
-            Fft.Transform(frameRe, frameIm, nFft);
-            float invN = 1f / nFft;
-            for (int i = 0; i < nFft; i++)
+            for (int f = blockStart; f < blockEnd; f++)
             {
-                frameRe[i] *= invN;
-                // frameIm should be ~0 after the inverse — discard it.
-            }
-
-            // Apply synthesis window and overlap-add.
-            long start = (long)f * hopLength;
-            for (int i = 0; i < nFft; i++)
-            {
-                outRaw[start + i] += frameRe[i] * window[i];
-                winSq[start + i] += window[i] * window[i];
+                // Apply synthesis window and overlap-add.
+                long start = (long)f * hopLength;
+                long row = (long)(f - blockStart) * nFft;
+                for (int i = 0; i < nFft; i++)
+                {
+                    outRaw[start + i] += block[row + i] * window[i];
+                    winSq[start + i] += window[i] * window[i];
+                }
             }
         }
 
@@ -96,5 +83,37 @@ public static class IStft
         float[] result = new float[trimmedLen];
         Array.Copy(outRaw, pad, result, 0, trimmedLen);
         return result;
+    }
+
+    /// <summary>One frame's inverse transform: rebuilds the conjugate-symmetric spectrum in
+    /// <paramref name="frameRe"/>/<paramref name="frameIm"/>, then leaves the time-domain frame in <paramref name="frameRe"/>.</summary>
+    private static void InverseFrame(float[] spectReal, float[] spectImag, int f, int nFft, int numBins, int half,
+        float[] frameRe, float[] frameIm)
+    {
+        // Reconstruct the full-length conjugate-symmetric spectrum.
+        long rowOff = (long)f * numBins;
+        for (int k = 0; k < numBins; k++)
+        {
+            frameRe[k] = spectReal[rowOff + k];
+            frameIm[k] = spectImag[rowOff + k];
+        }
+        for (int k = 1; k < half; k++)
+        {
+            frameRe[nFft - k] = spectReal[rowOff + k];
+            frameIm[nFft - k] = -spectImag[rowOff + k];  // conjugate
+        }
+        // The DC (k=0) and Nyquist (k=half) bins are real-valued; their imaginary
+        // parts are already 0 by construction.
+
+        // Inverse FFT: trick — IFFT(X) = conj(FFT(conj(X))) / N. We negate the
+        // imaginary part, run the forward FFT, negate again, and divide by N.
+        for (int i = 0; i < nFft; i++) frameIm[i] = -frameIm[i];
+        Fft.Transform(frameRe, frameIm, nFft);
+        float invN = 1f / nFft;
+        for (int i = 0; i < nFft; i++)
+        {
+            frameRe[i] *= invN;
+            // frameIm should be ~0 after the inverse — discard it.
+        }
     }
 }
