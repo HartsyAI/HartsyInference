@@ -115,6 +115,7 @@ SINGLE_KERNELS=(
     affine_mix
     fill_bias
     quant_int8_rowwise
+    dequant_recipe_bf16
     pixel_shuffle2d
     modulation_split4
     affine_broadcast_row_indexed
