@@ -20,6 +20,22 @@ internal static unsafe class WhisperOps
         return output;
     }
 
+    /// <summary><see cref="IBackend.Linear"/> with <see cref="IBackend.HighPrecisionGemm"/> forced on for this call, so F32
+    /// operands skip TF32; the previous setting is restored even when the GEMM throws.</summary>
+    public static void LinearFullPrecision(IBackend backend, Tensor output, Tensor input, Tensor weight, Tensor? bias)
+    {
+        bool previous = backend.HighPrecisionGemm;
+        backend.HighPrecisionGemm = true;
+        try
+        {
+            backend.Linear(output, input, weight, bias);
+        }
+        finally
+        {
+            backend.HighPrecisionGemm = previous;
+        }
+    }
+
     /// <summary>Reshapes [B, S, H*D] → [B, H, S, D] via element copy — the 4-D layout <see cref="IBackend.ScaledDotProductAttention"/> expects.</summary>
     public static void ReshapeToMultiHead4D(Tensor output, Tensor input, int batch, int seqLen, int numHeads, int headDim)
     {

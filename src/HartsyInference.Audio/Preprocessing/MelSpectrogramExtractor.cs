@@ -175,9 +175,14 @@ public sealed class MelSpectrogramExtractor
 
     private readonly Config _cfg;
     private readonly float[] _window;
-    private readonly float[,] _filterbank;
     private readonly int _numBins;
     private readonly int _fftSize;
+
+    // The filterbank row-major and flat, with each row's nonzero bin range: a mel filter is a triangle a few bins
+    // wide, so summing only [start, end) skips products that are exactly +0 and leaves every sum bit-identical.
+    private readonly float[] _filterWeights;   // [n_mels * _numBins]
+    private readonly int[] _filterStart;       // [n_mels]
+    private readonly int[] _filterEnd;         // [n_mels]
 
     // Reusable scratch arrays (one set per extractor instance).
     private readonly float[] _frame;       // [_fftSize] zero-padded windowed frame
@@ -193,7 +198,24 @@ public sealed class MelSpectrogramExtractor
         // FFT size must be a power of two; round up if NFft is not.
         _fftSize = Fft.NextPow2(cfg.NFft);
         _numBins = _fftSize / 2 + 1;
-        _filterbank = MelFilterbank.Get(cfg.SampleRate, _fftSize, cfg.NMels, cfg.Fmin, cfg.Fmax, cfg.Scale, cfg.SlaneyNorm);
+        float[,] filterbank = MelFilterbank.Get(cfg.SampleRate, _fftSize, cfg.NMels, cfg.Fmin, cfg.Fmax, cfg.Scale, cfg.SlaneyNorm);
+        _filterWeights = new float[cfg.NMels * _numBins];
+        _filterStart = new int[cfg.NMels];
+        _filterEnd = new int[cfg.NMels];
+        for (int m = 0; m < cfg.NMels; m++)
+        {
+            int start = -1, end = 0;
+            for (int k = 0; k < _numBins; k++)
+            {
+                float w = filterbank[m, k];
+                _filterWeights[m * _numBins + k] = w;
+                if (w == 0f) continue;
+                if (start < 0) start = k;
+                end = k + 1;
+            }
+            _filterStart[m] = Math.Max(start, 0);
+            _filterEnd[m] = end;
+        }
 
         _frame = new float[_fftSize];
         _stftRe = new float[_numBins];
@@ -230,57 +252,10 @@ public sealed class MelSpectrogramExtractor
 
         for (int t = 0; t < frames; t++)
         {
-            int start = t * _cfg.HopLength;
-            // Windowed frame, zero-padded to FFT size. torch.stft centers a shorter window in the FFT frame;
-            // the default left-aligns it (moot when WinLength == NFft).
-            int woff = _cfg.CenterWindowInFft ? (_fftSize - _cfg.WinLength) / 2 : 0;
-            for (int i = 0; i < _fftSize; i++) _frame[i] = 0f;
-            for (int i = 0; i < _cfg.WinLength; i++)
-            {
-                float sample = (start + woff + i) < src.Length ? src[start + woff + i] : 0f;
-                _frame[woff + i] = sample * _window[i];
-            }
-
-            // Real FFT.
-            Fft.RealTransform(_frame, _stftRe, _stftIm, _fftSize);
-
-            // Magnitude or power.
-            if (_cfg.PowerSpectrum)
-            {
-                for (int k = 0; k < _numBins; k++)
-                    _power[k] = _stftRe[k] * _stftRe[k] + _stftIm[k] * _stftIm[k];
-            }
-            else
-            {
-                for (int k = 0; k < _numBins; k++)
-                    _power[k] = MathF.Sqrt(_stftRe[k] * _stftRe[k] + _stftIm[k] * _stftIm[k]);
-            }
-
-            // Mel filterbank: [n_mels, n_bins] × [n_bins] -> [n_mels]
-            // Plain row-major matmul; the filterbank is sparse (triangular) but at
-            // [80, 201] sizes a dense matmul is cache-friendly enough that the
-            // sparse-skip codepath isn't worth the branch.
+            TransformFrame(src, t * _cfg.HopLength);
             for (int m = 0; m < _cfg.NMels; m++)
             {
-                float acc = 0f;
-                for (int k = 0; k < _numBins; k++) acc += _filterbank[m, k] * _power[k];
-                _melCol[m] = acc;
-            }
-
-            // Log compression (skipped entirely for LogBase.None — raw mel values pass through).
-            float floor = _cfg.LogFloor ?? 1e-10f;
-            for (int m = 0; m < _cfg.NMels; m++)
-            {
-                float l;
-                if (_cfg.LogBase == LogBase.None)
-                {
-                    l = _melCol[m];
-                }
-                else
-                {
-                    float v = _cfg.AdditiveLogFloor ? _melCol[m] + floor : MathF.Max(_melCol[m], floor);
-                    l = _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
-                }
+                float l = Compress(_melCol[m]);
                 output[m, t] = l;
                 if (l > globalMax) globalMax = l;
             }
@@ -316,7 +291,79 @@ public sealed class MelSpectrogramExtractor
         for (int i = n; i < _fftSize; i++) _frame[i] = 0f;
 
         Fft.RealTransform(_frame, _stftRe, _stftIm, _fftSize);
+        SpectrumToMel();
 
+        for (int m = 0; m < _cfg.NMels; m++) melColumn[m] = Compress(_melCol[m]);
+    }
+
+    /// <summary>The log-mel of <paramref name="audio"/> zero-padded to <paramref name="paddedLength"/> samples, written
+    /// row-major <c>[n_mels, OutputFrames(paddedLength)]</c> into <paramref name="output"/>: bit-for-bit what
+    /// <see cref="Compute(ReadOnlySpan{float}, float[,])"/> returns for the padded buffer, without building it. A frame
+    /// whose window lies wholly in the padding is all zeros, so its column is one constant and skips the transform —
+    /// most of Whisper's 30 s window for a short utterance. Only for non-centered presets: reflect padding would read
+    /// the tail.</summary>
+    public void ComputeZeroPadded(ReadOnlySpan<float> audio, int paddedLength, Span<float> output)
+    {
+        if (_cfg.Center)
+            throw new InvalidOperationException("ComputeZeroPadded needs a non-centered STFT; centered presets reflect-pad the tail.");
+        if (audio.Length > paddedLength)
+            throw new ArgumentException($"audio has {audio.Length} samples, more than the padded length {paddedLength}.", nameof(audio));
+        int frames = OutputFrames(paddedLength);
+        if (output.Length < _cfg.NMels * frames)
+            throw new ArgumentException($"output must hold [{_cfg.NMels}, {frames}] values.", nameof(output));
+
+        int woff = _cfg.CenterWindowInFft ? (_fftSize - _cfg.WinLength) / 2 : 0;
+        float silent = Compress(0f);
+        float globalMax = float.MinValue;
+        for (int t = 0; t < frames; t++)
+        {
+            int start = t * _cfg.HopLength;
+            if (start + woff >= audio.Length)
+            {
+                for (int m = 0; m < _cfg.NMels; m++) output[m * frames + t] = silent;
+                if (silent > globalMax) globalMax = silent;
+                continue;
+            }
+            TransformFrame(audio, start);
+            for (int m = 0; m < _cfg.NMels; m++)
+            {
+                float l = Compress(_melCol[m]);
+                output[m * frames + t] = l;
+                if (l > globalMax) globalMax = l;
+            }
+        }
+
+        if (_cfg.Norm == Normalization.WhisperDynamicRange)
+        {
+            float clampMin = globalMax - _cfg.DynamicRangeDb;
+            float invScale = 1f / _cfg.NormScale;
+            Span<float> values = output[..(_cfg.NMels * frames)];
+            for (int i = 0; i < values.Length; i++)
+                values[i] = (MathF.Max(values[i], clampMin) + _cfg.NormOffset) * invScale;
+        }
+    }
+
+    /// <summary>Windows the frame starting at <paramref name="start"/> (samples past the end of <paramref name="src"/>
+    /// read as zero), transforms it and leaves the filterbank output in <c>_melCol</c>.</summary>
+    private void TransformFrame(ReadOnlySpan<float> src, int start)
+    {
+        // Windowed frame, zero-padded to FFT size. torch.stft centers a shorter window in the FFT frame;
+        // the default left-aligns it (moot when WinLength == NFft).
+        int woff = _cfg.CenterWindowInFft ? (_fftSize - _cfg.WinLength) / 2 : 0;
+        for (int i = 0; i < _fftSize; i++) _frame[i] = 0f;
+        for (int i = 0; i < _cfg.WinLength; i++)
+        {
+            float sample = (start + woff + i) < src.Length ? src[start + woff + i] : 0f;
+            _frame[woff + i] = sample * _window[i];
+        }
+
+        Fft.RealTransform(_frame, _stftRe, _stftIm, _fftSize);
+        SpectrumToMel();
+    }
+
+    /// <summary>Power or magnitude of the transformed frame, then the filterbank, into <c>_melCol</c>.</summary>
+    private void SpectrumToMel()
+    {
         if (_cfg.PowerSpectrum)
         {
             for (int k = 0; k < _numBins; k++)
@@ -331,22 +378,22 @@ public sealed class MelSpectrogramExtractor
         for (int m = 0; m < _cfg.NMels; m++)
         {
             float acc = 0f;
-            for (int k = 0; k < _numBins; k++) acc += _filterbank[m, k] * _power[k];
+            int row = m * _numBins;
+            for (int k = _filterStart[m]; k < _filterEnd[m]; k++) acc += _filterWeights[row + k] * _power[k];
             _melCol[m] = acc;
         }
+    }
 
-        float floor = _cfg.LogFloor ?? 1e-10f;
-        for (int m = 0; m < _cfg.NMels; m++)
+    /// <summary>Log compression of one mel value (identity for <see cref="LogBase.None"/>).</summary>
+    private float Compress(float mel)
+    {
+        if (_cfg.LogBase == LogBase.None)
         {
-            if (_cfg.LogBase == LogBase.None)
-            {
-                melColumn[m] = _melCol[m];
-                continue;
-            }
-            float v = _cfg.AdditiveLogFloor ? _melCol[m] + floor : MathF.Max(_melCol[m], floor);
-            float l = _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
-            melColumn[m] = l;
+            return mel;
         }
+        float floor = _cfg.LogFloor ?? 1e-10f;
+        float v = _cfg.AdditiveLogFloor ? mel + floor : MathF.Max(mel, floor);
+        return _cfg.LogBase == LogBase.Log10 ? MathF.Log10(v) : MathF.Log(v);
     }
 
     /// <summary>Exposes the config for streaming clients that need WinLength / HopLength
