@@ -87,6 +87,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
 
     public Tensor DecodeBatch(ReadOnlySpan<int> tokenIds, ISequenceState[] states)
     {
+        if (Staged) throw new NotSupportedException("Batch decode is not available for a staged placement.");
         int n = tokenIds.Length;
         if (states.Length != n) throw new ArgumentException($"{n} tokens for {states.Length} sequence states.");
         int[] positions = new int[n];
