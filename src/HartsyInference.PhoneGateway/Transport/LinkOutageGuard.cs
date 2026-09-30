@@ -31,6 +31,9 @@ public sealed class LinkOutageGuard : IDisposable
         _options = options;
     }
 
+    /// <summary>An outage wait has started for a live call (metrics hook).</summary>
+    public Action? OutageStarted { get; set; }
+
     /// <summary>Plays a prompt to the caller and returns its duration in milliseconds.</summary>
     public Func<PromptKind, int>? PlayPrompt { get; set; }
 
@@ -75,25 +78,29 @@ public sealed class LinkOutageGuard : IDisposable
 
     public void LinkDisconnected()
     {
+        bool started;
         lock (_lock)
         {
             _linkUp = false;
-            if (_inCall)
-            {
-                StartOutageLocked();
-            }
+            started = _inCall && StartOutageLocked();
+        }
+        if (started)
+        {
+            OutageStarted?.Invoke();
         }
     }
 
     public void CallStarted()
     {
+        bool started;
         lock (_lock)
         {
             _inCall = true;
-            if (!_linkUp)
-            {
-                StartOutageLocked();
-            }
+            started = !_linkUp && StartOutageLocked();
+        }
+        if (started)
+        {
+            OutageStarted?.Invoke();
         }
     }
 
@@ -106,16 +113,18 @@ public sealed class LinkOutageGuard : IDisposable
         }
     }
 
-    private void StartOutageLocked()
+    /// <summary>Starts the outage wait unless one is running; true when a new one started.</summary>
+    private bool StartOutageLocked()
     {
         if (_outage is not null)
         {
-            return;
+            return false;
         }
         _outages++;
         CancellationTokenSource outage = new();
         _outage = outage;
         _ = RunOutageAsync(outage);
+        return true;
     }
 
     private bool CancelOutageLocked()

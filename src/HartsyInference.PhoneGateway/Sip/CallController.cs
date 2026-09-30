@@ -62,9 +62,14 @@ public sealed class CallController : IDisposable
         _metrics = metrics;
         _guard = new LinkOutageGuard(options.Outage)
         {
+            OutageStarted = metrics.Outage,
             PlayPrompt = PlayGuardPrompt,
             ResumeCall = ResumeCall,
-            HangUp = () => HangUp(LinkCallEndReason.Failed),
+            HangUp = () =>
+            {
+                metrics.OutageHangup();
+                HangUp(LinkCallEndReason.Failed);
+            },
         };
     }
 
