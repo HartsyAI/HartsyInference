@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.211
+## alpha.210
 
 - **Expert bank, expert cache and device dequant** (DeepSeek-V4.1-Flash program PR 12). `ExpertBank` builds each `ExpertWeights(W1, W2, W3)`
   once so the `Tensor` identities the weight caches key on stay stable. `IExpertCache` (`Acquire`/`Prefetch`/`Release`/`Stats`/`BudgetBytes`)
