@@ -91,7 +91,8 @@ public static class ModelDownloader
             if (File.Exists(target))
                 return;
             string audioRoot = Audio.AudioModelRoot.Location();
-            if (target.StartsWith(audioRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            // Ignoring case: on Windows and macOS the target keeps the catalog's Audio/ spelling for the same folder.
+            if (target.StartsWith(audioRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             {
                 // A converted checkpoint may stand in for this asset; linking it beats downloading the original.
                 HartsyInference.Audio.Cache.AudioStandIns.Resync(audioRoot);

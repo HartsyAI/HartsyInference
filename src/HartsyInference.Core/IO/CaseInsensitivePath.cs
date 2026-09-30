@@ -9,8 +9,9 @@ namespace HartsyInference.Core.IO;
 /// is always the case on case-insensitive filesystems (Windows, macOS). Otherwise each segment keeps its spelling when
 /// that exists, else takes the one sibling of the right kind that matches ignoring case. The first segment with no such
 /// sibling, or with two or more (ambiguous: logged once, never picked arbitrarily), keeps its spelling together with
-/// every segment after it, so a path that is about to be created lands inside the folders that already exist. Only a
-/// missing segment costs a listing of its parent directory; nothing is scanned recursively.</remarks>
+/// every segment after it, so a path that is about to be created lands inside the folders that already exist. There is
+/// no backtracking: an exact segment is kept even when the rest of the path exists only under a case variant of it.
+/// Only a missing segment costs a listing of its parent directory; nothing is scanned recursively.</remarks>
 public static class CaseInsensitivePath
 {
     private static readonly char[] _separators = [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar];
@@ -36,6 +37,7 @@ public static class CaseInsensitivePath
         ArgumentNullException.ThrowIfNull(root);
         ArgumentNullException.ThrowIfNull(relativePath);
         string exact = Path.Combine(root, relativePath);
+        // A rooted relativePath replaces root, as Path.Combine does, so there is nothing under root to match.
         if (Path.IsPathRooted(relativePath) || Exists(exact, kind))
         {
             return exact;
