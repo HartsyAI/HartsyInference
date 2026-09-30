@@ -21,6 +21,18 @@ public static class ByteLevelCodec
         return Encoding.UTF8.GetString(bytes, 0, n);
     }
 
+    /// <summary>Reverses the byte-level mapping to raw bytes (unknown codepoints skipped), without UTF-8 decoding.</summary>
+    public static byte[] DecodeToBytes(string raw)
+    {
+        byte[] bytes = new byte[raw.Length];
+        int n = 0;
+        foreach (char c in raw)
+        {
+            if (CharToByte.TryGetValue(c, out byte b)) bytes[n++] = b;
+        }
+        return n == bytes.Length ? bytes : bytes.AsSpan(0, n).ToArray();
+    }
+
     /// <summary>Encodes a UTF-8 string into the GPT-2 byte-level space (each byte → its remapped char). The inverse of <see cref="Decode"/>; used to look up byte-level token strings for special-token matching.</summary>
     public static string Encode(string text)
     {

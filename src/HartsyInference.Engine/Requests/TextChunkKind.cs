@@ -17,4 +17,13 @@ public enum TextChunkKind
 
     /// <summary>A parsed native tool call.</summary>
     NativeToolCall,
+
+    /// <summary>Incremental reasoning text from the model's think block.</summary>
+    Reasoning,
+
+    /// <summary>A fragment of a streaming tool call; <see cref="TextChunk.ToolCallIndex"/> says which call.</summary>
+    ToolCallDelta,
+
+    /// <summary>Token accounting, carried in <see cref="TextChunk.Usage"/>.</summary>
+    Usage,
 }

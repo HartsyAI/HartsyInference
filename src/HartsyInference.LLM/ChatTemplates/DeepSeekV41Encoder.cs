@@ -1,3 +1,4 @@
+using HartsyInference.LLM.OutputParsing;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.ChatTemplates;
@@ -38,6 +39,10 @@ public sealed class DeepSeekV41Encoder : IConversationEncoder
             ?? throw new InvalidOperationException($"Tokenizer has no '{ImageTokenLiteral}' token.");
         return ExpandImages(raw, placeholderId, imageOrder, options.Images!, reasoningOpen);
     }
+
+    /// <inheritdoc />
+    public IOutputParser CreateParser(ILlmTokenizer tokenizer, OutputParserState state)
+        => new DeepSeekV41OutputParser(tokenizer, state);
 
     private static EncodedConversation ExpandImages(int[] raw, int placeholderId, List<int> imageOrder,
         IReadOnlyList<ImageGrid> grids, bool reasoningOpen)

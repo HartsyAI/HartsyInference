@@ -1,3 +1,4 @@
+using HartsyInference.LLM.OutputParsing;
 using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.LLM.ChatTemplates;
@@ -23,5 +24,13 @@ public sealed class ChatTemplateEncoderAdapter : IChatTemplate
     {
         EncodeOptions options = new() { AddGenerationPrompt = addGenerationPrompt, Thinking = enableThinking ?? false };
         return _encoder.Encode(tokenizer, messages, options).Ids;
+    }
+
+    /// <summary>Builds the parser for completions of the prompt these <paramref name="messages"/> render to; the prompt is encoded once more to learn whether it ended inside the think block.</summary>
+    public IOutputParser CreateParser(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking)
+    {
+        EncodeOptions options = new() { AddGenerationPrompt = true, Thinking = enableThinking ?? false };
+        ParserInitialState initial = _encoder.Encode(tokenizer, messages, options).InitialParserState;
+        return _encoder.CreateParser(tokenizer, initial.ToParserState());
     }
 }
