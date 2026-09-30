@@ -11514,6 +11514,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 Attempt("W8A8 caches", () => FreeW8A8Cache(state));
             }
             Attempt("FP8 input-scale cache", FreeAllFp8InputScales);
+            Attempt("quant workspace", DisposeQuantWorkspace);
             if (state is not null) Attempt("transfer caches", () => GpuTransferHelper.EvictAll(state));
             if (_streamingCache is not null) Attempt("streaming pinned staging", _streamingCache.UnregisterPinnedSources);
 
