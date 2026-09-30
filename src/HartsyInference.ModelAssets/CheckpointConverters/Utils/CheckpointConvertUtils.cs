@@ -745,25 +745,25 @@ public static unsafe class CheckpointConvertUtils
 
     // ── FP8 Scaled ──────────────────────────────────────────
 
-    /// <summary>Widens, in place, every rank-0/1 FP8 tensor (biases, norm affines) to F32, folding any <see cref="Tensor.Fp8ScaleFactor"/>, and returns how many it widened.</summary>
+    /// <summary>Widens, in place, every rank-0/1 FP8 tensor (biases, norm affines) to F32, folding any <see cref="Tensor.Fp8ScaleFactor"/>, and returns the tensors it replaced so the caller can dispose the ones it owns.</summary>
     /// <remarks>Some repacks cast every tensor to fp8, not just the GEMM weights: the Comfy-Org HunyuanImage 2.1 file
     /// stores each bias and every LayerNorm/RMSNorm affine as raw F8_E4M3. Only a GEMM has an fp8 path; the norm kernels
     /// read their affine at the activation's precision, and the CUDA F32 LayerNorm read those 1-byte values as floats —
     /// garbage text conditioning and an out-of-bounds read. ComfyUI never meets this because it casts every weight and
     /// bias to the compute dtype per op. Widening here costs a few MB and matches what a GGUF delivers for the same
     /// tensors, so no backend op has to learn F8 vectors.</remarks>
-    public static int WidenFp8Vectors(Dictionary<string, Tensor> weights)
+    public static List<Tensor> WidenFp8Vectors(Dictionary<string, Tensor> weights)
     {
-        int widened = 0;
+        List<Tensor> replaced = new();
         foreach (string key in weights.Keys.ToList())
         {
             Tensor t = weights[key];
             if (t.Shape.Rank > 1 || (t.DType != DType.F8E4M3 && t.DType != DType.F8E5M2) || t.QuantInfo is not null)
                 continue;
             weights[key] = t.CastTo(DType.F32);
-            widened++;
+            replaced.Add(t);
         }
-        return widened;
+        return replaced;
     }
 
 

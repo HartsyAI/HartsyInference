@@ -72,11 +72,22 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
             // here would change a working path on a guess.
             bool castBf16 = source.Format == ModelFormat.Gguf;
             Dictionary<string, Tensor> raw = new Dictionary<string, Tensor>(source.Weights.Count, StringComparer.Ordinal);
+            List<IDisposable> casts = new List<IDisposable>();
             foreach (KeyValuePair<string, Tensor> kv in source.Weights)
             {
-                raw[kv.Key] = castBf16 && kv.Value.DType == DType.BF16 ? kv.Value.CastTo(DType.F16) : kv.Value;
+                Tensor tensor = kv.Value;
+                if (castBf16 && tensor.DType == DType.BF16)
+                {
+                    tensor = tensor.CastTo(DType.F16);
+                    casts.Add(tensor);
+                }
+                raw[kv.Key] = tensor;
             }
+            checkpoint = new CompositeDisposable([source, .. casts]);
             HunyuanImageCheckpointConverter.ConvertedWeights converted = HunyuanImageCheckpointConverter.Convert(raw);
+            // The converter's row splits and widened vectors are copies nothing else frees; they live as long as the
+            // checkpoint does.
+            checkpoint = new CompositeDisposable(checkpoint, converted.Owned);
             if (converted.Transformer.Count == 0)
             {
                 throw new InvalidOperationException($"HunyuanImage checkpoint '{Path.GetFileName(context.CheckpointPath)}' contains no transformer weights.");
@@ -93,7 +104,7 @@ public sealed class HunyuanImageRecipe : IArchitectureRecipe
                 QuantizedWeightPolicy.PrepareForBackends(converted.Transformer, context.TransformerBackends);
             // Tracked immediately so a failure further down frees the widened copies rather than
             // leaving them to the finalizer.
-            checkpoint = new CompositeDisposable(source, prepared);
+            checkpoint = new CompositeDisposable(checkpoint, prepared);
             MergedLoraStack? loraStack = RecipeLoraMerge.Apply(
                 context,
                 new LoraMergeTargets { Transformer = converted.Transformer },

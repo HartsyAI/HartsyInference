@@ -1,3 +1,4 @@
+using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -24,6 +25,11 @@ public sealed class HunyuanImageCheckpointConverter
 
         /// <summary>True when at least one transformer linear has FP8 storage.</summary>
         public required bool IsFp8Mix { get; init; }
+
+        /// <summary>Every tensor the conversion allocated rather than passed through — the fused-qkv/<c>linear1</c> row
+        /// splits, the flattened patch embed, the widened fp8 vectors. Disposing it frees them; it belongs to whatever
+        /// owns the source checkpoint, since their lifetime is the model's.</summary>
+        public required IDisposable Owned { get; init; }
     }
 
     /// <summary>Partitions a flat dict by key prefix. Original-Tencent layouts (GGUF repacks: <c>double_blocks.*.img_attn_qkv</c>, <c>txt_in.individual_token_refiner</c>, …) are remapped to diffusers naming first via <see cref="ConvertTencentToDiffusers"/>.</summary>
@@ -34,6 +40,7 @@ public sealed class HunyuanImageCheckpointConverter
     public static ConvertedWeights Convert(IReadOnlyDictionary<string, Tensor> source)
     {
         CheckpointConvertUtils.RequireFoldedCompanions(source, nameof(HunyuanImageCheckpointConverter));
+        HashSet<Tensor> sourceTensors = new(source.Values, ReferenceEqualityComparer.Instance);
         Dictionary<string, Tensor> allWeights = source as Dictionary<string, Tensor>
             ?? new Dictionary<string, Tensor>(source, StringComparer.Ordinal);
         if (allWeights.ContainsKey("double_blocks.0.img_attn_qkv.weight") ||
@@ -92,8 +99,16 @@ public sealed class HunyuanImageCheckpointConverter
         }
 
         bool isFp8Mix = DetectFp8Mix(transformer);
-        CheckpointConvertUtils.WidenFp8Vectors(transformer);
+        // A widened vector may replace a split this conversion made (a fused-qkv bias third); that intermediate has no
+        // other holder, so it goes now rather than into Owned.
+        foreach (Tensor replaced in CheckpointConvertUtils.WidenFp8Vectors(transformer))
+        {
+            if (!sourceTensors.Contains(replaced)) replaced.Dispose();
+        }
 
+        Tensor[] created = transformer.Values.Concat(vae.Values).Concat(clipL.Values).Concat(t5.Values)
+            .Where(tensor => !sourceTensors.Contains(tensor))
+            .Distinct(ReferenceEqualityComparer.Instance).Cast<Tensor>().ToArray();
         return new ConvertedWeights
         {
             Transformer = transformer,
@@ -101,6 +116,7 @@ public sealed class HunyuanImageCheckpointConverter
             ClipL = clipL,
             T5 = t5,
             IsFp8Mix = isFp8Mix,
+            Owned = new CompositeDisposable(created),
         };
     }
 

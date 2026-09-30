@@ -86,6 +86,11 @@ public class HunyuanImageCheckpointConverterTests
         Assert.Equal([1.0f, 0.5f, -2.0f], new ReadOnlySpan<float>((void*)widened.DataPointer, 3).ToArray());
         Assert.Same(weight, converted.Transformer["proj_out.weight"]);
         Assert.True(converted.IsFp8Mix);
+
+        // The widened copy belongs to the conversion; the passed-through matrix still belongs to the checkpoint.
+        converted.Owned.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => widened.AsSpan<float>().Length);
+        Assert.Equal(0x38, *(byte*)weight.DataPointer);
     }
 
     private static unsafe Tensor Fp8(byte[] bytes, TensorShape shape)
