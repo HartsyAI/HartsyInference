@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.212
+
+- **Fix: DeepSeek-V4.1 checkpoint refused the real official Engram shards** (DeepSeek-V4.1-Flash program). Shards 47 and 48 hold each
+  layer's embedding tables (`[rows,256]` F8_E4M3 + `[rows,8]` F8_E8M0) together with `engram.q_weight`, `engram.k_weight` and
+  `engram.wkv.{weight,scale}` (verified against the `dba1be0a` index and shard 47 header), and `DeepSeekV41Checkpoint.Open` threw "Engram
+  tables share shards with other weights". The tables stay pread-only and never mapped; the small Engram weights in the same shard are now
+  pread into owned tensors by the new `ShardedSafeTensorSet.ReadTensor`, which `GetWeight` and `GetQuant` use for them. Any other weight
+  sharing a table's shard is still refused. The tiny test checkpoint now mirrors the real shard layout.
+
 ## alpha.211
 
 - **Engram constants, hasher and row store** (DeepSeek-V4.1-Flash program PR 13, minus the in-model module). The constants (compressed token
