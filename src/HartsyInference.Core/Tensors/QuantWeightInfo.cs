@@ -1,3 +1,5 @@
+using HartsyInference.Core.Tensors.Quant;
+
 namespace HartsyInference.Core.Tensors;
 
 /// <summary>Quantization companions a ComfyUI checkpoint ships alongside a weight, carried on the weight itself so a backend can consume it <b>packed</b> instead of materializing a dequantized copy.</summary>
@@ -26,6 +28,10 @@ public sealed record QuantWeightInfo
     /// The quantizer only rotates a layer when <c>in_features % 256 == 0</c>, so 0 is common and not an error.</remarks>
     public int ConvRotGroupSize { get; init; }
 
+    /// <summary>The block-scaled recipe for checkpoints whose companions are tensors on both sides of a 2-D block (DeepSeek-V4.1); null for every Comfy format above.</summary>
+    /// <remarks>Recipes use their own <see cref="Format"/> strings, so <c>BlockScaleFormats.FromQuantFormat</c> never mistakes them for the Blackwell cuBLASLt formats.</remarks>
+    public QuantRecipe? Recipe { get; init; }
+
     /// <summary>The descriptor's <c>full_precision_matrix_mult</c>: this layer must dequantize and run a normal GEMM.</summary>
     public bool FullPrecisionMatMul { get; init; }
 
@@ -40,6 +46,7 @@ public sealed record QuantWeightInfo
     /// <param name="weightKey">The weight's checkpoint key, named in the refusal so the caller need not re-wrap it.</param>
     public QuantWeightInfo SliceRows(long rowOffset, long rowCount, string weightKey)
     {
+        QuantRecipe? recipe = Recipe?.SliceRows(rowOffset, rowCount, weightKey);
         Tensor? blockScale = BlockScale;
         if (blockScale is not null)
         {
@@ -50,7 +57,8 @@ public sealed record QuantWeightInfo
             blockScale = blockScale.SliceRows(rowOffset, rowCount);
         }
         Tensor? rowScale = RowScale is null || RowScale.ElementCount == 1 ? RowScale : RowScale.SliceRows(rowOffset, rowCount);
-        return ReferenceEquals(rowScale, RowScale) && ReferenceEquals(blockScale, BlockScale) ? this : this with { RowScale = rowScale, BlockScale = blockScale };
+        return ReferenceEquals(rowScale, RowScale) && ReferenceEquals(blockScale, BlockScale) && ReferenceEquals(recipe, Recipe)
+            ? this : this with { RowScale = rowScale, BlockScale = blockScale, Recipe = recipe };
     }
 
     /// <summary>Rows per swizzle tile of a block-scale companion (cuBLASLt's blocked layout: 128 rows × 4 block columns, tiles ordered by tile-row).</summary>

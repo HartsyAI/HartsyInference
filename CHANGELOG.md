@@ -6,6 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.207
+
+- **Quant recipes and companion binder** (DeepSeek-V4.1-Flash program PR 5). `QuantRecipe` (`Core/Tensors/Quant/`) describes one
+  quantized weight as encoding + `BlockGeometry` + scale tensor and slices scale-aware: `SliceRows` on block-row boundaries,
+  `SliceCols` on block-column boundaries (byte aligned for 4-bit), otherwise `NotSupportedException` naming the key and range
+  rather than pairing elements with another block's scale. `QuantWeightInfo.Recipe` carries it, and recipes use their own
+  `Format` strings (`recipe-fp8-block-e8m0`, ...) so `BlockScaleFormats.FromQuantFormat` cannot route them into the Blackwell
+  cuBLASLt path.
+- `QuantCompanionBinder.Bind(inventory, QuantFlavor)` pairs each weight with its scale companions from headers alone
+  (Official `.scale`/`.weight_scale_inv`, NVFP4, Quark, MLX affine gs64, EXL3) and infers a unique block geometry from the scale
+  shape. One aggregated error lists unpaired weights, orphan companions, ambiguous or unmatched geometry and bad scale dtypes.
+- Host codecs `Fp8BlockE8M0Codec` (FP8 E4M3, 32x32 or 1x32 E8M0 scales) and `Mxfp4E8M0Codec` (E2M1, low nibble = even element)
+  expose `DequantRows(packed, recipe, rowOffset, rowCount, dest)`; the scale is a multiplier `2^(e - 127)`, byte 255 is NaN.
+- **Fix:** `ApplyFp8ScaledDequant` silently dropped a rank-2 fp8 `.weight_scale`, leaving the raw fp8 weight unscaled. It now
+  throws for any non-scalar scale on an fp8 weight.
+- Milestone M1 (`DeepSeekV41Shard3ParityTests`, `tests/python-reference/dump_deepseek_v41_shard3_ref.py`) compares the codecs to the
+  official `kernel.py`/`convert.py` dequant on the first shard; it is skipped unless the checkpoint and fixtures exist.
+
 ## alpha.205
 
 - **Header-first sharded safetensors** (`ShardedSafeTensorSet`, DeepSeek-V4.1-Flash program PR 4). `OpenIndex` (driven by

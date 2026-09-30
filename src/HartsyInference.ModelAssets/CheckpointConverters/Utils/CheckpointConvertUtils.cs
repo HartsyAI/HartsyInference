@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Text;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
@@ -872,6 +873,12 @@ public static unsafe class CheckpointConvertUtils
                 // silently DROP the scale → the raw fp8 weight (±448) ran ~5× hot → the block activations exploded
                 // and every token collapsed to the dominant direction (the Wan-Animate checkerboard). Read the scalar
                 // as F32 for any real-valued scalar companion (F32 pass-through, else cast).
+                // A block/row scale is not a scalar: folding it away would run the raw fp8 weight unscaled.
+                if (weightScales.TryGetValue(baseKey, out Tensor? blockScaleT)
+                    && blockScaleT.Shape.Rank >= 2 && blockScaleT.Shape.ElementCount > 1)
+                    throw new HartsyInferenceException(
+                        $"fp8 weight '{key}' has a rank-{blockScaleT.Shape.Rank} scale {blockScaleT.Shape}; only scalar scales fold into "
+                        + "Fp8ScaleFactor. Bind block scales with QuantCompanionBinder instead of dropping them.");
                 if (weightScales.TryGetValue(baseKey, out Tensor? scaleT) && scaleT.Shape.ElementCount == 1
                     && (scaleT.DType == DType.F32 || scaleT.DType == DType.F16 || scaleT.DType == DType.BF16))
                 {
