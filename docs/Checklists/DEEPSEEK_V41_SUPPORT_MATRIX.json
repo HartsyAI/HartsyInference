@@ -93,7 +93,7 @@
       "backends": {
         "CPU": "Implemented",
         "CUDA": "Implemented",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -115,7 +115,7 @@
       "acceptanceTest": "MoeReferenceTests vs Python; exact-tie CPU==CUDA",
       "pr": 2,
       "status": "InProgress",
-      "note": "MoeRoute, MoeBuildDispatch, MoeCombine, TopKLastDim and Softplus: CPU and CUDA vs the routing ports and a torch fixture; Vulkan throws NotSupported until PR 24b; not checkpoint-verified"
+      "note": "MoeRoute, MoeBuildDispatch, MoeCombine, TopKLastDim and Softplus: CPU and CUDA vs the routing ports and a torch fixture; Vulkan (PR 24b): matches the CPU reference (ids, permutations and top-k indices exact, router weights within 5e-6 relative, Softplus within 1e-6 relative, combine and dispatch bit-identical, MoeCombine skips out-of-range slots instead of throwing); Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected; not checkpoint-verified"
     },
     {
       "id": "core.moe.exec",
@@ -155,7 +155,7 @@
       "backends": {
         "CPU": "Implemented",
         "CUDA": "Implemented",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -177,7 +177,7 @@
       "acceptanceTest": "CPU refs vs Python dumps; CUDA vs ref 1e-5",
       "pr": 6,
       "status": "InProgress",
-      "note": "SparseLatentAttention, IndexerScores, HcSplitSinkhorn/HcPreMix/HcPostMix, QuantizeLatentRows, ActQuantDequantInPlace and BuildWindowIndices: CPU refs match torch dumps (quant bytes exact, attention 1e-5, Sinkhorn 1e-6); CUDA matches the CPU refs (attention/indexer 1e-5, quant/act-quant/hc-mix/window bit-exact); Vulkan throws NotSupported until PR 24b; not checkpoint-verified, nothing here is wired into a model"
+      "note": "SparseLatentAttention, IndexerScores, HcSplitSinkhorn/HcPreMix/HcPostMix, QuantizeLatentRows, ActQuantDequantInPlace and BuildWindowIndices: CPU refs match torch dumps (quant bytes exact, attention 1e-5, Sinkhorn 1e-6); CUDA matches the CPU refs (attention/indexer 1e-5, quant/act-quant/hc-mix/window bit-exact); Vulkan (PR 24b): attention and indexer within 1e-5 of the CPU reference, Sinkhorn within 1e-6, HC mixes, quantizer bytes, act-quant and window indices exact; SparseLatentAttention is NotSupported above k=3800 and QuantizeLatentRows is NotSupported for destination tensors that are not whole 32-bit words; Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected; not checkpoint-verified, nothing here is wired into a model"
     },
     {
       "id": "core.block",
@@ -218,7 +218,7 @@
       "backends": {
         "CPU": "Implemented",
         "CUDA": "Implemented",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -240,7 +240,7 @@
       "acceptanceTest": "parity with dumped rope outputs; MlaForward untouched",
       "pr": 6,
       "status": "InProgress",
-      "note": "ApplyRopeInterleaved(x, cos, sin, rotaryDim, dimOffset) overload: CPU matches torch view_as_complex forward and inverse; CUDA bit-identical to the CPU reference; Vulkan throws NotSupported; MlaForward untouched"
+      "note": "ApplyRopeInterleaved(x, cos, sin, rotaryDim, dimOffset) overload: CPU matches torch view_as_complex forward and inverse; CUDA bit-identical to the CPU reference; Vulkan (PR 24b) bit-identical to the CPU reference forward and inverse (Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected); MlaForward untouched"
     },
     {
       "id": "core.model",
@@ -368,7 +368,7 @@
       "backends": {
         "CPU": "Implemented",
         "CUDA": "InProgress",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "InProgress"
       },
       "placement": [
         "resident",
@@ -391,7 +391,7 @@
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 5,
       "status": "InProgress",
-      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM (PR 23/24). PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); PR 12 adds the CUDA BF16 dequant kernels (dequant_recipe_to_bf16) and a 2-slot CudaQuantWorkspace, bit-exact against the host codecs on synthetic block layouts on the RTX 3060 (incl. E8M0 0/255, E4M3 NaN, scale column offsets); IBackend.Linear does not use them yet. M1 matched the official dequant bit-exactly on the host codecs over 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); the device-path M1 test is written but was skipped (no populated shard here); not Verified until the staged shard runs it"
+      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM (PR 23/24). PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); PR 12 adds the CUDA BF16 dequant kernels (dequant_recipe_to_bf16) and a 2-slot CudaQuantWorkspace, bit-exact against the host codecs on synthetic block layouts on the RTX 3060 (incl. E8M0 0/255, E4M3 NaN, scale column offsets); IBackend.Linear does not use them yet. M1 matched the official dequant bit-exactly on the host codecs over 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); the device-path M1 test is written but was skipped (no populated shard here); not Verified until the staged shard runs it; PR 24b adds a Vulkan BF16 dequant shader (VulkanBackend.DequantRecipeToBf16, dequant_recipe_bf16), bit-identical to the host codecs on synthetic layouts (E8M0 0/255, E4M3 NaN, scale column offsets, odd byte sizes) on the RTX 3060; IBackend.Linear does not use it, so SupportsResidentQuant(Tensor) stays false on Vulkan; Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected"
     },
     {
       "id": "quant.nvfp4.dequant",
@@ -878,7 +878,7 @@
       "acceptanceTest": "hit/miss/dedup/pin; 1000 cancel cycles leak-free",
       "pr": 12,
       "status": "InProgress",
-      "note": "ExpertBank + IExpertCache (segmented LRU, pinned entries, in-flight dedup, fence-ordered eviction) and CudaExpertCache over CudaStreamingWeightCache (whole-expert BeginUploadAsync, pinned staging ring, promotion blocked): policy unit-tested on CPU via a fake, transport tested on the RTX 3060 (hit/miss/dedup/pin, 1000 acquire-release cycles leak-free); not wired into a model, not checkpoint-verified; Vulkan has no streaming cache; host-staged uploads only (PR 24b)"
+      "note": "ExpertBank + IExpertCache (segmented LRU, pinned entries, in-flight dedup, fence-ordered eviction) and CudaExpertCache over CudaStreamingWeightCache (whole-expert BeginUploadAsync, pinned staging ring, promotion blocked): policy unit-tested on CPU via a fake, transport tested on the RTX 3060 (hit/miss/dedup/pin, 1000 acquire-release cycles leak-free); not wired into a model, not checkpoint-verified; Vulkan has no streaming cache and none was added in PR 24b: expert weights reach it as host-staged uploads only"
     },
     {
       "id": "mem.planner",
@@ -1064,7 +1064,7 @@
       "backends": {
         "CPU": "Unsupported",
         "CUDA": "Unsupported",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "InProgress"
       },
       "placement": [
         "resident",
@@ -1086,8 +1086,8 @@
       ],
       "acceptanceTest": "CPU-reference parity per shader; certification only on real AMD hardware",
       "pr": 24,
-      "status": "Unimplemented",
-      "note": "native block-scaled GEMM on Vulkan is Unsupported"
+      "status": "InProgress",
+      "note": "PR 24b ships Vulkan shaders for MoeRoute, MoeBuildDispatch, MoeCombine, TopKLastDim, Softplus, HcSplitSinkhorn, HcPreMix, HcPostMix, SparseLatentAttention, IndexerScores, BuildWindowIndices, QuantizeLatentRows, ActQuantDequantInPlace, the 5-argument ApplyRopeInterleaved and the recipe dequant to BF16, each parity-tested against the CPU reference on an NVIDIA RTX 3060; none is wired into a model. Native block-scaled GEMM on Vulkan is Unsupported (dequant paths only) and the expert cache is host-staged with no streaming cache. AMD hardware evidence is not collected, so this row is not certified"
     },
     {
       "id": "perf.kernels",
