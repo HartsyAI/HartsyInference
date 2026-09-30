@@ -147,6 +147,11 @@ SINGLE_KERNELS=(
     history_append
     repetition_penalty
     kv_cache_append_dev
+    softplus
+    topk_lastdim
+    moe_route
+    moe_build_dispatch
+    moe_combine
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do
