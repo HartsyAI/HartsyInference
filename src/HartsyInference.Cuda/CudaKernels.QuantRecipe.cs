@@ -8,10 +8,12 @@ public sealed partial class CudaKernels
     private nint _fp8BlockE8m0ToBf16;
     private nint _nvfp4ModelOptToBf16;
     private nint _affineToBf16;
+    private nint _exl3ToBf16;
+    private const int Exl3SharedBytes = 128 * 129 * sizeof(float);
 
     /// <summary>True when dequant_recipe_to_bf16.ptx loaded with every recipe kernel.</summary>
     public bool HasRecipeDequantKernels =>
-        _mxfp4E8m0ToBf16 != 0 && _fp8BlockE8m0ToBf16 != 0 && _nvfp4ModelOptToBf16 != 0 && _affineToBf16 != 0;
+        _mxfp4E8m0ToBf16 != 0 && _fp8BlockE8m0ToBf16 != 0 && _nvfp4ModelOptToBf16 != 0 && _affineToBf16 != 0 && _exl3ToBf16 != 0;
 
     // Optional module: absence leaves recipe dequant unsupported instead of failing construction.
     private void LoadRecipeDequantKernels()
@@ -23,6 +25,10 @@ public sealed partial class CudaKernels
         _fp8BlockE8m0ToBf16 = _recipeDequantModule.GetFunction("dequant_fp8_block_e8m0_to_bf16");
         _nvfp4ModelOptToBf16 = _recipeDequantModule.GetFunction("dequant_nvfp4_modelopt_to_bf16");
         _affineToBf16 = _recipeDequantModule.GetFunction("dequant_affine_to_bf16");
+        _exl3ToBf16 = _recipeDequantModule.GetFunction("dequant_exl3_2bit_to_bf16");
+        // 66,048 bytes of dynamic shared memory: past the 48 KB default, so the opt-in attribute (CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES = 8) is required.
+        int attributeResult = CudaDriverApi.cuFuncSetAttribute(_exl3ToBf16, 8, Exl3SharedBytes);
+        if (attributeResult != 0) throw new InvalidOperationException($"cuFuncSetAttribute for the EXL3 dequant kernel failed with CUDA error {attributeResult}.");
     }
 
     /// <summary>E2M1 nibbles times F8E8M0 scales to BF16 <c>[rows, 2 * packedCols]</c>; one thread per packed byte.</summary>
@@ -74,6 +80,23 @@ public sealed partial class CudaKernels
         args[0] = &pArg; args[1] = &sArg; args[2] = &bArg; args[3] = &oArg; args[4] = &rowsArg; args[5] = &colsArg;
         args[6] = &strideArg; args[7] = &offsetArg; args[8] = &blockRowsArg; args[9] = &groupArg; args[10] = &bitsArg;
         LaunchGrid(_affineToBf16, cols, rows, args, stream);
+    }
+
+    /// <summary>EXL3 2-bit MCG trellis (with <c>suh</c>/<c>svh</c> F16 sign vectors) to BF16 <c>[rowBlocks * 128, cols]</c>; one thread block per 128x128 Hadamard block.</summary>
+    /// <param name="trellis">The whole <c>[in/16, out/16, 32]</c> int16 trellis.</param>
+    /// <param name="outTiles">Output width in 16-wide tiles (the trellis tile-row pitch).</param>
+    /// <param name="firstOutBlock">First output 128-row block to decode.</param>
+    /// <param name="rowBlocks">Output 128-row blocks to decode.</param>
+    /// <param name="cols">Input width, a multiple of 128.</param>
+    public unsafe void LaunchExl3Dequant(ulong output, ulong trellis, ulong suh, ulong svh, int outTiles, int firstOutBlock, int rowBlocks, int cols, nint stream)
+    {
+        if (_exl3ToBf16 == 0) throw new InvalidOperationException("dequant_recipe_to_bf16.ptx not present in the Ptx folder.");
+        if (cols <= 0 || cols % 128 != 0) throw new ArgumentOutOfRangeException(nameof(cols), cols, "EXL3 dequant needs a positive multiple of 128 input columns.");
+        ulong tArg = trellis, uArg = suh, vArg = svh, oArg = output;
+        uint outTilesArg = (uint)outTiles, firstArg = (uint)firstOutBlock, colsArg = (uint)cols;
+        void** args = stackalloc void*[7];
+        args[0] = &tArg; args[1] = &uArg; args[2] = &vArg; args[3] = &oArg; args[4] = &outTilesArg; args[5] = &firstArg; args[6] = &colsArg;
+        CudaDriverApi.cuLaunchKernel(_exl3ToBf16, (uint)rowBlocks, (uint)(cols / 128), 1, 256, 1, 1, Exl3SharedBytes, stream, (nint)args, 0).ThrowOnError();
     }
 
     private static unsafe void LaunchGrid(nint function, int width, int rows, void** args, nint stream)

@@ -62,9 +62,13 @@ public sealed class CudaQuantWorkspace : IDisposable
     {
         ArgumentNullException.ThrowIfNull(matrix);
         QuantRecipe recipe = matrix.Recipe ?? throw new NotSupportedException("The expert matrix carries no quant recipe.");
-        Tensor scale = recipe.Scale ?? throw new InvalidOperationException("The recipe has no scale tensor.");
+        bool exl3 = recipe.Encoding == QuantEncoding.Exl3Trellis;
+        // EXL3 has no scale tensor: the two sign vectors ride in the scale and extra slots (suh, svh).
+        Tensor scale = exl3
+            ? (recipe.Exl3?.Suh ?? throw new NotSupportedException("The EXL3 recipe has no suh companion."))
+            : recipe.Scale ?? throw new InvalidOperationException("The recipe has no scale tensor.");
         Validate(recipe, matrix.Weight, scale);
-        Tensor? extra = recipe.Encoding == QuantEncoding.Nvfp4 ? recipe.GlobalScale : recipe.Bias;
+        Tensor? extra = exl3 ? recipe.Exl3!.Svh : recipe.Encoding == QuantEncoding.Nvfp4 ? recipe.GlobalScale : recipe.Bias;
         ulong extraPtr = 0;
         if (!_backend.TryGetResidentPointer(matrix.Weight, out ulong packed) || !_backend.TryGetResidentPointer(scale, out ulong scalePtr)
             || (extra is not null && !_backend.TryGetResidentPointer(extra, out extraPtr)))
@@ -130,6 +134,16 @@ public sealed class CudaQuantWorkspace : IDisposable
             throw new NotSupportedException($"Device dequant has no path for {recipe.Encoding}.");
         if (recipe.ScaleLayout != ScaleLayout.RowMajorBlocks)
             throw new NotSupportedException($"Device dequant reads {ScaleLayout.RowMajorBlocks} scales; recipe is {recipe.ScaleLayout}.");
+        if (recipe.Encoding == QuantEncoding.Exl3Trellis)
+        {
+            // Trellis geometry, companion dtypes and the 2-bit/MCG limits; the packed size is the trellis, not rows * cols / ElementsPerByte.
+            Exl3Format.ValidateRecipe(recipe, "(EXL3 device dequant)");
+            long expectedTrellis = Exl3Format.PackedBytes(recipe.LogicalCols, recipe.LogicalRows, Exl3Format.SupportedBits);
+            long actualTrellis = packed.DType.ComputeByteCount(packed.ElementCount);
+            if (actualTrellis != expectedTrellis)
+                throw new ArgumentException($"Packed trellis is {actualTrellis} bytes; the recipe describes {expectedTrellis}.");
+            return;
+        }
         ValidateCompanions(recipe);
         if (scale.Shape.Rank != 2) throw new ArgumentException($"Scale must be rank 2; got {scale.Shape}.");
         (long scaleRows, long scaleCols) = recipe.Geometry.ScaleShape(recipe.LogicalRows, recipe.LogicalCols);

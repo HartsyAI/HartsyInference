@@ -30,4 +30,11 @@
     </Content>
   </ItemGroup>
 
+  <!-- The committed EXL3 fixture the ModelAssets tests use (tile-exact against exllamav3), shared so the device decode is checked on the same bytes. -->
+  <ItemGroup>
+    <None Include="..\HartsyInference.ModelAssets.Tests\Fixtures\Exl3\*.i16;..\HartsyInference.ModelAssets.Tests\Fixtures\Exl3\*.f16" Link="Fixtures\Exl3\%(Filename)%(Extension)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
 </Project>
