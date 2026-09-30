@@ -91,8 +91,9 @@ internal sealed class LinkSendQueue
     }
 
     /// <summary>Queues a control frame, waiting for room when the lane is full.</summary>
-    /// <exception cref="TimeoutException">The lane stayed full for the configured timeout: the link is wedged.</exception>
-    public void EnqueueControl(in LinkControlItem item)
+    /// <returns>False when the lane stayed full for the configured timeout: the link is wedged and the frame was not
+    /// queued.</returns>
+    public bool TryEnqueueControl(in LinkControlItem item)
     {
         lock (_lock)
         {
@@ -103,12 +104,13 @@ internal sealed class LinkSendQueue
                 long remaining = deadline - Environment.TickCount64;
                 if (remaining <= 0 || !Monitor.Wait(_lock, (int)remaining))
                 {
-                    throw new TimeoutException($"PhoneLink control lane stayed full for {_controlTimeoutMs} ms; the link is not draining.");
+                    return false;
                 }
             }
             _control[(_controlHead + _controlCount) % capacity] = item;
             _controlCount++;
             Monitor.Pulse(_lock);
+            return true;
         }
     }
 

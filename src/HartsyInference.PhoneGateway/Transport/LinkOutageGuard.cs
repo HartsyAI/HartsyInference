@@ -153,7 +153,7 @@ public sealed class LinkOutageGuard : IDisposable
             Logs.Warning($"[PhoneGateway] Voice host unreachable during a call; holding the caller for up to {_options.OutageHangupMs} ms.");
             while (true)
             {
-                PlayPrompt?.Invoke(PromptKind.OneMoment);
+                Play(PromptKind.OneMoment);
                 long remaining = deadline - Environment.TickCount64;
                 if (remaining <= 0)
                 {
@@ -165,7 +165,7 @@ public sealed class LinkOutageGuard : IDisposable
                     break;
                 }
             }
-            int goodbyeMs = PlayPrompt?.Invoke(PromptKind.Goodbye) ?? 0;
+            int goodbyeMs = Play(PromptKind.Goodbye);
             await Task.Delay(goodbyeMs + HangupGraceMs, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -189,7 +189,29 @@ public sealed class LinkOutageGuard : IDisposable
             }
         }
         Logs.Warning("[PhoneGateway] Voice host did not return; hanging the call up.");
-        HangUp?.Invoke();
+        try
+        {
+            HangUp?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("[PhoneGateway] Hanging up after the host outage failed", ex);
+        }
+    }
+
+    /// <summary>Plays a prompt and returns its length; a failure is logged and counts as a silent prompt, so the wait
+    /// still ends in a hang-up rather than stalling with the outage marked in progress.</summary>
+    private int Play(PromptKind kind)
+    {
+        try
+        {
+            return PlayPrompt?.Invoke(kind) ?? 0;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[PhoneGateway] Playing the {kind} prompt failed", ex);
+            return 0;
+        }
     }
 
     public void Dispose()

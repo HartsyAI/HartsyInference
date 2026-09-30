@@ -289,6 +289,67 @@ public sealed class EngineLinkTests
     }
 
     [Fact]
+    public void Liveness_ClosesALinkWhoseWriterIsBlockedOnAHostThatStoppedReading()
+    {
+        using FakeLinkHost host = new();
+        host.Start();
+        using EngineLink link = new(Options(host) with { PingIntervalMs = 100, LivenessTimeoutMs = 400 });
+        using ManualResetEventSlim dropped = new(false);
+        string? reason = null;
+        link.Disconnected = r =>
+        {
+            reason = r;
+            dropped.Set();
+        };
+        link.Start();
+        Assert.True(host.WaitUntil(() => link.IsConnected, WaitMs));
+        host.ReadGate.Reset();
+
+        // Fill the socket fast so the writer blocks inside a write well before liveness expires; a check that lived
+        // in the writer loop would then never run again.
+        short[] frame = new short[LinkProtocol.InboundFrameSamples];
+        long lastSent = -1;
+        long unchangedSince = Environment.TickCount64;
+        long deadline = Environment.TickCount64 + WaitMs;
+        while (!dropped.IsSet && Environment.TickCount64 < deadline)
+        {
+            link.TryEnqueueInboundAudio(1, frame, concealed: false);
+            long sent = link.FramesSent;
+            if (sent != lastSent)
+            {
+                lastSent = sent;
+                unchangedSince = Environment.TickCount64;
+            }
+            else if (Environment.TickCount64 - unchangedSince > 50)
+            {
+                break;
+            }
+        }
+        _output.WriteLine($"writer stopped after {link.FramesSent} frames");
+
+        Assert.True(dropped.Wait(WaitMs), "a link whose writer is blocked was never closed");
+        _output.WriteLine($"dropped: {reason}");
+        host.ReadGate.Set();
+    }
+
+    [Fact]
+    public void OutageGuard_AThrowingPromptStillEndsInAHangUp()
+    {
+        bool linkUp = true;
+        using LinkOutageGuard guard = new(new LinkOutageGuardOptions { OutageHangupMs = 300, PromptRepeatMs = 100 }, () => linkUp);
+        guard.PlayPrompt = _ => throw new IOException("injected prompt failure");
+        using ManualResetEventSlim hungUp = new(false);
+        guard.HangUp = () => hungUp.Set();
+        guard.CallStarted();
+        linkUp = false;
+        guard.LinkDisconnected();
+
+        Assert.True(hungUp.Wait(WaitMs), "the outage never ended in a hang-up");
+        Assert.False(guard.InOutage);
+        Assert.Equal(1, guard.OutageHangups);
+    }
+
+    [Fact]
     public void OutageGuard_CallStartingInTheConnectGap_IsNotAnOutage()
     {
         // EngineLink reports IsConnected just before it raises Connected; a call activated in between used to start an
@@ -329,7 +390,7 @@ public sealed class EngineLinkTests
         }
         Assert.Equal(2, queue.AudioDropped);
         Assert.Equal(3, queue.AudioCount);
-        queue.EnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null));
+        Assert.True(queue.TryEnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null)));
         short[] scratch = new short[LinkProtocol.InboundFrameSamples];
         Assert.True(queue.TryDequeue(10, out LinkControlItem control, scratch, out _, out _, out bool isAudio));
         Assert.False(isAudio);
@@ -346,12 +407,12 @@ public sealed class EngineLinkTests
     }
 
     [Fact]
-    public void ControlLane_TimesOutInsteadOfDroppingWhenWedged()
+    public void ControlLane_ReportsAWedgedLaneInsteadOfThrowingOrDropping()
     {
         LinkSendQueue queue = new(audioDepth: 2, controlDepth: 2, controlTimeoutMs: 50);
-        queue.EnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null));
-        queue.EnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null));
-        Assert.Throws<TimeoutException>(() => queue.EnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null)));
+        Assert.True(queue.TryEnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null)));
+        Assert.True(queue.TryEnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null)));
+        Assert.False(queue.TryEnqueueControl(new LinkControlItem(LinkMessageType.CallEnd, 1, 0, 0, 0, null)));
         Assert.Equal(2, queue.ControlCount);
     }
 

@@ -147,16 +147,15 @@ public sealed class CallController : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         SIPUserAgent agent = _agent ?? throw new InvalidOperationException("CallController is not started.");
-        bool isUri = destination.Contains(':');
-        if (!isUri && _account.Registrar.Length == 0)
+        string? uri = DialString(destination, _account.Registrar);
+        if (uri is null)
         {
             return new CallPlacementResult(CallPlacementStatus.Invalid, "a bare number needs a registrar; give a full sip: URI");
         }
-        if (!IsDestinationAllowed(destination, _options.DestinationPrefixes))
+        if (!IsDestinationAllowed(destination, _options.DestinationPrefixes, _account.Registrar))
         {
-            return new CallPlacementResult(CallPlacementStatus.NotAllowed, "the destination does not match sip.destinationPrefixes");
+            return new CallPlacementResult(CallPlacementStatus.NotAllowed, "the destination does not match sip.destinationPrefixes through the registrar");
         }
-        string uri = isUri ? destination : $"sip:{destination}@{_account.Registrar}";
         lock (_stateLock)
         {
             if (_state != CallState.Idle)
@@ -202,30 +201,42 @@ public sealed class CallController : IDisposable
         return CallPlacementResult.Ok;
     }
 
-    /// <summary>True when <paramref name="destination"/> may be dialled: <paramref name="prefixes"/> is empty, or the
-    /// number (a SIP URI's user part, or the text before <c>@</c>) starts with one of them. The agent is steerable by its
-    /// caller, so an open dial plan on a real trunk is toll fraud waiting to happen.</summary>
-    internal static bool IsDestinationAllowed(string destination, IReadOnlyList<string> prefixes)
+    /// <summary>The SIP URI a destination dials: a bare number goes through <paramref name="registrar"/>, <c>user@host</c>
+    /// gains the <c>sip:</c> scheme, a URI is taken as given. Null for a bare number with no registrar.</summary>
+    internal static string? DialString(string destination, string registrar)
+    {
+        if (destination.Contains(':'))
+        {
+            return destination;
+        }
+        if (destination.Contains('@'))
+        {
+            return "sip:" + destination;
+        }
+        return registrar.Length == 0 ? null : $"sip:{destination}@{registrar}";
+    }
+
+    /// <summary>True when <paramref name="destination"/> may be dialled: <paramref name="prefixes"/> is empty, or it dials
+    /// through <paramref name="registrar"/> (a bare number, or a URI naming the registrar's host) a number starting with
+    /// one of them. The host matters as much as the number: a matching user at another host would take the call, and the
+    /// account's digest answer, somewhere else. The agent is steerable by its caller, so an open dial plan on a trunk is
+    /// toll fraud waiting to happen.</summary>
+    internal static bool IsDestinationAllowed(string destination, IReadOnlyList<string> prefixes, string registrar)
     {
         if (prefixes.Count == 0)
         {
             return true;
         }
-        string number;
-        if (destination.Contains(':'))
+        string? dial = DialString(destination, registrar);
+        if (dial is null || registrar.Length == 0
+            || !SIPURI.TryParse(dial, out SIPURI target) || target is null
+            || !SIPURI.TryParse("sip:" + registrar, out SIPURI trunk) || trunk is null)
         {
-            if (!SIPURI.TryParse(destination, out SIPURI uri) || uri is null)
-            {
-                return false;
-            }
-            number = uri.User ?? "";
+            return false;
         }
-        else
-        {
-            int at = destination.IndexOf('@');
-            number = at < 0 ? destination : destination[..at];
-        }
-        return number.Length > 0 && prefixes.Any(prefix => number.StartsWith(prefix, StringComparison.Ordinal));
+        string number = target.User ?? "";
+        return string.Equals(target.HostAddress, trunk.HostAddress, StringComparison.OrdinalIgnoreCase)
+            && number.Length > 0 && prefixes.Any(prefix => number.StartsWith(prefix, StringComparison.Ordinal));
     }
 
     /// <summary>Ends the live call from our side with <paramref name="reason"/> and tells the host.</summary>
@@ -851,16 +862,22 @@ public sealed class CallController : IDisposable
                 case "transfer":
                 {
                     string target = Argument(request, "target") ?? throw new ArgumentException("transfer needs 'target'.");
-                    if (!IsDestinationAllowed(target, _options.DestinationPrefixes))
+                    string? dial = DialString(target, _account.Registrar);
+                    if (dial is null)
                     {
-                        Reply(call.CallId, requestId, LinkToolStatus.Failed, "the transfer target does not match sip.destinationPrefixes");
+                        Reply(call.CallId, requestId, LinkToolStatus.Failed, "a bare number needs a registrar; give a full sip: URI");
+                        return;
+                    }
+                    if (!IsDestinationAllowed(target, _options.DestinationPrefixes, _account.Registrar))
+                    {
+                        Reply(call.CallId, requestId, LinkToolStatus.Failed, "the transfer target does not match sip.destinationPrefixes through the registrar");
                         return;
                     }
                     if (agent is null)
                     {
                         throw new InvalidOperationException("no SIP agent");
                     }
-                    SIPURI uri = SIPURI.ParseSIPURIRelaxed(target);
+                    SIPURI uri = SIPURI.ParseSIPURI(dial);
                     bool ok = await agent.BlindTransfer(uri, TimeSpan.FromSeconds(_options.TransferTimeoutSeconds), CancellationToken.None).ConfigureAwait(false);
                     Reply(call.CallId, requestId, ok ? LinkToolStatus.Ok : LinkToolStatus.Failed, ok ? null : "transfer was not accepted");
                     return;
@@ -912,14 +929,7 @@ public sealed class CallController : IDisposable
     private void Reply(uint callId, uint requestId, LinkToolStatus status, string? message)
     {
         _metrics.Tool(status != LinkToolStatus.Ok);
-        try
-        {
-            _link.SendToolResult(callId, requestId, new ToolResultMessage { Status = status, Message = message });
-        }
-        catch (TimeoutException ex)
-        {
-            Logs.Error("[PhoneGateway] Could not send a tool result; the link is not draining", ex);
-        }
+        _link.SendToolResult(callId, requestId, new ToolResultMessage { Status = status, Message = message });
     }
 
     private static string? Argument(ToolRequestMessage request, string name) =>

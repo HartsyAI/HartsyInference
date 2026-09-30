@@ -9,9 +9,11 @@ namespace HartsyInference.PhoneGateway.Transport;
 /// audio and control frames both ways on two dedicated threads.</summary>
 /// <remarks>The reader thread owns the connection: it dials with exponential backoff and full jitter, sends
 /// <c>Hello</c>, waits for <c>HelloAck</c>, then reads frames until the socket fails, and raises the callbacks below
-/// on itself. The writer thread drains <see cref="LinkSendQueue"/> (control first, then audio), sends a <c>Ping</c>
-/// every <see cref="EngineLinkOptions.PingIntervalMs"/> and closes a connection that has been silent for
-/// <see cref="EngineLinkOptions.LivenessTimeoutMs"/>. A failed connection empties both lanes: their frames belonged
+/// on itself. The writer thread drains <see cref="LinkSendQueue"/> (control first, then audio) and sends a <c>Ping</c>
+/// every <see cref="EngineLinkOptions.PingIntervalMs"/>; a timer watchdog closes a connection that has received nothing,
+/// or has had one write stuck, for <see cref="EngineLinkOptions.LivenessTimeoutMs"/>. Callbacks that throw are logged,
+/// never allowed to end a link thread, and a wedged control lane restarts the connection instead of throwing into the
+/// caller. A failed connection empties both lanes: their frames belonged
 /// to a session the host no longer has, and the controller re-sends <c>CallStart(resume)</c> from
 /// <see cref="Connected"/>. The flush epoch lives here because the spec makes it the reader's job: once
 /// <c>Flush(T)</c> has been seen, every <c>OutboundAudio</c> or <c>OutboundEnd</c> with a turn at or below T is dropped
@@ -19,6 +21,7 @@ namespace HartsyInference.PhoneGateway.Transport;
 public sealed class EngineLink : IDisposable
 {
     private const int WriterWaitSliceMs = 250;
+    private const int WatchdogMaxPeriodMs = 1000;
     private const int MaxOutboundScratchSamples = LinkProtocol.MaxPayloadBytes / 2;
 
     private readonly EngineLinkOptions _options;
@@ -40,6 +43,8 @@ public sealed class EngineLink : IDisposable
     private uint _flushedTurn;
     private uint _flushedCallId;
     private long _lastFrameNs;
+    private long _writeStartedNs;
+    private int _watchdogFired;
     private long _lastRttNs;
     private long _connectionsMade;
     private long _reconnects;
@@ -183,14 +188,34 @@ public sealed class EngineLink : IDisposable
         Control(new LinkControlItem(LinkMessageType.Error, callId, 0, 0, 0, error));
     }
 
-    /// <summary>Queues a control frame; silently dropped when no connection is up (its session is gone).</summary>
+    /// <summary>Queues a control frame; silently dropped when no connection is up (its session is gone). Never throws:
+    /// a lane the writer has not drained for the whole wait means the link is wedged, so the frame is dropped and the
+    /// connection forced to restart, rather than failing a caller that may be in the middle of tearing a call down.</summary>
     private void Control(in LinkControlItem item)
     {
         if (!_connected)
         {
             return;
         }
-        _queue.EnqueueControl(item);
+        if (!_queue.TryEnqueueControl(item))
+        {
+            Logs.Warning($"[PhoneGateway] PhoneLink control lane stayed full; dropping {item.Type} and reconnecting.");
+            ForceReconnect();
+        }
+    }
+
+    /// <summary>Closes the current socket, which fails the reader and the writer and restarts the connection.</summary>
+    private void ForceReconnect()
+    {
+        Socket? socket;
+        lock (_connectionLock)
+        {
+            socket = _socket;
+        }
+        if (socket is not null)
+        {
+            CloseSocketQuietly(socket);
+        }
     }
 
     private void ReaderMain()
@@ -215,6 +240,12 @@ public sealed class EngineLink : IDisposable
                     loggedFailure = true;
                 }
             }
+            catch (Exception ex)
+            {
+                // Anything else escaping here would end the whole process from this background thread, calls included.
+                reason = "unexpected " + ex.GetType().Name + ": " + ex.Message;
+                Logs.Error("[PhoneGateway] Voice host link failed unexpectedly; reconnecting", ex);
+            }
             bool wasConnected = _handshaken;
             _handshaken = false;
             TearDownConnection();
@@ -228,7 +259,7 @@ public sealed class EngineLink : IDisposable
                 {
                     Logs.Warning($"[PhoneGateway] Voice host link dropped: {reason}");
                 }
-                Disconnected?.Invoke(reason);
+                RaiseCallback("Disconnected", () => Disconnected?.Invoke(reason));
             }
             if (_stopping)
             {
@@ -259,6 +290,7 @@ public sealed class EngineLink : IDisposable
         NetworkStream stream = new(socket, ownsSocket: false);
         LinkFrameWriter writer = new(stream);
         LinkFrameReader reader = new(stream);
+        Timer? watchdog = null;
         try
         {
             Await(writer.WriteHelloAsync(new LinkHello(LinkProtocol.Version, LinkProtocol.InboundSampleRate, _options.Token), readCancel.Token));
@@ -280,6 +312,8 @@ public sealed class EngineLink : IDisposable
                 _outboundScratch = new short[scratch];
             }
             Volatile.Write(ref _lastFrameNs, MonotonicClock.NowNs());
+            Volatile.Write(ref _writeStartedNs, 0);
+            Volatile.Write(ref _watchdogFired, 0);
             _queue.Clear();
             _writerStop = false;
             Thread writerThread = new(() => WriterMain(writer, socket)) { Name = "phone-link-writer", IsBackground = true };
@@ -288,6 +322,8 @@ public sealed class EngineLink : IDisposable
                 _writerThread = writerThread;
             }
             writerThread.Start();
+            int watchPeriod = Math.Clamp(_options.LivenessTimeoutMs / 4, 10, WatchdogMaxPeriodMs);
+            watchdog = new Timer(_ => Watch(socket), null, watchPeriod, watchPeriod);
             if (Interlocked.Increment(ref _connectionsMade) > 1)
             {
                 Interlocked.Increment(ref _reconnects);
@@ -295,7 +331,7 @@ public sealed class EngineLink : IDisposable
             _handshaken = true;
             _connected = true;
             Logs.Info($"[PhoneGateway] Voice host link up: outbound {ack.OutboundRate} Hz, frames up to {ack.MaxFrameMs} ms.");
-            Connected?.Invoke(ack);
+            RaiseCallback("Connected", () => Connected?.Invoke(ack));
             while (!_stopping)
             {
                 LinkFrame? next = Await(reader.ReadAsync(readCancel.Token));
@@ -306,17 +342,58 @@ public sealed class EngineLink : IDisposable
                 }
                 Volatile.Write(ref _lastFrameNs, MonotonicClock.NowNs());
                 Interlocked.Increment(ref _framesReceived);
-                Dispatch(next.Value);
+                try
+                {
+                    Dispatch(next.Value);
+                }
+                catch (Exception ex) when (ex is not (LinkProtocolException or SocketException or IOException or ObjectDisposedException or OperationCanceledException))
+                {
+                    // A consumer callback failed: log it and keep the link; only a malformed frame is fatal here.
+                    Logs.Error($"[PhoneGateway] Handling a {next.Value.Type} frame from the voice host failed", ex);
+                }
             }
             reason = "stopping";
         }
         finally
         {
             _connected = false;
+            watchdog?.Dispose();
             StopWriter();
             reader.Dispose();
             writer.Dispose();
             stream.Dispose();
+        }
+    }
+
+    /// <summary>Liveness, checked off the I/O threads so it still fires while a write is blocked on a host that stopped
+    /// reading or a read waits on one that stopped writing: nothing received, or one write in flight, for the liveness
+    /// timeout closes the socket, which fails both threads and restarts the connection.</summary>
+    private void Watch(Socket socket)
+    {
+        long now = MonotonicClock.NowNs();
+        long limit = _options.LivenessTimeoutMs * 1_000_000L;
+        long writeStarted = Volatile.Read(ref _writeStartedNs);
+        string? why = now - Volatile.Read(ref _lastFrameNs) > limit ? "silent"
+            : writeStarted != 0 && now - writeStarted > limit ? "not reading (a write is blocked)"
+            : null;
+        if (why is null || Interlocked.Exchange(ref _watchdogFired, 1) != 0)
+        {
+            return;
+        }
+        Logs.Warning($"[PhoneGateway] Voice host link {why} for {_options.LivenessTimeoutMs} ms; closing it.");
+        CloseSocketQuietly(socket);
+    }
+
+    /// <summary>Runs a consumer callback so that its exception is logged instead of ending the link thread.</summary>
+    private static void RaiseCallback(string name, Action callback)
+    {
+        try
+        {
+            callback();
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[PhoneGateway] PhoneLink {name} callback failed", ex);
         }
     }
 
@@ -363,7 +440,7 @@ public sealed class EngineLink : IDisposable
                     Volatile.Write(ref _flushedTurn, turnId);
                     discardedMs = Flush?.Invoke(callId, turnId) ?? 0;
                 }
-                _queue.EnqueueControl(new LinkControlItem(LinkMessageType.FlushAck, callId, turnId, discardedMs, 0, null));
+                Control(new LinkControlItem(LinkMessageType.FlushAck, callId, turnId, discardedMs, 0, null));
                 return;
             }
             case LinkMessageType.CallEnd:
@@ -379,7 +456,7 @@ public sealed class EngineLink : IDisposable
                 return;
             }
             case LinkMessageType.Ping:
-                _queue.EnqueueControl(new LinkControlItem(LinkMessageType.Pong, LinkProtocol.ConnectionCallId, 0, 0, frame.ReadTimestampNs(), null));
+                Control(new LinkControlItem(LinkMessageType.Pong, LinkProtocol.ConnectionCallId, 0, 0, frame.ReadTimestampNs(), null));
                 return;
             case LinkMessageType.Pong:
                 Volatile.Write(ref _lastRttNs, MonotonicClock.NowNs() - (long)frame.ReadTimestampNs());
@@ -408,25 +485,22 @@ public sealed class EngineLink : IDisposable
     private bool IsStale(uint callId, uint turnId) =>
         callId == Volatile.Read(ref _flushedCallId) && turnId <= Volatile.Read(ref _flushedTurn);
 
+    /// <summary>Pings and drains the send lanes. Liveness is the watchdog's job (<see cref="Watch"/>): a write blocked on a
+    /// host that stopped reading never returns here to check anything, so every write is stamped for it to see.</summary>
     private void WriterMain(LinkFrameWriter writer, Socket socket)
     {
         long pingInterval = _options.PingIntervalMs * 1_000_000L;
-        long liveness = _options.LivenessTimeoutMs * 1_000_000L;
         long nextPing = MonotonicClock.NowNs() + pingInterval;
         try
         {
             while (!_writerStop)
             {
                 long now = MonotonicClock.NowNs();
-                if (now - Volatile.Read(ref _lastFrameNs) > liveness)
-                {
-                    Logs.Warning($"[PhoneGateway] Voice host link silent for {_options.LivenessTimeoutMs} ms; closing it.");
-                    socket.Shutdown(SocketShutdown.Both);
-                    return;
-                }
                 if (now >= nextPing)
                 {
+                    Volatile.Write(ref _writeStartedNs, now);
                     Await(writer.WritePingAsync((ulong)now, CancellationToken.None));
+                    Volatile.Write(ref _writeStartedNs, 0);
                     Interlocked.Increment(ref _framesSent);
                     nextPing = now + pingInterval;
                 }
@@ -435,6 +509,7 @@ public sealed class EngineLink : IDisposable
                 {
                     continue;
                 }
+                Volatile.Write(ref _writeStartedNs, MonotonicClock.NowNs());
                 if (isAudio)
                 {
                     Await(writer.WriteInboundAudioAsync(audioCallId, _audioScratch, concealed, CancellationToken.None));
@@ -443,6 +518,7 @@ public sealed class EngineLink : IDisposable
                 {
                     WriteControl(writer, control);
                 }
+                Volatile.Write(ref _writeStartedNs, 0);
                 Interlocked.Increment(ref _framesSent);
             }
         }
@@ -454,6 +530,12 @@ public sealed class EngineLink : IDisposable
                 Logs.Warning($"[PhoneGateway] Voice host link write failed: {ex.Message}");
                 CloseSocketQuietly(socket);
             }
+        }
+        catch (Exception ex)
+        {
+            // Anything else would end the process from this background thread; restart the connection instead.
+            Logs.Error("[PhoneGateway] Voice host link writer failed unexpectedly; reconnecting", ex);
+            CloseSocketQuietly(socket);
         }
     }
 

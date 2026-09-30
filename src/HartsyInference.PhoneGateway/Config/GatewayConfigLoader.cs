@@ -110,6 +110,10 @@ public static class GatewayConfigLoader
         {
             throw new GatewayConfigException("sip.destinationPrefixes may not contain an empty prefix (it would allow every destination).");
         }
+        if (sip.DestinationPrefixes.Length > 0 && sip.Registrar.Length == 0)
+        {
+            throw new GatewayConfigException("sip.destinationPrefixes needs sip.registrar: allowed numbers are dialled through it.");
+        }
         if (sip.GreetingPromptFile is not null && !File.Exists(sip.GreetingPromptFile))
         {
             throw new GatewayConfigException($"sip.greetingPromptFile '{sip.GreetingPromptFile}' does not exist.");

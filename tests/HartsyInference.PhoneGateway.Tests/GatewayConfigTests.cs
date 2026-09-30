@@ -122,6 +122,15 @@ public sealed class GatewayConfigTests
     }
 
     [Fact]
+    public void DestinationPrefixes_WithoutARegistrar_IsAConfigError()
+    {
+        GatewayConfig config = new() { Sip = new SipConfig { DestinationPrefixes = ["+1555"] } };
+        GatewayConfigException ex = Assert.Throws<GatewayConfigException>(() => GatewayConfigLoader.Resolve(config));
+        Assert.Contains("sip.destinationPrefixes", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("sip.registrar", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Registrar_WithoutAPasswordFile_IsAConfigError()
     {
         GatewayConfig config = new() { Sip = new SipConfig { Registrar = "sip.example.net", Username = "u" } };

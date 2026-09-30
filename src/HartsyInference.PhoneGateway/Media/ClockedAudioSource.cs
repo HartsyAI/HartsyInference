@@ -176,6 +176,9 @@ public sealed class ClockedAudioSource : IAudioSource, IDisposable
     public int WriteOutbound(ReadOnlySpan<short> pcm) => _ring.Write(pcm);
 
     /// <summary>Asks the tick thread to discard everything queued on its next tick.</summary>
+    /// <remarks>Audio written between the request and that tick (at most 20 ms) is discarded with the rest. That is
+    /// harmless because a flush is a barge-in, and the next turn's audio follows only after a full STT, LLM and TTS
+    /// cycle.</remarks>
     /// <returns>The samples queued at the moment of the request, an upper bound on what the tick will discard.</returns>
     public int Flush()
     {

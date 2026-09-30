@@ -42,6 +42,9 @@ internal sealed class FakeLinkHost : IDisposable
     /// <summary>When set, a Hello with another token is answered with Error and the socket closed.</summary>
     public string? ExpectedToken { get; set; }
 
+    /// <summary>Open by default; reset it to make the host stop reading, as a hung or stopped host would.</summary>
+    public ManualResetEventSlim ReadGate { get; } = new(true);
+
     public int Connections => Volatile.Read(ref _connections);
 
     public int AudioFramesReceived => Volatile.Read(ref _audioFrames);
@@ -163,6 +166,7 @@ internal sealed class FakeLinkHost : IDisposable
 
     public void Dispose()
     {
+        ReadGate.Set();
         Shutdown();
         File.Delete(SocketPath);
     }
@@ -239,6 +243,7 @@ internal sealed class FakeLinkHost : IDisposable
             {
                 while (!_closed)
                 {
+                    _host.ReadGate.Wait();
                     ValueTask<LinkFrame?> pending = _reader.ReadAsync(CancellationToken.None);
                     LinkFrame? next = pending.IsCompleted ? pending.GetAwaiter().GetResult() : pending.AsTask().GetAwaiter().GetResult();
                     if (next is null)
