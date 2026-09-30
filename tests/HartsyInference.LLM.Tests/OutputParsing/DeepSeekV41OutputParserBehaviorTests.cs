@@ -105,6 +105,19 @@ public sealed class DeepSeekV41OutputParserBehaviorTests
         Assert.True(got.Malformed);
         Assert.Empty(got.ToolCalls);
         Assert.Contains(replay.Calls, c => !c.Ended);
+        Assert.Equal([0], replay.Aborted);
+    }
+
+    [Fact]
+    public void NonStringValuesAreStreamedVerbatimLikeTheReference()
+    {
+        const string text = "\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n" +
+            "<｜DSML｜ parameter name=\"n\" string=\"false\">not json</｜DSML｜ parameter>\n" +
+            "</｜DSML｜ invoke>\n</｜DSML｜ calls>";
+        PieceTokenizer tok = new();
+        ParsedAssistant got = ReplayedTurn.Run(ParserTestHelpers.NewParser(tok, false), tok.SplitBytes(text), out _);
+        Assert.False(got.Malformed);
+        Assert.Equal("{\"n\": not json}", got.ToolCalls[0].ArgumentsJson);
     }
 
     [Fact]

@@ -53,5 +53,7 @@ public sealed class ParsedEventTranslatorTests
         const string open = "\n\n<｜DSML｜ calls>\n<｜DSML｜ invoke name=\"f\">\n<｜DSML｜ parameter name=\"a\" string=\"true\">x";
         List<TextChunk> chunks = Translate(open, false, 1);
         Assert.DoesNotContain(chunks, c => c.Kind == TextChunkKind.NativeToolCall);
+        Assert.Equal(TextChunkKind.ToolCallAbort, chunks[^1].Kind);
+        Assert.Equal(0, chunks[^1].ToolCallIndex);
     }
 }

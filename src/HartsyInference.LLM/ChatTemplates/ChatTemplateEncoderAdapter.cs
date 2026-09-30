@@ -26,11 +26,11 @@ public sealed class ChatTemplateEncoderAdapter : IChatTemplate
         return _encoder.Encode(tokenizer, messages, options).Ids;
     }
 
-    /// <summary>Builds the parser for completions of the prompt these <paramref name="messages"/> render to; the prompt is encoded once more to learn whether it ended inside the think block.</summary>
+    /// <summary>Builds the parser for completions of the prompt these <paramref name="messages"/> render to.</summary>
     public IOutputParser CreateParser(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking)
     {
         EncodeOptions options = new() { AddGenerationPrompt = true, Thinking = enableThinking ?? false };
-        ParserInitialState initial = _encoder.Encode(tokenizer, messages, options).InitialParserState;
+        ParserInitialState initial = _encoder.ResolveParserState(messages, options);
         return _encoder.CreateParser(tokenizer, initial.ToParserState());
     }
 }

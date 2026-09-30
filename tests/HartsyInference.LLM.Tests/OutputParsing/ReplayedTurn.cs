@@ -9,6 +9,7 @@ internal sealed class ReplayedTurn
     public StringBuilder Reasoning { get; } = new();
     public StringBuilder Content { get; } = new();
     public List<(string Name, string? Namespace, StringBuilder Args, bool Ended)> Calls { get; } = [];
+    public HashSet<int> Aborted { get; } = [];
     public int Malformed { get; private set; }
     public int Stops { get; private set; }
 
@@ -20,7 +21,7 @@ internal sealed class ReplayedTurn
             case ParsedEventKind.ContentDelta: Content.Append(e.Text); break;
             case ParsedEventKind.ToolCallBegin:
                 Assert(e.ToolCallIndex == Calls.Count, "call index out of order");
-                Assert(Calls.Count == 0 || Calls[^1].Ended || Malformed > 0, "call opened before the previous one ended");
+                Assert(Calls.Count == 0 || Calls[^1].Ended || Aborted.Contains(Calls.Count - 1), "call opened before the previous one ended");
                 Calls.Add((e.Text!, e.Namespace, new StringBuilder(), false));
                 break;
             case ParsedEventKind.ToolCallArgsDelta:
@@ -30,6 +31,10 @@ internal sealed class ReplayedTurn
             case ParsedEventKind.ToolCallEnd:
                 Assert(e.ToolCallIndex == Calls.Count - 1, "end for a call that is not open");
                 Calls[e.ToolCallIndex] = Calls[e.ToolCallIndex] with { Ended = true };
+                break;
+            case ParsedEventKind.ToolCallAbort:
+                Assert(e.ToolCallIndex == Calls.Count - 1 && !Calls[e.ToolCallIndex].Ended, "abort for a call that is not open");
+                Assert(Aborted.Add(e.ToolCallIndex), "call aborted twice");
                 break;
             case ParsedEventKind.Malformed: Malformed++; break;
             case ParsedEventKind.Stop: Stops++; break;

@@ -33,6 +33,7 @@ internal sealed class DsmlCallsParser
     private string _name = "";
     private string? _namespace;
     private bool _stringValue;
+    private bool _callOpen;
 
     /// <summary>Creates a parser that appends completed calls to <paramref name="calls"/> (its current count is the first call index).</summary>
     public DsmlCallsParser(List<ChatToolCall> calls) => _calls = calls;
@@ -126,6 +127,7 @@ internal sealed class DsmlCallsParser
         }
         _seen.Clear();
         _args.Clear();
+        _callOpen = true;
         sink(new ParsedEvent(ParsedEventKind.ToolCallBegin, _name, _calls.Count, _namespace));
         EmitArgs("{", sink);
         string stop = HeadStops[which];
@@ -206,6 +208,7 @@ internal sealed class DsmlCallsParser
         EmitArgs("}", sink);
         int index = _calls.Count;
         _calls.Add(new ChatToolCall($"call_{index}", _name, _args.ToString()) { Namespace = _namespace });
+        _callOpen = false;
         sink(new ParsedEvent(ParsedEventKind.ToolCallEnd, null, index));
         _phase = Phase.GapBeforeInvoke;
     }
@@ -214,6 +217,8 @@ internal sealed class DsmlCallsParser
     {
         _phase = Phase.Faulted;
         _rest = "";
+        if (_callOpen) sink(new ParsedEvent(ParsedEventKind.ToolCallAbort, null, _calls.Count));
+        _callOpen = false;
         sink(new ParsedEvent(ParsedEventKind.Malformed, reason));
     }
 }

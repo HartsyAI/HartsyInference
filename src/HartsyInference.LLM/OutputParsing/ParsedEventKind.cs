@@ -18,6 +18,9 @@ public enum ParsedEventKind
     /// <summary>The open tool call is complete.</summary>
     ToolCallEnd,
 
+    /// <summary>The open tool call was dropped because the format broke; its argument fragments must be discarded.</summary>
+    ToolCallAbort,
+
     /// <summary>The completion ended (end-of-sequence seen or the stream finished).</summary>
     Stop,
 

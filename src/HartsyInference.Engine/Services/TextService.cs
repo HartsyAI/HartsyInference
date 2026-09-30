@@ -213,7 +213,7 @@ public sealed class TextService : ITextService, IDisposable
             {
                 return adapter.CreateParser(tokenizer, messages, request.EnableThinking);
             }
-            catch (InvalidOperationException ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 Logs.Warning($"Structured output parser unavailable, streaming plain text: {ex.Message}");
             }

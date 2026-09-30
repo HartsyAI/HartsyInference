@@ -41,8 +41,22 @@ public sealed class DeepSeekV41Encoder : IConversationEncoder
     }
 
     /// <inheritdoc />
+    public ParserInitialState ResolveParserState(IReadOnlyList<ChatMessage> messages, EncodeOptions options)
+    {
+        int imageSlots = messages.Select(MaxImageIndex).DefaultIfEmpty(0).Max();
+        EncodeOptions probe = options.Images is null && imageSlots > 0
+            ? options with { Images = Enumerable.Repeat(new ImageGrid(1, 1), imageSlots).ToList() }
+            : options;
+        string text = RenderText(messages, probe);
+        return new ParserInitialState(text.EndsWith(DeepSeekV41Tools.ThinkStart, StringComparison.Ordinal));
+    }
+
+    /// <inheritdoc />
     public IOutputParser CreateParser(ILlmTokenizer tokenizer, OutputParserState state)
         => new DeepSeekV41OutputParser(tokenizer, state);
+
+    private static int MaxImageIndex(ChatMessage message)
+        => message.Blocks?.OfType<ImageBlock>().Select(b => b.ImageIndex + 1).DefaultIfEmpty(0).Max() ?? 0;
 
     private static EncodedConversation ExpandImages(int[] raw, int placeholderId, List<int> imageOrder,
         IReadOnlyList<ImageGrid> grids, bool reasoningOpen)

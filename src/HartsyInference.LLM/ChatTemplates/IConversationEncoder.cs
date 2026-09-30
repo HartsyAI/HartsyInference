@@ -12,6 +12,9 @@ public interface IConversationEncoder
     /// <summary>Encodes <paramref name="messages"/> under <paramref name="options"/>.</summary>
     EncodedConversation Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, EncodeOptions options);
 
+    /// <summary>How the prompt for <paramref name="messages"/> ends, without tokenizing or expanding images.</summary>
+    ParserInitialState ResolveParserState(IReadOnlyList<ChatMessage> messages, EncodeOptions options);
+
     /// <summary>Creates the parser for completions of this format, starting in <paramref name="state"/>.</summary>
     IOutputParser CreateParser(ILlmTokenizer tokenizer, OutputParserState state);
 }

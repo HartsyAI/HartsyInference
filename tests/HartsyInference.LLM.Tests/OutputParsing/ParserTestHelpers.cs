@@ -34,6 +34,7 @@ internal static class ParserTestHelpers
             Xunit.Assert.True(got.ToolCalls[i].ArgumentsJson == replay.Calls[i].Args.ToString(), $"{where}: args deltas of call {i} differ");
             Xunit.Assert.True(replay.Calls[i].Ended, $"{where}: call {i} never ended");
         }
+        Xunit.Assert.True(replay.Calls.Count == got.ToolCalls.Count + replay.Aborted.Count, $"{where}: a dropped call was not aborted");
         Xunit.Assert.Equal(1, replay.Stops);
         Xunit.Assert.Equal(got.Malformed, replay.Malformed > 0);
     }

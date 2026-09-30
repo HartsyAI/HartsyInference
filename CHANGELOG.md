@@ -9,7 +9,7 @@ stable release will require. Dates are UTC.
 ## alpha.209
 
 - **Streaming output parser** (DeepSeek-V4.1-Flash program PR 11). `IOutputParser` (`Push(tokenId)` / `Finish`) turns generated
-  ids into `ParsedEvent`s (reasoning, content, tool-call begin/args/end, stop, malformed). `DeepSeekV41OutputParser` matches
+  ids into `ParsedEvent`s (reasoning, content, tool-call begin/args/end/abort, stop, malformed). `DeepSeekV41OutputParser` matches
   `</think>`, EOS and the `\n\n<｜DSML｜ calls>` marker on the detokenized text with longest-suffix holdback, so a marker split
   across any token or UTF-8 boundary is still found, and streams each call's JSON arguments as they arrive with the reference
   grammar (`namespace::tool`, leading-space tags, `string="true|false"`). Every split point equals one-shot parsing and the
@@ -18,7 +18,7 @@ stable release will require. Dates are UTC.
   template byte-identical.
 - `IncrementalDetokenizer` replaces the O(n^2) re-decode for tokenizers that report `ILlmTokenizer.TokenBytes` (`GgufTokenizer`):
   bytes go through a stateful UTF-8 decoder that holds back an incomplete character. Other tokenizers keep the full re-decode.
-- `TextChunkKind` gains `Reasoning`, `ToolCallDelta` and `Usage`; `TextChunk` gains `ToolCallIndex`, `Status` and `Usage`
+- `TextChunkKind` gains `Reasoning`, `ToolCallDelta`, `ToolCallAbort` (a faulted call's deltas must be discarded) and `Usage`; `TextChunk` gains `ToolCallIndex`, `Status` and `Usage`
   (`TextStatus`, `TextUsage`, declared only: no Usage/Status chunk is emitted yet). A complete `NativeToolCall`
   (`call_{requestId}_{index}`, plus `Namespace`) still fires per call. `IConversationEncoder.CreateParser` wires the parser to
   the DeepSeek-V4.1 encoder.

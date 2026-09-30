@@ -50,6 +50,9 @@ internal sealed class ParsedEventTranslator
                     ToolCall = Call(e.ToolCallIndex, _args.ToString()),
                 });
                 break;
+            case ParsedEventKind.ToolCallAbort:
+                _sink(new TextChunk { Kind = TextChunkKind.ToolCallAbort, ToolCallIndex = e.ToolCallIndex });
+                break;
             case ParsedEventKind.Malformed:
                 Logs.Debug($"Malformed model output: {e.Text}");
                 break;

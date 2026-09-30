@@ -24,6 +24,9 @@ public enum TextChunkKind
     /// <summary>A fragment of a streaming tool call; <see cref="TextChunk.ToolCallIndex"/> says which call.</summary>
     ToolCallDelta,
 
+    /// <summary>The streaming tool call at <see cref="TextChunk.ToolCallIndex"/> was dropped as malformed; discard its deltas.</summary>
+    ToolCallAbort,
+
     /// <summary>Token accounting, carried in <see cref="TextChunk.Usage"/>.</summary>
     Usage,
 }
