@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.203
+## alpha.205
 
 - **Header-first sharded safetensors** (`ShardedSafeTensorSet`, DeepSeek-V4.1-Flash program PR 4). `OpenIndex` (driven by
   `model.safetensors.index.json`) and `OpenFiles` (odd names such as MLX's) read only each shard's 8+N header bytes with
@@ -26,6 +26,27 @@ stable release will require. Dates are UTC.
   would halve every value.
 - A split GGUF (`split.count` > 1) is detected on load and refused with a `llama-gguf-split --merge` hint instead of
   loading one part with tensors missing.
+
+## alpha.204
+
+- **Multi-stage pre-tokenizer and a structured conversation encoder (DeepSeek-V4.1 PR 10).** `HfTokenizerJson` read only the
+  first `Split` of a `Sequence` pre-tokenizer; the new `PreTokenizerPipeline` runs every `Split` stage in order with HF
+  behavior/invert semantics, then ByteLevel. Astral code points now tokenize correctly (the old single regex mangled surrogate
+  pairs), and an unknown pre-tokenizer stage type or non-Regex `Split` pattern throws `NotSupportedException`
+  instead of being ignored. `ChatMessage` gains blocks, tool calls, reasoning content, task and the `tool`/`latest_reminder`
+  roles; `IConversationEncoder` returns `EncodedConversation` (ids, image spans, dead/vision-route masks, initial parser
+  state). `DeepSeekV41Encoder` ports the upstream `encoding.py` render half; rendered text is byte-equal to the five
+  upstream fixtures and ids equal HF `tokenizers`. It is not registered in the catalog yet.
+
+## alpha.203
+
+- **MoE routing, dispatch, combine, top-k and softplus are backend primitives** (`IBackend.MoeRoute`, `MoeBuildDispatch`,
+  `MoeCombine`, `TopKLastDim`, `Softplus`). Routing covers softmax, sigmoid and sqrtsoftplus scoring with bias, per-token
+  alternate bias, group-limited selection (including the HF masked-fill quirk), renormalization, scale and a logit divisor;
+  ties take the lowest index. The CPU reference lives in Core and the CPU backend delegates to it. CUDA adds
+  `moe_route.ptx`, `moe_dispatch.ptx` and `lm_topk_f32.ptx` (radix-select top-k up to k=2048 over vocab-sized rows), all
+  deterministic with no global atomics. Vulkan reports `NotSupportedException`. `MoeFeedForward` is unchanged; the
+  DeepSeek-V4.1-Flash executor adopts these in a later PR.
 
 ## alpha.202
 

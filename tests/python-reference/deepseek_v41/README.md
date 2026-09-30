@@ -21,6 +21,7 @@ Re-check without downloading: `python fetch_upstream.py --verify-only`.
 | `test_kernel_ports.py` | Checks each port against an independent scalar or float64 implementation |
 | `run_small_config.py` | Runs upstream `Transformer` on two small seeded configs and dumps every intermediate |
 | `dump_engram_constants.py` | Dumps the Engram token map, hash multipliers, primes and offsets with SHA-256 |
+| `dump_moe_route_fixture.py` | Runs the upstream `Gate` (sqrtsoftplus, bias) and writes `fixtures/moe_route_sqrtsoftplus.json` |
 
 ## Commands
 

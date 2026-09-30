@@ -24,7 +24,8 @@ public sealed class GgufTokenizer : ILlmTokenizer
     private readonly Dictionary<string, int> _specialByLiteral;
     private readonly string[] _specialLiterals;              // sorted by length desc (longest-match)
     private readonly HashSet<int> _specialIds;
-    private readonly Regex _preTokenRegex;                   // family-specific pre-token split
+    private readonly Regex? _preTokenRegex;                  // family-specific pre-token split
+    private readonly PreTokenizerPipeline? _pipeline;        // multi-stage HF pre-tokenizer (wins over the regex)
     private readonly bool _ignoreMerges;                     // emit a whole pre-token directly if it's in vocab
 
     public int? BosId { get; }
@@ -33,11 +34,13 @@ public sealed class GgufTokenizer : ILlmTokenizer
     public string? EosToken { get; }
     public IReadOnlyList<int> StopIds { get; }
 
-    /// <summary>Builds from GGUF metadata arrays. <paramref name="tokens"/> is the full vocab (index = id); <paramref name="merges"/> are "left right" byte-level pairs in rank order; <paramref name="tokenType"/> (optional) marks control/user-defined tokens; <paramref name="extraStopIds"/> adds end-of-turn ids. <paramref name="preTokenizerRegex"/> overrides the default GPT-2 split regex (Llama-3 differs in digit grouping and contraction casing); <paramref name="ignoreMerges"/> mirrors HF's <c>ignore_merges</c> — a pre-token that is itself a vocab entry is emitted directly instead of being re-derived by BPE.</summary>
+    /// <summary>Builds from GGUF metadata arrays. <paramref name="tokens"/> is the full vocab (index = id); <paramref name="merges"/> are "left right" byte-level pairs in rank order; <paramref name="tokenType"/> (optional) marks control/user-defined tokens; <paramref name="extraStopIds"/> adds end-of-turn ids. <paramref name="preTokenizerRegex"/> overrides the default GPT-2 split regex (Llama-3 differs in digit grouping and contraction casing); <paramref name="ignoreMerges"/> mirrors HF's <c>ignore_merges</c> — a pre-token that is itself a vocab entry is emitted directly instead of being re-derived by BPE. <paramref name="preTokenizer"/> (HF multi-stage pipeline) takes precedence over <paramref name="preTokenizerRegex"/>.</summary>
     public GgufTokenizer(string[] tokens, string[]? merges, int[]? tokenType, int? bosId, int? eosId,
-        IReadOnlyList<int>? extraStopIds = null, string? preTokenizerRegex = null, bool ignoreMerges = false)
+        IReadOnlyList<int>? extraStopIds = null, string? preTokenizerRegex = null, bool ignoreMerges = false,
+        PreTokenizerPipeline? preTokenizer = null)
     {
-        _preTokenRegex = preTokenizerRegex is null ? DefaultPreTokenRegex
+        _pipeline = preTokenizer;
+        _preTokenRegex = preTokenizer is not null ? null : preTokenizerRegex is null ? DefaultPreTokenRegex
             : new Regex(preTokenizerRegex, RegexOptions.Compiled);
         _ignoreMerges = ignoreMerges;
         if (tokens is null || tokens.Length == 0) throw new ArgumentException("GGUF tokens array is empty.", nameof(tokens));
@@ -90,7 +93,12 @@ public sealed class GgufTokenizer : ILlmTokenizer
     {
         if (text.Length == 0) return [];
         List<int> ids = [];
-        foreach (Match m in _preTokenRegex.Matches(text))
+        if (_pipeline is not null)
+        {
+            foreach (string piece in _pipeline.Split(text)) EncodePieceBpe(ByteLevelCodec.Encode(piece), ids);
+            return [.. ids];
+        }
+        foreach (Match m in _preTokenRegex!.Matches(text))
             EncodePieceBpe(ByteLevelCodec.Encode(m.Value), ids);
         return [.. ids];
     }
