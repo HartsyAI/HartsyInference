@@ -6,6 +6,33 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.221
+
+- **English-only Whisper checkpoints transcribe.** `openai/whisper-{tiny,base,small,medium}.en` and
+  `distil-whisper/distil-{small,medium}.en` returned an empty transcript after walking to the token limit (~11 s per
+  utterance on a 3060; 98.7 s on CPU for the 11 s JFK clip). Their vocabulary has 51864 entries and every special token
+  sits one below the multilingual layout (EOT 50256, SOT 50257, `<|transcribe|>` 50358, `<|notimestamps|>` 50362,
+  `<|0.00|>` 50363), and their decoder prompt is SOT + `<|notimestamps|>` with no language or task token. The tokenizer
+  hardcoded the multilingual ids, so the prompt was `<|en|>, <|zh|>, <|transcribe|>, <|notimestamps|>` and the decode
+  loop waited for an EOT (50257) the model never emits. `WhisperTokenizer` now resolves every id (`EotId`, `SotId`,
+  `FirstLanguageId`, task, no-speech, no-timestamps, first timestamp) from the checkpoint's `added_tokens.json` and
+  `vocab.json`, exposes `IsMultilingual` (OpenAI's `n_vocab >= 51865` rule) and builds the English-only prompt from it;
+  `WhisperPipeline` stops on the checkpoint's EOT and suppresses from its SOT, and exposes `IsMultilingual`. The v2 and
+  `.en` HF files name the no-speech token `<|nocaptions|>`, so the old `<|nospeech|>` lookup fell back to 50362 for
+  them: right for the v2 layout, `<|notimestamps|>` on `.en`; the v3 files name it `<|nospeech|>` and resolved
+  correctly before. Multilingual decodes (v2 and v3 layouts) are unchanged.
+- `WhisperConfig.IsMultilingual` drives the config's special-token ids; the `.en` presets and the two distil `.en`
+  presets carry `VocabSize` 51864 and pad 50256. `WhisperPipeline.LoadAsync` takes `vocab_size` from the checkpoint's
+  `config.json` for an inferred preset, and `WhisperDecoder.LoadWeights` refuses an embedding or `proj_out` whose
+  shape disagrees with the config — the old 51865 assumption read the tensor after the embedding as a phantom logit —
+  and `LoadAsync` refuses a directory whose `config.json` and tokenizer files disagree about the layout.
+- STT catalog: `whisper:tiny.en` / `base.en` / `small.en` / `medium.en` resolve to the English-only releases, and the
+  catalog drops language and task for an English-only pipeline, so callers no longer need the `Language=""` trick
+  (which still works).
+- Tests: `WhisperTokenizerLayoutTests` (synthetic `.en` and multilingual layouts, unit lane), `.en` preset and
+  `InferConfig` assertions in `WhisperConfigTests`, and `WhisperEnglishOnlyTests` (Integration + RealWeights, CPU):
+  `whisper-small.en` transcribes the JFK clip 11/11 content words in 64 s, `whisper-tiny` unchanged and pinned.
+
 ## alpha.220
 
 - **Text stream lifetime.** `TextStreamPump` now uses an unbounded channel, reversing alpha.206's bounded (256) one by
@@ -58,6 +85,7 @@ stable release will require. Dates are UTC.
   the two-sentence stream is Whisper-verified at 10/10 content-word recall. Through `SpeechService.SynthesizeStreamAsync`
   the runtime now holds its generation lock for the whole Kokoro stream, where the old text-split loop released it
   between chunks.
+
 
 ## alpha.218
 

@@ -3,8 +3,11 @@ namespace HartsyInference.Audio.Models.Whisper;
 /// <summary>Configuration for a Whisper encoder-decoder model, covering all released sizes (tiny through large-v3) plus the Sept-2024 large-v3-turbo (distilled to 4 decoder layers) and the HuggingFace distil-whisper variants (2-layer decoder); all numbers are verified against the upstream <c>config.json</c> on HuggingFace.</summary>
 public sealed record WhisperConfig
 {
-    /// <summary>Vocabulary size including special tokens — 51865 for &lt;=v2, 51866 for v3+ (v3 added Cantonese, +1 entry).</summary>
+    /// <summary>Vocabulary size including special tokens — 51865 for &lt;=v2, 51866 for v3+ (v3 added Cantonese, +1 entry), 51864 for the English-only <c>*.en</c> releases. Must match the checkpoint's <c>embed_tokens</c> row count.</summary>
     public int VocabSize { get; init; } = 51_865;
+
+    /// <summary>Whether the checkpoint uses the multilingual token layout (OpenAI's rule: a vocabulary of at least 51865 entries). The English-only <c>*.en</c> releases sit one lower throughout (EOT 50256, SOT 50257) and prompt with SOT alone; the ids below follow this flag.</summary>
+    public bool IsMultilingual { get; init; } = true;
 
     /// <summary>Number of mel bins in the input spectrogram. 80 for &lt;=v2, 128 for v3+.</summary>
     public int NumMelBins { get; init; } = 80;
@@ -33,7 +36,7 @@ public sealed record WhisperConfig
     /// <summary>Layer-norm epsilon. HuggingFace default 1e-5.</summary>
     public float LayerNormEps { get; init; } = 1e-5f;
 
-    /// <summary>Padding token id. 50257 for &lt;=v2, 50256 for v3+ (HuggingFace pad_token_id).</summary>
+    /// <summary>Padding token id. 50257 for &lt;=v2, 50256 for v3+ and for the English-only releases (HuggingFace pad_token_id).</summary>
     public int PadTokenId { get; init; } = 50_257;
 
     /// <summary>Whether to scale token embeddings by sqrt(HiddenSize). Stock Whisper does not.</summary>
@@ -45,13 +48,13 @@ public sealed record WhisperConfig
     /// <summary>Number of language tokens: 99 through v2; large-v3 added Cantonese (<c>&lt;|yue|&gt;</c>) for 100, which shifts every special token after the language block up by one.</summary>
     public int LanguageCount { get; init; } = 99;
 
-    // ── Special token IDs (the block before the languages is fixed; everything after shifts with LanguageCount) ──
-    /// <summary>End-of-text / pad token. 50257.</summary>
-    public int EndOfTextTokenId => 50_257;
-    /// <summary>Start-of-transcript token. 50258.</summary>
-    public int StartOfTranscriptTokenId => 50_258;
-    /// <summary>First language token (English). 50259.</summary>
-    public int LanguageTokenStart => 50_259;
+    // ── Special token IDs (English-only sits one lower from EOT on; everything after the languages shifts with LanguageCount) ──
+    /// <summary>End-of-text / pad token. 50257 multilingual, 50256 English-only.</summary>
+    public int EndOfTextTokenId => IsMultilingual ? 50_257 : 50_256;
+    /// <summary>Start-of-transcript token. 50258 multilingual, 50257 English-only.</summary>
+    public int StartOfTranscriptTokenId => EndOfTextTokenId + 1;
+    /// <summary>First language token (English). 50259 multilingual, 50258 English-only.</summary>
+    public int LanguageTokenStart => StartOfTranscriptTokenId + 1;
     /// <summary>Translate task token. 50358 (&lt;=v2) / 50359 (v3).</summary>
     public int TranslateTokenId => LanguageTokenStart + LanguageCount;
     /// <summary>Transcribe task token. 50359 (&lt;=v2) / 50360 (v3).</summary>
@@ -146,21 +149,25 @@ public sealed record WhisperConfig
     /// <summary>distil-large-v3.5 — identical architecture to <see cref="DistilLargeV3"/> (1280/32enc/2dec, 128 mel, 51866 vocab per its config.json); the .5 is a longer-trained release, not a shape change.</summary>
     public static WhisperConfig DistilLargeV3_5 => DistilLargeV3;
 
-    /// <summary>distil-medium.en — 24/2, 80 mel, English-only.</summary>
-    public static WhisperConfig DistilMediumEn => Medium with { DecoderLayers = 2 };
+    /// <summary>distil-medium.en — 24/2, 80 mel, English-only token layout (its config.json: vocab 51864, SOT 50257).</summary>
+    public static WhisperConfig DistilMediumEn => MediumEn with { DecoderLayers = 2 };
 
-    /// <summary>distil-small.en — 12/2, 80 mel, English-only.</summary>
-    public static WhisperConfig DistilSmallEn => Small with { DecoderLayers = 2 };
+    /// <summary>distil-small.en — 12/2, 80 mel, English-only token layout (its config.json: vocab 51864, SOT 50257).</summary>
+    public static WhisperConfig DistilSmallEn => SmallEn with { DecoderLayers = 2 };
 
-    /// <summary>tiny.en — English-only tiny; identical shape to <see cref="Tiny"/>.</summary>
-    public static WhisperConfig TinyEn => Tiny;
+    /// <summary>tiny.en — English-only tiny; the shape of <see cref="Tiny"/> with the English-only vocabulary.</summary>
+    public static WhisperConfig TinyEn => EnglishOnly(Tiny);
 
-    /// <summary>base.en — English-only base; identical shape to <see cref="Base"/>.</summary>
-    public static WhisperConfig BaseEn => Base;
+    /// <summary>base.en — English-only base; the shape of <see cref="Base"/> with the English-only vocabulary.</summary>
+    public static WhisperConfig BaseEn => EnglishOnly(Base);
 
-    /// <summary>small.en — English-only small; identical shape to <see cref="Small"/>.</summary>
-    public static WhisperConfig SmallEn => Small;
+    /// <summary>small.en — English-only small; the shape of <see cref="Small"/> with the English-only vocabulary.</summary>
+    public static WhisperConfig SmallEn => EnglishOnly(Small);
 
-    /// <summary>medium.en — English-only medium; identical shape to <see cref="Medium"/>.</summary>
-    public static WhisperConfig MediumEn => Medium;
+    /// <summary>medium.en — English-only medium; the shape of <see cref="Medium"/> with the English-only vocabulary.</summary>
+    public static WhisperConfig MediumEn => EnglishOnly(Medium);
+
+    /// <summary>The English-only release of a multilingual shape: one vocabulary entry fewer (51864) and pad/EOT at 50256, per the <c>*.en</c> config.json files.</summary>
+    private static WhisperConfig EnglishOnly(WhisperConfig multilingual)
+        => multilingual with { VocabSize = 51_864, PadTokenId = 50_256, IsMultilingual = false };
 }

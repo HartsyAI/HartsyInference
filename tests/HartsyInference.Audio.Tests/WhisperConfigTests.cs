@@ -62,8 +62,48 @@ public sealed class WhisperConfigTests
             WhisperConfig.LargeV2, WhisperConfig.LargeV3, WhisperConfig.LargeV3Turbo,
             WhisperConfig.DistilLargeV2, WhisperConfig.DistilLargeV3,
             WhisperConfig.DistilMediumEn, WhisperConfig.DistilSmallEn,
+            WhisperConfig.TinyEn, WhisperConfig.BaseEn, WhisperConfig.SmallEn, WhisperConfig.MediumEn,
         ];
         foreach (WhisperConfig cfg in all) Assert.Equal(64, cfg.HeadDim);
+    }
+
+    [Fact]
+    public void EnglishOnlyPresets_CarryTheEnglishOnlyVocabAndIds()
+    {
+        // Per the *.en config.json files: vocab 51864, decoder_start 50257, eos/pad 50256, forced [[1, 50362]].
+        WhisperConfig[] english = [
+            WhisperConfig.TinyEn, WhisperConfig.BaseEn, WhisperConfig.SmallEn, WhisperConfig.MediumEn,
+            WhisperConfig.DistilSmallEn, WhisperConfig.DistilMediumEn,
+        ];
+        foreach (WhisperConfig c in english)
+        {
+            Assert.False(c.IsMultilingual);
+            Assert.Equal(51_864, c.VocabSize);
+            Assert.Equal(50_256, c.PadTokenId);
+            Assert.Equal(50_256, c.EndOfTextTokenId);
+            Assert.Equal(50_257, c.StartOfTranscriptTokenId);
+            Assert.Equal(50_258, c.LanguageTokenStart);
+            Assert.Equal(50_357, c.TranslateTokenId);
+            Assert.Equal(50_358, c.TranscribeTokenId);
+            Assert.Equal(50_361, c.NoSpeechTokenId);
+            Assert.Equal(50_362, c.NoTimestampsTokenId);
+            Assert.Equal(50_363, c.TimestampTokenStart);
+        }
+        Assert.Equal(WhisperConfig.Small.HiddenSize, WhisperConfig.SmallEn.HiddenSize);
+        Assert.Equal(WhisperConfig.Small.EncoderLayers, WhisperConfig.SmallEn.EncoderLayers);
+        Assert.Equal(2, WhisperConfig.DistilSmallEn.DecoderLayers);
+        Assert.Equal(2, WhisperConfig.DistilMediumEn.DecoderLayers);
+    }
+
+    [Fact]
+    public void Pipeline_InferConfig_MapsEnglishOnlyReposToEnglishOnlyPresets()
+    {
+        Assert.Equal(WhisperConfig.TinyEn, WhisperPipeline.InferConfig("openai/whisper-tiny.en"));
+        Assert.Equal(WhisperConfig.BaseEn, WhisperPipeline.InferConfig("openai/whisper-base.en"));
+        Assert.Equal(WhisperConfig.SmallEn, WhisperPipeline.InferConfig("openai/whisper-small.en"));
+        Assert.Equal(WhisperConfig.MediumEn, WhisperPipeline.InferConfig("openai/whisper-medium.en"));
+        Assert.Equal(WhisperConfig.DistilSmallEn, WhisperPipeline.InferConfig("distil-whisper/distil-small.en"));
+        Assert.NotEqual(WhisperConfig.Small, WhisperPipeline.InferConfig("openai/whisper-small.en"));
     }
 
     [Fact]

@@ -18,7 +18,7 @@ public sealed class TranscribeCommand : Command<TranscribeCommand.Settings>
 
         /// <summary>Transcription model id, optionally with a variant (e.g. whisper:tiny, moonshine:base), or an HF repo.</summary>
         [CommandOption("-m|--model")]
-        [Description("Model, optionally 'id:variant' (e.g. whisper:tiny, whisper:large-v3, moonshine:base), or any HF repo id.")]
+        [Description("Model, optionally 'id:variant' (e.g. whisper:tiny, whisper:small.en, whisper:large-v3, moonshine:base), or any HF repo id.")]
         public string Model { get; init; } = "whisper";
 
         /// <summary>Compute backend selector.</summary>

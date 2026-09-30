@@ -7,12 +7,14 @@ namespace HartsyInference.Audio.Pipelines;
 public sealed record WhisperOptions
 {
     /// <summary>Language code (e.g., <c>"en"</c>, <c>"zh"</c>) or <c>null</c> to skip the
-    /// language token entirely (English-only models). Set to <c>"auto"</c> to request
-    /// automatic detection — not yet implemented; throws.</summary>
+    /// language token entirely. English-only (<c>*.en</c>) checkpoints have no language slot
+    /// and ignore this field. Set to <c>"auto"</c> to request automatic detection — not yet
+    /// implemented; throws.</summary>
     public string? Language { get; init; } = "en";
 
     /// <summary>If true, emit translation (to English) instead of transcription. Most
-    /// models support this; check the model card before relying on it.</summary>
+    /// multilingual models support this; check the model card before relying on it.
+    /// English-only (<c>*.en</c>) checkpoints have no task slot and ignore this field.</summary>
     public bool Translate { get; init; }
 
     /// <summary>Whether to emit timestamp tokens. When false, <c>&lt;|notimestamps|&gt;</c>
