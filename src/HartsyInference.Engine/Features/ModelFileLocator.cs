@@ -1,3 +1,4 @@
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Features;
@@ -8,7 +9,7 @@ public static class ModelFileLocator
     /// <summary>Extensions tried, in order, when the supplied name carries none.</summary>
     private static readonly string[] _extensions = [".safetensors", ".sft", ".bin", ".pth", ".pt", ".ckpt"];
 
-    /// <summary>Resolves <paramref name="nameOrPath"/> to an existing file, searching the given models-root-relative <paramref name="subfolders"/> (recursively) and trying the common weight extensions. Returns null when nothing matches.</summary>
+    /// <summary>Resolves <paramref name="nameOrPath"/> to an existing file, searching the given models-root-relative <paramref name="subfolders"/> (recursively, each matched ignoring case when not spelled that way on disk) and trying the common weight extensions. Returns null when nothing matches.</summary>
     public static string? Find(string? nameOrPath, params string[] subfolders)
     {
         if (string.IsNullOrWhiteSpace(nameOrPath))
@@ -25,6 +26,7 @@ public static class ModelFileLocator
         {
             return rooted;
         }
+        string[] folders = Array.ConvertAll(subfolders, sub => CaseInsensitivePath.ResolveDirectory(root, sub));
         foreach (string candidate in NameCandidates(nameOrPath))
         {
             string direct = Path.Combine(root, candidate);
@@ -32,9 +34,9 @@ public static class ModelFileLocator
             {
                 return direct;
             }
-            foreach (string sub in subfolders)
+            foreach (string folder in folders)
             {
-                string path = Path.Combine(root, sub, candidate);
+                string path = Path.Combine(folder, candidate);
                 if (File.Exists(path))
                 {
                     return path;
@@ -43,9 +45,8 @@ public static class ModelFileLocator
         }
         // Last resort: a recursive scan of each subfolder matching on the bare stem (the host may nest by author/family).
         string stem = Path.GetFileNameWithoutExtension(nameOrPath);
-        foreach (string sub in subfolders)
+        foreach (string dir in folders)
         {
-            string dir = Path.Combine(root, sub);
             if (!Directory.Exists(dir))
             {
                 continue;

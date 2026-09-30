@@ -1,9 +1,10 @@
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Locates detector/segmenter weights under the engine models root using the same folder conventions the SwarmUI extension used (<c>rtdetr</c>, <c>grounding-dino</c>, <c>clipseg</c>, <c>yolov8</c>, <c>sam2</c>). An explicit path supplied by the caller (<c>ModelSpec.LocalPath</c>) always wins; nothing is ever downloaded.</summary>
+/// <summary>Locates detector/segmenter weights under the engine models root using the same folder conventions the SwarmUI extension used (<c>rtdetr</c>, <c>grounding-dino</c>, <c>clipseg</c>, <c>yolov8</c>, <c>sam2</c>), matched ignoring case when a folder is spelled otherwise on disk. An explicit path supplied by the caller (<c>ModelSpec.LocalPath</c>) always wins; nothing is ever downloaded.</summary>
 public static class VisionModelPaths
 {
     /// <summary>Models-root subfolder holding RT-DETR checkpoints.</summary>
@@ -39,7 +40,7 @@ public static class VisionModelPaths
                 }
             }
         }
-        return FirstSafetensors(Path.Combine(RepoPaths.ModelsRoot(), subfolder));
+        return FirstSafetensors(CaseInsensitivePath.ResolveDirectory(RepoPaths.ModelsRoot(), subfolder));
     }
 
     /// <summary>Finds the Grounding DINO <c>model.safetensors</c> + BERT <c>vocab.txt</c> pair; both must sit in the same directory (the HF snapshot layout, optionally nested one level). Returns nulls when not installed.</summary>
@@ -121,7 +122,7 @@ public static class VisionModelPaths
                 }
             }
         }
-        string root = Path.Combine(RepoPaths.ModelsRoot(), subfolder);
+        string root = CaseInsensitivePath.ResolveDirectory(RepoPaths.ModelsRoot(), subfolder);
         if (Directory.Exists(root))
         {
             yield return root;

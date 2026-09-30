@@ -2,6 +2,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Tests.Common;
 using Xunit;
@@ -60,7 +61,8 @@ public sealed class ModelFolderCaseTests : IDisposable
             return;
         Directory.CreateDirectory(Path.Combine(_root, "llm"));
 
-        Assert.Equal(Path.Combine(_root, "llm", "qwen3", Qwen3.Assets[0].FileName), ModelDownloader.TargetPath(Qwen3.Assets[0]));
+        Assert.Equal(Path.Combine(_root, "llm", "qwen3", Qwen3.Assets[0].FileName),
+            ModelDownloader.TargetPath(Qwen3.Assets[0]));
         Assert.Equal(Qwen3.Assets[0], Assert.Single(ModelDownloader.MissingAssets(Qwen3)));
         Assert.Null(ModelResolver.Resolve("qwen3", modelPathArg: null, Modality.Text).LocalPath);
     }
@@ -103,6 +105,17 @@ public sealed class ModelFolderCaseTests : IDisposable
         Assert.Equal(Path.Combine(weights, "en-cot"), Path.GetDirectoryName(target));
     }
 
+    [Fact]
+    public void SideModelLookup_SearchesAFolderSpelledInAnotherCase()
+    {
+        if (!CaseSensitive())
+            return;
+        // The CAM++ speaker encoder lookup: its folders are named audio/speaker and audio.
+        string campplus = Place("Audio", "Speaker", "campplus.safetensors");
+
+        Assert.Equal(campplus, ModelFileLocator.Find("campplus", Path.Combine("audio", "speaker"), "audio"));
+    }
+
     /// <summary>Creates an empty file at the joined segments under the models root and returns its path.</summary>
     private string Place(params string[] segments)
     {
@@ -116,7 +129,7 @@ public sealed class ModelFolderCaseTests : IDisposable
     {
         bool sensitive = FileSystemCase.IsCaseSensitive(_root);
         if (!sensitive)
-            _output.WriteLine("SKIPPED: the temp filesystem is case-insensitive, so a folder cannot be spelled apart from its lookup.");
+            _output.WriteLine("SKIPPED: the temp filesystem is case-insensitive, so no folder can differ from its lookup by case.");
         return sensitive;
     }
 }

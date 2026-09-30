@@ -1,6 +1,7 @@
 using HartsyInference.ModelAssets.Checkpoints;
 using MergedLoraStack = HartsyInference.ModelAssets.Lora.LoraStack;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -428,7 +429,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
     /// <summary>Any safetensors under the upsampler folder whose name looks like a latent upscaler — the shipped file carries a version suffix that a future release will bump.</summary>
     private static string? FindAnyLatentUpsampler()
     {
-        string dir = Path.Combine(RepoPaths.ModelsRoot(), UpsamplerSubdir);
+        string dir = CaseInsensitivePath.ResolveDirectory(RepoPaths.ModelsRoot(), UpsamplerSubdir);
         if (!Directory.Exists(dir))
         {
             return null;

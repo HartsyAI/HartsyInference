@@ -7,6 +7,7 @@ using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
 using HartsyInference.Engine.Audio.Wake.Speakers;
@@ -79,10 +80,13 @@ public sealed class WakeService : IDisposable
         HostHandlesTurns = _options.HostHandlesTurns;
     }
 
+    /// <summary>The wake assets folder used when <see cref="WakeServiceOptions.ModelRoot"/> is unset: <c>{models}/audio/wake</c>, matched ignoring case when spelled otherwise on disk.</summary>
+    public static string DefaultModelRoot() => CaseInsensitivePath.ResolveDirectory(AudioModelRoot.Location(), "wake");
+
     /// <summary>Loads the models, starts the detection worker, then opens the listener. In that order, so a satellite is never accepted into a service that cannot yet score its audio.</summary>
     public void Start()
     {
-        string root = _options.ModelRoot ?? Path.Combine(RepoPaths.ModelsRoot(), "audio", "wake");
+        string root = _options.ModelRoot ?? DefaultModelRoot();
 
         // Persisted per-word settings are the base; anything passed in options wins, so a host can override
         // without rewriting the file.

@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio.Wake.Speakers;
@@ -247,7 +248,8 @@ public sealed class SpeakerProfileStore
     }
 
     /// <summary>The default location, <c>{models}/audio/wake/speakers</c>.</summary>
-    public static string DefaultDirectory() => Path.Combine(RepoPaths.ModelsRoot(), "audio", "wake", "speakers");
+    public static string DefaultDirectory() =>
+        CaseInsensitivePath.ResolveDirectory(WakeService.DefaultModelRoot(), "speakers");
 
     /// <summary>Writes the binary first and the JSON index second, each via a temp file and an atomic move, so a crash mid-enroll leaves either the old profile or a mismatch that <see cref="Read"/> rejects — never a profile whose centroid silently belongs to somebody else.</summary>
     private void Write(string stem, SpeakerProfile profile)
