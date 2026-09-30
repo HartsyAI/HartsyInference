@@ -8,6 +8,7 @@ using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
+using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.Cuda.Profiling;
 using HartsyInference.Tests.Common;
@@ -41,7 +42,9 @@ namespace HartsyInference.Audio.Tests;
 /// <c>HARTSY_WHISPER_BENCH_REF_DIR</c> set, the same-named files there are compared and the first divergence reported.
 /// <c>HARTSY_WHISPER_BENCH_PROFILE=1</c> adds stage-timer runs (<c>diagnostics.profile</c>: stage wall and D2H syncs,
 /// each stage closed by a device sync) and per-op runs (<c>diagnostics.profile</c> + <c>profileSync</c>) of small.en;
-/// <c>HARTSY_WHISPER_BENCH_EXACT=1</c> runs everything at full F32 (no TF32 GEMMs). Tables go to the test output
+/// <c>HARTSY_WHISPER_BENCH_EXACT=1</c> runs everything at full F32 (no TF32 GEMMs). <c>HARTSY_WHISPER_BENCH_BACKEND=cpu</c>
+/// runs every model through the regression protocol on the CPU backend (token evidence without a GPU), and
+/// <c>HARTSY_WHISPER_BENCH_RUNS=warm,timed</c> overrides that protocol's call counts. Tables go to the test output
 /// and, when <c>HARTSY_WHISPER_BENCH_OUT</c> names a file, are appended there.</para></summary>
 [Trait("Category", "GpuIntegration")]
 [Trait("Category", "RealWeights")]
@@ -55,6 +58,8 @@ public sealed class WhisperBenchTests
     private const string RefDirEnvVar = "HARTSY_WHISPER_BENCH_REF_DIR";
     private const string ProfileEnvVar = "HARTSY_WHISPER_BENCH_PROFILE";
     private const string ExactEnvVar = "HARTSY_WHISPER_BENCH_EXACT";
+    private const string BackendEnvVar = "HARTSY_WHISPER_BENCH_BACKEND";
+    private const string RunsEnvVar = "HARTSY_WHISPER_BENCH_RUNS";
     private const string RequiredDeviceSubstring = "3060";
     private const string GateModel = "openai/whisper-small.en";
     private const int SampleRate = 16_000;
@@ -109,7 +114,8 @@ public sealed class WhisperBenchTests
         }
         try
         {
-            using IBackend backend = OpenBackend();
+            bool cpu = Environment.GetEnvironmentVariable(BackendEnvVar) == "cpu";
+            using IBackend backend = cpu ? new CpuBackend() : OpenBackend();
             float[] audio16k = LoadJfk16k(jfk);
             float[] narrowband = NarrowbandRoundTrip(audio16k);
             foreach (string repo in Models())
@@ -123,7 +129,7 @@ public sealed class WhisperBenchTests
                 Stopwatch load = Stopwatch.StartNew();
                 using WhisperPipeline whisper = await WhisperPipeline.LoadAsync(repo);
                 _out.WriteLine($"{repo} loaded in {load.Elapsed.TotalSeconds:F1}s (excluded from every row)");
-                if (repo == GateModel)
+                if (repo == GateModel && !cpu)
                 {
                     RunGate(backend, whisper, audio16k, narrowband, exact);
                     if (Environment.GetEnvironmentVariable(ProfileEnvVar) == "1")
@@ -217,9 +223,10 @@ public sealed class WhisperBenchTests
     private void RunRegression(IBackend backend, WhisperPipeline whisper, float[] audio16k, float[] narrowband, bool exact)
     {
         WhisperOptions options = Options(whisper);
+        (int warmRuns, int timedRuns) = RegressionRuns();
         StringBuilder table = new();
         table.AppendLine($"### Whisper `{whisper.ModelName}` regression — {backend.Capabilities.DeviceName}, "
-            + $"{RegressionWarmRuns} warm + {RegressionTimedRuns} timed{(exact ? ", full F32" : "")}, Language = {options.Language ?? "null"}");
+            + $"{warmRuns} warm + {timedRuns} timed{(exact ? ", full F32" : "")}, Language = {options.Language ?? "null"}");
         table.AppendLine();
         table.AppendLine("| Case | median ms | min ms | D2H syncs/call | tokens | vs ref | JFK words | transcript |");
         table.AppendLine("|---|---:|---:|---:|---:|---|---:|---|");
@@ -231,7 +238,7 @@ public sealed class WhisperBenchTests
         ];
         foreach ((string caseName, float[] audio) in cases)
         {
-            (Stats stats, long syncs, List<int> tokens) = Measure(backend, whisper, audio, options, RegressionWarmRuns, RegressionTimedRuns);
+            (Stats stats, long syncs, List<int> tokens) = Measure(backend, whisper, audio, options, warmRuns, timedRuns);
             string text = whisper.DecodeText(tokens);
             string check = CompareAndDump(CaseName(whisper, caseName), tokens, text);
             table.AppendLine($"| {caseName} | {Ms(stats.Median)} | {Ms(stats.Min)} | {syncs} | {tokens.Count} | {check} | "
@@ -380,6 +387,18 @@ public sealed class WhisperBenchTests
         string? list = Environment.GetEnvironmentVariable(ModelsEnvVar);
         return string.IsNullOrWhiteSpace(list) ? [GateModel]
             : list.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+    }
+
+    /// <summary>Warm-up and timed call counts for the regression protocol: <c>HARTSY_WHISPER_BENCH_RUNS=warm,timed</c>.</summary>
+    private static (int Warm, int Timed) RegressionRuns()
+    {
+        string? runs = Environment.GetEnvironmentVariable(RunsEnvVar);
+        if (string.IsNullOrWhiteSpace(runs))
+        {
+            return (RegressionWarmRuns, RegressionTimedRuns);
+        }
+        string[] parts = runs.Split(',', StringSplitOptions.TrimEntries);
+        return (int.Parse(parts[0], CultureInfo.InvariantCulture), Math.Max(1, int.Parse(parts[1], CultureInfo.InvariantCulture)));
     }
 
     /// <summary>Opens the CUDA device named by <see cref="OrdinalEnvVar"/> and asserts it is the 3060.</summary>
