@@ -88,8 +88,9 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
   PagedKvCache exist in LLM, but TextService does not currently use the scheduler.
 - [ ] Extend and measure existing speculative decoding; it is already exposed by TextService.
 - [ ] Reproduce the inherited model-swap VRAM-leak report before assigning a cause; audit all placement backends.
-- [ ] Streaming lifetime: cancellation before worker startup, consumer abandonment, bounded buffering,
-  and error completion (TextService.StreamAsync is a priority source-review finding).
+- [x] Streaming lifetime: cancellation before worker startup, consumer abandonment and error completion
+  (`TextStreamPump`, alpha.220). Buffering is unbounded by decision: the sink runs on the decode thread inside
+  the slot lock and device gate, so a blocking writer would stall decode while holding the GPU.
 - [ ] SSM recurrence profiling and long-context/quantized quality checks; per-architecture gaps are in LLM status.
 
 ## 6. Diffusion / acceleration

@@ -128,6 +128,19 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Architecture coverage frontier
 - [ ] Nemotron-H (Mamba-proper hybrid — beyond the Jamba / Zamba2 / Granite-4 hybrids already in Phase 7).
 
+### Tool calling
+- Plumbing exists (alpha.220): tool schemas reach the chat template (`tools` in Jinja, Qwen2.5-shaped `# Tools` block in
+  the ChatML fallback), messages carry `tool_calls`/`tool_call_id`/`name`, the `<tool_call>` sentinel grammar is armed,
+  and an `ITextStreamFilter` installed through `EngineOptions.TextStreamFilterFactory` can emit `NativeToolCall`
+  chunks and stop generation as `StopReason.ToolCall`. Nothing in the engine parses a call yet: parsers per format,
+  the registry and the agent loop arrive with the separate `HartsyInference.Tools` package. `ForceToolId` is not
+  implemented.
+- The verbatim Qwen2.5-1.5B and Qwen3-4B `chat_template`s render tools, `tool_calls`, `<tool_response>` and the
+  `enable_thinking` stub through `JinjaEngine` (unit fixtures in `JinjaToolsRenderTests`), so neither falls back to
+  ChatML for a tool turn. Third-party Qwen2.5 GGUFs differ in one literal (`{"name": …}` vs `{{"name": …}}`); Jinja
+  renders each as written.
+- [ ] End-to-end: a real Qwen3-4B tool turn yields a parsed call once the Tools package supplies the parser.
+
 ### CLI catalog
 - [ ] Reconcile remaining catalog variants/assets against the recorded CLI pass; rerun only unverified or changed paths.
 - [ ] Wire the T5 / seq2seq generation loop in `TextService` (T5 is not reachable via `hartsy text` today).
