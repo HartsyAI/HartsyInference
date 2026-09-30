@@ -8,18 +8,18 @@ stable release will require. Dates are UTC.
 
 ## alpha.224
 
-- **Kokoro synthesis 6× faster on the 3060** (15-word sentence 1145 → 190 ms median in-process, 165–191 across eight
-  runs; 5 words 778 → 75 ms, 30 words 2076 → 287 ms; 1552 → 9 device→host syncs per call). The synthesis graph stays
+- **Kokoro synthesis 6.7× faster on the 3060** (15-word sentence 1145 → 170 ms median in-process, 165–191 across nine
+  runs; 5 words 778 → 82 ms, 30 words 2076 → 254 ms; 1552 → 9 device→host syncs per call). The synthesis graph stays
   device-resident: the AdaIN / AdaLN style splits, the length regulator, the style broadcast and channel concats,
   reflection pads, residual adds and the PLBERT head permutes are backend ops (`SliceLastDim`, `LayerNormModulate`,
-  `RepeatTime`, grouped `ConvTranspose1d`, `Concat`, `GatherRows`, `Permute0213`, `Add`/`Scale`), `KokoroPipeline`
-  preloads its weights once per backend and keeps the two style halves resident for the call, and
-  `KokoroPipeline.EnumerateWeights` is public. Bounded, not bit-identical, by TF32 rounding only: log-magnitude-STFT
-  correlation vs alpha.218 0.997 / 0.995 / 0.989 for 5 / 15 / 30 words with identical lengths and transcripts — closer
-  than alpha.218's own full-F32 output (0.994 / 0.986, and a flipped duration on 30 words). StyleTTS 2, which shares the
-  predictor, decoder blocks and `BiLstm`, is waveform-identical at full F32 (correlation 1.000000) and 2–3× faster, and
-  CosyVoice 2, which shares the NSF DSP, is unchanged (correlation 1.000000). Evidence and the remaining levers in
-  `benchmarks/results/2026-09-30_kokoro_3060_perf.md`.
+  `RepeatTime`, grouped `ConvTranspose1d`, `Concat`, `GatherRows`, `Permute0213`, `Add`/`Scale`), and `KokoroPipeline`
+  preloads its weights once per backend and keeps the two style halves resident for the call. Bounded, not
+  bit-identical, by TF32 rounding only: log-magnitude-STFT correlation vs alpha.218 0.997 / 0.995 / 0.989 for 5 / 15 /
+  30 words with identical lengths and transcripts — closer than alpha.218's own full-F32 output (0.994 / 0.986, and a
+  flipped duration on 30 words) — and waveform-identical to alpha.218 when both run at full F32 (correlation
+  ≥ 0.99999). StyleTTS 2, which shares the predictor, decoder blocks and `BiLstm`, is waveform-identical at full F32
+  (correlation 1.000000) and 2–3× faster, and CosyVoice 2, which shares the NSF DSP, is unchanged (correlation
+  1.000000). Evidence and the remaining levers in `benchmarks/results/2026-09-30_kokoro_3060_perf.md`.
 - **`BiLstm` runs its recurrence on the host.** Both directions' input projections are one GEMM over the whole sequence
   (the two `W_ih` stacked at load), read back once; the sequential `h·W_hhᵀ` step is a SIMD dot per gate row
   (`LstmOps.RunSequence`), the two directions through `CpuParallel.For(2, …)`. `LstmCell.Step` and
