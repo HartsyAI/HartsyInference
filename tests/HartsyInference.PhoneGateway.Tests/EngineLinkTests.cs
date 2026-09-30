@@ -45,7 +45,7 @@ public sealed class EngineLinkTests
     }
 
     [Fact]
-    public async Task Audio_FlowsBothWaysWithContinuousSequence()
+    public void Audio_FlowsBothWaysWithContinuousSequence()
     {
         using FakeLinkHost host = new();
         host.Start();
@@ -58,12 +58,14 @@ public sealed class EngineLinkTests
         Assert.True(connected.Wait(WaitMs));
         link.SendCallStart(1, new CallStartMessage { Direction = LinkCallDirection.Inbound, SipCallId = "abc" });
         short[] frame = new short[LinkProtocol.InboundFrameSamples];
-        // Paced like the pump thread; a tight loop would overrun the ten-deep drop-oldest lane by design.
+        // Each frame waits for the writer to take it: this test is about order and continuity on a busy box, and the
+        // ten-deep drop-oldest lane is covered by AudioLane_DropsTheOldestFrameWhenFull.
         for (int i = 0; i < 25; i++)
         {
             Array.Fill(frame, (short)i);
+            long sent = link.FramesSent;
             Assert.True(link.TryEnqueueInboundAudio(1, frame, concealed: i % 5 == 0));
-            await Task.Delay(5);
+            Assert.True(host.WaitUntil(() => link.FramesSent > sent, WaitMs), $"the writer never took frame {i}");
         }
         Assert.True(host.WaitUntil(() => host.AudioFramesReceived >= 25, WaitMs),
             $"host audio={host.AudioFramesReceived} link sent={link.FramesSent} laneDropped={link.AudioLaneDropped} connected={link.IsConnected}");
