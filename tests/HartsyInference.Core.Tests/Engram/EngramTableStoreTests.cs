@@ -227,6 +227,17 @@ public sealed class EngramTableStoreTests : IDisposable
     }
 
     [Fact]
+    public void Dispose_IsIdempotentAndBlocksFurtherUse()
+    {
+        using PreadByteSource source = new(_officialPath);
+        EngramTableStore store = new(Layout(), source, EngramBacking.Storage, EngramRowRange.All(_tables.Rows), Budget(8));
+        store.Gather([1], new ushort[256]);
+        store.Dispose();
+        store.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => store.Gather([1], new ushort[256]));
+    }
+
+    [Fact]
     public void BudgetMustHoldOneRow()
     {
         using PreadByteSource source = new(_officialPath);

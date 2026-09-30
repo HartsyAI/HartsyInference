@@ -125,6 +125,18 @@ public sealed class EngramConstants
             if (id < 0 || id >= compressed)
                 throw new HartsyInferenceException($"Engram token map holds id {id}, outside the compressed vocab of {compressed}.");
         }
+        // The hasher uses C# '%', which is Python's only for a non-negative dividend: every id * multiplier product must be
+        // non-negative and fit in int64 (then their XOR is non-negative too), and every prime a positive divisor.
+        foreach (long multiplier in multipliers)
+        {
+            if (multiplier <= 0 || multiplier > long.MaxValue / Math.Max(compressed, 1))
+                throw new HartsyInferenceException($"Engram multiplier {multiplier} can overflow int64 against {compressed} compressed ids.");
+        }
+        foreach (long prime in primes)
+        {
+            if (prime <= 0)
+                throw new HartsyInferenceException($"Engram prime {prime} is not a positive divisor.");
+        }
         for (int layer = 0; layer < layers; layer++)
         {
             long sum = 0;

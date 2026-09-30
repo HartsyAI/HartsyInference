@@ -194,7 +194,11 @@ public sealed class EngramTableStore : IDisposable
     /// <inheritdoc/>
     public void Dispose()
     {
+        if (_disposed)
+            return;
         _disposed = true;
+        // Wait out a load that is already running so it does not fail on a disposed gate and mask its own result.
+        _ioGate.Wait();
         _ioGate.Dispose();
     }
 
