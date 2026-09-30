@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>SIP/RTP phone gateway for HartsyInference voice calls: sipsorcery signalling, a clocked RTP sender, a jitter buffer and the PhoneLink socket to the voice host. No models run here.</Description>
+    <RootNamespace>HartsyInference.PhoneGateway</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <!-- A service exe, not a library: net10 only, never packed. -->
+    <TargetFrameworks></TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <!-- Workstation concurrent GC: the 20 ms RTP cadence cannot ride out a blocking server-GC suspension. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.PhoneGateway.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Core (clock, FIFO scheduling, SPSC ring, histogram), Audio (G.711 tables, StreamingResampler) and the
+         link protocol. Never Engine: the gateway owns no models. Audio drags LLM and ModelAssets DLLs into the
+         output; accepted for v1 (managed-only, no native dependency, see docs/Research/PHONE_GATEWAY.md). -->
+    <ProjectReference Include="..\HartsyInference.Core\HartsyInference.Core.csproj" />
+    <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
+    <ProjectReference Include="..\HartsyInference.PhoneLink\HartsyInference.PhoneLink.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Pinned in Directory.Packages.props with the license note. -->
+    <PackageReference Include="SIPSorcery" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Two 8 kHz PCM16 prompts the gateway plays on its own when the voice host is unreachable. -->
+    <EmbeddedResource Include="Assets\one-moment.pcm" LogicalName="HartsyInference.PhoneGateway.Assets.one-moment.pcm" />
+    <EmbeddedResource Include="Assets\goodbye.pcm" LogicalName="HartsyInference.PhoneGateway.Assets.goodbye.pcm" />
+    <None Include="phone.example.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
