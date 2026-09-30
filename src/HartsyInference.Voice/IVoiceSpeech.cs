@@ -12,4 +12,9 @@ internal interface IVoiceSpeech : IDisposable
 
     /// <summary>Mono audio (±1) for one sentence of speakable text.</summary>
     float[] Synthesize(string text);
+
+    /// <summary>Loads the models again after their owner released them (a call threw <see cref="ObjectDisposedException"/>).
+    /// Called on the GPU thread without the device gate held, because loading takes the gate itself; throws when the
+    /// models cannot be reloaded.</summary>
+    void Reopen();
 }

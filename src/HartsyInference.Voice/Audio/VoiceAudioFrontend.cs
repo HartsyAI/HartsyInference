@@ -111,8 +111,12 @@ internal sealed class VoiceAudioFrontend : IDisposable
     /// <summary>Length of the utterance the last endpoint closed.</summary>
     public int UtteranceSamples => (int)_utterance.LengthSamples;
 
-    /// <summary>Samples from the end of that utterance's speech to the endpoint decision; 0 for a cut at the maximum length.</summary>
+    /// <summary>Samples from the end of that utterance's speech to the endpoint decision; 0 for a cut mid-speech at the
+    /// maximum length.</summary>
     public long HangoverSamples => _hangover;
+
+    /// <summary>First sample of that utterance on the front-end clock, padding included.</summary>
+    public long UtteranceStartSample => _utterance.StartSample;
 
     /// <summary>Scores one 20 ms frame of 16 kHz ±1 audio and reports what it decided.</summary>
     public VoiceFrameEvents ProcessFrame(ReadOnlySpan<float> frame)
@@ -210,13 +214,9 @@ internal sealed class VoiceAudioFrontend : IDisposable
             events |= VoiceFrameEvents.SpeechStarted;
         }
         events |= CheckBargeIn(windowStart);
-        if (closed)
+        if (closed || (_vad.InSpeech && clock - _vad.SpeechStartSample >= _maxUtteranceSamples && _vad.Flush(out segment)))
         {
-            events |= Close(segment, clock - (segment.EndSample - _speechPadSamples));
-        }
-        else if (_vad.InSpeech && clock - _vad.SpeechStartSample >= _maxUtteranceSamples && _vad.Flush(out segment))
-        {
-            events |= Close(segment, 0);
+            events |= Close(segment, clock);
         }
         _wasInSpeech = _vad.InSpeech;
         return events;
@@ -257,10 +257,11 @@ internal sealed class VoiceAudioFrontend : IDisposable
         return VoiceFrameEvents.BargeIn;
     }
 
-    private VoiceFrameEvents Close(SileroVadSegment segment, long hangover)
+    private VoiceFrameEvents Close(SileroVadSegment segment, long clock)
     {
         _utterance = segment;
-        _hangover = hangover;
+        // A segment ending at the clock was cut mid-speech; any other ends a padded stretch after its last speech.
+        _hangover = segment.EndSample >= clock ? 0 : clock - (segment.EndSample - _speechPadSamples);
         bool bargedIn = _bargeInClock >= segment.StartSample;
         return _signals.SpeakingTurn != 0 && !bargedIn ? VoiceFrameEvents.UtteranceDiscarded : VoiceFrameEvents.Endpoint;
     }

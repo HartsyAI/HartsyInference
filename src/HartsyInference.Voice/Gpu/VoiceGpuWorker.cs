@@ -14,22 +14,30 @@ namespace HartsyInference.Voice.Gpu;
 /// is set with continuations forced off this thread. A caller that stops waiting is released at once even while its
 /// job is still running here; the job's result is then dropped. <see cref="RequestTrim"/> returns pool memory to the
 /// driver once the queue is empty, because <see cref="IBackend.TrimMemoryPool"/> synchronizes the stream and must not
-/// sit between two sentences of a reply.</remarks>
+/// sit between two sentences of a reply.
+/// <para>A job that throws <see cref="ObjectDisposedException"/> found its models released by their owner (an engine
+/// release revokes runner leases). The worker then runs the reopen hook once, outside the gate because reopening
+/// takes the gate itself, and retries the job once; if either fails the job fails, its caller reports it, and the
+/// thread carries on with the next job.</para></remarks>
 internal sealed class VoiceGpuWorker : IDisposable
 {
     private readonly IBackend _device;
+    private readonly Action? _reopen;
     private readonly BlockingCollection<Job> _queue = new(new ConcurrentQueue<Job>());
     private readonly Thread _thread;
     private Task? _stopped;
     private int _trimRequested;
     private long _completed;
+    private int _reopens;
     private int _disposed;
 
-    /// <summary>Starts the thread for <paramref name="device"/>, which it borrows.</summary>
-    public VoiceGpuWorker(IBackend device)
+    /// <summary>Starts the thread for <paramref name="device"/>, which it borrows. <paramref name="reopen"/> reloads the
+    /// models after a job found them released; null fails such a job at once.</summary>
+    public VoiceGpuWorker(IBackend device, Action? reopen = null)
     {
         ArgumentNullException.ThrowIfNull(device);
         _device = device;
+        _reopen = reopen;
         _thread = new Thread(Run) { Name = "voice-gpu", IsBackground = true };
         _thread.Start();
     }
@@ -42,6 +50,9 @@ internal sealed class VoiceGpuWorker : IDisposable
 
     /// <summary>Jobs that ran to completion or failure.</summary>
     public long CompletedJobs => Interlocked.Read(ref _completed);
+
+    /// <summary>Times the models were reopened after a release.</summary>
+    public int Reopens => Volatile.Read(ref _reopens);
 
     /// <summary>Queues <paramref name="work"/> and returns its result once it ran on the GPU thread.</summary>
     public async Task<T> RunAsync<T>(VoiceGpuJobKind kind, Func<T> work, CancellationToken cancel)
@@ -121,14 +132,16 @@ internal sealed class VoiceGpuWorker : IDisposable
     {
         try
         {
-            using IDisposable gate = DeviceGate.Acquire(_device, job.Cancellation);
             try
             {
-                job.Execute();
+                RunGated(job);
             }
-            finally
+            catch (ObjectDisposedException released) when (_reopen is not null && job.Kind != VoiceGpuJobKind.Shutdown)
             {
-                _device.FreeActivations();
+                Logs.Warning($"[Voice] A {job.Kind} job found the speech models released ({released.Message}); reopening them and retrying once.");
+                _reopen();
+                Interlocked.Increment(ref _reopens);
+                RunGated(job);
             }
         }
         catch (OperationCanceledException) when (job.Cancellation.IsCancellationRequested)
@@ -140,6 +153,19 @@ internal sealed class VoiceGpuWorker : IDisposable
             job.Fail(ex);
         }
         Interlocked.Increment(ref _completed);
+    }
+
+    private void RunGated(Job job)
+    {
+        using IDisposable gate = DeviceGate.Acquire(_device, job.Cancellation);
+        try
+        {
+            job.Execute();
+        }
+        finally
+        {
+            _device.FreeActivations();
+        }
     }
 
     private void Trim()

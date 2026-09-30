@@ -50,7 +50,7 @@ public sealed class VoiceModelSet : IAsyncDisposable
         _createVad = createVad;
         _createDenoiser = options.Denoise ? createDenoiser : null;
         _frontEndModels = frontEndModels;
-        Gpu = new VoiceGpuWorker(audioDevice);
+        Gpu = new VoiceGpuWorker(audioDevice, speech.Reopen);
         if (options.CpuThreadCap > 0)
         {
             // Reading the value first loads the settings file, so a file value cannot later overwrite this override.
@@ -84,6 +84,48 @@ public sealed class VoiceModelSet : IAsyncDisposable
 
     /// <summary>A denoiser for one session, or null when denoising is off.</summary>
     internal RnnoiseStream? CreateDenoiser() => _createDenoiser?.Invoke();
+
+    /// <summary>Opens the speech models on <paramref name="engine"/> and loads the front-end weights.</summary>
+    /// <param name="engine">Built on <see cref="VoiceAgentOptions.AudioDevice"/>; the language model reaches another card
+    /// through <see cref="VoiceAgentOptions.LlmDevice"/> on each request. It must outlive the set. An engine release
+    /// (free memory, backend switch) revokes the speech leases; the GPU thread reopens them on the next job that finds
+    /// them gone and retries it once.</param>
+    /// <param name="options">Models, devices and front-end settings.</param>
+    /// <param name="wakeModelRoot">Folder holding <c>vad</c> and <c>denoise</c>; defaults to the models root's
+    /// <c>audio/wake</c>.</param>
+    /// <param name="cancel">Stops the load.</param>
+    public static async Task<VoiceModelSet> LoadAsync(InferenceEngine engine, VoiceAgentOptions options, string? wakeModelRoot = null,
+        CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(engine);
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
+        IBackend device = engine.ComputeBackend;
+        string deviceKey = device.Device.ToString();
+        if (!string.Equals(deviceKey, options.AudioDevice, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ArgumentException($"The engine runs on {deviceKey} but AudioDevice is {options.AudioDevice}. Build the engine on the audio "
+                + "device and reach the language model's card with LlmDevice.", nameof(engine));
+        }
+        // The small front-end files first, so a missing VAD or denoiser fails before the speech models load.
+        WakeModelSet frontEnd = LoadFrontEnd(wakeModelRoot ?? Path.Combine(RepoPaths.ModelsRoot(), "audio", "wake"), options,
+            out Func<IVadModel> createVad, out Func<RnnoiseStream>? createDenoiser);
+        VoiceLeaseSpeech? speech = null;
+        try
+        {
+            ModelSpec tts = ModelResolver.Resolve(options.TtsModel, null, Modality.Speech);
+            ModelSpec stt = ModelResolver.Resolve(options.SttModel, null, Modality.Transcribe);
+            speech = await VoiceLeaseSpeech.OpenAsync(token => engine.Speech.OpenSynthesizerAsync(tts, token),
+                token => engine.Transcribe.OpenTranscriberAsync(stt, token), ModelSelector.Parse(options.TtsModel).Variant, cancel).ConfigureAwait(false);
+            return new VoiceModelSet(options, speech, device, createVad, createDenoiser, frontEnd);
+        }
+        catch
+        {
+            speech?.Dispose();
+            frontEnd.Dispose();
+            throw;
+        }
+    }
 
     /// <summary>Loads the per-session front-end weights from <paramref name="wakeModelRoot"/> (the wake models'
     /// <c>vad</c> and <c>denoise</c> folders). Silero is required; RNNoise is required when

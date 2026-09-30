@@ -33,6 +33,8 @@ internal sealed class VoiceAudioWorker : IDisposable
     private Thread? _thread;
     private int _frameFill;
     private long _droppedOldest;
+    private long _frames;
+    private long _publishedFrames;
     private long _allocatedBytes;
     private volatile bool _stopping;
     private int _disposed;
@@ -63,6 +65,9 @@ internal sealed class VoiceAudioWorker : IDisposable
     /// <summary>Managed bytes the audio thread had allocated after its last drain; a diagnostic for the zero-allocation
     /// contract.</summary>
     public long AllocatedBytes => Volatile.Read(ref _allocatedBytes);
+
+    /// <summary>Frames the thread had processed after its last drain (published after <see cref="AllocatedBytes"/>).</summary>
+    public long ProcessedFrames => Volatile.Read(ref _publishedFrames);
 
     /// <summary>Producer side: queues caller audio (16 kHz, ±1) and wakes the thread. One producer thread; never blocks.</summary>
     public void Push(ReadOnlySpan<float> samples)
@@ -106,6 +111,7 @@ internal sealed class VoiceAudioWorker : IDisposable
                 return;
             }
             _frameFill = 0;
+            _frames++;
             VoiceFrameEvents events = _frontend.ProcessFrame(_frame);
             if (events != VoiceFrameEvents.None)
             {
@@ -144,6 +150,7 @@ internal sealed class VoiceAudioWorker : IDisposable
                 _doorbell.Reset();
                 ProcessAvailable();
                 Volatile.Write(ref _allocatedBytes, GC.GetAllocatedBytesForCurrentThread());
+                Volatile.Write(ref _publishedFrames, _frames);
                 if (_stopping)
                 {
                     break;
