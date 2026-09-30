@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.226
+## alpha.223
 
 - **Runner leases on the speech services.** `ISpeechService.OpenSynthesizerAsync(spec)` and
   `ITranscribeService.OpenTranscriberAsync(spec)` load a model exactly as `SynthesizeAsync`/`RunAsync` do (same catalog,
