@@ -22,12 +22,14 @@ stable release will require. Dates are UTC.
   timeout; `CallController` is the one-call state machine (greeting, RFC 4733 DTMF both ways,
   `hangup`/`send_dtmf`/`transfer`/`hold`/`unhold`/`play_prompt` tools). New INVITEs are screened on the transport
   before sipsorcery's user agent sees them (486 while a call is up, 503 with the host down, 603 by policy), each
-  refusal on its own server transaction and counted once per INVITE (Call-ID + top Via branch, 32 s). A tick-thread
-  fault ends the call instead of leaving it silent: logged once, `calls_media_fault_total`, BYE and
-  `CallEnd(Failed)`, or, before the call is announced, a BYE after the ACK and nothing sent to the host;
+  refusal on its own server transaction and counted once per INVITE (Call-ID + top Via branch, 32 s). A fault on
+  the RTP tick or inbound pump thread ends the call instead of leaving it half-dead: logged once,
+  `calls_media_fault_total`, BYE and `CallEnd(Failed)`, or, before the call is announced, a BYE after the ACK and
+  nothing sent to the host;
   `PhoneMediaSession` advertises the STUN/literal public address and latches on the first packet. Config is a
-  JSON file with secrets by environment-variable name only (the loader is the one new entry on the env-read
-  allowlist, noted in `docs/SETTINGS.md`); `/health`, `/metrics` (Prometheus) and token-gated
+  JSON file; secrets are files it names (`sip.passwordFile`, `link.tokenFile`, `admin.tokenFile`), read once,
+  refused when group or others can access them, never logged, and under systemd delivered with `LoadCredential=`
+  (`docs/SETTINGS.md` notes it); `/health`, `/metrics` (Prometheus) and token-gated
   `POST /calls` on loopback; recording off by default. `HartsyInference.Phone.slnf` builds it without the GPU
   packages. Docs: `docs/Research/PHONE_GATEWAY.md`.
 
