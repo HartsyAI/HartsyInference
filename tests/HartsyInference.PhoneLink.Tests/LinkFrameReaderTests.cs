@@ -100,6 +100,53 @@ public sealed class LinkFrameReaderTests
     }
 
     [Fact]
+    public async Task DisposeWhileAReadIsInFlight_LeavesTheBufferToTheGcAndEndsTheRead()
+    {
+        byte[] bytes = await LinkRoundTrip.EncodeAsync(w => w.WritePingAsync(1, None));
+        GatedReadStream stream = new(bytes);
+        LinkFrameReader reader = new(stream);
+        ValueTask<LinkFrame?> pending = reader.ReadAsync(None);
+        Assert.False(pending.IsCompleted);
+        byte[] buffer = PoolProbe.ArrayOf(stream.LastRead);
+
+        reader.Dispose();
+
+        Assert.False(PoolProbe.IsInPool(buffer));
+        stream.Release();
+        Assert.Null(await pending);
+        Assert.False(PoolProbe.IsInPool(buffer));
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await reader.ReadAsync(None));
+    }
+
+    [Fact]
+    public async Task DisposeAfterTheLastRead_ReturnsTheBufferToThePool()
+    {
+        byte[] bytes = await LinkRoundTrip.EncodeAsync(w => w.WritePingAsync(1, None));
+        GatedReadStream stream = new(bytes, gated: false);
+        LinkFrameReader reader = new(stream);
+        Assert.NotNull(await reader.ReadAsync(None));
+        byte[] buffer = PoolProbe.ArrayOf(stream.LastRead);
+
+        reader.Dispose();
+
+        Assert.True(PoolProbe.IsInPool(buffer));
+    }
+
+    [Fact]
+    public async Task ConcurrentRead_Throws()
+    {
+        GatedReadStream stream = new([]);
+        using LinkFrameReader reader = new(stream);
+        ValueTask<LinkFrame?> first = reader.ReadAsync(None);
+
+        Assert.Throws<InvalidOperationException>(() => reader.ReadAsync(None));
+
+        stream.Release();
+        Assert.Null(await first);
+        Assert.Null(await reader.ReadAsync(None));
+    }
+
+    [Fact]
     public async Task ReadAfterDispose_Throws()
     {
         LinkFrameReader reader = new(new MemoryStream());

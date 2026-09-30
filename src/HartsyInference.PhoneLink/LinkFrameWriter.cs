@@ -11,8 +11,10 @@ namespace HartsyInference.PhoneLink;
 ///
 /// <para><b>Single writer.</b> One instance serves one direction and one thread at a time; the owner serializes callers (the
 /// design is one sender thread per direction). A second concurrent write throws <see cref="InvalidOperationException"/> rather
-/// than interleaving bytes. <see cref="Dispose"/> returns the staging buffer to <see cref="ArrayPool{T}.Shared"/>; the stream is
-/// not owned.</para></summary>
+/// than interleaving bytes. The stream is not owned and must be unbuffered or flush-cheap (socket streams are): every frame
+/// ends with a <see cref="Stream.FlushAsync(CancellationToken)"/>. <see cref="Dispose"/> should follow completion of the last
+/// write; disposing while a write is still in flight is tolerated, but the staging buffer that write is sending is then left
+/// to the GC instead of being returned to <see cref="ArrayPool{T}.Shared"/>, because the stream may still be reading it.</para></summary>
 public sealed class LinkFrameWriter : IDisposable
 {
     private const int InitialCapacity = 4096;
@@ -238,6 +240,8 @@ public sealed class LinkFrameWriter : IDisposable
         }
         catch
         {
+            // Drop the half-written JSON so a later Flush (including Dispose's) cannot advance the staging buffer with it.
+            _json.Reset();
             Abort();
             throw;
         }
@@ -257,9 +261,11 @@ public sealed class LinkFrameWriter : IDisposable
                     $"{type} payload is {payloadLength} bytes; the limit is {LinkProtocol.MaxPayloadBytes} bytes.");
             }
             new LinkFrameHeader((uint)payloadLength, type, flags, callId, _sequence).Write(_staging.Span);
+            // Counted before the write: a failed write leaves a gap, and the spec makes any write error tear the link down.
             _sequence++;
             write = _stream.WriteAsync(_staging.WrittenMemory, cancel);
             if (!write.IsCompletedSuccessfully) return CompleteWriteAsync(write, cancel);
+            // Per-frame flush so a buffering stream cannot hold back a 20 ms audio frame; a no-op on socket streams.
             Task flush = _stream.FlushAsync(cancel);
             if (!flush.IsCompletedSuccessfully) return CompleteFlushAsync(flush);
         }
@@ -303,7 +309,10 @@ public sealed class LinkFrameWriter : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _json.Dispose();
-        _staging.Dispose();
+        // Claiming the writer stops any later frame. Failing to claim means a write is still in flight and the stream may
+        // still be reading the staging array, so it goes to the GC instead of back to the pool.
+        if (Interlocked.CompareExchange(ref _busy, 1, 0) == 0) _staging.Dispose();
+        else _staging.Abandon();
     }
 
     /// <summary>Growable pooled frame buffer; the first <see cref="LinkFrameHeader.Size"/> bytes are reserved for the header
@@ -355,5 +364,8 @@ public sealed class LinkFrameWriter : IDisposable
             byte[] array = Interlocked.Exchange(ref _array, []);
             if (array.Length > 0) ArrayPool<byte>.Shared.Return(array);
         }
+
+        /// <summary>Drops the array without returning it to the pool, for when a stream write may still be reading it.</summary>
+        public void Abandon() => Interlocked.Exchange(ref _array, []);
     }
 }

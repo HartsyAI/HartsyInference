@@ -52,6 +52,11 @@ Every frame is a 16-byte little-endian header followed by `payloadLength` bytes.
 A header declaring more than 1 MB is a protocol error and is rejected before any of the payload is read. There is no
 resynchronization: after any protocol error the receiver closes the socket and the gateway reconnects.
 
+**Any write error tears the connection down.** The sender counts `sequence` before the write, so a frame whose
+write fails leaves a gap; the sender must close the socket after a failed write (the gateway then reconnects and
+both counters restart at 0), so a peer never observes a `sequence` gap on a healthy link and may treat one as a
+protocol error.
+
 ## Messages
 
 Direction: G→H is gateway to host, H→G is host to gateway. Binary payloads are little-endian; JSON payloads use
@@ -157,5 +162,9 @@ accounting; it is not an acknowledgement and needs no reply.
 - `LinkFrameReader` reassembles frames split across any read boundaries in one pooled buffer that grows only to the
   largest frame seen. `LinkFrame.Payload` is a slice of that buffer, valid only until the next `ReadAsync`; decode
   it first. The oversize check runs on the 16 header bytes, so a hostile length never costs a 1 MB allocation.
+  `ReadPcm` enforces exactly 320 samples on `InboundAudio`; `OutboundAudio` is bounded by the payload cap only.
+- Dispose reader and writer after their last operation completes. Disposing while a read or write is still awaiting
+  the stream (a teardown on disconnect) is tolerated: the operation completes normally (a pending read reports end
+  of stream) and the buffer it was using is left to the GC rather than returned to the pool.
 - Neither side resamples in the link layer; rates are negotiated once in the handshake and the resamplers live in
   the gateway (`StreamingResampler`) and the voice session.

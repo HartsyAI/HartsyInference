@@ -94,6 +94,39 @@ public sealed class LinkFrameWriterTests
     }
 
     [Fact]
+    public async Task DisposeWhileAWriteIsInFlight_LeavesTheBufferToTheGc()
+    {
+        GatedWriteStream stream = new();
+        LinkFrameWriter writer = new(stream);
+        ValueTask first = writer.WritePingAsync(7, None);
+        Assert.False(first.IsCompleted);
+        byte[] staging = PoolProbe.ArrayOf(stream.LastWrite);
+
+        writer.Dispose();
+
+        Assert.False(PoolProbe.IsInPool(staging));
+        stream.Release();
+        await first;
+        Assert.True(LinkFrameHeader.TryRead(stream.LastWrite.Span, out LinkFrameHeader header));
+        Assert.Equal(new LinkFrameHeader(8, LinkMessageType.Ping, LinkFrameFlags.None, 0, 0), header);
+        Assert.False(PoolProbe.IsInPool(staging));
+        Assert.Throws<ObjectDisposedException>(() => writer.WritePongAsync(7, None));
+    }
+
+    [Fact]
+    public async Task DisposeAfterTheLastWrite_ReturnsTheBufferToThePool()
+    {
+        GatedWriteStream stream = new(gated: false);
+        LinkFrameWriter writer = new(stream);
+        await writer.WritePingAsync(7, None);
+        byte[] staging = PoolProbe.ArrayOf(stream.LastWrite);
+
+        writer.Dispose();
+
+        Assert.True(PoolProbe.IsInPool(staging));
+    }
+
+    [Fact]
     public async Task WriteAfterDispose_Throws()
     {
         LinkFrameWriter writer = new(Stream.Null);

@@ -238,14 +238,20 @@ public sealed class LinkFramingRoundTripTests
             byte[] shortToken = [1, 0, 0x80, 0x3E, 0, 0, 9, 0, (byte)'a'];
             await w.WriteAsync(LinkMessageType.Hello, LinkFrameFlags.None, 0, shortToken, None);
             await w.WriteHelloAsync(new LinkHello(LinkProtocol.Version, 8000, "narrowband"), None);
+            await w.WriteAsync(LinkMessageType.InboundAudio, LinkFrameFlags.None, 1, new byte[160 * 2], None);
+            await w.WriteAsync(LinkMessageType.InboundAudio, LinkFrameFlags.None, 1, new byte[640 * 2], None);
         });
         List<LinkFrame> frames = await LinkRoundTrip.DecodeAsync(new MemoryStream(bytes));
+        short[] pcm = new short[640];
 
         Assert.Throws<LinkProtocolException>(() => frames[0].ReadHelloAck());
         Assert.Throws<LinkProtocolException>(() => frames[1].ReadPcm(new short[8]));
         Assert.Throws<LinkProtocolException>(() => frames[2].ReadDtmf());
         Assert.Throws<LinkProtocolException>(() => frames[3].ReadHello());
         Assert.Contains("8000", Assert.Throws<LinkProtocolException>(() => frames[4].ReadHello()).Message);
+        Assert.Equal(160, frames[5].PcmSampleCount);
+        Assert.Contains("640", Assert.Throws<LinkProtocolException>(() => frames[5].ReadPcm(pcm)).Message);
+        Assert.Contains("640", Assert.Throws<LinkProtocolException>(() => frames[6].ReadPcm(pcm)).Message);
     }
 
     private static short[] Ramp(int count)

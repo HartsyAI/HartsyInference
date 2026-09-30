@@ -18,7 +18,8 @@ public readonly record struct LinkFrame(LinkFrameHeader Header, ReadOnlyMemory<b
     /// <summary>True on an <see cref="LinkMessageType.InboundAudio"/> frame the gateway filled by packet-loss concealment.</summary>
     public bool Concealed => (Header.Flags & LinkFrameFlags.Concealed) != 0;
 
-    /// <summary>Samples an audio frame carries, or zero for every other type.</summary>
+    /// <summary>Samples an audio frame's payload holds, or zero for every other type. Informational: <see cref="ReadPcm"/> is
+    /// the call that validates the count.</summary>
     public int PcmSampleCount => Header.Type switch
     {
         LinkMessageType.InboundAudio => Payload.Length / 2,
@@ -52,19 +53,24 @@ public readonly record struct LinkFrame(LinkFrameHeader Header, ReadOnlyMemory<b
 
     public CallStartMessage ReadCallStart() => ReadJson(LinkMessageType.CallStart, 0, LinkJsonContext.Default.CallStartMessage);
 
+    /// <summary>The reason byte as sent. Deliberately not validated against the enum, so a newer peer can add reasons: consumers
+    /// must treat a value outside <see cref="LinkCallEndReason"/> as an unknown reason, not as an error.</summary>
     public LinkCallEndReason ReadCallEnd() => (LinkCallEndReason)Body(LinkMessageType.CallEnd, 1, 1)[0];
 
     /// <summary>Copies the samples of an <see cref="LinkMessageType.InboundAudio"/> or <see cref="LinkMessageType.OutboundAudio"/>
-    /// frame into <paramref name="destination"/> and returns how many were written. Allocation-free.</summary>
+    /// frame into <paramref name="destination"/> and returns how many were written. Allocation-free. An inbound frame must hold
+    /// exactly <see cref="LinkProtocol.InboundFrameSamples"/> samples; an outbound frame is bounded only by the payload cap and
+    /// the <see cref="LinkHelloAck.MaxFrameMs"/> the host promised, which the gateway enforces.</summary>
     public int ReadPcm(Span<short> destination)
     {
-        int offset = Header.Type switch
+        const int inboundBytes = LinkProtocol.InboundFrameSamples * 2;
+        (int offset, int minLength, int maxLength) = Header.Type switch
         {
-            LinkMessageType.InboundAudio => 0,
-            LinkMessageType.OutboundAudio => TurnIdBytes,
+            LinkMessageType.InboundAudio => (0, inboundBytes, inboundBytes),
+            LinkMessageType.OutboundAudio => (TurnIdBytes, TurnIdBytes + 2, LinkProtocol.MaxPayloadBytes),
             _ => throw new LinkProtocolException($"{Header.Type} frames carry no PCM."),
         };
-        ReadOnlySpan<byte> pcm = Body(Header.Type, offset + 2, LinkProtocol.MaxPayloadBytes).Slice(offset);
+        ReadOnlySpan<byte> pcm = Body(Header.Type, minLength, maxLength).Slice(offset);
         if ((pcm.Length & 1) != 0)
             throw new LinkProtocolException($"{Header.Type} payload of {pcm.Length} PCM bytes is not a whole number of samples.");
         int samples = pcm.Length / 2;

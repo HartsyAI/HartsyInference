@@ -1,11 +1,15 @@
 namespace HartsyInference.PhoneLink.Tests;
 
-/// <summary>Write-only stream whose first write parks until <see cref="Release"/>, to hold a writer mid-frame.</summary>
-internal sealed class GatedWriteStream : Stream
+/// <summary>Write-only stream that remembers the memory of its last write and, when gated, parks every write until
+/// <see cref="Release"/>, to hold a writer mid-frame.</summary>
+internal sealed class GatedWriteStream(bool gated = true) : Stream
 {
     private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public int Writes { get; private set; }
+
+    /// <summary>The exact memory the writer handed over on the last write, still pointing at the writer's array.</summary>
+    public ReadOnlyMemory<byte> LastWrite { get; private set; }
 
     public void Release() => _gate.TrySetResult();
 
@@ -15,10 +19,11 @@ internal sealed class GatedWriteStream : Stream
     public override long Length => throw new NotSupportedException();
     public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
 
-    public override async ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+    public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
     {
         Writes++;
-        await _gate.Task.WaitAsync(cancellationToken);
+        LastWrite = buffer;
+        return gated ? new ValueTask(_gate.Task.WaitAsync(cancellationToken)) : default;
     }
 
     public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
