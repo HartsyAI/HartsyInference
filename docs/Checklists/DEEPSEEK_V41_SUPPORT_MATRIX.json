@@ -85,7 +85,7 @@
       "acceptanceTest": "GenericTransformerModelTests; unchanged LLM parity and sharding suites",
       "pr": 1,
       "status": "InProgress",
-      "note": "Adapter and contract merged for GenericTransformer; graph decode through the adapter unverified on GPU; V4.1 model consumes it in PR 9"
+      "note": "Adapter and contract added for GenericTransformer; graph decode through the adapter unverified on GPU; V4.1 model consumes it in PR 9"
     },
     {
       "id": "core.moe.route",
