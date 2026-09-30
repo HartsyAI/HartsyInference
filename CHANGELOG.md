@@ -22,15 +22,20 @@ stable release will require. Dates are UTC.
   flight; never await it while holding the gate. Any engine release (`Dispose`, `FreeMemory`, `SetBackend`,
   `SetPlacement`) revokes open leases:
   - it first waits, within the existing 120 s release budget, for a lease call in flight;
-  - later calls throw `ObjectDisposedException`;
+  - later calls throw `ObjectDisposedException`, and nothing signals the revocation sooner;
   - an open that straddles a release is refused.
+- To re-open, the holder disposes the revoked lease (a no-op) and opens a new one. After `FreeMemory`, `SetBackend`
+  or `SetPlacement` the engine stays usable, and the new lease reloads the model on its current backend.
 - `Dispose` releases the pin, is idempotent and waits for a call in flight. Both new service members default to
   `NotSupportedException`, so other implementations of the interfaces keep compiling.
 - Consumers: the voice session (Whisper small.en and Kokoro resident on one card for a call) and AudioLab's
   keep-resident setting.
 - A host with the LLM on one card and audio on another builds the engine on the audio card and sends each LLM request
   with `TextRequest.Device`. Text slots build their own backend and gate only their own ordinal, so the LLM loads
-  nothing on the engine's device. Documented in `docs/MULTI_GPU.md`.
+  nothing on the engine's device. On such an engine every `GenerateAsync`/`StreamAsync` must set `Device`, or the
+  model loads on the audio card. `ITextService.CountTokens` takes no device: it never loads a model or touches a
+  backend, and it counts with an idle loaded slot's tokenizer or falls back to an estimate. Documented on
+  `TextRequest.Device`, `ITextService.CountTokens` and in `docs/MULTI_GPU.md`.
 - `SpeechService` and `TranscribeService` now resolve descriptor, variant and cache key through one helper each, shared
   with the leases. The evaluation order is unchanged, so the service paths behave as before when no lease is open.
 - Tests (`Diffusion.Tests`):
@@ -46,7 +51,11 @@ stable release will require. Dates are UTC.
     - an open that straddles a release.
   - `AudioRunnerLeaseRealWeightTests` (Integration, CPU): a Kokoro lease encodes to the service's exact WAV bytes, and
     Whisper-tiny gives the service's exact JFK transcript at 16 kHz and through a 24 kHz clip.
-  - `AudioRunnerLeaseGpuTests` (GpuIntegration): Kokoro and Whisper small.en leases driven under `DeviceGate`.
+  - `AudioRunnerLeaseGpuTests` (GpuIntegration) passes on the RTX 3060, with Kokoro and Whisper small.en leases driven
+    under `DeviceGate`:
+    - Whisper small.en through a lease transcribes the JFK clip 11/11 and equals the service transcript;
+    - Kokoro through a lease is Whisper-verified 6/6;
+    - both stay resident and correct through three forced-pressure switches to Whisper-tiny.
   - `AudioEvictionPressure.Relax()` keeps a box that is genuinely short of RAM from evicting fake runners.
 
 ## alpha.222

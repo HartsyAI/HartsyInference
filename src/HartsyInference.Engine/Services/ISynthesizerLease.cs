@@ -12,10 +12,16 @@ namespace HartsyInference.Engine.Services;
 /// serializes device use by holding <see cref="DeviceGate"/> for the engine's backend
 /// (<see cref="InferenceEngine.ComputeBackend"/>) around each call, which also keeps it clear of service calls on that
 /// device.</item>
+/// <item>The lease always runs on the engine's own backend. A host that keeps an LLM on another card builds the engine
+/// on the audio card and sets <see cref="TextRequest.Device"/> on every text generation request.</item>
 /// <item>The runner is pinned: memory-pressure eviction never unloads it while the lease is open, and service calls
 /// for the same model run on it. A pin survives memory pressure, not the device: any engine release (Dispose,
-/// FreeMemory, SetBackend, SetPlacement) unloads the runner and revokes the lease, and later calls throw
-/// <see cref="ObjectDisposedException"/>.</item>
+/// FreeMemory, SetBackend, SetPlacement) waits for a call in flight, then unloads the runner and revokes the
+/// lease.</item>
+/// <item>A revoked lease reports it only as <see cref="ObjectDisposedException"/> on its next call; nothing signals it
+/// sooner. To re-open, dispose the revoked lease, which is a no-op, and open a new one. After FreeMemory, SetBackend or
+/// SetPlacement the engine stays usable, and the new lease reloads the model on the engine's current backend. After
+/// Dispose, open it on a new engine.</item>
 /// <item>Dispose releases the pin. It is idempotent and waits for a call in flight.</item>
 /// </list></remarks>
 public interface ISynthesizerLease : IDisposable

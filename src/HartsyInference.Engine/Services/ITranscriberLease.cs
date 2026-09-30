@@ -4,10 +4,17 @@ namespace HartsyInference.Engine.Services;
 
 /// <summary>A speech-to-text model held resident on its engine for direct, synchronous transcription of PCM, opened by
 /// <see cref="ITranscribeService.OpenTranscriberAsync"/>.</summary>
-/// <remarks>Same contract as <see cref="ISynthesizerLease"/>: one thread at a time; the caller holds
-/// <see cref="DeviceGate"/> around each call because the lease takes neither it nor the engine's audio generation lock;
-/// the runner is pinned through memory-pressure eviction; any engine release revokes the lease, after which calls throw
-/// <see cref="ObjectDisposedException"/>; Dispose is idempotent.</remarks>
+/// <remarks>Same contract as <see cref="ISynthesizerLease"/>:
+/// <list type="bullet">
+/// <item>one thread at a time;</item>
+/// <item>the caller holds <see cref="DeviceGate"/> around each call, because the lease takes neither it nor the engine's
+/// audio generation lock;</item>
+/// <item>it runs on the engine's own backend;</item>
+/// <item>the runner is pinned through memory-pressure eviction;</item>
+/// <item>any engine release revokes the lease, which surfaces as <see cref="ObjectDisposedException"/> on the next
+/// call, and the holder disposes it and opens a new one;</item>
+/// <item>Dispose is idempotent.</item>
+/// </list></remarks>
 public interface ITranscriberLease : IDisposable
 {
     /// <summary>Transcribes mono <paramref name="pcm"/> in [-1, 1] sampled at <paramref name="sampleRate"/> Hz on the
