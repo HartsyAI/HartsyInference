@@ -1050,6 +1050,13 @@ internal static unsafe class GpuTransferHelper
         return true;
     }
 
+    /// <summary>Marks a tensor as never to be auto-promoted into the weight cache on this backend, for tensors whose residency something else owns (the expert cache): a promoted copy would outlive the eviction that was meant to free it.</summary>
+    public static void ExcludeFromAutoPromotion(Tensor tensor)
+    {
+        ArgumentNullException.ThrowIfNull(tensor);
+        Resolve().UploadTracker.GetOrCreateValue(tensor).Blocked = true;
+    }
+
     /// <summary>Registers an already-uploaded weight in the cache. The caller is responsible for the alloc + H2D copy (sync or async); this just records the tensor → dptr mapping and bumps the byte counter.</summary>
     internal static void RegisterCachedWeight(Tensor weight, ulong dptr, nuint byteSize)
     {

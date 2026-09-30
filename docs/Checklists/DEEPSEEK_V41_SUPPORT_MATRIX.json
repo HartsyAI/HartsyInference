@@ -368,7 +368,7 @@
       "format": "official",
       "backends": {
         "CPU": "Implemented",
-        "CUDA": "Unimplemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -392,7 +392,7 @@
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 5,
       "status": "InProgress",
-      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM; PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); device dequant is later. M1 matched the official dequant bit-exactly on 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); not Verified until the staged shard runs it"
+      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM (PR 23/24). PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); PR 12 adds the CUDA BF16 dequant kernels (dequant_recipe_to_bf16) and a 2-slot CudaQuantWorkspace, bit-exact against the host codecs on synthetic block layouts on the RTX 3060 (incl. E8M0 0/255, E4M3 NaN, scale column offsets); IBackend.Linear does not use them yet. M1 matched the official dequant bit-exactly on the host codecs over 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); the device-path M1 test is written but was skipped (no populated shard here); not Verified until the staged shard runs it"
     },
     {
       "id": "quant.nvfp4.dequant",
@@ -852,7 +852,7 @@
       "format": "official",
       "backends": {
         "CPU": "Unsupported",
-        "CUDA": "Unimplemented",
+        "CUDA": "Implemented",
         "Vulkan": "Unsupported"
       },
       "placement": [
@@ -873,8 +873,8 @@
       ],
       "acceptanceTest": "hit/miss/dedup/pin; 1000 cancel cycles leak-free",
       "pr": 12,
-      "status": "Unimplemented",
-      "note": "Vulkan has no streaming cache; host-staged uploads only (PR 24b)"
+      "status": "InProgress",
+      "note": "ExpertBank + IExpertCache (segmented LRU, pinned entries, in-flight dedup, fence-ordered eviction) and CudaExpertCache over CudaStreamingWeightCache (whole-expert BeginUploadAsync, pinned staging ring, promotion blocked): policy unit-tested on CPU via a fake, transport tested on the RTX 3060 (hit/miss/dedup/pin, 1000 acquire-release cycles leak-free); not wired into a model, not checkpoint-verified; Vulkan has no streaming cache; host-staged uploads only (PR 24b)"
     },
     {
       "id": "mem.planner",

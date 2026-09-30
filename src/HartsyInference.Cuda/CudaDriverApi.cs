@@ -223,6 +223,12 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuEventSynchronize(nint hEvent);
 
+    /// <summary>0 once the event's recorded work has completed, <see cref="CUDA_ERROR_NOT_READY"/> while it is still pending.</summary>
+    [LibraryImport(LibName)]
+    internal static partial int cuEventQuery(nint hEvent);
+
+    internal const int CUDA_ERROR_NOT_READY = 600;
+
     // ── Graph Management (capture / replay) ─────────────────────────────
     //
     // A captured graph records a fixed sequence of stream work and replays it with
