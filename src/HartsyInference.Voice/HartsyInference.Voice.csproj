@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <PackageId>HartsyInference.Voice</PackageId>
+    <Description>Opt-in real-time voice agent for HartsyInference: a per-call session that turns streamed caller audio into spoken replies. RNNoise and Silero endpointing and barge-in run on a dedicated audio thread, speech recognition and synthesis on a dedicated GPU thread, and any ITextService is the language model, with tool calling through HartsyInference.Tools.</Description>
+    <RootNamespace>HartsyInference.Voice</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.Voice.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\HartsyInference.Audio\HartsyInference.Audio.csproj" />
+    <ProjectReference Include="..\HartsyInference.Engine\HartsyInference.Engine.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tools\HartsyInference.Tools.csproj" />
+  </ItemGroup>
+
+</Project>
