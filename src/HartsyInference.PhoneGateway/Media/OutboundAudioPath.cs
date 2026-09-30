@@ -16,6 +16,7 @@ public sealed class OutboundAudioPath
     private const int FramesPerSecond = 1000 / 20;
 
     private readonly ClockedAudioSource _source;
+    private readonly CallRecorder? _recorder;
     private readonly object _producerLock = new();
     private StreamingResampler? _resampler;
     private short[] _staging = [];
@@ -27,10 +28,11 @@ public sealed class OutboundAudioPath
     private uint _hostRate;
     private long _framesQueued;
 
-    public OutboundAudioPath(ClockedAudioSource source)
+    public OutboundAudioPath(ClockedAudioSource source, CallRecorder? recorder = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         _source = source;
+        _recorder = recorder;
     }
 
     /// <summary>The host rate the path is configured for; zero before <see cref="Configure"/>.</summary>
@@ -80,6 +82,7 @@ public sealed class OutboundAudioPath
             }
             if (_resampler is null)
             {
+                _recorder?.WriteOutbound(pcm);
                 _source.WriteOutbound(pcm);
                 Volatile.Write(ref _framesQueued, _framesQueued + pcm.Length / ClockedAudioSource.FrameSamples);
                 return;
@@ -138,6 +141,7 @@ public sealed class OutboundAudioPath
     {
         lock (_producerLock)
         {
+            _recorder?.WriteOutbound(pcm8k);
             _source.WriteOutbound(pcm8k);
         }
     }
@@ -154,6 +158,7 @@ public sealed class OutboundAudioPath
             float v = _outFloat[i] * 32767f;
             _outPcm[i] = (short)Math.Clamp(v, short.MinValue, short.MaxValue);
         }
+        _recorder?.WriteOutbound(_outPcm);
         _source.WriteOutbound(_outPcm);
         _staged = 0;
         Volatile.Write(ref _framesQueued, _framesQueued + 1);
