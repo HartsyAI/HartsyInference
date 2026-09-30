@@ -13,6 +13,7 @@
       "src\\HartsyInference.LLM\\HartsyInference.LLM.csproj",
       "src\\HartsyInference.Meta\\HartsyInference.Meta.csproj",
       "src\\HartsyInference.ModelAssets\\HartsyInference.ModelAssets.csproj",
+      "src\\HartsyInference.PhoneLink\\HartsyInference.PhoneLink.csproj",
       "src\\HartsyInference.ThreeD\\HartsyInference.ThreeD.csproj",
       "src\\HartsyInference.Video\\HartsyInference.Video.csproj",
       "src\\HartsyInference.Vision\\HartsyInference.Vision.csproj",
