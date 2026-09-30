@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.209
+## alpha.206
 
 - **Streaming output parser** (DeepSeek-V4.1-Flash program PR 11). `IOutputParser` (`Push(tokenId)` / `Finish`) turns generated
   ids into `ParsedEvent`s (reasoning, content, tool-call begin/args/end/abort, stop, malformed). `DeepSeekV41OutputParser` matches
