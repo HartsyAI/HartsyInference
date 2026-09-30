@@ -8,6 +8,7 @@ using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Cpu;
 using HartsyInference.Cuda;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.Tests.Common;
@@ -179,7 +180,9 @@ public sealed class VoiceTurnBenchTests
     }
 
     /// <summary>Probe (c): content-word recall of the full JFK clip — 16 kHz baseline, narrowband, and narrowband
-    /// after RNNoise (48 kHz hop via <see cref="RnnoiseStream"/>) — with small.en; the RNNoise row is optional.</summary>
+    /// after RNNoise (48 kHz hop via <see cref="RnnoiseStream"/>) — with small.en; the RNNoise row is optional.
+    /// RNNoise runs on a <see cref="CpuBackend"/>, where the wake worker runs it and where it is parity-verified;
+    /// its per-clip time is informational, the per-frame budget is the front-end task's gate.</summary>
     [Fact]
     public async Task ProbeC_Narrowband_Recall_With_And_Without_Rnnoise()
     {
@@ -196,7 +199,7 @@ public sealed class VoiceTurnBenchTests
         StringBuilder table = new StringBuilder();
         table.AppendLine("### Probe C — narrowband content-word recall vs the 16 kHz baseline (small.en, full 11 s clip)");
         table.AppendLine();
-        table.AppendLine("| Input | recall | Δ vs 16k (pts) | STT median ms | p95 ms | front-end median ms | transcript |");
+        table.AppendLine("| Input | recall | Δ vs 16k (pts) | STT median ms | p95 ms | RNNoise (CPU, whole clip) median ms | transcript |");
         table.AppendLine("|---|---:|---:|---:|---:|---:|---|");
 
         (Stats baseStats, string baseText) = Measure(() => whisper.TranscribeAudio(backend, audio16k, SampleRate, options));
@@ -218,8 +221,9 @@ public sealed class VoiceTurnBenchTests
                 weights.Load(loader.GetAllTensors());
             }
             using (weights)
+            using (CpuBackend cpu = new CpuBackend())
             {
-                (Stats dnStats, float[] denoised) = Measure(() => Denoise(backend, weights, narrowband));
+                (Stats dnStats, float[] denoised) = Measure(() => Denoise(cpu, weights, narrowband));
                 (Stats dnSttStats, string dnText) = Measure(() => whisper.TranscribeAudio(backend, denoised, SampleRate, options));
                 double dnRecall = ContentWordRecall(JfkTranscript, dnText);
                 table.AppendLine($"| narrowband + RNNoise | {dnRecall:P0} | {(dnRecall - baseRecall) * 100:+0;-0;0} | {Ms(dnSttStats.Median)} | "
