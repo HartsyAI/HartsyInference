@@ -125,4 +125,44 @@ public sealed class LatentQuantTests(ITestOutputHelper output)
             Dispose(cpuDest);
         }
     }
+
+    [Theory]
+    [InlineData(LatentEncoding.F32)]
+    [InlineData(LatentEncoding.Fp8E4M3Ue8m0x32)]
+    [InlineData(LatentEncoding.Fp4E2M1E4M3x16)]
+    public void QuantizeRows_SkipsDestinationsPastTheLastRow_AndKeepsTheRest(LatentEncoding enc)
+    {
+        if (!CudaContext.IsAvailable()) return;
+        const int Dim = 64, DestRows = 4;
+        using CudaBackend cuda = new(0, PtxDir());
+        int[] targets = { 1, 4, DestRows + 300, -1, 3 };
+        LatentSource gpuDest = MakeSource(enc, DestRows, Dim, 91), cpuDest = MakeSource(enc, DestRows, Dim, 91);
+        try
+        {
+            using Tensor rows = F32(AwkwardRows(targets.Length, Dim, 92), targets.Length, Dim);
+            using Tensor phys = I32(targets, targets.Length);
+            cuda.QuantizeLatentRows(gpuDest, rows, phys);
+            // The CPU reference rejects out-of-range destinations, so compare against it with those rows removed.
+            int[] valid = { 1, -1, 3 };
+            float[] all = ReadF32(rows);
+            float[] kept = new float[valid.Length * Dim];
+            int[] src = { 0, 3, 4 };
+            for (int r = 0; r < src.Length; r++) Array.Copy(all, src[r] * Dim, kept, r * Dim, Dim);
+            using Tensor keptRows = F32(kept, valid.Length, Dim);
+            using Tensor keptPhys = I32(valid, valid.Length);
+            new CpuBackend().QuantizeLatentRows(cpuDest, keptRows, keptPhys);
+            if (enc == LatentEncoding.F32)
+                AssertBitEqual(ReadF32(cpuDest.Codes!), ReadF32(gpuDest.Codes!), $"skip {enc}");
+            else
+            {
+                Assert.Equal(ReadU8(cpuDest.Codes!), ReadU8(gpuDest.Codes!));
+                Assert.Equal(ReadU8(cpuDest.Scales!), ReadU8(gpuDest.Scales!));
+            }
+        }
+        finally
+        {
+            Dispose(gpuDest);
+            Dispose(cpuDest);
+        }
+    }
 }

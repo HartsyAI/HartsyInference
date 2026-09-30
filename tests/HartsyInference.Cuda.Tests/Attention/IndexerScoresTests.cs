@@ -93,4 +93,24 @@ public sealed unsafe class IndexerScoresTests(ITestOutputHelper output)
             Dispose(keys);
         }
     }
+
+    [Fact]
+    public void RejectsMoreQueryTokensThanTheGridAllows()
+    {
+        if (!CudaContext.IsAvailable()) return;
+        const int Dim = 4, Tokens = 65536;
+        LatentSource keys = MakeSource(LatentEncoding.F32, 2, Dim, 1);
+        try
+        {
+            using CudaBackend cuda = new(0, PtxDir());
+            using Tensor q = F32(new float[Tokens * Dim], Tokens, 1, Dim), w = F32(new float[Tokens], Tokens, 1);
+            using Tensor len = I32(new int[Tokens], Tokens);
+            using Tensor scores = EmptyF32(Tokens, 2);
+            Assert.Throws<NotSupportedException>(() => cuda.IndexerScores(scores, q, keys, w, len, null, 1f));
+        }
+        finally
+        {
+            Dispose(keys);
+        }
+    }
 }

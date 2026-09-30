@@ -32,7 +32,9 @@ public sealed partial class CudaKernels
 
     /// <summary>True when all four latent PTX modules loaded, so every attention primitive can run on this device.</summary>
     public bool HasAttentionKernels => _sparseLatentAttentionF32 != 0 && _indexerScoresF32 != 0 &&
-        _latentQuantizeRowsF32 != 0 && _hcPostMixF32 != 0 && _windowIndicesI32 != 0;
+        _latentRowWinnerInit != 0 && _latentRowWinnerMark != 0 && _latentQuantizeRowsF32 != 0 &&
+        _actQuantDequantInplaceF32 != 0 && _hcSplitSinkhornF32 != 0 && _hcPreMixF32 != 0 && _hcPostMixF32 != 0 &&
+        _ropeInterleavedOffsetF32 != 0 && _windowIndicesI32 != 0;
 
     // Optional modules: absence leaves the primitives unsupported on this backend instead of failing construction.
     private void LoadAttentionKernels()
@@ -122,9 +124,9 @@ public sealed partial class CudaKernels
             .ThrowOnError();
         int group = LatentEncodings.GroupSize(enc);
         long units = (long)count * (group == 0 ? dim : dim / group);
-        void** quant = stackalloc void*[8];
+        void** quant = stackalloc void*[9];
         quant[0] = &cA; quant[1] = &sA; quant[2] = &rA; quant[3] = &pA; quant[4] = &wA; quant[5] = &nA; quant[6] = &dA;
-        quant[7] = &eA;
+        quant[7] = &eA; quant[8] = &drA;
         CudaDriverApi.cuLaunchKernel(_latentQuantizeRowsF32, Blocks(units), 1, 1, BlockSize, 1, 1, 0, stream, (nint)quant, 0)
             .ThrowOnError();
     }

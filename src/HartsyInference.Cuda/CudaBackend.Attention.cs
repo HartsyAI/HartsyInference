@@ -55,6 +55,8 @@ public sealed partial class CudaBackend
         if (keys.Rows > 0 && dim > CudaKernels.IndexerMaxDim)
             throw new NotSupportedException($"CUDA IndexerScores supports dim <= {CudaKernels.IndexerMaxDim}; got {dim}.");
         if (keys.Rows == 0) return;
+        if (tokens > 65535)
+            throw new NotSupportedException($"CUDA IndexerScores supports at most 65535 query tokens per call; got {tokens}.");
         using OpScope _op = EnterOp();
         EnsureKernels();
         RequireAttentionKernels();
@@ -203,7 +205,7 @@ public sealed partial class CudaBackend
         }
         finally
         {
-            FreeAll(pRows, pPhys, pWinner);
+            FreeAll(pRows, pPhys, pWinner, pCodes, pScales);
         }
     }
 

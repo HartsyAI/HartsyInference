@@ -33,7 +33,7 @@ extern "C" __global__ void latent_quantize_rows_f32(
     const float* __restrict__ rows,
     const int* __restrict__ physicalRows,
     const int* __restrict__ winner,
-    int count, int dim, int enc)
+    int count, int dim, int enc, int destRows)
 {
     const int group = lc_group_size(enc);
     const int units = group == 0 ? dim : dim / group;
@@ -41,7 +41,7 @@ extern "C" __global__ void latent_quantize_rows_f32(
     if (u >= (long long)count * units) return;
     const int i = (int)(u / units), g = (int)(u % units);
     const int p = physicalRows[i];
-    if (p < 0 || winner[p] != i) return;
+    if (p < 0 || p >= destRows || winner[p] != i) return;
     if (enc == LC_F32)
     {
         ((float*)codes)[(long long)p * dim + g] = rows[(long long)i * dim + g];
