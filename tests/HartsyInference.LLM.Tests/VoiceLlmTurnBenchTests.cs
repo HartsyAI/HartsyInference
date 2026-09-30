@@ -26,9 +26,15 @@ namespace HartsyInference.LLM.Tests;
 /// <c>JsonModeSentinel = "&lt;tool_call&gt;"</c> grammar <c>TextService</c> arms when <c>Tools</c> are present, and graph /
 /// speculative decode forced OFF (the grammar makes them ineligible anyway; forcing keeps the row honest if that
 /// rule ever changes); (2) "no tools" — no tool definition, no grammar, graph / speculative decode left at the
-/// engine knob defaults, which are printed. The Jinja template ignores <see cref="ChatMessage.Tools"/> today
-/// (PR2 of the plan changes that), so the tool JSON is also written into the system prompt text so the prompt
-/// carries it either way.</para>
+/// engine knob defaults, which are printed. The tool JSON is written into the system-prompt TEXT and attached as
+/// <see cref="ChatMessage.Tools"/>, which the template ignores: that is the shape the 2026-09-30 gate row was
+/// measured with (631 templated tokens). <c>main</c> now renders <see cref="GenerationRequest.Tools"/> through the
+/// Jinja template natively (#193); this probe deliberately keeps the measured shape so the row stays comparable,
+/// and moving it to <see cref="GenerationRequest.Tools"/> is the next probe revision.</para>
+///
+/// <para>Paths: the checkpoint comes from <see cref="TestPaths.Llm.Qwen3_4BQ4KM"/>, whose default root is
+/// <c>&lt;repo&gt;/Models</c>; on the reference box run with <c>HARTSYINFERENCE_MODELS_DIR=/mnt/model-storage/Models</c>
+/// (the 2026-09-30 run needed it).</para>
 ///
 /// <para>Timing: <c>t_prefill</c> is <see cref="GenerationRequest.OnPrefillCompleted"/>, which fires AFTER the first
 /// sample (prefill + first-token sampling, not prefill alone — the pipeline has no earlier hook), and is

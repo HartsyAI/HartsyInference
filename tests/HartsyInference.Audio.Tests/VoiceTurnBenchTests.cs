@@ -32,7 +32,10 @@ namespace HartsyInference.Audio.Tests;
 /// (<c>paths.modelsRoot</c> knob, else the test-lane <see cref="TestPaths.ModelsDir"/>), never a hard-coded home
 /// path — and the exact file each loader opens is checked BEFORE loading, because <c>LoadAsync</c> downloads on a
 /// miss and a benchmark must never start a download. Mandatory assets go through
-/// <see cref="RealWeightGate.Require"/>; medium.en and RNNoise are optional rows that log SKIPPED when absent.</para>
+/// <see cref="RealWeightGate.Require"/>; medium.en and RNNoise are optional rows that log SKIPPED when absent.
+/// On the reference box the knob is not read by the test process, and <see cref="TestPaths.ModelsDir"/> defaults
+/// to <c>&lt;repo&gt;/Models</c>, so run with <c>HARTSYINFERENCE_MODELS_DIR=/mnt/model-storage/Models</c> (the
+/// 2026-09-30 run needed it); the probe prints the root and every resolved path before loading.</para>
 ///
 /// <para>Method: 2 warm-up + 5 timed calls per case; median / p95 (linear interpolation between order
 /// statistics) / min wall-clock of the pipeline call only (model load excluded). Recall is content-word recall:
