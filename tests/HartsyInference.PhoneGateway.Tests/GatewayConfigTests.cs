@@ -2,75 +2,147 @@ using System.Text.Json;
 using HartsyInference.Core.Logging;
 using HartsyInference.PhoneGateway.Config;
 using HartsyInference.PhoneGateway.Sip;
+using HartsyInference.PhoneGateway.Tests.Support;
 using Xunit;
 
 namespace HartsyInference.PhoneGateway.Tests;
 
-/// <summary>Secrets reach the gateway by environment-variable name only, and a mistake in that plumbing is silent
-/// until a registration fails in production or a password lands in a log line.</summary>
+/// <summary>Secrets reach the gateway only as files named in its config, and a mistake in that plumbing is silent until
+/// a registration fails in production, a secret sits world-readable on disk, or a password lands in a log line.</summary>
 public sealed class GatewayConfigTests
 {
     [Fact]
-    public void ExampleFile_LoadsAndValidates()
+    public void ExampleFile_ParsesAndPointsAtSystemdCredentials()
     {
         string path = Path.Combine(AppContext.BaseDirectory, "phone.example.json");
         Assert.True(File.Exists(path), $"missing {path}");
-        GatewaySettings settings = GatewayConfigLoader.Load(path);
-        Assert.Equal(5060, settings.Config.Sip.Port);
-        Assert.Equal("none", settings.Config.Sip.PublicAddress);
-        Assert.Equal(InboundPolicy.AllowAll, settings.Config.Sip.InboundPolicy);
-        Assert.Equal("", settings.SipPassword);
-        Assert.False(settings.Config.Recording.Enabled);
-        Assert.False(settings.Config.Logging.SipDebug);
+        GatewayConfig config = GatewayConfigLoader.Parse(path);
+        Assert.Equal(5060, config.Sip.Port);
+        Assert.Equal("none", config.Sip.PublicAddress);
+        Assert.Equal(InboundPolicy.AllowAll, config.Sip.InboundPolicy);
+        Assert.False(config.Recording.Enabled);
+        Assert.False(config.Logging.SipDebug);
+        const string credentials = "/run/credentials/hartsyinference-phone-gateway.service/";
+        Assert.StartsWith(credentials, config.Sip.PasswordFile, StringComparison.Ordinal);
+        Assert.StartsWith(credentials, config.Link.TokenFile, StringComparison.Ordinal);
+        Assert.StartsWith(credentials, config.Admin.TokenFile, StringComparison.Ordinal);
     }
 
     [Fact]
-    public void EmptyObject_IsAValidLanConfig()
+    public void EmptyObject_IsAValidLanConfigWithNoSecrets()
     {
         GatewayConfig config = JsonSerializer.Deserialize("{}", GatewayJsonContext.Default.GatewayConfig)!;
         GatewaySettings settings = GatewayConfigLoader.Resolve(config);
         Assert.Equal("/run/hartsyinference/phone.sock", settings.Config.Link.SocketPath);
         Assert.Equal(60, settings.Config.Sip.RegistrationExpirySeconds);
-    }
-
-    [Fact]
-    public void Registrar_WithoutThePasswordVariable_FailsNamingTheVariable()
-    {
-        string variable = "HARTSY_TEST_SIP_PW_" + Guid.NewGuid().ToString("N")[..8];
-        GatewayConfig config = new() { Sip = new SipConfig { Registrar = "sip.example.net", Username = "u", PasswordEnv = variable } };
-        GatewayConfigException ex = Assert.Throws<GatewayConfigException>(() => GatewayConfigLoader.Resolve(config));
-        Assert.Contains(variable, ex.Message, StringComparison.Ordinal);
-        Assert.Contains("sip.passwordEnv", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public void Registrar_WithThePasswordVariable_ResolvesItAndNeverSerializesIt()
-    {
-        string variable = "HARTSY_TEST_SIP_PW_" + Guid.NewGuid().ToString("N")[..8];
-        Environment.SetEnvironmentVariable(variable, "s3cret-value");
-        try
-        {
-            GatewayConfig config = new() { Sip = new SipConfig { Registrar = "sip.example.net", Username = "u", PasswordEnv = variable } };
-            GatewaySettings settings = GatewayConfigLoader.Resolve(config);
-            Assert.Equal("s3cret-value", settings.SipPassword);
-            string json = JsonSerializer.Serialize(settings.Config, GatewayJsonContext.Default.GatewayConfig);
-            Assert.Contains("passwordEnv", json, StringComparison.Ordinal);
-            Assert.DoesNotContain("s3cret-value", json, StringComparison.Ordinal);
-        }
-        finally
-        {
-            Environment.SetEnvironmentVariable(variable, null);
-        }
-    }
-
-    [Fact]
-    public void UnsetOptionalTokens_DisableTheFeaturesInsteadOfFailing()
-    {
-        string variable = "HARTSY_TEST_TOKEN_" + Guid.NewGuid().ToString("N")[..8];
-        GatewayConfig config = new() { Link = new LinkConfig { TokenEnv = variable }, Admin = new AdminConfig { TokenEnv = variable } };
-        GatewaySettings settings = GatewayConfigLoader.Resolve(config);
+        Assert.Equal("", settings.SipPassword);
         Assert.Equal("", settings.LinkToken);
         Assert.Null(settings.AdminToken);
+    }
+
+    [Fact]
+    public void SecretFiles_AreReadTrimmedAndNeverSerialized()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using TempSecret password = new("s3cret-value\n");
+        using TempSecret link = new("link-token\r\n");
+        using TempSecret admin = new("admin-token");
+        GatewayConfig config = new()
+        {
+            Sip = new SipConfig { Registrar = "sip.example.net", Username = "u", PasswordFile = password.Path },
+            Link = new LinkConfig { TokenFile = link.Path },
+            Admin = new AdminConfig { TokenFile = admin.Path },
+        };
+        GatewaySettings settings = GatewayConfigLoader.Resolve(config);
+        Assert.Equal("s3cret-value", settings.SipPassword);
+        Assert.Equal("link-token", settings.LinkToken);
+        Assert.Equal("admin-token", settings.AdminToken);
+        string json = JsonSerializer.Serialize(settings.Config, GatewayJsonContext.Default.GatewayConfig);
+        Assert.Contains(password.Path, json, StringComparison.Ordinal);
+        Assert.DoesNotContain("s3cret-value", json, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("secret\n", "secret")]
+    [InlineData("secret\r\n", "secret")]
+    [InlineData("secret\n\n", "secret\n")]
+    [InlineData("secret ", "secret ")]
+    [InlineData("secret", "secret")]
+    public void SecretFile_TrimsExactlyOneTrailingLineEnding(string content, string expected)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using TempSecret secret = new(content);
+        Assert.Equal(expected, SecretFile.Read(secret.Path, "test.secretFile"));
+    }
+
+    [Theory]
+    [InlineData(UnixFileMode.GroupRead)]
+    [InlineData(UnixFileMode.OtherRead)]
+    [InlineData(UnixFileMode.GroupWrite)]
+    public void SecretFile_OpenToGroupOrOthers_IsRefused(UnixFileMode extra)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using TempSecret secret = new("secret", UnixFileMode.UserRead | UnixFileMode.UserWrite | extra);
+        GatewayConfigException ex = Assert.Throws<GatewayConfigException>(() => SecretFile.Read(secret.Path, "admin.tokenFile"));
+        Assert.Contains("admin.tokenFile", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("group or others", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("chmod 600", ex.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret\n", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SecretFile_OwnerReadOnly_IsAccepted()
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using TempSecret secret = new("secret", UnixFileMode.UserRead);
+        Assert.Equal("secret", SecretFile.Read(secret.Path, "test.secretFile"));
+    }
+
+    [Fact]
+    public void MissingSecretFile_IsAConfigErrorNamingTheSettingAndPath()
+    {
+        string missing = Path.Combine(Path.GetTempPath(), "hartsy-missing-" + Guid.NewGuid().ToString("N"));
+        GatewayConfig config = new() { Sip = new SipConfig { Registrar = "sip.example.net", Username = "u", PasswordFile = missing } };
+        GatewayConfigException ex = Assert.Throws<GatewayConfigException>(() => GatewayConfigLoader.Resolve(config));
+        Assert.Contains("sip.passwordFile", ex.Message, StringComparison.Ordinal);
+        Assert.Contains(missing, ex.Message, StringComparison.Ordinal);
+        Assert.Contains("does not exist", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Registrar_WithoutAPasswordFile_IsAConfigError()
+    {
+        GatewayConfig config = new() { Sip = new SipConfig { Registrar = "sip.example.net", Username = "u" } };
+        GatewayConfigException ex = Assert.Throws<GatewayConfigException>(() => GatewayConfigLoader.Resolve(config));
+        Assert.Contains("sip.passwordFile", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void EmptyOrRelativeSecretFile_IsRefused()
+    {
+        GatewayConfig relative = new() { Link = new LinkConfig { TokenFile = "secrets/link-token" } };
+        GatewayConfigException ex = Assert.Throws<GatewayConfigException>(() => GatewayConfigLoader.Resolve(relative));
+        Assert.Contains("link.tokenFile", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("absolute", ex.Message, StringComparison.Ordinal);
+        if (OperatingSystem.IsWindows())
+        {
+            return;
+        }
+        using TempSecret empty = new("\n");
+        GatewayConfigException emptyEx = Assert.Throws<GatewayConfigException>(() => SecretFile.Read(empty.Path, "link.tokenFile"));
+        Assert.Contains("is empty", emptyEx.Message, StringComparison.Ordinal);
     }
 
     [Theory]

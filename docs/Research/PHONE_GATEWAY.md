@@ -89,22 +89,27 @@ The start-up log line shows the gen0 budget the GC actually uses (`GCGen0MaxBudg
 ## Configuration file
 
 `phone.json` (template: `src/HartsyInference.PhoneGateway/phone.example.json`, copied next to the binary). Every
-section has defaults; `{}` is a valid LAN test file. Secrets are never in the file: the `*Env` fields name
-environment variables, read once at start-up, and a missing variable is reported by name.
+section has defaults; `{}` is a valid LAN test file (no registrar, no tokens). Secrets are never in the file and
+never in the environment: the `*File` fields name secret files, read once at start-up (see [Secrets](#secrets)).
 
 ```json
 {
   "sip": {
     "listenAddress": "0.0.0.0", "port": 5060, "transport": "udp",
-    "registrar": "", "username": "hartsy", "passwordEnv": "HARTSY_SIP_PASSWORD",
+    "registrar": "", "username": "hartsy",
+    "passwordFile": "/run/credentials/hartsyinference-phone-gateway.service/sip-password",
     "registrationExpirySeconds": 60,
     "publicAddress": "none",
     "rtpPortStart": 20000, "rtpPortEnd": 20100,
     "codec": "Any", "inboundPolicy": "AllowAll", "allowlist": [],
     "greetingPromptFile": null, "ringTimeoutSeconds": 45
   },
-  "link": { "socketPath": "/run/hartsyinference/phone.sock", "tokenEnv": "HARTSY_PHONE_LINK_TOKEN", "outageHangupSeconds": 20 },
-  "admin": { "port": 9280, "tokenEnv": "HARTSY_PHONE_ADMIN_TOKEN" },
+  "link": {
+    "socketPath": "/run/hartsyinference/phone.sock",
+    "tokenFile": "/run/credentials/hartsyinference-phone-gateway.service/phone-link-token",
+    "outageHangupSeconds": 20
+  },
+  "admin": { "port": 9280, "tokenFile": "/run/credentials/hartsyinference-phone-gateway.service/phone-admin-token" },
   "media": { "fifoPriority": 50, "tickCpu": -1, "warmUpTicks": 200 },
   "recording": { "enabled": false, "directory": "/var/lib/hartsyinference/phone-recordings" },
   "logging": { "level": "Info", "sipDebug": false }
@@ -113,7 +118,8 @@ environment variables, read once at start-up, and a missing variable is reported
 
 | Setting | Meaning |
 |---|---|
-| `sip.registrar` | Registrar host[:port]; empty means no registration (LAN, or IP-authenticated trunks). `passwordEnv` must then be set in the environment. |
+| `sip.registrar` | Registrar host[:port]; empty means no registration (LAN, or IP-authenticated trunks). With a registrar, `sip.passwordFile` is required. |
+| `sip.passwordFile` | Absolute path of the file holding the SIP password; read only when a registrar is set. |
 | `sip.registrationExpirySeconds` | 60..120; sipsorcery refreshes 5 s early. |
 | `sip.publicAddress` | `none` (local address), an IP literal, or `stun:host[:port]`; STUN is re-asked before every REGISTER and the Contact host rewritten. |
 | `sip.rtpPortStart/End` | RTP port range (shuffled). Forward it, and `sip.port`, on the router for a provider; nothing to do on a LAN. |
@@ -121,14 +127,38 @@ environment variables, read once at start-up, and a missing variable is reported
 | `sip.inboundPolicy` | `AllowAll`, `Allowlist` (caller user part in `allowlist`, else 603), `Reject` (always 603). |
 | `sip.greetingPromptFile` | Raw 8 kHz PCM16 file played to every answered inbound call before the host speaks. |
 | `link.outageHangupSeconds` | How long a live call waits for the host before "goodbye" and hang-up. |
-| `admin.tokenEnv` | Bearer token for `POST /calls`; unset leaves the endpoint's health and metrics up and `POST /calls` at 403. |
+| `link.tokenFile` | Absolute path of the file holding the shared PhoneLink token sent in `Hello`; empty sends no token. |
+| `admin.tokenFile` | Absolute path of the file holding the bearer token for `POST /calls`; empty leaves health and metrics up and `POST /calls` at 403. |
 | `media.fifoPriority` | `SCHED_FIFO` priority for the tick thread; 0 never asks. |
 | `media.tickCpu` | Pin the tick thread to one CPU (with `AllowedCPUs` on the unit); -1 for none. |
 | `recording.enabled` | Off by default; see the consent note. |
 | `logging.sipDebug` | Forwards sipsorcery's Debug/Trace output. **Never on by default**: the transport trace prints whole SIP messages, `Authorization` headers included. |
 
 Run: `HartsyInference.PhoneGateway --config /etc/hartsyinference/phone.json`. Exit code 2 is a configuration
-error; the message names the setting or variable.
+error; the message names the setting, and the path for a secret file.
+
+### Secrets
+
+The SIP password and the link and admin tokens are read once at start-up from the files `sip.passwordFile`,
+`link.tokenFile` and `admin.tokenFile` name, never from the config or the environment (which leaks through
+`/proc/<pid>/environ`, child processes and crash dumps). Paths are absolute. A secret file must be private to its
+owner, the ssh rule: mode 0600 or 0400; any group or other permission bit makes the gateway refuse to start, naming
+the file and the `chmod` that fixes it. One trailing line ending (LF or CRLF) is trimmed, an empty or missing file
+is a configuration error, and no secret is ever logged.
+
+Under systemd each secret is a credential, so the unit reads the root-owned file and hands the service a private
+copy:
+
+```ini
+LoadCredential=sip-password:/etc/hartsyinference/secrets/sip-password
+LoadCredential=phone-link-token:/etc/hartsyinference/secrets/phone-link-token
+LoadCredential=phone-admin-token:/etc/hartsyinference/secrets/phone-admin-token
+```
+
+The service then finds them at `/run/credentials/hartsyinference-phone-gateway.service/<name>`, and `phone.json`
+points at those absolute paths (as `phone.example.json` does), so not even `$CREDENTIALS_DIRECTORY` is read.
+Without systemd, any file with mode 0600 works: `install -m 600 /dev/null ~/.config/hartsy/sip-password`, then
+write the secret into it.
 
 Admin endpoint (loopback only): `GET /health` (JSON, 200 when the link is up and registration holds, else 503
 `degraded`), `GET /metrics` (Prometheus text: calls, rejections counted once per INVITE, media faults
@@ -147,7 +177,8 @@ arrives as `DtmfEvent` with the duration in ms.
 1. Start the voice host (PR9) so `/run/hartsyinference/phone.sock` exists, or point `link.socketPath` at a test
    host. Without a host the gateway still answers the admin endpoint but rejects INVITEs with 503.
 2. `phone.json`: `registrar` empty, `publicAddress: none`, `listenAddress` the LAN interface (or `0.0.0.0`),
-   `admin.port` 9280. Run the gateway; `curl 127.0.0.1:9280/health` should say `linkConnected: true`.
+   `admin.port` 9280, and `link.tokenFile`/`admin.tokenFile` either empty or pointing at 0600 files holding the
+   tokens the host and you expect. Run the gateway; `curl 127.0.0.1:9280/health` should say `linkConnected: true`.
 3. linphone: add a SIP account with no registration (or "use without account") and dial
    `sip:agent@<gateway-ip>:5060`. baresip: `baresip -e "/dial sip:agent@<gateway-ip>:5060"` (any user part;
    only the allowlist looks at the caller). PCMU/PCMA must be enabled on the phone.
@@ -161,8 +192,8 @@ arrives as `DtmfEvent` with the duration in ms.
 
 ## Provider bring-up notes
 
-- Registration: set `registrar`, `username`, export the password under the variable `passwordEnv` names
-  (`EnvironmentFile=` with mode 0640 on the unit). `registrationExpirySeconds` is clamped to 60..120; providers
+- Registration: set `registrar`, `username` and `passwordFile` (a `LoadCredential=` path, see
+  [Secrets](#secrets)). `registrationExpirySeconds` is clamped to 60..120; providers
   that demand longer minimums answer 423, which sipsorcery retries with the registrar's `Min-Expires`.
 - NAT: `publicAddress: stun:stun.l.google.com:19302` (or the provider's STUN) writes the WAN address into
   Contact and SDP; forward UDP `sip.port` and the RTP range to the box, or the provider's media never arrives.
@@ -181,7 +212,7 @@ arrives as `DtmfEvent` with the duration in ms.
 - `AllowedCPUs=` a core pair the engine host does not use, and `media.tickCpu` set to one of them, so the tick
   thread is not competing with `CpuParallel` on the host or with SwarmUI.
 - `Environment=DOTNET_GCgen0size=0x4000000`, `Nice=-10`, `RuntimeDirectory=hartsyinference` for the socket,
-  `EnvironmentFile=-/etc/hartsyinference/phone.env` (0640) for the secrets, `After=`/`Requires=` the host unit.
+  one `LoadCredential=` per secret (see [Secrets](#secrets)), `After=`/`Requires=` the host unit.
 - Development without systemd: `/etc/security/limits.d/hartsy-rt.conf` with `<user> - rtprio 50` and a new
   login session; `ulimit -r` must show 50.
 

@@ -18,8 +18,8 @@ public sealed record SipConfig
 
     public string Username { get; set; } = "";
 
-    /// <summary>Name of the environment variable holding the SIP password; required when a registrar is set.</summary>
-    public string PasswordEnv { get; set; } = "HARTSY_SIP_PASSWORD";
+    /// <summary>Absolute path of the file holding the SIP password (mode 0600/0400); required when a registrar is set.</summary>
+    public string PasswordFile { get; set; } = "";
 
     public int RegistrationExpirySeconds { get; set; } = 60;
 

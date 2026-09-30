@@ -7,10 +7,16 @@ and the API all use.
 
 **The engine reads no environment variables.** Exporting `HARTSY_ANYTHING` does nothing. The only environment
 variables anything here reads are third-party conventions we honour but do not own (`HF_TOKEN`, `HF_ENDPOINT`,
-`ESPEAK_DATA_DIR`, `NO_COLOR`, `COLORFGBG`) and the phone gateway's deployment secrets, which its own config file
-names by variable (`passwordEnv`, `tokenEnv`) so that no secret sits in a file (see
-[phone gateway](Research/PHONE_GATEWAY.md#configuration-file)). `tests/HartsyInference.Core.Tests/env-read-allowlist.txt`
-fails the build if that list grows.
+`ESPEAK_DATA_DIR`, `NO_COLOR`, `COLORFGBG`), and `tests/HartsyInference.Core.Tests/env-read-allowlist.txt` fails
+the build if that list grows.
+
+**Secrets are files, never settings or environment variables.** The phone gateway (a standalone exe, not the
+engine) reads its SIP password and its link and admin tokens once at start-up from files its own config names
+(`sip.passwordFile`, `link.tokenFile`, `admin.tokenFile`): absolute paths, mode 0600 or 0400, and a file that group
+or others can access is refused, the ssh rule. Under systemd, `LoadCredential=sip-password:/etc/hartsyinference/secrets/sip-password`
+puts the secret at `/run/credentials/hartsyinference-phone-gateway.service/sip-password` and the config points at
+that absolute path, so not even `$CREDENTIALS_DIRECTORY` is read; without systemd any 0600 file works. See
+[phone gateway](Research/PHONE_GATEWAY.md#secrets).
 
 ## Where settings live
 

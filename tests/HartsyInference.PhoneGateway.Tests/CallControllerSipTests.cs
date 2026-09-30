@@ -8,8 +8,8 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.PhoneGateway.Tests;
 
-/// <summary>Call-control failures that are silent without a test: a call whose RTP clock died staying up with no audio
-/// until the far end times it out, and a caller's INVITE retransmissions inflating the rejection counters. Real
+/// <summary>Call-control failures that are silent without a test: a call whose RTP clock or inbound pump died staying up
+/// half-dead until the far end times it out, and a caller's INVITE retransmissions inflating the rejection counters. Real
 /// sipsorcery peers on 127.0.0.1 and a fake host on a temporary socket; no audio timing is asserted, so these run in
 /// the unit lane. The tick fault is injected the way a real one arrives: an exception out of the frame subscriber
 /// (<c>SendAudio</c> in production), or out of the tick thread's start.</summary>
@@ -25,7 +25,7 @@ public sealed class CallControllerSipTests
     {
         using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
         ClockedAudioSource? source = null;
-        gateway.Controller.SourceCreated = s => source = s;
+        gateway.Controller.MediaCreated = (s, _) => source = s;
         using Softphone phone = new();
         Assert.True(await phone.CallAsync(gateway.Port), $"call failed: {phone.LastFailure}");
         Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Active, WaitMs));
@@ -49,7 +49,7 @@ public sealed class CallControllerSipTests
     {
         using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
         ClockedAudioSource? source = null;
-        gateway.Controller.SourceCreated = s => source = s;
+        gateway.Controller.MediaCreated = (s, _) => source = s;
         using Softphone phone = new();
         CallPlacementResult placed = await gateway.Controller.PlaceCallAsync($"sip:phone@127.0.0.1:{phone.Port}");
         Assert.True(placed.Placed, placed.Message);
@@ -65,10 +65,34 @@ public sealed class CallControllerSipTests
     }
 
     [Fact]
+    public async Task PumpFault_OnAnActiveCall_TakesTheSameTeardown()
+    {
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
+        InboundAudioPath? pump = null;
+        gateway.Controller.MediaCreated = (_, p) => pump = p;
+        using Softphone phone = new();
+        Assert.True(await phone.CallAsync(gateway.Port), $"call failed: {phone.LastFailure}");
+        Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Active, WaitMs));
+        Assert.True(gateway.Host.WaitUntil(() => gateway.Host.AudioFramesReceived >= 5, WaitMs), "the pump never ran");
+
+        pump!.InjectedFault = new InvalidOperationException("injected pump fault");
+
+        Assert.True(phone.HungUp.Wait(WaitMs), "the caller never got a BYE");
+        Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Idle, WaitMs));
+        Assert.True(gateway.Host.WaitUntil(() => gateway.Host.FramesOf(LinkMessageType.CallEnd).Count == 1, WaitMs));
+        Assert.Equal(LinkCallEndReason.Failed, gateway.Host.FramesOf(LinkMessageType.CallEnd)[0].AsFrame().ReadCallEnd());
+        Assert.True(pump.Faulted);
+        await Task.Delay(200);
+        Assert.Single(gateway.Host.FramesOf(LinkMessageType.CallEnd));
+        Assert.Equal(1, gateway.Metrics.CallsMediaFault);
+        Assert.Contains("hartsy_phone_calls_media_fault_total 1\n", PrometheusTextWriter.Render(gateway.Metrics), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task TickFault_BeforeTheCallIsAnnounced_EndsItWithByeAndNeverTellsTheHost()
     {
         using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
-        gateway.Controller.SourceCreated = s => s.InjectedStartFault = new InvalidOperationException("injected start fault");
+        gateway.Controller.MediaCreated = (s, _) => s.InjectedStartFault = new InvalidOperationException("injected start fault");
         using Softphone phone = new();
 
         // The 200 OK has gone out by the time the fault is seen, so the call is answered and then ended with a BYE.

@@ -5,7 +5,7 @@
     "transport": "udp",
     "registrar": "",
     "username": "hartsy",
-    "passwordEnv": "HARTSY_SIP_PASSWORD",
+    "passwordFile": "/run/credentials/hartsyinference-phone-gateway.service/sip-password",
     "registrationExpirySeconds": 60,
     "publicAddress": "none",
     "rtpPortStart": 20000,
@@ -18,12 +18,12 @@
   },
   "link": {
     "socketPath": "/run/hartsyinference/phone.sock",
-    "tokenEnv": "HARTSY_PHONE_LINK_TOKEN",
+    "tokenFile": "/run/credentials/hartsyinference-phone-gateway.service/phone-link-token",
     "outageHangupSeconds": 20
   },
   "admin": {
     "port": 9280,
-    "tokenEnv": "HARTSY_PHONE_ADMIN_TOKEN"
+    "tokenFile": "/run/credentials/hartsyinference-phone-gateway.service/phone-admin-token"
   },
   "media": {
     "fifoPriority": 50,

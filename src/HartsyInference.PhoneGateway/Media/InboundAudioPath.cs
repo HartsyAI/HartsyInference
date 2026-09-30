@@ -15,7 +15,9 @@ namespace HartsyInference.PhoneGateway.Media;
 /// <remarks>The pump runs on the default scheduler, phased 10 ms after the tick thread's deadlines so the two never
 /// wake together, and it never blocks: the link lane drops rather than waits, and a link that is down is counted
 /// in <see cref="DroppedByLink"/>. The packet handler does one copy and returns; decode and resample happen here,
-/// never on the IO thread and never anywhere the models run.</remarks>
+/// never on the IO thread and never anywhere the models run. An exception ends the pump: <see cref="Faulted"/> turns
+/// true and <see cref="PumpFaulted"/> is raised once, on the dying thread, so the owner can end the call rather than
+/// leave the host deaf to the caller.</remarks>
 public sealed class InboundAudioPath : IDisposable
 {
     private const long PeriodNs = ClockedAudioSource.PeriodNs;
@@ -34,6 +36,7 @@ public sealed class InboundAudioPath : IDisposable
     private readonly short[] _pcm16k = new short[OutputSamples];
     private Thread? _thread;
     private volatile bool _running;
+    private volatile bool _faulted;
     private long _framesPumped;
     private long _framesConcealed;
     private long _framesSilence;
@@ -49,6 +52,16 @@ public sealed class InboundAudioPath : IDisposable
         _callId = callId;
         _recorder = recorder;
     }
+
+    /// <summary>Raised once, on the pump thread as it dies, with the exception that ended it. Handlers must return quickly
+    /// and must not stop or dispose this path synchronously; with no handler the fault is logged here.</summary>
+    public event Action<Exception>? PumpFaulted;
+
+    /// <summary>True when the pump thread died on an exception.</summary>
+    public bool Faulted => _faulted;
+
+    /// <summary>Test seam: when set, the next pump iteration throws this, the way a decode or link failure would.</summary>
+    internal Exception? InjectedFault { get; set; }
 
     /// <summary>Frames handed to the link (audio, concealed or silence).</summary>
     public long FramesPumped => Volatile.Read(ref _framesPumped);
@@ -125,12 +138,38 @@ public sealed class InboundAudioPath : IDisposable
         }
         catch (Exception ex)
         {
-            Logs.Error("[PhoneGateway] RTP pump thread faulted; inbound audio stops for this call", ex);
+            _faulted = true;
+            ReportFault(ex);
+        }
+    }
+
+    /// <summary>Hands a pump fault to <see cref="PumpFaulted"/>, or logs it when nobody listens. Runs on the dying thread,
+    /// so an exception escaping a handler is logged rather than allowed to end the process.</summary>
+    private void ReportFault(Exception fault)
+    {
+        Action<Exception>? handler = PumpFaulted;
+        if (handler is null)
+        {
+            Logs.Error("[PhoneGateway] RTP pump thread faulted with no call owner listening", fault);
+            return;
+        }
+        try
+        {
+            handler(fault);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error("[PhoneGateway] The RTP pump fault handler threw", ex);
         }
     }
 
     private void Pump()
     {
+        Exception? injected = InjectedFault;
+        if (injected is not null)
+        {
+            throw injected;
+        }
         JitterPopResult result = _jitter.Pop(_encoded, out byte payloadType);
         bool concealed = false;
         switch (result)

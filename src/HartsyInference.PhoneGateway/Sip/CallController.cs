@@ -20,9 +20,9 @@ namespace HartsyInference.PhoneGateway.Sip;
 /// <remarks>Every new INVITE is screened on the transport before the user agent sees it: <c>486 Busy Here</c> while a
 /// call is up, <c>503</c> while the host link is down, <c>603 Decline</c> by policy. Each refusal goes out on its own
 /// server transaction, which answers the caller's retransmissions and absorbs the ACK, and is recorded in an
-/// <see cref="InviteRejectionLedger"/> so it is counted once and a copy is never offered as a call. A call whose tick
-/// thread faults is ended at once: BYE, <c>CallEnd(Failed)</c> to the host, <c>calls_media_fault_total</c>; if the
-/// fault lands before the call was announced, the call is never announced and is ended with a BYE. Tool requests
+/// <see cref="InviteRejectionLedger"/> so it is counted once and a copy is never offered as a call. A call whose tick or
+/// pump thread faults is ended at once: BYE, <c>CallEnd(Failed)</c> to the host, <c>calls_media_fault_total</c>; if
+/// the fault lands before the call was announced, the call is never announced and is ended with a BYE. Tool requests
 /// arrive on the link reader thread and run on the pool so that thread never waits on SIP. <c>OnCallHungup</c> fires
 /// for a remote BYE and for our own <c>Hangup()</c>, so the end reason is decided before hanging up and teardown is
 /// guarded by the state under <c>_stateLock</c>, which is never held across an await or a sipsorcery call.</remarks>
@@ -108,8 +108,9 @@ public sealed class CallController : IDisposable
     /// <summary>Why the last outbound call attempt failed, for the admin endpoint.</summary>
     public string LastCallFailure => Volatile.Read(ref _lastCallFailure);
 
-    /// <summary>Test seam: called with each call's tick source right after it is created, before it starts.</summary>
-    internal Action<ClockedAudioSource>? SourceCreated { get; set; }
+    /// <summary>Test seam: called with each call's tick source and inbound pump right after they are created, before
+    /// either starts.</summary>
+    internal Action<ClockedAudioSource, InboundAudioPath>? MediaCreated { get; set; }
 
     public void Start()
     {
@@ -464,18 +465,20 @@ public sealed class CallController : IDisposable
         OutboundAudioPath outbound = new(source, recorder);
         session.OnRtpPacketReceived += inbound.HandleRtpPacket;
         ActiveCall call = new(callId, direction, callerId, called, sipCallId, source, session, jitter, inbound, outbound, recorder);
-        source.TickFaulted += fault => OnTickFault(call, fault);
-        SourceCreated?.Invoke(source);
+        source.TickFaulted += fault => OnMediaFault(call, "RTP tick", fault);
+        inbound.PumpFaulted += fault => OnMediaFault(call, "RTP pump", fault);
+        MediaCreated?.Invoke(source, inbound);
         return call;
     }
 
-    /// <summary>Media is up: start the pump, announce the call, play the greeting. False, and nothing announced, when the
-    /// call's tick thread has already faulted; the caller then ends the answered call.</summary>
+    /// <summary>Media is up: announce the call, start the pump, play the greeting. False, and nothing announced, when a
+    /// media thread has already faulted; the caller then ends the answered call. A fault teardown waits for this to
+    /// finish (<see cref="ActiveCall.Settled"/>), so the host never sees <c>CallEnd</c> before <c>CallStart</c>.</summary>
     private bool Activate(ActiveCall call)
     {
         lock (_stateLock)
         {
-            if (call.Source.Faulted)
+            if (call.Source.Faulted || call.Inbound.Faulted)
             {
                 return false;
             }
@@ -485,12 +488,13 @@ public sealed class CallController : IDisposable
             _pendingTellHost = true;
             _ringingSipCallId = null;
         }
-        call.Inbound.Start();
         if (_link.IsConnected)
         {
             call.Outbound.Configure(_link.OutboundRate);
         }
         _link.SendCallStart(call.CallId, call.ToCallStart(resume: false));
+        // After the announcement, so the host never receives caller audio for a call it has not been told about.
+        call.Inbound.Start();
         _guard.CallStarted();
         _metrics.CallStarted(call.Direction == LinkCallDirection.Inbound);
         Logs.Info($"[PhoneGateway] Call {call.CallId} {call.Direction} {call.Remote} active (SIP {call.SipCallId}); fifo={call.Source.FifoActive}.");
@@ -505,6 +509,7 @@ public sealed class CallController : IDisposable
                 Logs.Error("[PhoneGateway] Greeting prompt could not be played", ex);
             }
         }
+        call.Settled.TrySetResult();
         return true;
     }
 
@@ -535,27 +540,32 @@ public sealed class CallController : IDisposable
         call.Session.OnRtpPacketReceived -= call.Inbound.HandleRtpPacket;
         call.Session.Close("not answered");
         call.Dispose();
+        call.Settled.TrySetResult();
     }
 
-    /// <summary>A call's tick thread died. Runs on that thread, so it only logs, counts and hands the teardown (which
-    /// joins this thread) to the pool.</summary>
-    private void OnTickFault(ActiveCall call, Exception fault)
+    /// <summary>One of a call's media threads (the RTP tick or the inbound pump) died. Runs on that thread, so it only
+    /// logs, counts and hands the teardown, which joins this thread, to the pool. At most once per call.</summary>
+    private void OnMediaFault(ActiveCall call, string thread, Exception fault)
     {
         lock (_stateLock)
         {
-            if (call.Ended)
+            if (call.Ended || call.FaultReported)
             {
-                Logs.Debug($"[PhoneGateway] Call {call.CallId}: tick thread faulted during teardown: {fault.Message}");
+                Logs.Debug($"[PhoneGateway] Call {call.CallId}: {thread} thread faulted after the call began ending: {fault.Message}");
                 return;
             }
+            call.FaultReported = true;
         }
-        Logs.Error($"[PhoneGateway] Call {call.CallId} (SIP {call.SipCallId}): the RTP tick thread faulted; ending the call", fault);
+        Logs.Error($"[PhoneGateway] Call {call.CallId} (SIP {call.SipCallId}): the {thread} thread faulted; ending the call", fault);
         _metrics.MediaFault();
-        _ = Task.Run(() => EndFaultedCall(call));
+        _ = Task.Run(() => EndFaultedCallAsync(call));
     }
 
-    private void EndFaultedCall(ActiveCall call)
+    private async Task EndFaultedCallAsync(ActiveCall call)
     {
+        // A call still being answered, placed or announced is left to finish that first: Activate refuses a faulted call
+        // (the answer or placement path then sends the BYE), and an announced one is hung up below.
+        await call.Settled.Task.ConfigureAwait(false);
         bool active;
         lock (_stateLock)
         {
@@ -564,14 +574,6 @@ public sealed class CallController : IDisposable
         if (active)
         {
             HangUp(LinkCallEndReason.Failed, tellHost: true, only: call);
-            return;
-        }
-        // Not announced yet: Activate refuses a faulted call and the answer or placement path ends it. An outbound call
-        // still ringing is cancelled so the placement returns now rather than at the ring timeout.
-        SIPUserAgent? agent = _agent;
-        if (call.Direction == LinkCallDirection.Outbound && agent is { IsCalling: true, IsCallActive: false })
-        {
-            agent.Cancel();
         }
     }
 
@@ -939,6 +941,12 @@ public sealed class CallController : IDisposable
 
         /// <summary>Set under the controller's state lock once teardown of this call has begun.</summary>
         public bool Ended { get; set; }
+
+        /// <summary>Set under the controller's state lock when a media fault of this call has been reported.</summary>
+        public bool FaultReported { get; set; }
+
+        /// <summary>Completes once the call is announced (end of <see cref="Activate"/>) or abandoned.</summary>
+        public TaskCompletionSource Settled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public CallStartMessage ToCallStart(bool resume) => new()
         {

@@ -13,8 +13,3 @@ src/HartsyInference.Audio/Phonemizer/Espeak/EspeakPhonemizer.cs 1
 src/HartsyInference.Cli/Infra/CliTheme.cs 1
 src/HartsyInference.Cli/Infra/TerminalImage.cs 1
 src/HartsyInference.Engine/HuggingFace/HuggingFaceClient.cs 1
-# Phone gateway (a standalone exe, never an engine setting): the SIP password and the link and admin tokens are
-# deployment secrets the operator names by variable in phone.json (passwordEnv/tokenEnv), the same category as
-# HF_TOKEN, so no secret sits in the config file. If this ratchet must not grow, the alternative is file-based
-# secrets (phone.json holds paths; systemd LoadCredential= puts them under /run/credentials/<unit>/).
-src/HartsyInference.PhoneGateway/Config/GatewayConfigLoader.cs 2

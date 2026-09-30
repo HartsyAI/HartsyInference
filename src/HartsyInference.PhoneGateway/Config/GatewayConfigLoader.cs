@@ -4,13 +4,18 @@ using HartsyInference.PhoneGateway.Sip;
 
 namespace HartsyInference.PhoneGateway.Config;
 
-/// <summary>Reads <c>phone.json</c>, validates it and resolves the secrets it names from the environment. A missing
-/// variable is reported by name; the value is never echoed.</summary>
+/// <summary>Reads <c>phone.json</c>, validates it and reads the secret files it names (<see cref="SecretFile"/>). Each
+/// secret is read once, here, and never logged; a problem with one is reported by setting and path.</summary>
 public static class GatewayConfigLoader
 {
-    /// <summary>Loads and validates the file at <paramref name="path"/>.</summary>
-    /// <exception cref="GatewayConfigException">The file is missing, malformed or names a variable that is not set.</exception>
-    public static GatewaySettings Load(string path)
+    /// <summary>Loads, validates and resolves the file at <paramref name="path"/>.</summary>
+    /// <exception cref="GatewayConfigException">The file, or a secret file it names, is missing, malformed or open to
+    /// group or others.</exception>
+    public static GatewaySettings Load(string path) => Resolve(Parse(path));
+
+    /// <summary>Reads and validates the file at <paramref name="path"/> without opening the secret files it names.</summary>
+    /// <exception cref="GatewayConfigException">The file is missing, malformed or holds an invalid setting.</exception>
+    public static GatewayConfig Parse(string path)
     {
         if (!File.Exists(path))
         {
@@ -27,10 +32,11 @@ public static class GatewayConfigLoader
         {
             throw new GatewayConfigException($"Config file {path} is not valid: {ex.Message}", ex);
         }
-        return Resolve(config);
+        Validate(config);
+        return config;
     }
 
-    /// <summary>Validates <paramref name="config"/> and resolves its secrets from the environment.</summary>
+    /// <summary>Validates <paramref name="config"/> and reads its secret files.</summary>
     public static GatewaySettings Resolve(GatewayConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -38,10 +44,14 @@ public static class GatewayConfigLoader
         string sipPassword = "";
         if (config.Sip.Registrar.Length > 0)
         {
-            sipPassword = RequireSecret(config.Sip.PasswordEnv, "sip.passwordEnv", "the SIP password for the registrar");
+            if (string.IsNullOrWhiteSpace(config.Sip.PasswordFile))
+            {
+                throw new GatewayConfigException("sip.passwordFile is required when sip.registrar is set: the path of a file holding the SIP password.");
+            }
+            sipPassword = SecretFile.Read(config.Sip.PasswordFile, "sip.passwordFile");
         }
-        string linkToken = OptionalSecret(config.Link.TokenEnv, "link.tokenEnv") ?? "";
-        string? adminToken = OptionalSecret(config.Admin.TokenEnv, "admin.tokenEnv");
+        string linkToken = OptionalSecret(config.Link.TokenFile, "link.tokenFile", "the link runs without a token") ?? "";
+        string? adminToken = OptionalSecret(config.Admin.TokenFile, "admin.tokenFile", "POST /calls is disabled");
         return new GatewaySettings { Config = config, SipPassword = sipPassword, LinkToken = linkToken, AdminToken = adminToken };
     }
 
@@ -128,30 +138,27 @@ public static class GatewayConfigLoader
         {
             throw new GatewayConfigException("recording.directory is required when recording.enabled is true.");
         }
+        RequireAbsoluteOrEmpty(sip.PasswordFile, "sip.passwordFile");
+        RequireAbsoluteOrEmpty(config.Link.TokenFile, "link.tokenFile");
+        RequireAbsoluteOrEmpty(config.Admin.TokenFile, "admin.tokenFile");
         ParseLogLevel(config.Logging.Level);
     }
 
-    private static string RequireSecret(string variable, string setting, string purpose)
+    private static void RequireAbsoluteOrEmpty(string path, string setting)
     {
-        if (string.IsNullOrWhiteSpace(variable))
+        if (path.Length > 0 && !Path.IsPathFullyQualified(path))
         {
-            throw new GatewayConfigException($"{setting} must name the environment variable holding {purpose}.");
+            throw new GatewayConfigException($"{setting} '{path}' must be an absolute path.");
         }
-        return Environment.GetEnvironmentVariable(variable)
-            ?? throw new GatewayConfigException($"Environment variable {variable} ({setting}) is not set; it must hold {purpose}.");
     }
 
-    private static string? OptionalSecret(string variable, string setting)
+    private static string? OptionalSecret(string path, string setting, string withoutIt)
     {
-        if (string.IsNullOrWhiteSpace(variable))
+        if (string.IsNullOrWhiteSpace(path))
         {
+            Logs.Info($"[PhoneGateway] {setting} is not set; {withoutIt}.");
             return null;
         }
-        string? value = Environment.GetEnvironmentVariable(variable);
-        if (value is null)
-        {
-            Logs.Info($"[PhoneGateway] Environment variable {variable} ({setting}) is not set; that feature runs without a secret.");
-        }
-        return value;
+        return SecretFile.Read(path, setting);
     }
 }

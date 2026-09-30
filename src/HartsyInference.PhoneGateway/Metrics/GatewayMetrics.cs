@@ -37,7 +37,7 @@ public sealed class GatewayMetrics
     public long CallsRejectedHostDown => Volatile.Read(ref _callsRejectedHostDown);
     public long CallsFailed => Volatile.Read(ref _callsFailed);
 
-    /// <summary>Calls ended because their RTP tick thread faulted.</summary>
+    /// <summary>Calls ended because a media thread (the RTP tick or the inbound pump) faulted.</summary>
     public long CallsMediaFault => Volatile.Read(ref _callsMediaFault);
     public long CallSecondsTotal => Volatile.Read(ref _callSecondsTotal);
     public long DtmfReceived => Volatile.Read(ref _dtmfReceived);
