@@ -47,9 +47,12 @@ public sealed class IncrementalDetokenizer
     {
         _window.Add(id);
         string text = _tokenizer.Decode(_window);
-        // Held back: nothing new yet, or the newest character is still incomplete (U+FFFD from a partial sequence).
-        if (text.Length <= _prefixText.Length || text[^1] == '�') return "";
-        string delta = text[_prefixText.Length..];
+        // A decoder that normalizes across the boundary breaks the prefix invariant; slicing at the common prefix
+        // never drops text (it may repeat a normalized character). Held back while the newest character is
+        // incomplete (U+FFFD from a partial sequence) or nothing new decoded yet.
+        int keep = text.AsSpan().CommonPrefixLength(_prefixText);
+        if (keep == text.Length || text[^1] == '�') return "";
+        string delta = text[keep..];
         // Pivot only lands on a character boundary (the text above did not end in U+FFFD), so the next window's
         // decode is a clean continuation of what was emitted.
         _window.RemoveRange(0, _read);
@@ -62,7 +65,7 @@ public sealed class IncrementalDetokenizer
     {
         if (_window.Count == _read) return "";
         string text = _tokenizer.Decode(_window);
-        string tail = text.Length > _prefixText.Length ? text[_prefixText.Length..] : "";
+        string tail = text[text.AsSpan().CommonPrefixLength(_prefixText)..];
         _read = _window.Count;
         _prefixText = text;
         return tail;

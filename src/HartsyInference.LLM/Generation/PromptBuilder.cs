@@ -9,8 +9,8 @@ internal static class PromptBuilder
     public static int[] BuildPromptIds(GenerationRequest request, ILlmTokenizer tokenizer, IChatTemplate template)
     {
         if (request.RawTokenIds is not null) return [.. request.RawTokenIds];
-        if (request.Messages is not null)
-            return template.Encode(tokenizer, WithSystemPrompt(request.Messages, request.SystemPrompt), addGenerationPrompt: true, request.EnableThinking, request.Tools);
+        if (request.EffectiveMessages() is { } messagesWithSystem)
+            return template.Encode(tokenizer, messagesWithSystem, addGenerationPrompt: true, request.EnableThinking, request.Tools);
         if (request.Prompt is not null)
         {
             List<ChatMessage> messages = new(2);

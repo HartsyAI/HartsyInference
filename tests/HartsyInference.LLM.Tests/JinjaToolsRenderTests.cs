@@ -231,6 +231,15 @@ public sealed class JinjaToolsRenderTests
     }
 
     [Fact]
+    public void ChatMlFallbackJsonEscapesTheToolCallName()
+    {
+        CaptureTokenizer tok = new();
+        List<ChatMessage> messages = [ChatMessage.Assistant("") with { ToolCalls = [new ChatToolCall("c", "say \"hi\"", "{}")] }];
+        int[] ids = new ChatMlTemplate().Encode(tok, messages, addGenerationPrompt: false);
+        Assert.Equal("<|im_start|>assistant\n<tool_call>\n{\"name\": \"say \\\"hi\\\"\", \"arguments\": {}}\n</tool_call><|im_end|>\n", tok.Text(ids));
+    }
+
+    [Fact]
     public void ChatMlFallbackWithoutToolsIsUnchanged()
     {
         CaptureTokenizer tok = new();

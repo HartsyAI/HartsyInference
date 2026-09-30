@@ -207,6 +207,8 @@ public sealed class TextService : ITextService, IDisposable
                 generation.ThrowIfCancellationRequested();
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
                 parser.Push(id, emit);
+                // A filter stop takes effect on this token, before the next decode step runs.
+                if (filterSink is { Stopped: true }) generation.ThrowIfCancellationRequested();
             };
         }
         else if (diagnosticId != 0)
@@ -222,7 +224,9 @@ public sealed class TextService : ITextService, IDisposable
         }
         catch (OperationCanceledException) when (filterSink is { Stopped: true } && !cancel.IsCancellationRequested)
         {
-            return new GenOutcome(filterSink.Text, StopReason.ToolCall, promptTokens, count, filterSink.ToolCall);
+            // ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.
+            StopReason filterStop = filterSink.ToolCall is null ? StopReason.Stop : StopReason.ToolCall;
+            return new GenOutcome(filterSink.Text, filterStop, promptTokens, count, filterSink.ToolCall);
         }
         if (parser is not null) parser.Finish(emit!);
 
@@ -238,7 +242,8 @@ public sealed class TextService : ITextService, IDisposable
     private static IOutputParser CreateParser(IChatTemplate template, ILlmTokenizer tokenizer, GenerationRequest genRequest,
         TextRequest request, bool rawCompletion)
     {
-        if (!rawCompletion && template is ChatTemplateEncoderAdapter adapter && genRequest.Messages is { } messages)
+        // The parser's initial state must come from the message list the template renders (system prompt included).
+        if (!rawCompletion && template is ChatTemplateEncoderAdapter adapter && genRequest.EffectiveMessages() is { } messages)
         {
             try
             {

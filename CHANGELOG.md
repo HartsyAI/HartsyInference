@@ -13,9 +13,10 @@ stable release will require. Dates are UTC.
   blocking writer let a slow SSE client stall decode while holding the GPU. Memory stays bounded by `MaxTokens` deltas
   and abandonment still cancels the producer through the linked token. The `Error` stop chunk carries the exception
   message in `Text`; a pre-cancelled token and a load failure both end the stream within 100 ms (unit-tested).
-- `TextRequest.SystemPrompt` is no longer dropped when `Messages` is set: `PromptBuilder` prepends it as a system turn
-  unless `Messages[0]` is already a system message (a host that folds its system text into the first message keeps
-  its single copy).
+- **Behaviour change:** `TextRequest.SystemPrompt` is no longer dropped when `Messages` is set: `PromptBuilder` prepends it
+  as a system turn unless `Messages[0]` is already a system message (a host that folds its system text into the first
+  message keeps its single copy), so the CLI's `--system` now takes effect. `GenerationRequest.EffectiveMessages()` is
+  that single rule, and the output parser resolves its initial state from the same view the template renders.
 - `IncrementalDetokenizer`'s fallback for tokenizers without `TokenBytes` decodes a short window from the last
   emitted boundary (the tokens emitted there stay as context) and holds a delta back while it ends in U+FFFD, instead
   of re-decoding the whole id list per token. Concatenated deltas equal a one-shot decode; the GGUF byte path is unchanged.

@@ -63,6 +63,27 @@ public sealed class IncrementalDecodeTests
         Assert.True(tok.MaxIdsPerDecode <= 3, $"window grew to {tok.MaxIdsPerDecode} ids");
     }
 
+    [Fact]
+    public void DecoderThatNormalizesAcrossTheBoundaryNeverDropsText()
+    {
+        // NFC-merging decode breaks the prefix invariant ("e" then U+0301 becomes "é"); slicing at the common prefix
+        // may repeat the merged character but must never lose one, and must not throw.
+        CombiningMergeTokenizer tok = new();
+        int[] ids = [0, 1, 2, 0, 1, 2];
+        string streamed = Run(tok, ids);
+        string oneShot = new CombiningMergeTokenizer().Decode(ids);
+        Assert.True(IsSubsequence(oneShot, streamed), $"streamed '{streamed}' lost characters of '{oneShot}'");
+        Assert.EndsWith("x", streamed);
+    }
+
+    private static bool IsSubsequence(string needle, string hay)
+    {
+        int i = 0;
+        foreach (char c in hay)
+            if (i < needle.Length && needle[i] == c) i++;
+        return i == needle.Length;
+    }
+
     private static string Run(IncrementalDetokenizer d, int[] ids)
     {
         StringBuilder sb = new();
@@ -123,6 +144,19 @@ public sealed class IncrementalDecodeTests
             List<byte> all = [];
             foreach (int id in ids) all.AddRange(_pieces[id]);
             return Encoding.UTF8.GetString([.. all]);
+        }
+    }
+
+    /// <summary>Pieces "e", U+0301 (combining acute) and "x"; the decoded string is NFC-normalized, so a window that starts on the combining mark merges differently from one that starts on the base letter.</summary>
+    private sealed class CombiningMergeTokenizer : NoBytesTokenizer
+    {
+        private static readonly string[] Pieces = ["e", "́", "x"];
+
+        public override string Decode(IReadOnlyList<int> ids)
+        {
+            StringBuilder sb = new();
+            foreach (int id in ids) sb.Append(Pieces[id]);
+            return sb.ToString().Normalize(NormalizationForm.FormC);
         }
     }
 

@@ -47,6 +47,17 @@ public sealed class PromptBuilderTests
     }
 
     [Fact]
+    public void EffectiveMessagesIsTheSameViewTheTemplateRenders()
+    {
+        // The output parser resolves its initial state from EffectiveMessages(), so it must apply the one rule.
+        GenerationRequest prepend = new() { Messages = [ChatMessage.User("hi")], SystemPrompt = "Be terse." };
+        Assert.Equal(["system", "user"], prepend.EffectiveMessages()!.Select(m => m.Role));
+        GenerationRequest folded = new() { Messages = [ChatMessage.System("Host."), ChatMessage.User("hi")], SystemPrompt = "Be terse." };
+        Assert.Same(folded.Messages, folded.EffectiveMessages());
+        Assert.Null(new GenerationRequest { Prompt = "hi", SystemPrompt = "Be terse." }.EffectiveMessages());
+    }
+
+    [Fact]
     public void ToolsReachTheTemplateOnBothMessageAndPromptPaths()
     {
         List<ToolSpec> tools = [ToolSpec.FromJson("{\"type\":\"function\",\"function\":{\"name\":\"f\"}}")];

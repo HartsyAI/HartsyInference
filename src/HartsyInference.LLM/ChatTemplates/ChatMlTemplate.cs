@@ -68,7 +68,7 @@ public sealed class ChatMlTemplate : IChatTemplate
                 StringBuilder body = new("assistant");
                 if (!string.IsNullOrEmpty(message.Content)) body.Append('\n').Append(message.Content);
                 foreach (ChatToolCall call in message.ToolCalls)
-                    body.Append("\n<tool_call>\n{\"name\": \"").Append(call.Name).Append("\", \"arguments\": ").Append(ArgumentsJson(call.ArgumentsJson)).Append("}\n</tool_call>");
+                    body.Append("\n<tool_call>\n{\"name\": ").Append(Values.ToJson(call.Name)).Append(", \"arguments\": ").Append(ArgumentsJson(call.ArgumentsJson)).Append("}\n</tool_call>");
                 Turn(body.ToString());
                 continue;
             }
