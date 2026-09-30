@@ -306,6 +306,8 @@ public sealed class KokoroBenchTests
         return content.Count == 0 ? 0 : content.Count(hyp.Contains) / (double)content.Count;
     }
 
+    /// <summary>Lower-cased, punctuation-stripped words with small integers spelled out — Whisper writes "at 3" for
+    /// "at three", and that is a correct transcription, not a missed word.</summary>
     private static IEnumerable<string> Words(string text)
     {
         StringBuilder sb = new StringBuilder(text.Length);
@@ -313,7 +315,28 @@ public sealed class KokoroBenchTests
         {
             sb.Append(char.IsLetterOrDigit(c) || c == '\'' ? c : ' ');
         }
-        return sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        return sb.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries).Select(SpellSmallNumber);
+    }
+
+    private static readonly string[] Ones =
+    [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten", "eleven", "twelve",
+        "thirteen", "fourteen", "fifteen", "sixteen", "seventeen", "eighteen", "nineteen",
+    ];
+
+    private static readonly string[] Tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+
+    private static string SpellSmallNumber(string token)
+    {
+        if (!int.TryParse(token, NumberStyles.None, CultureInfo.InvariantCulture, out int value) || value > 99)
+        {
+            return token;
+        }
+        if (value < 20)
+        {
+            return Ones[value];
+        }
+        return value % 10 == 0 ? Tens[value / 10] : $"{Tens[value / 10]}{Ones[value % 10]}";
     }
 
     private static string Ms(double seconds) => (seconds * 1000).ToString("F1", CultureInfo.InvariantCulture);

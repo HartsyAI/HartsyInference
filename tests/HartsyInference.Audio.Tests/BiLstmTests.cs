@@ -8,7 +8,7 @@ namespace HartsyInference.Audio.Tests;
 /// <summary><see cref="BiLstm"/> runs one batched input projection and a host recurrence; this pins it to the
 /// step-by-step <see cref="LstmCell.Step"/> definition on random weights, both directions, so a regression in
 /// the stacked weights, the reverse walk, the output half offsets or the SIMD dot would show as a mismatch.
-/// Every TTS that runs a bidirectional LSTM (Kokoro, StyleTTS 2, GPT-SoVITS) goes through this path.</summary>
+/// Kokoro and StyleTTS 2 (text encoder, duration encoder, shared prosody LSTM) go through this path.</summary>
 public sealed unsafe class BiLstmTests
 {
     [Theory]

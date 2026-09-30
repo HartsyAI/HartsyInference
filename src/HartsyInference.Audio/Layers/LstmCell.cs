@@ -131,9 +131,9 @@ internal static unsafe class LstmOps
     /// projections computed up front: <paramref name="gatesIn"/> holds <c>x·W_ihᵀ + b_ih</c> for every
     /// timestep (row <c>t</c> at <c>gatesIn + t·gatesInStride</c>, <c>4·hidden</c> wide). Each step adds
     /// <c>h·W_hhᵀ + b_hh</c> and applies the gate math; <c>h</c> lands in <paramref name="output"/> at
-    /// <c>t·outputStride + outputOffset</c>. The recurrence is the only sequential part of an LSTM, and at
-    /// hidden 256 it is a 1 MB weight against a 1 KB state — a host SIMD dot per gate row is faster than any
-    /// per-step device launch, and it never touches the backend, so the surrounding graph stays resident.</summary>
+    /// <c>t·outputStride + outputOffset</c>. The recurrence is the only sequential part of an LSTM and its weight is
+    /// cache-sized, so a SIMD dot per gate row here beats a per-step device launch (each one a stream drain) and
+    /// never touches the backend, leaving the surrounding graph resident.</summary>
     /// <param name="reverse">Walks <c>t = T-1 … 0</c> (the backward direction of a BiLSTM).</param>
     /// <param name="h">Scratch <c>[hidden]</c>, zeroed here (PyTorch's zero initial state).</param>
     /// <param name="c">Scratch <c>[hidden]</c>, zeroed here.</param>
@@ -174,8 +174,7 @@ internal static unsafe class LstmOps
         }
     }
 
-    /// <summary>Four independent accumulators: a single chain is bound by FMA latency, not throughput, and at
-    /// hidden 256 that alone made the recurrence four times slower than the arithmetic allows.</summary>
+    /// <summary>Four independent accumulators: a single chain is bound by FMA latency, not throughput.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static float Dot(float* a, float* b, int n)
     {

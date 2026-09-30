@@ -19,8 +19,8 @@ namespace HartsyInference.Audio.Layers;
 /// <para>Execution split: the input projection of BOTH directions is one backend GEMM over the whole
 /// sequence (<c>[B, T, in] → [B, T, 8·hidden]</c>, the two <c>W_ih</c> stacked at load time), read back to
 /// the host once; the sequential recurrence then runs on the host (<see cref="LstmOps.RunSequence"/>), the
-/// two directions in parallel, and the result is handed back as one host tensor. The previous per-timestep
-/// backend launches cost a device→host stream drain per step — the dominant cost of Kokoro's synthesis.</para>
+/// two directions in parallel, and the result is handed back as one host tensor — one device sync per layer
+/// instead of one per timestep.</para>
 ///
 /// <para>Weight key convention (PyTorch state dict):
 /// <code>

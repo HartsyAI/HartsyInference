@@ -142,9 +142,8 @@ public static class Fft
     /// Uses the same <c>e^{-2πi kn/N}</c> sign convention as the radix-2 path so the iSTFT
     /// inverse trick (<c>conj(FFT(conj(X)))/N</c>) remains valid.</summary>
     /// <summary>O(n²) DFT for the tiny non-power-of-two sizes (n &lt; 64), double accumulation. The twiddles come
-    /// from a per-size table indexed by <c>(k·t) mod n</c> — the per-element <c>Math.Cos/Sin</c> this used to call
-    /// was 2·n² transcendentals per frame, which at an iSTFT vocoder's n_fft=20 and ~27k frames per sentence
-    /// dominated the whole synthesis.</summary>
+    /// from a per-size table indexed by <c>(k·t) mod n</c>: an iSTFT vocoder calls this once per frame, so the
+    /// 2·n² transcendentals an inline <c>Math.Cos/Sin</c> would cost are the whole transform's budget.</summary>
     private static void DirectDft(Span<float> re, Span<float> im, int n)
     {
         (double[] cosTab, double[] sinTab) = GetDirectTwiddles(n);

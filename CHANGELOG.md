@@ -8,8 +8,8 @@ stable release will require. Dates are UTC.
 
 ## alpha.224
 
-- **Kokoro synthesis 6.6× faster on the 3060** (15-word sentence 1145 → 173 ms median in-process, 5 words 778 → 118 ms,
-  30 words 2076 → 283 ms; 1552 → 9 device→host syncs per call). The synthesis graph stays device-resident: the AdaIN /
+- **Kokoro synthesis 6.9× faster on the 3060** (15-word sentence 1145 → 165 ms median in-process, 5 words 778 → 101 ms,
+  30 words 2076 → 267 ms; 1552 → 9 device→host syncs per call). The synthesis graph stays device-resident: the AdaIN /
   AdaLN style splits, the length regulator, the style broadcast and channel concats, reflection pads, residual adds and
   the PLBERT head permutes are backend ops (`SliceLastDim`, `LayerNormModulate`, `RepeatTime`, grouped
   `ConvTranspose1d`, `Concat`, `GatherRows`, `Permute0213`, `Add`/`Scale`), `KokoroPipeline` preloads its weights once
