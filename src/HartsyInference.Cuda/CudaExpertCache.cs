@@ -3,7 +3,8 @@ using HartsyInference.Core.Backends;
 namespace HartsyInference.Cuda;
 
 /// <summary>Expert cache on the backend's <see cref="CudaStreamingWeightCache"/>: one expert is one <c>BeginUploadAsync</c> of its weights and scales through the pinned staging ring, on the upload stream.</summary>
-/// <remarks>Expert tensors are excluded from the ≥1 MB auto-promotion, so an evicted expert is never resurrected as a permanent weight.
+/// <remarks>Source pinning stays off: experts are mmap-backed and must reach the device through the pinned staging ring, never host-registration.
+/// Expert tensors are excluded from the ≥1 MB auto-promotion, so an evicted expert is never resurrected as a permanent weight.
 /// Disposing drains both streams, evicts every expert and returns the staging ring.</remarks>
 public sealed class CudaExpertCache : ExpertCacheBase
 {
@@ -19,7 +20,7 @@ public sealed class CudaExpertCache : ExpertCacheBase
         _streaming = backend.StreamingCache as CudaStreamingWeightCache
             ?? throw new InvalidOperationException("The backend has no CUDA streaming weight cache.");
         _previousPinUploadSource = _streaming.PinUploadSource;
-        _streaming.PinUploadSource = true;
+        _streaming.PinUploadSource = false;
         _streaming.StagingSlotCount = Math.Max(_streaming.StagingSlotCount, stagingSlots);
     }
 
@@ -53,7 +54,6 @@ public sealed class CudaExpertCache : ExpertCacheBase
     protected override void Drain()
     {
         _streaming.DrainAndReleasePool();
-        _streaming.UnregisterPinnedSources();
         _streaming.PinUploadSource = _previousPinUploadSource;
     }
 }
