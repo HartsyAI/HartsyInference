@@ -94,8 +94,12 @@ public sealed class AudioRunnerLeaseGpuTests
                 await engine.Speech.SynthesizeAsync(kokoro, ttsOptions with { Text = Sentence });
                 Assert.True(runtime.Stt.IsResident(SmallEnKey), "the pinned Whisper runner was evicted by a switch.");
                 Assert.True(runtime.Tts.IsResident(KokoroKey), "the pinned Kokoro runner was evicted by a switch.");
+                // The sweep frees every cached device allocation, so the pinned runners re-promote here.
                 AssertRecall(Gated(device, $"whisper small.en JFK after switch {turn + 1}",
                     () => stt.Transcribe(jfk16k, 16_000, sttOptions)), JfkWords);
+                float[] again = Gated(device, $"kokoro sentence after switch {turn + 1}", () => tts.Synthesize(Sentence, ttsOptions));
+                AssertRecall(Gated(device, $"whisper small.en on kokoro after switch {turn + 1}",
+                    () => stt.Transcribe(again, tts.SampleRate, sttOptions)), SentenceWords);
             }
         }
         if (AudioEvictionPressure.HostPressureObservable)
