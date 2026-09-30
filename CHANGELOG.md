@@ -6,6 +6,14 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.216
+
+- **LLM generation goes through one model contract.** `IGenerationModel` and `ISequenceState` (with cursor-only
+  `Checkpoint`/`Rollback`) sit between the generation pipeline and the transformer, and `GenericTransformerModel` adapts
+  the existing `GenericTransformer` to it. `TextGenerationPipeline` and `DynamicBatchScheduler` gain `IGenerationModel`
+  constructors; the old constructors build the adapter, so public signatures are unchanged. Projection, RoPE-table and
+  gated-FFN helpers moved into shared internal statics that `GenericTransformer` delegates to. No behaviour change is intended.
+
 ## alpha.215
 
 - **EXL3 trellis decode** (DeepSeek-V4.1-Flash program PR 23b). `Exl3Codec` decodes the `sfxnz/DeepSeek-V4.1-Flash-EXL3` 2-bit MCG experts: 16x16 tail-biting trellis tiles

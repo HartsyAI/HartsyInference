@@ -18,7 +18,8 @@ namespace HartsyInference.LLM.Generation;
 /// </remarks>
 public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 {
-    private readonly GenericTransformer _model;
+    private readonly IGenerationModel _model;
+    private readonly IGraphDecodable? _graphModel;
     private readonly ILlmTokenizer _tokenizer;
     private readonly IChatTemplate _template;
     private readonly IBackend _backend;
@@ -42,7 +43,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     {
         public required PendingRequest Pending;
         public required int[] PromptIds;
-        public required IKvCache Cache;
+        public required ISequenceState Cache;
         public required SamplerChain Sampler;
         public required HashSet<int> Stops;
         public required List<int> Generated;
@@ -59,10 +60,18 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// <summary><paramref name="pool"/> is shared across every sequence this scheduler admits (size it for the concurrency you want, not per-request); <paramref name="gpuGate"/>, when supplied, wraps every GPU-touching step through the server's shared backend-exclusivity queue (see class doc "Backend exclusivity") — omit only when nothing else can contend for the same backend instance.</summary>
     public DynamicBatchScheduler(GenericTransformer model, ILlmTokenizer tokenizer, IBackend backend,
         PagedKvPool pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
+        : this(new GenericTransformerModel(model, backend), tokenizer, pool, template, gpuGate)
+    {
+    }
+
+    /// <summary>Drives any <see cref="IGenerationModel"/> whose sequence states can be drawn from <paramref name="pool"/>; the scheduler does not own the model.</summary>
+    public DynamicBatchScheduler(IGenerationModel model, ILlmTokenizer tokenizer,
+        PagedKvPool pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
     {
         _model = model;
+        _graphModel = model as IGraphDecodable;
         _tokenizer = tokenizer;
-        _backend = backend;
+        _backend = model.OutputBackend;
         _pool = pool;
         _template = template ?? new ChatMlTemplate();
         _stopIds = [.. tokenizer.StopIds];
@@ -259,7 +268,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         HashSet<int> stops = _stopIds;
         if (req.StopTokenIds is not null) { stops = [.. _stopIds]; foreach (int s in req.StopTokenIds) stops.Add(s); }
 
-        TransformerConfig cfg = _model.Config;
+        int vocab = _model.Info.VocabSize;
         // Only a request admitted while the scheduler is otherwise idle, and only when it's eligible for the
         // SAME reasons TextGenerationPipeline.Generate's graph-decode dispatch requires (greedy,
         // SupportsGraphDecode), plus non-JSON-mode (that pipeline's own graph-decode step bypasses the CPU
@@ -271,31 +280,32 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         // (never converted later).
         bool graphEligible = solo && !_graphCaptureUnavailable && req.Sampling.Greedy && !req.Sampling.HasJsonConstraint
             && (req.GraphDecode ?? EngineKnobs.GraphDecode.Value)
-            && (TestForceSupportsGraphDecode ?? _model.SupportsGraphDecode(_backend));
+            && _graphModel is not null
+            && (TestForceSupportsGraphDecode ?? _graphModel.SupportsGraphDecode(_backend));
 
         // Throws KvPoolExhaustedException if the pool can't fit the prompt (PagedKvCache path only) —
         // propagates to the caller's SubmitAsync task as a fault, the reject policy PagedKvPool documents.
         // Stays F32 regardless of vram.kvF16: this branch exists specifically BECAUSE graphEligible, and
         // FlashAttentionDev refuses F16-storage KV (v1 scope — see CudaBackend), silently falling back to
         // eager per-token. Honoring the switch here would sabotage the very feature this branch selects for.
-        IKvCache cache = graphEligible
-            ? new FixedKvCache(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDimsPerLayer(), promptIds.Length + req.MaxTokens + 1)
-            : new PagedKvCache(_pool);
+        ISequenceState cache = graphEligible
+            ? _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, FullPrecisionKv: true))
+            : _model.CreateSequenceState(new SequenceStateOptions(promptIds.Length + req.MaxTokens + 1, _pool));
         try
         {
             List<int> generated = new(req.MaxTokens);
-            SamplerChain sampler = SamplerChain.FromOptions(req.Sampling, _tokenizer, cfg.VocabSize);
+            SamplerChain sampler = SamplerChain.FromOptions(req.Sampling, _tokenizer, vocab);
             int next;
-            using (Tensor hidden = _model.Forward(_backend, promptIds, 0, cache))
-            using (Tensor logits = _model.ProjectLogits(_backend, hidden, promptIds.Length))
-                next = sampler.Next(LastRow(logits, promptIds.Length, cfg.VocabSize), generated);
+            using (Tensor hidden = _model.Prefill(new PrefillChunk(promptIds, 0), cache))
+            using (Tensor logits = _model.ProjectLogits(hidden, promptIds.Length))
+                next = sampler.Next(LastRow(logits, promptIds.Length, vocab), generated);
 
             GraphDecodeSession? session = null;
             if (graphEligible)
             {
                 try
                 {
-                    session = CaptureGraphSession((FixedKvCache)cache, promptIds.Length, next, req.Sampling.RepetitionPenalty);
+                    session = CaptureGraphSession(cache, promptIds.Length, next, req.Sampling.RepetitionPenalty);
                 }
                 catch (Exception captureEx)
                 {
@@ -325,7 +335,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     }
 
     /// <summary>Captures one CUDA graph for greedy decode against <paramref name="cache"/>, mirroring <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> capture step but returning a <see cref="GraphDecodeSession"/> that outlives one method call; disposes whatever was already allocated before rethrowing on failure.</summary>
-    private GraphDecodeSession CaptureGraphSession(FixedKvCache cache, int promptLen, int firstToken, float repetitionPenalty)
+    private GraphDecodeSession CaptureGraphSession(ISequenceState cache, int promptLen, int firstToken, float repetitionPenalty)
     {
         // Checked before any real backend call so a test can simulate a capture failure without needing an
         // actual CUDA-capable backend (see TestGraphCaptureFailureInjector's doc) — every call attempted
@@ -333,87 +343,32 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         Exception? injected = TestGraphCaptureFailureInjector?.Invoke();
         if (injected is not null) throw injected;
 
-        // Found live testing this retrofit: a genuinely COLD model's first-ever solo admission reliably
-        // failed capture with CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED inside DenseFfn's weight projection —
-        // prefill's multi-token GEMM shape apparently promotes weights lazily via a different path than the
-        // single-token GEMV shape decode uses, so the FIRST-EVER single-token forward pass for this model
-        // can trigger a non-stream-ordered "auto-promote to GPU" allocation, which CUDA forbids mid-capture.
-        // Every later solo admission is unaffected (once promoted, a weight stays promoted for the model's
-        // lifetime) — this is a one-time, first-request-only cost. Forcing that promotion via a real
-        // single-token forward pass HERE, before capture starts, using a throwaway cache (weight promotion
-        // is cached on the model/backend, not tied to any specific cache instance, so this warms up exactly
-        // what the real capture will need without touching the real sequence's cache/position state at all)
-        // moves the failure-prone allocation safely outside the capture region. This is a pre-existing gap in
-        // TextGenerationPipeline.GenerateGraphDecode too (confirmed: reproduces there identically, no
-        // scheduler code involved) — not something this retrofit introduced, but this is the first code path
-        // that realistically hits it on a cold model (a single CLI process rarely captures graph decode
-        // completely cold the way a freshly-loaded server model's first request does).
-        // Every weight touched by a single-token-shaped (GEMV) forward pass needs this — not just the
-        // per-layer MLP/attention projections but also the LM head (ProjectLogits), which is a SEPARATE
-        // call from Forward and needs its own single-token-shaped warm-up (prefill's own ProjectLogits call
-        // uses promptLen>1 positions — a GEMM shape — so it doesn't warm the GEMV path either).
-        TransformerConfig warmupCfg = _model.Config;
-        using (FixedKvCache warmup = new(warmupCfg.NumLayers, 1, warmupCfg.NumKvHeads, warmupCfg.HeadDimsPerLayer(), maxSequenceLength: 2))
-        {
-            using Tensor warmupHidden = _model.Forward(_backend, [firstToken], 0, warmup);
-            _model.ProjectLogits(_backend, warmupHidden, 1).Dispose();
-        }
-
-        Tensor embedTable = _model.EnsureEmbedResidentForGraphDecode(_backend);
-        (Tensor cosTable, Tensor sinTable) = _model.EnsureRopeTableForGraphDecode(_backend, cache.MaxSequenceLength);
-        ulong devicePos = _backend.AllocDevicePos();
-        ulong deviceTokenId = _backend.AllocDeviceTokenId();
-        ulong history = _backend.AllocDeviceHistory(cache.MaxSequenceLength);
-        ulong historyCount = _backend.AllocDeviceCounter();
-        object? graph = null;
-        try
-        {
-            int pos = promptLen;
-            _backend.WriteDeviceTokenId(deviceTokenId, firstToken);
-            _backend.WriteDevicePos(devicePos, pos + 1, pos);
-            _backend.WriteDeviceCounter(historyCount, 0);
-            graph = _backend.CaptureGraph(() =>
-                _model.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos, deviceTokenId,
-                    history, historyCount, repetitionPenalty));
-            return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos);
-        }
-        catch
-        {
-            if (graph is not null) _backend.DisposeGraph(graph);
-            _backend.FreeDevicePos(devicePos);
-            _backend.FreeDeviceTokenId(deviceTokenId);
-            _backend.FreeDeviceHistory(history);
-            _backend.FreeDeviceCounter(historyCount);
-            throw;
-        }
+        // Warmup, residency and capture live in the model (see GenericTransformerModel.CaptureDecodeGraph).
+        return _graphModel!.CaptureDecodeGraph(cache, promptLen, firstToken, repetitionPenalty);
     }
 
     private void RunDecodeRound(List<ActiveSeq> feeders)
     {
-        TransformerConfig cfg = _model.Config;
+        int vocab = _model.Info.VocabSize;
         int bn = feeders.Count;
         int[] tokens = new int[bn];
-        int[] positions = new int[bn];
-        IKvCache[] caches = new IKvCache[bn];
+        ISequenceState[] states = new ISequenceState[bn];
         for (int b = 0; b < bn; b++)
         {
             ActiveSeq seq = feeders[b];
             tokens[b] = seq.Next;
-            positions[b] = seq.Cache.CurrentLength;
-            caches[b] = seq.Cache;
+            states[b] = seq.Cache;
             seq.Generated.Add(seq.Next);
             seq.Pending.OnToken?.Invoke(seq.Next);
         }
 
-        using Tensor embeds = new(new TensorShape(1, bn, cfg.HiddenSize), DType.F32);
-        _model.EmbedLookup(embeds, tokens);
-        using Tensor hidden = _model.ForwardBatchDecode(_backend, embeds, positions, caches);
-        using Tensor logits = _model.ProjectLogits(_backend, hidden, bn);
+        using Tensor hidden = _model.DecodeBatch(tokens, states);
+        using Tensor logits = _model.ProjectLogits(hidden, bn);
         for (int b = 0; b < bn; b++)
-            feeders[b].Next = feeders[b].Sampler.Next(LastRow(logits, b + 1, cfg.VocabSize), feeders[b].Generated);
+            feeders[b].Next = feeders[b].Sampler.Next(LastRow(logits, b + 1, vocab), feeders[b].Generated);
     }
 
-    /// <summary>One round for a lone sequence with a captured graph — mirrors <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> loop body order (add token, invoke callback, THEN replay) so the eviction check on <see cref="ActiveSeq.Next"/> stays correct; calls <see cref="IKvCache.AdvanceLength"/> explicitly so <see cref="ActiveSeq.Cache"/>'s position stays correct if this sequence is later joined by another and falls back to <see cref="RunDecodeRound"/>'s eager path.</summary>
+    /// <summary>One round for a lone sequence with a captured graph — mirrors <see cref="TextGenerationPipeline"/>'s <c>GenerateGraphDecode</c> loop body order (add token, invoke callback, THEN replay) so the eviction check on <see cref="ActiveSeq.Next"/> stays correct; commits the replayed token explicitly (<see cref="IGraphDecodable.CommitReplayedStep"/>) so <see cref="ActiveSeq.Cache"/>'s position stays correct if this sequence is later joined by another and falls back to <see cref="RunDecodeRound"/>'s eager path.</summary>
     private void ReplayGraphRound(ActiveSeq seq, GraphDecodeSession gs)
     {
         seq.Generated.Add(seq.Next);
@@ -421,7 +376,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         int next = gs.Replay();
         gs.Pos++;
         gs.WriteNextPos();
-        seq.Cache.AdvanceLength(1);
+        _graphModel!.CommitReplayedStep(seq.Cache);
         seq.Next = next;
     }
 
