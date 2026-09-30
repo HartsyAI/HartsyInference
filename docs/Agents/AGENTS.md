@@ -82,10 +82,10 @@ transpose is `backend.Transpose2D(out, in, d1, d2)`, never a hand-rolled loop.
 
 | Package | Shared statics |
 |---|---|
-| `Core` | `TensorCasts` host dtype casts (`EnsureF32`, `LoadF32`/`LoadF32Opt`, `F32ToBf16Bits`, `RelabelRank2Copy`), `ByteFormat` for VRAM log lines |
+| `Core` | `TensorCasts` host dtype casts (`EnsureF32`, `LoadF32`/`LoadF32Opt`, `F32ToBf16Bits`, `RelabelRank2Copy`), `ByteFormat` for VRAM log lines, `Runtime/MonotonicClock` (monotonic ns + absolute-deadline sleep), `Runtime/RealtimeScheduling` (`TryEnterFifo`, `TryPinToCpu`), `Runtime/SpscRing<T>` (lock-free single-producer/single-consumer ring), `Numerics/LatencyHistogram` (fixed µs buckets, p50/p99/max), `CpuParallel.InlineScope` (thread-local "never fan out") |
 | `Diffusion` | `DiTUtils` (denoiser blocks), `CfgHelper` (`SliceBatchElement`, `ApplyCfg`, `ConcatLastDim`), `DtypeCastHelper` (backend-routed, source-disposing casts), `Img2ImgSetup.Prepare`, `Schedulers/SchedulerFactory.Create`, `NoiseSchedule`, `VaeOps`/`MageVaeOps`, `WeightBytes` |
 | `ModelAssets` | `CheckpointConvertUtils` (key remaps, quant-aware QKV splits) |
-| `Audio` | `WhisperOps.ProjectLinear`, `Layers/Activations` (`ErfGelu`, `SigmoidS`), `RnnOps`, `VqOps`, `WeightNormFusion.LoadFused`, `LogitSampling`, `SignalPadding`, `IStft`, `Dsp/NsfVocoderDsp` (NSF source, STFT/iSTFT head, pad, scale), `Dsp/DeterministicRng` |
+| `Audio` | `WhisperOps.ProjectLinear`, `Layers/Activations` (`ErfGelu`, `SigmoidS`), `RnnOps`, `VqOps`, `WeightNormFusion.LoadFused`, `LogitSampling`, `SignalPadding`, `IStft`, `Dsp/NsfVocoderDsp` (NSF source, STFT/iSTFT head, pad, scale), `Dsp/DeterministicRng`, `Streaming/SentenceChunkedSynthesis` (sentence streaming over any whole-utterance synth; Piper and Kokoro use it), `Frontends/SentenceSplitter` + `StreamingSentenceSplitter` + `SplitClauses`, `Frontends/SpokenTextNormalizer`, `Io/G711` (μ-law/A-law), `Models/Wake/IVadModel` |
 
 Pick by ownership, not by name: `TensorCasts` is host-side, `DtypeCastHelper` routes through the backend and
 disposes its source. New shared code stays generic: when two or more callers need an operation, hoist ONE helper
