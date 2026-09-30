@@ -12,4 +12,8 @@ public enum MemoryComponent
 
     /// <summary>The latent encoder/decoder.</summary>
     Vae,
+
+    /// <summary>The whole decoder-only language model of a text checkpoint: backbone, experts and any memory-resident
+    /// tables, held for the life of the session. Appended last so the diffusion components keep their values.</summary>
+    LanguageModel,
 }

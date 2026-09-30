@@ -512,6 +512,9 @@ public static class ModelCatalog
                 },
             },
 
+            // Text / LLM — DeepSeek-V4.1-Flash: config, loader and catalog rows only; no model class yet.
+            DeepSeekV41Catalog.Build(),
+
             // Image / diffusion
             new CatalogEntry
             {

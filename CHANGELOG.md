@@ -6,13 +6,35 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.209
+## alpha.210
 
 - **LLM generation goes through one model contract.** `IGenerationModel` and `ISequenceState` (with cursor-only
   `Checkpoint`/`Rollback`) sit between the generation pipeline and the transformer, and `GenericTransformerModel` adapts
   the existing `GenericTransformer` to it. `TextGenerationPipeline` and `DynamicBatchScheduler` gain `IGenerationModel`
   constructors; the old constructors build the adapter, so public signatures are unchanged. Projection, RoPE-table and
   gated-FFN helpers moved into shared internal statics that `GenericTransformer` delegates to. No behaviour change is intended.
+
+## alpha.209
+
+- **DeepSeek-V4.1-Flash config, HF directory loader and catalog rows** (program PR 7). `HfCheckpointDirectory.TryProbe` recognises a
+  config plus safetensors directory from `config.json` and the file listing alone, and `HfQuantFlavorDetector` names the producer
+  (official, NVIDIA NVFP4, AMD Quark, EXL3, MLX) from `quantization_config`. `IHfKeyMapper` maps Official, MLX, EXL3 (`lm_head` to
+  `head`) and DwarfStar GGUF names (`blk.N.*`, fused experts, row264 Engram) to the canonical names.
+- `DeepSeekV41Config` parses `config.json`, requires `compress_ratios.Length == num_layers + 3` and derives per-layer plans;
+  it has no model class. `DeepSeekV41Checkpoint` opens the shard set header-first (Engram shards pread-only) and exposes
+  `GetWeight`, `ExpertBank(layer)` and `EngramTable(layer)` as borrowed views. A draft scan keeps `mtp` layers with missing experts
+  from throwing at open and lets `RequireDraft()` refuse DSpark with the exact gap (MLX `mtp.2` lacks 14 of 128 experts).
+- `ModelResolver` (Text) returns a directory that probes as a Hugging Face checkpoint and refuses a directory holding both a
+  `.gguf` and a safetensors index; a single `.gguf` resolves exactly as before. `TextService` validates and opens a
+  `deepseek_v41` directory, then throws `NotSupportedException` because the model class is not wired.
+- `ModelCatalog` row `deepseek-v4.1-flash` with per-derivative `CatalogVariant` shard sets pinned to the inspected commits and
+  `Components` flags (DwarfStar: no draft, separate vision file). It has no `Assets`, so the CLI offers no download.
+- The text memory estimate reads headers only and reports `WeightBytesByClass` (dense, expert, Engram, embed, head, vision, draft)
+  that sum to `metadata.total_size` (510,286,023,000 B on the official checkpoint); a new `MemoryComponent.LanguageModel` phase
+  carries the resident bytes and the stream floor. `AssessAsync` still answers `Unknown` until the residency planner lands.
+- Tests pin the real pinned `config.json` (fixture), folded real shard headers (12 KB template fixture) and, behind
+  `HARTSY_DSV41_HEADER_REPLICA`, a sparse replica of all 48 real headers; probing, resolver, catalog, loader and estimate cases run on
+  synthetic tiny checkpoints.
 
 ## alpha.208
 

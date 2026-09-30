@@ -16,6 +16,7 @@ using HartsyInference.LLM.Transformer;
 using HartsyInference.LLM.Multimodal;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Ssm;
+using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.Tokenizers;
 
@@ -254,6 +255,9 @@ public sealed class TextService : ITextService, IDisposable
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
+    /// <summary>The Hugging Face directory path: validates the checkpoint and refuses until a model class consumes it.</summary>
+    private static void LoadHfDirectory(HfCheckpointInfo checkpoint) => HfTextDirectoryLoader.Load(checkpoint);
+
     private void LoadInto(TextDeviceSlot slot, string deviceKey, ModelSpec spec, TextRequest request)
     {
         string? path = spec.LocalPath;
@@ -261,6 +265,11 @@ public sealed class TextService : ITextService, IDisposable
             throw new HartsyInferenceException(
                 $"No checkpoint found for model '{spec.Requested}'. Pass a .gguf file via the model spec " +
                 $"(looked under '{RepoPaths.ModelsRoot()}').");
+        if (Directory.Exists(path) && HfCheckpointDirectory.TryProbe(path) is { } hfCheckpoint)
+        {
+            LoadHfDirectory(hfCheckpoint);
+            return;
+        }
         if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null) && slot.LoadedPath == path)
             return;
         string[] shardDevices = ResolveShardDevices(deviceKey);

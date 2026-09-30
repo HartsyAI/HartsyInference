@@ -295,11 +295,11 @@
         "engine"
       ],
       "reference": "docs/Research/SAFETENSORS_FORMAT.md",
-      "plannedLocation": "src/HartsyInference.ModelAssets/SafeTensors/",
+      "plannedLocation": "src/HartsyInference.ModelAssets/SafeTensors/; consumed by src/HartsyInference.LLM/DeepSeekV41/DeepSeekV41Checkpoint.cs (PR 7)",
       "dependsOn": [
         "core.spec"
       ],
-      "acceptanceTest": "synthetic error matrix; header-only on staged checkpoint (96085 tensors, 510286023000 B)",
+      "acceptanceTest": "synthetic error matrix; header-only on staged checkpoint (96085 tensors, 510286023000 B); PR 7 opens all 48 real official headers through DeepSeekV41Checkpoint (guarded replica test)",
       "pr": 4,
       "status": "Implemented"
     },
@@ -325,11 +325,11 @@
         "engine"
       ],
       "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a convert.py",
-      "plannedLocation": "src/HartsyInference.ModelAssets/Quant/",
+      "plannedLocation": "src/HartsyInference.ModelAssets/Quant/; bound per flavor by DeepSeekV41Checkpoint (PR 7)",
       "dependsOn": [
         "load.shards"
       ],
-      "acceptanceTest": "DeepSeekV41Shard3ParityTests (milestone M1)",
+      "acceptanceTest": "DeepSeekV41Shard3ParityTests (milestone M1); PR 7 binds the official, NVFP4, Quark, EXL3 and MLX naming and refuses DSpark on MLX (mtp.2 lacks 14 of 128 experts)",
       "pr": 5,
       "status": "Implemented"
     },
@@ -358,7 +358,7 @@
         "load.shards",
         "load.binder"
       ],
-      "acceptanceTest": "config parse of pinned config.json; resolver cases",
+      "acceptanceTest": "config parse of pinned config.json; resolver cases; HF probe; key mappers; text memory estimate sums to 510286023000 B; TextService validates then throws NotSupported (no model class)",
       "pr": 7,
       "status": "Unimplemented"
     },
