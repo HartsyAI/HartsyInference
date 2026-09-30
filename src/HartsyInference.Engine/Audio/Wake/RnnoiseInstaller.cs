@@ -26,7 +26,8 @@ public static class RnnoiseInstaller
     public static string WeightsPath(string modelRoot) => Path.Combine(modelRoot, "denoise", "rnnoise.safetensors");
 
     /// <summary>Downloads, verifies and converts the denoiser into <paramref name="modelRoot"/> unless it is already
-    /// installed, and returns its path. The tarball is deleted once converted.</summary>
+    /// installed, and returns its path. The tarball is deleted once converted. A file already at the path is taken
+    /// as installed without being read; delete it to force a reinstall.</summary>
     public static async Task<string> EnsureAsync(string modelRoot, CancellationToken cancel)
     {
         ArgumentException.ThrowIfNullOrEmpty(modelRoot);

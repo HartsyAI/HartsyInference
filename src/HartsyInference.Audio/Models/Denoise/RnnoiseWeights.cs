@@ -44,10 +44,15 @@ public sealed class RnnoiseWeights : IDisposable
 
     /// <summary>Takes owned F32 copies via <see cref="WakeWeights"/>, so the loader that supplied them can be
     /// disposed immediately afterwards. Throws naming the tensor when one is missing or shaped for another
-    /// architecture, which would otherwise surface as a shape error on the first speech frame.</summary>
+    /// architecture, which would otherwise surface as a shape error on the first speech frame. Call once: a second
+    /// load would orphan the first set, so it throws instead.</summary>
     public void Load(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (IsLoaded || Conv1Weight is not null)
+            throw new InvalidOperationException(
+                "RnnoiseWeights are already loaded; build a new instance to load another set.");
         Conv1Weight = Require(weights, "conv1.weight",
             new TensorShape(RnnoiseModel.CondSize, RnnoiseModel.InputDim, RnnoiseModel.KernelSize));
         Conv1Bias = Require(weights, "conv1.bias", new TensorShape(RnnoiseModel.CondSize));

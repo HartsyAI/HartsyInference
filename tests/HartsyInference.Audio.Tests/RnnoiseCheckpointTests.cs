@@ -93,7 +93,19 @@ public sealed class RnnoiseCheckpointTests(ITestOutputHelper log) : IDisposable
 
         Assert.Contains("gru2.weight_hh_l0", error.Message);
         Assert.Equal([42], File.ReadAllBytes(output));
-        Assert.False(File.Exists(output + ".staging"));
+        Assert.Empty(Directory.GetFiles(_dir, "*.staging*"));
+    }
+
+    [Fact]
+    public void WeightsLoad_Twice_Throws_RatherThanOrphaningTheFirstSet()
+    {
+        using SafeTensorsLoader loader = new();
+        loader.Load(WriteCheckpoint(Layout));
+        Dictionary<string, Tensor> tensors = loader.GetAllTensors();
+        using RnnoiseWeights weights = new();
+        weights.Load(tensors);
+        Assert.Throws<InvalidOperationException>(() => weights.Load(tensors));
+        foreach (Tensor tensor in tensors.Values) tensor.Dispose();
     }
 
     [Fact]

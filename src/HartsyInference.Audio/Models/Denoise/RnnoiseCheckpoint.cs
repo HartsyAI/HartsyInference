@@ -56,7 +56,8 @@ public static class RnnoiseCheckpoint
     {
         ArgumentException.ThrowIfNullOrEmpty(checkpointPath);
         ArgumentException.ThrowIfNullOrEmpty(outputPath);
-        string staging = outputPath + ".staging";
+        // Unique per call, so two conversions to the same output cannot overwrite each other's staging file.
+        string staging = $"{outputPath}.{Guid.NewGuid():N}.staging";
         try
         {
             // The .pth wraps its state dict beside model_args/model_kwargs/loss/epoch; the default load descends
