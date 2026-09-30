@@ -1,4 +1,5 @@
 using Xunit;
+using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
 
 namespace HartsyInference.ModelAssets.Tests;
@@ -62,5 +63,35 @@ public class HunyuanImageCheckpointConverterTests
     public void NormalizeComfyOrgNames_LeavesTencentKeysUnchanged(string key)
     {
         Assert.Equal(key, HunyuanImageCheckpointConverter.NormalizeComfyOrgNames(key));
+    }
+
+    [Fact]
+    public unsafe void Convert_WidensFp8VectorsToF32AndKeepsFp8Matrices()
+    {
+        // The Comfy-Org repack stores biases and norm affines as raw F8_E4M3. Left as fp8 they reached the CUDA F32
+        // LayerNorm, which read the 1-byte values as floats: prompt-free blobs instead of an image.
+        // E4M3 bytes: 0x38 = 1.0, 0x30 = 0.5, 0xC0 = -2.0.
+        using Tensor bias = Fp8([0x38, 0x30, 0xC0], new TensorShape(3));
+        using Tensor weight = Fp8([0x38, 0x30, 0xC0, 0x38], new TensorShape(2, 2));
+        Dictionary<string, Tensor> source = new()
+        {
+            ["model.diffusion_model.proj_out.bias"] = bias,
+            ["model.diffusion_model.proj_out.weight"] = weight,
+        };
+
+        HunyuanImageCheckpointConverter.ConvertedWeights converted = HunyuanImageCheckpointConverter.Convert(source);
+
+        Tensor widened = converted.Transformer["proj_out.bias"];
+        Assert.Equal(DType.F32, widened.DType);
+        Assert.Equal([1.0f, 0.5f, -2.0f], new ReadOnlySpan<float>((void*)widened.DataPointer, 3).ToArray());
+        Assert.Same(weight, converted.Transformer["proj_out.weight"]);
+        Assert.True(converted.IsFp8Mix);
+    }
+
+    private static unsafe Tensor Fp8(byte[] bytes, TensorShape shape)
+    {
+        Tensor t = new Tensor(shape, DType.F8E4M3);
+        bytes.CopyTo(new Span<byte>((void*)t.DataPointer, bytes.Length));
+        return t;
     }
 }

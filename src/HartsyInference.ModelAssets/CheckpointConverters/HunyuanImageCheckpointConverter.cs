@@ -4,7 +4,7 @@ using HartsyInference.ModelAssets.SafeTensors;
 
 namespace HartsyInference.ModelAssets.CheckpointConverters;
 
-/// <summary>Loads + buckets a Hunyuan Image 2.1 single-file safetensors checkpoint into transformer / VAE / CLIP / T5 dictionaries. A checkpoint already in diffusers layout is preserved verbatim; the two published non-diffusers layouts — original-Tencent (what GGUF repacks ship) and the Comfy-Org repack — are remapped first via <see cref="ConvertTencentToDiffusers"/>. FP8 <c>.scale_weight</c> companion tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via the shared <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> helper.</summary>
+/// <summary>Loads + buckets a Hunyuan Image 2.1 single-file safetensors checkpoint into transformer / VAE / CLIP / T5 dictionaries. A checkpoint already in diffusers layout is preserved verbatim; the two published non-diffusers layouts — original-Tencent (what GGUF repacks ship) and the Comfy-Org repack — are remapped first via <see cref="ConvertTencentToDiffusers"/>. FP8 <c>.scale_weight</c> companion tensors are folded into <see cref="Tensor.Fp8ScaleFactor"/> via the shared <see cref="CheckpointConvertUtils.ApplyFp8ScaledDequant"/> helper, and FP8 biases/norm affines (the Comfy-Org repack casts every tensor to fp8) are widened to F32 via <see cref="CheckpointConvertUtils.WidenFp8Vectors"/>.</summary>
 public sealed class HunyuanImageCheckpointConverter
 {
     /// <summary>Result of partitioning a Hunyuan Image 2.1 safetensors file.</summary>
@@ -92,6 +92,7 @@ public sealed class HunyuanImageCheckpointConverter
         }
 
         bool isFp8Mix = DetectFp8Mix(transformer);
+        CheckpointConvertUtils.WidenFp8Vectors(transformer);
 
         return new ConvertedWeights
         {
