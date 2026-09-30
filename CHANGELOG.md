@@ -19,10 +19,15 @@ stable release will require. Dates are UTC.
   the link; `EngineLink` dials the voice host's Unix socket (backoff with full jitter, Hello/HelloAck, ping and
   liveness, control lane never dropped, audio lane drop-oldest, flush-epoch drop rule); `LinkOutageGuard` holds a
   caller through a host outage with an embedded prompt, re-announces the call on reconnect and hangs up after a
-  timeout; `CallController` is the one-call state machine (486 on a second INVITE, 603 by policy, 503 with the host
-  down, greeting, RFC 4733 DTMF both ways, `hangup`/`send_dtmf`/`transfer`/`hold`/`unhold`/`play_prompt` tools);
+  timeout; `CallController` is the one-call state machine (greeting, RFC 4733 DTMF both ways,
+  `hangup`/`send_dtmf`/`transfer`/`hold`/`unhold`/`play_prompt` tools). New INVITEs are screened on the transport
+  before sipsorcery's user agent sees them (486 while a call is up, 503 with the host down, 603 by policy), each
+  refusal on its own server transaction and counted once per INVITE (Call-ID + top Via branch, 32 s). A tick-thread
+  fault ends the call instead of leaving it silent: logged once, `calls_media_fault_total`, BYE and
+  `CallEnd(Failed)`, or, before the call is announced, a BYE after the ACK and nothing sent to the host;
   `PhoneMediaSession` advertises the STUN/literal public address and latches on the first packet. Config is a
-  JSON file with secrets by environment-variable name only; `/health`, `/metrics` (Prometheus) and token-gated
+  JSON file with secrets by environment-variable name only (the loader is the one new entry on the env-read
+  allowlist, noted in `docs/SETTINGS.md`); `/health`, `/metrics` (Prometheus) and token-gated
   `POST /calls` on loopback; recording off by default. `HartsyInference.Phone.slnf` builds it without the GPU
   packages. Docs: `docs/Research/PHONE_GATEWAY.md`.
 

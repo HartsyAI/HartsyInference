@@ -58,6 +58,23 @@ flag, and the histogram is written by that thread alone. Every other queue is be
 short `Monitor` is fine. `AudioRingBuffer` is deliberately not used on the tick path (it is `Monitor`-locked, and
 a descheduled producer holding it would stall a FIFO consumer).
 
+Call screening: sipsorcery's `SIPUserAgent` offers every copy of an INVITE to `OnIncomingCall` and silently
+ignores a new INVITE while it holds a call, so `CallController` screens on the transport first (its request handler
+is subscribed before the user agent exists). A new INVITE gets `486` while a call is up or being set up, `503`
+while the host link is down and `603` when the inbound policy refuses the caller. Each refusal goes out on its own
+`UASInviteTransaction`, which answers the caller's retransmissions and absorbs the ACK, and is recorded in an
+`InviteRejectionLedger` keyed by Call-ID and top Via branch for 32 s (RFC 3261 Timer B): the refusal is counted
+once in `calls_rejected_total`, and a copy that slips past the transaction layer gets the same answer instead of
+being offered as a call.
+
+Media faults: an exception on the tick thread ends that thread and raises `ClockedAudioSource.TickFaulted` once.
+The controller logs it once with the exception, counts `calls_media_fault_total` and ends the call rather than
+leaving it up in silence: an announced call gets a BYE and `CallEnd(Failed)` (the protocol's "SIP or media
+failure"); a call not yet announced is never announced, and the gateway waits for the ACK to its 200 (RFC 3261
+§15, at most 8 s, so a lost 200 cannot leave the caller in a call already ended) before sending the BYE. A failed
+answer always leaves the caller with a final response (500) or a BYE. A pump-thread fault is logged and stops
+inbound audio for that call without ending it.
+
 Scheduling: the tick thread asks for `SCHED_FIFO` at `media.fifoPriority` (default 50) once at start through
 `RealtimeScheduling.TryEnterFifo`. Refused (`ulimit -r 0` on a plain login) it logs the exact fix once and falls
 back to sleeping until 150 µs before each deadline and spinning the rest. `Thread.Priority` is not used anywhere
@@ -67,6 +84,7 @@ bound is asserted only when FIFO was granted (`TickJitterHarnessTests`).
 GC: workstation concurrent GC (csproj), `GCLatencyMode.SustainedLowLatency` and eight minimum pool threads
 (`RuntimeTuning`). sipsorcery allocates one packet buffer and one `IAsyncResult` per packet, so the systemd unit
 (PR9) sets `DOTNET_GCgen0size=0x4000000` to make gen0 collections rare; even a FIFO thread is suspended by a GC.
+The start-up log line shows the gen0 budget the GC actually uses (`GCGen0MaxBudget`, 64 MB with that setting).
 
 ## Configuration file
 
@@ -113,8 +131,9 @@ Run: `HartsyInference.PhoneGateway --config /etc/hartsyinference/phone.json`. Ex
 error; the message names the setting or variable.
 
 Admin endpoint (loopback only): `GET /health` (JSON, 200 when the link is up and registration holds, else 503
-`degraded`), `GET /metrics` (Prometheus text: calls, rejections, link state and RTT, lane drops, and for the live
-call the tick lateness histogram, jitter-buffer counters and pump counters), `POST /calls` with
+`degraded`), `GET /metrics` (Prometheus text: calls, rejections counted once per INVITE, media faults
+(`calls_media_fault_total`), link state and RTT, lane drops, and for the live call the tick lateness histogram,
+jitter-buffer counters and pump counters), `POST /calls` with
 `Authorization: Bearer <token>` and `{"destination":"sip:user@host"}` (or a number, dialled through the
 registrar): 202 placed, 409 busy, 503 host down, 502 not answered.
 
@@ -192,10 +211,15 @@ plays any raw 8 kHz PCM16 file.
 Tests in `tests/HartsyInference.PhoneGateway.Tests` (unit lane unless marked): `G711EquivalenceTests` (all
 65 536 μ-law and A-law codes against sipsorcery's encoders; `short.MinValue` documented separately: we clip, the
 NAudio-derived encoders wrap), `RtpJitterBufferTests`, `ClockedAudioSourceCadenceTests` (3 s frame count ± 1,
-zero allocation on the tick thread after warm-up, flush within one tick, FIFO refusal reason),
-`EngineLinkTests` (fake host on a temporary socket: handshake, audio both ways with sequence continuity, flush
-epoch, reconnect + `CallStart(resume)`, liveness, outage hang-up and recovery), `GatewayConfigTests`;
-`[Integration]` `TickJitterHarnessTests` (60 s, one burner per core) and `LoopbackSipCallTests` (stock sipsorcery
+zero allocation on the tick thread after warm-up, flush within one tick, FIFO refusal reason, a subscriber or
+start fault raising `TickFaulted` once), `EngineLinkTests` (fake host on a temporary socket: handshake, audio both
+ways with sequence continuity, flush epoch, reconnect + `CallStart(resume)`, liveness, outage hang-up and
+recovery, no outage for a call starting in the link's connect gap), `GatewayConfigTests`,
+`InviteRejectionLedgerTests`, `CallControllerSipTests` (loopback only, no audio timing: a tick fault on an active
+inbound or outbound call → BYE, `CallEnd(Failed)`, one `calls_media_fault_total`; a fault before the call is
+announced → BYE after the ACK and nothing sent to the host; one INVITE sent three times → three 486, 603 or 503
+answers and a counter of 1); `[Integration]` `TickJitterHarnessTests` (60 s, one burner per core) and
+`LoopbackSipCallTests` (stock sipsorcery
 softphone against the real controller: inbound call with audio both ways, DTMF and remote hangup; host `hangup`
 tool; second INVITE → 486; outbound call; 603 policy). `HartsyInference.Phone.slnf` builds the gateway and its
 tests without the GPU packages.
