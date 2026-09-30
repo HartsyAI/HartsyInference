@@ -298,11 +298,12 @@ public sealed partial class VoiceAgentSession
             session._signals.EndSpeaking(id);
         }
 
-        /// <summary>One sentence to audio; runs on the GPU thread.</summary>
+        /// <summary>One sentence to audio; runs on the GPU thread. A piece with no words (a trailing "..." or dash) is
+        /// skipped: the synthesizer produces no audio for it, which the lease reports as a failure.</summary>
         private float[] Synthesize(string sentence, CancellationToken cancel)
         {
             string speakable = SpokenTextNormalizer.ToSpeakable(sentence);
-            return speakable.Length == 0 ? [] : session._models.Synthesize(speakable);
+            return HasWords(speakable) ? session._models.Synthesize(speakable) : [];
         }
 
         /// <summary>The sentence synthesizer's scheduler seam: every sentence becomes one job on the GPU thread.</summary>

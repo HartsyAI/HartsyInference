@@ -53,6 +53,11 @@ internal sealed class FakeSpeech(int sampleRate = 24_000) : IVoiceSpeech
     public float[] Synthesize(string text)
     {
         ThrowIfRevoked();
+        if (!text.Any(char.IsLetterOrDigit))
+        {
+            // What the engine's synthesizer lease does when the model yields no audio for the text.
+            throw new InvalidOperationException("The text-to-speech model produced no audio.");
+        }
         Threads.Enqueue(Environment.CurrentManagedThreadId);
         HoldSynthesis?.Wait(TimeSpan.FromSeconds(30));
         Synthesized.Enqueue(text);

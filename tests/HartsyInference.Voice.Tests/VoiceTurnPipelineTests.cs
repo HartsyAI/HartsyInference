@@ -35,6 +35,22 @@ public sealed class VoiceTurnPipelineTests
     }
 
     [Fact]
+    public async Task AReplyWithNoWordsIsNotSentToTheSynthesizer()
+    {
+        // The engine's synthesizer lease fails when the model yields no audio, which is what a lone "..." gives it.
+        ScriptedTextService text = new ScriptedTextService().Reply("...").Reply("Sure, I can help with that.");
+        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text);
+        harness.Session.PushDtmf('6');
+        await harness.TurnCompletedAsync(1);
+        harness.Session.PushDtmf('7');
+        await harness.TurnCompletedAsync(2);
+
+        Assert.Equal(["Sure, I can help with that."], harness.Speech.Synthesized);
+        Assert.DoesNotContain(harness.Events, e => e.Kind == VoiceAgentEventKind.Error);
+        Assert.Equal(Sentence, harness.Reader.Samples.Length);
+    }
+
+    [Fact]
     public async Task ResampledPlaybackHasTheConvertedLength()
     {
         ScriptedTextService text = new ScriptedTextService().Reply("One second of reply audio.");
