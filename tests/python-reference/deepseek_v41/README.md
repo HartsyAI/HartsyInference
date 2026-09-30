@@ -26,6 +26,7 @@ Re-check without downloading: `python fetch_upstream.py --verify-only`.
 | `dump_hc_rope_window_fixtures.py` | Writes `fixtures/hc_mix.json` (Sinkhorn 1/3/20 iters, `hc_pre`, `hc_post`), `rope_interleaved_offset.json` (offset rotary and its inverse) and `window_indices.json` (`get_window_topk_idxs` prefill/decode) |
 | `dump_parser_reference.py` | Runs upstream `encoding.py` `parse_message_from_completion_text` on golden, canonical and malformed completions and writes `parser_reference/parser_reference.json` |
 | `cross_check_recipe.py` | Compares that fixture with the `deepseek-recipe` stream parser at ~40 split points per case (`pip install deepseek-recipe`) |
+| `dump_derivative_quant_fixtures.py` | Writes `fixtures/derivative_quant_codecs.json`: independent numpy decoders for ModelOpt NVFP4 and Quark MXFP4, and `mx.quantize`/`mx.dequantize` for MLX affine 4/8-bit gs64 (needs `pip install mlx[cpu]`, used only by this script) |
 
 ## Commands
 

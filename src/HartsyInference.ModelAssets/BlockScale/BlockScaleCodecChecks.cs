@@ -7,15 +7,23 @@ namespace HartsyInference.ModelAssets.BlockScale;
 /// <summary>Argument validation shared by the host codecs, so a recipe that does not describe the bytes fails before any decode.</summary>
 internal static class BlockScaleCodecChecks
 {
-    /// <summary>Validates the recipe against <paramref name="packedLength"/> and the requested window; returns the scale bytes' row stride.</summary>
-    internal static long Validate(QuantRecipe recipe, QuantEncoding expected, long packedLength, long rowOffset, long rowCount, long destLength)
+    private static readonly DType[] E8M0Types = [DType.F8E8M0, DType.U8];
+
+    /// <summary>Validates an E8M0-scaled recipe against <paramref name="packedLength"/> and the requested window; returns the scale row stride in elements.</summary>
+    internal static long Validate(QuantRecipe recipe, QuantEncoding expected, long packedLength, long rowOffset, long rowCount, long destLength) =>
+        Validate(recipe, expected, E8M0Types, packedLength, rowOffset, rowCount, destLength);
+
+    /// <summary>Validates a recipe whose scale must be one of <paramref name="scaleTypes"/>; returns the scale row stride in elements.</summary>
+    internal static long Validate(QuantRecipe recipe, QuantEncoding expected, DType[] scaleTypes, long packedLength, long rowOffset, long rowCount,
+        long destLength)
     {
         if (recipe.Encoding != expected)
             throw new HartsyInferenceException($"Recipe encoding is {recipe.Encoding}, this codec decodes {expected}.");
         if (recipe.ScaleLayout != ScaleLayout.RowMajorBlocks)
             throw new NotSupportedException($"{expected} host decode reads {ScaleLayout.RowMajorBlocks} scales; recipe is {recipe.ScaleLayout}.");
-        if (recipe.ScaleDType != DType.F8E8M0 && recipe.ScaleDType != DType.U8)
-            throw new NotSupportedException($"{expected} host decode needs E8M0 scale bytes (F8_E8M0 or U8); recipe has {recipe.ScaleDType}.");
+        if (Array.IndexOf(scaleTypes, recipe.ScaleDType) < 0)
+            throw new NotSupportedException(
+                $"{expected} host decode needs {string.Join(" or ", scaleTypes.Select(t => t.Name))} scales; recipe has {recipe.ScaleDType}.");
         Tensor scale = recipe.Scale ?? throw new HartsyInferenceException($"{expected} recipe has no scale tensor.");
         if (scale.DType != recipe.ScaleDType || scale.Shape.Rank != 2)
             throw new HartsyInferenceException($"{expected} scale must be rank-2 {recipe.ScaleDType}; got {scale.DType} {scale.Shape}.");

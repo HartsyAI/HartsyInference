@@ -22,19 +22,19 @@ public sealed record QuantRecipe
     /// <summary>Weight rows (output features) after dequantization.</summary>
     public required long LogicalRows { get; init; }
 
-    /// <summary>Weight columns (input features) after dequantization; twice the packed byte width for 4-bit encodings.</summary>
+    /// <summary>Weight columns (input features) after dequantization; twice the packed byte width for 4-bit encodings, and eight per U32 word for MLX.</summary>
     public required long LogicalCols { get; init; }
 
     /// <summary>Block scales, <c>[ceil(rows/blockRows), &gt;= ceil(cols/blockCols)]</c> in <see cref="Quant.ScaleLayout.RowMajorBlocks"/>.</summary>
     public Tensor? Scale { get; init; }
 
-    /// <summary>MLX affine per-group bias, same shape as <see cref="Scale"/>.</summary>
+    /// <summary>MLX affine per-group bias, same shape and dtype as <see cref="Scale"/>.</summary>
     public Tensor? Bias { get; init; }
 
     /// <summary>NVFP4 per-tensor F32 scalar.</summary>
     public Tensor? GlobalScale { get; init; }
 
-    /// <summary>NVFP4 activation scale.</summary>
+    /// <summary>NVFP4 activation scale; the dequant path never reads it (see <see cref="QuantExecutionPolicy"/>).</summary>
     public Tensor? InputScale { get; init; }
 
     /// <summary>EXL3 decode companions.</summary>
@@ -51,13 +51,22 @@ public sealed record QuantRecipe
         QuantEncoding.Mxfp4E8M0 => "recipe-mxfp4-e8m0",
         QuantEncoding.Nvfp4 => "recipe-nvfp4",
         QuantEncoding.AffineInt4 => "recipe-affine-int4",
+        QuantEncoding.AffineInt8 => "recipe-affine-int8",
         QuantEncoding.Exl3Trellis => "recipe-exl3",
         QuantEncoding.Gguf => "recipe-gguf",
         _ => throw new NotSupportedException($"No format name for {Encoding}."),
     };
 
     /// <summary>Elements per packed byte: 2 for the 4-bit encodings, 1 otherwise.</summary>
-    public int ElementsPerByte => Encoding is QuantEncoding.Mxfp4E8M0 or QuantEncoding.Nvfp4 ? 2 : 1;
+    public int ElementsPerByte => Encoding is QuantEncoding.Mxfp4E8M0 or QuantEncoding.Nvfp4 or QuantEncoding.AffineInt4 ? 2 : 1;
+
+    /// <summary>The tensors a BF16 dequant reads besides the packed weight: scale, global scale and bias, whichever the encoding has. <see cref="InputScale"/> is not one of them.</summary>
+    public IEnumerable<Tensor> DequantCompanions()
+    {
+        if (Scale is not null) yield return Scale;
+        if (GlobalScale is not null) yield return GlobalScale;
+        if (Bias is not null) yield return Bias;
+    }
 
     /// <summary>Narrows the recipe to <paramref name="rowCount"/> rows from <paramref name="rowOffset"/>, viewing the matching scale rows.</summary>
     public QuantRecipe SliceRows(long rowOffset, long rowCount, string weightKey)

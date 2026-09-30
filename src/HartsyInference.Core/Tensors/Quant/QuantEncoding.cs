@@ -12,11 +12,14 @@ public enum QuantEncoding
     /// <summary>Two E2M1 values per byte (low nibble = even index) with one scale per 32 input elements.</summary>
     Mxfp4E8M0,
 
-    /// <summary>Two E2M1 values per byte with F8E4M3 scales per 16 elements plus a per-tensor global scale.</summary>
+    /// <summary>Two E2M1 values per byte (low nibble = even index, as ModelOpt writes it) with E4M3 scales per 16 elements plus a per-tensor F32 global scale.</summary>
     Nvfp4,
 
-    /// <summary>MLX affine 4-bit: eight nibbles per U32, one scale and one bias per group.</summary>
+    /// <summary>MLX affine 4-bit: eight nibbles per U32 (lowest first), one scale and one bias per group.</summary>
     AffineInt4,
+
+    /// <summary>MLX affine 8-bit: four bytes per U32 (lowest first), one scale and one bias per group; the mixed-precision MLX checkpoints keep attention and shared experts here.</summary>
+    AffineInt8,
 
     /// <summary>EXL3 trellis-coded weights with Hadamard sign vectors and an MCG codebook.</summary>
     Exl3Trellis,

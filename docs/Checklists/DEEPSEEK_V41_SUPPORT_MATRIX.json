@@ -398,8 +398,8 @@
       "feature": "Weight decode/dequant (NVIDIA NVFP4 (W4A4 Blackwell, W4A16 elsewhere))",
       "format": "nvfp4",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -422,16 +422,16 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
-      "status": "Unimplemented",
-      "note": "W4A16 is a different numeric recipe with its own tolerance"
+      "status": "InProgress",
+      "note": "ModelOptNvfp4Codec (low nibble first, E4M3 per 16, scalar F32 weight_scale_2, scales multiplied first) matches an independent numpy decoder bit-exactly; CUDA dequant_nvfp4_modelopt_to_bf16 is bit-exact against the host codec on the RTX 3060 (incl. E4M3 NaN and an overflowing global scale); QuantExecutionPolicy plans W4A16 and leaves input_scale unread; the binder handles the hybrid layout (FP8 attention with F8_E8M0 .scale, I8 mtp experts) from the real header; not wired into IBackend.Linear; no PARITY evidence yet, so not Verified"
     },
     {
       "id": "quant.quark.dequant",
       "feature": "Weight decode/dequant (AMD Quark MXFP4 + MXFP8 attention)",
       "format": "quark",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -454,15 +454,16 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "U8 E2M1 + U8 e8m0 per 32 reuses Mxfp4E8M0Codec and the mxfp4 CUDA kernel, bit-exact against a numpy decoder and on the RTX 3060; the binder reads the real header including the FP8 attention F8_E8M0 weight_scale and refuses non-U8 fp4 scales; the 32x32 block-FP8 native GEMM is deferred (dequant only); not wired into IBackend.Linear, not Verified"
     },
     {
       "id": "quant.mlx.dequant",
       "feature": "Weight decode/dequant (MLX affine 4-bit gs64)",
       "format": "mlx",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -485,8 +486,8 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
-      "status": "Unimplemented",
-      "note": "mtp.2 lacks 13 experts; DSpark refused with the list"
+      "status": "InProgress",
+      "note": "AffineIntCodec (AffineInt4 and AffineInt8, U32 lowest field first, q*scale+bias per 64) matches mx.dequantize bit-exactly; the checkpoint is mixed precision (experts and engram.embed 4-bit, attention and shared experts 8-bit), bits inferred from the scale width; CUDA dequant_affine_to_bf16 bit-exact against the host codec on the RTX 3060; mtp.2 lacks 13 experts, DSpark refused with the list; not wired into IBackend.Linear, not Verified"
     },
     {
       "id": "quant.dwarfstar.dequant",
@@ -518,7 +519,7 @@
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
       "status": "Unimplemented",
-      "note": "no mtp; vision in a separate GGUF; not llama.cpp"
+      "note": "no mtp; vision in a separate GGUF; not llama.cpp; Engram row264 tables are deferred to the Engram store PR"
     },
     {
       "id": "quant.exl3.dequant",
@@ -550,7 +551,7 @@
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
       "status": "Unimplemented",
-      "note": "tile shape unconfirmed; read exllamav3 before implementing"
+      "note": "deferred to PR 23b: trellis decode needs the exllamav3 tile shape confirmed; the binder and QuantExecutionPolicy refuse EXL3 explicitly"
     },
     {
       "id": "quant.official.native",
@@ -580,7 +581,7 @@
       "acceptanceTest": "native vs dequant path agreement; rented hardware",
       "pr": 24,
       "status": "Unimplemented",
-      "note": "Vulkan native block-scaled GEMM is Unsupported; Vulkan uses dequant paths only"
+      "note": "Vulkan native block-scaled GEMM is Unsupported; Vulkan uses dequant paths only; the 32x32 block-FP8 native GEMM is deferred (PR 23 ships BF16 dequant only)"
     },
     {
       "id": "quant.nvfp4.native",
@@ -609,7 +610,8 @@
       ],
       "acceptanceTest": "native vs dequant path agreement; rented hardware",
       "pr": 24,
-      "status": "Unimplemented"
+      "status": "Unimplemented",
+      "note": "deferred: native NVFP4 block-scaled GEMM (the W4A4 input_scale path) needs Blackwell hardware; other GPUs run W4A16 through the BF16 dequant"
     },
     {
       "id": "quant.quark.native",
@@ -638,7 +640,8 @@
       ],
       "acceptanceTest": "native vs dequant path agreement; rented hardware",
       "pr": 24,
-      "status": "Unimplemented"
+      "status": "Unimplemented",
+      "note": "deferred: native MXFP4 block-scaled GEMM needs Blackwell hardware"
     },
     {
       "id": "engram.store",
