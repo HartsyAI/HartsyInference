@@ -94,7 +94,7 @@
       "backends": {
         "CPU": "Implemented",
         "CUDA": "Implemented",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -116,7 +116,7 @@
       "acceptanceTest": "MoeReferenceTests vs Python; exact-tie CPU==CUDA",
       "pr": 2,
       "status": "InProgress",
-      "note": "MoeRoute, MoeBuildDispatch, MoeCombine, TopKLastDim and Softplus: CPU and CUDA vs the routing ports and a torch fixture; Vulkan throws NotSupported until PR 24b; not checkpoint-verified"
+      "note": "MoeRoute, MoeBuildDispatch, MoeCombine, TopKLastDim and Softplus: CPU and CUDA vs the routing ports and a torch fixture; Vulkan (PR 24b): matches the CPU reference (ids, permutations and top-k indices exact, router weights within 5e-6 relative, Softplus within 1e-6 relative, combine and dispatch bit-identical, MoeCombine skips out-of-range slots instead of throwing); Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected; not checkpoint-verified"
     },
     {
       "id": "core.moe.exec",
@@ -156,7 +156,7 @@
       "backends": {
         "CPU": "Implemented",
         "CUDA": "Implemented",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -178,7 +178,7 @@
       "acceptanceTest": "CPU refs vs Python dumps; CUDA vs ref 1e-5",
       "pr": 6,
       "status": "InProgress",
-      "note": "SparseLatentAttention, IndexerScores, HcSplitSinkhorn/HcPreMix/HcPostMix, QuantizeLatentRows, ActQuantDequantInPlace and BuildWindowIndices: CPU refs match torch dumps (quant bytes exact, attention 1e-5, Sinkhorn 1e-6); CUDA matches the CPU refs (attention/indexer 1e-5, quant/act-quant/hc-mix/window bit-exact); Vulkan throws NotSupported until PR 24b; not checkpoint-verified, nothing here is wired into a model"
+      "note": "SparseLatentAttention, IndexerScores, HcSplitSinkhorn/HcPreMix/HcPostMix, QuantizeLatentRows, ActQuantDequantInPlace and BuildWindowIndices: CPU refs match torch dumps (quant bytes exact, attention 1e-5, Sinkhorn 1e-6); CUDA matches the CPU refs (attention/indexer 1e-5, quant/act-quant/hc-mix/window bit-exact); Vulkan (PR 24b): attention and indexer within 1e-5 of the CPU reference, Sinkhorn within 1e-6, HC mixes, quantizer bytes, act-quant and window indices exact; SparseLatentAttention is NotSupported above k=3800 and QuantizeLatentRows is NotSupported for destination tensors that are not whole 32-bit words; Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected; not checkpoint-verified, nothing here is wired into a model"
     },
     {
       "id": "core.block",
@@ -219,7 +219,7 @@
       "backends": {
         "CPU": "Implemented",
         "CUDA": "Implemented",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "Implemented"
       },
       "placement": [
         "resident",
@@ -241,7 +241,7 @@
       "acceptanceTest": "parity with dumped rope outputs; MlaForward untouched",
       "pr": 6,
       "status": "InProgress",
-      "note": "ApplyRopeInterleaved(x, cos, sin, rotaryDim, dimOffset) overload: CPU matches torch view_as_complex forward and inverse; CUDA bit-identical to the CPU reference; Vulkan throws NotSupported; MlaForward untouched"
+      "note": "ApplyRopeInterleaved(x, cos, sin, rotaryDim, dimOffset) overload: CPU matches torch view_as_complex forward and inverse; CUDA bit-identical to the CPU reference; Vulkan (PR 24b) bit-identical to the CPU reference forward and inverse (Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected); MlaForward untouched"
     },
     {
       "id": "core.model",
@@ -369,7 +369,7 @@
       "backends": {
         "CPU": "Implemented",
         "CUDA": "InProgress",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "InProgress"
       },
       "placement": [
         "resident",
@@ -392,15 +392,15 @@
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 5,
       "status": "InProgress",
-      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM (PR 23/24). PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); PR 12 adds the CUDA BF16 dequant kernels (dequant_recipe_to_bf16) and a 2-slot CudaQuantWorkspace, bit-exact against the host codecs on synthetic block layouts on the RTX 3060 (incl. E8M0 0/255, E4M3 NaN, scale column offsets); IBackend.Linear does not use them yet. M1 matched the official dequant bit-exactly on the host codecs over 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); the device-path M1 test is written but was skipped (no populated shard here); not Verified until the staged shard runs it"
+      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM (PR 23/24). PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); PR 12 adds the CUDA BF16 dequant kernels (dequant_recipe_to_bf16) and a 2-slot CudaQuantWorkspace, bit-exact against the host codecs on synthetic block layouts on the RTX 3060 (incl. E8M0 0/255, E4M3 NaN, scale column offsets); IBackend.Linear does not use them yet. M1 matched the official dequant bit-exactly on the host codecs over 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); the device-path M1 test is written but was skipped (no populated shard here); not Verified until the staged shard runs it; PR 24b adds a Vulkan BF16 dequant shader (VulkanBackend.DequantRecipeToBf16, dequant_recipe_bf16), bit-identical to the host codecs on synthetic layouts (E8M0 0/255, E4M3 NaN, scale column offsets, odd byte sizes) on the RTX 3060; IBackend.Linear does not use it, so SupportsResidentQuant(Tensor) stays false on Vulkan; Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected"
     },
     {
       "id": "quant.nvfp4.dequant",
       "feature": "Weight decode/dequant (NVIDIA NVFP4 (W4A4 Blackwell, W4A16 elsewhere))",
       "format": "nvfp4",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -423,16 +423,16 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
-      "status": "Unimplemented",
-      "note": "W4A16 is a different numeric recipe with its own tolerance"
+      "status": "InProgress",
+      "note": "ModelOptNvfp4Codec (low nibble first, E4M3 per 16, scalar F32 weight_scale_2, scales multiplied first) matches an independent numpy decoder bit-exactly; CUDA dequant_nvfp4_modelopt_to_bf16 is bit-exact against the host codec on the RTX 3060 (incl. E4M3 NaN and an overflowing global scale); QuantExecutionPolicy plans W4A16 and leaves input_scale unread; the binder handles the hybrid layout (FP8 attention with F8_E8M0 .scale, I8 mtp experts) from the real header; not wired into IBackend.Linear; no PARITY evidence yet, so not Verified"
     },
     {
       "id": "quant.quark.dequant",
       "feature": "Weight decode/dequant (AMD Quark MXFP4 + MXFP8 attention)",
       "format": "quark",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -455,15 +455,16 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "U8 E2M1 + U8 e8m0 per 32 reuses Mxfp4E8M0Codec and the mxfp4 CUDA kernel, bit-exact against a numpy decoder and on the RTX 3060; the binder reads the real header including the FP8 attention F8_E8M0 weight_scale and refuses non-U8 fp4 scales; the 32x32 block-FP8 native GEMM is deferred (dequant only); not wired into IBackend.Linear, not Verified"
     },
     {
       "id": "quant.mlx.dequant",
       "feature": "Weight decode/dequant (MLX affine 4-bit gs64)",
       "format": "mlx",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -486,8 +487,8 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
-      "status": "Unimplemented",
-      "note": "mtp.2 lacks 13 experts; DSpark refused with the list"
+      "status": "InProgress",
+      "note": "AffineIntCodec (AffineInt4 and AffineInt8, U32 lowest field first, q*scale+bias per 64) matches mx.dequantize bit-exactly; the checkpoint is mixed precision (experts and engram.embed 4-bit, attention and shared experts 8-bit), bits inferred from the scale width; CUDA dequant_affine_to_bf16 bit-exact against the host codec on the RTX 3060; mtp.2 lacks 13 experts, DSpark refused with the list; not wired into IBackend.Linear, not Verified"
     },
     {
       "id": "quant.dwarfstar.dequant",
@@ -519,15 +520,15 @@
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
       "status": "Unimplemented",
-      "note": "no mtp; vision in a separate GGUF; not llama.cpp"
+      "note": "no mtp; vision in a separate GGUF; not llama.cpp; Engram row264 tables are deferred to the Engram store PR"
     },
     {
       "id": "quant.exl3.dequant",
       "feature": "Weight decode/dequant (EXL3 2 bpw MCG trellis)",
       "format": "exl3",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "InProgress",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -550,8 +551,8 @@
       ],
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 23,
-      "status": "Unimplemented",
-      "note": "tile shape unconfirmed; read exllamav3 before implementing"
+      "status": "InProgress",
+      "note": "Exl3Codec (2-bit MCG only; other bit widths are refused naming the key) decodes the trellis bit-exactly against exllamav3 reconstruct_tile on a committed 256x384 fixture, then the F32 128-point Hadamard and suh/svh; the F32 result is within 1.1e-7 (fp64 oracle) and 1.2e-3 (upstream fused fp16 kernel) of max|W|, not bit-identical to the fused fp16 kernel; CUDA dequant_exl3_2bit_to_bf16 equals the host F32 rounded once to BF16 bit-for-bit on the RTX 3060 (fixture plus random shapes) and is reachable through CudaQuantWorkspace; slicing is input-column windows on 128 boundaries only, partial output-row windows are refused; binder validated on the real shard 3 and 43 headers only; the real checkpoint tensors have not been decoded, no expert-level parity or generation evidence, not wired into IBackend.Linear, so not Verified"
     },
     {
       "id": "quant.official.native",
@@ -581,7 +582,7 @@
       "acceptanceTest": "native vs dequant path agreement; rented hardware",
       "pr": 24,
       "status": "Unimplemented",
-      "note": "Vulkan native block-scaled GEMM is Unsupported; Vulkan uses dequant paths only"
+      "note": "Vulkan native block-scaled GEMM is Unsupported; Vulkan uses dequant paths only; the 32x32 block-FP8 native GEMM is deferred (PR 23 ships BF16 dequant only)"
     },
     {
       "id": "quant.nvfp4.native",
@@ -610,7 +611,8 @@
       ],
       "acceptanceTest": "native vs dequant path agreement; rented hardware",
       "pr": 24,
-      "status": "Unimplemented"
+      "status": "Unimplemented",
+      "note": "deferred: native NVFP4 block-scaled GEMM (the W4A4 input_scale path) needs Blackwell hardware; other GPUs run W4A16 through the BF16 dequant"
     },
     {
       "id": "quant.quark.native",
@@ -639,16 +641,17 @@
       ],
       "acceptanceTest": "native vs dequant path agreement; rented hardware",
       "pr": 24,
-      "status": "Unimplemented"
+      "status": "Unimplemented",
+      "note": "deferred: native MXFP4 block-scaled GEMM needs Blackwell hardware"
     },
     {
       "id": "engram.store",
       "feature": "Engram row store (storage / host / device)",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Unsupported",
+        "Vulkan": "Unsupported"
       },
       "placement": [
         "resident",
@@ -668,14 +671,15 @@
       ],
       "acceptanceTest": "10k random rows bit-exact vs Python; RSS bounded",
       "pr": 13,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "EngramTableStore (Storage and HostResident backings, dedup + sort + 4 KB page-merged preads, LRU slab cache, owned-range check) with official FP8/E8M0, DwarfStar GGUF row264 and MLX affine row layouts; row decode is bit-exact vs Python dequant on synthetic, edge and range-fetched real rows. Device backing throws NotSupported and EngramModule is deferred to PR 8. The 10k-random-row real-shard test, RSS bound and cold-latency measurement did not run (checkpoint not staged); DeepSeekV41Checkpoint cannot open the real official checkpoint yet because shards 47/48 also hold non-table engram tensors"
     },
     {
       "id": "engram.constants",
       "feature": "Engram constants as pinned fixtures",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
+        "CPU": "Implemented",
         "CUDA": "Unimplemented",
         "Vulkan": "Unimplemented"
       },
@@ -695,7 +699,8 @@
       ],
       "acceptanceTest": "equal to Python dump, DwarfStar metadata and MLX engram_token_map.json",
       "pr": 13,
-      "status": "Unimplemented"
+      "status": "Implemented",
+      "note": "Token map, multipliers, offsets and primes dumped from upstream engram.py at dba1be0a, embedded and SHA-256 checked; token map, primes and multipliers equal the DwarfStar GGUF metadata and the token map equals the MLX engram_token_map.json (recorded in the manifest). EngramHasher equals the upstream NgramHashState on 15 cases including DEAD tokens, sequence start and prefill-to-decode carry. Not Verified: no PARITY_VERIFICATION.md entry yet; the 15 hash cases are CPU-only"
     },
     {
       "id": "vision.tower",
@@ -874,7 +879,7 @@
       "acceptanceTest": "hit/miss/dedup/pin; 1000 cancel cycles leak-free",
       "pr": 12,
       "status": "InProgress",
-      "note": "ExpertBank + IExpertCache (segmented LRU, pinned entries, in-flight dedup, fence-ordered eviction) and CudaExpertCache over CudaStreamingWeightCache (whole-expert BeginUploadAsync, pinned staging ring, promotion blocked): policy unit-tested on CPU via a fake, transport tested on the RTX 3060 (hit/miss/dedup/pin, 1000 acquire-release cycles leak-free); not wired into a model, not checkpoint-verified; Vulkan has no streaming cache; host-staged uploads only (PR 24b)"
+      "note": "ExpertBank + IExpertCache (segmented LRU, pinned entries, in-flight dedup, fence-ordered eviction) and CudaExpertCache over CudaStreamingWeightCache (whole-expert BeginUploadAsync, pinned staging ring, promotion blocked): policy unit-tested on CPU via a fake, transport tested on the RTX 3060 (hit/miss/dedup/pin, 1000 acquire-release cycles leak-free); not wired into a model, not checkpoint-verified; Vulkan has no streaming cache and none was added in PR 24b: expert weights reach it as host-staged uploads only"
     },
     {
       "id": "mem.planner",
@@ -1060,7 +1065,7 @@
       "backends": {
         "CPU": "Unsupported",
         "CUDA": "Unsupported",
-        "Vulkan": "Unimplemented"
+        "Vulkan": "InProgress"
       },
       "placement": [
         "resident",
@@ -1082,8 +1087,8 @@
       ],
       "acceptanceTest": "CPU-reference parity per shader; certification only on real AMD hardware",
       "pr": 24,
-      "status": "Unimplemented",
-      "note": "native block-scaled GEMM on Vulkan is Unsupported"
+      "status": "InProgress",
+      "note": "PR 24b ships Vulkan shaders for MoeRoute, MoeBuildDispatch, MoeCombine, TopKLastDim, Softplus, HcSplitSinkhorn, HcPreMix, HcPostMix, SparseLatentAttention, IndexerScores, BuildWindowIndices, QuantizeLatentRows, ActQuantDequantInPlace, the 5-argument ApplyRopeInterleaved and the recipe dequant to BF16, each parity-tested against the CPU reference on an NVIDIA RTX 3060; none is wired into a model. Native block-scaled GEMM on Vulkan is Unsupported (dequant paths only) and the expert cache is host-staged with no streaming cache. AMD hardware evidence is not collected, so this row is not certified"
     },
     {
       "id": "perf.kernels",

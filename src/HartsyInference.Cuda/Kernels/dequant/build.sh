@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GGUF dequant, W8A8, ConvRot, the fp8 and block-scaled activation quantizers, the int8 mma GEMM, the DeepSeek-V4.1 recipe (MXFP4/FP8 block E8M0) BF16 unpack. GGUF dequant and W8A8 keep SM 7.5 (Turing): CUDA 13 dropped Volta, so sm_70 is rejected outright and the floor moved from V100 to the RTX 20xx generation. Kernel lists only — the build itself is ../build_common.sh.
+# GGUF dequant, W8A8, ConvRot, the fp8 and block-scaled activation quantizers, the int8 mma GEMM, the DeepSeek-V4.1 recipe (MXFP4/FP8 block E8M0) plus NVFP4-ModelOpt and MLX affine BF16 unpack. GGUF dequant and W8A8 keep SM 7.5 (Turing): CUDA 13 dropped Volta, so sm_70 is rejected outright and the floor moved from V100 to the RTX 20xx generation. Kernel lists only — the build itself is ../build_common.sh.
 set -euo pipefail
 THIS_DIR="$(cd "$(dirname "$0")" && pwd)"
 

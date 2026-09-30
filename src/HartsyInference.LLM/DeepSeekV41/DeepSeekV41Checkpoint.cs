@@ -10,6 +10,7 @@ namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>An opened DeepSeek-V4.1 checkpoint directory: the shard set, key mapper and bound quant recipes.</summary>
 /// <remarks>Opening reads headers only and views are borrowed, never copied. Engram shards are opened pread-only and never mapped.
+/// The small Engram weights beside a table (<c>q_weight</c>, <c>k_weight</c>, <c>wkv</c>) are pread into owned copies.
 /// A draft with missing routed experts (the MLX conversion's <c>mtp.2</c>) is reported, its partial experts are kept out of
 /// companion binding, and <see cref="RequireDraft"/> refuses it.</remarks>
 public sealed class DeepSeekV41Checkpoint : IDisposable
@@ -110,14 +111,16 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
     /// <summary>Where a tensor's bytes live.</summary>
     public TensorLocation GetLocation(string canonicalKey) => Shards.Inventory[Resolve(canonicalKey)];
 
-    /// <summary>A tensor as a borrowed view of its mapped shard; throws for Engram tables, which are pread-only.</summary>
-    public Tensor GetWeight(string canonicalKey) => Shards.GetTensor(Resolve(canonicalKey));
+    /// <summary>A borrowed view, or an owned copy for a small Engram weight; throws for Engram tables.</summary>
+    public Tensor GetWeight(string canonicalKey) => Materialize(Resolve(canonicalKey));
 
     /// <summary>The weight's quant recipe, or null when unquantized; throws for Engram tables (use <see cref="EngramTable"/>).</summary>
     public QuantWeightInfo? GetQuant(string canonicalKey)
     {
         string source = Resolve(canonicalKey);
-        return Bindings.Bindings.TryGetValue(source, out QuantBinding? binding) ? binding.ToWeightInfo(Shards.GetTensor) : null;
+        return Bindings.Bindings.TryGetValue(source, out QuantBinding? binding)
+            ? binding.ToWeightInfo(Materialize)
+            : null;
     }
 
     /// <summary>Access to one layer's routed experts; a draft layer with missing experts is refused.</summary>
@@ -197,6 +200,18 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
         return new DeepSeekV41Checkpoint(info, config, flavor, mapper, shards, sourceByCanonical, bindings, draft, incomplete, weights);
     }
 
+    // In a pread-only shard only Engram tables are refused as tensors; every other tensor there is pread into an owned copy.
+    private Tensor Materialize(string source) =>
+        Shards.Inventory[source].Shard.PreadOnly && !IsEngramTable(Mapper.MapToCanonical(source))
+            ? Shards.ReadTensor(source)
+            : Shards.GetTensor(source);
+
+    private static bool IsEngramTable(string? canonical) =>
+        canonical is not null && DeepSeekV41WeightClassifier.Classify(canonical) == DeepSeekV41WeightClass.Engram;
+
+    private static bool IsEngramCompanion(string canonical) =>
+        canonical.Contains(".engram.", StringComparison.Ordinal) && !IsEngramTable(canonical);
+
     private static string[] EngramShardNames(string indexPath, IHfKeyMapper mapper)
     {
         using JsonDocument index = JsonDocument.Parse(File.ReadAllBytes(indexPath));
@@ -211,14 +226,14 @@ public sealed class DeepSeekV41Checkpoint : IDisposable
                 continue;
             if (DeepSeekV41WeightClassifier.Classify(canonical) == DeepSeekV41WeightClass.Engram)
                 names.Add(file);
-            else
+            else if (!IsEngramCompanion(canonical))
                 shared.Add(file);
         }
         string[] mixed = names.Where(shared.Contains).Order(StringComparer.Ordinal).ToArray();
         if (mixed.Length > 0)
             throw new HartsyInferenceException(
                 $"Engram tables share shards with other weights ({string.Join(", ", mixed)}); " +
-                "Engram shards are read by offset only, so they must hold nothing else.");
+                "Engram shards are read by offset only, so they may hold nothing but Engram weights.");
         return names.Order(StringComparer.Ordinal).ToArray();
     }
 

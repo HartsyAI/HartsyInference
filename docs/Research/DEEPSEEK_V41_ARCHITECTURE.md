@@ -101,7 +101,7 @@ Dense weights per layer are about 170 MB (6.8 GB for 40 layers). One expert is a
 | Official | safetensors ×48 | dense FP8 e4m3 + e8m0 32×32; experts MXFP4 (I8-packed) + e8m0/32; Engram FP8 + e8m0/32 | hc/gate/sink F32; norms/embed/head/vision BF16 | FP8-act × FP8-w block GEMM; FP8-act × FP4-w GEMM |
 | NVIDIA NVFP4 | safetensors ×48 | experts U8-packed E2M1 + `weight_scale` E4M3/16 + `weight_scale_2` F32 + `input_scale` F32 | attention/shared/vision/Engram/mtp = official | W4A4 native on Blackwell only; elsewhere W4A16 (weights-only dequant, `input_scale` unused), a different numeric recipe with its own tolerance and label |
 | AMD Quark | safetensors ×48 | experts + shared: U8-packed E2M1 + `weight_scale` U8 (e8m0)/32; attention FP8 + e8m0 32×32 renamed `weight_scale` | vision/gate/hc/Engram/mtp original | MXFP4 W4A4, MXFP8 |
-| EXL3 | safetensors ×48 (branch) | experts `trellis` I16 + `suh/svh` F16 + `mcg` I32 (2 bpw); lm_head FP8 + row `weight_scale` U8 | others official | trellis decode (dequant) |
+| EXL3 | safetensors ×48 (branch) | experts `trellis` I16 + `suh/svh` F16 + `mcg` I32 (2 bpw); lm_head FP8 + row `weight_scale` U8 | others official | trellis decode (dequant): `Exl3Codec` and `dequant_exl3_2bit_to_bf16`, layout in [EXL3_TRELLIS_FORMAT.md](EXL3_TRELLIS_FORMAT.md) |
 | MLX | safetensors ×79, odd naming | affine 4-bit gs64: `weight` U32, `scales`/`biases` F32, Engram included (lossy re-quantization) | gate/hc/norms | group-int4 dequant |
 | DwarfStar GGUF | one GGUF + separate vision GGUF | Q2: IQ2_XXS gate/up + Q2_K down; Q4: Q4_K; Q8_0 attention/shared/head; F16 hc_fn/indexer/compressor/engram_kv; Engram I8 `[264, rows]` (256 fp8 + 8 e8m0) | **no `mtp`**; tokenizer `gpt2`/`joyai-llm` | existing GGUF codecs |
 
@@ -132,7 +132,7 @@ Each gap stays open until its acceptance test exists and passes.
 | `fp4_gemm`, tilelang kernels | need Blackwell (`fp4_gemm`) or SM ≥ 8.9 (`fp8_gemm`) | local reference runs use bf16 dense and no fp4 experts with the pure-torch ports in `kernel_ports.py` | tilelang-vs-port agreement recorded from the rented run |
 | Multi-image ordering, tool namespaces | `encoding.py` @ `dba1be0a` | five shipped fixtures plus our own multi-image, mid-system and task cases | exact token ids against HF `tokenizers` |
 | DwarfStar numerics | own quant recipe (imatrix), not llama.cpp | DwarfStar `gguf-tools/deepseek41_*.py` layout; our codecs | tensor-wise dequant agreement with official dequantized weights within the format's error |
-| EXL3 trellis decode | exllamav3 format (MCG codebook, K=2 trellis, `suh/svh`) | exllamav3 `quant/exl3_lib` as the format spec | lossless bounded-memory decode vs exllamav3's own dequant on a sampled expert |
+| EXL3 trellis decode | exllamav3 format (MCG codebook, K=2 trellis, `suh/svh`) | exllamav3 `quant/exl3_lib` as the format spec | trellis stage bit-exact vs exllamav3's own kernel on a committed fixture; full W within a stated bound of its fused fp16 kernel (real-expert sampling still open) |
 | `weight_scale_inv` semantics, nibble order | inferred from `convert.py` | M1 on shard 3 | bit-exact 64-row dequant windows |
 
 ## Reference harness

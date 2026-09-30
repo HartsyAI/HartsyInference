@@ -112,6 +112,25 @@ public sealed class ShardedSafeTensorSet : IDisposable
         return tensor;
     }
 
+    /// <summary>Preads the tensor into a new owned tensor, whether or not its shard is pread-only; nothing is mapped.</summary>
+    /// <remarks>For small tensors sharing a pread-only shard with a table too large to map. The bytes are copied and a
+    /// tensor over 2 GiB is refused.</remarks>
+    public unsafe Tensor ReadTensor(string name)
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (!Inventory.TryGetValue(name, out TensorLocation? location))
+            throw new KeyNotFoundException($"Tensor '{name}' is not in the shard set from {Source}.");
+        SafeTensorDTypes.ThrowIfNotMaterialisable(location.DType, name, location.Shard.Path);
+        if (location.ByteLength > int.MaxValue)
+            throw new InvalidOperationException($"Tensor '{name}' is {location.ByteLength} bytes; ReadTensor copies at most 2 GiB.");
+
+        Tensor tensor = new Tensor(location.Shape, location.DType);
+        if (location.ByteLength > 0)
+            location.Shard.Source().ReadAt(
+                location.FileOffset, new Span<byte>(tensor.DataPointer, (int)location.ByteLength));
+        return tensor;
+    }
+
     /// <summary>Returns the shard's positional-read source, opening it on first use. The set owns it; do not dispose it.</summary>
     public IWeightByteSource GetByteSource(SafeTensorShard shard)
     {

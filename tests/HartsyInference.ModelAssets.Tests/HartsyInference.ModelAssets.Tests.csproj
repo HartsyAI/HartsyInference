@@ -14,6 +14,10 @@
   </ItemGroup>
 
   <ItemGroup>
+    <None Include="Fixtures\Exl3\*.i16;Fixtures\Exl3\*.f16" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Audio\HartsyInference.Audio.csproj" />
     <ProjectReference Include="..\..\src\HartsyInference.Cpu\HartsyInference.Cpu.csproj" />

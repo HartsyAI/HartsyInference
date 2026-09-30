@@ -4,7 +4,7 @@ using HartsyInference.Core.Tensors.Quant;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>A bounded ring of BF16 dequant slots for recipe weights (MXFP4 or FP8 with E8M0 scales): the fallback that unpacks one expert matrix at a time
+/// <summary>A bounded ring of BF16 dequant slots for recipe weights (MXFP4 or FP8 with E8M0 scales, ModelOpt NVFP4, MLX affine): the fallback that unpacks one expert matrix at a time
 /// on the compute stream, bypassing <c>IBackend.Linear</c>'s F16 cast cache, whose per-tensor copies would outgrow the expert budget.</summary>
 /// <remarks>Slots are allocated on first use and freed at dispose. Dequant and the GEMM that reads it are queued on the same stream, so a returned slot
 /// can be refilled at once. The ring is bounded: renting with every slot out throws rather than growing.</remarks>
@@ -61,15 +61,23 @@ public sealed class CudaQuantWorkspace : IDisposable
     public QuantWorkspaceLease Dequantize(ExpertMatrix matrix)
     {
         ArgumentNullException.ThrowIfNull(matrix);
-        QuantRecipe recipe = matrix.Recipe ?? throw new NotSupportedException("The expert matrix carries no quant recipe; it is already a dense weight.");
-        Tensor scale = recipe.Scale ?? throw new InvalidOperationException("The recipe has no scale tensor.");
+        QuantRecipe recipe = matrix.Recipe ?? throw new NotSupportedException("The expert matrix carries no quant recipe.");
+        bool exl3 = recipe.Encoding == QuantEncoding.Exl3Trellis;
+        // EXL3 has no scale tensor: the two sign vectors ride in the scale and extra slots (suh, svh).
+        Tensor scale = exl3
+            ? (recipe.Exl3?.Suh ?? throw new NotSupportedException("The EXL3 recipe has no suh companion."))
+            : recipe.Scale ?? throw new InvalidOperationException("The recipe has no scale tensor.");
         Validate(recipe, matrix.Weight, scale);
-        if (!_backend.TryGetResidentPointer(matrix.Weight, out ulong packed) || !_backend.TryGetResidentPointer(scale, out ulong scalePtr))
-            throw new InvalidOperationException("Weight or scale is not device resident; acquire the expert from the cache first.");
+        Tensor? extra = exl3 ? recipe.Exl3!.Svh : recipe.Encoding == QuantEncoding.Nvfp4 ? recipe.GlobalScale : recipe.Bias;
+        ulong extraPtr = 0;
+        if (!_backend.TryGetResidentPointer(matrix.Weight, out ulong packed) || !_backend.TryGetResidentPointer(scale, out ulong scalePtr)
+            || (extra is not null && !_backend.TryGetResidentPointer(extra, out extraPtr)))
+            throw new InvalidOperationException("Weight, scale or companion is not device resident; acquire the expert from the cache first.");
 
-        long bytes = recipe.LogicalRows * recipe.LogicalCols * 2;
+        long bytes = QuantExecutionPolicy.Plan(recipe).WorkspaceBytes;
         if (bytes > SlotBytes)
-            throw new NotSupportedException($"A {recipe.LogicalRows}x{recipe.LogicalCols} BF16 matrix is {bytes} bytes; a workspace slot holds {SlotBytes}.");
+            throw new NotSupportedException(
+                $"A {recipe.LogicalRows}x{recipe.LogicalCols} BF16 matrix is {bytes} bytes; a workspace slot holds {SlotBytes}.");
         int slot;
         ulong buffer;
         lock (_gate)
@@ -91,7 +99,7 @@ public sealed class CudaQuantWorkspace : IDisposable
         }
         try
         {
-            _backend.LaunchRecipeDequant(recipe, packed, scalePtr, buffer);
+            _backend.LaunchRecipeDequant(recipe, packed, scalePtr, extraPtr, buffer);
         }
         catch
         {
@@ -122,21 +130,60 @@ public sealed class CudaQuantWorkspace : IDisposable
 
     private static void Validate(QuantRecipe recipe, Tensor packed, Tensor scale)
     {
-        if (recipe.Encoding is not (QuantEncoding.Mxfp4E8M0 or QuantEncoding.Fp8E4M3BlockE8M0))
-            throw new NotSupportedException($"Device dequant covers Mxfp4E8M0 and Fp8E4M3BlockE8M0; recipe is {recipe.Encoding}.");
+        if (!QuantExecutionPolicy.SupportsBf16Dequant(recipe.Encoding))
+            throw new NotSupportedException($"Device dequant has no path for {recipe.Encoding}.");
         if (recipe.ScaleLayout != ScaleLayout.RowMajorBlocks)
             throw new NotSupportedException($"Device dequant reads {ScaleLayout.RowMajorBlocks} scales; recipe is {recipe.ScaleLayout}.");
-        if (recipe.ScaleDType != DType.F8E8M0 && recipe.ScaleDType != DType.U8)
-            throw new NotSupportedException($"Device dequant needs E8M0 scale bytes; recipe has {recipe.ScaleDType}.");
+        if (recipe.Encoding == QuantEncoding.Exl3Trellis)
+        {
+            // Trellis geometry, companion dtypes and the 2-bit/MCG limits; the packed size is the trellis, not rows * cols / ElementsPerByte.
+            Exl3Format.ValidateRecipe(recipe, "(EXL3 device dequant)");
+            long expectedTrellis = Exl3Format.PackedBytes(recipe.LogicalCols, recipe.LogicalRows, Exl3Format.SupportedBits);
+            long actualTrellis = packed.DType.ComputeByteCount(packed.ElementCount);
+            if (actualTrellis != expectedTrellis)
+                throw new ArgumentException($"Packed trellis is {actualTrellis} bytes; the recipe describes {expectedTrellis}.");
+            return;
+        }
+        ValidateCompanions(recipe);
         if (scale.Shape.Rank != 2) throw new ArgumentException($"Scale must be rank 2; got {scale.Shape}.");
         (long scaleRows, long scaleCols) = recipe.Geometry.ScaleShape(recipe.LogicalRows, recipe.LogicalCols);
         if (scale.Shape[0] < scaleRows || scale.Shape[1] < recipe.ScaleColOffset + scaleCols)
-            throw new ArgumentException($"Scale {scale.Shape} is smaller than the [{scaleRows}, {recipe.ScaleColOffset + scaleCols}] the {recipe.Geometry} geometry needs.");
+            throw new ArgumentException(
+                $"Scale {scale.Shape} is smaller than the [{scaleRows}, {recipe.ScaleColOffset + scaleCols}] the {recipe.Geometry} geometry needs.");
         long expectedPacked = recipe.LogicalRows * recipe.LogicalCols / recipe.ElementsPerByte;
         long actualPacked = packed.DType.ComputeByteCount(packed.ElementCount);
         if (actualPacked != expectedPacked)
             throw new ArgumentException($"Packed weight is {actualPacked} bytes; the recipe describes {expectedPacked}.");
-        if (recipe.Encoding == QuantEncoding.Mxfp4E8M0 && (recipe.Geometry.BlockCols % 2 != 0 || recipe.LogicalCols % 2 != 0))
-            throw new NotSupportedException($"Mxfp4 needs even block width and columns; got {recipe.Geometry} over {recipe.LogicalCols} columns.");
+        if (recipe.ElementsPerByte == 2 && (recipe.Geometry.BlockCols % 2 != 0 || recipe.LogicalCols % 2 != 0))
+            throw new NotSupportedException(
+                $"{recipe.Encoding} needs even block width and columns; got {recipe.Geometry} over {recipe.LogicalCols} columns.");
+    }
+
+    private static void ValidateCompanions(QuantRecipe recipe)
+    {
+        switch (recipe.Encoding)
+        {
+            case QuantEncoding.Nvfp4:
+                RequireScaleType(recipe, DType.F8E4M3);
+                if (recipe.GlobalScale is null || recipe.GlobalScale.DType != DType.F32 || recipe.GlobalScale.ElementCount != 1)
+                    throw new NotSupportedException("Nvfp4 device dequant needs a scalar F32 global scale (weight_scale_2).");
+                break;
+            case QuantEncoding.AffineInt4:
+            case QuantEncoding.AffineInt8:
+                RequireScaleType(recipe, DType.F32);
+                if (recipe.Bias is null || recipe.Bias.DType != DType.F32 || recipe.Bias.Shape != recipe.Scale!.Shape)
+                    throw new NotSupportedException("Affine device dequant needs an F32 bias shaped like the scale.");
+                break;
+            default:
+                if (recipe.ScaleDType != DType.F8E8M0 && recipe.ScaleDType != DType.U8)
+                    throw new NotSupportedException($"Device dequant needs E8M0 scale bytes; recipe has {recipe.ScaleDType}.");
+                break;
+        }
+    }
+
+    private static void RequireScaleType(QuantRecipe recipe, DType expected)
+    {
+        if (recipe.ScaleDType != expected)
+            throw new NotSupportedException($"{recipe.Encoding} device dequant needs {expected} scales; recipe has {recipe.ScaleDType}.");
     }
 }

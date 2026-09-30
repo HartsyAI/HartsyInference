@@ -115,6 +115,7 @@ SINGLE_KERNELS=(
     affine_mix
     fill_bias
     quant_int8_rowwise
+    dequant_recipe_bf16
     pixel_shuffle2d
     modulation_split4
     affine_broadcast_row_indexed
@@ -147,6 +148,20 @@ SINGLE_KERNELS=(
     history_append
     repetition_penalty
     kv_cache_append_dev
+    softplus
+    topk_lastdim
+    moe_route
+    moe_build_dispatch
+    moe_combine
+    hc_split_sinkhorn
+    hc_pre_mix
+    hc_post_mix
+    sparse_latent_attention
+    indexer_scores
+    quantize_latent_rows
+    act_quant_dequant
+    build_window_indices
+    rope_interleaved_offset
 )
 
 for k in "${DTYPE_KERNELS[@]}"; do

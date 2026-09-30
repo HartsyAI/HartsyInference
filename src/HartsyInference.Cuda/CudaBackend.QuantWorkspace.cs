@@ -9,7 +9,7 @@ public sealed partial class CudaBackend
     private CudaQuantWorkspace? _quantWorkspace;
     private readonly object _quantWorkspaceGate = new();
 
-    /// <summary>The backend's BF16 dequant ring for MXFP4 and FP8-block recipe weights.</summary>
+    /// <summary>The backend's BF16 dequant ring for recipe weights (MXFP4, FP8 block, ModelOpt NVFP4, MLX affine).</summary>
     public CudaQuantWorkspace QuantWorkspace
     {
         get
@@ -50,25 +50,47 @@ public sealed partial class CudaBackend
         workspace?.Dispose();
     }
 
-    internal void LaunchRecipeDequant(QuantRecipe recipe, ulong packed, ulong scale, ulong output)
+    internal void LaunchRecipeDequant(QuantRecipe recipe, ulong packed, ulong scale, ulong extra, ulong output)
     {
         using OpScope _op = EnterOp();
         EnsureKernels();
         if (_kernels is not { HasRecipeDequantKernels: true })
             throw new NotSupportedException("dequant_recipe_to_bf16.ptx is not loaded (Kernels/dequant/build.sh).");
+        if (recipe.Encoding == QuantEncoding.Exl3Trellis)
+        {
+            if (!_kernels.HasExl3DequantKernel)
+                throw new NotSupportedException("The EXL3 dequant kernel is not available on this device (missing PTX entry or no 66,048-byte shared memory opt-in).");
+            // packed = trellis, scale = suh, extra = svh (the workspace resolves the resident pointers).
+            _kernels.LaunchExl3Dequant(
+                output, packed, scale, extra, checked((int)(recipe.LogicalRows / Exl3Format.TileSize)), 0,
+                checked((int)(recipe.LogicalRows / Exl3Format.HadamardBlock)), checked((int)recipe.LogicalCols), _stream.Handle);
+            return;
+        }
         long stride = recipe.Scale!.Shape[1];
         int rows = checked((int)recipe.LogicalRows);
         int cols = checked((int)recipe.LogicalCols);
         int offset = checked((int)recipe.ScaleColOffset);
-        if (recipe.Encoding == QuantEncoding.Mxfp4E8M0)
+        int blockRows = recipe.Geometry.BlockRows;
+        int blockCols = recipe.Geometry.BlockCols;
+        switch (recipe.Encoding)
         {
-            _kernels.LaunchMxfp4E8m0Dequant(output, packed, scale, rows, cols / 2, stride, offset,
-                recipe.Geometry.BlockRows, recipe.Geometry.BlockCols, _stream.Handle);
-        }
-        else
-        {
-            _kernels.LaunchFp8BlockE8m0Dequant(output, packed, scale, rows, cols, stride, offset,
-                recipe.Geometry.BlockRows, recipe.Geometry.BlockCols, _stream.Handle);
+            case QuantEncoding.Mxfp4E8M0:
+                _kernels.LaunchMxfp4E8m0Dequant(output, packed, scale, rows, cols / 2, stride, offset, blockRows, blockCols, _stream.Handle);
+                break;
+            case QuantEncoding.Fp8E4M3BlockE8M0:
+                _kernels.LaunchFp8BlockE8m0Dequant(output, packed, scale, rows, cols, stride, offset, blockRows, blockCols, _stream.Handle);
+                break;
+            case QuantEncoding.Nvfp4:
+                _kernels.LaunchNvfp4ModelOptDequant(
+                    output, packed, scale, extra, rows, cols / 2, stride, offset, blockRows, blockCols, _stream.Handle);
+                break;
+            case QuantEncoding.AffineInt4:
+            case QuantEncoding.AffineInt8:
+                int bits = recipe.Encoding == QuantEncoding.AffineInt4 ? 4 : 8;
+                _kernels.LaunchAffineDequant(output, packed, scale, extra, rows, cols, stride, offset, blockRows, blockCols, bits, _stream.Handle);
+                break;
+            default:
+                throw new NotSupportedException($"No device dequant for {recipe.Encoding}.");
         }
     }
 }

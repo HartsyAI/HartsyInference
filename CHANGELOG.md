@@ -6,13 +6,85 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.211
+## alpha.216
 
 - **LLM generation goes through one model contract.** `IGenerationModel` and `ISequenceState` (with cursor-only
   `Checkpoint`/`Rollback`) sit between the generation pipeline and the transformer, and `GenericTransformerModel` adapts
   the existing `GenericTransformer` to it. `TextGenerationPipeline` and `DynamicBatchScheduler` gain `IGenerationModel`
   constructors; the old constructors build the adapter, so public signatures are unchanged. Projection, RoPE-table and
   gated-FFN helpers moved into shared internal statics that `GenericTransformer` delegates to. No behaviour change is intended.
+
+## alpha.215
+
+- **EXL3 trellis decode** (DeepSeek-V4.1-Flash program PR 23b). `Exl3Codec` decodes the `sfxnz/DeepSeek-V4.1-Flash-EXL3` 2-bit MCG experts: 16x16 tail-biting trellis tiles
+  through the MCG hash, a 128-point Hadamard per block and the `suh`/`svh` sign vectors. The trellis stage is bit-exact against exllamav3's own `reconstruct_tile` on a
+  committed 256x384 fixture (`tests/HartsyInference.ModelAssets.Tests/Fixtures/Exl3/`). The full F32 result stays within 1.1e-7 of an fp64 dense-Hadamard oracle and within 1.2e-3
+  of exllamav3's fused fp16 kernel, relative to max|W|; it is not bit-identical to that kernel, whose butterflies run in fp16.
+- `QuantCompanionBinder` binds EXL3 experts from `.trellis` and refuses a missing `suh`, `svh` or `mcg`, bit widths other than 2 (naming the key and shape), geometry that is not a multiple of 128
+  and wrong companion dtypes. Non-routed FP8 weights and the row-scaled `lm_head` bind through the FP8 path. New `DType.I16` and the safetensors `I16` mapping carry the trellis.
+- `QuantRecipe` slicing: input-column windows on 128 boundaries slice the trellis and `suh`; a partial output-row window throws `NotSupportedException` naming the key and range.
+- **CUDA.** `dequant_recipe_to_bf16` gains `dequant_exl3_2bit_to_bf16` (sm_80 PTX regenerated; the existing entries are unchanged). `CudaQuantWorkspace` dequantizes EXL3 matrices to BF16
+  and `QuantExecutionPolicy` plans W2A16. The device result equals the host F32 rounded once to BF16, bit for bit, on an RTX 3060.
+- Not done: no real-checkpoint tensor has been decoded, the BF16 output is coarser than exllamav3's fp16, output-row windows, a Vulkan path and `IBackend.Linear` wiring.
+
+## alpha.214
+
+- **Derivative quant formats** (DeepSeek-V4.1-Flash program PR 23). `ModelOptNvfp4Codec` decodes NVIDIA NVFP4 (low nibble first, E4M3 scale per 16,
+  scalar F32 `weight_scale_2` multiplied into the scale first) and `AffineIntCodec` decodes MLX affine `q*scale + bias` per 64 at 4 or 8 bits
+  (new `QuantEncoding.AffineInt8`; the V4.1 MLX checkpoint mixes both). AMD Quark MXFP4 reuses `Mxfp4E8M0Codec` with U8 scales. Codecs match an independent
+  numpy decoder and `mx.dequantize` bit-exactly (`tests/python-reference/deepseek_v41/fixtures/derivative_quant_codecs.json`).
+- `QuantCompanionBinder` binds the hybrid NVFP4 layout (FP8 attention with F8_E8M0 `.scale`), Quark FP8 attention scales and MLX 4/8-bit inferred from
+  the scale shape, and refuses experts without `weight_scale_2`, non-U8 Quark scales, wrong packed widths, group sizes other than 64 and non-F32 MLX scales.
+  `QuantRecipe`/`ExpertMatrix`/`ExpertWeights` carry the bias and global-scale companions so the expert cache uploads them.
+- **CUDA.** `dequant_recipe_to_bf16` gains `dequant_nvfp4_modelopt_to_bf16` and `dequant_affine_to_bf16` (sm_80 PTX regenerated), and `CudaQuantWorkspace`
+  dequantizes NVFP4, Quark and MLX expert matrices to BF16 bit-exactly against the host codecs. `QuantExecutionPolicy` plans the BF16 dequant and
+  labels NVFP4 as W4A16 (`input_scale` is left unread; no W4A4 is claimed).
+- Deferred: EXL3 trellis decode (PR 23b), the 32x32 block-FP8 native GEMM, native NVFP4/MXFP4 block-scaled GEMM on Blackwell, DwarfStar GGUF Engram row264.
+
+## alpha.213
+
+- **Vulkan paths for the DeepSeek-V4.1-Flash primitives** (program PR 24b). New compute shaders, each parity-tested against the CPU reference
+  on an NVIDIA RTX 3060 through Vulkan: `MoeRoute`, `MoeBuildDispatch`, `MoeCombine`, `TopKLastDim`, `Softplus`; `HcSplitSinkhorn`,
+  `HcPreMix`, `HcPostMix`; `SparseLatentAttention`, `IndexerScores`, `BuildWindowIndices`, `QuantizeLatentRows`, `ActQuantDequantInPlace`
+  and the 5-argument `ApplyRopeInterleaved`. Integer outputs, quantizer bytes, window indices, rope and the HC mixes are exact; router
+  weights are within 5e-6 relative, attention and indexer within 1e-5, Sinkhorn within 1e-6.
+- Behaviour to know: `MoeCombine` and `QuantizeLatentRows` skip an out-of-range slot or destination row instead of throwing;
+  `SparseLatentAttention` throws `NotSupportedException` for k above 3800 and `QuantizeLatentRows` for destination tensors that are not
+  whole 32-bit words.
+- `VulkanBackend.DequantRecipeToBf16` (shader `dequant_recipe_bf16`) widens MXFP4-E8M0 and block-FP8-E8M0 recipe weights to BF16,
+  bit-identical to `Mxfp4E8M0Codec` and `Fp8BlockE8M0Codec` on synthetic layouts. It forms subnormal results on the BF16 grid directly because
+  Vulkan devices flush float subnormals. `SupportsRecipeDequant` reports what it can decode. `SupportsResidentQuant(Tensor)` stays false on
+  Vulkan: there is no block-scaled GEMM, so recipe weights are widened, not kept packed.
+- The Vulkan expert cache is not implemented; experts are host-staged uploads. Native block-scaled GEMM on Vulkan stays `Unsupported`.
+  No AMD hardware evidence has been collected; the NVIDIA-via-Vulkan runs are plumbing evidence only. Nothing here is wired into a model.
+
+## alpha.212
+
+- **Fix: DeepSeek-V4.1 checkpoint refused the real official Engram shards** (DeepSeek-V4.1-Flash program). Shards 47 and 48 hold each
+  layer's embedding tables (`[rows,256]` F8_E4M3 + `[rows,8]` F8_E8M0) together with `engram.q_weight`, `engram.k_weight` and
+  `engram.wkv.{weight,scale}` (verified against the `dba1be0a` index and shard 47 header), and `DeepSeekV41Checkpoint.Open` threw "Engram
+  tables share shards with other weights". The tables stay pread-only and never mapped; the small Engram weights in the same shard are now
+  pread into owned tensors by the new `ShardedSafeTensorSet.ReadTensor`, which `GetWeight` and `GetQuant` use for them. Any other weight
+  sharing a table's shard is still refused. The tiny test checkpoint now mirrors the real shard layout.
+
+## alpha.211
+
+- **Engram constants, hasher and row store** (DeepSeek-V4.1-Flash program PR 13, minus the in-model module). The constants (compressed token
+  map, multipliers, offsets, primes) are dumped from the unmodified upstream `engram.py` at checkpoint revision `dba1be0a`, committed under
+  `DeepSeekV41/Engram/Constants/` (gitignore exception for `*.bin`), embedded, and SHA-256 checked on load; C# never re-derives them.
+  `dump_engram_constants.py --cross-check` also compares them with the DwarfStar GGUF metadata (token map, primes, multipliers) and the MLX
+  `engram_token_map.json`, recorded in the manifest.
+- `EngramHasher` (XOR of compressed ids times multipliers over the lookbacks, modulo the per-head prime plus the cumulative offset; DEAD
+  tokens and sequence-start lookbacks map to the pad id; history carries across prefill and decode) equals the upstream `NgramHashState`
+  exactly on 15 cases.
+- `EngramTableStore` in Core: `IEngramRowLayout` with the official FP8/E8M0, GGUF row264 and MLX affine layouts; `PrefetchAsync`, `Gather`,
+  `Stats`; per-batch dedup and sort, reads merged per 4 KB page over `IWeightByteSource`, LRU slab row cache, owned-row range check,
+  `Storage` and `HostResident` backings (`Device` throws `NotSupportedException`). `EngramTableStores.Open` builds one from a checkpoint table.
+- Tests: layout decode vs Python dequant on edge, seeded synthetic and range-fetched real rows; store behavior on a synthetic shard file.
+  A guarded Integration test gathers 10,000 random real rows from shard 47 and skips without the checkpoint; it did not run here, and
+  neither did an RSS-bound or cold-latency measurement. `EngramModule` waits for PR 8.
+- Known issue found, not fixed here: `DeepSeekV41Checkpoint.Open` rejects the real official checkpoint because shards 47 and 48 also hold
+  `engram.q_weight`, `engram.k_weight` and `engram.wkv.*`, and pread-only shards cannot serve those tensors.
 
 ## alpha.210
 

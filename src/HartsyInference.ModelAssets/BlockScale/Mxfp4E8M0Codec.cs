@@ -9,9 +9,10 @@ namespace HartsyInference.ModelAssets.BlockScale;
 public static unsafe class Mxfp4E8M0Codec
 {
     // The reference FP4_TABLE has +0.0 at nibble 8, where Mxfp4Codec.Fp4Lut has -0.0.
-    private static readonly float[] Lut = BuildLut();
+    private static readonly float[] Lut = ZeroPositiveLut();
 
-    private static float[] BuildLut()
+    /// <summary>A fresh copy of the E2M1 table with nibble 8 as +0.0, the convention of every V4.1 derivative's reference decoder.</summary>
+    internal static float[] ZeroPositiveLut()
     {
         float[] lut = (float[])Mxfp4Codec.Fp4Lut.Clone();
         lut[8] = 0.0f;
