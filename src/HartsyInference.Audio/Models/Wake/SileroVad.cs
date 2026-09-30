@@ -19,10 +19,13 @@ namespace HartsyInference.Audio.Models.Wake;
 /// samples of context prepended to each chunk are carried internally, so callers push bare 512-sample chunks
 /// and call <see cref="Reset"/> on a stream discontinuity. One instance holds one stream's state and is not
 /// thread-safe; give each concurrent session its own.</para></summary>
-public sealed unsafe class SileroVad : IDisposable
+public sealed unsafe class SileroVad : IVadModel, IDisposable
 {
     /// <summary>Samples scored per step (32 ms at 16 kHz).</summary>
     public const int WindowSamples = 512;
+
+    /// <inheritdoc/>
+    int IVadModel.WindowSamples => WindowSamples;
     /// <summary>Samples of the previous chunk prepended to each window.</summary>
     public const int ContextSamples = 64;
     /// <summary>Total samples the network consumes per step.</summary>

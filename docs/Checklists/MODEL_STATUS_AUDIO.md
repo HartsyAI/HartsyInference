@@ -130,6 +130,11 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Streaming
 - [ ] Extend streaming beyond the implemented paths (including CosyVoice); validate latency/quality per provider.
 
+| Model | Streaming | Notes |
+|---|---|---|
+| **Piper** | ✅ sentence-chunked | Refactored onto the shared `SentenceChunkedSynthesis.StreamBySentence` (`Task.Run` as the scheduler seam); the descriptor's private loop is gone. Gate: streamed concatenation byte-identical to the per-sentence reference loop on `en_US-ryan-medium`, seed 1234, CPU (`SentenceStreamingTtsDigestTests`). |
+| **Kokoro** | ✅ sentence-chunked (new) | `TtsCatalog.Kokoro` is a `StreamingTtsRunner`: voice pack resolved once per job, `EnglishG2P` per sentence, sentences over 300 chars clause-split (PLBERT's 512 positions count phonemes, so the text bound is a proxy). Whole-text `Synthesize` unchanged and digest-identical to a direct `KokoroPipeline` call; two-sentence stream Whisper-base verified 10/10 content-word recall on CPU. Through `SpeechService.SynthesizeStreamAsync` the runtime holds `_genLock` for the whole stream (the old text-split loop released it between chunks), so a wake transcription on the same engine queues behind a Kokoro stream. |
+
 ### YuE2
 
 Lyrics + style tags → an editable ABC score → up to fifteen minutes of 48 kHz stereo. A Qwen3-geometry 3B AR LM plans

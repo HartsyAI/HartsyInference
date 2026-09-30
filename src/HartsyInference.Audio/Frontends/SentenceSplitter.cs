@@ -91,6 +91,70 @@ public static class SentenceSplitter
         return sentences;
     }
 
+    /// <summary>Cuts a sentence longer than <paramref name="maxChars"/> into clauses a model can take whole.</summary>
+    /// <param name="text">One sentence. Null, empty or whitespace yields nothing.</param>
+    /// <param name="maxChars">Longest piece to return. A sentence at or under it comes back as is.</param>
+    /// <returns>Pieces in order, each trimmed and at most <paramref name="maxChars"/> long, that concatenate with
+    /// single spaces back to the sentence's words.</returns>
+    /// <remarks>Only for input the model cannot accept in one piece — Kokoro's PLBERT has 512 positions and that is
+    /// a count of phonemes, not characters, so a caller's limit is a text-length proxy for it. Each cut goes at the
+    /// last comma, semicolon, colon or dash before the limit that is followed by whitespace (so "1,000" stays
+    /// whole), then at the last space, and only as a last resort through a word.</remarks>
+    public static IReadOnlyList<string> SplitClauses(string? text, int maxChars)
+    {
+        if (maxChars <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(maxChars), maxChars, "maxChars must be positive");
+        }
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return [];
+        }
+        string remaining = text.Trim();
+        if (remaining.Length <= maxChars)
+        {
+            return [remaining];
+        }
+        List<string> pieces = [];
+        while (remaining.Length > maxChars)
+        {
+            int cut = ClauseCut(remaining, maxChars);
+            string piece = remaining[..cut].Trim();
+            if (piece.Length > 0)
+            {
+                pieces.Add(piece);
+            }
+            remaining = remaining[cut..].Trim();
+        }
+        if (remaining.Length > 0)
+        {
+            pieces.Add(remaining);
+        }
+        return pieces;
+    }
+
+    /// <summary>Index at which to end the first piece of <paramref name="text"/>, which is longer than <paramref name="maxChars"/>.</summary>
+    private static int ClauseCut(string text, int maxChars)
+    {
+        for (int i = maxChars - 1; i > 0; i--)
+        {
+            if (IsClauseDelimiter(text[i]) && char.IsWhiteSpace(text[i + 1]))
+            {
+                return i + 1;
+            }
+        }
+        for (int i = maxChars; i > 0; i--)
+        {
+            if (char.IsWhiteSpace(text[i]))
+            {
+                return i;
+            }
+        }
+        return maxChars;
+    }
+
+    private static bool IsClauseDelimiter(char c) => c is ',' or ';' or ':' or '—' or '–';
+
     /// <summary>The three characters that can end a sentence. A colon or semicolon can too, in principle, but
     /// cutting there changes the intonation of what follows, which is exactly the seam this avoids.</summary>
     private static bool IsTerminator(char c) => c is '.' or '!' or '?';

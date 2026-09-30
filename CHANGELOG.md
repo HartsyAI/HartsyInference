@@ -6,6 +6,30 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.219
+
+- **Shared real-time helpers (Core).** `Runtime/MonotonicClock` (`CLOCK_MONOTONIC` reads and `clock_nanosleep` to an
+  absolute deadline, EINTR retried, no allocation; Linux only, `Stopwatch`/`Thread.Sleep` fallback elsewhere),
+  `Runtime/RealtimeScheduling` (`TryEnterFifo` after an `RLIMIT_RTPRIO` probe, `TryPinToCpu`; never throw, the reason
+  names the `LimitRTPRIO=` / `limits.d` fix), `Runtime/SpscRing<T>` (lock-free single-producer/single-consumer ring,
+  drop-newest with a dropped count, consumer-side `DiscardAll`), `Numerics/LatencyHistogram` (fixed µs buckets,
+  p50/p99/max, allocation-free `Record`) and `CpuParallel.InlineScope` (a thread-local scope in which `CpuParallel.For`
+  never fans out). `Thread.Priority` is a no-op on Linux, which is why the FIFO helper exists.
+- **Sentence streaming is one shared helper (Audio).** `Streaming/SentenceChunkedSynthesis.StreamBySentence` /
+  `StreamFromDeltas` turn any whole-utterance synth into a sentence stream with the streaming-codec producer/consumer
+  discipline, `AudioStreamer` backpressure, a `run` delegate as the scheduler seam and cancellation before, inside and
+  after every job. `Frontends/StreamingSentenceSplitter` applies `SentenceSplitter`'s rules to token deltas (never
+  emits the open tail; a smaller first-sentence minimum), `SentenceSplitter.SplitClauses` cuts over-long sentences at
+  clause marks, `Frontends/SpokenTextNormalizer` strips `<think>` blocks, markdown and emoji, `Io/G711` codes μ-law
+  and A-law by table, and `Models/Wake/IVadModel` lets `SileroVadStream` be driven by any VAD (`SileroVad` implements it).
+- **Piper streams through the shared helper** — its private sentence loop is gone. Streamed output is byte-identical
+  to before (digest gate on `en_US-ryan-medium`). **Kokoro now streams by sentence** through the same helper: the
+  voice pack is resolved once per job, G2P runs per sentence, sentences over 300 characters are clause-split so
+  PLBERT's 512 positions hold. Whole-text `Synthesize` is unchanged (digest-identical to a direct pipeline call);
+  the two-sentence stream is Whisper-verified at 10/10 content-word recall. Through `SpeechService.SynthesizeStreamAsync`
+  the runtime now holds its generation lock for the whole Kokoro stream, where the old text-split loop released it
+  between chunks.
+
 ## alpha.218
 
 - **Audio eviction keeps the incoming model.** `AudioRuntime`'s memory-pressure sweep compared the prefixed job key

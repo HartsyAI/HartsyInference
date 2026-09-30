@@ -12,13 +12,15 @@ namespace HartsyInference.Audio.Models.Wake;
 /// <c>minSpeechMs</c> is dropped instead of emitted. Reported boundaries are padded outward by
 /// <c>speechPadMs</c> so a downstream recognizer keeps the onset consonant and the trailing vowel.</para>
 ///
-/// <para>The stream does not own its <see cref="SileroVad"/>; the model carries this stream's LSTM state, so
-/// give every concurrent session its own model instance rather than sharing one.</para></summary>
+/// <para>The stream does not own its model; the model carries this stream's recurrent state, so give every
+/// concurrent session its own model instance rather than sharing one. Any <see cref="IVadModel"/> can drive it;
+/// <see cref="SileroVad"/> is the production one.</para></summary>
 public sealed class SileroVadStream
 {
     private const int SampleRate = 16000;
 
-    private readonly SileroVad _vad;
+    private readonly IVadModel _vad;
+    private readonly int _windowSamples;
     private readonly float _enterThreshold;
     private readonly float _exitThreshold;
     private readonly int _minSpeechSamples;
@@ -35,13 +37,24 @@ public sealed class SileroVadStream
     /// and 30 ms of boundary padding.</summary>
     public SileroVadStream(SileroVad vad, float enterThreshold = 0.5f, float exitThreshold = 0.35f,
         int minSpeechMs = 250, int minSilenceMs = 100, int speechPadMs = 30)
+        : this((IVadModel)vad, enterThreshold, exitThreshold, minSpeechMs, minSilenceMs, speechPadMs)
+    {
+    }
+
+    /// <summary>Drives the endpointing from any <see cref="IVadModel"/>, with the same defaults as the
+    /// <see cref="SileroVad"/> constructor. The model's <see cref="IVadModel.WindowSamples"/> sets the chunk size.</summary>
+    public SileroVadStream(IVadModel vad, float enterThreshold = 0.5f, float exitThreshold = 0.35f,
+        int minSpeechMs = 250, int minSilenceMs = 100, int speechPadMs = 30)
     {
         ArgumentNullException.ThrowIfNull(vad);
+        if (vad.WindowSamples <= 0)
+            throw new ArgumentException($"The model's window must be positive, got {vad.WindowSamples}.", nameof(vad));
         if (exitThreshold > enterThreshold)
             throw new ArgumentException($"Exit threshold {exitThreshold} must not exceed enter threshold {enterThreshold}.", nameof(exitThreshold));
         if (minSpeechMs < 0 || minSilenceMs < 0 || speechPadMs < 0)
             throw new ArgumentException("Durations must be non-negative.", nameof(minSpeechMs));
         _vad = vad;
+        _windowSamples = vad.WindowSamples;
         _enterThreshold = enterThreshold;
         _exitThreshold = exitThreshold;
         _minSpeechSamples = minSpeechMs * SampleRate / 1000;
@@ -51,7 +64,13 @@ public sealed class SileroVadStream
 
     /// <summary>The model this stream drives. Exposed because the stream does not own it — whoever constructed
     /// the pair has to dispose it, and when the stream is the only handle that has been kept, this is it.</summary>
-    public SileroVad Model => _vad;
+    /// <exception cref="InvalidOperationException">The stream was built on an <see cref="IVadModel"/> that is not a
+    /// <see cref="SileroVad"/>; use <see cref="VadModel"/>.</exception>
+    public SileroVad Model => _vad as SileroVad
+        ?? throw new InvalidOperationException($"This stream drives a {_vad.GetType().Name}, not a SileroVad; use VadModel.");
+
+    /// <summary>The model this stream drives, whatever its type.</summary>
+    public IVadModel VadModel => _vad;
 
     /// <summary>Probability of the most recently pushed chunk.</summary>
     public float LastProbability { get; private set; }
@@ -73,15 +92,16 @@ public sealed class SileroVadStream
     /// <summary>Total samples pushed since the last <see cref="Reset"/>.</summary>
     public long ConsumedSamples => _consumed;
 
-    /// <summary>Scores one 512-sample chunk of ±1-normalized audio; returns true on the chunk that closes a
-    /// segment long enough to keep, filling <paramref name="segment"/> with its padded sample bounds.</summary>
+    /// <summary>Scores one chunk of ±1-normalized audio (512 samples for Silero; the model's
+    /// <see cref="IVadModel.WindowSamples"/> in general); returns true on the chunk that closes a segment long
+    /// enough to keep, filling <paramref name="segment"/> with its padded sample bounds.</summary>
     public bool Push(IBackend backend, ReadOnlySpan<float> chunk, out SileroVadSegment segment)
     {
         segment = default;
         float probability = _vad.Process(backend, chunk);
         LastProbability = probability;
-        _consumed += SileroVad.WindowSamples;
-        long chunkStart = _consumed - SileroVad.WindowSamples;
+        _consumed += _windowSamples;
+        long chunkStart = _consumed - _windowSamples;
 
         if (probability >= _enterThreshold)
         {

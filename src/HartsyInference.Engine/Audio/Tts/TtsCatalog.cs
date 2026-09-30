@@ -25,6 +25,10 @@ internal static class TtsCatalog
     /// <summary>Public-domain CMU Pronouncing Dictionary — the English G2P source, fetched on first use.</summary>
     private const string CmudictUrl = "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict";
 
+    /// <summary>Longest sentence Kokoro is handed whole, in characters of text. PLBERT has 512 positions and that is
+    /// a count of phonemes after G2P, which expands digits and adds stress marks, so the text bound stays well under it.</summary>
+    private const int KokoroMaxSentenceChars = 300;
+
     /// <summary>Resolves a catalog id to its descriptor, or throws naming what is available.</summary>
     internal static TtsModelDescriptor Resolve(string id)
     {
@@ -142,15 +146,34 @@ internal static class TtsCatalog
             EnglishG2P g2p = new EnglishG2P(cmudict);
             KokoroPipeline pipeline = await KokoroPipeline.LoadAsync(cancel).ConfigureAwait(false);
             await EnsureKokoroVoiceAsync("af_heart", cancel).ConfigureAwait(false);
-            return new TtsRunner(24_000, (backend, job) =>
+            float[] Synth(IBackend backend, TtsJob job)
             {
-                string voice = string.IsNullOrEmpty(job.Voice) ? "af_heart" : job.Voice;
+                string voice = KokoroVoice(job);
                 EnsureKokoroVoiceAsync(voice, CancellationToken.None).GetAwaiter().GetResult();
-                float speed = job.Speed.HasValue ? (float)job.Speed.Value : 1f;
-                return pipeline.Synthesize(backend, g2p.ToIpa(job.Text), voiceName: voice, speed: speed);
-            }, pipeline);
+                return pipeline.Synthesize(backend, g2p.ToIpa(job.Text), voiceName: voice, speed: KokoroSpeed(job));
+            }
+            // Through SpeechService.SynthesizeStreamAsync the runtime holds _genLock for this whole stream; the
+            // old text-split loop released it between chunks.
+            async IAsyncEnumerable<AudioChunk> Stream(IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
+            {
+                string voice = KokoroVoice(job);
+                float speed = KokoroSpeed(job);
+                await EnsureKokoroVoiceAsync(voice, cancel).ConfigureAwait(false);
+                await foreach (AudioChunk chunk in SentenceChunkedSynthesis.StreamBySentence(job.Text, 24_000,
+                    (sentence, _) => pipeline.Synthesize(backend, g2p.ToIpa(sentence), voiceName: voice, speed: speed),
+                    static (work, token) => Task.Run(work, token),
+                    SentenceSplitter.MinSentenceLength, KokoroMaxSentenceChars, cancel).ConfigureAwait(false))
+                {
+                    yield return chunk;
+                }
+            }
+            return new StreamingTtsRunner(24_000, Synth, Stream, pipeline);
         },
     };
+
+    private static string KokoroVoice(TtsJob job) => string.IsNullOrEmpty(job.Voice) ? "af_heart" : job.Voice;
+
+    private static float KokoroSpeed(TtsJob job) => job.Speed.HasValue ? (float)job.Speed.Value : 1f;
 
     /// <summary>Ensures a Kokoro voice pack exists as the raw-float32 <c>.bin</c> the engine reads. The HF repo ships each voice as a torch-saved <c>.pt</c> whose single contiguous f32 storage at <c>*/data/0</c> is that payload.</summary>
     private static async Task EnsureKokoroVoiceAsync(string voiceName, CancellationToken cancel)

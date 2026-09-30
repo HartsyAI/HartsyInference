@@ -48,6 +48,19 @@ public static class CpuParallel
     private static ConcurrentExclusiveSchedulerPair? _schedulerPair;
     private static int _schedulerLimit;
 
+    // Per thread, not per process: a dedicated audio thread opts out of fan-out without touching the knob every
+    // other caller shares. Only the thread that entered the scope sees it, which is the point.
+    [ThreadStatic]
+    private static bool _inline;
+
+    /// <summary>True while the calling thread is inside an <see cref="InlineScope"/>.</summary>
+    public static bool IsInline => _inline;
+
+    /// <summary>Enters a scope in which <see cref="For"/> runs every item on the calling thread, whatever the knob says.</summary>
+    /// <remarks>For a thread with a deadline of its own — a real-time audio thread — that must never hand work to the
+    /// pool and wait for it back. Dispose restores the previous state, so scopes nest.</remarks>
+    public static InlineScope EnterInline() => new();
+
     private static TaskScheduler SharedScheduler(int limit)
     {
         lock (_schedulerLock)
@@ -75,7 +88,7 @@ public static class CpuParallel
     {
         ArgumentNullException.ThrowIfNull(body);
         int threads = MaxThreads;
-        if (count <= 1 || threads <= 1 || totalWork < MinWorkForParallel)
+        if (count <= 1 || threads <= 1 || _inline || totalWork < MinWorkForParallel)
         {
             for (int i = 0; i < count; i++)
             {
@@ -123,5 +136,29 @@ public static class CpuParallel
         // its neighbours, few enough that dispatch stays a rounding error.
         int want = threads * 4;
         return rows >= want ? 1 : Math.Max(1, want / Math.Max(1, rows));
+    }
+
+    /// <summary>Marks the calling thread inline for <see cref="For"/> until disposed; obtained from <see cref="EnterInline"/>.</summary>
+    public readonly struct InlineScope : IDisposable
+    {
+        private readonly bool _previous;
+        private readonly bool _active;
+
+        /// <summary>Enters the scope on the calling thread.</summary>
+        public InlineScope()
+        {
+            _previous = _inline;
+            _active = true;
+            _inline = true;
+        }
+
+        /// <summary>Restores the state the calling thread had before the scope was entered; a <c>default</c> instance does nothing.</summary>
+        public void Dispose()
+        {
+            if (_active)
+            {
+                _inline = _previous;
+            }
+        }
     }
 }
