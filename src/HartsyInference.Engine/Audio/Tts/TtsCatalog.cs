@@ -25,6 +25,10 @@ internal static class TtsCatalog
     /// <summary>Public-domain CMU Pronouncing Dictionary — the English G2P source, fetched on first use.</summary>
     private const string CmudictUrl = "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict";
 
+    /// <summary>Longest sentence Kokoro is handed whole, in characters of text. PLBERT has 512 positions and that is
+    /// a count of phonemes after G2P, which expands digits and adds stress marks, so the text bound stays well under it.</summary>
+    private const int KokoroMaxSentenceChars = 300;
+
     /// <summary>Resolves a catalog id to its descriptor, or throws naming what is available.</summary>
     internal static TtsModelDescriptor Resolve(string id)
     {
@@ -166,10 +170,6 @@ internal static class TtsCatalog
             return new StreamingTtsRunner(24_000, Synth, Stream, pipeline);
         },
     };
-
-    /// <summary>Longest sentence Kokoro is handed whole, in characters of text. PLBERT has 512 positions and that is
-    /// a count of phonemes after G2P, which expands digits and adds stress marks, so the text bound stays well under it.</summary>
-    private const int KokoroMaxSentenceChars = 300;
 
     private static string KokoroVoice(TtsJob job) => string.IsNullOrEmpty(job.Voice) ? "af_heart" : job.Voice;
 

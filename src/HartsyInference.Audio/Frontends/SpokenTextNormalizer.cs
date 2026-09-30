@@ -74,7 +74,8 @@ public static partial class SpokenTextNormalizer
     [GeneratedRegex(@"^[ \t]{0,3}#{1,6}[ \t]+", RegexOptions.Multiline)]
     private static partial Regex Heading();
 
-    [GeneratedRegex(@"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+", RegexOptions.Multiline)]
+    // One or two digits: a list runs "1." to "99.", a year that opens a line does not.
+    [GeneratedRegex(@"^[ \t]*(?:[-*+]|\d{1,2}[.)])[ \t]+", RegexOptions.Multiline)]
     private static partial Regex ListMarker();
 
     [GeneratedRegex(@"^[ \t]*>[ \t]?", RegexOptions.Multiline)]

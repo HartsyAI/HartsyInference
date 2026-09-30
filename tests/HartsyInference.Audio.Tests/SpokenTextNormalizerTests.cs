@@ -63,6 +63,8 @@ public sealed class SpokenTextNormalizerTests
             SpokenTextNormalizer.ToSpeakable("Call 555-0100 at 3.5 pm about order 42."));
         Assert.Equal("Use snake_case_name here.", SpokenTextNormalizer.ToSpeakable("Use snake_case_name here."));
         Assert.Equal("2 * 3 = 6 and 4 * 5 = 20", SpokenTextNormalizer.ToSpeakable("2 * 3 = 6 and 4 * 5 = 20"));
+        // A year opening a line is prose, not a list marker.
+        Assert.Equal("1999. The year it happened.", SpokenTextNormalizer.ToSpeakable("1999. The year it happened."));
     }
 
     [Fact]
