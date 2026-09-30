@@ -13,9 +13,10 @@ namespace HartsyInference.Audio.Models.Denoise;
 /// Retuning would be cheaper but would invalidate the shipped weights, which were trained against 48 kHz band
 /// energies.</para>
 ///
-/// <para><b>Output lags input</b> by <see cref="LatencySamples"/>, so the first calls return fewer samples than
-/// they were given (and may return none). Callers must use the returned count rather than assuming the output
-/// matches the input length.</para>
+/// <para><b>Output lags input</b> by <see cref="LatencySamples"/>: every whole frame in yields a whole frame out,
+/// and output sample <c>i + LatencySamples</c> is input sample <c>i</c> denoised, so the first
+/// <see cref="LatencySamples"/> out are lead-in. A call returns only the whole frames it completed, which is fewer
+/// samples than it was given (possibly none) when input ends mid-frame; use the returned count.</para>
 ///
 /// <para>Audio is int16-scaled (±32768) — see <see cref="RnnoiseDenoiser"/>. That is already the wake pipeline's
 /// convention, so no conversion is needed between them.</para>
@@ -43,8 +44,9 @@ public sealed class RnnoiseStream : IDisposable
     /// <summary>Source rate this instance accepts and returns.</summary>
     public int SampleRate { get; }
 
-    /// <summary>Source-rate samples of delay between a sample going in and coming out, counting the resamplers'
-    /// one-frame-per-stage latency and the denoiser's own analysis window plus its one-frame lookahead.</summary>
+    /// <summary>Source-rate samples of delay between a sample going in and coming out: the resamplers' one frame
+    /// per stage, plus the denoiser's two frames (20 ms) — one for overlap-add, one for the lookahead its gains
+    /// use. Upstream's C library has the same 20 ms.</summary>
     public int LatencySamples { get; }
 
     /// <summary>The denoiser's VAD head for the most recent non-silent frame.</summary>
@@ -76,9 +78,9 @@ public sealed class RnnoiseStream : IDisposable
             _fromNative = new StreamingResampler(NativeRate, sampleRate, RnnoiseDenoiser.FrameSize);
             resamplerLatency = 2 * FrameSize;
         }
-        // The denoiser holds a full analysis window plus the deliberate one-frame lookahead its gains use.
-        int denoiserLatency = (int)((long)FrameSize * (RnnoiseDenoiser.WindowSize + RnnoiseDenoiser.FrameSize)
-            / RnnoiseDenoiser.FrameSize);
+        // Overlap-add holds window - hop (one frame) and the gains lag one more; analysis adds nothing, because
+        // priming lets the first frame's window complete on arrival. Two frames, i.e. one window.
+        int denoiserLatency = (int)((long)FrameSize * RnnoiseDenoiser.WindowSize / RnnoiseDenoiser.FrameSize);
         LatencySamples = resamplerLatency + denoiserLatency;
     }
 

@@ -13,7 +13,9 @@ Several audio models in our research scope ship only .pth pickles:
   - RNNoise     (rnnoise10Ga_*.pth — training checkpoint wrapping state_dict alongside
                  model_kwargs/loss/epoch. Prefer this over the shipped rnnoise_data.c /
                  weights_blob.bin, which carry int8-quantized copies of some layers;
-                 the .pth is the unquantized float source.)
+                 the .pth is the unquantized float source. tools/convert_rnnoise.py, or the
+                 engine's RnnoiseInstaller, does this from xiph's release tarball with its
+                 sha256 checked and the right one of its two checkpoints picked.)
 
 HartsyInference reads only safetensors at runtime (project rule: pure C#, no python
 pickle parsing). This is the offline one-shot tool that produces the artifact our
