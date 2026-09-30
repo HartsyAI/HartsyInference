@@ -5,7 +5,7 @@ using HartsyInference.Cpu.Kernels;
 namespace HartsyInference.Cpu;
 
 /// <summary>CPU-based inference backend that routes all compute operations to SIMD-optimized kernel classes. Supports AVX2, AVX-512, and ARM NEON via <see cref="SimdDispatch"/>.</summary>
-public sealed class CpuBackend : IBackend
+public sealed partial class CpuBackend : IBackend
 {
     private int _disposed;
 
