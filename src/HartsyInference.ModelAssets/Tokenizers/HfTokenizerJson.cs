@@ -2,11 +2,12 @@ using System.Text.Json;
 
 namespace HartsyInference.ModelAssets.Tokenizers;
 
-/// <summary>Builds the engine's byte-level BPE core (<see cref="GgufTokenizer"/>) from a HuggingFace <c>tokenizer.json</c> file — the single artifact the Llama-3 / Qwen / Mistral repos actually ship. Reuses the existing BPE implementation rather than depending on the two-file <c>vocab.json</c> + <c>merges.txt</c> split (which has to be extracted out-of-band). Reads the <c>model.vocab</c> / <c>model.merges</c> / <c>added_tokens</c> arrays, the <c>ignore_merges</c> flag, and the <c>pre_tokenizer</c> Split regex so the family-specific tokenization (e.g. Llama-3's digit grouping) is reproduced exactly.</summary>
+/// <summary>Builds the engine's byte-level BPE core (<see cref="GgufTokenizer"/>) from a HuggingFace <c>tokenizer.json</c> file — the single artifact the Llama-3 / Qwen / Mistral repos actually ship. Reuses the existing BPE implementation rather than depending on the two-file <c>vocab.json</c> + <c>merges.txt</c> split (which has to be extracted out-of-band). Reads the <c>model.vocab</c> / <c>model.merges</c> / <c>added_tokens</c> arrays, the <c>ignore_merges</c> flag, and the full <c>pre_tokenizer</c> stage sequence (Split behaviors, invert, ByteLevel) via <see cref="PreTokenizerPipeline"/> so the family-specific tokenization (e.g. Llama-3's digit grouping) is reproduced exactly.</summary>
 public static class HfTokenizerJson
 {
-    /// <summary>Parses a byte-level-BPE <c>tokenizer.json</c> stream into a ready <see cref="GgufTokenizer"/>. The caller owns <paramref name="json"/> (this does not dispose it). <paramref name="extraStopIds"/> is forwarded to the tokenizer for end-of-turn handling.</summary>
-    public static GgufTokenizer LoadByteLevelBpe(Stream json, IReadOnlyList<int>? extraStopIds = null)
+    /// <summary>Parses a byte-level-BPE <c>tokenizer.json</c> stream into a ready <see cref="GgufTokenizer"/>. The caller owns <paramref name="json"/> (this does not dispose it). <paramref name="extraStopIds"/> is forwarded to the tokenizer for end-of-turn handling. <paramref name="bosToken"/> / <paramref name="eosToken"/> name the added-token literals for families that do not use the Llama-3 names.</summary>
+    public static GgufTokenizer LoadByteLevelBpe(Stream json, IReadOnlyList<int>? extraStopIds = null,
+        string? bosToken = null, string? eosToken = null)
     {
         ArgumentNullException.ThrowIfNull(json);
         using JsonDocument doc = JsonDocument.Parse(json);
@@ -41,8 +42,10 @@ public static class HfTokenizerJson
                     ?? throw new InvalidOperationException("added_token has null content.");
                 added.Add((content, id));
                 entries.Add((content, id));
-                if (content == "<|begin_of_text|>") bosId = id;
-                else if (content == "<|end_of_text|>") eosId = id;
+                if (bosToken is null && content == "<|begin_of_text|>") bosId = id;
+                else if (eosToken is null && content == "<|end_of_text|>") eosId = id;
+                if (content == bosToken) bosId = id;
+                if (content == eosToken) eosId = id;
             }
         }
 
@@ -57,12 +60,13 @@ public static class HfTokenizerJson
         foreach ((string _, int id) in added) tokenType[id] = 3;
 
         string[] merges = ReadMerges(model);
-        string? preRegex = ReadPreTokenizerRegex(root);
+        JsonElement? preTokenizerJson = root.TryGetProperty("pre_tokenizer", out JsonElement pt) ? pt : null;
+        PreTokenizerPipeline pipeline = PreTokenizerPipeline.FromJson(preTokenizerJson);
         bool ignoreMerges = model.TryGetProperty("ignore_merges", out JsonElement im)
             && im.ValueKind == JsonValueKind.True;
 
         return new GgufTokenizer(tokens, merges, tokenType, bosId, eosId, extraStopIds,
-            preTokenizerRegex: preRegex, ignoreMerges: ignoreMerges);
+            ignoreMerges: ignoreMerges, preTokenizer: pipeline);
     }
 
     /// <summary>Reads <c>model.merges</c>, accepting both the legacy <c>"left right"</c> string form and the newer <c>["left","right"]</c> pair form, normalizing to the space-joined form the BPE core expects.</summary>
@@ -83,31 +87,5 @@ public static class HfTokenizerJson
             i++;
         }
         return result;
-    }
-
-    /// <summary>Extracts the byte-level split regex from the <c>pre_tokenizer</c> (a Split inside a Sequence, or a bare Split). Returns null if none is present, leaving the BPE core on its GPT-2 default.</summary>
-    private static string? ReadPreTokenizerRegex(JsonElement root)
-    {
-        if (!root.TryGetProperty("pre_tokenizer", out JsonElement pt) || pt.ValueKind != JsonValueKind.Object)
-            return null;
-        string? type = pt.TryGetProperty("type", out JsonElement tEl) ? tEl.GetString() : null;
-        if (type == "Sequence" && pt.TryGetProperty("pretokenizers", out JsonElement seq))
-        {
-            foreach (JsonElement child in seq.EnumerateArray())
-            {
-                string? pattern = SplitRegex(child);
-                if (pattern is not null) return pattern;
-            }
-            return null;
-        }
-        return SplitRegex(pt);
-    }
-
-    private static string? SplitRegex(JsonElement el)
-    {
-        if (el.ValueKind != JsonValueKind.Object) return null;
-        if (!(el.TryGetProperty("type", out JsonElement t) && t.GetString() == "Split")) return null;
-        if (!el.TryGetProperty("pattern", out JsonElement pat)) return null;
-        return pat.TryGetProperty("Regex", out JsonElement rx) ? rx.GetString() : null;
     }
 }
