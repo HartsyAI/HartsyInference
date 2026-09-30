@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.203
+## alpha.204
 
 - **Multi-stage pre-tokenizer and a structured conversation encoder (DeepSeek-V4.1 PR 10).** `HfTokenizerJson` read only the
   first `Split` of a `Sequence` pre-tokenizer; the new `PreTokenizerPipeline` runs every `Split` stage in order with HF
@@ -16,6 +16,16 @@ stable release will require. Dates are UTC.
   roles; `IConversationEncoder` returns `EncodedConversation` (ids, image spans, dead/vision-route masks, initial parser
   state). `DeepSeekV41Encoder` ports the upstream `encoding.py` render half; rendered text is byte-equal to the five
   upstream fixtures and ids equal HF `tokenizers`. It is not registered in the catalog yet.
+
+## alpha.203
+
+- **MoE routing, dispatch, combine, top-k and softplus are backend primitives** (`IBackend.MoeRoute`, `MoeBuildDispatch`,
+  `MoeCombine`, `TopKLastDim`, `Softplus`). Routing covers softmax, sigmoid and sqrtsoftplus scoring with bias, per-token
+  alternate bias, group-limited selection (including the HF masked-fill quirk), renormalization, scale and a logit divisor;
+  ties take the lowest index. The CPU reference lives in Core and the CPU backend delegates to it. CUDA adds
+  `moe_route.ptx`, `moe_dispatch.ptx` and `lm_topk_f32.ptx` (radix-select top-k up to k=2048 over vocab-sized rows), all
+  deterministic with no global atomics. Vulkan reports `NotSupportedException`. `MoeFeedForward` is unchanged; the
+  DeepSeek-V4.1-Flash executor adopts these in a later PR.
 
 ## alpha.202
 

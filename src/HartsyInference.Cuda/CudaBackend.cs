@@ -12,7 +12,7 @@ namespace HartsyInference.Cuda;
 
 /// <summary>CUDA GPU backend implementing <see cref="IBackend"/>: cuBLAS GEMM for matmul, PTX kernels for element-wise/normalization ops.</summary>
 /// <remarks>Uses activation caching to keep intermediate results on GPU between ops — lazy sync to CPU on DataPointer access.</remarks>
-public sealed class CudaBackend : GpuBackendBase, IBackend
+public sealed partial class CudaBackend : GpuBackendBase, IBackend
 {
     private readonly CudaContext _context;
     private readonly CudaStream _stream;

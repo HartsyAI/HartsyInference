@@ -91,8 +91,8 @@
       "feature": "MoE routing: sqrtsoftplus, bias/bias_vl, top-6, tie rule",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
         "Vulkan": "Unimplemented"
       },
       "placement": [
@@ -114,7 +114,8 @@
       ],
       "acceptanceTest": "MoeReferenceTests vs Python; exact-tie CPU==CUDA",
       "pr": 2,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "MoeRoute, MoeBuildDispatch, MoeCombine, TopKLastDim and Softplus: CPU and CUDA vs the routing ports and a torch fixture; Vulkan throws NotSupported until PR 24b; not checkpoint-verified"
     },
     {
       "id": "core.moe.exec",
