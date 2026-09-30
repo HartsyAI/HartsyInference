@@ -208,6 +208,7 @@ internal sealed class AudioRuntime
         int epoch = Volatile.Read(ref _releaseEpoch);
         return RunAsync(backend, new AudioJob(cache, key), async ct =>
         {
+            ct.ThrowIfCancellationRequested();
             TRunner runner = await cache.GetOrLoadAsync(key, load, ct).ConfigureAwait(false);
             TLease lease = create(runner);
             Register(lease, epoch);

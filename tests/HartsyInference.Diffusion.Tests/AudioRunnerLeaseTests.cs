@@ -326,6 +326,26 @@ public sealed class AudioRunnerLeaseTests
     }
 
     [Fact]
+    public async Task OpenCancelledWhileQueued_ThrowsAndLeavesNothingPinned()
+    {
+        using IDisposable calm = AudioEvictionPressure.Relax();
+        using InferenceEngine engine = new("cpu");
+        FakeTts busy = await SeedTtsAsync(engine, KokoroKey, blocking: true);
+        await SeedSttAsync(engine, WhisperKey);
+        Task<AudioResult> generation = Task.Run(() => engine.Speech.SynthesizeAsync(Kokoro, new SpeechRequest { Text = "Holding the lock." }));
+        Assert.True(busy.CallEntered.Wait(TimeSpan.FromSeconds(10)), "the service generation never started.");
+
+        using CancellationTokenSource cancel = new();
+        Task<ITranscriberLease> opening = engine.Transcribe.OpenTranscriberAsync(WhisperTiny, cancel.Token);
+        cancel.Cancel();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => opening.WaitAsync(TimeSpan.FromSeconds(10)));
+        Assert.False(engine.AudioRuntime.Stt.IsPinned(WhisperKey));
+
+        busy.CallMayFinish.Set();
+        await generation.WaitAsync(TimeSpan.FromSeconds(10));
+    }
+
+    [Fact]
     public async Task OpenThatStraddlesARelease_IsRefused()
     {
         using IDisposable calm = AudioEvictionPressure.Relax();

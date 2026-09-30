@@ -9,6 +9,7 @@ namespace HartsyInference.Engine.Services;
 internal sealed class SynthesizerLease : AudioRunnerLease, ISynthesizerLease
 {
     private readonly ITtsRunner _runner;
+    // Never stale: a backend change revokes the lease before the engine drops this backend.
     private readonly IBackend _backend;
     private readonly string? _weightsVoice;
 

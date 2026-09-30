@@ -47,7 +47,7 @@ stable release will require. Dates are UTC.
     - revocation by `Dispose`, `FreeMemory` and `SetBackend`;
     - engine and lease Dispose waiting for a call in flight;
     - concurrent and double Dispose;
-    - no pin left after a failed open;
+    - no pin left after a failed open or one cancelled while queued;
     - an open that straddles a release.
   - `AudioRunnerLeaseRealWeightTests` (Integration, CPU): a Kokoro lease encodes to the service's exact WAV bytes, and
     Whisper-tiny gives the service's exact JFK transcript at 16 kHz and through a 24 kHz clip.

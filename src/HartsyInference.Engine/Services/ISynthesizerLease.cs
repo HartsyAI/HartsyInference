@@ -16,8 +16,9 @@ namespace HartsyInference.Engine.Services;
 /// on the audio card and sets <see cref="TextRequest.Device"/> on every text generation request.</item>
 /// <item>The runner is pinned: memory-pressure eviction never unloads it while the lease is open, and service calls
 /// for the same model run on it. A pin survives memory pressure, not the device: any engine release (Dispose,
-/// FreeMemory, SetBackend, SetPlacement) waits for a call in flight, then unloads the runner and revokes the
-/// lease.</item>
+/// FreeMemory, SetBackend, SetPlacement) waits for a call in flight, then unloads the runner and revokes the lease.
+/// The wait is bounded by the engine's 120 s release budget; a call still running past it has its runner disposed
+/// underneath it.</item>
 /// <item>A revoked lease reports it only as <see cref="ObjectDisposedException"/> on its next call; nothing signals it
 /// sooner. To re-open, dispose the revoked lease, which is a no-op, and open a new one. After FreeMemory, SetBackend or
 /// SetPlacement the engine stays usable, and the new lease reloads the model on the engine's current backend. After

@@ -11,6 +11,7 @@ namespace HartsyInference.Engine.Services;
 internal sealed class TranscriberLease : AudioRunnerLease, ITranscriberLease
 {
     private readonly ISttRunner _runner;
+    // Never stale: a backend change revokes the lease before the engine drops this backend.
     private readonly IBackend _backend;
     private readonly int _inputSampleRate;
 
