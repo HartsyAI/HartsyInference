@@ -8,11 +8,12 @@ using SIPSorceryMedia.Abstractions;
 namespace HartsyInference.PhoneGateway.Tests.Support;
 
 /// <summary>A stock sipsorcery user agent on an ephemeral 127.0.0.1 port with a sine-wave source; answers any INVITE and
-/// counts the G.711 RTP packets it receives.</summary>
+/// counts the INVITEs and G.711 RTP packets it receives.</summary>
 internal sealed class Softphone : IDisposable
 {
     private readonly SIPTransport _transport = new();
     private long _rtpFrames;
+    private int _incomingCalls;
 
     public Softphone()
     {
@@ -24,7 +25,11 @@ internal sealed class Softphone : IDisposable
             LastFailure = message;
             LastFailureStatus = response?.StatusCode;
         };
-        Agent.OnIncomingCall += (ua, request) => _ = AnswerAsync(ua, request);
+        Agent.OnIncomingCall += (ua, request) =>
+        {
+            Interlocked.Increment(ref _incomingCalls);
+            _ = AnswerAsync(ua, request);
+        };
     }
 
     public SIPUserAgent Agent { get; }
@@ -38,6 +43,9 @@ internal sealed class Softphone : IDisposable
     public int Port => _transport.GetSIPChannels()[0].ListeningEndPoint.Port;
 
     public long RtpFramesReceived => Interlocked.Read(ref _rtpFrames);
+
+    /// <summary>INVITEs offered to this phone.</summary>
+    public int IncomingCalls => Volatile.Read(ref _incomingCalls);
 
     public Task<bool> CallAsync(int gatewayPort) => Agent.Call($"sip:agent@127.0.0.1:{gatewayPort}", null, null, CreateSession(), 10);
 

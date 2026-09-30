@@ -68,6 +68,10 @@ public sealed class CallController : IDisposable
         {
             throw new FileNotFoundException("sip.greetingPromptFile does not exist.", options.GreetingPromptFile);
         }
+        if (options.AllowAnyDestination && options.DestinationPrefixes.Count > 0)
+        {
+            throw new ArgumentException("AllowAnyDestination cannot be combined with DestinationPrefixes.", nameof(options));
+        }
         _account = account;
         _link = link;
         _options = options;
@@ -144,6 +148,14 @@ public sealed class CallController : IDisposable
         _link.Event = (_, e) => Logs.Info($"[PhoneGateway] host event {e.Kind}{(e.State is null ? "" : " " + e.State)}{(e.Text is null ? "" : ": " + e.Text)}");
         _link.Error = (callId, e) => Logs.Error($"[PhoneGateway] host error (call {callId}): {e.Text}");
         _metrics.MediaProbe = SnapshotMedia;
+        if (_options.AllowAnyDestination)
+        {
+            Logs.Warning("[PhoneGateway] sip.allowAnyDestination is true: outbound calls and the transfer tool may dial any destination, so toll-fraud protection is off. Use it on a LAN or for development only; on a trunk, set sip.destinationPrefixes instead.");
+        }
+        else if (_options.DestinationPrefixes.Count == 0)
+        {
+            Logs.Info("[PhoneGateway] Outbound dialling is off (sip.destinationPrefixes is empty): POST /calls and the transfer tool are refused.");
+        }
     }
 
     /// <summary>Places a call. <paramref name="destination"/> is a SIP URI, or a number dialled through the registrar.</summary>
@@ -151,7 +163,7 @@ public sealed class CallController : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(destination);
         SIPUserAgent agent = _agent ?? throw new InvalidOperationException("CallController is not started.");
-        string? uri = AuthorizeDestination(destination, _options.DestinationPrefixes, _account.Registrar, out CallPlacementStatus refusal);
+        string? uri = AuthorizeDestination(destination, _options.DestinationPrefixes, _account.Registrar, _options.AllowAnyDestination, out CallPlacementStatus refusal);
         if (uri is null)
         {
             return new CallPlacementResult(refusal, RefusalMessage(refusal));
@@ -224,11 +236,18 @@ public sealed class CallController : IDisposable
         return registrar.Length == 0 ? null : $"sip:{destination}@{registrar}";
     }
 
+    /// <summary><see cref="AuthorizeDestination(string, IReadOnlyList{string}, string, bool, out CallPlacementStatus)"/>
+    /// with <c>allowAnyDestination</c> off, the default.</summary>
+    internal static string? AuthorizeDestination(string destination, IReadOnlyList<string> prefixes, string registrar, out CallPlacementStatus refusal) =>
+        AuthorizeDestination(destination, prefixes, registrar, allowAnyDestination: false, out refusal);
+
     /// <summary>The URI to dial for <paramref name="destination"/>, or null with <paramref name="refusal"/> saying why:
     /// <see cref="CallPlacementStatus.Invalid"/> when it is not a SIP destination (or is a number with no registrar),
-    /// <see cref="CallPlacementStatus.NotAllowed"/> when <paramref name="prefixes"/> refuse it.</summary>
-    /// <remarks>With no prefixes any parseable destination is dialled as <see cref="DialString"/> gives it. With
-    /// prefixes, only a number through <paramref name="registrar"/> is dialled: a bare number, <c>tel:&lt;number&gt;</c>,
+    /// <see cref="CallPlacementStatus.NotAllowed"/> when the dial plan refuses it.</summary>
+    /// <remarks>The dial plan fails closed. With no <paramref name="prefixes"/> every destination is refused, unless
+    /// <paramref name="allowAnyDestination"/> (a LAN or development) lets any parseable one through as
+    /// <see cref="DialString"/> gives it; prefixes win if both are set. With prefixes, only a number through
+    /// <paramref name="registrar"/> is dialled: a bare number, <c>tel:&lt;number&gt;</c>,
     /// or <c>&lt;number&gt;@&lt;registrar host&gt;</c> with or without a <c>sip:</c>/<c>sips:</c> scheme, where the number
     /// (digits, <c>+</c>, <c>*</c>, <c>#</c>) starts with a prefix. A port, a URI parameter (<c>maddr</c> overrides where
     /// the request is sent, <c>transport</c> how), a header or any other host refuses the destination outright, and the
@@ -236,7 +255,7 @@ public sealed class CallController : IDisposable
     /// caller wrote reaches the SIP stack. A matching number that went anywhere but the registrar would take the call,
     /// and the account's digest answer, with it; the agent is steerable by the far end of the call, so on a trunk an
     /// open dial plan is toll fraud waiting to happen.</remarks>
-    internal static string? AuthorizeDestination(string destination, IReadOnlyList<string> prefixes, string registrar, out CallPlacementStatus refusal)
+    internal static string? AuthorizeDestination(string destination, IReadOnlyList<string> prefixes, string registrar, bool allowAnyDestination, out CallPlacementStatus refusal)
     {
         refusal = CallPlacementStatus.Invalid;
         string? dial = DialString(destination, registrar);
@@ -244,11 +263,11 @@ public sealed class CallController : IDisposable
         {
             return null;
         }
+        refusal = CallPlacementStatus.NotAllowed;
         if (prefixes.Count == 0)
         {
-            return dial;
+            return allowAnyDestination ? dial : null;
         }
-        refusal = CallPlacementStatus.NotAllowed;
         if (!TryPlainNumber(destination, registrar, out string number, out bool secure)
             || !prefixes.Any(prefix => number.StartsWith(prefix, StringComparison.Ordinal)))
         {
@@ -257,7 +276,8 @@ public sealed class CallController : IDisposable
         return $"{(secure ? "sips" : "sip")}:{number}@{registrar}";
     }
 
-    /// <summary>True when <see cref="AuthorizeDestination"/> would dial <paramref name="destination"/>.</summary>
+    /// <summary>True when <see cref="AuthorizeDestination(string, IReadOnlyList{string}, string, out CallPlacementStatus)"/>
+    /// (<c>allowAnyDestination</c> off) would dial <paramref name="destination"/>.</summary>
     internal static bool IsDestinationAllowed(string destination, IReadOnlyList<string> prefixes, string registrar) =>
         AuthorizeDestination(destination, prefixes, registrar, out _) is not null;
 
@@ -323,9 +343,12 @@ public sealed class CallController : IDisposable
         return true;
     }
 
-    private static string RefusalMessage(CallPlacementStatus refusal) => refusal == CallPlacementStatus.NotAllowed
-        ? "with sip.destinationPrefixes set, a destination is a number matching them, bare or as <number>@<registrar> with no port, parameters or headers"
-        : "not a dialable destination: give a sip: URI, user@host, or a number (a number needs sip.registrar)";
+    private string RefusalMessage(CallPlacementStatus refusal) =>
+        refusal != CallPlacementStatus.NotAllowed
+            ? "not a dialable destination: give a sip: URI, user@host, or a number (a number needs sip.registrar)"
+            : _options.DestinationPrefixes.Count == 0
+                ? "outbound dialling is off: sip.destinationPrefixes is empty; set it to the number prefixes the trunk may dial, or set sip.allowAnyDestination to true on a LAN or for development"
+                : "with sip.destinationPrefixes set, a destination is a number matching them, bare or as <number>@<registrar> with no port, parameters or headers";
 
     /// <summary>Ends the live call from our side with <paramref name="reason"/> and tells the host.</summary>
     public void HangUp(LinkCallEndReason reason) => HangUp(reason, tellHost: true, only: null);
@@ -950,7 +973,7 @@ public sealed class CallController : IDisposable
                 case "transfer":
                 {
                     string target = Argument(request, "target") ?? throw new ArgumentException("transfer needs 'target'.");
-                    string? dial = AuthorizeDestination(target, _options.DestinationPrefixes, _account.Registrar, out CallPlacementStatus refusal);
+                    string? dial = AuthorizeDestination(target, _options.DestinationPrefixes, _account.Registrar, _options.AllowAnyDestination, out CallPlacementStatus refusal);
                     if (dial is null || !SIPURI.TryParse(dial, out SIPURI uri) || uri is null)
                     {
                         Reply(call.CallId, requestId, LinkToolStatus.Failed, "transfer target: " + RefusalMessage(refusal));

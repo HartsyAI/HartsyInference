@@ -21,19 +21,22 @@ stable release will require. Dates are UTC.
   `link_control_lane_dropped_total` and restarting the connection, audio lane drop-oldest, flush-epoch drop rule);
   `LinkOutageGuard` holds a caller through a host outage with an embedded prompt, re-announces the call on reconnect and
   hangs up after a timeout; `CallController` is the one-call state machine (greeting, RFC 4733 DTMF both ways,
-  `hangup`/`send_dtmf`/`transfer`/`hold`/`unhold`/`play_prompt` tools; `sip.destinationPrefixes` limits outbound calls
-  and transfers to matching numbers through the registrar, refuses a destination with a port, URI parameters (`maddr`,
-  `transport`), headers or another host, and dials `sip:<number>@<registrar>` rebuilt from the validated number; a
-  failed media setup answers 500 and leaves the gateway idle). New INVITEs are screened on the transport before
-  sipsorcery's user agent sees them (486 while a call is up, 503 with the host down, 603 by policy), each refusal on its
-  own server transaction and counted once per INVITE (Call-ID + top Via branch, 32 s). A fault on the RTP tick or
-  inbound pump thread ends the call instead of leaving it half-dead: logged once, `calls_media_fault_total`, BYE and
-  `CallEnd(Failed)`, or, before the call is announced, a BYE after the ACK and nothing sent to the host.
-  `PhoneMediaSession` advertises the STUN/literal public address and latches on the first packet. Config is a JSON file;
-  secrets are files it names (`sip.passwordFile`, `link.tokenFile`, `admin.tokenFile`), read once, refused when group or
-  others can access them, never logged, and under systemd delivered with `LoadCredential=` (`docs/SETTINGS.md` notes
-  it); `/health`, `/metrics` (Prometheus) and token-gated `POST /calls` on loopback; recording off by default.
-  `HartsyInference.Phone.slnf` builds it without the GPU packages. Docs: `docs/Research/PHONE_GATEWAY.md`.
+  `hangup`/`send_dtmf`/`transfer`/`hold`/`unhold`/`play_prompt` tools; the dial plan fails closed: outbound calls
+  (`POST /calls`) and transfers need `sip.destinationPrefixes`, which allows only matching numbers through the
+  registrar, refuses a destination with a port, URI parameters (`maddr`, `transport`), headers or another host, and
+  dials `sip:<number>@<registrar>` rebuilt from the validated number, and with no prefixes every destination is refused
+  (403) unless `sip.allowAnyDestination` is set for a LAN or development, which warns at start-up and cannot be combined
+  with prefixes; a failed media setup answers 500 and leaves the gateway idle). New INVITEs are screened on the
+  transport before sipsorcery's user agent sees them (486 while a call is up, 503 with the host down, 603 by policy),
+  each refusal on its own server transaction and counted once per INVITE (Call-ID + top Via branch, 32 s). A fault on
+  the RTP tick or inbound pump thread ends the call instead of leaving it half-dead: logged once,
+  `calls_media_fault_total`, BYE and `CallEnd(Failed)`, or, before the call is announced, a BYE after the ACK and
+  nothing sent to the host. `PhoneMediaSession` advertises the STUN/literal public address and latches on the first
+  packet. Config is a JSON file; secrets are files it names (`sip.passwordFile`, `link.tokenFile`, `admin.tokenFile`),
+  read once, refused when group or others can access them, never logged, and under systemd delivered with
+  `LoadCredential=` (`docs/SETTINGS.md` notes it); `/health`, `/metrics` (Prometheus) and token-gated `POST /calls` on
+  loopback; recording off by default. `HartsyInference.Phone.slnf` builds it without the GPU packages. Docs:
+  `docs/Research/PHONE_GATEWAY.md`.
 
 ## alpha.224
 

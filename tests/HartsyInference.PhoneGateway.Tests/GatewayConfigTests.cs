@@ -22,6 +22,9 @@ public sealed class GatewayConfigTests
         Assert.Equal(InboundPolicy.AllowAll, config.Sip.InboundPolicy);
         Assert.False(config.Recording.Enabled);
         Assert.False(config.Logging.SipDebug);
+        Assert.NotEmpty(config.Sip.Registrar);
+        Assert.NotEmpty(config.Sip.DestinationPrefixes);
+        Assert.False(config.Sip.AllowAnyDestination);
         const string credentials = "/run/credentials/hartsyinference-phone-gateway.service/";
         Assert.StartsWith(credentials, config.Sip.PasswordFile, StringComparison.Ordinal);
         Assert.StartsWith(credentials, config.Link.TokenFile, StringComparison.Ordinal);
@@ -38,6 +41,27 @@ public sealed class GatewayConfigTests
         Assert.Equal("", settings.SipPassword);
         Assert.Equal("", settings.LinkToken);
         Assert.Null(settings.AdminToken);
+        Assert.Empty(settings.Config.Sip.DestinationPrefixes);
+        Assert.False(settings.Config.Sip.AllowAnyDestination);
+    }
+
+    [Fact]
+    public void AllowAnyDestination_IsReadFromTheFile()
+    {
+        GatewayConfig config = JsonSerializer.Deserialize("{\"sip\":{\"allowAnyDestination\":true}}", GatewayJsonContext.Default.GatewayConfig)!;
+        Assert.True(GatewayConfigLoader.Resolve(config).Config.Sip.AllowAnyDestination);
+    }
+
+    [Fact]
+    public void AllowAnyDestination_WithPrefixes_IsAConfigError()
+    {
+        GatewayConfig config = new()
+        {
+            Sip = new SipConfig { Registrar = "sip.example.net", Username = "u", DestinationPrefixes = ["+1555"], AllowAnyDestination = true },
+        };
+        GatewayConfigException ex = Assert.Throws<GatewayConfigException>(() => GatewayConfigLoader.Resolve(config));
+        Assert.Contains("sip.allowAnyDestination", ex.Message, StringComparison.Ordinal);
+        Assert.Contains("sip.destinationPrefixes", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

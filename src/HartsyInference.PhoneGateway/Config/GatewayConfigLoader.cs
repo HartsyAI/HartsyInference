@@ -110,6 +110,11 @@ public static class GatewayConfigLoader
         {
             throw new GatewayConfigException("sip.destinationPrefixes may not contain an empty prefix (it would allow every destination).");
         }
+        if (sip.AllowAnyDestination && sip.DestinationPrefixes.Length > 0)
+        {
+            throw new GatewayConfigException(
+                "sip.allowAnyDestination cannot be combined with sip.destinationPrefixes: set the prefixes (a trunk) or allowAnyDestination (a LAN or development), not both.");
+        }
         if (sip.DestinationPrefixes.Length > 0 && sip.Registrar.Length == 0)
         {
             throw new GatewayConfigException("sip.destinationPrefixes needs sip.registrar: allowed numbers are dialled through it.");

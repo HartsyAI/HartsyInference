@@ -93,7 +93,7 @@ public sealed class LoopbackSipCallTests
     [Fact]
     public async Task OutboundCall_PlacedByTheGateway_AndHungUpByIt()
     {
-        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions());
+        using GatewayLoopback gateway = GatewayLoopback.Start(new CallControllerOptions { AllowAnyDestination = true });
         using Softphone phone = new();
         CallPlacementResult placed = await gateway.Controller.PlaceCallAsync($"sip:phone@127.0.0.1:{phone.Port}");
         Assert.True(placed.Placed, placed.Message);

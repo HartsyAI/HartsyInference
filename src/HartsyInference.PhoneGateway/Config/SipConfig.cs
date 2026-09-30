@@ -36,9 +36,14 @@ public sealed record SipConfig
 
     public string[] Allowlist { get; set; } = [];
 
-    /// <summary>Number prefixes outbound calls and transfers may dial (e.g. <c>+1555</c>); empty allows any. The agent
-    /// can be talked into dialling by its caller, so set this on a real trunk.</summary>
+    /// <summary>Number prefixes outbound calls and transfers may dial through the registrar (e.g. <c>+1555</c>). Empty
+    /// refuses every outbound destination unless <see cref="AllowAnyDestination"/> is set: the agent can be talked into
+    /// dialling by its caller, so the dial plan fails closed.</summary>
     public string[] DestinationPrefixes { get; set; } = [];
+
+    /// <summary>Lets outbound calls and transfers dial any destination, with no toll-fraud protection; for a LAN or
+    /// development only, logged as a warning at start-up. Cannot be combined with <see cref="DestinationPrefixes"/>.</summary>
+    public bool AllowAnyDestination { get; set; }
 
     /// <summary>Raw 8 kHz PCM16 file played to every answered inbound call; null for none.</summary>
     public string? GreetingPromptFile { get; set; }

@@ -106,19 +106,40 @@ public sealed class DestinationPolicyTests
         Assert.False(CallController.IsDestinationAllowed("sip:+15551234@anywhere.example", _usPrefix, ""));
     }
 
+    /// <summary>The dial plan fails closed: no prefixes and no <c>allowAnyDestination</c> refuses everything, even a
+    /// number that would go through the registrar.</summary>
+    [Theory]
+    [InlineData("+19005551234")]
+    [InlineData("+15551234")]
+    [InlineData("sip:anyone@anywhere.example")]
+    [InlineData("tel:+15551234")]
+    public void NoPrefixes_RefuseEveryDestinationByDefault(string destination)
+    {
+        Assert.False(CallController.IsDestinationAllowed(destination, [], Trunk));
+        Assert.Null(CallController.AuthorizeDestination(destination, [], Trunk, allowAnyDestination: false, out CallPlacementStatus refusal));
+        Assert.Equal(CallPlacementStatus.NotAllowed, refusal);
+    }
+
     [Theory]
     [InlineData("+19005551234")]
     [InlineData("sip:anyone@anywhere.example")]
-    public void NoPrefixes_AllowAnyDestination(string destination)
+    public void AllowAnyDestination_AllowsAnyDestination(string destination)
     {
-        Assert.True(CallController.IsDestinationAllowed(destination, [], Trunk));
+        Assert.NotNull(CallController.AuthorizeDestination(destination, [], Trunk, allowAnyDestination: true, out _));
     }
 
     [Fact]
-    public void NoPrefixes_DialTheDestinationAsGiven()
+    public void AllowAnyDestination_DialsTheDestinationAsGiven()
     {
         const string uri = "sip:anyone@anywhere.example:5070;transport=tcp";
-        Assert.Equal(uri, CallController.AuthorizeDestination(uri, [], Trunk, out _));
+        Assert.Equal(uri, CallController.AuthorizeDestination(uri, [], Trunk, allowAnyDestination: true, out _));
+    }
+
+    [Fact]
+    public void AllowAnyDestination_NeverOverridesPrefixes()
+    {
+        Assert.Null(CallController.AuthorizeDestination("sip:anyone@anywhere.example", _usPrefix, Trunk, allowAnyDestination: true, out CallPlacementStatus refusal));
+        Assert.Equal(CallPlacementStatus.NotAllowed, refusal);
     }
 
     /// <summary>Anything without a <c>sip:</c>/<c>sips:</c> scheme gets one; a colon alone (a port) is not a scheme,
@@ -146,7 +167,7 @@ public sealed class DestinationPolicyTests
     [InlineData("tel:+15551234")]
     public void DialString_AlwaysSatisfiesTheStrictParser(string destination)
     {
-        string? dial = CallController.AuthorizeDestination(destination, [], Trunk, out _);
+        string? dial = CallController.AuthorizeDestination(destination, [], Trunk, allowAnyDestination: true, out _);
         Assert.NotNull(dial);
         SIPURI uri = SIPURI.ParseSIPURI(dial);
         Assert.Equal(SIPSchemesEnum.sip, uri.Scheme);

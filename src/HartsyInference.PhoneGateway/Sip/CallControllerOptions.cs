@@ -12,9 +12,13 @@ public sealed record CallControllerOptions
     /// <summary>Caller user parts (numbers or SIP users) answered under <see cref="InboundPolicy.Allowlist"/>.</summary>
     public IReadOnlyList<string> Allowlist { get; init; } = [];
 
-    /// <summary>When not empty, an outbound call or a <c>transfer</c> must dial a number (a SIP URI's user part)
-    /// starting with one of these; empty allows any destination.</summary>
+    /// <summary>When not empty, an outbound call or a <c>transfer</c> must dial a number starting with one of these
+    /// through the registrar. Empty refuses every outbound destination unless <see cref="AllowAnyDestination"/> is set.</summary>
     public IReadOnlyList<string> DestinationPrefixes { get; init; } = [];
+
+    /// <summary>Dial any destination (LAN and development only: no toll-fraud protection). Exclusive with
+    /// <see cref="DestinationPrefixes"/>.</summary>
+    public bool AllowAnyDestination { get; init; }
 
     /// <summary>Raw 8 kHz PCM16 file played to every answered inbound call before the host speaks; null for none.</summary>
     public string? GreetingPromptFile { get; init; }

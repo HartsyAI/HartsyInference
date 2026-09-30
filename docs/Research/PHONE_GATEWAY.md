@@ -89,19 +89,21 @@ The start-up log line shows the gen0 budget the GC actually uses (`GCGen0MaxBudg
 ## Configuration file
 
 `phone.json` (template: `src/HartsyInference.PhoneGateway/phone.example.json`, copied next to the binary). Every
-section has defaults; `{}` is a valid LAN test file (no registrar, no tokens). Secrets are never in the file and
-never in the environment: the `*File` fields name secret files, read once at start-up (see [Secrets](#secrets)).
+section has defaults; `{}` is a valid LAN test file (no registrar, no tokens, outbound dialling off). Secrets are
+never in the file and never in the environment: the `*File` fields name secret files, read once at start-up (see
+[Secrets](#secrets)).
 
 ```json
 {
   "sip": {
     "listenAddress": "0.0.0.0", "port": 5060, "transport": "udp",
-    "registrar": "", "username": "hartsy",
+    "registrar": "sip.example.net", "username": "hartsy",
     "passwordFile": "/run/credentials/hartsyinference-phone-gateway.service/sip-password",
     "registrationExpirySeconds": 60,
     "publicAddress": "none",
     "rtpPortStart": 20000, "rtpPortEnd": 20100,
-    "codec": "Any", "inboundPolicy": "AllowAll", "allowlist": [], "destinationPrefixes": [],
+    "codec": "Any", "inboundPolicy": "AllowAll", "allowlist": [],
+    "destinationPrefixes": ["+1555"], "allowAnyDestination": false,
     "greetingPromptFile": null, "ringTimeoutSeconds": 45
   },
   "link": {
@@ -125,7 +127,8 @@ never in the environment: the `*File` fields name secret files, read once at sta
 | `sip.rtpPortStart/End` | RTP port range (shuffled). Forward it, and `sip.port`, on the router for a provider; nothing to do on a LAN. |
 | `sip.codec` | `Any` (PCMU then PCMA), `Pcmu`, `Pcma`. Only G.711 at 8 kHz is ever negotiated. |
 | `sip.inboundPolicy` | `AllowAll`, `Allowlist` (caller user part in `allowlist`, else 603), `Reject` (always 603). The allowlist matches the `From` header, which anyone who can reach `sip.port` can set: on a trunk, firewall `sip.port` and the RTP range to the provider's addresses. |
-| `sip.destinationPrefixes` | Number prefixes (e.g. `+1555`) that outbound calls and the `transfer` tool may dial; needs `sip.registrar`. With prefixes set, a destination must be exactly a number (digits, `+`, `*`, `#`) through the registrar: bare, `tel:<number>`, or `<number>@<registrar host>` with or without `sip:`/`sips:`. A port, a URI parameter (`maddr` overrides where the INVITE is sent, `transport` how), a header or another host refuses it (403) rather than being stripped, and the call dials `sip:<number>@<registrar>` rebuilt from the validated number. A matching number at another host would take the call, and the account's digest answer, elsewhere. With an IPv6-literal registrar only the bare and `tel:` forms can match (a host containing `:` is refused, failing closed). Empty allows any destination. The agent can be talked into dialling by its caller, so set this on a real trunk to rule out premium-rate toll fraud. |
+| `sip.destinationPrefixes` | Number prefixes (e.g. `+1555`) that outbound calls and the `transfer` tool may dial; needs `sip.registrar`. With prefixes set, a destination must be exactly a number (digits, `+`, `*`, `#`) through the registrar: bare, `tel:<number>`, or `<number>@<registrar host>` with or without `sip:`/`sips:`. A port, a URI parameter (`maddr` overrides where the INVITE is sent, `transport` how), a header or another host refuses it (403) rather than being stripped, and the call dials `sip:<number>@<registrar>` rebuilt from the validated number. A matching number at another host would take the call, and the account's digest answer, elsewhere. With an IPv6-literal registrar only the bare and `tel:` forms can match (a host containing `:` is refused, failing closed). Empty, the default, refuses every outbound call and transfer (403 / `Failed`, naming this setting) unless `sip.allowAnyDestination` is true: the agent can be talked into dialling by its caller, and premium-rate transfer fraud is one of the most common attacks on SIP systems, so the dial plan fails closed. `phone.example.json` carries a placeholder (`+1555`) to replace. |
+| `sip.allowAnyDestination` | `false` by default. `true` lets outbound calls and the `transfer` tool dial any destination, with no toll-fraud protection: a LAN or development only. The gateway logs a warning at start-up while it is on, and combining it with `sip.destinationPrefixes` is a configuration error. |
 | `sip.greetingPromptFile` | Raw 8 kHz PCM16 file played to every answered inbound call before the host speaks. |
 | `link.outageHangupSeconds` | How long a live call waits for the host before "goodbye" and hang-up. |
 | `link.tokenFile` | Absolute path of the file holding the shared PhoneLink token sent in `Hello`; empty sends no token. |
@@ -163,16 +166,17 @@ write the secret into it.
 
 Admin endpoint (loopback only): `GET /health` (JSON, 200 when the link is up and registration holds, else 503
 `degraded`), `GET /metrics` (Prometheus text: calls, rejections counted once per INVITE, media faults
-(`calls_media_fault_total`), link state and RTT, audio and control lane drops, and for the live call the tick lateness histogram,
-jitter-buffer counters and pump counters), `POST /calls` with
-`Authorization: Bearer <token>` and `{"destination":"sip:user@host"}` (or `user@host`, or a bare or `tel:`
-number, dialled through the registrar): 202 placed, 409 busy, 503 host down, 403 destination outside
-`sip.destinationPrefixes`, 400 not a SIP destination or a number with no registrar, 502 not answered or media
-setup failed. A failed media setup (no free RTP port, for one)
-answers an INVITE with 500 and leaves the gateway idle, ready for the next call.
+(`calls_media_fault_total`), link state and RTT, audio and control lane drops, and for the live call the tick
+lateness histogram, jitter-buffer counters and pump counters), `POST /calls` with `Authorization: Bearer <token>`
+and `{"destination":"sip:user@host"}` (or `user@host`, or a bare or `tel:` number, dialled through the registrar):
+202 placed, 409 busy, 503 host down, 403 refused by the dial plan (outside `sip.destinationPrefixes`, or no prefixes
+with `sip.allowAnyDestination` off, the default), 400 not a SIP destination or a number with no registrar, 502 not
+answered or media setup failed. The same dial plan governs the host's `transfer` tool: one rule, so a leaked admin
+token cannot dial premium numbers either. A failed media setup (no free RTP port, for one) answers an INVITE with
+500 and leaves the gateway idle, ready for the next call.
 
 Telephony tools the host may request over the link: `hangup`, `send_dtmf` (`digits`, optional `gapMs`),
-`transfer` (`target`, blind, refused outside `sip.destinationPrefixes`), `hold`, `unhold`, `play_prompt` (`file` = raw 8 kHz PCM16 path, or `name` =
+`transfer` (`target`, blind, under the same dial plan as `POST /calls`), `hold`, `unhold`, `play_prompt` (`file` = raw 8 kHz PCM16 path, or `name` =
 `one-moment` | `goodbye`; `text` is answered `Unsupported`, the gateway has no TTS). Caller DTMF (RFC 4733)
 arrives as `DtmfEvent` with the duration in ms.
 
@@ -180,9 +184,12 @@ arrives as `DtmfEvent` with the duration in ms.
 
 1. Start the voice host (PR9) so `/run/hartsyinference/phone.sock` exists, or point `link.socketPath` at a test
    host. Without a host the gateway still answers the admin endpoint but rejects INVITEs with 503.
-2. `phone.json`: `registrar` empty, `publicAddress: none`, `listenAddress` the LAN interface (or `0.0.0.0`),
-   `admin.port` 9280, and `link.tokenFile`/`admin.tokenFile` either empty or pointing at 0600 files holding the
-   tokens the host and you expect. Run the gateway; `curl 127.0.0.1:9280/health` should say `linkConnected: true`.
+2. `phone.json`: `registrar` empty, `destinationPrefixes` empty and `allowAnyDestination: true` (a LAN has no
+   trunk to run up a bill, so `POST /calls` and the `transfer` tool may dial LAN phones; the gateway warns at
+   start-up that toll-fraud protection is off), `publicAddress: none`, `listenAddress` the LAN interface (or
+   `0.0.0.0`), `admin.port` 9280, and `link.tokenFile`/`admin.tokenFile` either empty or pointing at 0600 files
+   holding the tokens the host and you expect. Run the gateway; `curl 127.0.0.1:9280/health` should say
+   `linkConnected: true`.
 3. linphone: add a SIP account with no registration (or "use without account") and dial
    `sip:agent@<gateway-ip>:5060`. baresip: `baresip -e "/dial sip:agent@<gateway-ip>:5060"` (any user part;
    only the allowlist looks at the caller). PCMU/PCMA must be enabled on the phone.
@@ -206,9 +213,12 @@ arrives as `DtmfEvent` with the duration in ms.
 - Transport: `udp` by default; `tcp` for providers that insist. TLS/SRTP are not wired in this PR (sipsorcery
   supports both; `RtpSecureMediaOption` stays `None`).
 - IP-authenticated trunks: leave `registrar` empty and set `inboundPolicy: Allowlist` with the trunk's
-  caller ids, or the gateway will answer anything that reaches port 5060.
-- Outbound: `POST /calls` with a bare or `tel:` number dials `sip:<number>@<registrar>` with the account
-  credentials; `user@host` (with or without a port) gets the `sip:` scheme.
+  caller ids, or the gateway will answer anything that reaches port 5060. Keep such a trunk inbound-only for now:
+  `destinationPrefixes` dials through the registrar, so without one the only way to dial out is
+  `allowAnyDestination`, which has no toll-fraud protection.
+- Outbound: set `destinationPrefixes` to what the trunk may reach. `POST /calls` with a bare or `tel:` number then
+  dials `sip:<number>@<registrar>` with the account credentials; with no prefixes (and `allowAnyDestination`
+  off) every outbound call and transfer is refused.
 
 ## systemd requirements (unit lands in PR9)
 
