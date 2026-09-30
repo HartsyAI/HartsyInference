@@ -21,7 +21,8 @@ stable release will require. Dates are UTC.
   that the passthrough detokenizer drops, the bare forms (`{` at line start, `{"name"` anywhere, `[` at line start,
   `name{` at line start, `call:` anywhere) are first-class rules, not fallbacks; they are strict, though: a bare JSON
   span is released at its first key unless it is `"name"`, and with the offered tool names known (the installed
-  filter passes `request.Tools`) a bare span naming any other tool is text, while the tagged forms stay permissive.
+  filter passes `request.Tools`) a bare span naming any other tool is text (a bare `name{` is released at its brace
+  unless the name is a complete offered one), while the tagged forms stay permissive.
   `ToolCallStreamFilter : ITextStreamFilter` emits each call as `TextChunkKind.NativeToolCall` and stops after the
   first by default (`StopAfterFirstCall`), deferring the stop until every call closed by the same delta has been
   emitted; `ToolCalling.Install(EngineOptions, format?)` sets `TextStreamFilterFactory` for requests that offer

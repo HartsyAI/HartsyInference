@@ -135,4 +135,20 @@ public sealed class ToolSchemaTests
         Assert.Equal("5", await registry.InvokeAsync(new NativeToolCall { Name = "count", Arguments = "{\"n\": 4}" }));
         Assert.Equal("", await registry.InvokeAsync(new NativeToolCall { Name = "nothing", Arguments = "{}" }));
     }
+
+    [Fact]
+    public async Task AsyncResultsOfAnyTypeRenderOnRepeatedCalls()
+    {
+        ToolRegistry registry = new ToolRegistry()
+            .Add("double_it", async (int n) =>
+            {
+                await Task.Yield();
+                return n * 2;
+            })
+            .Add("pause", async (CancellationToken cancel) => await Task.Delay(1, cancel));
+        Assert.Equal("8", await registry.InvokeAsync(new NativeToolCall { Name = "double_it", Arguments = "{\"n\": 4}" }));
+        Assert.Equal("10", await registry.InvokeAsync(new NativeToolCall { Name = "double_it", Arguments = "{\"n\": 5}" }));
+        Assert.Equal("", await registry.InvokeAsync(new NativeToolCall { Name = "pause", Arguments = "{}" }));
+        Assert.Equal("", await registry.InvokeAsync(new NativeToolCall { Name = "pause", Arguments = "{}" }));
+    }
 }

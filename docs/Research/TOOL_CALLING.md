@@ -49,7 +49,9 @@ Rules that hold for every format:
 - The bare forms are *strict*: a bare JSON span is released at its first key unless that key is `"name"` (a code
   block or a JSON answer with tools on streams normally instead of stalling until its braces balance), and when the
   parser knows the offered tool names (`ToolCalling.Install` passes `request.Tools`; `ToolCallParser`/
-  `ToolCallStreamFilter` take `knownTools`) a bare span naming anything else is text. The tagged forms
+  `ToolCallStreamFilter` take `knownTools`) a bare span naming anything else is text; the bare `name{` forms
+  (Mistral at line start, Gemma after `call:`) are released at the brace unless the name is a complete offered one,
+  so a word that only prefixes a tool name does not hold the text after it. The tagged forms
   (`<tool_call>`, `<|python_tag|>`, `[TOOL_CALLS]`, `<|tool_call>`) stay permissive so a mistyped tool name reaches
   the host as a call it can answer with an error result. Without a known-name list every bare `{"name": …}` object
   is a call.

@@ -383,4 +383,65 @@ public sealed class ToolCallParserTests
         Assert.Equal("\n", parser.Push("\nget_weather").ForwardText);
         Assert.Equal("get_weather", parser.Push("{\"city\": \"Rome\"}").Call!.Name);
     }
+
+    [Fact]
+    public void MistralNamedFormNamingOnlyAPrefixOfAKnownToolIsReleasedAtTheBrace()
+    {
+        ToolCallParser parser = new(ToolCallFormat.Mistral, knownTools: ["get_weather"]);
+        Assert.Equal("", parser.Push("get").ForwardText);
+        Assert.Equal("get", parser.Push("{").ForwardText);
+        Assert.False(parser.InCall);
+        ToolCallParseResult rest = parser.Push(" \"city\": \"Paris\" }");
+        Assert.Equal("{ \"city\": \"Paris\" }", rest.ForwardText);
+        Assert.Null(rest.Calls);
+        Assert.Equal("", parser.Flush().ForwardText);
+        Assert.Equal(0, parser.CompletedCalls);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(3)]
+    public void MistralNamedFormOpensOnlyOnACompleteKnownName(int seed)
+    {
+        const string text = "get{\"city\": \"Paris\"}\nget_weather{\"city\": \"Rome\"}";
+        (string forwarded, List<NativeToolCall> calls) = ParserDriver.Drive(ToolCallFormat.Mistral, text, seed, knownTools: ["get_weather"]);
+        Assert.Equal("get{\"city\": \"Paris\"}\n", forwarded);
+        NativeToolCall call = Assert.Single(calls);
+        Assert.Equal("get_weather", call.Name);
+        Assert.Equal("{\"city\": \"Rome\"}", call.Arguments);
+    }
+
+    [Fact]
+    public void GemmaBareCallNamingAnUnknownToolIsReleasedAtTheBrace()
+    {
+        ToolCallParser parser = new(ToolCallFormat.Gemma, knownTools: ["get_weather"]);
+        ToolCallParseResult opened = parser.Push("call:get{city:Paris,");
+        Assert.False(parser.InCall);
+        Assert.Null(opened.Calls);
+        Assert.Equal("call:get{city:Paris,", opened.ForwardText);
+        Assert.Equal("get_weather", parser.Push("\ncall:get_weather{city:Rome}").Call!.Name);
+    }
+
+    [Theory]
+    [InlineData(ToolCallFormat.Hermes, "{\"na me\": \"x\", ")]
+    [InlineData(ToolCallFormat.Mistral, "[{\"na me\": \"x\", ")]
+    public void WhitespaceInsideTheProbedKeyReleasesTheSpanAtOnce(ToolCallFormat format, string text)
+    {
+        ToolCallParser parser = new(format);
+        ToolCallParseResult result = parser.Push(text);
+        Assert.False(parser.InCall);
+        Assert.Null(result.Calls);
+        Assert.Equal(text, result.ForwardText);
+    }
+
+    [Theory]
+    [InlineData(ToolCallFormat.Hermes, "{ \n \"name\": \"hang_up\", \"arguments\": {}}")]
+    [InlineData(ToolCallFormat.Mistral, "[ { \"name\": \"hang_up\", \"arguments\": {}}]")]
+    public void WhitespaceBetweenTheProbedTokensStillOpensACall(ToolCallFormat format, string text)
+    {
+        (string forwarded, List<NativeToolCall> calls) = ParserDriver.Drive(format, text, 4);
+        Assert.Equal("", forwarded);
+        Assert.Equal("hang_up", Assert.Single(calls).Name);
+    }
 }

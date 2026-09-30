@@ -3,7 +3,7 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Tools.Parsing;
 
-/// <summary>Incremental tool-call parser over decoded text deltas for one <see cref="ToolCallFormat"/>. Text outside a call span is forwarded as it arrives, holding back only the characters that may still begin a marker; a span is read until its JSON (or Gemma block) value balances, then becomes one or more <see cref="NativeToolCall"/>s with ids <c>call_0</c>, <c>call_1</c>, … per parser. Anything that does not resolve into a call (invalid JSON, no <c>name</c>, a closing tag before the value balanced, a span past the cap, an unterminated span at <see cref="Flush"/>) is forwarded as plain text, so model output never throws. The bare forms (<see cref="ToolCallMarker.Strict"/>) are held back only while they can still be a call: a JSON span must open with <c>"name"</c> and, when the parser knows the offered tool names, the call must name one of them; the tagged forms stay permissive so a mistyped tool name reaches the host as a call it can answer with an error.</summary>
+/// <summary>Incremental tool-call parser over decoded text deltas for one <see cref="ToolCallFormat"/>. Text outside a call span is forwarded as it arrives, holding back only the characters that may still begin a marker; a span is read until its JSON (or Gemma block) value balances, then becomes one or more <see cref="NativeToolCall"/>s with ids <c>call_0</c>, <c>call_1</c>, … per parser. Anything that does not resolve into a call (invalid JSON, no <c>name</c>, a closing tag before the value balanced, a span past the cap, an unterminated span at <see cref="Flush"/>) is forwarded as plain text, so model output never throws. The bare forms (<see cref="ToolCallMarker.Strict"/>) are held back only while they can still be a call: a JSON span must open with <c>"name"</c> and, when the parser knows the offered tool names, the call must name one of them (a bare <c>name{</c> opens only on a complete offered name); the tagged forms stay permissive so a mistyped tool name reaches the host as a call it can answer with an error.</summary>
 /// <remarks>Runs on the decode thread inside the engine's slot lock: every operation is bounded by the delta length plus the marker length, with one string per call span and no allocation on the plain-text path when nothing is held.</remarks>
 public sealed class ToolCallParser
 {
@@ -162,6 +162,7 @@ public sealed class ToolCallParser
     {
         if (_rules.NamedFormAtLineStart && _lineStart && IsIdentifierStart(c))
         {
+            // Each line's first word may open name{…}; known names end the hold once no offered name matches.
             _hold.Append(c);
             if (_knownNameList is null || PrefixesKnownName())
             {
@@ -204,6 +205,13 @@ public sealed class ToolCallParser
             if (c == '{')
             {
                 string name = _hold.ToString();
+                // A mere prefix of an offered name would otherwise hold the text after it until its braces balance.
+                if (_knownNames is not null && !_knownNames.Contains(name))
+                {
+                    ReleaseHold();
+                    Feed(c);
+                    return;
+                }
                 _hold.Clear();
                 _holdIsIdentifier = false;
                 StartNamedCall(name, ToolCallPayload.JsonObject);
@@ -379,7 +387,7 @@ public sealed class ToolCallParser
         {
             string name = _name.ToString();
             if (name.StartsWith(GemmaCallPrefix, StringComparison.Ordinal)) name = name[GemmaCallPrefix.Length..];
-            if (!IsIdentifier(name))
+            if (!IsIdentifier(name) || (_strictSpan && _knownNames is not null && !_knownNames.Contains(name)))
             {
                 Abort();
                 return;
@@ -405,10 +413,10 @@ public sealed class ToolCallParser
         else _json.Feed(first);
     }
 
-    /// <summary>Advances the opening-key probe; whitespace is skipped, a mismatch means the span is not a call.</summary>
+    /// <summary>Advances the opening-key probe; whitespace is skipped between the tokens before the key but not inside the quoted key, and a mismatch means the span is not a call.</summary>
     private bool ProbeChar(char c)
     {
-        if (char.IsWhiteSpace(c)) return true;
+        if (char.IsWhiteSpace(c) && _probeIndex <= _probe!.IndexOf('"')) return true;
         if (c != _probe![_probeIndex]) return false;
         if (++_probeIndex == _probe.Length) _probe = null;
         return true;

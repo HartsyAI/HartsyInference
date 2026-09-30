@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Reflection;
 using System.Runtime.ExceptionServices;
@@ -6,9 +7,16 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Tools;
 
-/// <summary>An <see cref="IToolHandler"/> over a C# delegate: binds the model's JSON arguments to the delegate's parameters by name (exact, then case-insensitive), converts scalars and enums, fills optional parameters from their defaults, invokes, and renders the return value (string, Task/ValueTask of string, or any convertible value) as the tool result.</summary>
+/// <summary>An <see cref="IToolHandler"/> over a C# delegate: binds the model's JSON arguments to the delegate's parameters by name (exact, then case-insensitive), converts scalars and enums, fills optional parameters from their defaults, invokes, and renders the return value (a string, a Task or ValueTask of any result, or any convertible value) as the tool result.</summary>
+/// <remarks>A non-string <c>Task&lt;T&gt;</c> or <c>ValueTask&lt;T&gt;</c> result is read through reflection that is looked up once per runtime result type and cached; each call then makes one reflective invoke.</remarks>
 internal sealed class DelegateToolHandler : IToolHandler
 {
+    /// <summary>Per runtime result type, its <c>ValueTask&lt;T&gt;.AsTask</c> method, or null for any other type.</summary>
+    private static readonly ConcurrentDictionary<Type, MethodInfo?> AsTaskMethods = new();
+
+    /// <summary>Per runtime task type, the <c>Task&lt;T&gt;.Result</c> property it inherits, or null for a task without a result.</summary>
+    private static readonly ConcurrentDictionary<Type, PropertyInfo?> ResultProperties = new();
+
     private readonly Delegate _method;
     private readonly ParameterInfo[] _parameters;
     private readonly ToolDefinition _definition;
@@ -161,19 +169,25 @@ internal sealed class DelegateToolHandler : IToolHandler
 
     /// <summary>A <c>ValueTask&lt;T&gt;</c> result as its <see cref="Task"/>, or null for any other value.</summary>
     private static Task? AsTask(object value)
-    {
-        Type type = value.GetType();
-        if (!type.IsGenericType || type.GetGenericTypeDefinition() != typeof(ValueTask<>)) return null;
-        return (Task?)type.GetMethod("AsTask", Type.EmptyTypes)?.Invoke(value, null);
-    }
+        => (Task?)AsTaskMethods.GetOrAdd(value.GetType(), FindAsTask)?.Invoke(value, null);
 
-    /// <summary>The <c>Result</c> of a completed <c>Task&lt;T&gt;</c>, or null for a plain <see cref="Task"/> (whose runtime box is a <c>Task&lt;VoidTaskResult&gt;</c>).</summary>
-    private static object? TaskResult(Task task)
+    private static MethodInfo? FindAsTask(Type type)
+        => type.IsGenericType && type.GetGenericTypeDefinition() == typeof(ValueTask<>)
+            ? type.GetMethod(nameof(ValueTask<object>.AsTask), Type.EmptyTypes) : null;
+
+    /// <summary>The <c>Result</c> of a completed <c>Task&lt;T&gt;</c>, or null for a plain <see cref="Task"/>.</summary>
+    private static object? TaskResult(Task task) => ResultProperties.GetOrAdd(task.GetType(), FindResult)?.GetValue(task);
+
+    /// <summary>The <c>Result</c> property of the <c>Task&lt;T&gt;</c> <paramref name="type"/> derives from; null for a plain task, whose async box is a <c>Task&lt;VoidTaskResult&gt;</c>.</summary>
+    private static PropertyInfo? FindResult(Type type)
     {
-        Type type = task.GetType();
-        PropertyInfo? property = type.IsGenericType ? type.GetProperty("Result") : null;
-        if (property is null || property.PropertyType.Name == "VoidTaskResult") return null;
-        return property.GetValue(task);
+        for (Type? t = type; t is not null; t = t.BaseType)
+        {
+            if (!t.IsGenericType || t.GetGenericTypeDefinition() != typeof(Task<>)) continue;
+            PropertyInfo? property = t.GetProperty(nameof(Task<object>.Result));
+            return property is null || property.PropertyType.Name == "VoidTaskResult" ? null : property;
+        }
+        return null;
     }
 
     private static string Render(object? value)
