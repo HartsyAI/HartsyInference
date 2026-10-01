@@ -249,7 +249,10 @@ is this gateway's only peer. What the gateway can rely on:
 
 - `Hello` is checked first (version 1, 16 kHz, the token in constant time); a refusal is `Error` then close, and a
   connection only replaces the host's current one once its own `Hello` has passed. At most four connections may be in
-  their handshake at once; more are closed at accept.
+  their handshake at once; more are closed at accept. A local process holding four idle connections can therefore
+  turn this gateway's reconnect away until one of them times out (the host's handshake timeout, 5 s); the gateway
+  retries with jittered backoff (250 ms base, 30 s cap). Only members of the socket's group can connect at all (0660
+  inside a 0750 directory).
 - Reply audio arrives at 20 ms per frame on the host's own absolute 20 ms clock, plus 40 ms at the start of each burst,
   so the tick thread finds audio queued when it wakes. Frames carry the turn that produced them; after the host
   writes `Flush(T)` it sends nothing tagged T or lower, so the drop rule here only catches frames already on the socket.
