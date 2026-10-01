@@ -31,6 +31,10 @@ HF transformers is in [PARITY_VERIFICATION](../../docs/Checklists/PARITY_VERIFIC
 | 10 s | 16k | 193.5 / 186.3 | 177.5 / 173.2 | 181.7 / 182.4 | met | identical |
 | 10 s | narrowband | 191.7 / 184.5 | 176.2 / 173.1 | 177.0 / 182.1 | met | identical |
 
+Identical arms move 10–20 ms from run to run on the 2 s and 5 s rows (2 s narrowband baseline: 97.1 and 114.7 ms), so
+these rows carry the gate verdict, not a per-row speed-up or slow-down; the attribution below is where the change
+shows.
+
 Recall and the other paths (arm B):
 
 | Case | Result |

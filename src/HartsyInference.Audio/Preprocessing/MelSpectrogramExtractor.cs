@@ -296,6 +296,8 @@ public sealed class MelSpectrogramExtractor
     /// <para><paramref name="windowAudio"/> must be exactly <c>WinLength</c> samples (or
     /// shorter, in which case zeros pad to <c>FFT size</c>). <paramref name="melColumn"/>
     /// must be exactly <c>NMels</c> values.</para></summary>
+    /// <remarks>Not thread-safe: it writes the extractor's own scratch, unlike <see cref="Compute(ReadOnlySpan{float}, float[,])"/>
+    /// and <see cref="ComputeZeroPadded"/>, whose blocks rent theirs.</remarks>
     public void ComputeFrame(ReadOnlySpan<float> windowAudio, Span<float> melColumn)
     {
         if (melColumn.Length != _cfg.NMels)
