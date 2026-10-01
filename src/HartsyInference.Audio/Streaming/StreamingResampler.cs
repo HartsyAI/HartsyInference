@@ -23,7 +23,6 @@ public sealed class StreamingResampler
 {
     private readonly Resampler _resampler;
     private readonly float[] _ring;
-    private readonly float[] _scratch;
     private readonly int _inputFrame;
     private readonly int _outputFrame;
     private readonly int _pad;
@@ -67,7 +66,6 @@ public sealed class StreamingResampler
 
         _outputOffset = (int)((long)pad * up / down);
         _ring = new float[pad + 2 * inputFrameSize];
-        _scratch = new float[_resampler.OutputLength(inputFrameSize + 2 * pad)];
     }
 
     /// <summary>Converts one frame. The first call returns the conversion of silence — output trails input by
@@ -82,8 +80,7 @@ public sealed class StreamingResampler
         Array.Copy(_ring, _inputFrame, _ring, 0, _pad + _inputFrame);
         input.CopyTo(_ring.AsSpan(_pad + _inputFrame));
 
-        _resampler.Resample(_ring.AsSpan(0, _inputFrame + 2 * _pad), _scratch);
-        _scratch.AsSpan(_outputOffset, _outputFrame).CopyTo(output);
+        _resampler.ResampleRange(_ring.AsSpan(0, _inputFrame + 2 * _pad), _outputOffset, output[.._outputFrame]);
     }
 
     /// <summary>Drops the carried context. Call on a stream discontinuity, so the filter does not smear audio

@@ -110,6 +110,30 @@ public static class CpuParallel
         }
     }
 
+    /// <summary>As <see cref="For(int, long, Action{int})"/>, with the loop's state passed in rather than captured,
+    /// so <paramref name="body"/> can be created once.</summary>
+    /// <remarks>A capturing lambda is a fresh closure and delegate on every call, even when the loop then runs
+    /// inline. With the state passed in, the body can be a static lambda or a delegate held in a static field, and a
+    /// call that runs inline — small work, one core, or an <see cref="InlineScope"/> — allocates nothing, which is
+    /// what a real-time audio thread calling a kernel a hundred times a second needs. Only the fan-out branch still
+    /// wraps the body, where dispatch already costs far more than the wrapper.</remarks>
+    public static void For<TState>(int count, long totalWork, TState state, Action<int, TState> body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        int threads = MaxThreads;
+        if (count <= 1 || threads <= 1 || _inline || totalWork < MinWorkForParallel)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                body(i, state);
+            }
+            return;
+        }
+        // In its own method: the fan-out lambda captures state and body, and a captured parameter's closure is
+        // allocated on entry to the method that declares it, inline branch or not.
+        ForParallel(count, threads, state, body);
+    }
+
     /// <summary>Splits <paramref name="length"/> into roughly <paramref name="targetChunks"/> contiguous chunks,
     /// returning the chunk size.</summary>
     /// <remarks>Used by kernels whose natural outer dimension is too small to fill the machine — a final vocoder
@@ -136,6 +160,22 @@ public static class CpuParallel
         // its neighbours, few enough that dispatch stays a rounding error.
         int want = threads * 4;
         return rows >= want ? 1 : Math.Max(1, want / Math.Max(1, rows));
+    }
+
+    private static void ForParallel<TState>(int count, int threads, TState state, Action<int, TState> body)
+    {
+        try
+        {
+            Parallel.For(0, count, new ParallelOptions
+            {
+                MaxDegreeOfParallelism = threads,
+                TaskScheduler = SharedScheduler(threads),
+            }, i => body(i, state));
+        }
+        catch (AggregateException ex) when (ex.InnerException is not null)
+        {
+            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+        }
     }
 
     /// <summary>Marks the calling thread inline for <see cref="For"/> until disposed; obtained from <see cref="EnterInline"/>.</summary>

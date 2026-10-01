@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Vocoders;
+using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Audio.Streaming;
 using Xunit;
 
@@ -175,4 +176,36 @@ public sealed class StreamingStftTests
         Assert.Throws<ArgumentException>(() => stft.TryExtractFrame(tooSmall, tooSmall));
         Assert.Throws<ArgumentException>(() => istft.PushFrame(ok, ok, new float[Hop - 1]));
     }
+
+    /// <summary>The analyzer plans its FFT only where <see cref="Fft"/> would take Bluestein: a power-of-two stream
+    /// keeps <see cref="Fft"/>'s exact output, and RNNoise's 960 runs on the plan. The two transforms agree to
+    /// rounding, so a wrong gate shows only in the last bits. This compares bits, and first checks that the two
+    /// paths differ on this input, so it can tell them apart.</summary>
+    [Theory]
+    [InlineData(512, false)]
+    [InlineData(960, true)]
+    public void Frames_ComeFromThePlanOnlyAtBluesteinSizes(int nFft, bool planned)
+    {
+        float[] signal = MakeSignal(nFft);
+        float[] rectangular = new float[nFft];
+        Array.Fill(rectangular, 1f);
+        StreamingStft stft = new StreamingStft(nFft, nFft, window: rectangular);
+        stft.AddSamples(signal);
+        int bins = stft.BinCount;
+        float[] re = new float[bins], im = new float[bins];
+        Assert.True(stft.TryExtractFrame(re, im));
+
+        float[] planRe = new float[bins], planIm = new float[bins];
+        new FftPlan(nFft).ForwardReal(signal, planRe, planIm);
+        float[] fftRe = new float[bins], fftIm = new float[bins];
+        Fft.RealTransform(signal, fftRe, fftIm, nFft);
+        Assert.False(Bits(planRe).SequenceEqual(Bits(fftRe)) && Bits(planIm).SequenceEqual(Bits(fftIm)),
+            $"FftPlan and Fft agree bit for bit at {nFft}, so this input cannot tell which one ran");
+
+        (float[] expectedRe, float[] expectedIm) = planned ? (planRe, planIm) : (fftRe, fftIm);
+        Assert.Equal(Bits(expectedRe), Bits(re));
+        Assert.Equal(Bits(expectedIm), Bits(im));
+    }
+
+    private static uint[] Bits(float[] values) => Array.ConvertAll(values, BitConverter.SingleToUInt32Bits);
 }
