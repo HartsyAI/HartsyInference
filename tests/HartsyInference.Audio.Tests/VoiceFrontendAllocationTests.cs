@@ -16,7 +16,7 @@ public sealed class VoiceFrontendAllocationTests
     private const int Warmup = 50;
     private const int Frames = 1_000;
 
-    private static readonly (string Name, long[] Shape)[] RnnoiseLayout =
+    internal static readonly (string Name, long[] Shape)[] RnnoiseLayout =
     [
         ("conv1.weight", [128, 65, 3]), ("conv1.bias", [128]), ("conv2.weight", [384, 128, 3]), ("conv2.bias", [384]),
         ("gru1.weight_ih_l0", [1152, 384]), ("gru1.weight_hh_l0", [1152, 384]), ("gru1.bias_ih_l0", [1152]),
@@ -82,8 +82,8 @@ public sealed class VoiceFrontendAllocationTests
     }
 
     /// <summary>Hands the model small random weights of the given shapes. Both models copy what they are given, so
-    /// the originals are disposed straight after.</summary>
-    private static void Load((string Name, long[] Shape)[] layout, int seed,
+    /// the originals are disposed straight after. <see cref="RnnoisePairTests"/> uses it too.</summary>
+    internal static void Load((string Name, long[] Shape)[] layout, int seed,
         Action<IReadOnlyDictionary<string, Tensor>> load)
     {
         Random rng = new(seed);

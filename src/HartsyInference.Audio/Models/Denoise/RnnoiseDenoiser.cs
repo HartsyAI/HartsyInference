@@ -93,11 +93,12 @@ public sealed class RnnoiseDenoiser : IDisposable
     /// far better speech/noise signal than the RMS gate it could replace upstream of wake scoring.</summary>
     public float SpeechProbability { get; private set; }
 
-    /// <summary>Pairs in which only the first frame was silent, so the second ran alone; counted so a test can show
-    /// it covered that branch.</summary>
+    /// <summary>Pairs in which only the first frame was silent, so the second ran alone. Test-only: counted so a test
+    /// can show it covered that branch, and read nowhere else.</summary>
     internal int PairsWithFirstSilent { get; private set; }
 
-    /// <summary>Pairs in which only the second frame was silent, so the first ran alone.</summary>
+    /// <summary>Pairs in which only the second frame was silent, so the first ran alone. Test-only, like
+    /// <see cref="PairsWithFirstSilent"/>.</summary>
     internal int PairsWithSecondSilent { get; private set; }
 
     /// <summary>Builds a stream over shared <paramref name="weights"/>, which are borrowed, not owned.</summary>
