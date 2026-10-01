@@ -1,13 +1,15 @@
 using HartsyInference.Audio.Cache;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Audio.Wake;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.VoiceHost.Tests.Loopback;
 
-/// <summary>What the loopback calls need on disk (Silero, the JFK clip, Whisper small.en, Kokoro af_heart) and the check that
-/// the one CUDA device the test can see is the RTX 3060.</summary>
+/// <summary>What the loopback calls need on disk (Silero, RNNoise's int8 weights — <see cref="HartsyInference.Voice.VoiceAgentOptions.Denoise"/>
+/// defaults on, and the host never substitutes raw audio for a missing denoiser — the JFK clip, Whisper small.en, Kokoro
+/// af_heart) and the check that the one CUDA device the test can see is the RTX 3060.</summary>
 internal static class LoopbackAssets
 {
     public const string RequiredDevice = "3060";
@@ -23,6 +25,7 @@ internal static class LoopbackAssets
         return
         [
             Path.Combine(WakeRoot, "vad", "silero_vad_16k.safetensors"), Jfk,
+            Path.Combine(WakeRoot, "denoise", "rnnoise.safetensors"), RnnoiseInstaller.Int8TablesPath(WakeRoot),
             Path.Combine(whisper, "model.safetensors"), Path.Combine(whisper, "added_tokens.json"),
             Path.Combine(kokoro, "config.json"), Path.Combine(kokoro, "voices", "af_heart.bin"),
             Path.Combine(RepoPaths.ModelsRoot(), "audio", "cmudict.dict"),
