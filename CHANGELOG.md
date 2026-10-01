@@ -33,6 +33,9 @@ stable release will require. Dates are UTC.
   through index arithmetic; `Compute` no longer builds the reflect-padded copy. Frames fan out through
   `CpuParallel.For` in blocks sized by the FFT alone, each renting its scratch, so a warm extractor allocates
   nothing; `FftPlan.ForwardReal` takes a caller-owned work buffer so blocks share one plan.
+- `WhisperBenchTests` evaluates the narrowband recall gate (≥ the 16 kHz baseline − 10 pts) on the full clip and on
+  slices of 5 s and longer, and prints a gate column. The 2 s slice is still timed, but its recall is informational:
+  its cut lands inside "Americans", where the reference model also drops the word's end on the narrowband samples.
 
 ## alpha.232
 
