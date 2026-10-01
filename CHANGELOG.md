@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.227
+## alpha.228
 
 - **Folders under the models root are matched ignoring case when the engine's spelling is missing.** On a
   case-sensitive filesystem the catalog's `LLM/qwen3/Qwen3-4B-Q4_K_M.gguf` never found the SwarmUI store's
