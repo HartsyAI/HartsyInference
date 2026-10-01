@@ -47,6 +47,11 @@ public sealed class VoiceHostConfigTests : IDisposable
         Assert.Equal(16_000, settings.Agent.OutboundSampleRate);
         Assert.Equal(VoiceAgentOptions.DefaultSystemPrompt, settings.Agent.SystemPrompt);
         Assert.Equal("Hello, how can I help you?", config.Agent.Greeting);
+        // The template must not drift from VoiceAgentOptions' own default: a hard-coded false here silently runs
+        // every install without RNNoise (voice.endpoint.ms loses the denoiser's ~40 ms) regardless of what the
+        // code default is. Compared against the default, not a literal true/false, so this still catches drift
+        // if the code default itself ever changes.
+        Assert.Equal(new VoiceAgentOptions().Denoise, settings.Agent.Denoise);
     }
 
     [Fact]
