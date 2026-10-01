@@ -48,11 +48,15 @@ public sealed class RnnoiseModel : IDisposable
     private readonly RnnoiseWeights _weights;
 
     private readonly Tensor _conv1Input = new(new TensorShape(1, InputDim, KernelSize), DType.F32);
-    private readonly Tensor _conv1Out = new(new TensorShape(1, CondSize, 1), DType.F32);
-    private readonly Tensor _conv1Act = new(new TensorShape(1, CondSize, 1), DType.F32);
+    private readonly Tensor _conv1Out = new(new TensorShape(1, CondSize), DType.F32);
+    private readonly Tensor _conv1Act = new(new TensorShape(1, CondSize), DType.F32);
     private readonly Tensor _conv2Input = new(new TensorShape(1, CondSize, KernelSize), DType.F32);
-    private readonly Tensor _conv2Out = new(new TensorShape(1, GruSize, 1), DType.F32);
-    private readonly Tensor _conv2Act = new(new TensorShape(1, GruSize, 1), DType.F32);
+    private readonly Tensor _conv2Out = new(new TensorShape(1, GruSize), DType.F32);
+    private readonly Tensor _conv2Act = new(new TensorShape(1, GruSize), DType.F32);
+    private readonly Tensor _conv1Window;
+    private readonly Tensor _conv2Window;
+    private readonly Tensor _conv1Matrix;
+    private readonly Tensor _conv2Matrix;
     private readonly Tensor _cat = new(new TensorShape(1, CatSize), DType.F32);
     private readonly Tensor _gruInput = new(new TensorShape(1, GruSize), DType.F32);
     private readonly Tensor _gi = new(new TensorShape(1, Gates), DType.F32);
@@ -72,6 +76,11 @@ public sealed class RnnoiseModel : IDisposable
         ArgumentNullException.ThrowIfNull(weights);
         if (!weights.IsLoaded) throw new InvalidOperationException("RnnoiseWeights have not been loaded.");
         _weights = weights;
+        // Borrowed views, flattening each conv to the matrix-vector product it is at one output step.
+        _conv1Window = _conv1Input.Reshape(new TensorShape(1, InputDim * KernelSize));
+        _conv2Window = _conv2Input.Reshape(new TensorShape(1, CondSize * KernelSize));
+        _conv1Matrix = weights.Conv1Weight.Reshape(new TensorShape(CondSize, InputDim * KernelSize));
+        _conv2Matrix = weights.Conv2Weight.Reshape(new TensorShape(GruSize, CondSize * KernelSize));
         _hidden = [.. Enumerable.Range(0, 3).Select(_ => new Tensor(new TensorShape(1, GruSize), DType.F32))];
         _hiddenNext = [.. Enumerable.Range(0, 3).Select(_ => new Tensor(new TensorShape(1, GruSize), DType.F32))];
         Reset();
@@ -88,12 +97,15 @@ public sealed class RnnoiseModel : IDisposable
         if (bandGains.Length < OutputDim)
             throw new ArgumentException($"bandGains must hold {OutputDim} values.", nameof(bandGains));
 
+        // Each conv emits one step from a three-frame window with no padding, which makes it a matrix-vector
+        // product: the weight's [out, in, k] and the window's [in, k] flatten to the same in*K+k order. Routed
+        // through Linear because the generic Conv1d kernel spends most of its time on per-tap bookkeeping at T=1.
         ShiftIn(_conv1Input.AsSpan<float>(), features, InputDim);
-        backend.Conv1d(_conv1Out, _conv1Input, _weights.Conv1Weight, _weights.Conv1Bias, 1, 0, 0, 1, 1);
+        backend.Linear(_conv1Out, _conv1Window, _conv1Matrix, _weights.Conv1Bias);
         backend.Tanh(_conv1Act, _conv1Out);
 
         ShiftIn(_conv2Input.AsSpan<float>(), _conv1Act.AsSpan<float>(), CondSize);
-        backend.Conv1d(_conv2Out, _conv2Input, _weights.Conv2Weight, _weights.Conv2Bias, 1, 0, 0, 1, 1);
+        backend.Linear(_conv2Out, _conv2Window, _conv2Matrix, _weights.Conv2Bias);
         backend.Tanh(_conv2Act, _conv2Out);
 
         Span<float> cat = _cat.AsSpan<float>();

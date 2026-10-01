@@ -226,10 +226,22 @@ public sealed class RnnoisePitchAnalyzer
 
         Span<int> bestPitch = stackalloc int[2];
 
-        // Coarse sweep at 4x decimation.
+        // Coarse sweep at 4x decimation, a vector of lags at a time. Each lane sums its own lag over j in order,
+        // exactly as the one-lag loop does, so the correlations are unchanged and only the dispatch is wider.
         int coarseLen = length >> 2;
         int coarseMax = maxPitch >> 2;
-        for (int i = 0; i < coarseMax; i++)
+        int lag0 = 0;
+        if (Vector.IsHardwareAccelerated)
+        {
+            for (; lag0 + Vector<float>.Count <= coarseMax; lag0 += Vector<float>.Count)
+            {
+                Vector<float> sums = Vector<float>.Zero;
+                for (int j = 0; j < coarseLen; j++)
+                    sums += new Vector<float>(_xLp4[j]) * new Vector<float>(_yLp4, lag0 + j);
+                sums.CopyTo(_xcorr, lag0);
+            }
+        }
+        for (int i = lag0; i < coarseMax; i++)
         {
             float sum = 0f;
             for (int j = 0; j < coarseLen; j++) sum += _xLp4[j] * _yLp4[i + j];

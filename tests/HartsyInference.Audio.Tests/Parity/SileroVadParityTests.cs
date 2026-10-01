@@ -2,6 +2,7 @@ using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Audio.Tests;
 
@@ -14,7 +15,7 @@ namespace HartsyInference.Audio.Tests;
 /// spectrum instead of a magnitude is still a plausible-looking feature, and dropping the ReLU between the
 /// LSTM hidden state and the final convolution just moves the probabilities. All three produce a model that
 /// loads, runs, and is wrong.</para></summary>
-public sealed class SileroVadParityTests
+public sealed class SileroVadParityTests(ITestOutputHelper log)
 {
     private static string? RefDir => Environment.GetEnvironmentVariable("HARTSYINFERENCE_WAKE_REF_DIR");
     private static string? ModelsDir => Environment.GetEnvironmentVariable("HARTSYINFERENCE_WAKE_MODELS");
@@ -38,6 +39,7 @@ public sealed class SileroVadParityTests
         float maxAbs = 0f;
         for (int i = 0; i < reference.Length; i++)
             maxAbs = MathF.Max(maxAbs, MathF.Abs(reference[i] - probabilities[i]));
+        log.WriteLine($"per-chunk probability max abs difference {maxAbs:E2} over {reference.Length} chunks");
         Assert.True(maxAbs < 1e-3f, $"per-chunk probability max abs diff {maxAbs} exceeds 1e-3 over {reference.Length} chunks");
 
         // jfk.wav is continuous speech, so a model stuck near zero would still pass a diff-only check if the

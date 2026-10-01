@@ -22,6 +22,14 @@ public static class Fft
     private static readonly Dictionary<int, BluesteinPlan> _bluesteinCache = new();
     private static readonly ConcurrentDictionary<int, (double[] Cos, double[] Sin)> _directTwiddleCache = new();
 
+    // Sizes that are not powers of two take the direct DFT below this and Bluestein from it up.
+    private const int DirectDftLimit = 64;
+
+    /// <summary>Whether <see cref="Transform"/> takes the Bluestein path for <paramref name="n"/>: not a power of two,
+    /// and too large for the direct DFT. That path allocates on every call, so a streaming caller plans such a size
+    /// with <see cref="FftPlan"/> when it can. Every other size keeps this class's own path, and its output.</summary>
+    internal static bool UsesBluestein(int n) => n >= DirectDftLimit && (n & (n - 1)) != 0;
+
     /// <summary>Rounds <paramref name="n"/> up to a power of two, the size the radix-2 path needs.</summary>
     public static int NextPow2(int n)
     {
@@ -41,7 +49,7 @@ public static class Fft
             // Non-power-of-two. Tiny sizes → direct O(n²) DFT; larger (e.g. YuE Vocos iSTFT n_fft=3528) → Bluestein
             // (chirp-z: any-size DFT via power-of-two FFTs, O(n log n), no per-op trig). The O(n²) DirectDft here was
             // a ~37-billion-inline-trig-call/song vocoder-decode bottleneck (~18 min → seconds).
-            if (n < 64) DirectDft(re, im, n);
+            if (n < DirectDftLimit) DirectDft(re, im, n);
             else Bluestein(re, im, n);
             return;
         }
@@ -148,7 +156,8 @@ public static class Fft
     internal static void DirectDft(Span<float> re, Span<float> im, int n)
     {
         // Bounds the stackalloc below and the [n, n] table; larger sizes belong to Bluestein.
-        if (n < 1 || n >= 64) throw new ArgumentOutOfRangeException(nameof(n), n, "DirectDft handles 1 ≤ n < 64.");
+        if (n < 1 || n >= DirectDftLimit)
+            throw new ArgumentOutOfRangeException(nameof(n), n, $"DirectDft handles 1 ≤ n < {DirectDftLimit}.");
         (double[] cosTab, double[] sinTab) = GetDirectTwiddles(n);
         Span<float> outRe = stackalloc float[n];
         Span<float> outIm = stackalloc float[n];

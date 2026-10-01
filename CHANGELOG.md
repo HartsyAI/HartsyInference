@@ -6,6 +6,85 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.229
+
+- **The voice front end is about 3× faster at p50 and allocation-free, and still misses its 2 ms budget on this
+  box.** Silero VAD plus RNNoise per 20 ms frame, on one pinned core with frames back to back
+  (`VoiceFrontendBenchTests`, six runs on the final head): p50 1.57–1.70 ms, p99 3.72–5.72 ms, max 4.3–7.3 ms. In
+  alpha.226 it was p50 5.1 ms, p99 7.0 ms and max 10.9 ms; the voice plan allows 2 ms. The thread's own CPU time
+  matches wall time within 0.01 ms, so the slow frames are not preemption. Allocation fell from 102 KB per frame to
+  none, and no GC ran while timed. Most of what remains is RNNoise's six F32 GRU products per 10 ms (1152×384 each),
+  which are bound by memory bandwidth. F16 weights would halve that and int8 would quarter it; that is a precision
+  decision, and it is left open here.
+- **Off the quiet bench, weight traffic decides the budget.** Measured 2026-10-01 on the i7-6900K (20 MB L3), pinned
+  to CPU 0.
+  - **Only clean runs count.** Each run kept no foreign dotnet build or test before or after it, and no SwarmUI
+    request landed during it, as checked against the SwarmUI journal (`tests/swarm-quiet-window.sh --verify-since`
+    for the latest runs). Runs that overlapped a SwarmUI generation were discarded.
+  - **At the live 20 ms cadence with no extra load**, p50 is 2.61–2.64 ms in three runs and p99 4.2–5.2 ms, so p50
+    misses too. Between frames, other work on the box evicts the weights that the back-to-back bench keeps hot by
+    re-reading them every 1.6 ms.
+  - **With 4 threads streaming over large buffers on other cores**, p50 is 10.3–10.7 ms over two runs; with 8 it is
+    15.5–16.4 ms, with p99 up to 18.6 and 28.2 ms. That load takes 19–22 GB/s of this box's DRAM bandwidth. The
+    thread's CPU time rises with its wall time, so these are memory stalls, and the clock stayed at 3.5 GHz.
+  - **At the live cadence against 8 streaming threads**, 632 of 2,000 frames started late, so the front end barely
+    keeps up with real time.
+  - **The same 8 load threads on L1-resident buffers change nothing**: p50 1.54 ms.
+  - **Under load, each stage's time is its weight bytes over the bench thread's share of DRAM bandwidth.** That share
+    is 2.1–2.3 GB/s against 4 threads and 1.4–1.6 GB/s against 8, and RNNoise and Silero agree on it within 3–11 %
+    in every run. RNNoise reads its 11.5 MB of F32 weights twice per frame; Silero reads its 1.2 MB once.
+  - By that arithmetic, F16 or int8 GRU weights shrink the stall in proportion, but neither gets under 2 ms against
+    saturating load unless the weights also stay in L3.
+- `FftPlan` (Audio, `Preprocessing`): a planned mixed-radix complex FFT ported from the kiss_fft RNNoise vendors —
+  radix 2, 3, 4 and 5, twiddles and input permutation computed once, nothing allocated per call, upstream's
+  operation order and twiddle table. `StreamingStft`, `StreamingIstft` and RNNoise's pitch transform use it only
+  where `Fft` would take Bluestein: a size of 64 or more that is not a power of two. At RNNoise's 960 points Bluestein
+  ran two padded 2048-point transforms and allocated 16 KB per call. Every other size stays on `Fft`, whose
+  output is unchanged. `FftPlan` matches a double-precision DFT to 1e-6 relative at fourteen sizes.
+- RNNoise's two convolutions each produce a single step, so they now run as `Linear` over flattened views of the same
+  weights rather than through the generic `Conv1d` kernel, whose per-tap bookkeeping dominated at that length.
+- `SileroVad` runs its STFT as one matrix product over the four hop-spaced windows, and each encoder convolution as
+  an unfold followed by a matrix product, with activations kept time-major and the weights only viewed. Against the
+  onnxruntime reference its per-chunk probabilities now differ by at most 8.9e-7 over 343 chunks of jfk.wav (4.77e-6
+  before); against the previous forward, by at most 4.35e-6 over 686 chunks clean and noisy, with the same 233 chunks
+  scoring as speech.
+- `Resampler.ResampleRange` computes only the requested slice of outputs, running the interior ones as a vector dot
+  product over reversed taps, which matches `Resample` to float rounding. `StreamingResampler` uses it and no longer
+  resamples the context padding it throws away. Its output therefore matches the previous output to float rounding
+  rather than bit for bit, and the rounding follows the CPU's vector width. That applies in `RnnoiseStream` and in the
+  phone gateway's outbound path, its two users. `Resample` itself is unchanged. Measured floor against the previous
+  block-and-slice output, on jfk.wav in 20 ms frames (AVX2):
+  - max abs 3.0–4.2e-7 and RMS 2.1–2.3e-8, 136 dB under the speech's 0.142 RMS;
+  - for 8 ↔ 16 kHz, 16 ↔ 48 kHz and 8 ↔ 48 kHz in both directions, and the gateway's 22.05 and 24 kHz → 8 kHz;
+  - pinned below 1e-5 by `StreamingResamplerTests.SliceOnlyPath_MatchesTheOldBlockAndSlicePath_ToFloatRounding`.
+- `RnnoisePitchAnalyzer`'s coarse lag sweep runs a vector of lags at once. Each lane sums its own lag in the original
+  order, so the denoiser's output is bit-identical (all 528,000 samples of a 48 kHz test clip).
+- **The front end no longer allocates.** `CpuParallel.For` captured its body in a closure, and C# builds a captured
+  parameter's closure on entry to the method, so every `LinearTransB` and `Conv1d` call allocated 64 B and 104 B even
+  when it then ran inline. The new `CpuParallel.For<TState>` takes the loop state explicitly and keeps its fan-out
+  lambda in a separate method; those two kernels pass their tile state and a delegate held in a static field. The loop
+  bodies moved without changing. `RnnoiseStream` at 16 kHz and `SileroVad` now allocate nothing per frame inside
+  `CpuParallel.EnterInline()`. Other `CpuParallel.For` callers are untouched.
+- `LinearTransB` runs four weight rows at a time. Each row still performs exactly the single-row sequence (products,
+  horizontal sum, scalar tail and per-tile accumulation), so every CPU `Linear` output is bit-identical. It is faster
+  because one row's dependent FMA chain left the core mostly idle: a 1152×384 product went from ≈ 75 µs to ≈ 58 µs on
+  one core. `LinearTransBIdentityTests` compares against the previous loop byte for byte.
+- RNNoise parity with upstream's float build is unchanged: median 0.017 % clean and 0.019 % with noise, with the
+  same p99 and max against all four references.
+- Tests: `FftPlanTests` (including a bit-for-bit pin to upstream kiss_fft at 960 points and a comparison with the
+  Bluestein path at 960 and 480), `StreamingStftTests.Frames_ComeFromThePlanOnlyAtBluesteinSizes` (bit for bit: 512
+  stays on `Fft`, 960 plans), `ResamplerTests.ResampleRange_MatchesTheSameSliceOfResample`, the streaming floor
+  above, `VoiceFrontendAllocationTests` (zero bytes over 1000 frames), `LinearTransBIdentityTests`, and three
+  stateful-`For` cases in `CpuParallelInlineScopeTests`. `SileroVadParityTests` logs its maximum difference.
+- `VoiceFrontendBenchTests` changes:
+  - It reports thread CPU time per frame beside wall time, and picks the core whose hyperthread pair is idlest.
+  - It logs the bench core's clock from cpufreq.
+  - Three new opt-in knobs:
+    - `HARTSY_VOICE_FRONTEND_BENCH_LOAD_THREADS=N` runs a STREAM triad on N other cores, pinned outside the bench core's
+      hyperthread pair.
+    - `HARTSY_VOICE_FRONTEND_BENCH_LOAD=l1` keeps that load's buffers in L1, as a control without memory traffic.
+    - `HARTSY_VOICE_FRONTEND_BENCH_PACED=1` starts one frame every 20 ms, spinning in between.
+
 ## alpha.228
 
 - **Folders under the models root are matched ignoring case when the engine's spelling is missing.** On a
