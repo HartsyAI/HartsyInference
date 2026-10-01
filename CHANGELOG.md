@@ -50,7 +50,8 @@ stable release will require. Dates are UTC.
 - RNNoise parity with upstream's float build is unchanged: median 0.017 % clean and 0.019 % with noise, with the
   same p99 and max against all four references.
 - Tests: `FftPlanTests` (including a bit-for-bit pin to upstream kiss_fft at 960 points and a comparison with the
-  Bluestein path at 960 and 480), `ResamplerTests.ResampleRange_MatchesTheSameSliceOfResample`,
+  Bluestein path at 960 and 480), `StreamingStftTests.Frames_ComeFromThePlanOnlyAtBluesteinSizes` (bit for bit: 512
+  stays on `Fft`, 960 plans), `ResamplerTests.ResampleRange_MatchesTheSameSliceOfResample`,
   `VoiceFrontendAllocationTests` (zero bytes over 1000 frames), `LinearTransBIdentityTests`, and three stateful-`For`
   cases in `CpuParallelInlineScopeTests`. `VoiceFrontendBenchTests` now reports thread CPU time per frame beside wall
   time, and picks the core whose hyperthread pair is idlest. `SileroVadParityTests` logs its maximum difference.
