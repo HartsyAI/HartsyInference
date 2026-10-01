@@ -174,6 +174,24 @@ JIT/warm-up blip described above (absent from run 2 onward; irrelevant to a long
 many turns) — it is smaller after Tier 2 (peak ~23 ms vs. ~53 ms after Tier 1) since there is simply less new
 code being JITted into a hot path.
 
+## Review finding: the Tier 2 fast-path check had a float-order gap
+
+`claude[bot]`'s review of the PR caught a real edge case: `TopPStep.Apply`'s fast-path check
+(`candidateSum >= _p`) sums candidate probabilities in vocabulary-index order; the kept-set walk sums the SAME
+values again, in sorted order. Float addition isn't associative, so when `p` sits within a few ULPs of the
+true candidate total the two sums can round to different floats — `candidateSum` clears `p`, but the sorted
+walk can exhaust every candidate without doing so, which (before the fix below) left `keep == candidateCount`
+with a slightly different kept set than the old full-sort code would have picked. Confirmed this is a REAL,
+not theoretical, gap: a throwaway CPU-only check found `indexOrderSum != sortedOrderSum` by roughly 1e-6 for
+every one of three seeds tried, at vocab sizes 2K/20K/152K.
+
+Fix: detect that the sorted walk never reached `p` (it can only happen in exactly this scenario, since
+`candidateSum >= _p` already guarantees the exact candidate total, summed the other way, clears `p`) and fall
+through to the full-vocabulary sort instead — always correct, and only pays the fallback's cost in a margin
+case real model logits essentially never land on exactly. `TopPSortRefactorIdentityTests`'
+`AtTheCandidateSumRoundingBoundary` cases compute both sums independently (a third, from-scratch reference)
+and set `p` in the gap between them when one exists, which is exactly the scenario this fix targets.
+
 ## Regression evidence
 
 - `TopPSortRefactorIdentityTests`: 22 cases (20 after Tier 1, +2 after Tier 2 for the candidate/fallback split),
