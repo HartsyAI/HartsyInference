@@ -235,4 +235,37 @@ public sealed class InpaintOnlyMaskedTests
         Assert.Equal(CanvasHeight, composited.Height);
         Assert.Contains("inpaint_only_masked", composited.Meta.Keys);
     }
+
+    /// <summary>Default composite is a hard edge (SwarmUI's ThresholdMask); a blurred mask only softens the denoise, not the final paste.</summary>
+    [Fact]
+    public void Composite_ByDefault_PastesTheBlurredEdgeAtFullStrength()
+    {
+        ImageRequest hardRequest = RequestWith(MaskWithRect(64, 48, 32, 24), shrinkGrow: 8, grow: 0) with
+        {
+            Inpaint = new Inpaint { Mask = MaskWithRect(64, 48, 32, 24), ShrinkGrow = 8, Blur = 8 },
+        };
+        ImageRequest softRequest = hardRequest with { MaskCompositeUnthresholded = true };
+
+        byte hardEdge = EdgePixelAfterComposite(hardRequest);
+        byte softEdge = EdgePixelAfterComposite(softRequest);
+
+        Assert.Equal(200, hardEdge);
+        Assert.InRange(softEdge, 41, 199);
+    }
+
+    /// <summary>The pixel one step outside the painted rect, where a blur leaves a weak but nonzero mask value.</summary>
+    private static byte EdgePixelAfterComposite(ImageRequest request)
+    {
+        InpaintOnlyMasked.Plan plan = InpaintOnlyMasked.Prepare(request)!;
+        ImageResult generated = new ImageResult
+        {
+            Rgb = Enumerable.Repeat((byte)200, plan.GenerateWidth * plan.GenerateHeight * 3).ToArray(),
+            Width = plan.GenerateWidth,
+            Height = plan.GenerateHeight,
+            Seed = 1,
+            Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+        };
+        ImageResult composited = InpaintOnlyMasked.Composite(generated, plan);
+        return composited.Rgb[(60 * CanvasWidth + 62) * 3];
+    }
 }

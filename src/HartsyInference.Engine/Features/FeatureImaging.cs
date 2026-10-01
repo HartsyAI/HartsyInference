@@ -155,6 +155,16 @@ public static class FeatureImaging
         }
     }
 
+    /// <summary>Hard threshold like SwarmUI's ThresholdMask: values at or above <paramref name="threshold"/> become 255, the rest 0.</summary>
+    public static void BinarizeInPlace(byte[] mask, byte threshold)
+    {
+        ArgumentNullException.ThrowIfNull(mask);
+        for (int i = 0; i < mask.Length; i++)
+        {
+            mask[i] = mask[i] >= threshold ? (byte)255 : (byte)0;
+        }
+    }
+
     private static void ValidateCrop(int sourceWidth, int sourceHeight, int x, int y, int width, int height)
     {
         if (width <= 0 || height <= 0)

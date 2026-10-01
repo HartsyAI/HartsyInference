@@ -6,6 +6,18 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.230
+
+- **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
+  pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
+  `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
+  Blur only softens the in-denoise blend, unless `ImageRequest.MaskCompositeUnthresholded` asks for the soft paste.
+  `Inpaint.RecompositeMask` turns the full-canvas paste off (Init Image Recomposite Mask); the crop and segment paths
+  always paste. `RecipeImg2ImgBinder` switches the pipelines' own paste off whenever a mask is present, so a caller
+  driving a recipe pipeline directly with a mask gets no paste and should go through `IImagesService`.
+- A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
+  before the full-canvas run; before, the mask resolver's guard threw.
+
 ## alpha.229
 
 - **Mask Grow and the tight "inpaint only masked" crop now match SwarmUI.** Mask Grow expands the mask by

@@ -10,6 +10,19 @@ public static class MaskResolver
     /// <summary>Builds the mask tensor for <paramref name="inpaint"/>, or null when there is no mask. Caller disposes.</summary>
     public static Tensor? Resolve(Inpaint? inpaint, int targetWidth, int targetHeight)
     {
+        byte[]? maskBytes = ResolveBytes(inpaint, targetWidth, targetHeight);
+        if (maskBytes is null)
+        {
+            return null;
+        }
+        Tensor mask = FeatureImaging.GrayToMaskTensor(maskBytes, targetWidth, targetHeight);
+        Logs.Verbose($"[Features][Mask] enabled: {targetWidth}x{targetHeight}, grow={inpaint!.Grow}, blur={inpaint.Blur}.");
+        return mask;
+    }
+
+    /// <summary>The mask as an L8 buffer (255 = inpaint) at the target size, or null; shared with the end recomposite.</summary>
+    public static byte[]? ResolveBytes(Inpaint? inpaint, int targetWidth, int targetHeight)
+    {
         if (inpaint?.Mask is null)
         {
             return null;
@@ -32,8 +45,6 @@ public static class MaskResolver
                 + "seeing it here means a caller drove a recipe pipeline directly and would silently get a full-canvas "
                 + "inpaint instead. Route through IImagesService.GenerateAsync.");
         }
-        Tensor mask = FeatureImaging.GrayToMaskTensor(maskBytes, targetWidth, targetHeight);
-        Logs.Verbose($"[Features][Mask] enabled: {targetWidth}x{targetHeight}, grow={inpaint.Grow}px, blur={inpaint.Blur}px.");
-        return mask;
+        return maskBytes;
     }
 }
