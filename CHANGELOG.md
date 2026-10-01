@@ -6,6 +6,59 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.236 (tentative)
+
+- **`HartsyInference.Voice`: opt-in per-call voice agent.** New packable library (references Audio, Engine and Tools;
+  not in the meta package). `VoiceModelSet.LoadAsync(engine, options)` opens Whisper and Kokoro runner leases on an
+  engine built on `AudioDevice` (checked) and loads the per-session front-end weights from the wake models' `vad` and
+  `denoise` folders: Silero is required, and RNNoise is required when `Denoise` is on, failing at load rather than
+  passing raw audio through. `WarmAsync` runs five syntheses and one recognition of a second of silence on the model
+  set's GPU thread, plus a one-token, thinking-off generation on `LlmDevice`. The five texts cover Kokoro's
+  power-of-two frame-length buckets from 32 to 512, so a reply's first sentence finds its bucket's convolution plans
+  already built. `VoiceAgentSession(models, ITextService, ToolRegistry, options)` is one call: `StartAsync`,
+  `PushInbound` (never blocks; 30 s, oldest dropped and counted), `ReadOutbound` (never blocks; zero-fills),
+  `SpeakAsync`, `PushDtmf` (`[DTMF n]` user turns), `Transcript`, `EventRaised` (in order, on a pool thread),
+  `EndAsync`. States: Created, Warming, Listening, Thinking, Speaking, ToolRunning, Ended.
+- Threads:
+  - The audio thread is dedicated, runs in `CpuParallel`'s inline scope with its own `CpuBackend`, sleeps on a
+    doorbell and allocates nothing per 20 ms frame (asserted over 1000 frames). It runs RNNoise at int16 scale, then
+    Silero endpointing (700 ms silence, 15 s cut), then barge-in (after a 300 ms hold-off, 200 ms at probability
+    0.6 or above; it flushes the outbound queue and `CancelAsync`s the turn).
+  - The GPU thread (owned by the model set) holds the device gate for one job at a time, and frees each job's
+    activations with the pool's reservation kept (`FreeActivations(trimPool: false)`). It queues one pool trim per
+    turn when the session returns to listening, skipped if the next turn's work is already queued.
+  - The turn loop runs the token-trimmed conversation through `ToolLoop` with thinking off and `Device` on every
+    request, then streams sentences to the GPU thread, resamples and queues them.
+- The outbound flush is consumer-applied (the ring allows discards only on the reader): the audio thread bumps an
+  epoch, the reader discards, the writer re-bumps when a frame lands after the discard, and a new turn waits until
+  the reader has applied every flush.
+- `ReadOutbound` allocates nothing, also while a turn waits for playback, space or a flush.
+  - The producer's waiter carries its target, and the reader completes it once, on the read that reaches it.
+  - The token completes the waiter through `UnsafeRegister`, so the wake queues only the producer's continuation.
+  - A full queue wakes its writer once per quarter of the ring.
+- An utterance whose speech lies within the reply (plus a hold-off-long echo tail) and never barged in is not
+  answered, and is counted. Two user or two plain assistant messages in a row merge, so turns stay alternating.
+- A revoked lease (engine free-memory, backend switch) is reopened once outside the gate and the job retried.
+- Per-turn `VoiceTurnMetrics` are logged as `[Voice] turn N: …` with every `voice.*` stage.
+- Tests (`tests/HartsyInference.Voice.Tests`, 76 unit tests on fakes): endpointing, barge-in, the flush protocol
+  (with a concurrent-flush ordering stress), GPU-thread jobs (every job keeps the pool, one trim per turn),
+  conversation trimming, model-set load contract, the warm-up (one synthesis per length bucket), whole turns, lease
+  revocation, and zero allocation on the audio thread and on the reader (0 B over 1000 reads with a cancellable
+  wait pending, one wake at its position).
+- Integration tests (CPU, real weights):
+  - JFK endpointing: Silero 0.57 ms per 20 ms frame.
+  - Whisper tiny through the session: 100 % JFK content-word recall, 91 % narrowband.
+- GPU classes pass on the RTX 3060:
+  - Session end to end, scripted LLM: Whisper small.en 89-156 ms per utterance (gate 350 ms). Kokoro takes 195 ms
+    median for a 15-word sentence (gate 250 ms) and 241 ms for a turn's first sentence (18 words, first synthesis),
+    within the 250 ms budget, with alpha.232's length-bucketed conv plans and the bucket warm-up. The first turn
+    totals 1195 ms from end of speech to first reply audio (budget 1.3 s). Recall is JFK 11/11, reply 8/9.
+  - Barge-in: no reply audio read after the decision, flush applied 4.1 ms later (gate 100 ms).
+  - Pinned runners: the leases survive memory-pressure switches with no reopen.
+  - A Slow Qwen3 class runs only with an explicit 4090 grant.
+- With the in-flight RNNoise weights, RNNoise + Silero measured 6.2 ms per 20 ms frame (gate 2 ms), so `Denoise`
+  defaults off. Design: `docs/Research/VOICE_AGENT_SESSION.md`.
+
 ## alpha.236
 
 - **Non-greedy sampling (temperature/top-p) no longer sorts the whole vocabulary from scratch every token.**
