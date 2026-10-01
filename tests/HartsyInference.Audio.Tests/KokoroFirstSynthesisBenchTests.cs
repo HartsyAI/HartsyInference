@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Text.Json;
 using HartsyInference.Audio.Frontends;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Pipelines;
@@ -23,26 +24,30 @@ namespace HartsyInference.Audio.Tests;
 /// 15-word sentences, then the same 20 again. The first pass is the gate; the second pass speaks lengths the backend has
 /// already seen, so the difference between the passes is per-length setup. <c>HARTSY_KOKORO_FIRST_MODE=gaps</c> sleeps
 /// 2-5 s (fixed sequence) before every sentence of both passes, the way turns are spaced on a call; comparing it with
-/// the default back-to-back mode on the same sentences isolates what idle time costs (GPU clocks).</para>
+/// the default back-to-back mode on the same sentences isolates what idle time costs. <c>HARTSY_KOKORO_FIRST_ORDER=reverse</c>
+/// speaks the 20 in reverse order (rows stay keyed by sentence), so two runs can show the audio does not depend on which
+/// length came first.</para>
 ///
 /// <para>Per sentence it records wall time (G2P included, as the synthesizer lease runs it), token and frame counts,
-/// device→host syncs, and the backend's per-shape setup: cuDNN convolution plans built (with heuristic and finalize
-/// time), cuBLASLt plans built, and the default pool's reserved bytes. <c>HARTSY_KOKORO_FIRST_PROFILE=1</c> turns the
-/// pipeline stage timer on (it syncs at every stage, so gate numbers come from runs without it).
-/// <c>HARTSY_KOKORO_FIRST_CLEANUP</c> picks what runs after each synthesis, outside the timer: <c>session</c> (default)
-/// is the voice session's GPU worker, <c>FreeActivations()</c>, which also trims the pool; <c>free</c> keeps the pool
-/// (<c>FreeActivations(trimPool: false)</c>); <c>none</c> runs nothing. <c>HARTSY_KOKORO_FIRST_KNOBS</c> takes a settings
-/// JSON for a fix arm (for example <c>{"numerics.audioConvCudnn": false}</c>). Whisper-tiny verifies every first-pass
-/// sentence after all timing.</para>
+/// device→host syncs, and the backend's per-shape setup: cuDNN convolution plans built (from a length bucket's engine
+/// choice or by their own heuristic), bucket reference builds, heuristic and finalize time, cuBLASLt plans, and the
+/// default pool's reserved bytes. <c>HARTSY_KOKORO_FIRST_PROFILE=1</c> turns the pipeline stage timer on (it syncs at
+/// every stage, so gate numbers come from runs without it). <c>HARTSY_KOKORO_FIRST_CLEANUP</c> picks what runs after
+/// each synthesis, outside the timer: <c>session</c> (default) is <c>FreeActivations()</c>, which also trims the pool;
+/// <c>free</c> keeps the pool (<c>FreeActivations(trimPool: false)</c>, what the voice session runs per job); <c>none</c>
+/// runs nothing. <c>HARTSY_KOKORO_FIRST_KNOBS</c> takes an engine settings document for a fix arm, for example
+/// <c>{"settings": {"numerics.audioConvCudnn": false}}</c>. Whisper-tiny verifies every first-pass sentence after all
+/// timing.</para>
 ///
 /// <para>Output: tables to the test log and <c>HARTSY_KOKORO_FIRST_OUT</c>; with <c>HARTSY_KOKORO_FIRST_OUT_DIR</c>, a
 /// per-sentence CSV (UTC start and end, for joining with an nvidia-smi clock log) and each first-pass sentence as
 /// <c>.f32</c>/<c>.wav</c>; with <c>HARTSY_KOKORO_FIRST_REF_DIR</c>, each first-pass sentence is compared with the
-/// same-named <c>.f32</c> there.</para></summary>
+/// same-named <c>.f32</c> there (byte identity, else log-spectral correlation and max-abs).</para></summary>
 public sealed class KokoroFirstSynthesisBenchTests
 {
     private const string GateEnvVar = "HARTSY_KOKORO_FIRST";
     private const string ModeEnvVar = "HARTSY_KOKORO_FIRST_MODE";
+    private const string OrderEnvVar = "HARTSY_KOKORO_FIRST_ORDER";
     private const string ProfileEnvVar = "HARTSY_KOKORO_FIRST_PROFILE";
     private const string CleanupEnvVar = "HARTSY_KOKORO_FIRST_CLEANUP";
     private const string KnobsEnvVar = "HARTSY_KOKORO_FIRST_KNOBS";
@@ -105,6 +110,14 @@ public sealed class KokoroFirstSynthesisBenchTests
         }
     }
 
+    [Theory]
+    [InlineData("{\"settings\": {\"numerics.audioConvCudnn\": false}}", true)]
+    [InlineData("{\"profile\": \"reference\"}", true)]
+    [InlineData("{\"numerics.audioConvCudnn\": false}", false)]
+    [InlineData("[]", false)]
+    public void KnobDocument_NeedsSettingsOrProfile(string json, bool applies) =>
+        Assert.Equal(applies, AppliesSettings(json));
+
     [Fact]
     [Trait("Category", "GpuIntegration")]
     [Trait("Category", "RealWeights")]
@@ -125,6 +138,10 @@ public sealed class KokoroFirstSynthesisBenchTests
         bool profile = Environment.GetEnvironmentVariable(ProfileEnvVar) == "1";
         if (!string.IsNullOrWhiteSpace(knobs))
         {
+            // A document without "settings" or "profile" applies nothing, silently: an arm that meant to change the engine
+            // would measure the default instead.
+            Assert.True(AppliesSettings(knobs), $"{KnobsEnvVar} must be a settings document, e.g. "
+                + "{\"settings\": {\"numerics.audioConvCudnn\": false}}");
             KnobFile.Apply(knobs, KnobsEnvVar);
         }
         ConcurrentQueue<string> captured = new();
@@ -150,6 +167,7 @@ public sealed class KokoroFirstSynthesisBenchTests
     private async Task RunAsync(string cmudict, string? knobs, bool profile, ConcurrentQueue<string> captured)
     {
         bool gaps = string.Equals(Environment.GetEnvironmentVariable(ModeEnvVar), "gaps", StringComparison.OrdinalIgnoreCase);
+        bool reverse = string.Equals(Environment.GetEnvironmentVariable(OrderEnvVar), "reverse", StringComparison.OrdinalIgnoreCase);
         Cleanup cleanup = (Environment.GetEnvironmentVariable(CleanupEnvVar) ?? "session").ToLowerInvariant() switch
         {
             "session" => Cleanup.Session,
@@ -170,8 +188,9 @@ public sealed class KokoroFirstSynthesisBenchTests
         using KokoroPipeline kokoro = await KokoroPipeline.LoadAsync();
         using WhisperPipeline verify = await WhisperPipeline.LoadAsync(WhisperTiny);
         _out.WriteLine($"Kokoro + {WhisperTiny} loaded in {load.Elapsed.TotalSeconds:F1}s (excluded)");
-        string arm = $"mode={(gaps ? "gaps 2-5 s" : "back-to-back")} cleanup={cleanup} "
-            + $"stage-timer={(profile ? "on" : "off")} knobs={(string.IsNullOrWhiteSpace(knobs) ? "default" : knobs.Trim())}";
+        string arm = $"mode={(gaps ? "gaps 2-5 s" : "back-to-back")} order={(reverse ? "reverse" : "forward")} cleanup={cleanup} "
+            + $"stage-timer={(profile ? "on" : "off")} length-buckets={(EngineKnobs.AudioConvLengthBuckets.Value ? "on" : "off")} "
+            + $"knobs={(string.IsNullOrWhiteSpace(knobs) ? "default" : knobs.Trim())}";
         _out.WriteLine($"arm: {arm}");
 
         // The voice session's warm-up: one synthesis before the first real sentence.
@@ -181,26 +200,27 @@ public sealed class KokoroFirstSynthesisBenchTests
         table.AppendLine();
         Row probe1 = Measure(backend, kokoro, g2p, ShortProbe, cleanup, captured);
         Row probe2 = Measure(backend, kokoro, g2p, ShortProbe, cleanup, captured);
-        table.AppendLine($"\"{ShortProbe}\" first {Ms(probe1.WallMs)} ms ({probe1.ConvBuilds} conv plans, "
-            + $"{Ms(probe1.ConvBuildMs)} ms building), second {Ms(probe2.WallMs)} ms ({probe2.ConvBuilds} conv plans)");
+        table.AppendLine($"\"{ShortProbe}\" first {Ms(probe1.WallMs)} ms ({probe1.ConvPlans} conv plans, {probe1.ConvReferences} "
+            + $"bucket references, {Ms(probe1.ConvBuildMs)} ms building), second {Ms(probe2.WallMs)} ms ({probe2.ConvPlans} conv plans)");
         table.AppendLine();
 
-        List<Row> first = RunPass(backend, kokoro, g2p, gaps, cleanup, captured);
-        List<Row> repeat = RunPass(backend, kokoro, g2p, gaps, cleanup, captured);
+        Row[] first = RunPass(backend, kokoro, g2p, gaps, reverse, cleanup, captured);
+        Row[] repeat = RunPass(backend, kokoro, g2p, gaps, reverse, cleanup, captured);
         // Read before verification: the recognizer builds plans for its own convolutions on this backend.
         string families = backend.DescribeCudnnConvPlanFamilies(25);
 
         // Verification after all timing, so the recognizer's own setup never lands inside a timed sentence.
         Resampler toWhisper = Resampler.Create(kokoro.Config.SampleRate, WhisperRate);
         WhisperOptions options = new WhisperOptions { Language = "en" };
-        for (int i = 0; i < first.Count; i++)
+        for (int i = 0; i < first.Length; i++)
         {
             string heard = verify.TranscribeAudio(backend, toWhisper.Resample(first[i].Wave), WhisperRate, options);
             first[i] = first[i] with { Heard = heard, Recall = AudioParityMetrics.ContentWordRecall(Sentences[i], heard) };
         }
 
-        AppendSummary(table, first, repeat);
-        AppendSentences(table, first, repeat, refDir);
+        Comparison[]? versusReference = string.IsNullOrEmpty(refDir) ? null : CompareWithReference(first, refDir);
+        AppendSummary(table, first, repeat, versusReference);
+        AppendSentences(table, first, repeat, versusReference);
         table.AppendLine();
         table.AppendLine("Kokoro cuDNN convolution families, costliest first (plans built by the warm-up, probes and both passes):");
         table.AppendLine("```");
@@ -217,17 +237,20 @@ public sealed class KokoroFirstSynthesisBenchTests
         }
     }
 
-    private static List<Row> RunPass(CudaBackend backend, KokoroPipeline kokoro, EnglishG2P g2p, bool gaps, Cleanup cleanup,
-        ConcurrentQueue<string> captured)
+    /// <summary>Speaks the 20 sentences once, in order or in reverse; the result is indexed by sentence either way. Gap
+    /// lengths follow the speaking position, so both orders sleep the same sequence.</summary>
+    private static Row[] RunPass(CudaBackend backend, KokoroPipeline kokoro, EnglishG2P g2p, bool gaps, bool reverse,
+        Cleanup cleanup, ConcurrentQueue<string> captured)
     {
-        List<Row> rows = new List<Row>(Sentences.Length);
-        for (int i = 0; i < Sentences.Length; i++)
+        Row[] rows = new Row[Sentences.Length];
+        for (int position = 0; position < Sentences.Length; position++)
         {
+            int index = reverse ? Sentences.Length - 1 - position : position;
             if (gaps)
             {
-                Thread.Sleep(TimeSpan.FromSeconds(GapSeconds(i)));
+                Thread.Sleep(TimeSpan.FromSeconds(GapSeconds(position)));
             }
-            rows.Add(Measure(backend, kokoro, g2p, Sentences[i], cleanup, captured));
+            rows[index] = Measure(backend, kokoro, g2p, Sentences[index], cleanup, captured) with { Position = position + 1 };
         }
         return rows;
     }
@@ -264,63 +287,104 @@ public sealed class KokoroFirstSynthesisBenchTests
                 break;
         }
         string stages = string.Join(" || ", captured.Where(l => l.Contains("[Kokoro]", StringComparison.Ordinal)));
-        return new Row(text, startUtc, endUtc, wallMs, g2pMs, kokoro.CountTokens(ipa), wave.Length / SamplesPerFrame, syncs,
-            convAfter.PlanBuilds - convBefore.PlanBuilds, convAfter.BuildMs - convBefore.BuildMs,
-            convAfter.HeuristicMs - convBefore.HeuristicMs, convAfter.FinalizeMs - convBefore.FinalizeMs,
-            convAfter.RuntimeCompiledBuilds - convBefore.RuntimeCompiledBuilds,
-            ltMissesAfter - ltMissesBefore, ltMsAfter - ltMsBefore, reservedBefore, reservedAfter,
-            wave, AudioParityMetrics.Sha256Hex(wave)[..12], stages, "", double.NaN);
+        return new Row(text, 0, startUtc, endUtc, wallMs, g2pMs, kokoro.CountTokens(ipa), wave.Length / SamplesPerFrame, syncs,
+            convAfter.PlanBuilds - convBefore.PlanBuilds, convAfter.BucketPlanBuilds - convBefore.BucketPlanBuilds,
+            convAfter.ReferenceBuilds - convBefore.ReferenceBuilds, convAfter.BucketFallbacks - convBefore.BucketFallbacks,
+            convAfter.BuildMs - convBefore.BuildMs, convAfter.HeuristicMs - convBefore.HeuristicMs,
+            convAfter.FinalizeMs - convBefore.FinalizeMs, ltMissesAfter - ltMissesBefore, ltMsAfter - ltMsBefore,
+            reservedBefore, reservedAfter, wave, AudioParityMetrics.Sha256Hex(wave)[..12], stages, "", double.NaN);
     }
 
-    private static void AppendSummary(StringBuilder table, List<Row> first, List<Row> repeat)
+    /// <summary>Each first-pass sentence against the same-named <c>.f32</c> in <paramref name="refDir"/>.</summary>
+    private static Comparison[] CompareWithReference(Row[] first, string refDir)
     {
-        table.AppendLine("| Pass | p50 ms | p95 ms | min ms | max ms | mean conv plans | mean conv build ms | mean Lt plans "
-            + "| mean pool growth MB | recall min / mean |");
-        table.AppendLine("|---|---:|---:|---:|---:|---:|---:|---:|---:|---|");
-        foreach ((string name, List<Row> rows) in new[] { ("first (new text)", first), ("repeat (same text)", repeat) })
+        Comparison[] result = new Comparison[first.Length];
+        for (int i = 0; i < first.Length; i++)
+        {
+            string path = Path.Combine(refDir, Name(i) + ".f32");
+            if (!File.Exists(path))
+            {
+                result[i] = new Comparison(false, false, double.NaN, double.NaN);
+                continue;
+            }
+            float[] reference = MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(path)).ToArray();
+            float[] wave = first[i].Wave;
+            if (reference.Length != wave.Length)
+            {
+                result[i] = new Comparison(true, false, double.NaN, double.NaN);
+                continue;
+            }
+            bool identical = reference.AsSpan().SequenceEqual(wave);
+            (double maxAbs, double _) = AudioParityMetrics.Compare(reference, wave);
+            result[i] = new Comparison(true, identical, identical ? 1.0 : AudioParityMetrics.LogSpectralCorrelation(reference, wave), maxAbs);
+        }
+        return result;
+    }
+
+    private static void AppendSummary(StringBuilder table, Row[] first, Row[] repeat, Comparison[]? versusReference)
+    {
+        table.AppendLine("| Pass | p50 ms | p95 ms | min ms | max ms | mean conv plans (from bucket) | mean bucket references "
+            + "| mean conv build ms | mean Lt plans | mean pool growth MB | recall min / mean |");
+        table.AppendLine("|---|---:|---:|---:|---:|---|---:|---:|---:|---:|---|");
+        foreach ((string name, Row[] rows) in new[] { ("first (new text)", first), ("repeat (same text)", repeat) })
         {
             List<double> sorted = rows.Select(r => r.WallMs).OrderBy(v => v).ToList();
             string recall = rows.All(r => double.IsNaN(r.Recall)) ? "—"
                 : $"{rows.Min(r => r.Recall):P0} / {rows.Average(r => r.Recall):P0}";
             table.AppendLine($"| {name} | {Ms(GpuBenchSupport.Percentile(sorted, 0.5))} | {Ms(GpuBenchSupport.Percentile(sorted, 0.95))} "
-                + $"| {Ms(sorted[0])} | {Ms(sorted[^1])} | {rows.Average(r => r.ConvBuilds):F1} | {rows.Average(r => r.ConvBuildMs):F1} "
-                + $"| {rows.Average(r => r.LtBuilds):F1} | {rows.Average(r => (r.ReservedAfter - r.ReservedBefore) / 1048576.0):F1} | {recall} |");
+                + $"| {Ms(sorted[0])} | {Ms(sorted[^1])} | {rows.Average(r => r.ConvPlans):F1} ({rows.Average(r => r.ConvBucketPlans):F1}) "
+                + $"| {rows.Average(r => r.ConvReferences):F1} | {rows.Average(r => r.ConvBuildMs):F1} | {rows.Average(r => r.LtPlans):F1} "
+                + $"| {rows.Average(r => (r.ReservedAfter - r.ReservedBefore) / 1048576.0):F1} | {recall} |");
         }
         int same = first.Zip(repeat).Count(p => p.First.Digest == p.Second.Digest);
         table.AppendLine();
-        table.AppendLine($"First and repeat pass give byte-identical audio for {same} of {first.Count} sentences.");
+        table.AppendLine($"First and repeat pass give byte-identical audio for {same} of {first.Length} sentences; bucket "
+            + $"fallbacks (a bucket's choice that did not finalize for a length) over both passes: "
+            + $"{first.Sum(r => r.ConvFallbacks) + repeat.Sum(r => r.ConvFallbacks)}.");
+        if (versusReference is not null)
+        {
+            Comparison[] compared = versusReference.Where(c => c.Found).ToArray();
+            Comparison[] differing = compared.Where(c => !c.Identical).ToArray();
+            string floor = differing.Length == 0 ? "" : differing.Any(c => double.IsNaN(c.LogSpectral))
+                ? "; at least one differs in length"
+                : $"; the others: log-spectral correlation ≥ {differing.Min(c => c.LogSpectral):F6}, max-abs ≤ {differing.Max(c => c.MaxAbs):E2}";
+            table.AppendLine($"Against the reference audio: {compared.Count(c => c.Identical)} of {compared.Length} sentences "
+                + $"byte-identical{floor}.");
+        }
         table.AppendLine();
     }
 
-    private static void AppendSentences(StringBuilder table, List<Row> first, List<Row> repeat, string? refDir)
+    private static void AppendSentences(StringBuilder table, Row[] first, Row[] repeat, Comparison[]? versusReference)
     {
-        table.AppendLine("| # | tokens | frames | first ms | repeat ms | G2P ms | D2H syncs | conv plans (build / heuristic / finalize ms) "
-            + "| runtime-compiled | Lt plans (ms) | pool MB before → after | recall | vs ref log-spec | heard |");
-        table.AppendLine("|---:|---:|---:|---:|---:|---:|---:|---|---:|---|---|---:|---:|---|");
-        for (int i = 0; i < first.Count; i++)
+        table.AppendLine("| # | spoken at | tokens | frames | first ms | repeat ms | G2P ms | D2H syncs | conv plans (from bucket) "
+            + "| bucket references | conv build ms (heuristic / finalize) | Lt plans (ms) | pool MB before → after | recall "
+            + "| vs reference | heard |");
+        table.AppendLine("|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---|---|---|---:|---|---|");
+        for (int i = 0; i < first.Length; i++)
         {
             Row r = first[i];
             string vsRef = "—";
-            if (!string.IsNullOrEmpty(refDir) && File.Exists(Path.Combine(refDir, Name(i) + ".f32")))
+            if (versusReference is { } comparisons && comparisons[i].Found)
             {
-                float[] reference = MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(Path.Combine(refDir, Name(i) + ".f32"))).ToArray();
-                vsRef = reference.Length == r.Wave.Length
-                    ? AudioParityMetrics.LogSpectralCorrelation(reference, r.Wave).ToString("F6", CultureInfo.InvariantCulture)
-                    : $"len {reference.Length}→{r.Wave.Length}";
+                Comparison c = comparisons[i];
+                vsRef = c.Identical ? "identical"
+                    : double.IsNaN(c.LogSpectral) ? "length differs"
+                    : $"log-spec {c.LogSpectral:F6}, max-abs {c.MaxAbs:E2}";
             }
-            table.AppendLine($"| {i + 1} | {r.Tokens} | {r.Frames} | {Ms(r.WallMs)} | {Ms(repeat[i].WallMs)} | {r.G2pMs:F2} | {r.Syncs} "
-                + $"| {r.ConvBuilds} ({r.ConvBuildMs:F1} / {r.ConvHeuristicMs:F1} / {r.ConvFinalizeMs:F1}) | {r.RuntimeCompiled} "
-                + $"| {r.LtBuilds} ({r.LtBuildMs:F1}) | {r.ReservedBefore / 1048576.0:F0} → {r.ReservedAfter / 1048576.0:F0} "
-                + $"| {r.Recall:P0} | {vsRef} | {AudioParityMetrics.Cell(r.Heard)} |");
+            table.AppendLine($"| {i + 1} | {r.Position} | {r.Tokens} | {r.Frames} | {Ms(r.WallMs)} | {Ms(repeat[i].WallMs)} | {r.G2pMs:F2} "
+                + $"| {r.Syncs} | {r.ConvPlans} ({r.ConvBucketPlans}) | {r.ConvReferences} "
+                + $"| {r.ConvBuildMs:F1} ({r.ConvHeuristicMs:F1} / {r.ConvFinalizeMs:F1}) | {r.LtPlans} ({r.LtBuildMs:F1}) "
+                + $"| {r.ReservedBefore / 1048576.0:F0} → {r.ReservedAfter / 1048576.0:F0} | {r.Recall:P0} | {vsRef} "
+                + $"| {AudioParityMetrics.Cell(r.Heard)} |");
         }
     }
 
-    private static void AppendStages(StringBuilder table, List<Row> first, List<Row> repeat)
+    private static void AppendStages(StringBuilder table, Row[] first, Row[] repeat)
     {
         table.AppendLine();
         table.AppendLine("Stage timer per sentence (stage=ms/D2H syncs; each mark drains the stream):");
         table.AppendLine("```");
-        for (int i = 0; i < first.Count; i++)
+        for (int i = 0; i < first.Length; i++)
         {
             table.AppendLine($"#{i + 1} first : {first[i].Stages}");
             table.AppendLine($"#{i + 1} repeat: {repeat[i].Stages}");
@@ -328,33 +392,53 @@ public sealed class KokoroFirstSynthesisBenchTests
         table.AppendLine("```");
     }
 
-    private static void WriteArtifacts(string outDir, int sampleRate, List<Row> first, List<Row> repeat)
+    private static void WriteArtifacts(string outDir, int sampleRate, Row[] first, Row[] repeat)
     {
         StringBuilder csv = new StringBuilder();
-        csv.AppendLine("pass,index,utc_start,utc_end,wall_ms,g2p_ms,tokens,frames,d2h_syncs,conv_plans,conv_build_ms,"
-            + "conv_heuristic_ms,conv_finalize_ms,runtime_compiled,lt_plans,lt_build_ms,pool_reserved_before,pool_reserved_after,sha12");
-        foreach ((string pass, List<Row> rows) in new[] { ("first", first), ("repeat", repeat) })
+        csv.AppendLine("pass,index,position,utc_start,utc_end,wall_ms,g2p_ms,tokens,frames,d2h_syncs,conv_plans,conv_bucket_plans,"
+            + "conv_references,conv_fallbacks,conv_build_ms,conv_heuristic_ms,conv_finalize_ms,lt_plans,lt_build_ms,"
+            + "pool_reserved_before,pool_reserved_after,sha12");
+        foreach ((string pass, Row[] rows) in new[] { ("first", first), ("repeat", repeat) })
         {
-            for (int i = 0; i < rows.Count; i++)
+            for (int i = 0; i < rows.Length; i++)
             {
                 Row r = rows[i];
-                csv.AppendLine(string.Join(',', pass, (i + 1).ToString(CultureInfo.InvariantCulture),
+                csv.AppendLine(string.Join(',', pass, (i + 1).ToString(CultureInfo.InvariantCulture), r.Position,
                     r.StartUtc.ToString("O", CultureInfo.InvariantCulture), r.EndUtc.ToString("O", CultureInfo.InvariantCulture),
-                    F(r.WallMs), F(r.G2pMs), r.Tokens, r.Frames, r.Syncs, r.ConvBuilds, F(r.ConvBuildMs), F(r.ConvHeuristicMs),
-                    F(r.ConvFinalizeMs), r.RuntimeCompiled, r.LtBuilds, F(r.LtBuildMs), r.ReservedBefore, r.ReservedAfter, r.Digest));
+                    F(r.WallMs), F(r.G2pMs), r.Tokens, r.Frames, r.Syncs, r.ConvPlans, r.ConvBucketPlans, r.ConvReferences,
+                    r.ConvFallbacks, F(r.ConvBuildMs), F(r.ConvHeuristicMs), F(r.ConvFinalizeMs), r.LtPlans, F(r.LtBuildMs),
+                    r.ReservedBefore, r.ReservedAfter, r.Digest));
             }
         }
         File.WriteAllText(Path.Combine(outDir, "kokoro_first_sentences.csv"), csv.ToString());
-        for (int i = 0; i < first.Count; i++)
+        for (int i = 0; i < first.Length; i++)
         {
             File.WriteAllBytes(Path.Combine(outDir, Name(i) + ".f32"), MemoryMarshal.AsBytes<float>(first[i].Wave).ToArray());
             WavFile.WriteMono16(Path.Combine(outDir, Name(i) + ".wav"), first[i].Wave, sampleRate);
         }
     }
 
-    /// <summary>The fixed idle gap before sentence <paramref name="index"/> in gap mode: 2-5 s, spread by the golden ratio
-    /// so consecutive gaps differ and every run sleeps the same sequence.</summary>
-    private static double GapSeconds(int index) => 2.0 + 3.0 * ((index + 1) * 0.6180339887498949 % 1.0);
+    /// <summary>Whether an engine settings document changes anything: <see cref="KnobFile.Apply"/> reads only its
+    /// <c>settings</c> object and <c>profile</c> name and ignores every other property.</summary>
+    private static bool AppliesSettings(string json)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            JsonElement root = document.RootElement;
+            return root.ValueKind == JsonValueKind.Object
+                && ((root.TryGetProperty("settings", out JsonElement settings) && settings.ValueKind == JsonValueKind.Object)
+                    || (root.TryGetProperty("profile", out JsonElement profile) && profile.ValueKind == JsonValueKind.String));
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>The fixed idle gap before speaking position <paramref name="position"/> in gap mode: 2-5 s, spread by the
+    /// golden ratio so consecutive gaps differ and every run sleeps the same sequence.</summary>
+    private static double GapSeconds(int position) => 2.0 + 3.0 * ((position + 1) * 0.6180339887498949 % 1.0);
 
     private static string Name(int index) => $"kokoro_first_{index + 1:D2}";
 
@@ -365,7 +449,7 @@ public sealed class KokoroFirstSynthesisBenchTests
     /// <summary>What runs after each synthesis.</summary>
     private enum Cleanup
     {
-        /// <summary>The voice session's GPU worker: <c>FreeActivations()</c>, which trims the pool too.</summary>
+        /// <summary><c>FreeActivations()</c>, which trims the pool too.</summary>
         Session,
 
         /// <summary><c>FreeActivations(trimPool: false)</c>: activations go back to the pool, which keeps them.</summary>
@@ -375,8 +459,12 @@ public sealed class KokoroFirstSynthesisBenchTests
         None,
     }
 
-    private sealed record Row(string Text, DateTime StartUtc, DateTime EndUtc, double WallMs, double G2pMs, int Tokens, int Frames,
-        long Syncs, long ConvBuilds, double ConvBuildMs, double ConvHeuristicMs, double ConvFinalizeMs, long RuntimeCompiled,
-        long LtBuilds, double LtBuildMs, long ReservedBefore, long ReservedAfter, float[] Wave, string Digest, string Stages,
-        string Heard, double Recall);
+    /// <summary>One first-pass sentence against its reference: whether a reference was found, byte identity, and when the
+    /// bytes differ, the log-spectral correlation (NaN when the lengths differ) and max-abs difference.</summary>
+    private readonly record struct Comparison(bool Found, bool Identical, double LogSpectral, double MaxAbs);
+
+    private sealed record Row(string Text, int Position, DateTime StartUtc, DateTime EndUtc, double WallMs, double G2pMs, int Tokens,
+        int Frames, long Syncs, long ConvPlans, long ConvBucketPlans, long ConvReferences, long ConvFallbacks, double ConvBuildMs,
+        double ConvHeuristicMs, double ConvFinalizeMs, long LtPlans, double LtBuildMs, long ReservedBefore, long ReservedAfter,
+        float[] Wave, string Digest, string Stages, string Heard, double Recall);
 }

@@ -22,6 +22,22 @@ internal sealed class PlanBuildProbe
     /// <summary>Whether the chosen engine carries <c>CUDNN_BEHAVIOR_NOTE_RUNTIME_COMPILATION</c> (an NVRTC kernel built
     /// for the shape at finalize time).</summary>
     public bool RuntimeCompiled;
+
+    /// <summary>Set by a caller that will plan other shapes from this build's choice: read the knob choices too.</summary>
+    public bool CaptureKnobs;
+
+    /// <summary>The chosen config's knob choices (type, value) when <see cref="CaptureKnobs"/> is set, or null when they were
+    /// not asked for or could not be read.</summary>
+    public (int Type, long Value)[]? Knobs;
+}
+
+/// <summary>An engine configuration lifted off one plan so another shape of the same operation can be planned with it
+/// without a heuristic query: the engine's global index and every knob choice the heuristic made.</summary>
+internal sealed record EngineChoice(long GlobalIndex, (int Type, long Value)[] Knobs)
+{
+    /// <summary>The choice the probe recorded, or null when the engine or its knobs could not be read.</summary>
+    public static EngineChoice? From(PlanBuildProbe probe) =>
+        probe.EngineGlobalIndex >= 0 && probe.Knobs is not null ? new EngineChoice(probe.EngineGlobalIndex, probe.Knobs) : null;
 }
 
 /// <summary>The cuDNN backend-graph engine-config search shared by <see cref="CudnnConv"/> and <see cref="CudnnSdpa"/>.</summary>
@@ -110,10 +126,86 @@ internal static class CudnnPlanSearch
         throw new InvalidOperationException($"cuDNN {what}: no engine config produced a valid execution plan");
     }
 
-    /// <summary>Reads the engine behind <paramref name="cfg"/> into <paramref name="probe"/>: its global index and
-    /// whether it is runtime-compiled. Diagnostics only; a failed read leaves the probe's defaults.</summary>
+    /// <summary>Builds an execution plan for <paramref name="graph"/> from <paramref name="choice"/> instead of asking the
+    /// heuristic: the engine at the choice's global index with the choice's knobs. False when the engine does not support
+    /// this graph, a knob value is invalid for it, the plan does not finalize, or it wants more workspace than
+    /// <paramref name="maxWorkspaceBytes"/>; the caller then runs the heuristic as before. Descriptors it creates go into
+    /// <paramref name="owned"/>; the plan does not depend on them once finalized.</summary>
+    internal static unsafe bool TryPlanFromChoice(nint handle, nint graph, List<nint> owned, EngineChoice choice,
+        long maxWorkspaceBytes, out nint exec, out long workspaceBytes)
+    {
+        exec = 0;
+        workspaceBytes = 0;
+        try
+        {
+            if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINE_DESCRIPTOR, out nint engine) != CUDNN_STATUS_SUCCESS)
+                return false;
+            owned.Add(engine);
+            void* gp = (void*)graph;
+            long index = choice.GlobalIndex;
+            if (cudnnBackendSetAttribute(engine, CUDNN_ATTR_ENGINE_OPERATION_GRAPH, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &gp) != CUDNN_STATUS_SUCCESS
+                || cudnnBackendSetAttribute(engine, CUDNN_ATTR_ENGINE_GLOBAL_INDEX, CUDNN_TYPE_INT64, 1, &index) != CUDNN_STATUS_SUCCESS
+                || cudnnBackendFinalize(engine) != CUDNN_STATUS_SUCCESS)
+                return false;
+
+            nint[] knobs = new nint[choice.Knobs.Length];
+            for (int i = 0; i < knobs.Length; i++)
+            {
+                if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_KNOB_CHOICE_DESCRIPTOR, out knobs[i]) != CUDNN_STATUS_SUCCESS)
+                    return false;
+                owned.Add(knobs[i]);
+                int type = choice.Knobs[i].Type;
+                long value = choice.Knobs[i].Value;
+                if (cudnnBackendSetAttribute(knobs[i], CUDNN_ATTR_KNOB_CHOICE_KNOB_TYPE, CUDNN_TYPE_KNOB_TYPE, 1, &type) != CUDNN_STATUS_SUCCESS
+                    || cudnnBackendSetAttribute(knobs[i], CUDNN_ATTR_KNOB_CHOICE_KNOB_VALUE, CUDNN_TYPE_INT64, 1, &value) != CUDNN_STATUS_SUCCESS
+                    || cudnnBackendFinalize(knobs[i]) != CUDNN_STATUS_SUCCESS)
+                    return false;
+            }
+
+            if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINECFG_DESCRIPTOR, out nint cfg) != CUDNN_STATUS_SUCCESS)
+                return false;
+            owned.Add(cfg);
+            void* ep = (void*)engine;
+            if (cudnnBackendSetAttribute(cfg, CUDNN_ATTR_ENGINECFG_ENGINE, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, &ep) != CUDNN_STATUS_SUCCESS)
+                return false;
+            if (knobs.Length > 0)
+            {
+                fixed (nint* kp = knobs)
+                {
+                    if (cudnnBackendSetAttribute(cfg, CUDNN_ATTR_ENGINECFG_KNOB_CHOICES, CUDNN_TYPE_BACKEND_DESCRIPTOR, knobs.Length, kp)
+                        != CUDNN_STATUS_SUCCESS)
+                        return false;
+                }
+            }
+            if (cudnnBackendFinalize(cfg) != CUDNN_STATUS_SUCCESS)
+                return false;
+
+            (nint plan, long ws, bool ok) = TryPlan(handle, cfg);
+            if (!ok)
+                return false;
+            if (ws > maxWorkspaceBytes)
+            {
+                cudnnBackendDestroyDescriptor(plan);
+                return false;
+            }
+            exec = plan;
+            workspaceBytes = ws;
+            return true;
+        }
+        catch (CudnnStatusException)
+        {
+            // TryPlan's attribute writes throw rather than return a status; any refusal here means "plan this length
+            // the usual way", never a reason to give up on cuDNN for the session.
+            return false;
+        }
+    }
+
+    /// <summary>Reads the engine behind <paramref name="cfg"/> into <paramref name="probe"/>: its global index, whether it
+    /// is runtime-compiled, and the config's knob choices. A failed read leaves the probe's defaults.</summary>
     private static unsafe void DescribeEngine(nint cfg, PlanBuildProbe probe)
     {
+        if (probe.CaptureKnobs)
+            probe.Knobs = ReadKnobChoices(cfg);
         if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINE_DESCRIPTOR, out nint engine) != CUDNN_STATUS_SUCCESS)
             return;
         try
@@ -141,6 +233,48 @@ internal static class CudnnPlanSearch
         finally
         {
             cudnnBackendDestroyDescriptor(engine);
+        }
+    }
+
+    /// <summary>The knob choices of a finalized engine config, or null when they could not be read.</summary>
+    private static unsafe (int Type, long Value)[]? ReadKnobChoices(nint cfg)
+    {
+        // Every knob type cuDNN 9 defines fits (44 in 9.20); the array is only the receiving capacity.
+        const int maxKnobs = 64;
+        nint[] descriptors = new nint[maxKnobs];
+        int created = 0;
+        try
+        {
+            for (; created < maxKnobs; created++)
+            {
+                if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_KNOB_CHOICE_DESCRIPTOR, out descriptors[created]) != CUDNN_STATUS_SUCCESS)
+                    return null;
+            }
+            long count;
+            fixed (nint* dp = descriptors)
+            {
+                if (cudnnBackendGetAttribute(cfg, CUDNN_ATTR_ENGINECFG_KNOB_CHOICES, CUDNN_TYPE_BACKEND_DESCRIPTOR, maxKnobs,
+                        out count, dp) != CUDNN_STATUS_SUCCESS)
+                    return null;
+            }
+            (int Type, long Value)[] knobs = new (int, long)[Math.Min(count, maxKnobs)];
+            for (int i = 0; i < knobs.Length; i++)
+            {
+                int type = 0;
+                long value = 0;
+                if (cudnnBackendGetAttribute(descriptors[i], CUDNN_ATTR_KNOB_CHOICE_KNOB_TYPE, CUDNN_TYPE_KNOB_TYPE, 1, out _, &type)
+                        != CUDNN_STATUS_SUCCESS
+                    || cudnnBackendGetAttribute(descriptors[i], CUDNN_ATTR_KNOB_CHOICE_KNOB_VALUE, CUDNN_TYPE_INT64, 1, out _, &value)
+                        != CUDNN_STATUS_SUCCESS)
+                    return null;
+                knobs[i] = (type, value);
+            }
+            return knobs;
+        }
+        finally
+        {
+            for (int i = 0; i < created; i++)
+                cudnnBackendDestroyDescriptor(descriptors[i]);
         }
     }
 

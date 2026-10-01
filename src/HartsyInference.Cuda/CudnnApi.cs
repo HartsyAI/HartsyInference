@@ -58,6 +58,7 @@ internal static partial class CudnnApi
     internal const int CUDNN_BACKEND_ENGINECFG_DESCRIPTOR = 3;
     internal const int CUDNN_BACKEND_ENGINEHEUR_DESCRIPTOR = 4;
     internal const int CUDNN_BACKEND_EXECUTION_PLAN_DESCRIPTOR = 5;
+    internal const int CUDNN_BACKEND_KNOB_CHOICE_DESCRIPTOR = 7;
     internal const int CUDNN_BACKEND_OPERATION_CONVOLUTION_FORWARD_DESCRIPTOR = 10;
     internal const int CUDNN_BACKEND_OPERATION_CONVOLUTION_BACKWARD_DATA_DESCRIPTOR = 12;
     internal const int CUDNN_BACKEND_OPERATION_POINTWISE_DESCRIPTOR = 13;
@@ -77,6 +78,7 @@ internal static partial class CudnnApi
     internal const int CUDNN_TYPE_VOID_PTR = 6;
     internal const int CUDNN_TYPE_CONVOLUTION_MODE = 7;
     internal const int CUDNN_TYPE_HEUR_MODE = 8;
+    internal const int CUDNN_TYPE_KNOB_TYPE = 9;
     internal const int CUDNN_TYPE_POINTWISE_MODE = 14;
     internal const int CUDNN_TYPE_BACKEND_DESCRIPTOR = 15;
     internal const int CUDNN_TYPE_BEHAVIOR_NOTE = 19;
@@ -107,6 +109,9 @@ internal static partial class CudnnApi
     internal const int CUDNN_ATTR_ENGINEHEUR_OPERATION_GRAPH = 201;
     internal const int CUDNN_ATTR_ENGINEHEUR_RESULTS = 202;
     internal const int CUDNN_ATTR_ENGINECFG_ENGINE = 300;
+    internal const int CUDNN_ATTR_ENGINECFG_KNOB_CHOICES = 302;
+    internal const int CUDNN_ATTR_KNOB_CHOICE_KNOB_TYPE = 600;
+    internal const int CUDNN_ATTR_KNOB_CHOICE_KNOB_VALUE = 601;
     internal const int CUDNN_ATTR_EXECUTION_PLAN_HANDLE = 400;
     internal const int CUDNN_ATTR_EXECUTION_PLAN_ENGINE_CONFIG = 401;
     internal const int CUDNN_ATTR_EXECUTION_PLAN_WORKSPACE_SIZE = 402;
