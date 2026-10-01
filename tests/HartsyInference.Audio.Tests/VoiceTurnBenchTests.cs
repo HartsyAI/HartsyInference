@@ -39,7 +39,11 @@ namespace HartsyInference.Audio.Tests;
 /// 2026-09-30 run needed it); the probe prints the root and every resolved path before loading.</para>
 ///
 /// <para>Method: 2 warm-up + 5 timed calls per case; median / p95 (linear interpolation between order
-/// statistics) / min wall-clock of the pipeline call only (model load excluded). Recall is content-word recall:
+/// statistics) / min wall-clock of the pipeline call only (model load excluded). Probes A and B first run a primer
+/// of different content (Whisper: the clip's last 3 s; Kokoro: an unrelated sentence), so one-time costs — kernel
+/// loading, the first weight upload — land outside every row; each case's FIRST call (its first warm-up: new input
+/// on a warm model, which is all a live call ever sends) is reported beside the warm median, because new text can
+/// cost more than a repeat. Recall is content-word recall:
 /// both texts lower-cased, punctuation stripped, split on whitespace, stop words
 /// (a, an, and, the, of, for, to, so, my, your, you, what, can, do, not, is, it, in, on) removed from the
 /// reference; recall = |reference content words present in the hypothesis| / |reference content words|. The
@@ -65,6 +69,7 @@ public sealed class VoiceTurnBenchTests
     private const string KokoroVoice = "af_heart";
     private const string JfkTranscript =
         "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.";
+    private const string PrimerSentence = "Good morning, this sentence only warms the voice up.";
 
     private static readonly int[] SliceSeconds = [2, 5, 10];
 
@@ -102,8 +107,8 @@ public sealed class VoiceTurnBenchTests
         StringBuilder table = new StringBuilder();
         table.AppendLine("### Probe A — Whisper `.en` per-utterance wall (3060, in-process, 30 s pad)");
         table.AppendLine();
-        table.AppendLine("| Model | Slice | Variant | median ms | p95 ms | min ms | transcript |");
-        table.AppendLine("|---|---:|---|---:|---:|---:|---|");
+        table.AppendLine("| Model | Slice | Variant | first-call ms | median ms | p95 ms | min ms | transcript |");
+        table.AppendLine("|---|---:|---|---:|---:|---:|---:|---|");
 
         List<string> models = [WhisperSmallEn];
         if (WhisperFiles(WhisperMediumEn).All(File.Exists))
@@ -113,7 +118,7 @@ public sealed class VoiceTurnBenchTests
         else
         {
             _out.WriteLine($"SKIPPED optional row: {WhisperMediumEn} not cached under {AudioModelCache.GetRepoDirectory(WhisperMediumEn, "stt")}");
-            table.AppendLine($"| {WhisperMediumEn} | — | — | SKIPPED | — | — | weights not cached |");
+            table.AppendLine($"| {WhisperMediumEn} | — | — | SKIPPED | — | — | — | weights not cached |");
         }
 
         foreach (string repo in models)
@@ -121,14 +126,19 @@ public sealed class VoiceTurnBenchTests
             Stopwatch load = Stopwatch.StartNew();
             using WhisperPipeline whisper = await WhisperPipeline.LoadAsync(repo);
             _out.WriteLine($"{repo} loaded in {load.Elapsed.TotalSeconds:F1}s (excluded from every row)");
+            float[] primer = audio16k[Math.Max(0, audio16k.Length - 3 * SampleRate)..];
+            for (int i = 0; i < WarmRuns; i++)
+            {
+                whisper.TranscribeAudio(backend, primer, SampleRate, options);
+            }
             foreach (int seconds in SliceSeconds)
             {
                 foreach ((string variant, float[] source) in new[] { ("16k", audio16k), ("narrowband 8k→16k", narrowband) })
                 {
                     float[] slice = source[..Math.Min(source.Length, seconds * SampleRate)];
-                    (Stats stats, string text) = Measure(() => whisper.TranscribeAudio(backend, slice, SampleRate, options));
-                    table.AppendLine($"| {repo} | {seconds} s | {variant} | {Ms(stats.Median)} | {Ms(stats.P95)} | {Ms(stats.Min)} | {Cell(text)} |");
-                    _out.WriteLine($"{repo} {seconds}s {variant}: median {Ms(stats.Median)} ms p95 {Ms(stats.P95)} min {Ms(stats.Min)} | {text.Trim()}");
+                    (Stats stats, string text, double first) = Measure(() => whisper.TranscribeAudio(backend, slice, SampleRate, options));
+                    table.AppendLine($"| {repo} | {seconds} s | {variant} | {Ms(first)} | {Ms(stats.Median)} | {Ms(stats.P95)} | {Ms(stats.Min)} | {Cell(text)} |");
+                    _out.WriteLine($"{repo} {seconds}s {variant}: first {Ms(first)} ms, median {Ms(stats.Median)} ms p95 {Ms(stats.P95)} min {Ms(stats.Min)} | {text.Trim()}");
                 }
             }
         }
@@ -154,12 +164,21 @@ public sealed class VoiceTurnBenchTests
         int kokoroRate = kokoro.Config.SampleRate;
         Resampler toWhisper = Resampler.Create(kokoroRate, SampleRate);
         WhisperOptions options = new WhisperOptions { Language = null };
+        string primerIpa = g2p.ToIpa(PrimerSentence);
+        for (int i = 0; i < WarmRuns; i++)
+        {
+            float[] primerWave = kokoro.Synthesize(backend, primerIpa, KokoroVoice, 1f);
+            if (i == 0)
+            {
+                verify.TranscribeAudio(backend, toWhisper.Resample(primerWave), SampleRate, options);
+            }
+        }
 
         StringBuilder table = new StringBuilder();
         table.AppendLine("### Probe B — Kokoro af_heart per sentence (3060, in-process; G2P timed separately)");
         table.AppendLine();
-        table.AppendLine("| Words | synth median ms | p95 ms | min ms | audio s | RTF (median/audio) | G2P ms | Whisper-verify recall | verify transcript |");
-        table.AppendLine("|---:|---:|---:|---:|---:|---:|---:|---:|---|");
+        table.AppendLine("| Words | first-run ms (new text) | warm median ms | p95 ms | min ms | audio s | RTF (median/audio) | G2P ms | Whisper-verify recall | verify transcript |");
+        table.AppendLine("|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|");
 
         foreach ((int words, string text) in Sentences)
         {
@@ -167,13 +186,13 @@ public sealed class VoiceTurnBenchTests
             Stopwatch g2pTimer = Stopwatch.StartNew();
             string ipa = g2p.ToIpa(text);
             double g2pMs = g2pTimer.Elapsed.TotalMilliseconds;
-            (Stats stats, float[] wave) = Measure(() => kokoro.Synthesize(backend, ipa, KokoroVoice, 1f));
+            (Stats stats, float[] wave, double first) = Measure(() => kokoro.Synthesize(backend, ipa, KokoroVoice, 1f));
             double audioSeconds = wave.Length / (double)kokoroRate;
             string heard = verify.TranscribeAudio(backend, toWhisper.Resample(wave), SampleRate, options);
             double recall = ContentWordRecall(text, heard);
-            table.AppendLine($"| {words} | {Ms(stats.Median)} | {Ms(stats.P95)} | {Ms(stats.Min)} | {audioSeconds:F2} | "
+            table.AppendLine($"| {words} | {Ms(first)} | {Ms(stats.Median)} | {Ms(stats.P95)} | {Ms(stats.Min)} | {audioSeconds:F2} | "
                 + $"{stats.Median / audioSeconds:F3} | {g2pMs:F1} | {recall:P0} | {Cell(heard)} |");
-            _out.WriteLine($"Kokoro {words}w: median {Ms(stats.Median)} ms p95 {Ms(stats.P95)} min {Ms(stats.Min)} | "
+            _out.WriteLine($"Kokoro {words}w: first {Ms(first)} ms, median {Ms(stats.Median)} ms p95 {Ms(stats.P95)} min {Ms(stats.Min)} | "
                 + $"{audioSeconds:F2}s audio | G2P {g2pMs:F1} ms | verify recall {recall:P0} | {heard.Trim()}");
         }
         Emit(table);
@@ -202,11 +221,11 @@ public sealed class VoiceTurnBenchTests
         table.AppendLine("| Input | recall | Δ vs 16k (pts) | STT median ms | p95 ms | RNNoise (CPU, whole clip) median ms | transcript |");
         table.AppendLine("|---|---:|---:|---:|---:|---:|---|");
 
-        (Stats baseStats, string baseText) = Measure(() => whisper.TranscribeAudio(backend, audio16k, SampleRate, options));
+        (Stats baseStats, string baseText, _) = Measure(() => whisper.TranscribeAudio(backend, audio16k, SampleRate, options));
         double baseRecall = ContentWordRecall(JfkTranscript, baseText);
         table.AppendLine($"| 16 kHz baseline | {baseRecall:P0} | 0 | {Ms(baseStats.Median)} | {Ms(baseStats.P95)} | — | {Cell(baseText)} |");
 
-        (Stats nbStats, string nbText) = Measure(() => whisper.TranscribeAudio(backend, narrowband, SampleRate, options));
+        (Stats nbStats, string nbText, _) = Measure(() => whisper.TranscribeAudio(backend, narrowband, SampleRate, options));
         double nbRecall = ContentWordRecall(JfkTranscript, nbText);
         table.AppendLine($"| narrowband 8k→16k | {nbRecall:P0} | {(nbRecall - baseRecall) * 100:+0;-0;0} | {Ms(nbStats.Median)} | {Ms(nbStats.P95)} | — | {Cell(nbText)} |");
         _out.WriteLine($"16k recall {baseRecall:P0} | narrowband recall {nbRecall:P0} (Δ {(nbRecall - baseRecall) * 100:+0;-0;0} pts)");
@@ -223,8 +242,8 @@ public sealed class VoiceTurnBenchTests
             using (weights)
             using (CpuBackend cpu = new CpuBackend())
             {
-                (Stats dnStats, float[] denoised) = Measure(() => Denoise(cpu, weights, narrowband));
-                (Stats dnSttStats, string dnText) = Measure(() => whisper.TranscribeAudio(backend, denoised, SampleRate, options));
+                (Stats dnStats, float[] denoised, _) = Measure(() => Denoise(cpu, weights, narrowband));
+                (Stats dnSttStats, string dnText, _) = Measure(() => whisper.TranscribeAudio(backend, denoised, SampleRate, options));
                 double dnRecall = ContentWordRecall(JfkTranscript, dnText);
                 table.AppendLine($"| narrowband + RNNoise | {dnRecall:P0} | {(dnRecall - baseRecall) * 100:+0;-0;0} | {Ms(dnSttStats.Median)} | "
                     + $"{Ms(dnSttStats.P95)} | {Ms(dnStats.Median)} | {Cell(dnText)} |");
@@ -337,12 +356,21 @@ public sealed class VoiceTurnBenchTests
         return result;
     }
 
-    private static (Stats Stats, T Last) Measure<T>(Func<T> run)
+    /// <summary>Two warm-ups then five timed calls; the first warm-up's own wall time is returned as
+    /// <c>First</c> (the case's first sight of its input) and is never part of the warm statistics.</summary>
+    private static (Stats Stats, T Last, double First) Measure<T>(Func<T> run)
     {
         T last = default!;
+        double first = 0;
         for (int i = 0; i < WarmRuns; i++)
         {
+            Stopwatch warm = Stopwatch.StartNew();
             last = run();
+            warm.Stop();
+            if (i == 0)
+            {
+                first = warm.Elapsed.TotalSeconds;
+            }
         }
         List<double> samples = new List<double>(TimedRuns);
         for (int i = 0; i < TimedRuns; i++)
@@ -352,7 +380,7 @@ public sealed class VoiceTurnBenchTests
             sw.Stop();
             samples.Add(sw.Elapsed.TotalSeconds);
         }
-        return (Stats.Of(samples), last);
+        return (Stats.Of(samples), last, first);
     }
 
     private static double ContentWordRecall(string reference, string hypothesis)
