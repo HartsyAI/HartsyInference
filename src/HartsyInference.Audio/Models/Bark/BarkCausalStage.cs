@@ -227,6 +227,13 @@ public sealed unsafe class BarkCausalStage : IDisposable
         return result;
     }
 
+    // SampleTopPWithProb scratch, reused across calls on the same thread (one BarkCausalStage instance's
+    // GenerateSemantic loop samples synchronously, up to 768 calls) — grown, never shrunk.
+    [ThreadStatic] private static float[]? t_semWork;
+    [ThreadStatic] private static float[]? t_semWorkSort;
+    [ThreadStatic] private static int[]? t_semOrder;
+    [ThreadStatic] private static double[]? t_semProbs;
+
     /// <summary>Upstream semantic sampling: top-p filter on the raw logits (cumulative softmax order), THEN
     /// softmax over <c>filtered / temperature</c>, multinomial draw. Also reports the final probability of
     /// <paramref name="eosSlot"/> for the <c>min_eos_p</c> early stop.</summary>
@@ -234,18 +241,28 @@ public sealed unsafe class BarkCausalStage : IDisposable
         int eosSlot, out float eosProb)
     {
         int n = logits.Length;
-        float[] work = logits.ToArray();
+        if (t_semWork is null || t_semWork.Length < n) t_semWork = new float[n];
+        float[] work = t_semWork;
+        logits.CopyTo(work);
         if (topP > 0f && topP < 1f)
         {
-            int[] order = new int[n];
+            // Was a fresh int[n] + a full delegate-comparator Array.Sort every call (the same anti-pattern
+            // PR #215 fixed in the LLM package) — up to 768 calls per semantic generation. The draw below walks
+            // `work` by NATURAL index, so (like TopPStep) the sort only needs to reproduce the old CUTOFF SET;
+            // it runs over a dedicated copy so `work` itself stays in natural order for that final draw.
+            if (t_semWorkSort is null || t_semWorkSort.Length < n) t_semWorkSort = new float[n];
+            if (t_semOrder is null || t_semOrder.Length < n) t_semOrder = new int[n];
+            if (t_semProbs is null || t_semProbs.Length < n) t_semProbs = new double[n];
+            float[] wSort = t_semWorkSort;
+            int[] order = t_semOrder;
+            double[] probs = t_semProbs;
+            Array.Copy(work, wSort, n);
             for (int i = 0; i < n; i++) order[i] = i;
-            float[] w = work;
-            Array.Sort(order, (a, b) => w[b].CompareTo(w[a]));
+            SortHelpers.SortDescendingByValue(wSort, order, n);
             // softmax over sorted logits for the cumulative cut (upstream does this pre-temperature)
             double sum = 0;
-            float max = w[order[0]];
-            double[] probs = new double[n];
-            for (int r = 0; r < n; r++) { probs[r] = Math.Exp(w[order[r]] - max); sum += probs[r]; }
+            float max = wSort[0];
+            for (int r = 0; r < n; r++) { probs[r] = Math.Exp(wSort[r] - max); sum += probs[r]; }
             double cum = 0;
             for (int r = 0; r < n; r++)
             {

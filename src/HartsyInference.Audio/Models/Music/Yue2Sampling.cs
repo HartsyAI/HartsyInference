@@ -160,38 +160,51 @@ public static class Yue2LogitProcessor
         return n < k ? float.NegativeInfinity : min;
     }
 
+    // ApplyNucleus scratch, reused across calls on the same thread — grown, never shrunk. Previously a fresh
+    // List<int>/List<float> plus `[.. candidates]`/`[.. values]` array copies every call; the sort itself was
+    // already the primitive Array.Sort(float[], int[]) overload (no delegate anti-pattern here), so this is a
+    // pure allocation fix, same as PR #215's per-generation scratch buffers.
+    [ThreadStatic] private static int[]? t_candidates;
+    [ThreadStatic] private static float[]? t_negValues;
+    [ThreadStatic] private static double[]? t_probabilities;
+
     private static void ApplyNucleus(Span<float> scores, float topP, int alwaysKeep)
     {
         // Only finite entries can carry probability, so the nucleus is computed over them alone — identical to the
         // reference's full-vocabulary sort, where every masked entry softmaxes to exactly zero.
-        List<int> candidates = [];
-        List<float> values = [];
-        for (int i = 0; i < scores.Length; i++)
+        int n = scores.Length;
+        if (t_candidates is null || t_candidates.Length < n) t_candidates = new int[n];
+        if (t_negValues is null || t_negValues.Length < n) t_negValues = new float[n];
+        int[] candidates = t_candidates;
+        float[] negValues = t_negValues;
+        int count = 0;
+        for (int i = 0; i < n; i++)
         {
             if (!float.IsFinite(scores[i])) continue;
-            candidates.Add(i);
-            values.Add(-scores[i]);   // negated so an ascending sort gives descending score
+            candidates[count] = i;
+            negValues[count] = -scores[i];   // negated so an ascending sort gives descending score
+            count++;
         }
-        if (candidates.Count <= alwaysKeep) return;
+        if (count <= alwaysKeep) return;
 
-        int[] order = [.. candidates];
-        Array.Sort([.. values], order);
+        Array.Sort(negValues, candidates, 0, count);
 
-        float max = scores[order[0]];
+        float max = scores[candidates[0]];
+        if (t_probabilities is null || t_probabilities.Length < count) t_probabilities = new double[count];
+        double[] probabilities = t_probabilities;
         double total = 0;
-        double[] probabilities = new double[order.Length];
-        for (int i = 0; i < order.Length; i++)
+        for (int i = 0; i < count; i++)
         {
-            probabilities[i] = Math.Exp(scores[order[i]] - max);
+            probabilities[i] = Math.Exp(scores[candidates[i]] - max);
             total += probabilities[i];
         }
 
         double cumulative = 0;
-        for (int i = 0; i < order.Length; i++)
+        for (int i = 0; i < count; i++)
         {
             double p = probabilities[i] / total;
             // The reference removes on the EXCLUSIVE prefix sum, so the entry that crosses the threshold survives.
-            if (i >= alwaysKeep && cumulative > topP) scores[order[i]] = float.NegativeInfinity;
+            if (i >= alwaysKeep && cumulative > topP) scores[candidates[i]] = float.NegativeInfinity;
             cumulative += p;
         }
     }

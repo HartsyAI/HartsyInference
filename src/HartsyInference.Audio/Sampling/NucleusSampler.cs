@@ -9,6 +9,14 @@ namespace HartsyInference.Audio.Sampling;
 /// windows) on top by pre-shaping the logit buffer and choosing the candidate count.</summary>
 public static class NucleusSampler
 {
+    // Fallback-path scratch (see Draw's unbounded branch below), reused across calls on the SAME thread —
+    // grown, never shrunk, so alternating vocab sizes (e.g. FishSpeech's text pass then codebook pass) never
+    // reallocate downward. One AR generation's decode loop samples synchronously on a single thread, so
+    // thread-affinity is exactly the right scope: it amortizes the buffer the way a per-generation instance
+    // would, without requiring Draw to stop being a stateless static call (23 call sites rely on that shape).
+    [ThreadStatic] private static float[]? t_fallbackProbs;
+    [ThreadStatic] private static int[]? t_fallbackOrder;
+
     /// <summary>Draws one token index in <c>[0, count)</c> from <paramref name="logits"/>. Applies
     /// temperature, softmax, top-k and top-p filtering, then samples with the supplied RNG state.
     /// <paramref name="maskToken"/> (if in range) is forced to zero probability — used for ancestral /
@@ -83,7 +91,10 @@ public static class NucleusSampler
         }
 
         // Fallback: unbounded top-k (k == count). Full softmax + sort.
-        float[] probs = new float[count];
+        if (t_fallbackProbs is null || t_fallbackProbs.Length < count) t_fallbackProbs = new float[count];
+        if (t_fallbackOrder is null || t_fallbackOrder.Length < count) t_fallbackOrder = new int[count];
+        float[] probs = t_fallbackProbs;
+        int[] order = t_fallbackOrder;
         float max = float.NegativeInfinity;
         for (int i = 0; i < count; i++)
         {
@@ -102,36 +113,35 @@ public static class NucleusSampler
         for (int i = 0; i < count; i++) probs[i] *= inv;
         if ((uint)maskToken < (uint)count) probs[maskToken] = 0f;
 
-        int[] order = ArgsortDescending(probs, count);
-        float minPThresholdF = minP > 0f ? minP * probs[order[0]] : 0f;
+        // Was `int[] order = ArgsortDescending(probs, count)` — a fresh float[count]/int[count] plus a full
+        // O(count log count) delegate-comparator Array.Sort every single draw (the same anti-pattern PR #215
+        // fixed in the LLM package's TopPStep). SortHelpers.SortDescendingByValue sorts `probs` itself into
+        // descending order in place (verified to land every tied/adversarial case exactly where the old
+        // delegate sort did — see SortHelpersTests), so below reads `probs[rank]` for the value and
+        // `order[rank]` for that value's original token id, instead of the old `probs[order[rank]]`.
+        for (int i = 0; i < count; i++) order[i] = i;
+        SortHelpers.SortDescendingByValue(probs, order, count);
+        float minPThresholdF = minP > 0f ? minP * probs[0] : 0f;
         float cumulativeF = 0f;
         int keepF = 0;
         for (int rank = 0; rank < k; rank++)
         {
-            if (minPThresholdF > 0f && rank > 0 && probs[order[rank]] < minPThresholdF) break;
-            cumulativeF += probs[order[rank]];
+            if (minPThresholdF > 0f && rank > 0 && probs[rank] < minPThresholdF) break;
+            cumulativeF += probs[rank];
             keepF = rank + 1;
             if (topP > 0 && topP < 1f && cumulativeF >= topP) break;
         }
 
         float keptSum = 0f;
-        for (int rank = 0; rank < keepF; rank++) keptSum += probs[order[rank]];
+        for (int rank = 0; rank < keepF; rank++) keptSum += probs[rank];
         if (keptSum <= 0f) return order[0];
         float rF = DeterministicRng.NextUniform(ref rng) * keptSum;
         float accF = 0f;
         for (int rank = 0; rank < keepF; rank++)
         {
-            accF += probs[order[rank]];
+            accF += probs[rank];
             if (rF <= accF) return order[rank];
         }
         return order[keepF - 1];
-    }
-
-    private static int[] ArgsortDescending(float[] values, int count)
-    {
-        int[] idx = new int[count];
-        for (int i = 0; i < count; i++) idx[i] = i;
-        Array.Sort(idx, (a, b) => values[b].CompareTo(values[a]));
-        return idx;
     }
 }
