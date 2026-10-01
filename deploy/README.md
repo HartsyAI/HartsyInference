@@ -53,22 +53,36 @@ the API server get `AllowedCPUs=0-6,8-14`, and the host caps the engine's kernel
 
 ## Install checklist (operator, sudo)
 
-- [ ] `dotnet publish -c Release src/HartsyInference.VoiceHost -o /opt/hartsyinference/voice-host` and
-      `dotnet publish -c Release src/HartsyInference.PhoneGateway -o /opt/hartsyinference/phone-gateway`.
-- [ ] Secrets, root-owned, mode 0600: `/etc/hartsyinference/secrets/phone-link-token`, `phone-admin-token`,
-      `sip-password` (a placeholder is fine with no registrar). The units hand them over with `LoadCredential=`.
-- [ ] `/etc/hartsyinference/voice.json` (template `voice.example.json` next to the host binary) and
-      `/etc/hartsyinference/phone.json` (template `phone.example.json`); their `*File` settings point at
-      `/run/credentials/<unit>/<name>`.
-- [ ] Review `User=`, `WorkingDirectory=` and `ExecStart=` in both units, then
-      `sudo cp deploy/systemd/hartsyinference-{voice-host,phone-gateway,server}.service /etc/systemd/system/`.
-- [ ] `sudo systemctl daemon-reload && sudo systemctl enable --now hartsyinference-voice-host hartsyinference-phone-gateway`
-      (and `sudo systemctl restart hartsyinference-server` if it runs, for its new `AllowedCPUs=`).
-- [ ] [Host tuning](#host-tuning): preview with `deploy/install-host-tuning.sh`, then
-      `sudo deploy/install-host-tuning.sh --apply`; `cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort |
-      uniq -c` shows `16 performance`.
+- [ ] Preview, then apply, in this order ([host tuning](#host-tuning) first, so the governor and the rtprio limit
+      are already in place when the voice units start):
+      ```bash
+      sudo deploy/install-host-tuning.sh --apply
+      sudo deploy/install-voice-agent.sh --apply
+      ```
+      Each previews with no option (needs no root); running either again changes nothing already correct, and both
+      print the SHA-256 of every file they install. `install-voice-agent.sh` does the following, in one step:
+      - publishes both executables as you, the invoking user (never as root), into
+        `/opt/hartsyinference/{voice-host,phone-gateway}` (root:root, 0755);
+      - generates any missing secret under `/etc/hartsyinference/secrets/` (root, 0700 dir, 0600 files,
+        `phone-link-token`, `phone-admin-token`, `sip-password`; never printed);
+      - writes `/etc/hartsyinference/{voice.json,phone.json}` from the example templates with the LAN profile, only
+        if a file is not already there (an existing one is never overwritten; a diff is shown instead);
+      - copies the two units, and the server unit too but only if one is already installed;
+      - `daemon-reload`s, then enables and starts the voice host and the gateway, and prints their status plus the
+        runbook's "Confirm the install" commands.
+      - `--revert` stops, disables and removes the two units; `--purge` also removes the binaries, configs and
+        secrets. `--publish-dir DIR` reuses an existing publish (e.g. from `run-voice-agent-dev.sh` below) instead
+        of running `dotnet publish` again.
+- [ ] Before any of this: `deploy/run-voice-agent-dev.sh` runs the same two executables as plain user processes (no
+      root, no systemd) against a LAN-profile config of their own under `~/.config/hartsyinference/voice-agent-dev`,
+      to check the build, the models and the dial plan on this box first.
 - [ ] Run the checks in the [runbook](../docs/Checklists/VOICE_AGENT_VERIFICATION.md), starting with the journal line
       `RTP tick thread running under SCHED_FIFO 50` on the first call.
+
+Manual install steps are kept as an appendix in the
+[runbook](../docs/Checklists/VOICE_AGENT_VERIFICATION.md#appendix-the-manual-steps-install-voice-agentsh-automates),
+for anyone who needs to adjust a path these scripts assume (`User=`, `WorkingDirectory=`, `ExecStart=` in the units)
+or wants to see each step `install-voice-agent.sh` automates.
 
 The units were checked with `systemd-analyze verify` (no root needed):
 
@@ -153,8 +167,10 @@ Undo with `systemctl --user revert swarmui.service`.
 
 ## Development without systemd
 
-The tick thread needs an `rtprio` limit to use FIFO; without one it logs the fix once and spins the last 150 µs
-before each deadline instead. Grant it with `/etc/security/limits.d/hartsy-rt.conf`, which
+`deploy/run-voice-agent-dev.sh` does this for you (its own `voice.json`/`phone.json` point `socketPath` at
+`$XDG_RUNTIME_DIR/hartsyinference`, a directory it already owns), including a note when `ulimit -r` is below 50.
+Without it, by hand: the tick thread needs an `rtprio` limit to use FIFO; without one it logs the fix once and spins
+the last 150 µs before each deadline instead. Grant it with `/etc/security/limits.d/hartsy-rt.conf`, which
 `sudo deploy/install-host-tuning.sh --apply` installs ([Host tuning](#host-tuning)):
 
 ```
