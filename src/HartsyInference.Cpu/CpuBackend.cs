@@ -67,6 +67,7 @@ public sealed partial class CpuBackend : IBackend
         Tensor? diagInput = null)
     {
         ThrowIfDisposed();
+        LowRankAdjunctGemm.RefuseAdjunct(weight, "CpuBackend.LinearI8U8");
         Int8GemvKernels.Linear(output, input, weight, scale, bias, diag, diagInput);
     }
 
