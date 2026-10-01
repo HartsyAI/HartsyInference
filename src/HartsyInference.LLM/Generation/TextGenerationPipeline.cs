@@ -165,9 +165,12 @@ public sealed class TextGenerationPipeline
         }
         catch (OperationCanceledException)
         {
-            // Every ct.ThrowIfCancellationRequested() above runs strictly BETWEEN committed steps (the prompt
-            // prefill above, each decode/graph/spec step below), so cache.Length and generated.Count are always
-            // mutually consistent at the point this throws — safe to retain, same as a normal return.
+            // NOT always strictly between committed steps: onToken runs (and, via TextService's filter-stop
+            // wrapper, can throw) right after generated.Add(next) but BEFORE the Prefill call that actually
+            // commits `next` to the cache (eager loop; graph decode's onToken sits at the same spot). So
+            // generated.Count can be exactly one ahead of what cache.Length reflects when this fires — the
+            // `finally` below reconciles against cache.Length, the one count that is always ground truth,
+            // rather than trusting generated.Count here.
             committed = true;
             throw;
         }
@@ -179,9 +182,14 @@ public sealed class TextGenerationPipeline
             }
             else if (committed)
             {
-                int[] fullIds = new int[promptIds.Length + generated.Count];
+                // Clamped to cache.Length, not generated.Count: a cancellation from inside onToken (a filter or
+                // tool-call stop) can leave one token recorded in `generated` whose Prefill never ran. Storing
+                // more ids than the cache actually holds would make a later AcquireCache compute a reused-prefix
+                // length beyond old.Length, and FixedKvCache.Truncate throws on that.
+                int committedGenerated = Math.Clamp(cache.Length - promptIds.Length, 0, generated.Count);
+                int[] fullIds = new int[promptIds.Length + committedGenerated];
                 promptIds.CopyTo(fullIds, 0);
-                generated.CopyTo(fullIds, promptIds.Length);
+                generated.CopyTo(0, fullIds, promptIds.Length, committedGenerated);
                 reuse.Update(cache, fullIds, _model!.EstimateSequenceBytes(cache.Capacity));
             }
             else
@@ -205,14 +213,17 @@ public sealed class TextGenerationPipeline
     /// <paramref name="reuse"/> cache first — never the other way around, so a failed allocation never leaves
     /// <paramref name="reuse"/> pointing at an already-disposed buffer). The returned length is always LESS than
     /// <paramref name="promptIds"/>.Length, even on an exact repeat, so the caller always prefills a real final
-    /// token and gets a fresh logits row to sample from.</summary>
+    /// token and gets a fresh logits row to sample from; it is also never more than <c>old.Length</c> (defensive —
+    /// <see cref="Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/>'s own bookkeeping
+    /// keeps <c>reuse.TokenIds</c> within that bound already, but <see cref="FixedKvCache.Truncate"/> throws
+    /// instead of clamping, so a future bug here should degrade to less reuse, not a crash).</summary>
     private (ISequenceState Cache, int ReusedLen) AcquireCache(RetainedSequence? reuse, int[] promptIds, int maxSeq, int? capacityHint)
     {
         if (reuse?.Cache is { } old)
         {
             if (old.Capacity >= maxSeq)
             {
-                int reusedLen = Math.Max(0, Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), promptIds.Length - 1));
+                int reusedLen = Math.Max(0, Math.Min(Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), old.Length), promptIds.Length - 1));
                 old.Truncate(reusedLen);
                 return (old, reusedLen);
             }

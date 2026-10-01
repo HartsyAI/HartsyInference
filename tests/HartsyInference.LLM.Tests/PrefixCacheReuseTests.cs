@@ -154,6 +154,52 @@ public sealed class PrefixCacheReuseTests
     }
 
     [Fact]
+    public void OnTokenCancellation_BetweenAddAndItsOwnPrefill_RetainsExactlyWhatTheCacheCommitted()
+    {
+        // Regression: onToken runs right after generated.Add(next) but BEFORE that token's own Prefill commits
+        // it to the cache -- exactly where TextService's filter/tool-call-stop wrapper throws
+        // OperationCanceledException from inside onToken once it sees a completed tool call. Without clamping to
+        // cache.Length, the retained sequence would claim one more token than the cache actually holds, and the
+        // NEXT turn's AcquireCache (whenever the new prompt's common prefix reaches that same length -- exactly
+        // what happens when ToolLoop's next request is built from this turn's own text) would call
+        // FixedKvCache.Truncate with a length past the cache's current length, which throws.
+        _rng = 0xFACADEu;
+        TransformerConfig cfg = Cfg();
+        Dictionary<string, Tensor> w = Weights(cfg);
+        using CpuBackend backend = new();
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model");
+        StubTokenizer tokenizer = new();
+        SamplingOptions sampling = SamplingOptions.Default with { Greedy = true };
+        int[] promptIds = [.. Enumerable.Range(0, 6).Select(_ => NextToken(cfg.VocabSize))];
+
+        TextGenerationPipeline pipeline = new(model, tokenizer, backend);
+        using RetainedSequence retained = new();
+
+        GenerationRequest cancelling = new() { RawTokenIds = promptIds, MaxTokens = 8, Sampling = sampling, PrefixCacheCapacityHint = 64 };
+        int seen = 0;
+        Assert.Throws<OperationCanceledException>(() =>
+            pipeline.Generate(cancelling, retained, onToken: _ => { if (++seen == 2) throw new OperationCanceledException(); }));
+
+        Assert.NotNull(retained.Cache);
+        // The invariant the fix guarantees: never more ids retained than the cache actually committed.
+        Assert.Equal(retained.Cache!.Length, retained.TokenIds.Length);
+
+        // The next turn's prompt is built from this turn's own (possibly-truncated) text, same as ToolLoop does
+        // -- a strict extension of exactly what got retained, which used to be able to exceed old.Length.
+        int[] nextPromptIds = [.. retained.TokenIds, .. Enumerable.Range(0, 4).Select(_ => NextToken(cfg.VocabSize))];
+        GenerationRequest next = new() { RawTokenIds = nextPromptIds, MaxTokens = 6, Sampling = sampling, PrefixCacheCapacityHint = 64 };
+
+        GenerationResult actual = pipeline.Generate(next, retained);   // must not throw
+        GenerationResult reference = new TextGenerationPipeline(model, tokenizer, backend).Generate(next);
+
+        Assert.Equal(string.Join(",", reference.TokenIds), string.Join(",", actual.TokenIds));
+        Assert.True(actual.ReusedPromptTokens > 0, "the retained prefix from turn 1 should still have been reused.");
+
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
     public void CapacityOutgrown_ReallocatesAndStaysCorrect()
     {
         // A tiny initial cache (sized for turn 1 only) must be transparently replaced once the conversation grows
