@@ -223,7 +223,8 @@ public sealed class TextGenerationPipeline
         {
             if (old.Capacity >= maxSeq)
             {
-                int reusedLen = Math.Max(0, Math.Min(Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), old.Length), promptIds.Length - 1));
+                int commonLen = Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), old.Length);
+                int reusedLen = Math.Max(0, Math.Min(commonLen, promptIds.Length - 1));
                 old.Truncate(reusedLen);
                 return (old, reusedLen);
             }
