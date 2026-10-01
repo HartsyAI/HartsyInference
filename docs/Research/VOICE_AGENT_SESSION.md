@@ -132,10 +132,10 @@ On the RTX 3060 (`CUDA_VISIBLE_DEVICES=1`, after a 10-minute Swarm quiet window,
 |---|---|---|
 | Whisper small.en per utterance (`voice.stt.ms`) | ≤ 350 ms | 110 / 88 / 167 ms for JFK's three utterances (1.9 / 1.2 / 5.7 s) |
 | Kokoro af_heart, 15-word sentence on the GPU thread | ≤ 250 ms | median 187 ms over five runs (254 ms the first time that text was synthesized, then 150-191 ms) |
-| Kokoro first sentence of a turn (`voice.tts.first_chunk_ms`) | ≤ 250 ms | 261 ms for an 18-word sentence synthesized for the first time; 131 ms, then 53 ms, for "Okay." |
+| Kokoro first sentence of a turn (`voice.tts.first_chunk_ms`) | ≤ 250 ms | **Over budget:** 261 ms for an 18-word sentence synthesized for the first time; 131 ms, then 53 ms, for "Okay.". The first synthesis of a new text runs 60-80 ms slower than repeats; open with the Kokoro bring-up |
 | Endpoint hangover (`voice.endpoint.ms`) | 700 ms (tune 500-800) | 736 ms: 700 ms of silence, the 30 ms pad and 32 ms Silero windows |
 | Resample and queue (`voice.transport.ms`) | ≤ 50 ms | 14 / 0.4 / 2.0 ms |
-| Turn total, end of speech to first reply audio queued (`voice.turn.total_ms`) | ≤ 1.3 s, stretch 1.0 s | turn 1: 1191 ms, of which the scripted LLM took 27 ms (1164 ms without it). Turns 2 and 3 (8064 and 9571 ms) waited behind the reply before them, because the test pushes the whole clip at once |
+| Turn total, end of speech to first reply audio queued (`voice.turn.total_ms`) | ≤ 1.3 s, stretch 1.0 s | turn 1: 1191 ms = endpoint 736 + STT 110 + scripted LLM 27 + Kokoro 261 + transport 14, plus 43 ms of turn overhead; 1164 ms without the LLM, which leaves 136 ms for a real model's first sentence within 1.3 s. The endpoint hangover dominates; tuning it within 500-800 ms is a product decision, and the default stays 700 ms. Turns 2 and 3 (8064 and 9571 ms) waited behind the reply before them, because the test pushes the whole clip at once |
 | Front-end per 20 ms frame during the call, Silero only (`voice.frontend.ms`) | ≤ 2 ms | p99 bucket ≤ 2 ms in every turn; max 1.9 / 21.7 / 2.4 ms. The test pushes the whole clip at once, so the audio thread works through turn 2's frames while turn 1's recognition and synthesis run; the serial gate is the CPU row above |
 | Whisper-verify, both directions | ≥ 80 % | caller (JFK) 11/11 content words; reply 8/9 ("tomorrow" heard as "row") |
 
