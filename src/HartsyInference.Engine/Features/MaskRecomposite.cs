@@ -2,7 +2,8 @@ using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>Pastes a full-canvas masked result over the init image through the mask, hard-thresholded like SwarmUI's CompositeMask.</summary>
+/// <summary>Pastes a full-canvas masked result over the init image through the mask, hard-thresholded like SwarmUI's CompositeMask.
+/// Applies to any masked request, including one whose family used the init as a reference.</summary>
 public static class MaskRecomposite
 {
     /// <summary>Composites <paramref name="generated"/> over the init image; unchanged without a mask or with recomposite off.</summary>

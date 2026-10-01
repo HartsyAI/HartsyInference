@@ -16,7 +16,7 @@ public static class MaskResolver
             return null;
         }
         Tensor mask = FeatureImaging.GrayToMaskTensor(maskBytes, targetWidth, targetHeight);
-        Logs.Verbose($"[Features][Mask] enabled: {targetWidth}x{targetHeight}, grow={inpaint!.Grow}, blur={inpaint.Blur}.");
+        Logs.Verbose($"[Features][Mask] enabled: {targetWidth}x{targetHeight}, grow={inpaint!.Grow}px, blur={inpaint.Blur}px.");
         return mask;
     }
 

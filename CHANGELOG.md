@@ -11,7 +11,8 @@ stable release will require. Dates are UTC.
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
   pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
   `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
-  Blur only softens the in-denoise blend, unless `ImageRequest.MaskCompositeUnthresholded` asks for the soft paste.
+  Blur only softens the in-denoise blend (and, because the grown and blurred mask is thresholded, widens the pasted
+  region by about the blur radius), unless `ImageRequest.MaskCompositeUnthresholded` asks for the soft paste.
   `Inpaint.RecompositeMask` turns the full-canvas paste off (Init Image Recomposite Mask); the crop and segment paths
   always paste. `RecipeImg2ImgBinder` switches the pipelines' own paste off whenever a mask is present, so a caller
   driving a recipe pipeline directly with a mask gets no paste and should go through `IImagesService`.
