@@ -215,6 +215,47 @@ public sealed class VoiceModelSetTests
         Assert.False(warm.EnableThinking);
         Assert.Equal("cuda:0", warm.Device);
         Assert.False(warm.AlwaysFreeMemory);
+        Assert.Null(warm.Tools);
+    }
+
+    [Fact]
+    public async Task WarmUpWithToolsStreamsTheRealPathInsteadOfOneSinkLessToken()
+    {
+        using CpuBackend device = new();
+        FakeSpeech speech = new();
+        // A queued round, not a bare GenerateAsync default: ScriptedTextService.StreamAsync throws
+        // "No scripted round left." without one, so draining it without that exception is itself evidence that
+        // WarmAsync went through the stream (filter/parser/channel) path, not the sink-less GenerateAsync one.
+        ScriptedTextService text = new ScriptedTextService().Reply("Sure, one moment.");
+        VoiceAgentOptions options = VoiceHarness.DefaultOptions() with { LlmDevice = "cuda:0" };
+        await using VoiceModelSet models = new(options, speech, device, () => new LevelVadModel(), createDenoiser: null);
+        ToolRegistry tools = new ToolRegistry().Add("get_time", () => DateTime.Now.ToString("h:mm tt"), "Tells the current local time.");
+
+        await models.WarmAsync(text, tools.Definitions).WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal(VoiceModelSet.WarmTexts, speech.Synthesized);
+        TextRequest warm = Assert.Single(text.Requests);
+        Assert.Equal(VoiceModelSet.WarmToolMaxTokens, warm.MaxTokens);
+        Assert.False(warm.EnableThinking);
+        Assert.Equal("cuda:0", warm.Device);
+        Assert.False(warm.AlwaysFreeMemory);
+        Assert.Same(tools.Definitions, warm.Tools);
+    }
+
+    [Fact]
+    public async Task WarmUpWithoutToolsIsUnchangedEvenWhenAnEmptyToolListIsPassed()
+    {
+        using CpuBackend device = new();
+        FakeSpeech speech = new();
+        ScriptedTextService text = new();
+        VoiceAgentOptions options = VoiceHarness.DefaultOptions() with { LlmDevice = "cuda:0" };
+        await using VoiceModelSet models = new(options, speech, device, () => new LevelVadModel(), createDenoiser: null);
+
+        await models.WarmAsync(text, []).WaitAsync(TimeSpan.FromSeconds(10));
+
+        TextRequest warm = Assert.Single(text.Requests);
+        Assert.Equal(1, warm.MaxTokens);
+        Assert.Null(warm.Tools);
     }
 
     [Fact]

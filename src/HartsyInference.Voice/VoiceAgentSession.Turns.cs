@@ -334,7 +334,12 @@ public sealed partial class VoiceAgentSession
             bool utterance = input.Kind == VoiceTurnKind.Utterance;
             LatencyHistogram.Summary frames = input.FrameTimes;
             bool timedFrames = utterance && frames.Count > 0;
-            double? hangoverMs = utterance ? input.HangoverSamples / SamplesPerMs : null;
+            // The denoiser's samples lag its input by DenoiserLatencySamples (0 when Denoise is off), so every sample
+            // the front end counts already happened that much earlier in wall-clock terms than the sample count
+            // alone says — added back here so the hangover (and TotalMs, which folds it in) is wall-clock honest.
+            double? hangoverMs = utterance
+                ? (input.HangoverSamples + session._audio.Frontend.DenoiserLatencySamples) / SamplesPerMs
+                : null;
             long firstWriteNs = _output?.FirstWriteNs ?? 0;
             long bargeInStopNs = interrupted ? session._outbound.LastDiscardNs - session._signals.BargeInNs : 0;
             return new VoiceTurnMetrics

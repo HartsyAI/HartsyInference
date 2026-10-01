@@ -13,7 +13,10 @@ stable release will require. Dates are UTC.
   engine built on `AudioDevice` (checked) and loads the per-session front-end weights from the wake models' `vad` and
   `denoise` folders: Silero is required, and RNNoise is required when `Denoise` is on, failing at load rather than
   passing raw audio through. `WarmAsync` runs five syntheses and one recognition of a second of silence on the model
-  set's GPU thread, plus a one-token, thinking-off generation on `LlmDevice`. The five texts cover Kokoro's
+  set's GPU thread, plus a generation on `LlmDevice`: a one-token request without tools, or, when the caller passes
+  its tool set, `WarmToolMaxTokens` (8) real tokens with tools offered, through `StreamAsync` rather than
+  `GenerateAsync` so the tool-call grammar, its stream filter and parser, and the template's tools branch are all hot
+  before the first caller — see the Qwen3 re-measurement below. The five texts cover Kokoro's
   power-of-two frame-length buckets from 32 to 512, so a reply's first sentence finds its bucket's convolution plans
   already built. `VoiceAgentSession(models, ITextService, ToolRegistry, options)` is one call: `StartAsync`,
   `PushInbound` (never blocks; 30 s, oldest dropped and counted), `ReadOutbound` (never blocks; zero-fills),
@@ -40,7 +43,7 @@ stable release will require. Dates are UTC.
   answered, and is counted. Two user or two plain assistant messages in a row merge, so turns stay alternating.
 - A revoked lease (engine free-memory, backend switch) is reopened once outside the gate and the job retried.
 - Per-turn `VoiceTurnMetrics` are logged as `[Voice] turn N: …` with every `voice.*` stage.
-- Tests (`tests/HartsyInference.Voice.Tests`, 77 unit tests on fakes): endpointing, barge-in, the flush protocol
+- Tests (`tests/HartsyInference.Voice.Tests`, 82 unit tests on fakes): endpointing, barge-in, the flush protocol
   (with a concurrent-flush ordering stress), GPU-thread jobs (every job keeps the pool, one trim per turn),
   conversation trimming, model-set load contract, the warm-up (one synthesis per length bucket), whole turns, lease
   revocation, and zero allocation on the audio thread and on the reader (0 B over 1000 reads with a cancellable
@@ -76,6 +79,53 @@ stable release will require. Dates are UTC.
   949.65 ms on this cold first live turn (tools installed, real prompt — not the plan's isolated, pre-warmed
   152 ms/151 tok/s probe), turn total **1974.72 ms, over the 1.3 s budget**, almost entirely from the LLM stage.
   Recall 100 % both directions.
+- **LLM voice-turn latency bring-up.** Root cause of the cold-call numbers above: `WarmAsync` warmed the LLM with a
+  one-token, no-tools request, so the tool-call grammar, `ToolCallStreamFilter`/`ToolCallParser`, the Jinja template's
+  tools branch, and every decode step past the first were cold on the real first turn. Fixed above (`WarmAsync`
+  accepts the host's tool definitions and runs `WarmToolMaxTokens` tokens through `StreamAsync` when given any).
+  `VoiceSessionQwen3EndToEndTests` now drives 4 turns of the same utterance (conversation history grows each turn)
+  with two independent timelines — `RecordingDiagnostics` (raw per-token events via `EngineOptions.Diagnostics`) and
+  a `TimestampingTextService` decorator (the chunks the session streams, after the tool-call filter) — plus a
+  best-effort read of `CudaBackend.LtGemmPlanStats` after warm-up and every turn. Re-measured (RTX 3060 + 4090, both
+  cards visible, clean quiet window, verified clean afterwards):
+
+  | Turn | `llm.ttft_ms` (≤ 150) | `llm.first_sentence_ms` (≤ 200) | `turn.total_ms` (≤ 1.3 s) |
+  |---|---:|---:|---:|
+  | 1 (cold) | 65.2 | 291.3 | 1366.3 |
+  | 2 | 77.1 | 308.5 | 1295.2 |
+  | 3 | 71.7 | 307.2 | 1284.7 |
+  | 4 | 77.7 | 318.7 | 1301.4 |
+
+  TTFT: **357 → 65-78 ms, meets budget on every turn, cold or warm** (`LtGemmPlanStats` stayed `(0,0,0,0)`
+  throughout — this GGUF-quantized model's decode path never reaches cuBLASLt's fused-epilogue GEMM, so the fix is
+  not plan-cache priming specifically; warming the real request shape, the grammar sampler and 8 decode steps is
+  what moved it, and nothing isolates which of those three the remaining credit belongs to). `voice.endpoint.ms`
+  reads **776.00 on every turn = 736 + RNNoise's 40 ms lag**, confirming the endpoint-metric fix below in a real
+  session (the unit test can only prove the arithmetic; a live RNNoise instance suppresses the harness's level-
+  scripted fake VAD as noise, so it cannot drive a turn). `turn.total_ms`: turns 2 and 3 meet budget; turn 4 misses
+  by 1.4 ms (noise); turn 1 misses by 66 ms, all of it `tts.first_chunk_ms` (142 ms, Kokoro's known first-synthesis-
+  of-new-text cost, not an LLM or warm-up residue — turn 1's LLM numbers, 65/291, are indistinguishable from turns
+  2-4's). **`llm.first_sentence_ms` still misses its 200 ms budget by 90-120 ms on every turn, cold or warm**, and is
+  not a warm-up problem: the reply is one sentence, and `StreamingSentenceSplitter` cannot know it is complete until
+  the stream ends (no later text to confirm the boundary), so `first_sentence` = TTFT + the full decode + its EOS
+  step — measured 65 + 8×25 + 25 ≈ 290 ms, matching the per-chunk timeline (turns 1-2; turns 3-4 only by their
+  aggregate rate) to within 2 ms. The real lever is decode throughput: the session streams at **38-40 tok/s**
+  (steady ~25 ms/token, no bursts — nothing is being held by the filter), against the plan's own isolated probe
+  (`VoiceLlmTurnBenchTests`, `benchmarks/results/2026-09-30_voice_turn_latency.md`) at **151.1 tok/s with the same
+  sentinel grammar armed** (tools-on vs tools-off differ by 0.5 tok/s there, so the grammar step itself is not the
+  cost). The ~4x gap is session-path overhead the probe's bare `onToken` callback never pays: per-token incremental
+  detokenization, `ToolCallStreamFilter`/`ToolCallParser` character scanning, and the parsed-event/channel plumbing
+  between the engine and `VoiceAgentSession`, all per decode step. At the probe's rate the same 9-token reply would
+  land near 125 ms, inside budget. Fixing this needs its own engine/Tools PR with per-stage profiling (not done
+  here — two 4090 runs were spent and the evidence does not point at one line); flagged as a follow-up task, not
+  bypassed and not worked around by changing the splitter or `FirstSentenceMinChars`.
+- `voice.endpoint.ms` now adds the denoiser's algorithmic lag (`RnnoiseStream.LatencySamples`, exposed as
+  `VoiceAudioFrontend.DenoiserLatencySamples`, 0 when `Denoise` is off) to the sample-counted hangover, so the metric
+  (and `turn.total_ms`, which folds it in) reports the caller's real wall-clock wait instead of being silently short
+  by 40 ms whenever denoising runs — see the live-session confirmation above.
+- **Still open for PR9 (`feat/voice-host-and-deploy`, stacked on this branch):** `VoiceHost`'s boot-time
+  `WarmAsync` call must pass its tool set too, or production warm-up stays on the cold one-token path this fix
+  addresses only when a caller opts in.
 
 ## alpha.236
 

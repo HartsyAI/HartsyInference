@@ -21,7 +21,10 @@ public readonly record struct VoiceTurnMetrics
     /// <summary>Length of the caller's utterance, VAD padding included.</summary>
     public double? UtteranceMs { get; init; }
 
-    /// <summary><c>voice.endpoint.ms</c>: from the end of the caller's speech to the endpoint decision.</summary>
+    /// <summary><c>voice.endpoint.ms</c>: from the end of the caller's speech to the endpoint decision, counted in
+    /// samples and including the denoiser's algorithmic lag (<see cref="Audio.VoiceAudioFrontend.DenoiserLatencySamples"/>,
+    /// 0 when <see cref="VoiceAgentOptions.Denoise"/> is off) so the figure is wall-clock honest rather than 40 ms short
+    /// of the caller's real wait whenever denoising runs.</summary>
     public double? EndpointMs { get; init; }
 
     /// <summary><c>voice.frontend.ms</c> median bucket: denoise plus VAD per 20 ms frame since the previous endpoint.</summary>

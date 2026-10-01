@@ -13,6 +13,15 @@ Telephony tools (hang up, DTMF, transfer) are registered by the host; the sessio
 
 `VoiceModelSet.WarmAsync` prepares every model before the first call:
 
+- When the caller passes the host's tool definitions, it also runs `WarmToolMaxTokens` (8) real tokens with tools
+  offered, through `ITextService.StreamAsync` rather than `GenerateAsync`, so the tool-call grammar sampler, the
+  `ToolCallStreamFilter`/`ToolCallParser` it drives, the Jinja template's tools branch and `WarmToolMaxTokens` real
+  decode steps are all hot before the first caller. Without tools (the default; also what a session with none
+  registered gets) the request is unchanged from before: one token, no grammar. The warm-up's own `Messages` never
+  touch a session's conversation or the sentence splitter, so it changes nothing about what the first real turn
+  generates. This is what the Qwen3-4B [measurement](#qwen3-4b-on-the-rtx-4090-audio-on-the-3060-both-cards-visible)
+  below is re-measured against; `VoiceHost` (PR9) must be updated to pass its own tool set at boot, or production
+  warm-up stays on the cold one-token path.
 - It synthesizes five texts, each as its own GPU job: "Okay.", a 3-word, a 6-word, a 13-word and a 30-word sentence.
 - On the RTX 3060 these gave 58, 70, 81, 195 and 407 of Kokoro's 25 ms alignment frames. That is the power-of-two
   buckets 64, 128, 128, 256 and 512, every bucket a sentence reaches:
@@ -147,7 +156,9 @@ keeps listening.
 
 One `[Voice] turn N (kind): …` line per turn, every key always present (`-` when the stage did not run):
 `voice.frontend.ms.{p50,p99,max}` (denoise plus VAD per 20 ms frame since the previous endpoint; percentiles are
-`LatencyHistogram` bucket bounds), `voice.endpoint.ms` (sample clock), `voice.stt.ms`, `voice.llm.ttft_ms`,
+`LatencyHistogram` bucket bounds), `voice.endpoint.ms` (sample clock, plus the denoiser's algorithmic lag —
+`VoiceAudioFrontend.DenoiserLatencySamples`, 0 when `Denoise` is off — so the figure is wall-clock honest instead of
+40 ms short whenever denoising runs), `voice.stt.ms`, `voice.llm.ttft_ms`,
 `voice.llm.first_sentence_ms`, `voice.tts.first_chunk_ms`, `voice.transport.ms`, `voice.turn.total_ms` (sample-clock
 hangover plus the wall time from the endpoint to the first reply audio queued) and `voice.bargein.stop_ms` (decision
 to the reader's discard). The gateway's stages (`voice.rtp.*`) are measured by the gateway.
@@ -233,6 +244,55 @@ prompt and history — not the plan's isolated, pre-warmed TTFT/throughput probe
 synthetic prompt, no tools). Reported as measured; endpoint and LLM-side tuning are the orchestrator's call, per the
 plan's decision log.
 
+#### Re-measured after the `WarmAsync` fix, 4 turns, both cards visible
+
+Root cause of the row above: `WarmAsync` warmed the LLM with a one-token, no-tools request, so the grammar sampler,
+the stream filter/parser and every decode step past the first were cold on the real first turn. Fixed: `WarmAsync`
+now takes the host's tool definitions and, when given any, runs `WarmToolMaxTokens` (8) tokens through `StreamAsync`
+instead (see [above](#summary)). Re-run of `VoiceSessionQwen3EndToEndTests`, now driving 4 turns of the same
+caller utterance back to back (history grows each turn), clean quiet window on both cards, verified clean after:
+
+| Turn | `llm.ttft_ms` (≤ 150) | `llm.first_sentence_ms` (≤ 200) | `tts.first_chunk_ms` | `voice.endpoint.ms` | `turn.total_ms` (≤ 1.3 s) |
+|---|---:|---:|---:|---:|---:|
+| 1 (cold) | 65.2 | 291.3 | 142.3 | 776.0 | 1366.3 |
+| 2 | 77.1 | 308.5 | 104.4 | 776.0 | 1295.2 |
+| 3 | 71.7 | 307.2 | 95.5 | 776.0 | 1284.7 |
+| 4 | 77.7 | 318.7 | 105.1 | 776.0 | 1301.4 |
+
+- **TTFT 357 → 65-78 ms, meets budget on every turn, cold or warm.** `CudaBackend.LtGemmPlanStats` read `(0,0,0,0)`
+  before and after every turn: this GGUF-quantized model's decode never reaches cuBLASLt's fused-epilogue GEMM path,
+  so plan-cache priming is not the mechanism — the fix is warming the real request shape (206 templated tokens vs.
+  the old request's ~20), the grammar sampler and real decode steps together; nothing here isolates which of the
+  three the remaining credit belongs to.
+- **`voice.endpoint.ms` reads 776.00 on every turn = 736 + RNNoise's 40 ms lag**, confirming the endpoint-metric fix
+  below in a real session with `Denoise` on (the CPU unit test can only prove the arithmetic in isolation: a real
+  RNNoise instance ahead of the harness's level-scripted fake VAD suppresses the fake "speech" as noise, so that
+  combination cannot drive a turn at all).
+- **`turn.total_ms`**: turns 2 and 3 meet the 1.3 s budget; turn 4 misses by 1.4 ms (noise); turn 1 misses by 66 ms,
+  all of it `tts.first_chunk_ms` (142 ms — Kokoro's first-synthesis-of-new-text cost, a known item, not an LLM or
+  warm-up residue: turn 1's LLM numbers are indistinguishable from turns 2-4's).
+- **`llm.first_sentence_ms` still misses its 200 ms budget by 90-120 ms, every turn, cold or warm — not a warm-up
+  problem.** The reply is one sentence ("Hello, how can I assist you today?"); `StreamingSentenceSplitter` cannot
+  know a sentence is complete until the stream ends (nothing later confirms the boundary), so for a one-sentence
+  reply `first_sentence` = TTFT + the full decode + its EOS step. Turn 1's per-token timeline confirms it exactly:
+  9 tokens roughly 25 ms apart (65 TTFT + 8×25 decode + 25 for the EOS step ≈ 290 ms, measured 291.34); turns 3-4
+  were not timelined per token, only by their aggregate rate (37-38 tok/s), consistent with the same shape. The
+  lever is decode throughput: the session streams at **38-40 tok/s**, steady spacing, no bursts (nothing is held by
+  the tool-call filter — confirmed separately: Hermes markers are `<tool_call>` / `{"name"` / line-start `{`, so a
+  reply starting "Hello" matches none of them and is forwarded a character at a time, see
+  `ToolCallParserTests.PlainTextIsForwardedUnchangedWithoutCopying`). The plan's own isolated probe
+  (`VoiceLlmTurnBenchTests`, `benchmarks/results/2026-09-30_voice_turn_latency.md`) measured **151.1 tok/s with the
+  same sentinel grammar armed** (tools-on vs. tools-off differ by 0.5 tok/s there, so the grammar step itself is not
+  the cost). The ~4x gap is session-path overhead the probe's bare `onToken` callback never pays: per-token
+  incremental detokenization, the tool-call filter/parser's character scan, and the parsed-event/channel plumbing
+  between `TextService` and `VoiceAgentSession`, all paid once per decode step. At the probe's rate the same
+  9-token reply lands near 125 ms, inside budget. **Not fixed here**: it needs its own engine/Tools PR with
+  per-stage profiling to find which layer costs the ~18 ms/token difference, which two GPU runs were not spent
+  chasing further; the splitter and `FirstSentenceMinChars` were deliberately left alone — changing either would
+  move the number without touching the actual cost.
+- **Open for PR9**: `VoiceHost`'s boot-time `WarmAsync` call must pass its own tool set, or production warm-up
+  stays on the cold one-token path this fix only helps when a caller opts in.
+
 ## Open
 
 - Partial transcripts need a streaming recognizer; `PartialTranscripts = true` is rejected.
@@ -242,3 +302,10 @@ plan's decision log.
 - No hallucination filter beyond "only VAD-closed segments reach the recognizer" and the no-words discard.
 - The CPU kernels' per-call dispatch closures make real Silero allocate on the audio thread; fixing them is a
   cross-model Cpu change with its own A/B.
+- `llm.first_sentence_ms` misses its 200 ms budget by 90-120 ms on every turn (cold or warm): the session streams
+  decode at 38-40 tok/s against the plan's isolated probe's 151.1 tok/s with the same grammar armed — see
+  [the Qwen3 re-measurement](#re-measured-after-the-warmasync-fix-4-turns-both-cards-visible). Needs an engine/Tools
+  PR with per-stage profiling of the per-token path (`TextService`'s incremental detokenizer, the tool-call
+  filter/parser, the parsed-event/channel plumbing) to find the ~18 ms/token difference; not chased further here.
+- `VoiceHost` (PR9)'s boot-time `WarmAsync` call needs updating to pass its own tool set, or production warm-up
+  stays on the cold one-token path.

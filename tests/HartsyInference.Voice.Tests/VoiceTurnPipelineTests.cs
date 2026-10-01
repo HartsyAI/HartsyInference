@@ -1,9 +1,15 @@
+using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
+using HartsyInference.Engine.Audio.Wake;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Tests.Common;
 using HartsyInference.Tools;
+using HartsyInference.Voice.Audio;
 using HartsyInference.Voice.Tests.Fakes;
+using HartsyInference.Voice.Turns;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Voice.Tests;
 
@@ -15,6 +21,10 @@ namespace HartsyInference.Voice.Tests;
 public sealed class VoiceTurnPipelineTests
 {
     private const int Sentence = 2_400;
+
+    private readonly ITestOutputHelper _output;
+
+    public VoiceTurnPipelineTests(ITestOutputHelper output) => _output = output;
 
     [Fact]
     public async Task SentencesPlayInOrderAtContiguousOffsets()
@@ -260,6 +270,36 @@ public sealed class VoiceTurnPipelineTests
         {
             Logs.SetLogger(null!);
         }
+    }
+
+    [Fact]
+    public void FrontendDenoiserLatencySamplesReflectsTheRealDenoisersAlgorithmicLagOrZeroWithoutOne()
+    {
+        // A real RNNoise instance ahead of the fake level-scripted VAD would make this a session-level test instead
+        // (push a turn, read VoiceTurnMetrics.EndpointMs), but RNNoise legitimately suppresses a constant-level tone
+        // as non-speech noise (confirmed: with Denoise on, LevelVadModel never sees speech and the turn never ends),
+        // so that combination cannot drive a turn at all. This checks the one new property Turn.Metrics() reads
+        // (VoiceAgentSession.Turns.cs) directly: VoiceAudioFrontend.DenoiserLatencySamples. The arithmetic that adds
+        // it into EndpointMs/TotalMs is otherwise covered by AnUtteranceIsRecognizedOnTheGpuThreadAndAnsweredWithEveryMetricLogged
+        // above, which proves the unchanged (Denoise off, latency 0) case still lands in its established [700, 764] range.
+        if (!RealWeightGate.Require(_output.WriteLine, VoiceAssets.RnnoiseWeights, VoiceAssets.RnnoiseInt8Tables))
+        {
+            return;
+        }
+        using WakeModelSet wake = new(VoiceAssets.WakeRoot);
+        Assert.True(wake.LoadDenoiser(RnnoisePrecision.Int8));
+        RnnoiseStream denoiser = wake.CreateDenoiser() ?? throw new InvalidOperationException("Could not instantiate RNNoise.");
+        using CpuBackend cpu = new();
+        VoiceTurnSignals signals = new();
+        VoiceAgentOptions options = new();
+
+        using VoiceAudioFrontend withDenoiser = new(cpu, new LevelVadModel(), denoiser, signals, options);
+        _output.WriteLine($"real RNNoise LatencySamples = {denoiser.LatencySamples} ({denoiser.LatencySamples / 16.0:F1} ms at 16 kHz)");
+        Assert.True(denoiser.LatencySamples > 0, "a real denoiser should report a non-zero algorithmic lag.");
+        Assert.Equal(denoiser.LatencySamples, withDenoiser.DenoiserLatencySamples);
+
+        using VoiceAudioFrontend withoutDenoiser = new(cpu, new LevelVadModel(), null, signals, options);
+        Assert.Equal(0, withoutDenoiser.DenoiserLatencySamples);
     }
 
     [Fact]

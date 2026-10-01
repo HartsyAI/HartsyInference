@@ -111,6 +111,13 @@ internal sealed class VoiceAudioFrontend : IDisposable
     /// <summary>Whether frames go through RNNoise.</summary>
     public bool Denoising => _denoiser is not null;
 
+    /// <summary>The denoiser's algorithmic lag in samples at <see cref="SampleRate"/> (0 when <see cref="Denoising"/> is
+    /// false): output sample <c>i</c> is input sample <c>i</c> minus this many samples, so every decision counted on
+    /// the front-end's sample clock — the endpoint hangover, the barge-in run — is this much later in wall-clock terms
+    /// than the sample count alone suggests. Nothing upstream of <see cref="ProcessFrame"/> can see it; a caller that
+    /// wants a wall-clock-honest duration adds it back.</summary>
+    public int DenoiserLatencySamples => _denoiser?.LatencySamples ?? 0;
+
     /// <summary>The turn the last <see cref="VoiceFrameEvents.BargeIn"/> interrupted.</summary>
     public int BargeInTurn => _bargeInTurn;
 
