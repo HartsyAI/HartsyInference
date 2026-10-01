@@ -287,6 +287,15 @@ check "the legitimate empty directory survived" test -d /opt/hartsyinference/voi
 rm -rf "$FAKE_PUBLISH/voice-host/plugins"
 
 echo
+echo "=== scenario: stale-file pruning also removes a stale symlink, not just regular files ==="
+# find -type f alone never matches a symlink; without -o -type l a stale one would survive forever.
+ln -s /nonexistent-target /opt/hartsyinference/voice-host/stale-leftover-link
+echo "changed again, to trigger a real re-copy" >"$FAKE_PUBLISH/voice-host/HartsyInference.VoiceHost.dll"
+check "apply #10 (with a stale leftover symlink) exits 0" run_script --apply --publish-dir "$FAKE_PUBLISH"
+check_not "the stale leftover symlink was removed" test -e /opt/hartsyinference/voice-host/stale-leftover-link -o -L /opt/hartsyinference/voice-host/stale-leftover-link
+echo stub >"$FAKE_PUBLISH/voice-host/HartsyInference.VoiceHost.dll"
+
+echo
 echo "=== scenario: a failed publish (second dotnet call fails) does not leak the temp dir ==="
 cat >"$FAKE_BIN/dotnet" <<'DOTNET_FAIL_EOF'
 #!/usr/bin/env bash
