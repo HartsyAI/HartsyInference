@@ -13,6 +13,10 @@ public sealed class SamplerChain
     private readonly List<ISamplerStep> _steps;
     private readonly bool _greedy;
     private uint _rngState;
+    // One SamplerChain lives for exactly one generation (built fresh per FromOptions call, which Generate calls
+    // once per request) and Next runs once per decode step of that SAME generation — sized once, on the first
+    // non-greedy token, and reused for every later one instead of a fresh vocab-sized array per token.
+    private float[]? _drawProbs;
 
     private SamplerChain(List<ISamplerStep> steps, bool greedy, ulong seed)
     {
@@ -24,6 +28,12 @@ public sealed class SamplerChain
     }
 
     /// <summary>Builds the ordered chain (JSON grammar, repetition penalty, temperature, top-k, top-p, min-p), including only the steps active for the given options; the grammar step goes FIRST as a hard structural constraint (though order doesn't actually affect correctness here). <paramref name="tokenizer"/>/<paramref name="vocabSize"/> are required only when <see cref="SamplingOptions.JsonMode"/> or <see cref="SamplingOptions.JsonModeSentinel"/> is set.</summary>
+    /// <remarks>Every caller in this repo builds a fresh chain per generation (<c>TextGenerationPipeline.Generate</c>
+    /// calls this once per request) and drives it from one thread only. <see cref="TopPStep"/>/<see cref="TopKStep"/>/
+    /// <see cref="MinPStep"/> and this chain's own final-draw scratch buffer rely on that: each is sized once and
+    /// reused across a generation's decode steps, which is only safe because nothing else is reading or writing
+    /// the SAME chain/step instance concurrently. Caching a chain across requests, or sharing one across threads,
+    /// would turn that reuse into a data race.</remarks>
     public static SamplerChain FromOptions(SamplingOptions options, ILlmTokenizer? tokenizer = null, int vocabSize = 0)
     {
         if (options is null)
@@ -87,7 +97,11 @@ public sealed class SamplerChain
             return Argmax(logits);
         }
         int count = logits.Length;
-        float[] probs = new float[count];
+        if (_drawProbs is null || _drawProbs.Length != count)
+        {
+            _drawProbs = new float[count];
+        }
+        float[] probs = _drawProbs;
         SamplerMath.Softmax(logits, probs);
         float sum = 0.0f;
         for (int i = 0; i < count; i++)

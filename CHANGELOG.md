@@ -6,6 +6,31 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.236
+
+- **Non-greedy sampling (temperature/top-p) no longer sorts the whole vocabulary from scratch every token.**
+  The phone voice agent's short replies were measured streaming at 37-40 tok/s on the 4090 against an isolated
+  probe's 151 tok/s for what looked like the same request. Neither named suspect (per-generation CUDA/KV-cache
+  startup cost; `StreamAsync`/`ToolLoop`'s detokenizer/filter/channel transport) held up when measured directly
+  — both are flat/negligible. The probe measured only greedy decoding; the voice session's `TextRequest`
+  defaults to `Temperature=0.7, TopP=0.95, Greedy=false`, and `TopPStep`'s nucleus filter allocated three
+  vocab-sized arrays and argsorted the full ~152K-token vocabulary through a `Comparison<int>` delegate — every
+  decode step, only on the non-greedy path.
+  - **Fix.** `TopPStep`/`TopKStep`/`MinPStep`/`SamplerChain` reuse per-generation scratch buffers instead of
+    allocating fresh ones every token. `SamplerMath.SortDescendingByValue` sorts via `Array.Sort(float[], int[])`
+    (no delegate dispatch) instead of a comparer. `TopPStep` additionally sorts only the candidate tokens whose
+    probability already clears a tiny floor when their own total reaches `p` (provably identical to sorting the
+    whole vocabulary whenever it applies — see the type's remarks), falling back to a full sort otherwise.
+  - **Numbers (Qwen3-4B Q4_K_M, 4090):** session-default sampling's first-10-token latency: 25.2 ms/token before
+    (39.7 tok/s) → 7.6 ms/token after (131.6 tok/s); the realistic voice-turn bench (`ToolLoop.RunAsync` →
+    `StreamAsync`) moves from 27-38 tok/s to 94-106 tok/s. Greedy decoding (unaffected code path) holds steady at
+    110-160 tok/s across every measurement pass. Reply text and token-ids are byte-identical to the pre-fix
+    output in every case measured. [Results](benchmarks/results/2026-10-01_llm_short_reply_decode.md).
+- `TopPSortRefactorIdentityTests` keeps the pre-fix sampler algorithm verbatim as a reference and checks the new
+  code masks identical logits across peaked/near-flat/pre-masked-tail/fallback-forcing distributions up to
+  151,936 (Qwen3's vocabulary) and 2,000,000 elements — `regression-ab.sh`'s identical-output arms are greedy
+  and never reach this code at all.
+
 ## alpha.235
 
 - **Whisper's GELU is now the exact erf form Whisper uses.** OpenAI's Whisper applies `F.gelu` after both conv-stem
