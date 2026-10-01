@@ -1,5 +1,6 @@
 using HartsyInference.Cpu;
 using HartsyInference.Voice.Gpu;
+using HartsyInference.Voice.Tests.Fakes;
 using Xunit;
 
 namespace HartsyInference.Voice.Tests;
@@ -92,6 +93,24 @@ public sealed class VoiceGpuWorkerTests
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             worker.RunAsync<int>(VoiceGpuJobKind.Synthesize, () => throw new ObjectDisposedException("lease"), CancellationToken.None));
         Assert.Equal(3, await worker.RunAsync(VoiceGpuJobKind.Synthesize, () => 3, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
+    public async Task EveryJobFreesItsActivationsAndKeepsThePoolForTheNext()
+    {
+        using CpuBackend cpu = new();
+        RecordingDevice device = RecordingDevice.Wrap(cpu);
+        using VoiceGpuWorker worker = new(device.Backend);
+        VoiceGpuJobKind[] kinds = [VoiceGpuJobKind.Warm, VoiceGpuJobKind.Transcribe, VoiceGpuJobKind.Synthesize, VoiceGpuJobKind.Synthesize];
+        foreach (VoiceGpuJobKind kind in kinds)
+        {
+            await worker.RunAsync(kind, () => 0, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        await Assert.ThrowsAsync<InvalidOperationException>(() => worker.RunAsync<int>(VoiceGpuJobKind.Synthesize,
+            () => throw new InvalidOperationException("a failing job frees its activations too"), CancellationToken.None));
+
+        Assert.Equal(Enumerable.Repeat(RecordingDevice.FreeKeepingPool, kinds.Length + 1), device.Calls);
+        Assert.Equal(0, worker.Trims);
     }
 
     [Fact]

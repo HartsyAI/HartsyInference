@@ -388,6 +388,34 @@ public sealed class VoiceTurnPipelineTests
     }
 
     [Fact]
+    public async Task EveryJobKeepsThePoolAndEachTurnTrimsItOnceOnItsReturnToListening()
+    {
+        ScriptedTextService text = new ScriptedTextService().Reply("The first reply has one sentence.")
+            .Reply("The second reply has two sentences. Here is the other one.");
+        RecordingDevice? recorder = null;
+        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text, device: cpu => (recorder = RecordingDevice.Wrap(cpu)).Backend);
+        for (int turn = 1; turn <= 2; turn++)
+        {
+            harness.Session.PushDtmf('1');
+            await harness.TurnCompletedAsync(turn);
+            int id = turn;
+            await harness.WaitForAsync(e => e.Kind == VoiceAgentEventKind.StateChanged && e.State == VoiceAgentState.Listening && e.TurnId == id);
+            DateTime deadline = DateTime.UtcNow.AddSeconds(5);
+            while (harness.Models.Gpu.Trims < turn && DateTime.UtcNow < deadline)
+            {
+                await Task.Delay(5);
+            }
+        }
+        await Task.Delay(100);
+
+        // One synthesis per sentence, each freeing its activations with the pool kept, then one trim per turn.
+        string free = RecordingDevice.FreeKeepingPool;
+        string trim = RecordingDevice.Trim;
+        Assert.Equal([free, trim, free, free, trim], recorder!.Calls);
+        Assert.Equal(2, harness.Models.Gpu.Trims);
+    }
+
+    [Fact]
     public async Task ACancelledStartEndsTheSession()
     {
         using CpuBackend device = new();

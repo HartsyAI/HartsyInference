@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Cpu;
 using HartsyInference.Engine.Services;
 using HartsyInference.Tools;
@@ -53,16 +54,18 @@ internal sealed class VoiceHarness : IAsyncDisposable
     /// <summary>Defaults for the harness: synthesis and playback at the same rate, so played samples are the markers.</summary>
     public static VoiceAgentOptions DefaultOptions() => new() { OutboundSampleRate = 24_000, LlmDevice = "cpu", AudioDevice = "cpu" };
 
-    /// <summary>A session on fake models.</summary>
+    /// <summary>A session on fake models. <paramref name="device"/> wraps the CPU audio device, for a test that records
+    /// what the GPU thread asks of it.</summary>
     public static async Task<VoiceHarness> StartAsync(VoiceAgentOptions? options = null, FakeSpeech? speech = null, ScriptedTextService? text = null,
-        ToolRegistry? tools = null, int outboundCapacity = 0, bool startReader = true, TimeSpan? readerPause = null)
+        ToolRegistry? tools = null, int outboundCapacity = 0, bool startReader = true, TimeSpan? readerPause = null,
+        Func<CpuBackend, IBackend>? device = null)
     {
         VoiceAgentOptions resolved = options ?? DefaultOptions();
         FakeSpeech fake = speech ?? new FakeSpeech();
-        CpuBackend device = new();
-        VoiceModelSet models = new(resolved, fake, device, () => new LevelVadModel(), createDenoiser: null);
+        CpuBackend cpu = new();
+        VoiceModelSet models = new(resolved, fake, device?.Invoke(cpu) ?? cpu, () => new LevelVadModel(), createDenoiser: null);
         VoiceHarness harness = new(models, ownsModels: true, resolved, fake, text ?? new ScriptedTextService(), tools ?? new ToolRegistry(),
-            outboundCapacity, device);
+            outboundCapacity, cpu);
         return await harness.BeginAsync(startReader, readerPause ?? TimeSpan.FromMilliseconds(1));
     }
 

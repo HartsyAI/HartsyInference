@@ -10,11 +10,13 @@ namespace HartsyInference.Voice.Gpu;
 /// <remarks>Per job: a job whose token is already cancelled is skipped; otherwise the device's
 /// <see cref="DeviceGate"/> slot is taken for that one job only (never across an await, never together with the
 /// language model's device, so the ascending-ordinal rule of <see cref="DeviceGate.AcquireAll"/> can never be broken
-/// from here), the job runs, <see cref="IBackend.FreeActivations()"/> releases its activations, and its completion
-/// is set with continuations forced off this thread. A caller that stops waiting is released at once even while its
-/// job is still running here; the job's result is then dropped. <see cref="RequestTrim"/> queues a return of pool
-/// memory to the driver that runs only if nothing is queued behind it, because <see cref="IBackend.TrimMemoryPool"/>
-/// synchronizes the stream and must never sit ahead of the next turn's first job or between two sentences.
+/// from here), the job runs, <see cref="IBackend.FreeActivations(bool)"/> releases its activations with the pool's
+/// reservation kept (the parameterless form also trims the pool, so every sentence and every utterance would reserve
+/// its memory from the driver again), and its completion is set with continuations forced off this thread. A caller
+/// that stops waiting is released at once even while its job is still running here; the job's result is then
+/// dropped. <see cref="RequestTrim"/> queues the one return of pool memory to the driver a turn makes, which runs only
+/// if nothing is queued behind it, because <see cref="IBackend.TrimMemoryPool"/> synchronizes the stream and must
+/// never sit ahead of the next turn's first job or between two sentences.
 /// <para>A job that throws <see cref="ObjectDisposedException"/> found its models released by their owner (an engine
 /// release revokes runner leases). The worker then runs the reopen hook once, outside the gate because reopening
 /// takes the gate itself, and retries the job once; if either fails the job fails, its caller reports it, and the
@@ -183,7 +185,7 @@ internal sealed class VoiceGpuWorker : IDisposable
         }
         finally
         {
-            _device.FreeActivations();
+            _device.FreeActivations(trimPool: false);
         }
     }
 
