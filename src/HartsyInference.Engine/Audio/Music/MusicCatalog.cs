@@ -100,8 +100,8 @@ internal static class MusicCatalog
         // Folder-checkpoint families (YuE) load a whole variant DIRECTORY; the download set lands in "{variant}/…".
         if (AudioWeightsCatalog.IsFolderCheckpoint(familyId))
         {
-            // The downloader's own folder, so the loader reads where a download writes, also when the family folder
-            // is spelled in another case on disk.
+            // The downloader's folder for the variant (the primary's TargetName is "{variant}/model-00001-…"), so the
+            // loader reads where a download writes, also when the family folder is spelled in another case on disk.
             if (primary is not null)
             {
                 return Path.GetDirectoryName(ModelDownloader.TargetPath(primary))!;
