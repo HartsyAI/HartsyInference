@@ -137,13 +137,14 @@ the per-length heuristic); the `GpuIntegration` category in four batches, 99 / 1
 test and the opt-in soak tests return early with one GPU visible); the untagged cuDNN conv classes (`CudnnConvTests`,
 `Conv1dKernelTests`) 22/22 with the plan-cache tests. No failures.
 
-## Spot check: four more vocoder families, buckets off vs on (engine `6d0e717a`, 2026-10-01 07:27-08:16Z)
+## Spot check: four more vocoder families, buckets off vs on (engine `6d0e717a`, 2026-10-01 07:27-08:32Z)
 
 Each arm is a fresh process and backend on the 3060, with the same text, seed (1234) and reference audio. Every sentence
 is synthesized twice: first (per-length setup) and repeat (steady state, every plan cached). The repeat against the first
 is the model's own run-to-run noise floor. Piper also has a no-TF32 arm (direct F32 conv kernels, full-precision
-GEMMs) as an exact-math reference; the LM models do not, because changing GEMM precision can flip a sampled token.
-Scored on the CPU: Whisper small.en, log-spectral correlation, max-abs, and for Piper sentence 3 the alignment lag
+GEMMs) as an exact-math reference. The LM models cannot have that one, because changing GEMM precision can flip a
+sampled token; CosyVoice 2 instead has a conv-only F32 arm (direct F32 conv kernels, GEMMs untouched). Scored on the
+CPU: Whisper small.en, log-spectral correlation, max-abs, and where on and off differ beyond rounding the alignment lag
 and the difference distribution. Every bucketed arm built its plans from buckets with no fallback.
 
 | Model (codec) | # | on vs off | Noise floor (repeat vs first), off / on | Recall off / on | Transcripts |
@@ -166,14 +167,25 @@ and the difference distribution. Every bucketed arm built its plans from buckets
     difference is local: 89 % of its energy sits in the top 5 % of 10 ms windows, peaking at 2.85 s of 4.02 s, while
     the waveforms agree to ~1e-3 elsewhere. A TF32-level difference upstream of the vocoder (the flow) reshaped one
     short stretch of the waveform; lengths and the transcript are unchanged.
-- **CosyVoice 2 moves most: 0.979 / 0.987, far above its own run-to-run floor (≈ 1.0).** The alignment says what
-  moved: on sentence 2 the best lag is −15 samples (−0.6 ms), and the correlation rises from −0.22 at lag 0 to 0.65.
-  That is the phase drift of an NSF harmonic source (HiFT integrates F0 into phase): its 10-step flow-matching ODE
-  runs a conv estimator, so a TF32-level difference in one step carries through the solve into the mel and F0, and the
-  harmonic phase drifts. The waveform metrics punish phase drift; the transcripts and lengths are unchanged. No F32
-  reference was run for CosyVoice (see above). A conv-only F32 arm (`numerics.audioConvCudnn=false`, GEMMs untouched,
-  so its LM tokens should not move) would place both arms against exact conv math. That is about a minute on the 3060
-  if wanted.
+- **CosyVoice 2 moves most, and its two arms are equally far from exact conv math.** On vs off is 0.987 and 0.979,
+  far above its run-to-run floor (≈ 1.0). A conv-only F32 arm (`numerics.audioConvCudnn=false`, GEMMs untouched, so
+  the sampled tokens did not move; same lengths) gives CosyVoice's own band against exact conv math:
+
+  | Sentence | off vs conv-F32 | on vs conv-F32 | on vs off |
+  |---:|---|---|---|
+  | 1 | 0.983683, max-abs 1.66 | 0.981989, max-abs 1.95 | 0.987337, max-abs 1.10 |
+  | 2 | 0.981261, max-abs 1.93 | 0.985641, max-abs 1.85 | 0.979200, max-abs 1.98 |
+
+  - Both TF32 arms sit 0.982-0.986 from exact conv math. That is CosyVoice's TF32 band: its flow ODE carries any conv
+    rounding into the mel, and the bucket choice moves it no more than the per-length choice does.
+  - **What moved, per sentence.** Sentence 1: no time shift (best lag −1 sample, correlation 0.884 against 0.873 at
+    lag 0), and the difference is spread across the clip (the top 5 % of 10 ms windows hold only 32 % of its energy).
+    Sentence 2: a sub-millisecond phase shift (best lag −15 samples, −0.6 ms, lifts the correlation from −0.22 to 0.65),
+    which is what HiFT's NSF source does when the F0 it integrates moves slightly.
+  - Transcripts and recall (100 %) are the same in all three arms.
+  - Incidentally, the conv-only F32 arm is deterministic run to run while both cuDNN arms vary by ≤ 1.2e-4, and the
+    direct kernels ran CosyVoice faster here (6535 / 10431 ms first synthesis against 7350-7492 / 11811-11866 ms).
+    That is outside this change; it is noted for a follow-up look at CosyVoice's conv routing.
 
 **Timing, buckets off → on** (sum over the model's sentences; first = per-length setup, repeat = steady state):
 
