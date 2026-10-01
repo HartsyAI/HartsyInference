@@ -24,7 +24,8 @@ stable release will require. Dates are UTC.
   - Encoder: head split and merge on `Permute0213`; the stem transposes the conv output directly (a `Reshape` view read
     it back to the host); the positional add is a backend `Add` against a row view of the table.
   - Weights: the encoder and decoder preload what their device ops read on every call (idempotent, and it undoes an
-    eviction), so biases and norms no longer upload on every op. The token table, which is also the tied logits
+    eviction), so biases and norms no longer upload on every op. A card that cannot hold them warns once and keeps
+    the previous per-use upload and headroom-gated promotion instead of failing the call. The token table, which is also the tied logits
     weight, is read on the host through a pointer taken at load, so the per-step embedding lookup never drops its
     device copy.
   - `MelSpectrogramExtractor` (every preset): each mel filter sums only its nonzero bins. `ComputeZeroPadded` computes
