@@ -16,6 +16,9 @@ internal sealed class ScriptedTextService : ITextService
 
     public Func<string, int> TokenCounter { get; init; } = CountWords;
 
+    /// <summary>Streamed when no scripted round is left; null makes an unscripted request an error.</summary>
+    public string? DefaultReply { get; init; }
+
     public ScriptedTextService Round(params TextChunk[] chunks)
     {
         _rounds.Enqueue(chunks);
@@ -23,7 +26,10 @@ internal sealed class ScriptedTextService : ITextService
     }
 
     /// <summary>Queues a round that streams <paramref name="text"/> word by word and stops normally.</summary>
-    public ScriptedTextService Reply(string text)
+    public ScriptedTextService Reply(string text) => Round([.. ReplyChunks(text)]);
+
+    /// <summary>The chunks of a round that streams <paramref name="text"/> word by word and stops normally.</summary>
+    public static List<TextChunk> ReplyChunks(string text)
     {
         List<TextChunk> chunks = [];
         foreach (string piece in SplitKeepingSpaces(text))
@@ -32,7 +38,7 @@ internal sealed class ScriptedTextService : ITextService
         }
         chunks.Add(new TextChunk { Kind = TextChunkKind.Result, Text = text });
         chunks.Add(Stop(StopReason.Stop));
-        return Round([.. chunks]);
+        return chunks;
     }
 
     public static TextChunk Text(string text) => new() { Kind = TextChunkKind.Chunk, Text = text };
@@ -47,7 +53,7 @@ internal sealed class ScriptedTextService : ITextService
         Requests.Enqueue(request);
         if (!_rounds.TryDequeue(out IReadOnlyList<TextChunk>? round))
         {
-            throw new InvalidOperationException("No scripted round left.");
+            round = DefaultReply is null ? throw new InvalidOperationException("No scripted round left.") : ReplyChunks(DefaultReply);
         }
         foreach (TextChunk chunk in round)
         {
