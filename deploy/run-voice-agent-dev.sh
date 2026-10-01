@@ -35,6 +35,11 @@ die() {
     exit 1
 }
 
+# Escapes $1 for use inside a `pkill -f`/grep extended-regex pattern (pkill -f matches the whole command line as a
+# regex, not a literal substring): a state/publish directory override containing regex metacharacters must not
+# turn the pattern into something else or fail to match at all.
+regex_escape() { printf '%s' "$1" | sed 's/[][^$.*+?(){}|\]/\\&/g'; }
+
 usage() {
     cat <<'EOF'
 Usage: deploy/run-voice-agent-dev.sh [--no-build] [--force] [--host-timeout SECONDS] | --stop
@@ -111,8 +116,8 @@ stop_all() {
     if [[ -n $tail_gw_pid ]]; then
         kill "$tail_gw_pid" 2>/dev/null || true
     fi
-    pkill -f "tail -n0 -F -- $host_log" 2>/dev/null || true
-    pkill -f "tail -n0 -F -- $gw_log" 2>/dev/null || true
+    pkill -f "tail -n0 -F -- $(regex_escape "$host_log")" 2>/dev/null || true
+    pkill -f "tail -n0 -F -- $(regex_escape "$gw_log")" 2>/dev/null || true
     # Gateway first: it owns no models and nothing else depends on it; stopping it first means it is not left
     # trying to talk to a host that just disappeared.
     stop_one "$gw_pidfile" "HartsyInference.PhoneGateway.dll" 15

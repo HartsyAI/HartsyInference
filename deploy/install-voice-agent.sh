@@ -113,12 +113,18 @@ publish_as_user() {
     command -v dotnet >/dev/null || die "dotnet not found on PATH"
     local tmp
     tmp=$(sudo -u "$SUDO_USER" mktemp -d)
+    # A failed publish below exits under set -e before the final line runs, so apply()'s own cleanup
+    # (rm -rf -- "$src_dir") never happens -- it never received a value. Clean up $tmp here instead, the moment
+    # this function's own command fails; cleared once both publishes succeed, so it never fires for an unrelated
+    # later failure.
+    trap 'rm -rf -- "$tmp"' ERR
     # Everything here must go to stderr: the caller captures this function's stdout as the return value
     # (src_dir=$(publish_as_user)), and say()/dotnet publish both write to stdout otherwise, which would corrupt
     # the path with log lines.
     say "publishing as $SUDO_USER -> $tmp" >&2
     sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.VoiceHost" -o "$tmp/$voice_host_app" >&2
     sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.PhoneGateway" -o "$tmp/$phone_gateway_app" >&2
+    trap - ERR
     printf '%s' "$tmp"
 }
 
@@ -130,8 +136,10 @@ verify_publish_dir() {
 }
 
 # Copies every file under $1 (a published app directory) to $2 (root:root, 0755), only where the bytes differ; prints
-# the source files' SHA-256 either way, so a dry run and the apply that follows it can be compared. Sets wrote=1 if
-# anything changed.
+# the source files' SHA-256 either way, so a dry run and the apply that follows it can be compared. Also removes
+# any file under $2 with no counterpart under $1 (and the empty directories that leaves), so $2 stays a mirror of
+# $1 across publishes -- this assumes $2 (/opt/hartsyinference/<app>) holds only what this script put there, never
+# anything an operator added by hand. Sets wrote=1 if anything changed.
 put_tree() {
     local src=$1 dst=$2 file rel changed=0 count=0 stale=0
     [[ -d $src ]] || die "$src does not exist"
@@ -185,8 +193,11 @@ put_tree() {
         if ((stale > 0)); then
             for rel in "${stale_files[@]}"; do
                 rm -f -- "$dst/$rel"
+                # Only each removed file's own now-maybe-empty parent chain, stopping at the first directory
+                # that still has something in it (never a wholesale "any empty dir under $dst": a plugin or
+                # locale folder the app ships empty, and that still exists under $src, must not be swept too).
+                rmdir -p --ignore-fail-on-non-empty -- "$(dirname -- "$dst/$rel")" 2>/dev/null || true
             done
-            find "$dst" -mindepth 1 -type d -empty -delete
             say "removed $stale stale file(s) no longer under $src"
         fi
         say "installed $changed of $count file(s) into $dst"
@@ -336,6 +347,9 @@ disable_now_unit() {
     else
         say "$unit: not installed"
     fi
+    # A dangling link here means the unit file was removed by hand, not by this script's own drop_file -- which
+    # in revert() only runs *after* every disable_now_unit call, so "not already gone" is the common case the
+    # first time through. Correct either way; just depends on that call order.
     if [[ ! -e "$unit_dir/$unit" && -L "$wants_dir/$unit" ]]; then
         run rm -f -- "$wants_dir/$unit"
         wrote=1
