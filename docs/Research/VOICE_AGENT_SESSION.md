@@ -388,8 +388,8 @@ only after the goodbye has played:
    A goodbye that never drains cannot keep the call open: the host logs a warning and sends the request anyway.
 5. `ToolRequest(hangup)` goes out; the gateway sends its BYE and answers; the host sends `CallEnd(Completed)`.
 
-The session ends a turn only after the sender has read its last sample, so in practice the drain takes one 20 ms tick
-and the request leaves about 250 ms after the goodbye's last frame. A caller who barges in on the goodbye does not
+The session ends a turn only after the sender has read its last sample, so the drain should take one 20 ms tick and
+the request leave about 250 ms after the goodbye's last frame (measured below). A caller who barges in on the goodbye does not
 cancel the hang-up, because the model decided to end the call: the flush empties the goodbye, the turn counts as
 drained at once, and the request follows within a tick or two.
 
@@ -421,6 +421,26 @@ unknown key fails the start):
 | `tools` | `enabled` (all seven by default), `timeoutMs` (10000) |
 | `engine` | `cpuThreadCap` (`numerics.cpuThreads` for the host's life; 14 under the unit), `settingsFile` (an engine settings file instead of the service user's) |
 | `logging` | `level` |
+
+### Measured on the RTX 3060 (loopback)
+
+`LoopbackSipCallWithHostTests` and `LoopbackHostKillTests`: a sipsorcery softphone plays the JFK clip at 8 kHz to the
+real gateway, which talks PhoneLink to the real host running Kokoro and Whisper small.en on the RTX 3060; the model is
+scripted. Pending the GPU run.
+
+| Measure | Gate | Test output line | Result |
+|---|---|---|---|
+| Caller's question recognized over G.711 ("And so, my fellow Americans") | has "fellow" or "americans" | `host heard: "…"` | pending |
+| Turn latency: STT, TTS first chunk, transport, total | logged | `turn N: stt … ms, … total … ms` | pending |
+| Barge-in: `Flush(T)` at the gateway after the VAD decision | logged | `Flush(T) reached the gateway after … ms` | pending |
+| Barge-in: last audible frame the gateway's RTP tick sent after the decision | ≤ 100 ms | `…, the last at … ms` | pending |
+| Frames of the flushed turn reaching the gateway after `Flush` | 0 | `gateway stale drops …` | pending |
+| Agent hangup: audible goodbye frames before the BYE | ≥ 50 | `… audible frames of goodbye before the BYE` | pending |
+| Agent hangup: BYE after the goodbye's last audible frame | ≥ 2 quiet frames | `the BYE came … ms after the goodbye's last audible frame, … quiet frames later` | pending |
+| Sender lateness p50 / p99 / max, catch-up frames, resyncs | logged | host: `Phone gateway link closed …; sender ticks=… lateness p50=…` | pending |
+| Sender audio-path allocation | 0 B | host: `audioPathAllocated=…B` | pending |
+| Host killed with SIGKILL mid-call: BYE at the phone | ≤ 3 s outage period + 2 s | `host killed; the phone got the BYE … ms later` | pending |
+| Restarted host: stale socket replaced, next call answered, SIGTERM exit 0 and socket removed | all hold | `LoopbackHostKillTests` passes | pending |
 
 ## Open
 
