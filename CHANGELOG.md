@@ -9,8 +9,8 @@ stable release will require. Dates are UTC.
 ## alpha.228
 
 - **Whisper transcription is GPU-resident; small.en meets the phone-agent STT gate on the RTX 3060.** Per utterance
-  (in-process, warm): 2 / 5 / 10 s in 130 / 121 / 200 ms median at 16 kHz (narrowband 8 k → 16 k: 123 / 117 / 200 ms),
-  from 1410 / 980 / 1737 ms; device→host syncs per call 658 / 877 / 2045 → 8 / 11 / 27, one per generated token.
+  (in-process, warm): 2 / 5 / 10 s in 124 / 116 / 194 ms median at 16 kHz (narrowband 8 k → 16 k: 122 / 113 / 201 ms),
+  from 1358 / 954 / 1747 ms; device→host syncs per call 658 / 877 / 2045 → 8 / 11 / 27, one per generated token.
   The output is unchanged: the same tokens as before on the 3060 for small.en (the JFK slices, the full clip at 16 kHz
   and narrowband, timestamped and streaming decodes) and for tiny, small, medium, distil-large-v3 and v3.5, and on the
   CPU backend for tiny, base and small.en.
