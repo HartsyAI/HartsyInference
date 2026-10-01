@@ -5,7 +5,7 @@ using HartsyInference.Engine.Services;
 
 namespace HartsyInference.Engine.Features;
 
-/// <summary>"Inpaint only masked" (<see cref="Inpaint.ShrinkGrow"/>): instead of denoising the whole canvas, crop the init image to the mask's bounding box grown by N pixels, generate at the model's native resolution over just that crop, then scale the result back and composite it into the original. The masked region therefore receives the model's full resolution budget, which is the entire point — refining a face on a 2K canvas at 1K native otherwise spends almost all of its pixels on the parts the user did not select. <para>This mirrors the node graph SwarmUI's own inpaint path builds (<c>SwarmMaskBounds</c> → <c>SwarmImageCrop</c> → <c>SwarmImageScaleForMP</c> → sample → <c>ImageScale</c> → <c>ImageCompositeMasked</c>), so an image generated here matches what the same settings produced before, rather than merely being plausible.</para> <para>It sits above the recipe pipelines because it changes the generated resolution and needs a post-generation composite — no pipeline can implement it alone.</para></summary>
+/// <summary>"Inpaint only masked" (<see cref="Inpaint.CropsToMask"/>): instead of denoising the whole canvas, crop the init image to the mask's bounding box grown by N pixels, generate at the model's native resolution over just that crop, then scale the result back and composite it into the original. The masked region therefore receives the model's full resolution budget, which is the entire point — refining a face on a 2K canvas at 1K native otherwise spends almost all of its pixels on the parts the user did not select. <para>This mirrors the node graph SwarmUI's own inpaint path builds (<c>SwarmMaskBounds</c> → <c>SwarmImageCrop</c> → <c>SwarmImageScaleForMP</c> → sample → <c>ImageScale</c> → <c>ImageCompositeMasked</c>), so an image generated here matches what the same settings produced before, rather than merely being plausible.</para> <para>It sits above the recipe pipelines because it changes the generated resolution and needs a post-generation composite — no pipeline can implement it alone.</para></summary>
 public static class InpaintOnlyMasked
 {
     /// <summary>Mask values below this are treated as unselected when finding the bounding box, matching the 0.01 threshold SwarmUI applies before <c>SwarmMaskBounds</c>.</summary>
@@ -21,11 +21,11 @@ public static class InpaintOnlyMasked
     public sealed record Plan(int X, int Y, int CropWidth, int CropHeight, int GenerateWidth, int GenerateHeight,
         ImageData OriginalInit, ImageData CroppedInit, byte[] CroppedMask);
 
-    /// <summary>Resolves the crop for <paramref name="request"/>, or null when this run is not an "inpaint only masked" one — no init image, no mask, <see cref="Inpaint.ShrinkGrow"/> at 0, or a mask that selects nothing. <paramref name="request"/> must already have its defaults applied, since the crop is scaled to the resolution the model will actually run at.</summary>
+    /// <summary>Resolves the crop for <paramref name="request"/>, or null when this run is not an "inpaint only masked" one — no init image, no mask, <see cref="Inpaint.CropsToMask"/> false, or a mask that selects nothing. <paramref name="request"/> must already have its defaults applied, since the crop is scaled to the resolution the model will actually run at.</summary>
     public static Plan? Prepare(ImageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Inpaint is null || request.Img2Img is null || request.Inpaint.ShrinkGrow == 0)
+        if (request.Inpaint is null || request.Img2Img is null || !request.Inpaint.CropsToMask)
         {
             return null;
         }
@@ -35,7 +35,7 @@ public static class InpaintOnlyMasked
         byte[] mask = FeatureImaging.ResizeGrayscale(request.Inpaint.Mask, init.Width, init.Height);
         if (request.Inpaint.Grow > 0)
         {
-            FeatureImaging.DilateInPlace(mask, init.Width, init.Height, request.Inpaint.Grow);
+            FeatureImaging.DilateInPlace(mask, init.Width, init.Height, FeatureImaging.GrowRadius(request.Inpaint.Grow));
         }
         if (request.Inpaint.Blur > 0)
         {
@@ -67,7 +67,7 @@ public static class InpaintOnlyMasked
         return new Plan(x, y, cropWidth, cropHeight, generateWidth, generateHeight, init, croppedInit, croppedMask);
     }
 
-    /// <summary>Rewrites the request to generate the crop: the init image and mask become the cropped pair resized to the generation size, and <see cref="Inpaint.ShrinkGrow"/> is cleared so the downstream mask resolver treats this as an ordinary inpaint.</summary>
+    /// <summary>Rewrites the request to generate the crop: the init image and mask become the cropped pair resized to the generation size, and the crop request (<see cref="Inpaint.ShrinkGrow"/>, <see cref="Inpaint.CropToMask"/>) is cleared so the downstream mask resolver treats this as an ordinary inpaint.</summary>
     public static ImageRequest Apply(ImageRequest request, Plan plan)
     {
         ArgumentNullException.ThrowIfNull(request);

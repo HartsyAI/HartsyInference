@@ -10,8 +10,12 @@ namespace HartsyInference.Engine.Features;
 /// <summary>Tier 3.2: <c>&lt;segment:X&gt;</c> post-hoc refinement — the mask-driven counterpart to <see cref="InpaintOnlyMasked"/>'s bbox crop, run AFTER a base image already exists as pixels (a <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> plan is a live per-step attention bias applied while the image still denoises; a <c>&lt;segment:&gt;</c> plan needs pixels to segment, so it cannot run before the base image is decoded — confirmed against SwarmUI core's own <c>RunSegmentationProcessing</c> reference implementation before writing this, see <c>ROADMAP.md</c>'s design-pass entry). <para>Reuses <see cref="InpaintOnlyMasked"/> verbatim for the crop→generate→composite cycle per segment — that subroutine already does exactly "crop to the mask's bounding box (oversized), generate at the model's native resolution over just the crop, composite back" for ordinary "inpaint only masked" requests. The only genuinely new piece is producing the mask (CLIPSeg text-match on the CURRENT image) and building the per-segment synthetic <see cref="ImageRequest"/> that mask feeds into. Segments are applied sequentially, each seeing the previous segment's composited result, so overlapping segments compose left-to-right in prompt order.</para> <para><b>Base-prompt tag-leak — fixed for segment/clear text (2026-08-11), see <see cref="StripSegmentText"/>.</b> <c>&lt;region:&gt;</c>/<c>&lt;object:&gt;</c> still have the same class of leak (no recipe pipeline tokenizes <see cref="Engine.Features.PromptRegionParser.GlobalPrompt"/> for its base pass, each re-parses <c>request.Prompt</c> raw via <c>RegionalPromptResolver.HasRegionParts</c>) — that is a DIFFERENT fix, not covered here: those pipelines need the raw prompt string (region tags intact) to re-parse themselves, so stripping at <see cref="Services.ImagesService"/> the way this class does for segments would silently break five already-verified architectures (1.4's Flux.1/Z-Image/Ideogram4, 3.7's Flux.2/Krea2). Left as a separate, documented gap in <c>ROADMAP.md</c>.</para> <para>Covers CLIPSeg free-text matching only (<c>X</c> not starting with <c>yolo-</c>) — the YOLO closed-vocab detection path (<see cref="Vision.Detection"/>-shaped output, needs its own box→mask rasterization before this same crop/composite cycle applies) is not wired. Single-mask-per-segment only; the pipe-separated <c>X|Y</c> OR-composite syntax is not parsed. <c>&lt;clear:&gt;</c> (a separate alpha-cutout mechanism, no denoise) is not wired either — see the class doc above for why it's a distinct feature.</para></summary>
 public static class SegmentRefinement
 {
-    /// <summary>Oversize padding used when <see cref="Regional.MaskOversize"/> is unset (0) — <see cref="InpaintOnlyMasked.Prepare"/> requires a nonzero <c>ShrinkGrow</c> to trigger its crop path at all, and 0 padding would crop exactly to the mask's raw bounds with no margin for the blurred edge to blend into. Matches SwarmUI core's own <c>SegmentMaskOversize</c> default.</summary>
+    /// <summary>Oversize padding used when <see cref="Regional.MaskOversize"/> is 0 and <see cref="Regional.ExactMaskOversize"/> is off; SwarmUI core's <c>SegmentMaskOversize</c> default.</summary>
     private const int DefaultMaskOversize = 16;
+
+    /// <summary>The crop padding for a segment: <see cref="Regional.MaskOversize"/> as given when exact or nonzero, else the default.</summary>
+    internal static int ResolveOversize(Regional regional) =>
+        regional.ExactMaskOversize || regional.MaskOversize != 0 ? regional.MaskOversize : DefaultMaskOversize;
 
     /// <summary>Tag prefixes that <see cref="PromptRegionParser.Parse"/> treats as opening a recognized section other than segment/clear — mirrored here (not shared via the parser) so this stays a narrow, low-risk addition rather than a change to the shared parser class the five already-verified regional architectures depend on.</summary>
     private static readonly string[] _otherRecognizedPrefixes =
@@ -130,7 +134,7 @@ public static class SegmentRefinement
         }
         Regional regional = resolved.Regional
             ?? new Regional { Plan = resolved.Prompt };
-        int oversize = regional.MaskOversize == 0 ? DefaultMaskOversize : regional.MaskOversize;
+        int oversize = ResolveOversize(regional);
 
         ImageResult current = generated;
         int refined = 0;
@@ -162,7 +166,7 @@ public static class SegmentRefinement
                 Prompt = seg.Prompt,
                 Regional = null,
                 Img2Img = new Img2Img { InitImage = currentImage, Creativity = seg.Strength2, Mode = Img2ImgMode.Denoise },
-                Inpaint = new Inpaint { Mask = maskImage, Grow = regional.MaskGrow, Blur = regional.MaskBlur, ShrinkGrow = oversize },
+                Inpaint = new Inpaint { Mask = maskImage, Grow = regional.MaskGrow, Blur = regional.MaskBlur, ShrinkGrow = oversize, CropToMask = true },
                 Steps = regional.Steps ?? resolved.Steps,
                 CfgScale = regional.CfgScale.HasValue ? (float)regional.CfgScale.Value : resolved.CfgScale,
             };

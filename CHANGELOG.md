@@ -6,6 +6,15 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.230
+
+- **Mask Grow and the tight "inpaint only masked" crop now match SwarmUI.** Mask Grow expands the mask by
+  `(grow + 1) / 2` pixels per side, as `SwarmMaskGrow` does; it used the full amount, so every inpaint and
+  `<segment:>` mask was twice as wide as the same setting in SwarmUI. `Inpaint.CropToMask` and
+  `Regional.ExactMaskOversize` let a caller ask for a crop at padding 0, which `ShrinkGrow` and `MaskOversize`
+  could not express because 0 means off and default there. Both fields keep their meaning, so no published
+  signature changes.
+
 ## alpha.229
 
 - **The voice front end is about 3× faster at p50 and allocation-free, and still misses its 2 ms budget on this
