@@ -15,8 +15,9 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Writes one arm of the cuDNN length-bucket spot check for one TTS model: the model's sentences synthesized on a
 /// fresh 3060 backend with the conv engine chosen per length bucket (<c>on</c>), per exact length (<c>off</c>, today's
-/// heuristic), or with no TF32 anywhere (<c>f32</c>: direct F32 conv kernels, full-precision GEMMs; an exact-math reference
-/// for models whose output does not go through sampling). Same text, seed and reference audio in every arm, so the arms
+/// heuristic), with no TF32 anywhere (<c>f32</c>: direct F32 conv kernels, full-precision GEMMs; an exact-math reference
+/// for models whose output does not go through sampling), or with exact conv math only (<c>convf32</c>: direct F32 conv
+/// kernels, GEMMs untouched, so a sampling model's tokens stay put; written under the <c>f32_</c> prefix). Same text, seed and reference audio in every arm, so the arms
 /// differ only in conv numerics. Each sentence is synthesized twice: the first time pays the per-length setup, the
 /// second is the steady state with every plan cached. The repeat is saved too (<c>&lt;arm&gt;_&lt;nn&gt;r.f32</c>): a model
 /// that is not run-to-run deterministic on the GPU (CosyVoice 2's flow) shows its own noise floor there, which is what an
@@ -24,7 +25,7 @@ namespace HartsyInference.Diffusion.Tests;
 ///
 /// <para><c>HARTSY_TTS_SPOT_MODEL</c> is a speech catalog id (<c>piper</c>, <c>cosyvoice</c>, <c>kyutaitts</c>,
 /// <c>csm</c>, <c>orpheus</c>, <c>dia</c>), <c>HARTSY_TTS_SPOT_VARIANT</c> an optional variant,
-/// <c>HARTSY_TTS_SPOT_ARM</c> one of on / off / f32, and <c>HARTSY_TTS_SPOT_OUT_DIR</c> where each sentence lands as
+/// <c>HARTSY_TTS_SPOT_ARM</c> one of on / off / f32 / convf32, and <c>HARTSY_TTS_SPOT_OUT_DIR</c> where each sentence lands as
 /// <c>&lt;model&gt;/&lt;arm&gt;_&lt;nn&gt;.f32</c> (and <c>.wav</c>) with a line in <c>&lt;model&gt;/arms.csv</c>. The audio
 /// is compared on the CPU by <c>TtsConvBucketSpotCheckCompareTests</c> in the audio test project.</para></summary>
 public sealed class TtsConvBucketSpotCheckTests
@@ -75,7 +76,7 @@ public sealed class TtsConvBucketSpotCheckTests
         string arm = Required(ArmEnvVar);
         string outDir = Path.Combine(Required(OutDirEnvVar), model);
         string variant = Environment.GetEnvironmentVariable(VariantEnvVar) ?? "";
-        Assert.Contains(arm, (string[])["on", "off", "f32"]);
+        Assert.Contains(arm, (string[])["on", "off", "f32", "convf32"]);
         Directory.CreateDirectory(outDir);
 
         string[] texts = model == "piper" ? PiperSentences : Sentences;
@@ -110,7 +111,7 @@ public sealed class TtsConvBucketSpotCheckTests
                 float[] repeat = runner.Synthesize(backend, Job(texts[i], reference));
                 double repeatMs = Stopwatch.GetElapsedTime(again).TotalMilliseconds;
                 bool repeatIdentical = repeat.AsSpan().SequenceEqual(wave);
-                string name = $"{arm}_{i + 1:D2}";
+                string name = $"{(arm == "convf32" ? "f32" : arm)}_{i + 1:D2}";
                 File.WriteAllBytes(Path.Combine(outDir, name + "r.f32"), MemoryMarshal.AsBytes<float>(repeat).ToArray());
                 File.WriteAllBytes(Path.Combine(outDir, name + ".f32"), MemoryMarshal.AsBytes<float>(wave).ToArray());
                 WavFile.WriteMono16(Path.Combine(outDir, name + ".wav"), wave, runner.SampleRate);
@@ -141,11 +142,15 @@ public sealed class TtsConvBucketSpotCheckTests
         ? new TtsJob { Text = text, Seed = Seed }
         : new TtsJob { Text = text, Seed = Seed, ReferenceMono24k = reference, RefText = JfkTranscript };
 
-    /// <summary>on / off pick the conv engine per length bucket or per exact length; f32 turns every TF32 path off (direct
-    /// F32 conv kernels instead of cuDNN, full-precision GEMMs).</summary>
+    /// <summary>on / off pick the conv engine per length bucket or per exact length; convf32 runs the convs as direct F32
+    /// kernels instead of cuDNN; f32 does that and turns the TF32 GEMM paths off too.</summary>
     private static void SetArm(string arm)
     {
         KnobStore.Set(EngineKnobs.AudioConvLengthBuckets, arm == "on");
+        if (arm == "convf32")
+        {
+            KnobStore.Set(EngineKnobs.AudioConvCudnn, false);
+        }
         if (arm == "f32")
         {
             KnobStore.Set(EngineKnobs.AudioConvCudnn, false);
