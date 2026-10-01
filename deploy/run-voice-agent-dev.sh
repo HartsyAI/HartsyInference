@@ -364,7 +364,11 @@ tail_both() {
     tail_gw_pid=$!
     say "tailing both logs below; Ctrl+C ends both cleanly (or run with --stop from another shell)."
     while kill -0 "$host_pid" 2>/dev/null && kill -0 "$gw_pid" 2>/dev/null; do
-        sleep 1
+        # Backgrounded, not a plain foreground `sleep 1`: bash only runs a trap after a foreground sleep
+        # returns, which would add up to a second of delay to the one wait loop the user is actually sitting
+        # at, watching the tailed logs, expecting Ctrl+C to act right away.
+        sleep 1 &
+        wait $!
     done
     # host_pid/gw_pid are this shell's own direct children (the `(exec dotnet ...) &` subshell IS dotnet, exec
     # replaces it), so wait can reap each one's real exit code -- including after --stop from another shell,

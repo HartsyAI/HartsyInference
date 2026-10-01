@@ -343,6 +343,21 @@ tmp_after=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
 check "no temp dir leaked by the symlink refusal" test "$tmp_before" = "$tmp_after"
 rm -f /opt/hartsyinference/voice-host/HartsyInference.VoiceHost.dll
 check "apply recovers once the symlink is removed" run_script --apply
+
+echo
+echo "=== scenario: \$opt_dir itself symlinked, default publish path, leaks no temp dir ==="
+# An earlier die() than the one above: refuse_symlink "$opt_dir" fires before put_tree ever runs, right after
+# publish_as_user() has already succeeded and populated $src_dir -- the trap has to be armed before this point,
+# not just before put_tree, or this exact case leaks.
+mv /opt/hartsyinference /opt/hartsyinference.real
+ln -s /opt/hartsyinference.real /opt/hartsyinference
+tmp_before=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
+check_not "apply refuses to write through a symlinked \$opt_dir" run_script --apply
+tmp_after=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
+check "no temp dir leaked by the \$opt_dir symlink refusal" test "$tmp_before" = "$tmp_after"
+rm -f /opt/hartsyinference
+mv /opt/hartsyinference.real /opt/hartsyinference
+check "apply recovers once the \$opt_dir symlink is removed" run_script --apply
 unset SUDO_USER
 
 echo

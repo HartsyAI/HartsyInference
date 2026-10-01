@@ -166,12 +166,13 @@ put_tree() {
                 changed=$((changed + 1))
             fi
         done < <(find "$src" -type f -print0 | sort -z)
-        # A file under $dst with no counterpart under $src: cp -a only ever adds/overwrites, so without this a
-        # DLL dropped between publishes (or its .deps.json) would stay in /opt forever.
+        # A file (or symlink -- cp -a preserves one as a link rather than following it, so -type f alone would
+        # never see it here) under $dst with no counterpart under $src: cp -a only ever adds/overwrites, so
+        # without this a DLL dropped between publishes (or its .deps.json) would stay in /opt forever.
         while IFS= read -r -d '' file; do
             rel=${file#"$dst"/}
-            [[ -f "$src/$rel" ]] || stale_files+=("$rel")
-        done < <(find "$dst" -type f -print0 | sort -z)
+            [[ -e "$src/$rel" || -L "$src/$rel" ]] || stale_files+=("$rel")
+        done < <(find "$dst" \( -type f -o -type l \) -print0 | sort -z)
         stale=${#stale_files[@]}
     else
         changed=$count
@@ -396,16 +397,18 @@ apply() {
     else
         src_dir=$(publish_as_user)
         own_src_dir=1
+        # Armed here, not after refuse_symlink/install -d on $opt_dir below: publish_as_user already succeeded
+        # by this point, so the full tree exists in $src_dir -- a die() in either of those two lines (a
+        # symlinked $opt_dir, say) would leak it otherwise, the same leak as publish_as_user's own, just one
+        # call earlier. Covers put_tree() dying partway too (refuse_symlink, for one), which
+        # publish_as_user()'s own EXIT trap (already cleared by the time we get here) does not -- that one only
+        # covers a failed publish itself, not what happens to its output afterward.
+        trap 'rm -rf -- "$src_dir"' EXIT
     fi
 
     refuse_symlink "$opt_dir"
     run install -d -o root -g root -m 0755 -- "$opt_dir"
     if [[ -n $src_dir ]]; then
-        # Covers put_tree() dying partway (refuse_symlink, for one) between here and our own rm -rf below, which
-        # publish_as_user()'s own EXIT trap (already cleared by the time we get here) does not: that one only
-        # covers a failed publish itself, not what happens to its output afterward. EXIT, not ERR: put_tree's
-        # failure path is refuse_symlink -> die() -> exit, and ERR does not fire on an explicit exit.
-        ((own_src_dir)) && trap 'rm -rf -- "$src_dir"' EXIT
         put_tree "$src_dir/$voice_host_app" "$opt_dir/$voice_host_app"
         host_tree_changed=$wrote
         put_tree "$src_dir/$phone_gateway_app" "$opt_dir/$phone_gateway_app"
@@ -470,6 +473,12 @@ revert() {
     if ((purge)); then
         say "--purge: removing binaries, configs and secrets"
         run rm -rf -- "$opt_dir/$voice_host_app" "$opt_dir/$phone_gateway_app" "$etc_dir/voice.json" "$etc_dir/phone.json" "$secrets_dir"
+        # Only if that leaves them empty: a config this script doesn't know about (nothing today, but the
+        # pattern this whole script follows is to never remove something it didn't itself put there) would
+        # keep $etc_dir non-empty, and rmdir would just report that and leave it, harmlessly.
+        if ((!dry_run)); then
+            rmdir --ignore-fail-on-non-empty -- "$opt_dir" "$etc_dir" 2>/dev/null || true
+        fi
     else
         say "binaries ($opt_dir), configs and secrets ($etc_dir) are left in place; --purge to remove them too"
     fi
