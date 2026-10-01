@@ -25,10 +25,11 @@ namespace HartsyInference.Audio.Tests.Parity;
 ///   export HARTSYINFERENCE_RNNOISE_REF_DIR=/path/containing/input48k.raw+reference48k.raw
 /// </code>
 ///
-/// <para><b>On the tolerance.</b> Agreement is not bit-exact and cannot be: upstream's kiss_fft is mixed-radix
-/// over 960 points where <see cref="Preprocessing.Fft"/> falls back to Bluestein, the high-pass is a recursive
-/// biquad that accumulates the difference, and the pitch search takes an <i>integer</i> argmax over correlations
-/// computed from those spectra. When a tie tips, that frame's comb filter mixes a different harmonic structure
+/// <para><b>On the tolerance.</b> Agreement is not bit-exact and cannot be. The FFT is a port of upstream's
+/// kiss_fft (<see cref="Preprocessing.FftPlan"/>), but the spectrum is scaled after the transform rather than
+/// before it, the network's products sum in a different order, and upstream approximates tanh and sigmoid; the
+/// high-pass is a recursive biquad that accumulates any difference, and the pitch search takes an <i>integer</i>
+/// argmax over correlations computed from those spectra. When a tie tips, that frame's comb filter mixes a different harmonic structure
 /// and the error spikes for a few frames before the gain smoothing reconverges. The assertions below are
 /// therefore on the <b>distribution</b> — overall energy, and a median — rather than a max-abs bound, which
 /// would only be testing whether a pitch tie happened to tip on this particular clip. Measured distributions are

@@ -51,7 +51,7 @@ public sealed class RnnoiseDenoiser : IDisposable
     private const float SilenceEnergy = 0.04f;
 
     /// <summary>Upstream's FFT (CELT's kiss_fft) scales the <b>forward</b> transform by 1/N — which is why its
-    /// inverse multiplies by N again. <see cref="Fft.RealTransform"/> returns an unscaled DFT, so spectra are
+    /// inverse multiplies by N again. <see cref="FftPlan"/> returns an unscaled DFT, so spectra are
     /// brought onto upstream's scale here. This is not cosmetic: band energies go as |X|², so leaving it out
     /// inflates them by N² (921,600 at this window) and every absolute threshold downstream — the silence floor,
     /// the 1e-2 inside the log, the 0.001 in the correlation normalizer — lands in the wrong place.</summary>
@@ -68,6 +68,7 @@ public sealed class RnnoiseDenoiser : IDisposable
     private readonly StreamingStft _stft;
     private readonly StreamingIstft _istft;
     private readonly RnnoisePitchAnalyzer _pitch = new();
+    private readonly FftPlan _fft = new(WindowSize);
     private readonly RnnoiseModel _model;
 
     private readonly float[] _highPassed = new float[FrameSize];
@@ -173,7 +174,7 @@ public sealed class RnnoiseDenoiser : IDisposable
         ReadOnlySpan<float> history = _pitch.History;
         int start = RnnoisePitchAnalyzer.BufferSize - WindowSize - period;
         for (int i = 0; i < WindowSize; i++) _pitchWindow[i] = history[start + i] * _window[i];
-        Fft.RealTransform(_pitchWindow, _pRe, _pIm, WindowSize);
+        _fft.ForwardReal(_pitchWindow, _pRe, _pIm);
         Scale(_pRe, _pIm, ForwardFftScale);
 
         RnnoiseBands.ComputeBandEnergy(_pRe, _pIm, _ep);

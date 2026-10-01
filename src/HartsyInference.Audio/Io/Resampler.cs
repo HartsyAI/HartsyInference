@@ -19,6 +19,9 @@ public sealed class Resampler
     private readonly int _down;
     private readonly int _taps;
     private readonly float[][] _phaseTable; // [_up][_taps]
+    // Each phase's taps back to front, for forward dot products; built on first ResampleRange only, since the
+    // whole-buffer path never reads it. A racing second build is identical and harmless.
+    private float[][]? _reversedTable;
 
     private Resampler(int up, int down, int taps, float[][] phaseTable)
     {
@@ -87,30 +90,89 @@ public sealed class Resampler
         int outLen = OutputLength(input.Length);
         float[] result = output ?? new float[outLen];
         if (result.Length < outLen) throw new ArgumentException("output buffer too small", nameof(output));
+        Convolve(input, 0, result.AsSpan(0, outLen));
+        return result;
+    }
 
+    /// <summary>Writes outputs <c>[first, first + output.Length)</c> of what <see cref="Resample"/> would produce
+    /// for <paramref name="input"/>, so a caller that keeps only a slice — a streaming converter discarding its
+    /// context padding — pays for the slice alone. Outputs whose taps all land inside the input run as a vector dot
+    /// product, which sums in a different order: they match <see cref="Resample"/> to float rounding, not bit for
+    /// bit. The rest are computed exactly as <see cref="Resample"/> computes them.</summary>
+    public void ResampleRange(ReadOnlySpan<float> input, int first, Span<float> output)
+    {
+        if (first < 0 || (long)first + output.Length > OutputLength(input.Length))
+            throw new ArgumentOutOfRangeException(nameof(first), first,
+                $"outputs [{first}, {first + output.Length}) exceed the {OutputLength(input.Length)} this input yields.");
+        float[][] reversed = _reversedTable ??= ReverseTaps(_phaseTable);
+        int half = _taps / 2;
+        long t0 = (long)first * _down;
+        int inIdx0 = (int)(t0 / _up);
+        int phase = (int)(t0 % _up);
+        for (int j = 0; j < output.Length; j++)
+        {
+            // Taps run backwards over the input from inIdx0 + half; the reversed table reads the same span forwards.
+            int start = inIdx0 + half - (_taps - 1);
+            output[j] = start >= 0 && start + _taps <= input.Length
+                ? Dot(input.Slice(start, _taps), reversed[phase])
+                : Output(input, first + j);
+            // Step t = m * down by one output without dividing: phase is t mod up, inIdx0 is t / up.
+            phase += _down;
+            while (phase >= _up)
+            {
+                phase -= _up;
+                inIdx0++;
+            }
+        }
+    }
+
+    private void Convolve(ReadOnlySpan<float> input, int first, Span<float> output)
+    {
+        for (int j = 0; j < output.Length; j++) output[j] = Output(input, first + j);
+    }
+
+    private float Output(ReadOnlySpan<float> input, int m)
+    {
         // scipy resample_poly convolution: zero-stuff by `up`, filter with h, decimate by
         // `down`. For output m the live taps land on phase = (m*down) % up and the signal is
         // convolved *backwards* (x[inIdx0 - k]) about the filter centre; `half` removes the
         // (filterLen-1)/2 group delay so output 0 lines up with input 0.
         int half = _taps / 2;
+        long t = (long)m * _down;
+        int inIdx0 = (int)(t / _up);
+        int phase = (int)(((t % _up) + _up) % _up);
+        float[] taps = _phaseTable[phase];
 
-        for (int m = 0; m < outLen; m++)
+        float acc = 0f;
+        for (int k = 0; k < _taps; k++)
         {
-            long t = (long)m * _down;
-            int inIdx0 = (int)(t / _up);
-            int phase = (int)(((t % _up) + _up) % _up);
-            float[] taps = _phaseTable[phase];
-
-            float acc = 0f;
-            for (int k = 0; k < _taps; k++)
-            {
-                int s = inIdx0 - k + half;
-                if ((uint)s < (uint)input.Length) acc += input[s] * taps[k];
-            }
-            result[m] = acc;
+            int s = inIdx0 - k + half;
+            if ((uint)s < (uint)input.Length) acc += input[s] * taps[k];
         }
+        return acc;
+    }
 
-        return result;
+    private static float[][] ReverseTaps(float[][] table)
+    {
+        float[][] reversed = new float[table.Length][];
+        for (int p = 0; p < table.Length; p++)
+        {
+            int n = table[p].Length;
+            reversed[p] = new float[n];
+            for (int k = 0; k < n; k++) reversed[p][k] = table[p][n - 1 - k];
+        }
+        return reversed;
+    }
+
+    private static float Dot(ReadOnlySpan<float> x, float[] y)
+    {
+        Vector<float> acc = Vector<float>.Zero;
+        int i = 0;
+        for (; i <= x.Length - Vector<float>.Count; i += Vector<float>.Count)
+            acc += new Vector<float>(x[i..]) * new Vector<float>(y, i);
+        float sum = Vector.Sum(acc);
+        for (; i < x.Length; i++) sum += x[i] * y[i];
+        return sum;
     }
 
     private static double KaiserWindow(int n, int N, double beta)
