@@ -305,7 +305,11 @@ wait-loop, bench lock, `--verify-since` clean after):
 | 3 | 62.4 | 148.7 | 102.5 | 98.4 | 776.0 | 1124.0 |
 | 4 | 81.9 | 172.1 | 99.8 | 81.4 | 776.0 | 1133.5 |
 
-**Every stage meets its budget on every turn, cold or warm.** TTFT 357 → 46-82 ms (unchanged from the warm-up fix,
+**Every stage met its budget on every turn, cold or warm, this run** (one run, as the plan's GPU rules keep 4090
+time short and few; the margin is tightest on turn 1's total, 73 ms, and turn 4's first sentence, 28 ms — a noisier
+run could cross either). Requires the engine at alpha.236 or later (#215's sampler fix); below that, the real
+first-sentence number is the ~290 ms the first re-measurement above found, regardless of this PR. TTFT 357 → 46-82
+ms (unchanged from the warm-up fix,
 as expected — the sampler fix is a decode-step change, not a prefill one). `first_sentence` 950 → 120-172 ms,
 inside its 200 ms budget for the first time, consistent with decode at 99.8-121.7 tok/s (was 37-40) — close to the
 sampler fix's own cited 94-106 tok/s for a realistic `ToolLoop` turn. `turn.total` 1975 → 1093-1227 ms, inside its

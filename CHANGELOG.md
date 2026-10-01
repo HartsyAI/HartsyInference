@@ -106,7 +106,9 @@ stable release will require. Dates are UTC.
   | 3 | 62.4 | 148.7 | 102.5 | 1124.0 |
   | 4 | 81.9 | 172.1 | 99.8 | 1133.5 |
 
-  **Every stage meets its budget on every turn, cold or warm**: TTFT 357 → 46-82 ms; `first_sentence` 950 → 120-172
+  **Every stage met its budget on every turn, cold or warm, this run** (one run; tightest margins are turn 1's
+  total, 73 ms, and turn 4's first sentence, 28 ms — needs the engine at alpha.236+ for #215's sampler fix, or the
+  real number is back to ~290 ms regardless of this PR). TTFT 357 → 46-82 ms; `first_sentence` 950 → 120-172
   ms (was still 291-319 ms, over budget, before the sampler fix); `turn.total` 1975 → 1092-1227 ms. Decode is 99.8-
   121.7 tok/s (was 37-40), matching the sampler fix's own cited 94-106 tok/s for a realistic `ToolLoop` turn.
   `LtGemmPlanStats` stayed `(0,0,0,0)` throughout both re-measurements — this GGUF-quantized model's decode never
