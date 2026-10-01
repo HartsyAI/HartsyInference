@@ -189,6 +189,50 @@ the reader read no reply audio after the barge-in decision (0.0 ms) and applied 
 ms). `PinnedRunnersSurviveEvictionTests`: the pinned Whisper small.en and Kokoro leases survived three
 memory-pressure switches with no reopen, and each transcription stayed word-perfect.
 
+### Re-run with `Denoise` on (int8), RTX 3060
+
+Same test, same card, after a clean 10+-minute Swarm quiet window verified clean afterwards (`--verify-since`),
+under the bench lock, one run. `VoiceSessionEndToEndTests` passed; turn 1 (the only turn not waiting behind a
+previous reply's playout):
+
+| Stage | Budget | Result |
+|---|---|---|
+| `voice.frontend.ms` (RNNoise int8 + Silero, live call) | ≤ 2-5 ms (p50/p99) | p50 1.00, p99 2.00, max 1.11 ms |
+| Whisper small.en (`voice.stt.ms`) | ≤ 350 ms | 133.26 ms |
+| Kokoro 15-word sentence, median of 5 | ≤ 250 ms | 195.4 ms (195.7, 154.7, 170.5, 200.6, 195.4) |
+| `voice.tts.first_chunk_ms` | ≤ 250 ms | 259.35 ms (first synthesis of the turn's full reply sentence — the open Kokoro first-synthesis item, not a regression from denoising) |
+| `voice.endpoint.ms` | 700 ms (tune 500-800) | 736.00 ms — **unchanged from Denoise off.** This metric counts samples at the VAD, and RNNoise's 640-sample delay shifts every sample's wall-clock arrival uniformly, so a sample-counted interval (close decision minus last-speech sample) is insensitive to it. The 40 ms is real but invisible here: it is paid once, before the 736 ms count even starts, so the caller's true wall-clock wait is nearer 776 ms. |
+| `voice.transport.ms` | ≤ 50 ms | 5.92 ms |
+| `voice.turn.total_ms` | ≤ 1.3 s, stretch 1.0 s | **1209.39 ms** (endpoint 736 + STT 133.26 + scripted LLM 26.71 + Kokoro 259.35 + transport 5.92, plus ~47 ms overhead). Without the scripted LLM: 1182.68 ms, leaving **~117 ms** for a real model's first sentence within 1.3 s (was 121 ms with `Denoise` off — the ~4 ms narrowing is noise at this precision, not the full 40 ms, consistent with the metric's blind spot above) |
+| Whisper-verify, both directions | ≥ 80 % | caller 11/11; reply 8/9 ("tomorrow" heard as "row", same known gap) |
+
+Warm-up: 585.5 / 144.2 / 98.4 / 239.2 / 314.9 ms for the five bucket texts, recognized 1 s of silence in 275.9 ms —
+consistent with the pre-int8 numbers; RNNoise adds no measurable warm-up cost of its own.
+
+### Qwen3-4B on the RTX 4090, audio on the 3060 (both cards visible)
+
+`VoiceSessionQwen3EndToEndTests`, `HARTSY_VOICE_LLM_GPU=1`, after a clean quiet window on **both** cards, under the
+bench lock. `qwen3` now resolves to `/mnt/model-storage/Models/llm/qwen3/Qwen3-4B-Q4_K_M.gguf` (the model-folder-case
+fix, #205, landed on main since this was last tried). Warm-up (speech on the 3060 and one Qwen3 token on the 4090, in
+parallel, including the cold GGUF load): 10.0 s. Turn 1, the JFK clip's first utterance, tools installed:
+
+| Stage | Budget | Result |
+|---|---|---|
+| `voice.frontend.ms` | ≤ 2-5 ms | p50 1.00, p99 5.00, max 2.46 ms (at the p99 ceiling on this single live call; still inside budget) |
+| `voice.stt.ms` | ≤ 350 ms | 117.09 ms |
+| `voice.llm.ttft_ms` | — (plan's isolated probe: ~150 ms) | **357.36 ms** |
+| `voice.llm.first_sentence_ms` | — | **949.65 ms** (one short sentence, "Hello, how can I assist you today?") |
+| `voice.tts.first_chunk_ms` | ≤ 250 ms | 123.97 ms |
+| `voice.transport.ms` | ≤ 50 ms | 14.52 ms |
+| `voice.turn.total_ms` | ≤ 1.3 s, stretch 1.0 s | **1974.72 ms — over budget**, almost entirely from `llm.first_sentence_ms` (everything else sums to ≈1025 ms, already most of the 1.3 s on its own) |
+| Caller recall ("fellow Americans") | — | 100 % |
+| Reply recall | — | 100 % ("Hello, how can I assist you today?" heard back verbatim) |
+
+This is the first live inference call right after the cold warm-up, with tool calling installed and the real system
+prompt and history — not the plan's isolated, pre-warmed TTFT/throughput probe (152 ms TTFT, 151 tok/s, 500-token
+synthetic prompt, no tools). Reported as measured; endpoint and LLM-side tuning are the orchestrator's call, per the
+plan's decision log.
+
 ## Open
 
 - Partial transcripts need a streaming recognizer; `PartialTranscripts = true` is rejected.

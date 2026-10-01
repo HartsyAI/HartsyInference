@@ -66,6 +66,16 @@ stable release will require. Dates are UTC.
   `LoadDenoiser()` call keeps loading Float, so wake scoring is unaffected). A missing int8 table fails the load the
   same way a missing weights file always has — loudly, never a passthrough. RNNoise adds 640 samples (40 ms) of
   algorithmic delay ahead of both the endpoint and barge-in decisions. Design: `docs/Research/VOICE_AGENT_SESSION.md`.
+- **GPU re-run with `Denoise` on (RTX 3060, quiet window verified clean):** `VoiceSessionEndToEndTests` passed;
+  turn 1 `voice.frontend.ms` p50/p99/max 1.00/2.00/1.11 ms (int8 RNNoise + Silero, live call), STT 133.26 ms,
+  Kokoro median 195.4 ms, `voice.endpoint.ms` **unchanged at 736.00 ms** (a sample-counted interval is blind to
+  RNNoise's fixed delay — it is paid once before the count starts, so the caller's real wait is nearer 776 ms),
+  turn total 1209.39 ms (≤ 1.3 s budget; ~117 ms left for a real model's first sentence). Recall 11/11 caller,
+  8/9 reply. `VoiceSessionQwen3EndToEndTests` (real Qwen3-4B on the 4090, audio on the 3060, both cards visible)
+  also passed: `qwen3` now resolves (#205's case fix), `voice.llm.ttft_ms` 357.36 ms and `first_sentence_ms`
+  949.65 ms on this cold first live turn (tools installed, real prompt — not the plan's isolated, pre-warmed
+  152 ms/151 tok/s probe), turn total **1974.72 ms, over the 1.3 s budget**, almost entirely from the LLM stage.
+  Recall 100 % both directions.
 
 ## alpha.236
 
