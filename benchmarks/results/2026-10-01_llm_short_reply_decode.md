@@ -122,9 +122,10 @@ from ~12.5 ms/call to ~4.7 ms/call — the sampler is no longer close to the bot
 `TopPSortRefactorIdentityTests.cs` (new) keeps the pre-fix `TopPStep.Apply`/`SamplerMath.Softmax`/
 `ArgsortDescending` verbatim as a reference and asserts the new code masks the SAME logits to `-Infinity`, for
 the same input, across peaked / near-flat / pre-masked-tail / fallback-forcing distributions from 1 to
-151,936 (and, for the dedicated fallback case, 2,000,000) elements — the actual correctness proof, since
-`regression-ab.sh`'s identical-output arms are greedy and greedy never reaches `TopPStep` or the non-greedy
-draw at all.
+151,936 (and, for the dedicated fallback case, 2,000,000) elements. This is the proof for the piece
+`regression-ab.sh` genuinely cannot reach: its identical-output arms are greedy, and `SamplerChain.Next` never
+runs the non-greedy multinomial draw (its own softmax + cumulative scan) under `Greedy=true`, full stop.
+`TopPStep` itself is a different story — see "Regression evidence" below, this one DOES reach it.
 
 ### After numbers
 
@@ -184,6 +185,25 @@ code being JITted into a hot path.
 - `tests/HartsyInference.LLM.Tests` CPU lane: 545/546 pass; the one failure
   (`Glm4SyntheticParityTests.SyntheticGlm4_MatchesHfTransformers_FinalLogits`, a missing fixture file) is listed
   as a known pre-existing failure and is unrelated to sampling.
-- Full solution CPU lane: see the PR body / final report for the run taken at ship time.
-- `regression-ab.sh --expect identical` on `llama32-1b` and `qwen25-1.5b-iq3xs` (greedy — see the PR for why that
-  gate, specifically, cannot exercise `TopPStep` or the non-greedy draw either): see the PR body / final report.
+- **Full solution CPU lane** (`dotnet test HartsyInference.sln`, the task's exact filter, GPUs hidden via
+  `CUDA_VISIBLE_DEVICES=""` for the Cuda.Tests project specifically — the others don't vary with GPU
+  visibility), run project by project (21 projects, 7,459 tests total): **7,399 pass, 60 fail, and every one of
+  the 60 matches a category the task names as pre-existing** — 51 `Cuda.Tests` with the GPU hidden, 5 Audio
+  G2P/tokenizer (`EnglishG2PTests` x2, `AudioTextFrontendTests` x3), 2 `YueTokenizerTests`, 1
+  `Glm4SyntheticParityTests`, 1 `LtxVideo25DistilledRoutingTests`. Zero new failures.
+- **`tests/regression-ab.sh --gpu 0 --tag "" --filter llama32-1b,qwen25-1.5b-iq3xs --reps 1 --expect identical`**
+  on the 3060 (`--tag quant` alone would have silently dropped `llama32-1b`, which is tagged `baseline,core` not
+  `quant` in `regression-cases.sh`; `--tag ""` plus an explicit `--filter` runs exactly the two named cases
+  regardless of which tag each one carries). Both PASS, digests `equal` (byte-identical generated text — spot
+  checked, a real multi-paragraph story, not an empty/degenerate output). Unexpectedly, this gate DOES exercise
+  `TopPStep` even though both cases run at `--temperature 0`: the CLI's own default is `TopP = 0.95` regardless
+  of `Greedy` (`GenerationDispatch.cs`: `TopP = parameters.GetFloat("top-p", 0.95f)`, independent of the
+  `Greedy = temperature <= 0f` line right below it) — `SamplerChain.Next` runs every configured step BEFORE
+  checking `_greedy` (repetition penalty needs to apply under greedy too), so `TopPStep` masks the logits on
+  every decode step of these cases, for no effect on the output (the argmax token's probability is always the
+  highest, so it is always inside TopP's kept set — masking everything else can't change what argmax picks),
+  but at full cost. That "no effect, full cost" is exactly why these cases ALSO show a speedup: per-step time
+  fell 68.1% (`llama32-1b`, 22.03 -> 7.03 ms) and 47.2% (`qwen25-1.5b-iq3xs`, 37.45 -> 19.76 ms) — this fix pays
+  off on CLI-default greedy decoding too, not just the voice session's non-greedy path, anywhere `TopP<1.0` is
+  configured alongside `Greedy=true`. This gate still does not reach `SamplerChain.Next`'s own non-greedy draw
+  (unreachable under `Greedy=true`, full stop) — `TopPSortRefactorIdentityTests` is what proves that piece.
