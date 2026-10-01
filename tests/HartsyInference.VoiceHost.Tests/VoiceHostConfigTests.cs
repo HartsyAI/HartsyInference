@@ -100,6 +100,7 @@ public sealed class VoiceHostConfigTests : IDisposable
     [InlineData("""{"models":{"audioDevice":"auto"}}""", "models.audioDevice")]
     [InlineData("""{"models":{"llmDevice":"tpu:0"}}""", "models.llmDevice")]
     [InlineData("""{"models":{"sttModel":" "}}""", "models.sttModel")]
+    [InlineData("""{"models":{"wakeModelRoot":"audio/wake"}}""", "models.wakeModelRoot")]
     [InlineData("""{"agent":{"outboundSampleRate":11025}}""", "agent.outboundSampleRate")]
     [InlineData("""{"agent":{"endOfTurnSilenceMs":50}}""", "agent.endOfTurnSilenceMs")]
     [InlineData("""{"agent":{"bargeInProbability":1.5}}""", "agent.bargeInProbability")]

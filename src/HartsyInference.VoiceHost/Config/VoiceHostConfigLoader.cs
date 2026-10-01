@@ -123,6 +123,8 @@ public static class VoiceHostConfigLoader
         Require(BackendFactory.IsValidSelector(models.LlmDevice), $"models.llmDevice '{models.LlmDevice}' is not a device such as cuda:0.");
         Require(!BackendFactory.Kind(models.AudioDevice).Equals("auto", StringComparison.Ordinal),
             "models.audioDevice must name a device (cuda:1, cpu), not auto: the model set checks the engine runs exactly there.");
+        Require(models.WakeModelRoot is null || Path.IsPathFullyQualified(models.WakeModelRoot),
+            $"models.wakeModelRoot '{models.WakeModelRoot}' must be an absolute path, or null for the models root's audio/wake.");
         Require(LinkProtocol.IsOutboundSampleRate((uint)Math.Max(0, agent.OutboundSampleRate)),
             $"agent.outboundSampleRate {agent.OutboundSampleRate} must be one of 8000, 16000, 22050, 24000, 48000.");
         string[] enabled = tools.Enabled ?? throw new VoiceHostConfigException("tools.enabled must be a list of tool names.");
