@@ -45,8 +45,9 @@ namespace HartsyInference.Audio.Tests;
 /// <item><c>HARTSY_VOICE_FRONTEND_BENCH_PACED=1</c> releases one frame every 20 ms on a fixed clock, as the live stream
 /// does, so other cores get the gap to evict the bench's cache lines. A frame that overruns delays the next ones, which
 /// then run back to back until the clock is caught up, as queued audio would; the log counts the frames that started
-/// late. It spins between frames rather than sleeping, which keeps the core's clock ramp and C-state exits out of the
-/// figure.</item>
+/// late. Frame times run from when a frame starts, so they hold its processing only, not a late frame's wait behind
+/// earlier overruns. It spins between frames rather than sleeping, which keeps the core's clock ramp and C-state exits
+/// out of the figure.</item>
 /// </list>
 /// The log also reports the load's CPUs, its bandwidth over the timed frames, and the bench core's clock sampled from
 /// cpufreq over the same frames.</para>
@@ -482,9 +483,10 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
     }
 
     /// <summary>Samples one CPU's clock from cpufreq every 50 ms, between <see cref="Begin"/> and <see cref="End"/>, on
-    /// a thread pinned off the bench pair and the load. On x86 the kernel derives the figure from APERF/MPERF over the
-    /// last tick, so it is the clock the core ran at rather than the governor's request. It reads into a reused buffer,
-    /// so it allocates nothing managed while the bench is timed.</summary>
+    /// a thread pinned off the bench pair and the load. Where the cpufreq driver derives the figure from APERF/MPERF
+    /// over the last tick, as intel_pstate and intel_cpufreq do, it is the clock the core ran at rather than the
+    /// governor's request; other drivers may report the request. It reads into a reused buffer, so it allocates nothing
+    /// managed while the bench is timed.</summary>
     private sealed class ClockSampler : IDisposable
     {
         private readonly Thread? _thread;
