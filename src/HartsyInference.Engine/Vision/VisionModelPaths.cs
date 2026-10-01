@@ -1,9 +1,10 @@
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 using HartsyInference.Engine.Features;
 
 namespace HartsyInference.Engine.Vision;
 
-/// <summary>Locates detector/segmenter weights under the engine models root using the same folder conventions the SwarmUI extension used (<c>rtdetr</c>, <c>grounding-dino</c>, <c>clipseg</c>, <c>yolov8</c>, <c>sam2</c>). An explicit path supplied by the caller (<c>ModelSpec.LocalPath</c>) always wins; nothing is ever downloaded.</summary>
+/// <summary>Locates detector/segmenter weights under the engine models root using the same folder conventions the SwarmUI extension used (<c>rtdetr</c>, <c>grounding-dino</c>, <c>clipseg</c>, <c>yolov8</c>, <c>sam2</c>), matched ignoring case when a folder is spelled otherwise on disk. An explicit path supplied by the caller (<c>ModelSpec.LocalPath</c>) always wins; nothing is ever downloaded.</summary>
 public static class VisionModelPaths
 {
     /// <summary>Models-root subfolder holding RT-DETR checkpoints.</summary>
@@ -22,7 +23,11 @@ public static class VisionModelPaths
     public const string Sam2Folder = "sam2";
 
     /// <summary>Finds a single <c>.safetensors</c> for a detector: an explicit file wins, an explicit directory is scanned, otherwise the conventional models-root subfolder (and one nested level) is scanned. Null when absent.</summary>
-    public static string? FindCheckpoint(string? explicitPath, string subfolder)
+    public static string? FindCheckpoint(string? explicitPath, string subfolder) =>
+        FindCheckpoint(explicitPath, subfolder, ignoreCase: true);
+
+    /// <summary><see cref="FindCheckpoint(string?, string)"/>, matching the conventional subfolder in another case only with <paramref name="ignoreCase"/>.</summary>
+    private static string? FindCheckpoint(string? explicitPath, string subfolder, bool ignoreCase)
     {
         if (!string.IsNullOrWhiteSpace(explicitPath))
         {
@@ -39,7 +44,10 @@ public static class VisionModelPaths
                 }
             }
         }
-        return FirstSafetensors(Path.Combine(RepoPaths.ModelsRoot(), subfolder));
+        string root = RepoPaths.ModelsRoot();
+        return FirstSafetensors(ignoreCase
+            ? CaseInsensitivePath.ResolveDirectory(root, subfolder)
+            : Path.Combine(root, subfolder));
     }
 
     /// <summary>Finds the Grounding DINO <c>model.safetensors</c> + BERT <c>vocab.txt</c> pair; both must sit in the same directory (the HF snapshot layout, optionally nested one level). Returns nulls when not installed.</summary>
@@ -75,7 +83,9 @@ public static class VisionModelPaths
     {
         // A checkpoint the caller named explicitly always wins over a name probe — otherwise a stray
         // same-named file in the models folder silently shadows the file the user actually asked for.
-        string? explicitResolved = FindCheckpoint(explicitPath, YoloFolder);
+        // The yolov8 folder is matched exactly here: the name probe below tries other cases itself, after its
+        // exact pass, and a case variant scanned first would shadow the file that pass finds.
+        string? explicitResolved = FindCheckpoint(explicitPath, YoloFolder, ignoreCase: false);
         if (explicitResolved is not null)
         {
             return explicitResolved;
@@ -121,7 +131,7 @@ public static class VisionModelPaths
                 }
             }
         }
-        string root = Path.Combine(RepoPaths.ModelsRoot(), subfolder);
+        string root = CaseInsensitivePath.ResolveDirectory(RepoPaths.ModelsRoot(), subfolder);
         if (Directory.Exists(root))
         {
             yield return root;

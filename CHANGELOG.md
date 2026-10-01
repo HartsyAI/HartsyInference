@@ -6,6 +6,35 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.228
+
+- **Folders under the models root are matched ignoring case when the engine's spelling is missing.** On a
+  case-sensitive filesystem the catalog's `LLM/qwen3/Qwen3-4B-Q4_K_M.gguf` never found the SwarmUI store's
+  `llm/qwen3/`, so `qwen3` resolved to nothing and a download would have created a second `LLM/` beside `llm/`.
+  `CaseInsensitivePath` (`HartsyInference.Core.IO`: `ResolveFile`, `ResolveDirectory`, `ResolveEntry`) resolves a path
+  under a root one segment at a time:
+  - an existing exact path comes back exactly as `Path.Combine` builds it, which is always the case on Windows and
+    macOS;
+  - otherwise each segment takes the one sibling of the right kind whose name differs only in case; two or more are
+    ambiguous, logged once, and keep the engine's spelling;
+  - a segment that resolves to nothing keeps its spelling along with the rest of the path, so a download lands in the
+    folders that already exist. Only a missing segment costs a listing of its parent.
+- Matching only fills former misses. A lookup that searches several places tries the engine's spelling in all of them
+  before any case variant, so whatever it found before is still what it finds:
+  - `ModelDownloader.TargetPath`: canonical, then legacy names, exactly, then both ignoring case. This covers the
+    catalog path `ModelResolver` checks first, every download target and `MissingAssets`;
+  - `ModelResolver`: catalog file, then modality-folder guess, exactly, then both ignoring case;
+  - `ModelFileLocator`: its whole search over the named folders, then over folders that exist only in another case.
+    This covers the CAM++ `audio/speaker` lookup;
+  - `VisionModelPaths.FindYolo` scans `yolov8` exactly before its name probe.
+- Single-place lookups match case variants directly: the `VisionModelPaths` conventional folders, the LTX-2
+  latent-upsampler scan, the `AudioModelCache` root and the downloader's audio stand-in check.
+- Below the audio root nothing is matched in another case. `AudioModelRoot` and `AudioModelCache` resolve only the
+  `audio` folder itself, so RVC, YuE2 and Demucs look exactly where they did. YuE reads its checkpoint folder from
+  `TargetPath`, so the loader reads where a download writes.
+- The wake model root is now `WakeService.DefaultModelRoot()`, shared by the service,
+  `SpeakerProfileStore.DefaultDirectory` and `hartsy wake train`. Documented in `docs/SETTINGS.md`.
+
 ## alpha.227
 
 - **Whisper transcription is GPU-resident; small.en meets the phone-agent STT gate on the RTX 3060.** Per utterance

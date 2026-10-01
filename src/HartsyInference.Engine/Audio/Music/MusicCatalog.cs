@@ -96,12 +96,18 @@ internal static class MusicCatalog
         }
         string baseDirectory = AudioModelRoot.WeightsDirectory("music", familyId);
         string variant = AudioWeightsCatalog.NormalizeVariant(familyId, selector.Variant);
+        ModelAsset? primary = AudioWeightsCatalog.Primary(familyId, variant);
         // Folder-checkpoint families (YuE) load a whole variant DIRECTORY; the download set lands in "{variant}/…".
         if (AudioWeightsCatalog.IsFolderCheckpoint(familyId))
         {
+            // The downloader's folder for the variant (the primary's TargetName is "{variant}/model-00001-…"), so the
+            // loader reads where a download writes, also when the family folder is spelled in another case on disk.
+            if (primary is not null)
+            {
+                return Path.GetDirectoryName(ModelDownloader.TargetPath(primary))!;
+            }
             return string.IsNullOrEmpty(variant) ? baseDirectory : Path.Combine(baseDirectory, variant);
         }
-        ModelAsset? primary = AudioWeightsCatalog.Primary(familyId, variant);
         if (primary is not null)
         {
             return ModelDownloader.TargetPath(primary);

@@ -60,7 +60,7 @@ public sealed class WakeTrainCommand : AsyncCommand<WakeTrainCommand.Settings>
             return 1;
         }
 
-        string modelRoot = Path.Combine(RepoPaths.ModelsRoot(), "audio", "wake");
+        string modelRoot = WakeService.DefaultModelRoot();
         if (!Directory.Exists(Path.Combine(modelRoot, "backbone")))
         {
             AnsiConsole.MarkupLine($"[red]Wake backbone not found under[/] {modelRoot}/backbone");

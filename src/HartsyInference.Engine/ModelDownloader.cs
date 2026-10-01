@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.IO;
 using HartsyInference.Engine.HuggingFace;
 
 namespace HartsyInference.Engine;
@@ -14,26 +15,28 @@ public static class ModelDownloader
     /// <summary>One gate per target path — the async equivalent of the extension's per-canonical-name lock set.</summary>
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> _gates = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>The on-disk path an asset resolves to under the models root.</summary>
-    public static string TargetPath(ModelAsset asset)
+    /// <summary>The on-disk path an asset resolves to under the models root: the file that exists, else where a
+    /// download should put it. Folders spelled in another case on a case-sensitive filesystem (SwarmUI's <c>llm/</c>
+    /// for the catalog's <c>LLM/</c>) are matched only after every exact spelling missed, so a file found exactly is
+    /// always the one returned, and a download lands in the folder that already exists instead of a second one.</summary>
+    public static string TargetPath(ModelAsset asset) =>
+        FindExisting(asset, ignoreCase: false) ?? FindExisting(asset, ignoreCase: true)
+            ?? CaseInsensitivePath.ResolveFile(RepoPaths.ModelsRoot(), Path.Combine(asset.TargetSubdir, asset.FileName));
+
+    /// <summary>The asset's file when it is on disk under its canonical name or a legacy name, in that order, each
+    /// spelled exactly or, with <paramref name="ignoreCase"/>, matched ignoring case; null when none exists.</summary>
+    internal static string? FindExisting(ModelAsset asset, bool ignoreCase)
     {
-        string canonical = Path.Combine(RepoPaths.ModelsRoot(), asset.TargetSubdir, asset.FileName);
-        if (File.Exists(canonical) || asset.LegacyTargetNames.Count == 0)
-        {
-            return canonical;
-        }
+        string root = RepoPaths.ModelsRoot();
+        string? found = Existing(root, Path.Combine(asset.TargetSubdir, asset.FileName), ignoreCase);
         // The canonical name moved (usually to match what SwarmUI downloads) and this install still holds the
         // file under the old one. Resolving to it beats re-fetching multi-gigabyte bytes we already have, and
         // keeps the strict no-download callers (MageFlowRecipe and friends) from reporting it missing.
-        foreach (string legacy in asset.LegacyTargetNames)
+        for (int i = 0; found is null && i < asset.LegacyTargetNames.Count; i++)
         {
-            string candidate = Path.Combine(RepoPaths.ModelsRoot(), asset.TargetSubdir, legacy);
-            if (File.Exists(candidate))
-            {
-                return candidate;
-            }
+            found = Existing(root, Path.Combine(asset.TargetSubdir, asset.LegacyTargetNames[i]), ignoreCase);
         }
-        return canonical;
+        return found;
     }
 
     /// <summary>The subset of <paramref name="entry"/>'s assets not already present on disk.</summary>
@@ -42,12 +45,12 @@ public static class ModelDownloader
 
     /// <summary>The local path of the model's primary file (its transformer/checkpoint), or null when the entry has no
     /// assets. Used as the resolved <c>LocalPath</c> once the set is present.</summary>
-    public static string? PrimaryLocalPath(CatalogEntry entry)
-    {
-        ModelAsset? primary = entry.Assets.FirstOrDefault(a => a.Role == "transformer")
-            ?? (entry.Assets.Count > 0 ? entry.Assets[0] : null);
-        return primary is null ? null : TargetPath(primary);
-    }
+    public static string? PrimaryLocalPath(CatalogEntry entry) =>
+        PrimaryAsset(entry) is ModelAsset primary ? TargetPath(primary) : null;
+
+    /// <summary>The model's primary asset (its transformer/checkpoint), or null when the entry has no assets.</summary>
+    internal static ModelAsset? PrimaryAsset(CatalogEntry entry) =>
+        entry.Assets.FirstOrDefault(a => a.Role == "transformer") ?? (entry.Assets.Count > 0 ? entry.Assets[0] : null);
 
     /// <summary>Downloads <paramref name="assets"/> to their target paths, reporting per-file progress (0..1). Each
     /// asset is fetched under its own lock, skipped if already present, and SHA-256-verified when a hash is set.</summary>
@@ -86,8 +89,9 @@ public static class ModelDownloader
             // Re-check under the lock: a concurrent request may have finished the download while we waited.
             if (File.Exists(target))
                 return;
-            string audioRoot = Path.Combine(RepoPaths.ModelsRoot(), "audio");
-            if (target.StartsWith(audioRoot + Path.DirectorySeparatorChar, StringComparison.Ordinal))
+            string audioRoot = Audio.AudioModelRoot.Location();
+            // Ignoring case: on Windows and macOS the target keeps the catalog's Audio/ spelling for the same folder.
+            if (target.StartsWith(audioRoot + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
             {
                 // A converted checkpoint may stand in for this asset; linking it beats downloading the original.
                 HartsyInference.Audio.Cache.AudioStandIns.Resync(audioRoot);
@@ -121,5 +125,13 @@ public static class ModelDownloader
         {
             gate.Release();
         }
+    }
+
+    private static string? Existing(string root, string relativePath, bool ignoreCase)
+    {
+        string path = ignoreCase
+            ? CaseInsensitivePath.ResolveFile(root, relativePath)
+            : Path.Combine(root, relativePath);
+        return File.Exists(path) ? path : null;
     }
 }

@@ -85,6 +85,18 @@ settings file governs the CLI, the API and any headless host. Both are deliberat
 its own tree, so loading them from a different one would be worse than useless. `settings get` reports `host`
 for such a value.
 
+## Folders under the models root
+
+The models root is shared with SwarmUI and other tools, which may spell a folder differently from the engine:
+SwarmUI's root has `llm/` where the catalog names `LLM/`. Every folder is looked up with the engine's spelling
+first. When that folder is missing, the one folder whose name differs from it only in case is used, and a
+download goes into it rather than into a second folder beside it. A lookup that searches several places tries the
+engine's spelling in all of them before any such folder, so whatever it found before is still what it finds. Two
+such folders (`llm/` and `Llm/` with no `LLM/`) are ambiguous: the lookup logs a warning once and keeps the engine's
+spelling, so merge them into one. Hand-placed audio checkpoints (RVC voices, YuE2, Demucs) are the exception: their
+folders below `audio/` must keep the engine's spelling. Windows and macOS ignore case already, so nothing changes
+there.
+
 ## Scope: when a setting takes effect
 
 | scope | meaning |

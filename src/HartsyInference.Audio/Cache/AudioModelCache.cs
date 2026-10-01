@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Audio.Cache;
@@ -436,7 +437,8 @@ public static class AudioModelCache
         // Read via the knob (not a reference to RepoPaths/AudioModelRoot) to respect the
         // Audio package's dependency direction -- Engine depends on Audio, not the reverse.
         string? modelsRoot = EngineKnobs.ModelsRoot.Value;
-        if (!string.IsNullOrEmpty(modelsRoot)) return Path.Combine(modelsRoot, "audio");
+        // Matched like AudioModelRoot's folder, so the cache and placed checkpoints stay in one tree.
+        if (!string.IsNullOrEmpty(modelsRoot)) return CaseInsensitivePath.ResolveDirectory(modelsRoot, "audio");
         string home = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         return Path.Combine(home, ".cache", "hartsyinference", "models");
     }
