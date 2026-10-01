@@ -253,8 +253,10 @@ is this gateway's only peer. What the gateway can rely on:
   so the tick thread finds audio queued when it wakes. Frames carry the turn that produced them; after the host
   writes `Flush(T)` it sends nothing tagged T or lower, so the drop rule here only catches frames already on the socket.
 - `OutboundEnd(T)` follows a turn's last frame (and precedes the next turn's first), never for a flushed turn.
-- The `hangup` tool request comes only after the agent's goodbye has played; the host then sends
-  `CallEnd(Completed)`, which this gateway ignores for a call it already hung up.
+- The `hangup` tool request comes only after the agent's goodbye has played: after that turn's `OutboundEnd` (or its
+  `Flush`) plus 200 ms for this gateway's queue and the far end's jitter buffer, capped at the audio the host still
+  held plus 1 s and at 10 s. A barge-in on the goodbye does not cancel it. The host then sends `CallEnd(Completed)`,
+  which this gateway ignores for a call it already hung up.
 - A session failure ends that call with `CallEnd(Failed)`; host shutdown (SIGTERM) ends every call with
   `CallEnd(LocalHangup)` before closing the link. A killed host closes nothing: the outage guard takes over.
 

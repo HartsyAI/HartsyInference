@@ -13,6 +13,10 @@ internal interface IVoiceCallSession : IAsyncDisposable
     /// <summary>Rate of the audio <see cref="ReadOutbound"/> returns.</summary>
     int OutboundSampleRate { get; }
 
+    /// <summary>Reply samples queued and not yet read, from any thread; bounds how long a <c>hangup</c> waits for its
+    /// goodbye.</summary>
+    int OutboundQueuedSamples { get; }
+
     Task StartAsync(CancellationToken cancel);
 
     /// <summary>Caller audio, 16 kHz, ±1. Never blocks.</summary>

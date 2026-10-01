@@ -34,6 +34,12 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
 
     public int OutboundSampleRate => 16_000;
 
+    /// <summary><see cref="Queued"/>, or <see cref="EndlessQueuedSamples"/> while <see cref="EndlessTurn"/> is set.</summary>
+    public int OutboundQueuedSamples => EndlessTurn > 0 ? EndlessQueuedSamples : Queued;
+
+    /// <summary>What <see cref="OutboundQueuedSamples"/> reports for an endless turn.</summary>
+    public int EndlessQueuedSamples { get; set; }
+
     /// <summary>Thrown by <see cref="StartAsync"/>.</summary>
     public Exception? StartFailure { get; init; }
 

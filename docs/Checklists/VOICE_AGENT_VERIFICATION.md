@@ -50,7 +50,8 @@ linphone (account "without registration") or `baresip -e "/dial sip:agent@<box-i
 - [ ] Talk over a long reply: it stops within a fraction of a second (`voice.bargein.stop_ms` in the turn line) and the
       interruption is answered.
 - [ ] Ask the agent to press a key or say goodbye: `send_dtmf` reaches the far end; after the goodbye has played the
-      call ends from the agent's side.
+      call ends from the agent's side, and the host journal shows `the goodbye of turn N has played; hanging up` (a
+      `was still going out after … ms` warning means the cap fired instead).
 - [ ] Hang up from the phone: both journals show the call ending (`Call N ended RemoteHangup` on the gateway).
 
 ## 4. Host killed mid-call

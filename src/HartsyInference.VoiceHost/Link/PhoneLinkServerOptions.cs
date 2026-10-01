@@ -30,6 +30,21 @@ internal sealed record PhoneLinkServerOptions
     /// <summary>How long ending a call waits for its session to stop.</summary>
     public int CallEndTimeoutMs { get; init; } = 10_000;
 
+    /// <summary>Goodbye audio still downstream of the link after its last frame is written, beyond this host's
+    /// <see cref="PrebufferMs"/> lead: the gateway resampler's held frame (20 ms), one RTP tick, and the far end's jitter
+    /// buffer (typically 60 to 100 ms). <c>hangup</c> waits this much longer before the BYE.</summary>
+    public int HangupDownstreamMs { get; init; } = 160;
+
+    /// <summary>How long after its goodbye's last frame is on the link <c>hangup</c> waits before asking for the BYE.</summary>
+    public int HangupMarginMs => PrebufferMs + HangupDownstreamMs;
+
+    /// <summary>Added to the audio the session still holds when the goodbye's turn ends: the cap on waiting for that
+    /// audio to drain to the gateway.</summary>
+    public int HangupSlackMs { get; init; } = 1_000;
+
+    /// <summary>The most <c>hangup</c> waits for its goodbye, whatever is queued.</summary>
+    public int HangupMaxWaitMs { get; init; } = 10_000;
+
     /// <summary>Tools offered on every call, from <see cref="VoiceHostTools.Names"/>.</summary>
     public IReadOnlyList<string> Tools { get; init; } = VoiceHostTools.Names;
 

@@ -345,7 +345,8 @@ voice-link-reader   per connection: Hello (first frame, version 1, 16 kHz, token
                     DtmfEvent → PushDtmf · ToolResult → pending request · Ping → Pong · CallEnd → end the session
 voice-link-sender   per connection, the only writer after the handshake; absolute 20 ms deadlines (MonotonicClock),
                     no spin, no FIFO; per tick: queued control frames first, then each call's audio:
-                    ReadOutbound(out turnId), one turn and at most 20 ms per frame → OutboundAudio(turnId)
+                    ReadOutbound(out turnId), one turn and at most 20 ms per frame → OutboundAudio(turnId);
+                    publishes each call's drained turn for the hangup
 pool                each session's turn loop and event pump; session events → Event / Flush / OutboundEnd items;
                     telephony tools awaiting the gateway; call start and end
 watchdog timer      nothing received for 20 s, or one write stuck for 20 s → close the link
@@ -371,10 +372,26 @@ turn gets none.
 Telephony tools are per call, each an `IToolHandler` bound to that call: `send_dtmf`, `transfer`, `hold`, `unhold` and
 `play_prompt` (`name` only: `one-moment`, `goodbye`; the gateway's `file` form is not offered to the model) send
 `ToolRequest` and return the gateway's `ToolResult` as `{"status","message"}`, or `Failed` after `tools.timeoutMs` or at
-the end of the call. `get_time` is answered on the host. **`hangup` is deferred:** the gateway sends its BYE the moment
-it runs the tool, while the model's goodbye is usually still being synthesized, so the handler answers `Ok` at once and
-the host sends the request when that turn's reply has finished playing, then `CallEnd(Completed)`. A caller who barges
-into the goodbye keeps the call.
+the end of the call. `get_time` is answered on the host.
+
+**`hangup` waits for the goodbye, within a cap.** The gateway sends its BYE the moment it runs the tool, while the
+model's goodbye is usually still being synthesized, so the handler answers `Ok` at once and the host sends the request
+only after the goodbye has played:
+
+1. It starts when the turn that called the tool ends (`TurnCompleted`, interrupted or not).
+2. It waits until that turn's audio has drained to the gateway: the turn's `OutboundEnd` is written, or the turn was
+   flushed, or it had no audio. The sender publishes this per call (`DrainedTurn`) and the hangup polls it every
+   10 ms, so the sender still allocates nothing.
+3. If the goodbye went out whole, it waits 200 ms more (`link.prebufferMs` + 160 ms) for the audio still downstream:
+   the prebuffer lead, the gateway resampler's held frame, one RTP tick and the far end's jitter buffer.
+4. The whole wait is capped at the audio the session still held when the turn ended plus 1 s, and at 10 s in any case.
+   A goodbye that never drains cannot keep the call open: the host logs a warning and sends the request anyway.
+5. `ToolRequest(hangup)` goes out; the gateway sends its BYE and answers; the host sends `CallEnd(Completed)`.
+
+The session ends a turn only after the sender has read its last sample, so in practice the drain takes one 20 ms tick
+and the request leaves about 250 ms after the goodbye's last frame. A caller who barges in on the goodbye does not
+cancel the hang-up, because the model decided to end the call: the flush empties the goodbye, the turn counts as
+drained at once, and the request follows within a tick or two.
 
 Events: state changes, final transcripts and turn latencies go to the gateway as `Event` frames. The gateway logs every
 host event at Info, so its journal holds what callers said; treat it like a recording (see the gateway's consent note).

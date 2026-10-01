@@ -136,6 +136,10 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
     /// <summary>Rate of the audio <see cref="ReadOutbound(Span{float})"/> returns.</summary>
     public int OutboundSampleRate => _options.OutboundSampleRate;
 
+    /// <summary>Reply samples queued and not yet read: how much of the reply in progress is still to play. Readable from
+    /// any thread, as a snapshot.</summary>
+    public int OutboundQueuedSamples => Math.Max(0, _outbound.Queued);
+
     /// <summary>Caller samples lost because the audio thread fell behind.</summary>
     public long InboundDroppedSamples => _audio.DroppedSamples;
 

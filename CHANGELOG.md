@@ -24,13 +24,16 @@ stable release will require. Dates are UTC.
   becomes `Flush(turnId)` and nothing of that turn follows it; `OutboundEnd` closes each turn that played. Session
   events go out as `Event` frames (state, final transcript, turn latency).
 - Telephony tools (`send_dtmf`, `transfer`, `hold`, `unhold`, `play_prompt`) are `ToolRequest`/`ToolResult` round trips
-  with a timeout; `get_time` is answered on the host; `hangup` is sent once the reply that asked for it has played, so
-  the caller hears the goodbye. A resumed call gets a fresh session and an apology line; any session failure ends only
+  with a timeout; `get_time` is answered on the host; `hangup` goes to the gateway only once the goodbye of the turn
+  that called it has drained to the link (its `OutboundEnd` written, or the turn flushed) plus 200 ms for the audio
+  still downstream, capped at the audio the session still held plus 1 s and at 10 s, so the caller hears the goodbye
+  and a stuck drain cannot keep the call open; a barge-in on the goodbye cuts it short but still ends the call. A
+  resumed call gets a fresh session and an apology line; any session failure ends only
   its call with `CallEnd(Failed)`; SIGTERM ends calls with `CallEnd(LocalHangup)`. Workstation concurrent GC,
   `SustainedLowLatency` while calls are up, pool floor `numerics.cpuThreads + 8`.
 - **`HartsyInference.Voice`: `ReadOutbound(Span<float>, out int turnId)`** returns one turn's audio at a time and names
   the turn that wrote it (each turn publishes a mark before its first sample), so a remote player can drop a flushed
-  turn by id. The untagged read is unchanged.
+  turn by id. The untagged read is unchanged. `OutboundQueuedSamples` reports the reply audio still queued.
 - **`SecretFile` moved to Core** (`HartsyInference.Core.Configuration`), with the caller's exception factory; the gateway
   reads its secrets through it unchanged.
 - **Deployment:** `deploy/systemd/hartsyinference-voice-host.service` (`Restart=always`, `RuntimeDirectory`,
@@ -38,11 +41,12 @@ stable release will require. Dates are UTC.
   `LimitRTPRIO=50`, `Nice=-10`, `AllowedCPUs=7,15`, a 64 MB gen0 budget, three credentials, no service-wide FIFO);
   `AllowedCPUs=0-6,8-14` on the API unit, whose start-limit settings now sit in `[Unit]`, where systemd reads them.
   Runbook: `docs/Checklists/VOICE_AGENT_VERIFICATION.md`.
-- Tests (`tests/HartsyInference.VoiceHost.Tests`): 74 unit tests against a fake gateway on a temporary socket with
+- Tests (`tests/HartsyInference.VoiceHost.Tests`): 78 unit tests against a fake gateway on a temporary socket with
   scripted sessions (handshake refusals, call lifecycle and faults, PCM16 scale and sequence checks, flush and stale-turn
-  rules, tool round trips and timeouts, deferred hangup, config and token file, 1200-frame sender cadence with zero
-  allocation), and `[Slow]` loopback calls (sipsorcery softphone → real gateway → real host with Kokoro and Whisper
-  small.en on the RTX 3060), including a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
+  rules, tool round trips and timeouts, hangup after the goodbye's last frame, its cap and a barge-in on the goodbye,
+  config and token file, 1200-frame sender cadence with zero allocation), and `[Slow]` loopback calls (sipsorcery
+  softphone → real gateway → real host with Kokoro and Whisper small.en on the RTX 3060), including silence on the line
+  between the goodbye and the BYE, and a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
   Six new Voice unit tests cover the tagged read.
 
 ## alpha.237

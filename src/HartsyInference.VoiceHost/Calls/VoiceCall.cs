@@ -20,10 +20,19 @@ namespace HartsyInference.VoiceHost.Calls;
 /// <para>Barge-in: the session's <c>BargeIn(T)</c> becomes <c>Flush(T)</c> on the sender, which from then on drops any
 /// audio tagged T or lower that the session still hands it, so nothing of the cancelled reply follows the flush on the
 /// wire. A turn's <c>OutboundEnd</c> goes out once its last audio has, because the gateway's resampler holds the last
-/// frame until it.</para></remarks>
+/// frame until it.</para>
+/// <para>Hang-up: the gateway sends its BYE the moment it runs <c>hangup</c>, so the host asks only once the goodbye
+/// has played. When the turn that called the tool ends, the host waits for that turn's audio to drain to the gateway
+/// (<see cref="DrainedTurn"/>: its <c>OutboundEnd</c> written, or the turn flushed, or it had no audio), then
+/// <see cref="PhoneLinkServerOptions.HangupMarginMs"/> for what is still queued downstream; the whole wait is capped
+/// at the audio the session still held plus <see cref="PhoneLinkServerOptions.HangupSlackMs"/>, and never exceeds
+/// <see cref="PhoneLinkServerOptions.HangupMaxWaitMs"/>, so a goodbye that never drains cannot keep the call open. A
+/// barge-in does not cancel it: the model chose to end the call, the flush empties the goodbye, and the BYE goes out at
+/// once.</para></remarks>
 internal sealed class VoiceCall
 {
     private const float FromPcm16 = 1f / 32768f;
+    private const int HangupPollMs = 10;
 
     private readonly LinkConnection _connection;
     private readonly IVoiceCallSessionFactory _factory;
@@ -40,6 +49,8 @@ internal sealed class VoiceCall
     private bool _counted;
     private volatile bool _audioReady;
     private int _completedTurn;
+    private int _flushedTurn;
+    private int _drainedTurn;
     private int _hangupArmed;
     private long _inboundFrames;
     private long _inboundConcealed;
@@ -95,8 +106,12 @@ internal sealed class VoiceCall
     /// <summary>The session, once created; for tests.</summary>
     internal IVoiceCallSession? Session => Volatile.Read(ref _session);
 
-    /// <summary>Sender-only: the highest turn flushed on the wire.</summary>
-    internal int FlushedTurn { get; private set; }
+    /// <summary>The highest turn flushed on the wire. Written by the sender only.</summary>
+    internal int FlushedTurn => Volatile.Read(ref _flushedTurn);
+
+    /// <summary>The latest turn whose reply audio is all on the link: that turn and every earlier one had its
+    /// <c>OutboundEnd</c> written, was flushed, or had no audio. Written by the sender only.</summary>
+    public int DrainedTurn => Volatile.Read(ref _drainedTurn);
 
     /// <summary>Sender-only: the turn whose audio went out and whose <c>OutboundEnd</c> has not; 0 for none.</summary>
     internal int OpenTurn { get; set; }
@@ -244,15 +259,29 @@ internal sealed class VoiceCall
         return session.ReadOutbound(destination, out turnId);
     }
 
-    /// <summary>Sender thread: <c>Flush(turn)</c> is on the wire; audio of that turn or older is dropped from here on.</summary>
+    /// <summary>Sender thread: <c>Flush(turn)</c> is on the wire; audio of that turn or older is dropped from here on, so
+    /// none of it is left to play.</summary>
     internal void MarkFlushed(int turn)
     {
-        FlushedTurn = Math.Max(FlushedTurn, turn);
-        if (OpenTurn <= FlushedTurn)
+        if (turn > _flushedTurn)
+        {
+            Volatile.Write(ref _flushedTurn, turn);
+        }
+        if (OpenTurn <= _flushedTurn)
         {
             OpenTurn = 0;
         }
+        MarkDrained(turn);
         Volatile.Write(ref _flushes, _flushes + 1);
+    }
+
+    /// <summary>Sender thread: every turn up to <paramref name="turn"/> has all its reply audio on the link.</summary>
+    internal void MarkDrained(int turn)
+    {
+        if (turn > _drainedTurn)
+        {
+            Volatile.Write(ref _drainedTurn, turn);
+        }
     }
 
     /// <summary>Sender thread: bookkeeping for audio sent or dropped as stale.</summary>
@@ -422,25 +451,46 @@ internal sealed class VoiceCall
                 },
             });
         }
-        if (Interlocked.Exchange(ref _hangupArmed, 0) == 0)
+        if (Interlocked.Exchange(ref _hangupArmed, 0) != 0)
         {
-            return;
+            // Interrupted or not: the model chose to end the call, and a barge-in only empties the goodbye.
+            _ = HangUpAfterGoodbyeAsync(item.TurnId);
         }
-        if (item.Metrics is { Interrupted: true })
-        {
-            Logs.Info($"[VoiceHost] Call {CallId}: the caller spoke over the goodbye of turn {item.TurnId}; staying on the line.");
-            return;
-        }
-        _ = HangUpAsync();
     }
 
     private void SendEvent(LinkEventMessage message) =>
         _connection.Enqueue(new HostControlItem(LinkMessageType.Event, CallId, 0, 0, message, this));
 
-    /// <summary>The <c>hangup</c> tool's request, sent once the reply that asked for it has played: the gateway sends its
-    /// BYE and answers, then the host ends the call on its side too, whatever the answer.</summary>
-    private async Task HangUpAsync()
+    /// <summary>The <c>hangup</c> tool's request, sent once the goodbye of <paramref name="turn"/>, the turn that called
+    /// it, has played: its audio drained to the gateway plus the downstream margin, or the cap (see the class remarks).
+    /// The gateway sends its BYE and answers, then the host ends the call on its side too, whatever the answer.</summary>
+    private async Task HangUpAfterGoodbyeAsync(int turn)
     {
+        long startNs = MonotonicClock.NowNs();
+        IVoiceCallSession? session = Session;
+        long queuedMs = session is null ? 0 : (long)session.OutboundQueuedSamples * 1000 / Math.Max(1, session.OutboundSampleRate);
+        long capMs = Math.Min(_options.HangupMaxWaitMs, queuedMs + _options.HangupSlackMs);
+        long deadlineNs = startNs + capMs * 1_000_000L;
+        bool drained = await PollAsync(() => DrainedTurn >= turn, deadlineNs).ConfigureAwait(false);
+        if (drained && FlushedTurn < turn)
+        {
+            // The goodbye went out whole: let the prebuffer lead, the gateway's held frame and the far end's jitter
+            // buffer play it before the BYE.
+            await PollAsync(static () => false, Math.Min(MonotonicClock.NowNs() + _options.HangupMarginMs * 1_000_000L, deadlineNs)).ConfigureAwait(false);
+        }
+        if (IsEnding)
+        {
+            return;
+        }
+        long waitedMs = (MonotonicClock.NowNs() - startNs) / 1_000_000L;
+        if (drained)
+        {
+            Logs.Info($"[VoiceHost] Call {CallId}: the goodbye of turn {turn} has played; hanging up ({waitedMs} ms after the turn ended).");
+        }
+        else
+        {
+            Logs.Warning($"[VoiceHost] Call {CallId}: the goodbye of turn {turn} was still going out after {capMs} ms; hanging up anyway.");
+        }
         ToolResultMessage result = await RequestToolAsync(new ToolRequestMessage { Name = VoiceHostTools.Hangup }, CancellationToken.None).ConfigureAwait(false);
         if (result.Status != LinkToolStatus.Ok)
         {
@@ -450,6 +500,22 @@ internal sealed class VoiceCall
     }
 
     private void ArmHangup() => Volatile.Write(ref _hangupArmed, 1);
+
+    /// <summary>Waits until <paramref name="condition"/> holds (true), or until <paramref name="deadlineNs"/> or the end of
+    /// the call (false). It polls, so the sender, which publishes what it waits on, never signals and never allocates.</summary>
+    private async Task<bool> PollAsync(Func<bool> condition, long deadlineNs)
+    {
+        while (!condition())
+        {
+            long leftMs = (deadlineNs - MonotonicClock.NowNs()) / 1_000_000L;
+            if (leftMs <= 0 || IsEnding)
+            {
+                return false;
+            }
+            await Task.Delay((int)Math.Min(leftMs, HangupPollMs)).ConfigureAwait(false);
+        }
+        return true;
+    }
 
     /// <summary>Sends a telephony request for this call and waits for the gateway's answer, up to the tool timeout; a
     /// timeout or the end of the call comes back as <c>Failed</c> so the model hears why.</summary>

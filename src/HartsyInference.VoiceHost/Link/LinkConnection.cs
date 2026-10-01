@@ -610,10 +610,14 @@ internal sealed class LinkConnection
 
     /// <summary>Up to <paramref name="frames"/> frames of one call's reply audio, plus the prebuffer when a burst starts.
     /// Audio of a flushed turn is dropped; a turn's <c>OutboundEnd</c> goes out before the next turn's first frame, or once
-    /// the session reports the turn finished and nothing of it is left.</summary>
+    /// the session reports the turn finished and nothing of it is left, and the call's <see cref="VoiceCall.DrainedTurn"/>
+    /// follows.</summary>
     [MethodImpl(MethodImplOptions.AggressiveOptimization)]
     private void PumpCall(VoiceCall call, int frames)
     {
+        // Taken before the read: a session reports a turn finished only after writing all of its audio, so an empty read
+        // after this snapshot means everything up to it has been read.
+        int completed = call.CompletedTurn;
         int budget = frames * _frameSamples + (call.Bursting ? 0 : _prebufferSamples);
         bool any = false;
         while (budget > 0)
@@ -655,9 +659,18 @@ internal sealed class LinkConnection
             call.CountOutbound(got, 0);
         }
         call.Bursting = any;
-        if (!any && call.OpenTurn != 0 && call.CompletedTurn >= call.OpenTurn)
+        if (any)
+        {
+            return;
+        }
+        if (call.OpenTurn != 0 && completed >= call.OpenTurn)
         {
             EndTurn(call);
+        }
+        if (call.OpenTurn == 0)
+        {
+            // Nothing open and nothing queued: every finished turn is out, including one that never had audio.
+            call.MarkDrained(completed);
         }
     }
 
@@ -665,13 +678,13 @@ internal sealed class LinkConnection
     {
         int turn = call.OpenTurn;
         call.OpenTurn = 0;
-        if (turn <= call.FlushedTurn)
+        if (turn > call.FlushedTurn)
         {
-            return;
+            Volatile.Write(ref _writeStartedNs, MonotonicClock.NowNs());
+            Await(_writer.WriteOutboundEndAsync(call.CallId, (uint)turn, CancellationToken.None));
+            Volatile.Write(ref _writeStartedNs, 0);
         }
-        Volatile.Write(ref _writeStartedNs, MonotonicClock.NowNs());
-        Await(_writer.WriteOutboundEndAsync(call.CallId, (uint)turn, CancellationToken.None));
-        Volatile.Write(ref _writeStartedNs, 0);
+        call.MarkDrained(turn);
     }
 
     private static void Await(ValueTask task)

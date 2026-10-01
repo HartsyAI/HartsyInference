@@ -13,6 +13,8 @@ internal sealed class VoiceAgentCallSession(VoiceAgentSession session) : IVoiceC
 
     public int OutboundSampleRate => session.OutboundSampleRate;
 
+    public int OutboundQueuedSamples => session.OutboundQueuedSamples;
+
     public Task StartAsync(CancellationToken cancel) => session.StartAsync(cancel);
 
     public void PushInbound(ReadOnlySpan<float> samples) => session.PushInbound(samples);

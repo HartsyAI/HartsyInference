@@ -12,7 +12,8 @@ namespace HartsyInference.VoiceHost.Tests.Loopback;
 /// over PhoneLink to the real host running Kokoro and Whisper small.en on the RTX 3060, with a scripted language model.
 /// Asserted here and nowhere else: audio and transcripts cross both ways; a barge-in stops the reply on the wire within
 /// 100 ms of the VAD decision, measured to the last frame the gateway's RTP tick actually sent; no frame of the cancelled
-/// turn reaches the gateway after its <c>Flush</c>; and both hang-ups end the call on both sides. Run alone, after the
+/// turn reaches the gateway after its <c>Flush</c>; both hang-ups end the call on both sides; and the agent's BYE reaches
+/// the phone only after its goodbye has played out, with silence on the line in between. Run alone, after the
 /// quiet window:
 /// <c>CUDA_VISIBLE_DEVICES=1 HARTSY_REQUIRE_REAL_WEIGHTS=1 HARTSYINFERENCE_MODELS_DIR=/mnt/model-storage/Models dotnet test tests/HartsyInference.VoiceHost.Tests -c Release --filter "FullyQualifiedName~LoopbackSipCallWithHostTests"</c>.</summary>
 [Trait("Category", "Slow")]
@@ -159,9 +160,17 @@ public sealed class LoopbackSipCallWithHostTests : IClassFixture<LoopbackHostFix
             long asked = MonotonicClock.NowNs();
             await phone.SpeakAsync(Question);
             Assert.True(phone.HungUp.Wait(45_000), "the agent's hangup never reached the phone.");
-            int goodbyeFrames = phone.Frames().Count(f => f.Ns >= asked && f.Ns <= phone.HungUpNs && f.Peak >= Audible);
+            (long Ns, int Peak)[] heard = phone.Frames().Where(f => f.Ns >= asked && f.Ns <= phone.HungUpNs).ToArray();
+            int goodbyeFrames = heard.Count(f => f.Peak >= Audible);
             _output.WriteLine($"{goodbyeFrames} audible frames of goodbye before the BYE");
             Assert.True(goodbyeFrames >= 50, "the call ended before the goodbye played.");
+            // The BYE waited for the goodbye to drain: its last audible frame arrived, then the gateway's tick was
+            // sending silence again before the BYE.
+            int lastAudible = Array.FindLastIndex(heard, f => f.Peak >= Audible);
+            int quietTail = heard.Length - 1 - lastAudible;
+            double tailMs = (phone.HungUpNs - heard[lastAudible].Ns) / 1e6;
+            _output.WriteLine($"the BYE came {tailMs:F0} ms after the goodbye's last audible frame, {quietTail} quiet frames later");
+            Assert.True(quietTail >= 2, $"only {quietTail} quiet frames between the goodbye's last audible frame and the BYE: the goodbye was cut.");
             Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Idle && _host.Call is null, 10_000));
         }
         finally
