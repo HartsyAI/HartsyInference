@@ -104,11 +104,15 @@ sudo deploy/install-host-tuning.sh --apply    # install, enable and start; runni
 sudo deploy/install-host-tuning.sh --revert   # remove both, put every CPU on performance back on schedutil
 ```
 
-- `--apply` installs this checkout's files as root, so run it from a checkout that only you or root can write. The dry
-  run and `--apply` both print the sources' SHA-256, so you can check you are installing what you previewed.
-- `--revert` puts back on `schedutil` only the CPUs that run `performance`, the governor the unit sets; a governor set
-  by hand is left alone. A CPU that does not offer `schedutil` is an error and stays on `performance` until the next
-  boot, which starts from the kernel default because the unit is gone. Stopping the unit by hand changes nothing.
+- `--apply` installs this checkout's files as root, so run it from a checkout that only you or root can write. That
+  rule is the protection: the dry run and `--apply` both print the two installed files' SHA-256 to compare, but the
+  hashes do not cover the script itself, which runs as root.
+- The unit writes `performance` to every CPU. A CPU that does not offer it fails the unit, and `--apply` stops there. All
+  16 CPUs on this box offer it.
+- `--revert` puts back on `schedutil` only the CPUs that run `performance`, the governor the unit sets. Any other
+  governor set by hand is left alone; a CPU put on `performance` by hand moves too, since the script cannot tell the two
+  apart. A CPU that does not offer `schedutil` is an error and stays on `performance` until the next boot, which starts
+  from the kernel default because the unit is gone. Stopping the unit by hand changes nothing.
 - `power-profiles-daemon`, `thermald`, `tuned`, `tlp` or cpupower could rewrite the governor after boot, and a CPU
   brought online after boot starts on the kernel default. The governor check in the
   [runbook](../docs/Checklists/VOICE_AGENT_VERIFICATION.md) shows either, and running `--apply` again restarts the unit.

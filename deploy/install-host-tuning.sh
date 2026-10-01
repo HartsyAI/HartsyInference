@@ -127,7 +127,7 @@ count_off() {
 check_governors() {
     local want=$1 file current on=0
     for file in "${governor_files[@]}"; do
-        current=$(<"$file")
+        current=$(<"$file") || continue  # the CPU went offline since the glob
         if [[ $current == "$want" ]]; then
             on=$((on + 1))
         elif ! offers "$file" "$want"; then
@@ -147,7 +147,7 @@ check_governors() {
 restore_governors() {
     local file current back=0 already=0 other=0
     for file in "${governor_files[@]}"; do
-        current=$(<"$file")
+        current=$(<"$file") || continue  # the CPU went offline since the glob
         if [[ $current == "$stock" ]]; then
             already=$((already + 1))
         elif [[ $current != "$tuned" ]]; then
@@ -263,7 +263,7 @@ main() {
     dry_run=$explicit_dry
     command -v systemctl >/dev/null || die "systemctl not found; this installs a systemd unit"
     if ((!dry_run && EUID != 0)); then
-        die "--$action changes system settings and must run as root: sudo $self --$action"
+        die "--$action changes system settings and must run as root: sudo bash $self --$action"
     fi
     if ((${#governor_files[@]} == 0)); then
         say "no cpufreq governors under /sys/devices/system/cpu; the unit would change nothing here"
@@ -279,7 +279,7 @@ main() {
         die "$failures CPU(s) are not on the expected governor; see above"
     fi
     if ((dry_run)); then
-        say "dry run only; to do this: sudo $self --$action"
+        say "dry run only; to do this: sudo bash $self --$action"
     else
         say "done"
     fi
