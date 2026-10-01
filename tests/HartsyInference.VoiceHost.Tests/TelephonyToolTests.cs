@@ -125,6 +125,8 @@ public sealed class TelephonyToolTests
 
         FakeGateway.RecordedFrame request = gateway.WaitFor(LinkMessageType.ToolRequest)[0];
         double waitedMs = (request.ReceivedNs - ended) / 1e6;
+        int marginMs = new PhoneLinkServerOptions { SocketPath = "unused" }.HangupMarginMs;
+        Assert.True(waitedMs >= marginMs - 30, $"a turn with no audio waited {waitedMs:F0} ms, less than the {marginMs} ms margin.");
         Assert.True(waitedMs < 2_000, $"a turn with no audio waited {waitedMs:F0} ms, as if for the 5 s cap.");
         Assert.Empty(gateway.FramesOf(LinkMessageType.OutboundEnd));
     }
