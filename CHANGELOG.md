@@ -6,6 +6,37 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.231
+
+- **RNNoise runs the two 10 ms frames of a 20 ms voice frame layer by layer, bit for bit.** Per 20 ms frame it now
+  reads 16.9 MB of weights instead of 23.1 MB.
+  - `RnnoiseModel.ProcessPair` puts both frames' conv windows through each conv in one product, both frames'
+    GRU input projections `W·x` through one pass over `W`, and both rows through the dense heads. Only the
+    recurrent `U·h` stays one frame at a time.
+  - That reads the conv weights (0.69 MB), the three input-side `W` (5.32 MB) and the heads (0.20 MB) once per 20 ms
+    instead of twice. The recurrent `U` (5.32 MB, read twice) is 63 % of what remains.
+  - `RnnoiseDenoiser.ProcessPair` analyzes both frames before synthesizing either. When either frame is silent, the
+    other runs alone.
+  - `RnnoiseStream` pairs two whole frames when one call holds them. It never holds one back, so latency is
+    unchanged.
+- **Measured against the previous build** (2026-10-01, i7-6900K, pinned to CPU 0). The builds were interleaved
+  A/B, under the bench lock, with a separate check of running processes and of the SwarmUI journal before and after
+  every run.
+  - Quiet, back to back: p50 1.43–1.52 → 1.32 ms, p99 2.46–2.73 → 1.95–1.98 ms.
+  - Quiet, at the live 20 ms cadence: p50 2.03–2.36 → 2.02–2.10 ms, p99 2.99–3.93 → 2.44–2.85 ms. The gate still
+    misses here.
+  - With 4 / 8 threads streaming memory on other cores: p50 6.1–6.2 → 4.3 ms and 9.5–10.0 → 6.7–7.0 ms. The
+    RNNoise stage's time fell by about a third, a little more than its weight traffic.
+  - Zero allocation and no GC in every run.
+- Tests:
+  - `RnnoisePairTests` runs a stream that takes one frame per call against one fed two frames, one and a half, two
+    and a half, or random sizes per call. At 16 and 48 kHz it compares every output sample, and the speech
+    probability after every call, bit for bit, and asserts that pairs with either frame silent occurred. The
+    synthetic-weight cases run in the unit lane; the real-weight cases, on speech, are Integration.
+  - `LinearTransBIdentityTests` checks that each row of a two-row product has the bits of that row alone, at the
+    paired path's shapes, inline and fanned out.
+  - Both also pass with `DOTNET_EnableAVX2=0`, which forces the scalar kernels.
+
 ## alpha.230
 
 - **Mask Grow and the tight "inpaint only masked" crop now match SwarmUI.** Mask Grow expands the mask by
