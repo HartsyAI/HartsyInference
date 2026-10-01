@@ -290,6 +290,8 @@ public sealed class EngineLinkTests
         guard.CallStarted();
         Assert.False(guard.InOutage);
 
+        // The link has no handshake timeout, so an unread Hello holds the redial for as long as the gate stays shut. If
+        // one is ever added, the hold below has to stay shorter than it.
         host.ReadGate.Reset();
         host.DropConnection();
 
@@ -297,6 +299,8 @@ public sealed class EngineLinkTests
         // The first "one moment" plays as the outage starts, before the hook fires.
         Assert.True(guard.InOutage);
         Assert.Contains(PromptKind.OneMoment, prompts);
+        // Not a tautology: a call started in the first connection's connect gap used to count as an outage and resume
+        // here, before the host was ever dropped.
         Assert.False(resumed.IsSet);
 
         host.ReadGate.Set();
