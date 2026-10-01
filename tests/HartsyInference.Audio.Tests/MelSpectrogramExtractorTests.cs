@@ -3,11 +3,10 @@ using Xunit;
 
 namespace HartsyInference.Audio.Tests;
 
-/// <summary>End-to-end mel pipeline sanity checks. The "matches Python within 1e-4"
-/// test that the research doc calls for needs a Python-generated reference dump,
-/// which we'll add under tests/python-reference/ in a follow-up; these checks cover
-/// the basic shape and the well-known Whisper-specific normalization output range
-/// (~[0, 1] after the +4/4 shift on a normal speech clip).</summary>
+/// <summary>End-to-end mel pipeline sanity checks: the basic shape and the well-known
+/// Whisper-specific normalization output range (~[0, 1] after the +4/4 shift on a normal
+/// speech clip). Numeric agreement with HF's <c>WhisperFeatureExtractor</c> is
+/// <c>Parity/WhisperLogMelParityTests</c>.</summary>
 public sealed class MelSpectrogramExtractorTests
 {
     [Fact]
@@ -30,19 +29,15 @@ public sealed class MelSpectrogramExtractorTests
         Assert.Equal(128, cfg.NMels);
     }
 
-    [Fact]
-    public void OutputFrames_Whisper_30sClip_Matches3000()
+    [Theory]
+    [InlineData(80)]
+    [InlineData(128)]
+    public void OutputFrames_Whisper_30sClip_Is3000(int nMels)
     {
-        // Whisper's 30s zero-padded mel input is [80, 3000].
-        // 30s * 16000 Hz = 480000 samples. With hop=160 and win=400 and the drop-last,
-        // we expect 3000 frames (matching torch.stft with center=True semantics
-        // approximately — we use no-center which is equivalent here after dropping last).
-        MelSpectrogramExtractor extractor = new(MelSpectrogramExtractor.WhisperConfig());
-        int frames = extractor.OutputFrames(480_000);
-        // With no-center STFT: frames = 1 + (480000-400)/160 = 1 + 2997 = 2998, drop-last → 2997.
-        // PyTorch's center=True adds 2 more frames via reflection padding. For our purposes,
-        // we just need a number close to 3000 — the encoder is robust to ±a few frames.
-        Assert.InRange(frames, 2995, 3001);
+        // Centered STFT: 1 + 480000 / 160 frames, the last dropped — the [n_mels, 3000] the encoder was trained on,
+        // 1500 positions after its stride-2 conv.
+        MelSpectrogramExtractor extractor = new(MelSpectrogramExtractor.WhisperConfig(nMels));
+        Assert.Equal(3000, extractor.OutputFrames(480_000));
     }
 
     [Fact]

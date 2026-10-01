@@ -12,7 +12,8 @@ namespace HartsyInference.Audio.Preprocessing;
 ///
 /// <para>Unscaled forward transform, with <see cref="Fft"/>'s sign convention <c>e^{-2πi kn/N}</c>; an inverse is
 /// the conjugate trick on top. Sizes with a prime factor above 5 are not supported (<see cref="IsSupported"/>).
-/// Holds a work buffer, so one plan per stream: not thread-safe.</para></summary>
+/// Holds a work buffer, so one plan per stream: not thread-safe, except through the overload that takes the
+/// caller's own work buffer and reads only the plan's fixed tables.</para></summary>
 public sealed class FftPlan
 {
     // kiss_fft's own ceiling on stages; 5^8 is well past any audio window.
@@ -60,6 +61,9 @@ public sealed class FftPlan
     /// <summary>Points per transform.</summary>
     public int Size { get; }
 
+    /// <summary>Floats a caller-owned work buffer must hold: one interleaved complex value per point.</summary>
+    public int WorkLength => 2 * Size;
+
     /// <summary>Whether <paramref name="size"/> can be planned: at least 2, with no prime factor above 5.</summary>
     public static bool IsSupported(int size) => TryFactor(size, out _, out _);
 
@@ -89,26 +93,32 @@ public sealed class FftPlan
 
     /// <summary>Forward DFT of <see cref="Size"/> real samples, writing the <c>Size / 2 + 1</c> non-negative-frequency
     /// bins. Computed as a complex transform with a zero imaginary part, as upstream does.</summary>
-    public unsafe void ForwardReal(ReadOnlySpan<float> input, Span<float> outRe, Span<float> outIm)
+    public void ForwardReal(ReadOnlySpan<float> input, Span<float> outRe, Span<float> outIm)
+        => ForwardReal(input, outRe, outIm, _work);
+
+    /// <summary><see cref="ForwardReal(ReadOnlySpan{float}, Span{float}, Span{float})"/> in the caller's
+    /// <paramref name="work"/> buffer of <see cref="WorkLength"/> floats, so concurrent callers can share one plan.</summary>
+    public unsafe void ForwardReal(ReadOnlySpan<float> input, Span<float> outRe, Span<float> outIm, Span<float> work)
     {
         int n = Size;
         int bins = n / 2 + 1;
         if (input.Length < n) throw new ArgumentException($"input must hold {n} samples.", nameof(input));
         if (outRe.Length < bins || outIm.Length < bins)
             throw new ArgumentException($"outputs must hold {bins} bins.", nameof(outRe));
-        fixed (float* work = _work)
+        if (work.Length < WorkLength) throw new ArgumentException($"work must hold {WorkLength} floats.", nameof(work));
+        fixed (float* buffer = work)
         fixed (int* bitrev = _bitrev)
         {
             for (int i = 0; i < n; i++)
             {
-                work[2 * bitrev[i]] = input[i];
-                work[2 * bitrev[i] + 1] = 0f;
+                buffer[2 * bitrev[i]] = input[i];
+                buffer[2 * bitrev[i] + 1] = 0f;
             }
-            Run(work);
+            Run(buffer);
             for (int i = 0; i < bins; i++)
             {
-                outRe[i] = work[2 * i];
-                outIm[i] = work[2 * i + 1];
+                outRe[i] = buffer[2 * i];
+                outIm[i] = buffer[2 * i + 1];
             }
         }
     }

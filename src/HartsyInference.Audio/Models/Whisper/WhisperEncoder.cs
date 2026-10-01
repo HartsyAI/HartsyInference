@@ -178,7 +178,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
     }
 
     /// <summary>A view of the table's leading <paramref name="seqLen"/> rows, kept so its device copy is reused by
-    /// every forward at that length (1499 for a 30 s window); a different length replaces it.</summary>
+    /// every forward at that length (all 1500 for a 30 s window); a different length replaces it.</summary>
     private Tensor PositionRows(int seqLen)
     {
         if (_positionRows is not null && _positionRows.Shape[0] == seqLen)
