@@ -16,6 +16,10 @@ public sealed class EngineLinkTests
 {
     private const int WaitMs = 5000;
 
+    /// <summary>For waits on a reconnect, which starts threads and so can stall on a box running other test lanes; the
+    /// waits are on events, so a healthy run never comes near it.</summary>
+    private const int UnderLoadWaitMs = 30_000;
+
     private readonly ITestOutputHelper _output;
     public EngineLinkTests(ITestOutputHelper output) => _output = output;
 
@@ -255,14 +259,20 @@ public sealed class EngineLinkTests
         Assert.False(guard.InOutage);
     }
 
+    /// <summary>The outage is held open by the test rather than raced. Left alone, it lasts only for the link's first
+    /// redial (a 0-10 ms backoff plus a handshake), which a 5 ms poll of <see cref="LinkOutageGuard.InOutage"/> can miss
+    /// entirely on a loaded box. Here the host stops reading before the drop, so the redial connects but its handshake
+    /// waits until the test opens the gate; the guard's own hooks mark the transitions; and the hang-up timeout is far
+    /// beyond any scheduling delay, so only a host that never returns could end the call.</summary>
     [Fact]
-    public async Task Outage_ResumesWhenTheHostReturnsInTime()
+    public void Outage_ResumesWhenTheHostReturnsInTime()
     {
         using FakeLinkHost host = new();
         host.Start();
         using EngineLink link = new(Options(host));
-        using LinkOutageGuard guard = new(new LinkOutageGuardOptions { OutageHangupMs = 3000, PromptRepeatMs = 200 }, () => link.IsConnected);
+        using LinkOutageGuard guard = new(new LinkOutageGuardOptions { OutageHangupMs = 120_000, PromptRepeatMs = 200 }, () => link.IsConnected);
         ConcurrentQueue<PromptKind> prompts = new();
+        using ManualResetEventSlim outageStarted = new(false);
         using ManualResetEventSlim resumed = new(false);
         int hangups = 0;
         guard.PlayPrompt = kind =>
@@ -270,22 +280,34 @@ public sealed class EngineLinkTests
             prompts.Enqueue(kind);
             return 50;
         };
-        guard.ResumeCall = () => resumed.Set();
+        guard.OutageStarted = outageStarted.Set;
+        guard.ResumeCall = resumed.Set;
         guard.HangUp = () => Interlocked.Increment(ref hangups);
         link.Connected = _ => guard.LinkConnected();
         link.Disconnected = _ => guard.LinkDisconnected();
         link.Start();
-        Assert.True(host.WaitUntil(() => link.IsConnected, WaitMs));
+        Assert.True(host.WaitUntil(() => link.IsConnected, UnderLoadWaitMs));
         guard.CallStarted();
-        host.DropConnection();
-        Assert.True(host.WaitUntil(() => guard.InOutage, WaitMs));
-        Assert.True(resumed.Wait(WaitMs));
-        await Task.Delay(300);
         Assert.False(guard.InOutage);
+
+        host.ReadGate.Reset();
+        host.DropConnection();
+
+        Assert.True(outageStarted.Wait(UnderLoadWaitMs), "dropping the host never started an outage");
+        // The first "one moment" plays as the outage starts, before the hook fires.
+        Assert.True(guard.InOutage);
         Assert.Contains(PromptKind.OneMoment, prompts);
+        Assert.False(resumed.IsSet);
+
+        host.ReadGate.Set();
+
+        Assert.True(resumed.Wait(UnderLoadWaitMs), "the call was never resumed after the host came back");
+        // LinkConnected ends the wait before it resumes the call, so these hold the moment resumed is set.
+        Assert.False(guard.InOutage);
         Assert.DoesNotContain(PromptKind.Goodbye, prompts);
-        Assert.Equal(0, hangups);
+        Assert.Equal(0, Volatile.Read(ref hangups));
         Assert.Equal(1, guard.Outages);
+        Assert.Equal(0, guard.OutageHangups);
         guard.CallEnded();
     }
 
