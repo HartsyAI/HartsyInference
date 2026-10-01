@@ -58,6 +58,7 @@ internal sealed class LinkConnection
     private long _audioAllocated;
     private long _catchUpFrames;
     private long _resyncs;
+    private long _slowWrites;
     private long _unknownCallFrames;
     private int _closeStarted;
     private int _unknownTypeLogged;
@@ -107,6 +108,9 @@ internal sealed class LinkConnection
     public long CatchUpFrames => Volatile.Read(ref _catchUpFrames);
 
     public long Resyncs => Volatile.Read(ref _resyncs);
+
+    /// <summary>Writes that did not complete at once.</summary>
+    public long SlowWrites => Interlocked.Read(ref _slowWrites);
 
     /// <summary>Starts the reader thread, which runs the handshake.</summary>
     public void Start()
@@ -180,7 +184,16 @@ internal sealed class LinkConnection
         bool adopted = false;
         try
         {
-            if (!Handshake())
+            bool passed;
+            try
+            {
+                passed = Handshake();
+            }
+            finally
+            {
+                _server.HandshakeEnded();
+            }
+            if (!passed)
             {
                 reason = "handshake refused";
                 return;
@@ -263,7 +276,8 @@ internal sealed class LinkConnection
         {
             LatencyHistogram.Summary late = _lateness.Snapshot();
             Logs.Info($"[VoiceHost] Phone gateway link closed ({reason}); sender ticks={late.Count} lateness p50={late.P50Us}us p99={late.P99Us}us "
-                + $"max={late.MaxUs}us catchUp={CatchUpFrames} resyncs={Resyncs} audioPathAllocated={AudioPathAllocatedBytes}B; {calls.Length} call(s) ended.");
+                + $"max={late.MaxUs}us catchUp={CatchUpFrames} resyncs={Resyncs} audioPathAllocated={AudioPathAllocatedBytes}B slowWrites={SlowWrites}; "
+                + $"{calls.Length} call(s) ended.");
         }
         _server.Released(this);
         Task.WhenAll(calls.Select(c => c.Ended)).ContinueWith(static (_, state) => ((TaskCompletionSource)state!).TrySetResult(), _closed,
@@ -687,13 +701,16 @@ internal sealed class LinkConnection
         call.MarkDrained(turn);
     }
 
-    private static void Await(ValueTask task)
+    /// <summary>Blocks on a write. One that does not complete at once (the socket buffer is full) allocates a task and is
+    /// counted in <see cref="SlowWrites"/>, so a nonzero <see cref="AudioPathAllocatedBytes"/> can be told apart from it.</summary>
+    private void Await(ValueTask task)
     {
         if (task.IsCompleted)
         {
             task.GetAwaiter().GetResult();
             return;
         }
+        Interlocked.Increment(ref _slowWrites);
         task.AsTask().GetAwaiter().GetResult();
     }
 

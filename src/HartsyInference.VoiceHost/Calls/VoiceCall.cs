@@ -22,7 +22,11 @@ namespace HartsyInference.VoiceHost.Calls;
 /// wire. A turn's <c>OutboundEnd</c> goes out once its last audio has, because the gateway's resampler holds the last
 /// frame until it.</para>
 /// <para>Hang-up: the gateway sends its BYE the moment it runs <c>hangup</c>, so the host asks only once the goodbye
-/// has played. When the turn that called the tool ends, the host waits for that turn's audio to drain to the gateway
+/// has played. The request belongs to one turn: the handler marks that the tool ran, and the session's
+/// <c>ToolResult</c> event for it names the turn (the events arrive in order, after the handler and before that turn's
+/// <c>TurnCompleted</c>); a <c>ToolResult</c> without the handler having run (the tool disabled) arms nothing, and a
+/// later turn finishing first disarms it rather than hang up on a caller who is still talking. When the turn that
+/// called the tool ends, the host waits for that turn's audio to drain to the gateway
 /// (<see cref="DrainedTurn"/>: its <c>OutboundEnd</c> written, or the turn flushed, or it had no audio), then
 /// <see cref="PhoneLinkServerOptions.HangupMarginMs"/> for what is still queued downstream; the whole wait is capped
 /// at the audio the session still held plus <see cref="PhoneLinkServerOptions.HangupSlackMs"/>, and never exceeds
@@ -51,7 +55,8 @@ internal sealed class VoiceCall
     private int _completedTurn;
     private int _flushedTurn;
     private int _drainedTurn;
-    private int _hangupArmed;
+    private int _hangupRequested;
+    private int _hangupTurn;
     private long _inboundFrames;
     private long _inboundConcealed;
     private long _inboundBeforeStart;
@@ -126,6 +131,20 @@ internal sealed class VoiceCall
     /// the apology. A failure ends the call with <c>CallEnd(Failed)</c>.</summary>
     public async Task StartAsync()
     {
+        try
+        {
+            await StartCoreAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // The expected failures are handled inside; this keeps an unexpected one from leaving the call open unobserved.
+            Logs.Error($"[VoiceHost] Call {CallId}: starting it failed unexpectedly", ex);
+            await EndAsync(LinkCallEndReason.Failed, "the call failed to start").ConfigureAwait(false);
+        }
+    }
+
+    private async Task StartCoreAsync()
+    {
         await Task.Yield();
         lock (_lifecycleLock)
         {
@@ -139,7 +158,7 @@ internal sealed class VoiceCall
         IVoiceCallSession session;
         try
         {
-            ToolRegistry tools = VoiceHostTools.Build(_options.Tools, RequestToolAsync, ArmHangup, _options.Clock);
+            ToolRegistry tools = VoiceHostTools.Build(_options.Tools, RequestToolAsync, RequestHangup, _options.Clock);
             session = _factory.Create(CallId, tools);
             session.EventRaised += OnSessionEvent;
         }
@@ -422,6 +441,9 @@ internal sealed class VoiceCall
             case VoiceAgentEventKind.TurnCompleted:
                 OnTurnCompleted(item);
                 return;
+            case VoiceAgentEventKind.ToolResult when item.ToolCall?.Name == VoiceHostTools.Hangup:
+                OnHangupResult(item.TurnId);
+                return;
             case VoiceAgentEventKind.Error:
                 Logs.Warning($"[VoiceHost] Call {CallId}, turn {item.TurnId}: {item.Text}");
                 return;
@@ -451,10 +473,28 @@ internal sealed class VoiceCall
                 },
             });
         }
-        if (Interlocked.Exchange(ref _hangupArmed, 0) != 0)
+        int armed = Volatile.Read(ref _hangupTurn);
+        if (armed == 0 || item.TurnId < armed)
         {
-            // Interrupted or not: the model chose to end the call, and a barge-in only empties the goodbye.
-            _ = HangUpAfterGoodbyeAsync(item.TurnId);
+            return;
+        }
+        Volatile.Write(ref _hangupTurn, 0);
+        if (item.TurnId > armed)
+        {
+            Logs.Warning($"[VoiceHost] Call {CallId}: turn {armed} asked to hang up but never finished, and turn {item.TurnId} did; staying on the line.");
+            return;
+        }
+        // Interrupted or not: the model chose to end the call, and a barge-in only empties the goodbye.
+        _ = HangUpAfterGoodbyeAsync(item.TurnId);
+    }
+
+    /// <summary>The session recorded a <c>hangup</c> result for <paramref name="turn"/>: arm the hang-up for that turn, if
+    /// the handler really ran (a disabled tool's error result also carries the name).</summary>
+    private void OnHangupResult(int turn)
+    {
+        if (Interlocked.Exchange(ref _hangupRequested, 0) != 0 && turn > 0)
+        {
+            Volatile.Write(ref _hangupTurn, turn);
         }
     }
 
@@ -463,8 +503,22 @@ internal sealed class VoiceCall
 
     /// <summary>The <c>hangup</c> tool's request, sent once the goodbye of <paramref name="turn"/>, the turn that called
     /// it, has played: its audio drained to the gateway plus the downstream margin, or the cap (see the class remarks).
-    /// The gateway sends its BYE and answers, then the host ends the call on its side too, whatever the answer.</summary>
+    /// The gateway sends its BYE and answers, then the host ends the call on its side too, whatever the answer. Nobody
+    /// awaits it, so anything unexpected ends the call with <c>CallEnd(Failed)</c> instead of leaving it open.</summary>
     private async Task HangUpAfterGoodbyeAsync(int turn)
+    {
+        try
+        {
+            await HangUpAfterGoodbyeCoreAsync(turn).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[VoiceHost] Call {CallId}: hanging up after turn {turn} failed; ending the call", ex);
+            await EndAsync(LinkCallEndReason.Failed, "the hang-up failed").ConfigureAwait(false);
+        }
+    }
+
+    private async Task HangUpAfterGoodbyeCoreAsync(int turn)
     {
         long startNs = MonotonicClock.NowNs();
         IVoiceCallSession? session = Session;
@@ -499,7 +553,8 @@ internal sealed class VoiceCall
         await EndAsync(LinkCallEndReason.Completed, "the agent hung up").ConfigureAwait(false);
     }
 
-    private void ArmHangup() => Volatile.Write(ref _hangupArmed, 1);
+    /// <summary>The <c>hangup</c> handler ran; the session's <c>ToolResult</c> event that follows names the turn.</summary>
+    private void RequestHangup() => Volatile.Write(ref _hangupRequested, 1);
 
     /// <summary>Waits until <paramref name="condition"/> holds (true), or until <paramref name="deadlineNs"/> or the end of
     /// the call (false). It polls, so the sender, which publishes what it waits on, never signals and never allocates.</summary>

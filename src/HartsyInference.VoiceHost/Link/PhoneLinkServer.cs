@@ -11,9 +11,14 @@ namespace HartsyInference.VoiceHost.Link;
 /// a live listener there makes the start fail rather than steal the path. The socket file gets
 /// <see cref="PhoneLinkServerOptions.SocketMode"/> right after bind, inside a directory the systemd unit creates for the
 /// host alone (<c>RuntimeDirectory</c>). The accept thread does nothing but accept; every connection's handshake runs on
-/// its own reader thread, so a client that never sends <c>Hello</c> holds up nobody.</remarks>
+/// its own reader thread, so a client that never sends <c>Hello</c> holds up nobody. At most
+/// <see cref="MaxPendingHandshakes"/> connections may be in their handshake at once; more are closed at accept, so a
+/// misbehaving local process cannot pile up reader threads.</remarks>
 internal sealed class PhoneLinkServer : IAsyncDisposable
 {
+    /// <summary>Connections allowed in their handshake at once.</summary>
+    public const int MaxPendingHandshakes = 4;
+
     private const int AcceptBacklog = 4;
     private const int AcceptRetryMs = 100;
     private const int DrainMs = 1000;
@@ -26,6 +31,8 @@ internal sealed class PhoneLinkServer : IAsyncDisposable
     private LinkConnection? _current;
     private uint _nextRequestId;
     private long _refused;
+    private long _turnedAway;
+    private int _pendingHandshakes;
     private int _stopped;
 
     public PhoneLinkServer(PhoneLinkServerOptions options, IVoiceCallSessionFactory factory)
@@ -64,6 +71,12 @@ internal sealed class PhoneLinkServer : IAsyncDisposable
 
     /// <summary>Connections refused at the handshake (bad token, rate, version, no Hello).</summary>
     public long Refused => Interlocked.Read(ref _refused);
+
+    /// <summary>Connections closed at accept because <see cref="MaxPendingHandshakes"/> others were in their handshake.</summary>
+    public long TurnedAway => Interlocked.Read(ref _turnedAway);
+
+    /// <summary>Connections in their handshake right now.</summary>
+    internal int PendingHandshakes => Volatile.Read(ref _pendingHandshakes);
 
     /// <summary>Binds the socket and starts accepting.</summary>
     /// <exception cref="InvalidOperationException">Another process listens on the path, or the path is a directory.</exception>
@@ -187,6 +200,9 @@ internal sealed class PhoneLinkServer : IAsyncDisposable
 
     internal void CountRefused() => Interlocked.Increment(ref _refused);
 
+    /// <summary>A connection's handshake is over, passed or not; its slot is free.</summary>
+    internal void HandshakeEnded() => Interlocked.Decrement(ref _pendingHandshakes);
+
     /// <summary>Removes a socket file nobody listens on (a host that was killed); refuses a path someone does.</summary>
     private static void RemoveStaleSocket(string path)
     {
@@ -238,7 +254,28 @@ internal sealed class PhoneLinkServer : IAsyncDisposable
                 _stopping.Wait(AcceptRetryMs);
                 continue;
             }
-            new LinkConnection(this, client, _options, Factory.OutboundSampleRate).Start();
+            if (Interlocked.Increment(ref _pendingHandshakes) > MaxPendingHandshakes)
+            {
+                Interlocked.Decrement(ref _pendingHandshakes);
+                client.Dispose();
+                long turnedAway = Interlocked.Increment(ref _turnedAway);
+                if (turnedAway == 1 || turnedAway % 100 == 0)
+                {
+                    Logs.Warning($"[VoiceHost] Closed a PhoneLink connection at accept: {MaxPendingHandshakes} others are still in their handshake ({turnedAway} so far).");
+                }
+                continue;
+            }
+            try
+            {
+                new LinkConnection(this, client, _options, Factory.OutboundSampleRate).Start();
+            }
+            catch (Exception ex)
+            {
+                // Its reader never started, so nothing else frees the slot; an exception here would end the host.
+                Interlocked.Decrement(ref _pendingHandshakes);
+                client.Dispose();
+                Logs.Error("[VoiceHost] Starting a PhoneLink connection failed", ex);
+            }
         }
     }
 }

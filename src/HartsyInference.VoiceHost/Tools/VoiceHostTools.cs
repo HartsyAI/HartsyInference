@@ -23,7 +23,8 @@ public static class VoiceHostTools
     /// <summary>A registry with the <paramref name="enabled"/> tools for one call.</summary>
     /// <param name="enabled">Names from <see cref="Names"/>.</param>
     /// <param name="request">Sends a telephony request to the gateway for this call and returns its answer.</param>
-    /// <param name="requestHangup">Arms the hang-up that follows the current reply.</param>
+    /// <param name="requestHangup">Marks that <c>hangup</c> ran; the call arms the hang-up for the turn the session's
+    /// <c>ToolResult</c> event names.</param>
     /// <param name="clock">The time <c>get_time</c> reports.</param>
     internal static ToolRegistry Build(IReadOnlyList<string> enabled, Func<ToolRequestMessage, CancellationToken, Task<ToolResultMessage>> request,
         Action requestHangup, TimeProvider clock)

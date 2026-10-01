@@ -20,6 +20,9 @@ internal sealed class FakeSessionFactory : IVoiceCallSessionFactory
     /// <summary>When set, the next session's start waits for it.</summary>
     public Task? StartGate { get; set; }
 
+    /// <summary>When set, the next session's end completes only with it.</summary>
+    public Task? EndGate { get; set; }
+
     public IReadOnlyList<FakeCallSession> Sessions => [.. _sessions];
 
     public IVoiceCallSession Create(uint callId, ToolRegistry tools)
@@ -29,9 +32,10 @@ internal sealed class FakeSessionFactory : IVoiceCallSessionFactory
             CreateFailure = null;
             throw failure;
         }
-        FakeCallSession session = new(callId, tools) { StartFailure = StartFailure, StartGate = StartGate };
+        FakeCallSession session = new(callId, tools) { StartFailure = StartFailure, StartGate = StartGate, EndGate = EndGate };
         StartFailure = null;
         StartGate = null;
+        EndGate = null;
         _sessions.Enqueue(session);
         return session;
     }

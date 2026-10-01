@@ -9,7 +9,8 @@ namespace HartsyInference.VoiceHost.Tests;
 
 /// <summary>Calls over a live link: <c>CallStart</c> creates and starts a session with every tool bound, session events
 /// reach the gateway as <c>Event</c> frames, <c>CallEnd</c> ends and disposes the session without echoing, a resumed call
-/// gets a fresh session and the apology, a lost link ends its calls, a session that fails anywhere ends only its own call
+/// gets a fresh session and the apology (and runs while the lost session is still ending), a lost link ends its calls,
+/// a session that fails anywhere ends only its own call
 /// with <c>CallEnd(Failed)</c>, and stopping the host ends calls with <c>LocalHangup</c> and removes the socket.</summary>
 public sealed class CallLifecycleTests
 {
@@ -87,6 +88,36 @@ public sealed class CallLifecycleTests
         Assert.NotSame(lost, fresh);
         Assert.True(HostRig.Wait(() => fresh.Spoken.Length == 1));
         Assert.Equal("Sorry, the line dropped.", fresh.Spoken[0]);
+    }
+
+    [Fact]
+    public async Task AResumedCallRunsWhileTheLostSessionIsStillEnding()
+    {
+        await using HostRig rig = HostRig.Start();
+        TaskCompletionSource release = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        rig.Factory.EndGate = release.Task;
+        (FakeGateway first, FakeCallSession lost) = await rig.StartCallAsync();
+        first.Dispose();
+        Assert.True(HostRig.Wait(() => lost.EndCalled && rig.Server.Current is null), "the lost link was never released.");
+
+        FakeGateway second = rig.Connect();
+        second.SendCallStart(1, resume: true);
+        FakeCallSession fresh = await rig.Factory.WaitForSessionAsync(1);
+        rig.WaitUntilReady(1);
+        Assert.False(lost.Disposed, "the lost session finished ending before the resumed call started; the test proved nothing.");
+
+        // The resumed call carries audio both ways while the old session is still ending, and the old session's late
+        // events stay on the dead link.
+        second.SendInbound(1, new short[LinkProtocol.InboundFrameSamples]);
+        fresh.QueueReply(turnId: 1, samples: 3 * 320);
+        Assert.True(second.WaitUntil(() => second.FramesOf(LinkMessageType.OutboundAudio).Sum(f => f.Pcm.Length) == 3 * 320));
+        Assert.True(HostRig.Wait(() => fresh.InboundSamples.Length == LinkProtocol.InboundFrameSamples));
+        lost.Raise(VoiceAgentEventKind.UserTranscript, turnId: 7, text: "from the lost session");
+        release.SetResult();
+        Assert.True(HostRig.Wait(() => lost.Disposed), "the lost session was never disposed.");
+        await Task.Delay(100);
+        Assert.DoesNotContain(second.FramesOf(LinkMessageType.Event), f => f.Event.Text == "from the lost session");
+        Assert.NotNull(rig.Call(1));
     }
 
     [Fact]

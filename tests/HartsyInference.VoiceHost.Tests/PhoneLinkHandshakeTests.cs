@@ -6,8 +6,9 @@ namespace HartsyInference.VoiceHost.Tests;
 
 /// <summary>The host's side of <c>Hello</c>: the right token gets <c>HelloAck</c> with the outbound rate and the 20 ms
 /// frame bound; a wrong token, a rate other than 16 kHz, another protocol version, a first frame that is not
-/// <c>Hello</c> or no <c>Hello</c> at all gets <c>Error</c> and a closed socket, never the token in a log line; a
-/// connection replaces the current one only once its own <c>Hello</c> has passed.</summary>
+/// <c>Hello</c> or no <c>Hello</c> at all gets <c>Error</c> and a closed socket, never the token in a log line; at most
+/// four connections wait in their handshake at once; a connection replaces the current one only once its own
+/// <c>Hello</c> has passed.</summary>
 public sealed class PhoneLinkHandshakeTests
 {
     [Fact]
@@ -90,6 +91,37 @@ public sealed class PhoneLinkHandshakeTests
 
         Assert.Contains("Hello", gateway.WaitFor(LinkMessageType.Error)[0].AsFrame().ReadError().Text, StringComparison.Ordinal);
         Assert.True(gateway.WaitForClose());
+    }
+
+    [Fact]
+    public async Task AtMostFourConnectionsWaitInTheirHandshakeAtOnce()
+    {
+        await using HostRig rig = HostRig.Start(options => options with { HandshakeTimeoutMs = 30_000 });
+        List<FakeGateway> silent = [];
+        try
+        {
+            for (int i = 0; i < Link.PhoneLinkServer.MaxPendingHandshakes; i++)
+            {
+                silent.Add(FakeGateway.Connect(rig.SocketPath));
+            }
+            Assert.True(HostRig.Wait(() => rig.Server.PendingHandshakes == Link.PhoneLinkServer.MaxPendingHandshakes));
+            using FakeGateway extra = FakeGateway.Connect(rig.SocketPath);
+
+            Assert.True(extra.WaitForClose(2_000), "a fifth connection still in its handshake was kept.");
+            Assert.Equal(1, rig.Server.TurnedAway);
+            silent[0].Dispose();
+            Assert.True(HostRig.Wait(() => rig.Server.PendingHandshakes == Link.PhoneLinkServer.MaxPendingHandshakes - 1),
+                "the closed connection's slot never came back.");
+            FakeGateway gateway = rig.Connect();
+            Assert.False(gateway.IsClosed);
+        }
+        finally
+        {
+            foreach (FakeGateway gateway in silent)
+            {
+                gateway.Dispose();
+            }
+        }
     }
 
     [Fact]

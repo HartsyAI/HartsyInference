@@ -3,8 +3,10 @@ Description=HartsyInference phone gateway (SIP/RTP leg of the voice agent; no mo
 Documentation=https://github.com/HartsyAI/HartsyInference/blob/main/docs/Research/PHONE_GATEWAY.md
 Wants=network-online.target
 After=network-online.target hartsyinference-voice-host.service
-# The host owns the socket directory and the models; the gateway is restarted with it. While the host restarts on its
-# own (a crash), the gateway keeps live calls on hold with its "one moment" prompt and re-attaches them.
+# The host owns the socket directory and the models. Requires= ties operator actions together: `systemctl stop` or
+# `systemctl restart` of the host stops or restarts this gateway too, which drops every live call. A host crash does
+# not propagate: systemd restarts the host on its own (Restart=always) and leaves the gateway running, which holds live
+# calls with its "one moment" prompt and re-attaches them when the host is back within link.outageHangupSeconds.
 Requires=hartsyinference-voice-host.service
 StartLimitIntervalSec=120
 StartLimitBurst=5

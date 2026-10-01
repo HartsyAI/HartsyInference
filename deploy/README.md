@@ -40,7 +40,9 @@ Model-level readiness, draining, and fault-isolation verification remain [open w
 Two services on one box: [hartsyinference-voice-host](systemd/hartsyinference-voice-host.service) (the engine, the
 speech models on the RTX 3060, the PhoneLink socket) and
 [hartsyinference-phone-gateway](systemd/hartsyinference-phone-gateway.service) (SIP/RTP, no models). The gateway
-`Requires=` the host. Design: [voice session](../docs/Research/VOICE_AGENT_SESSION.md#voice-host-hartsyinferencevoicehost)
+`Requires=` the host, so `systemctl stop` or `restart` of the host stops or restarts the gateway too and drops live
+calls. A host crash does not propagate: systemd restarts the host alone, and the gateway holds live calls with its "one
+moment" prompt and re-attaches them. Design: [voice session](../docs/Research/VOICE_AGENT_SESSION.md#voice-host-hartsyinferencevoicehost)
 and [phone gateway](../docs/Research/PHONE_GATEWAY.md); the full install and call checklist is the
 [voice agent runbook](../docs/Checklists/VOICE_AGENT_VERIFICATION.md).
 

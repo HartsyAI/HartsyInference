@@ -338,7 +338,8 @@ the LLM onto the audio card, and the session never sends one. Units and install 
 end-to-end checks: [runbook](../Checklists/VOICE_AGENT_VERIFICATION.md).
 
 ```
-voice-link-accept   accept() only; each connection's handshake runs on its own reader
+voice-link-accept   accept() only; each connection's handshake runs on its own reader, at most 4 at once (more are
+                    closed at accept)
 voice-link-reader   per connection: Hello (first frame, version 1, 16 kHz, token compared in constant time on SHA-256
                     digests) → HelloAck or Error + close; then every frame, sequence checked (a gap closes the link):
                     CallStart → session (started on the pool) · InboundAudio PCM16 → ±1 (×1/32768) → PushInbound ·
@@ -380,7 +381,10 @@ the end of the call. `get_time` is answered on the host.
 model's goodbye is usually still being synthesized, so the handler answers `Ok` at once and the host sends the request
 only after the goodbye has played:
 
-1. It starts when the turn that called the tool ends (`TurnCompleted`, interrupted or not).
+1. It starts when the turn that called the tool ends (`TurnCompleted`, interrupted or not). The handler marks that the
+   tool ran, and the session's `ToolResult` event for it, which arrives after the handler and before that turn's
+   `TurnCompleted`, names the turn. A `ToolResult` whose handler never ran (the tool disabled) arms nothing, and a later
+   turn finishing first disarms it rather than hang up on a caller who is still talking.
 2. It waits until that turn's audio has drained to the gateway: the turn's `OutboundEnd` is written, or the turn was
    flushed, or it had no audio. The sender publishes this per call (`DrainedTurn`) and the hangup polls it every
    10 ms, so publishing it allocates nothing and wakes nobody.

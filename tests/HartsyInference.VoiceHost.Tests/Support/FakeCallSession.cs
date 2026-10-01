@@ -46,6 +46,9 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
     /// <summary>When set, <see cref="StartAsync"/> waits for it, so a test can act while the session is still starting.</summary>
     public Task? StartGate { get; init; }
 
+    /// <summary>When set, <see cref="EndAsync"/> completes only with it, so a test can act while the session is still ending.</summary>
+    public Task? EndGate { get; init; }
+
     /// <summary>Thrown by the next <see cref="ReadOutbound"/>.</summary>
     public Exception? ReadFailure { get; set; }
 
@@ -214,7 +217,7 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
         {
             Raise(VoiceAgentEventKind.StateChanged, state: VoiceAgentState.Ended);
         }
-        return Task.CompletedTask;
+        return EndGate ?? Task.CompletedTask;
     }
 
     public ValueTask DisposeAsync()

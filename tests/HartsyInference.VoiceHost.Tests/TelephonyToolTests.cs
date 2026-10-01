@@ -14,7 +14,9 @@ namespace HartsyInference.VoiceHost.Tests;
 /// <c>ToolResult</c>, or a <c>Failed</c> result after the tool timeout or the end of the call; <c>hangup</c> answers at once
 /// and goes to the gateway only once the turn that asked for it has ended and its goodbye is on the link, plus the
 /// downstream margin, within a cap that a goodbye which never drains cannot outlast; a barge-in on the goodbye cuts it
-/// short and the call still ends; <c>get_time</c> is answered on the host; only the enabled tools are offered.</summary>
+/// short and the call still ends; the hang-up belongs to the turn the session's <c>ToolResult</c> names, so a later turn
+/// finishing first, or a result for a disabled tool, ends nothing; <c>get_time</c> is answered on the host; only the
+/// enabled tools are offered.</summary>
 public sealed class TelephonyToolTests
 {
     private const int Frame = 320;
@@ -87,8 +89,7 @@ public sealed class TelephonyToolTests
     {
         await using HostRig rig = HostRig.Start();
         (FakeGateway gateway, FakeCallSession session) = await rig.StartCallAsync();
-        string answer = await Invoke(session, VoiceHostTools.Hangup).WaitAsync(TimeSpan.FromSeconds(5));
-        Assert.Contains("\"Ok\"", answer, StringComparison.Ordinal);
+        await HangUpOnTurnAsync(session, turnId: 3);
         session.QueueReply(turnId: 3, samples: 25 * Frame);
         await Task.Delay(100);
         Assert.Empty(gateway.FramesOf(LinkMessageType.ToolRequest));
@@ -119,7 +120,7 @@ public sealed class TelephonyToolTests
     {
         await using HostRig rig = HostRig.Start(options => options with { HangupSlackMs = 5_000 });
         (FakeGateway gateway, FakeCallSession session) = await rig.StartCallAsync();
-        await Invoke(session, VoiceHostTools.Hangup).WaitAsync(TimeSpan.FromSeconds(5));
+        await HangUpOnTurnAsync(session, turnId: 2);
         long ended = MonotonicClock.NowNs();
         session.Raise(VoiceAgentEventKind.TurnCompleted, turnId: 2, metrics: new VoiceTurnMetrics { TurnId = 2 });
 
@@ -140,7 +141,7 @@ public sealed class TelephonyToolTests
         // (shortened here from its 10 s default).
         await using HostRig rig = HostRig.Start(options => options with { HangupMaxWaitMs = maxWaitMs });
         (FakeGateway gateway, FakeCallSession session) = await rig.StartCallAsync();
-        await Invoke(session, VoiceHostTools.Hangup).WaitAsync(TimeSpan.FromSeconds(5));
+        await HangUpOnTurnAsync(session, turnId: 3);
         session.EndlessQueuedSamples = queuedSamples;
         session.EndlessTurn = 3;
         Assert.True(gateway.WaitUntil(() => Samples(gateway, 3) >= 5 * Frame));
@@ -165,7 +166,7 @@ public sealed class TelephonyToolTests
     {
         await using HostRig rig = HostRig.Start();
         (FakeGateway gateway, FakeCallSession session) = await rig.StartCallAsync();
-        await Invoke(session, VoiceHostTools.Hangup).WaitAsync(TimeSpan.FromSeconds(5));
+        await HangUpOnTurnAsync(session, turnId: 3);
         session.QueueReply(turnId: 3, samples: 5 * 16_000);
         if (turnEndsFirst)
         {
@@ -193,6 +194,38 @@ public sealed class TelephonyToolTests
         gateway.SendToolResult(1, requestId, LinkToolStatus.Ok);
         Assert.Equal(LinkCallEndReason.Completed, gateway.WaitFor(LinkMessageType.CallEnd)[0].AsFrame().ReadCallEnd());
         Assert.True(HostRig.Wait(() => session.Disposed && rig.Call(1) is null));
+    }
+
+    [Fact]
+    public async Task AHangupBelongsToItsTurnAndALaterTurnFinishingFirstDisarmsIt()
+    {
+        using LogCapture log = new();
+        await using HostRig rig = HostRig.Start();
+        (FakeGateway gateway, FakeCallSession session) = await rig.StartCallAsync();
+        await HangUpOnTurnAsync(session, turnId: 3);
+        session.Raise(VoiceAgentEventKind.TurnCompleted, turnId: 4, metrics: new VoiceTurnMetrics { TurnId = 4 });
+        session.Raise(VoiceAgentEventKind.TurnCompleted, turnId: 3, metrics: new VoiceTurnMetrics { TurnId = 3 });
+        await Task.Delay(500);
+
+        Assert.Empty(gateway.FramesOf(LinkMessageType.ToolRequest));
+        Assert.NotNull(rig.Call(1));
+        Assert.Contains("turn 3 asked to hang up but never finished", log.All, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AHangupResultWithoutTheToolRunningArmsNothing()
+    {
+        // hangup disabled: the model can still name it, and the registry answers with an error the session records.
+        await using HostRig rig = HostRig.Start(options => options with { Tools = [VoiceHostTools.GetTime] });
+        (FakeGateway gateway, FakeCallSession session) = await rig.StartCallAsync();
+        string answer = await Invoke(session, VoiceHostTools.Hangup).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("Unknown tool", answer, StringComparison.Ordinal);
+        RaiseHangupResult(session, turnId: 2, answer);
+        session.Raise(VoiceAgentEventKind.TurnCompleted, turnId: 2, metrics: new VoiceTurnMetrics { TurnId = 2 });
+        await Task.Delay(500);
+
+        Assert.Empty(gateway.FramesOf(LinkMessageType.ToolRequest));
+        Assert.NotNull(rig.Call(1));
     }
 
     [Fact]
@@ -226,6 +259,25 @@ public sealed class TelephonyToolTests
 
     private static Task<string> Invoke(FakeCallSession session, string tool, string arguments = "{}") =>
         session.Tools.InvokeAsync(new NativeToolCall { Id = "call-1", Name = tool, Arguments = arguments });
+
+    /// <summary>What the real session does when turn <paramref name="turnId"/>'s model calls <c>hangup</c>: the registry
+    /// runs the handler, then the session raises <c>ToolResult</c> for that call on its event pump.</summary>
+    private static async Task HangUpOnTurnAsync(FakeCallSession session, int turnId)
+    {
+        string answer = await Invoke(session, VoiceHostTools.Hangup).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Contains("\"Ok\"", answer, StringComparison.Ordinal);
+        RaiseHangupResult(session, turnId, answer);
+    }
+
+    private static void RaiseHangupResult(FakeCallSession session, int turnId, string result) =>
+        session.Raise(new VoiceAgentEvent
+        {
+            Kind = VoiceAgentEventKind.ToolResult,
+            TurnId = turnId,
+            Text = result,
+            ToolCall = new NativeToolCall { Id = "call-1", Name = VoiceHostTools.Hangup, Arguments = "{}" },
+            TimestampNs = MonotonicClock.NowNs(),
+        });
 
     private static int Samples(FakeGateway gateway, uint turn) =>
         gateway.FramesOf(LinkMessageType.OutboundAudio).Where(f => f.TurnId == turn).Sum(f => f.Pcm.Length);
