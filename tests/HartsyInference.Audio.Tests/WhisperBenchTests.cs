@@ -19,7 +19,7 @@ namespace HartsyInference.Audio.Tests;
 
 /// <summary>Whisper per-utterance latency bench on the RTX 3060: the numbers the phone-call plan's STT bring-up gate
 /// (small.en ≤ 350 ms per utterance for 2 / 5 / 10 s of speech, narrowband content-word recall ≥ the 16 kHz baseline
-/// − 10 points on the full clip and on the slices of 5 s and longer, JFK 11/11 words) is evaluated against, plus
+/// − 10 points on the full clip and on every slice but the 2 s one, JFK 11/11 words) is evaluated against, plus
 /// token-level regression evidence for every other Whisper checkpoint. Opt-in with <c>HARTSY_WHISPER_BENCH=1</c>;
 /// otherwise it returns early so the CPU lane and unattended GPU runs never pay for it.
 ///
@@ -76,10 +76,16 @@ public sealed class WhisperBenchTests
     private const int RegressionTimedRuns = 2;
     private const double GateMs = 350;
     // Narrowband may lose at most this many recall points against the 16 kHz transcript, on the full clip and on
-    // slices at least MinRecallGateSeconds long.
+    // every slice except UngatedRecallSliceSeconds.
     private const double RecallFloorPoints = 10;
-    private const int MinRecallGateSeconds = 5;
-    private const string ShortSliceRecallNote =
+    // The one slice whose recall is not gated, and why. The 2.0 s cut of the JFK clip lands inside "Americans", and
+    // the reference model drops the word's end there too (HF small.en on the same samples: 1.9 s gives "Ameri-" in
+    // both bands; 2.0 s gives "Americans," at 16 kHz by a 0.008 logit margin and "Ameri-" narrowband; 2.1-2.5 s
+    // give "Americans" in both), so recall at this cut measures where the cut falls, not narrowband robustness.
+    // Decided by the orchestrator, delegated by the user (2026-10-01). It exempts exactly this slice: any other
+    // slice, including one added to SliceSeconds later, is gated unless it is given its own measured reason here.
+    private const int UngatedRecallSliceSeconds = 2;
+    private const string UngatedRecallSliceNote =
         "informational: the 2 s cut lands inside \"Americans\", so recall here measures the cut, not narrowband robustness";
     private const string JfkTranscript =
         "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.";
@@ -214,7 +220,7 @@ public sealed class WhisperBenchTests
             string wide = heard[(seconds, "16k")];
             string narrow = heard[(seconds, "narrowband")];
             double sliceRecall = ContentWordRecall(wide, narrow);
-            string gate = seconds >= MinRecallGateSeconds ? RecallGate(sliceRecall - 1) : ShortSliceRecallNote;
+            string gate = seconds == UngatedRecallSliceSeconds ? UngatedRecallSliceNote : RecallGate(sliceRecall - 1);
             table.AppendLine($"| {seconds} s narrowband vs its 16 kHz transcript | {sliceRecall:P0} | {Points(sliceRecall - 1)} | {gate} | — | "
                 + $"{Cell(narrow)} |");
         }
