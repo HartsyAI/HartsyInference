@@ -145,6 +145,7 @@ public sealed class RnnoiseDenoiser : IDisposable
         Analyze(second, _second);
         if (!_first.Silent && !_second.Silent)
         {
+            // Only the second frame's speech probability is kept, as two Process calls would leave it.
             _model.ProcessPair(backend, _first.Features, _second.Features, _first.Gains, _second.Gains,
                 out _, out float vad);
             SpeechProbability = vad;
