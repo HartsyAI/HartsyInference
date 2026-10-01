@@ -24,6 +24,10 @@ Usage: python3 swarm_audio_bench.py [--host HOST] [--port PORT] [--out results.j
 
   Usage: python3 swarm_audio_bench.py --voice [--voice-whisper-model small] [--voice-tts-voice af_heart]
                                       [--voice-out swarm_voice_results.json]
+
+  The between-call idle check reads GetGlobalStatus (every session's queue). Afterwards,
+  `tests/swarm-quiet-window.sh --verify-since <start>` lists this run's own 21 `ProcessTTS: requested` lines
+  (STT calls write none) and exits 4 on them; any T2I `requested` line or extra TTS line is someone else's.
 """
 import argparse
 import base64

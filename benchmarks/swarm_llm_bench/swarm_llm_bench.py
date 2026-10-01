@@ -37,7 +37,7 @@ with the chunk count reported alongside as a sanity cross-check.
   Gate: refuses to run unless --quiet-window-passed is given (run tests/swarm-quiet-window.sh --gpu 4090
   first) and re-checks GetGlobalStatus (every session's queue) before every call; foreign Swarm activity or a
   foreign GPU process aborts the batch. After the batch, `tests/swarm-quiet-window.sh --verify-since <start>`
-  confirms no request landed in Swarm's journal during it.
+  should read 0: LLMAssistant chats write no journal line, so any T2I/TTS request it lists came from someone else.
 
   Usage: python3 swarm_llm_bench.py --voice-qwen3 --quiet-window-passed [--host 192.168.10.188]
                                     [--voice-out benchmarks/results/swarm_voice_llm.json]

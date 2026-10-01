@@ -37,7 +37,9 @@
 #
 # AFTER A TIMED ARM run `--verify-since <UTC start of the arm>`: it scans the journal from that instant for
 # request lines and Swarm restarts and reads the global queue once; exit 0 = nothing landed, exit 4 = redo the
-# arm. It cannot see past GPU processes — sample nvidia-smi during the arm for that.
+# arm. It cannot see past GPU processes — sample nvidia-smi during the arm for that. It counts YOUR OWN Swarm
+# requests too: an in-process arm should read 0, but an arm that itself calls Swarm (AudioLab TTS, T2I) exits 4
+# on its own lines — for those, compare the listed `requested` lines with what the arm sent.
 #
 # Usage:
 #   tests/swarm-quiet-window.sh [--gpu <uuid|name-substring>]... [--minutes 10] [--interval 30]
