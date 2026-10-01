@@ -1,7 +1,9 @@
+using System.Diagnostics;
 using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio.Wake;
 using HartsyInference.Engine.Dispatch;
@@ -186,7 +188,8 @@ public sealed class VoiceModelSet : IAsyncDisposable
 
     /// <summary>Loads every model into memory and builds its per-length state before the first call: one synthesis per
     /// text of <see cref="WarmTexts"/> and one recognition of a second of silence, each its own job on the GPU thread,
-    /// and a one-token generation on the language model's device.</summary>
+    /// and a one-token generation on the language model's device. Logs one <c>[Voice] Warm-up</c> line with each
+    /// job's time on the GPU thread and the audio length of each synthesis.</summary>
     public async Task WarmAsync(ITextService text, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -211,12 +214,30 @@ public sealed class VoiceModelSet : IAsyncDisposable
 
     private async Task WarmSpeechAsync(float[] silence, CancellationToken cancel)
     {
-        // One job per text, each under its own gate hold, as a turn's sentences are.
-        foreach (string sentence in WarmTexts)
+        // One job per text, each under its own gate hold, as a turn's sentences are. Each is timed inside its job, so
+        // the log shows the synthesis alone and not the queue ahead of it.
+        (double Ms, double Seconds)[] synthesized = new (double, double)[WarmTexts.Count];
+        for (int i = 0; i < synthesized.Length; i++)
         {
-            await Gpu.RunAsync(VoiceGpuJobKind.Warm, () => _speech.Synthesize(sentence), cancel).ConfigureAwait(false);
+            string sentence = WarmTexts[i];
+            synthesized[i] = await Gpu.RunAsync(VoiceGpuJobKind.Warm, () =>
+            {
+                long started = Stopwatch.GetTimestamp();
+                float[] audio = _speech.Synthesize(sentence);
+                return (Stopwatch.GetElapsedTime(started).TotalMilliseconds, audio.Length / (double)_speech.SynthesisSampleRate);
+            }, cancel).ConfigureAwait(false);
         }
-        await Gpu.RunAsync(VoiceGpuJobKind.Warm, () => _speech.Transcribe(silence), cancel).ConfigureAwait(false);
+        double recognitionMs = await Gpu.RunAsync(VoiceGpuJobKind.Warm, () =>
+        {
+            long started = Stopwatch.GetTimestamp();
+            _speech.Transcribe(silence);
+            return Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+        }, cancel).ConfigureAwait(false);
+        Logs.Info($"[Voice] Warm-up on {Options.AudioDevice}: synthesized "
+            + $"{string.Join(" / ", WarmTexts.Select(text => text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length))} words in "
+            + $"{string.Join(" / ", synthesized.Select(run => $"{run.Ms:F1}"))} ms "
+            + $"({string.Join(" / ", synthesized.Select(run => $"{run.Seconds:F2}"))} s of audio); "
+            + $"recognized {silence.Length / (double)VoiceAudioFrontend.SampleRate:0.#} s of silence in {recognitionMs:F1} ms.");
     }
 
     /// <summary>Releases the speech models on the GPU thread, stops it, releases the front-end weights and restores the

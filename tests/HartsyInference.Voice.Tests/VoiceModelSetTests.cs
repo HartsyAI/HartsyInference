@@ -1,4 +1,5 @@
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Requests;
@@ -103,9 +104,25 @@ public sealed class VoiceModelSetTests
         ScriptedTextService text = new();
         VoiceAgentOptions options = VoiceHarness.DefaultOptions() with { LlmDevice = "cuda:0" };
         await using VoiceModelSet models = new(options, speech, device, () => new LevelVadModel(), createDenoiser: null);
+        List<string> log = [];
+        Logs.SetLogger((_, message) =>
+        {
+            lock (log)
+            {
+                log.Add(message);
+            }
+        });
+        try
+        {
+            await models.WarmAsync(text).WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            Logs.SetLogger(null!);
+        }
 
-        await models.WarmAsync(text).WaitAsync(TimeSpan.FromSeconds(10));
-
+        string warmLine = Assert.Single(log, message => message.StartsWith("[Voice] Warm-up on cpu: synthesized 1 / 3 / 6 / 13 / 30 words in ", StringComparison.Ordinal));
+        Assert.Contains("recognized 1 s of silence in ", warmLine, StringComparison.Ordinal);
         Assert.Equal(VoiceModelSet.WarmTexts, speech.Synthesized);
         Assert.Single(speech.TranscribedSamples, 16_000);
         Assert.All(speech.Threads, thread => Assert.Equal(models.Gpu.ManagedThreadId, thread));

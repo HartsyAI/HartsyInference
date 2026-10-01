@@ -58,6 +58,12 @@ public sealed class VoiceSessionEndToEndTests
             await using VoiceModelSet models = await VoiceModelSet.LoadAsync(engine, options, VoiceAssets.WakeRoot);
             ScriptedTextService text = new ScriptedTextService { DefaultReply = "Okay." }.Reply(Reply);
             await models.WarmAsync(text);
+            string warm;
+            lock (log)
+            {
+                warm = Assert.Single(log, message => message.StartsWith("[Voice] Warm-up on ", StringComparison.Ordinal));
+            }
+            _output.WriteLine(warm);
 
             double[] kokoroMs = new double[5];
             for (int run = 0; run < kokoroMs.Length; run++)
