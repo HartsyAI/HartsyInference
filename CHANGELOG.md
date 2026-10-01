@@ -43,7 +43,7 @@ stable release will require. Dates are UTC.
   answered, and is counted. Two user or two plain assistant messages in a row merge, so turns stay alternating.
 - A revoked lease (engine free-memory, backend switch) is reopened once outside the gate and the job retried.
 - Per-turn `VoiceTurnMetrics` are logged as `[Voice] turn N: …` with every `voice.*` stage.
-- Tests (`tests/HartsyInference.Voice.Tests`, 82 unit tests on fakes): endpointing, barge-in, the flush protocol
+- Tests (`tests/HartsyInference.Voice.Tests`, 83 unit tests on fakes): endpointing, barge-in, the flush protocol
   (with a concurrent-flush ordering stress), GPU-thread jobs (every job keeps the pool, one trim per turn),
   conversation trimming, model-set load contract, the warm-up (one synthesis per length bucket), whole turns, lease
   revocation, and zero allocation on the audio thread and on the reader (0 B over 1000 reads with a cancellable
@@ -117,12 +117,14 @@ stable release will require. Dates are UTC.
   detokenization, `ToolCallStreamFilter`/`ToolCallParser` character scanning, and the parsed-event/channel plumbing
   between the engine and `VoiceAgentSession`, all per decode step. At the probe's rate the same 9-token reply would
   land near 125 ms, inside budget. Fixing this needs its own engine/Tools PR with per-stage profiling (not done
-  here — two 4090 runs were spent and the evidence does not point at one line); flagged as a follow-up task, not
-  bypassed and not worked around by changing the splitter or `FirstSentenceMinChars`.
+  here — the one 4090 run spent on this measurement does not point at one line); flagged as a follow-up task
+  (`task_f93453aa`), not bypassed and not worked around by changing the splitter or `FirstSentenceMinChars`.
 - `voice.endpoint.ms` now adds the denoiser's algorithmic lag (`RnnoiseStream.LatencySamples`, exposed as
   `VoiceAudioFrontend.DenoiserLatencySamples`, 0 when `Denoise` is off) to the sample-counted hangover, so the metric
   (and `turn.total_ms`, which folds it in) reports the caller's real wall-clock wait instead of being silently short
-  by 40 ms whenever denoising runs — see the live-session confirmation above.
+  by 40 ms whenever denoising runs — see the live-session confirmation above. Pinned by a CPU test: a real Silero VAD
+  + a real RNNoise instance over the JFK clip, one turn through a full `VoiceAgentSession` (fake speech/LLM), reports
+  `EndpointMs` 736.00 with `Denoise` off and 776.00 on — exactly the 40 ms lag, every run.
 - **Still open for PR9 (`feat/voice-host-and-deploy`, stacked on this branch):** `VoiceHost`'s boot-time
   `WarmAsync` call must pass its tool set too, or production warm-up stays on the cold one-token path this fix
   addresses only when a caller opts in.

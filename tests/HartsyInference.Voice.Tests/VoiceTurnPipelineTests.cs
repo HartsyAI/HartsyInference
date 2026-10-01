@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Denoise;
+using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Core.Logging;
 using HartsyInference.Cpu;
 using HartsyInference.Engine.Audio.Wake;
@@ -300,6 +301,42 @@ public sealed class VoiceTurnPipelineTests
 
         using VoiceAudioFrontend withoutDenoiser = new(cpu, new LevelVadModel(), null, signals, options);
         Assert.Equal(0, withoutDenoiser.DenoiserLatencySamples);
+    }
+
+    [Fact]
+    public async Task EndpointMsIsFortyMillisecondsLaterInARealSessionWithARealDenoiser()
+    {
+        // The real end-to-end wiring the frontend-only test above cannot reach: a real Silero VAD over real JFK
+        // speech (not the fake level-scripted VAD, which a real denoiser's suppression of non-speech-like audio
+        // makes unusable for this comparison — see the test above) through a full VoiceAgentSession turn, so
+        // Turn.Metrics() (VoiceAgentSession.Turns.cs) actually runs with Denoise on. Speech and the LLM stay fake
+        // (FakeSpeech, ScriptedTextService) since only the front end needs to be real for this comparison.
+        if (!RealWeightGate.Require(_output.WriteLine, VoiceAssets.SileroWeights, VoiceAssets.RnnoiseWeights, VoiceAssets.RnnoiseInt8Tables, VoiceAssets.Jfk))
+        {
+            return;
+        }
+        double offMs = await RunOneTurnEndpointMsAsync(denoise: false);
+        double onMs = await RunOneTurnEndpointMsAsync(denoise: true);
+        _output.WriteLine($"voice.endpoint.ms: Denoise off={offMs:F2}, on={onMs:F2}, delta={onMs - offMs:F2} ms");
+        Assert.InRange(onMs - offMs, 38.0, 42.0);
+    }
+
+    /// <summary>One turn over the JFK clip's first utterance, real Silero VAD and (when <paramref name="denoise"/>)
+    /// real RNNoise ahead of it, fake speech and a scripted LLM; returns the turn's <c>voice.endpoint.ms</c>.</summary>
+    private static async Task<double> RunOneTurnEndpointMsAsync(bool denoise)
+    {
+        VoiceAgentOptions options = new() { AudioDevice = "cpu", LlmDevice = "cpu", OutboundSampleRate = 24_000, Denoise = denoise };
+        using WakeModelSet wake = VoiceModelSet.LoadFrontEnd(VoiceAssets.WakeRoot, options, out Func<IVadModel> createVad, out Func<RnnoiseStream>? createDenoiser);
+        using CpuBackend cpu = new();
+        FakeSpeech speech = new();
+        speech.Transcripts.Enqueue("fellow Americans");
+        await using VoiceModelSet models = new(options, speech, cpu, createVad, createDenoiser, wake);
+        ScriptedTextService text = new() { DefaultReply = "Okay." };
+        await using VoiceHarness harness = await VoiceHarness.StartAsync(models, text, TimeSpan.FromMilliseconds(2));
+        harness.Push(VoiceAssets.Jfk16k());
+        harness.PushSilence(1.5);
+        VoiceTurnMetrics metrics = (await harness.TurnCompletedAsync(1, 30)).Metrics!.Value;
+        return metrics.EndpointMs!.Value;
     }
 
     [Fact]
