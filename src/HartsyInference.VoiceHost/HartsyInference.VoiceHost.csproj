@@ -1,0 +1,38 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <Description>Voice host for HartsyInference phone calls: the engine in-process with the speech models on the audio card, one voice agent session per call, and the PhoneLink socket the phone gateway dials.</Description>
+    <RootNamespace>HartsyInference.VoiceHost</RootNamespace>
+    <OutputType>Exe</OutputType>
+    <!-- A service exe, not a library: net10 only, never packed. -->
+    <TargetFrameworks></TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+    <!-- Workstation concurrent GC: a blocking server-GC suspension would stall the 20 ms sender and the audio thread. -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+    <TieredPGO>true</TieredPGO>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="HartsyInference.VoiceHost.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The generic host comes from the ASP.NET Core shared framework, which the API server already needs on the box:
+         no NuGet package is added. -->
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Voice brings Engine, Audio and Tools; PhoneLink is the socket protocol. -->
+    <ProjectReference Include="..\HartsyInference.Voice\HartsyInference.Voice.csproj" />
+    <ProjectReference Include="..\HartsyInference.PhoneLink\HartsyInference.PhoneLink.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tools\HartsyInference.Tools.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="voice.example.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
