@@ -187,6 +187,8 @@ public sealed class KokoroFirstSynthesisBenchTests
 
         List<Row> first = RunPass(backend, kokoro, g2p, gaps, cleanup, captured);
         List<Row> repeat = RunPass(backend, kokoro, g2p, gaps, cleanup, captured);
+        // Read before verification: the recognizer builds plans for its own convolutions on this backend.
+        string families = backend.DescribeCudnnConvPlanFamilies(25);
 
         // Verification after all timing, so the recognizer's own setup never lands inside a timed sentence.
         Resampler toWhisper = Resampler.Create(kokoro.Config.SampleRate, WhisperRate);
@@ -200,9 +202,9 @@ public sealed class KokoroFirstSynthesisBenchTests
         AppendSummary(table, first, repeat);
         AppendSentences(table, first, repeat, refDir);
         table.AppendLine();
-        table.AppendLine("cuDNN convolution families, costliest first (plans built over the whole run):");
+        table.AppendLine("Kokoro cuDNN convolution families, costliest first (plans built by the warm-up, probes and both passes):");
         table.AppendLine("```");
-        table.Append(backend.DescribeCudnnConvPlanFamilies(25));
+        table.Append(families);
         table.AppendLine("```");
         if (profile)
         {
