@@ -47,9 +47,24 @@ public sealed class TopPSortRefactorIdentityTests
     public void OldAndNewTopP_MaskTheSameLogits_NearFlatDistribution(int seed, int vocab, float p)
     {
         // A tiny spread makes softmax nearly uniform: the nucleus needs MOST of the vocabulary to reach p, a very
-        // different cumulative-walk length than the peaked cases above.
+        // different cumulative-walk length than the peaked cases above. At Qwen3's real vocab size this still
+        // takes the new code's candidate-subset FAST path (every token's share of a uniform distribution, ~6.6e-6
+        // at 151,936, sits above the 1e-6 candidate floor) — see the next test for the fallback path itself.
         float[] logits = RandomLogits(seed, vocab, spread: 0.01f);
         AssertSameMasking(logits, p);
+    }
+
+    [Fact]
+    public void OldAndNewTopP_MaskTheSameLogits_FallbackPath_VocabLargerThanCandidateFloorAllows()
+    {
+        // TopPStep's candidate pre-filter only takes its fast path when the candidates' own probability mass
+        // already reaches p; otherwise it falls back to sorting the whole vocabulary (the same code this test
+        // class already checks for every other case — see TopPStep.Apply's remarks for the identity argument).
+        // A vocabulary large enough that even a uniform distribution's per-token share falls BELOW the 1e-6
+        // candidate floor (2,000,000 > 1 / 1e-6) forces candidateCount to near zero, guaranteeing that fallback
+        // actually runs here rather than coincidentally taking the fast path anyway.
+        float[] logits = RandomLogits(seed: 31, vocab: 2_000_000, spread: 0.0001f);
+        AssertSameMasking(logits, p: 0.95f);
     }
 
     [Theory]
