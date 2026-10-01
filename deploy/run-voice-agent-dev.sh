@@ -101,12 +101,18 @@ stop_one() {
 }
 
 stop_all() {
+    # $tail_host_pid/$tail_gw_pid are sed's pid (the last stage of `tail | sed &`, which is what $! names), not
+    # tail's: killing sed alone leaves tail -F running until its next write hits a closed pipe. Kill both stages:
+    # the tracked pid for the prompt stop, and a pattern match on the exact tail invocation as the real target
+    # (specific enough -- it names this run's own log path -- not to catch anything unrelated).
     if [[ -n $tail_host_pid ]]; then
         kill "$tail_host_pid" 2>/dev/null || true
     fi
     if [[ -n $tail_gw_pid ]]; then
         kill "$tail_gw_pid" 2>/dev/null || true
     fi
+    pkill -f "tail -n0 -F -- $host_log" 2>/dev/null || true
+    pkill -f "tail -n0 -F -- $gw_log" 2>/dev/null || true
     # Gateway first: it owns no models and nothing else depends on it; stopping it first means it is not left
     # trying to talk to a host that just disappeared.
     stop_one "$gw_pidfile" "HartsyInference.PhoneGateway.dll" 15
@@ -117,17 +123,21 @@ stop_all() {
 
 gen_secrets() {
     install -d -m 0700 -- "$secrets_dir"
-    local name f
+    local name f tmp
     for name in phone-link-token phone-admin-token sip-password; do
         f="$secrets_dir/$name"
-        if [[ -f $f ]]; then
+        if [[ -s $f ]]; then
             say "$f: already present"
         else
+            # Via a temp file in the same directory: a failure partway (disk full, killed) never leaves an empty
+            # $f that a later run would wrongly treat as already generated (-s above, not -f).
+            tmp=$(mktemp "$secrets_dir/.$name.XXXXXX")
             (
                 umask 077
-                openssl rand -hex 32 >"$f"
+                openssl rand -hex 32 >"$tmp"
             )
-            chmod 0600 -- "$f"
+            chmod 0600 -- "$tmp"
+            mv -f -- "$tmp" "$f"
             say "generated $f (0600; value not printed)"
         fi
     done
@@ -240,7 +250,9 @@ publish_all() {
 note_fifo() {
     local rt
     rt=$(ulimit -r 2>/dev/null || echo 0)
-    if ((rt < 50)); then
+    # "unlimited" is a real value ulimit -r can print (no rtprio cap at all); as a bash arithmetic operand it
+    # would evaluate to 0 (an unset-variable-named lookup), wrongly tripping the <50 note below.
+    if [[ $rt != "unlimited" ]] && ((rt < 50)); then
         say "note: ulimit -r is ${rt} (<50); the gateway's RTP tick thread runs on the default scheduler, not" \
             "SCHED_FIFO (it logs its own refusal and continues; fine for this check). See" \
             "deploy/install-host-tuning.sh for the production rtprio limit."
@@ -363,7 +375,11 @@ main() {
         die "already running; stop it first: $0 --stop"
     fi
 
-    trap 'stop_all; exit 0' INT TERM
+    # EXIT, not just INT/TERM: a die() after this point (a host or gateway readiness timeout, a start failure)
+    # must not leave a started process running and holding VRAM with nothing left to stop it. stop_all() is a
+    # no-op when nothing from this invocation is up, so it is safe on every exit path, including the normal one
+    # at the end of main() below.
+    trap stop_all EXIT
 
     install -d -m 0700 -- "$state_dir" "$socket_dir"
     install -d -- "$log_dir"

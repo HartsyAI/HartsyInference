@@ -113,9 +113,12 @@ publish_as_user() {
     command -v dotnet >/dev/null || die "dotnet not found on PATH"
     local tmp
     tmp=$(sudo -u "$SUDO_USER" mktemp -d)
-    say "publishing as $SUDO_USER -> $tmp"
-    sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.VoiceHost" -o "$tmp/$voice_host_app"
-    sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.PhoneGateway" -o "$tmp/$phone_gateway_app"
+    # Everything here must go to stderr: the caller captures this function's stdout as the return value
+    # (src_dir=$(publish_as_user)), and say()/dotnet publish both write to stdout otherwise, which would corrupt
+    # the path with log lines.
+    say "publishing as $SUDO_USER -> $tmp" >&2
+    sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.VoiceHost" -o "$tmp/$voice_host_app" >&2
+    sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.PhoneGateway" -o "$tmp/$phone_gateway_app" >&2
     printf '%s' "$tmp"
 }
 
@@ -130,7 +133,7 @@ verify_publish_dir() {
 # the source files' SHA-256 either way, so a dry run and the apply that follows it can be compared. Sets wrote=1 if
 # anything changed.
 put_tree() {
-    local src=$1 dst=$2 file rel changed=0 count=0
+    local src=$1 dst=$2 file rel changed=0 count=0 stale=0
     [[ -d $src ]] || die "$src does not exist"
     wrote=0
     say "source SHA-256 ($src):"
@@ -140,6 +143,7 @@ put_tree() {
         count=$((count + 1))
     done < <(find "$src" -type f -print0 | sort -z)
     say "$count file(s) under $src"
+    local stale_files=()
     if [[ -d $dst ]]; then
         while IFS= read -r -d '' file; do
             rel=${file#"$src"/}
@@ -148,16 +152,27 @@ put_tree() {
                 changed=$((changed + 1))
             fi
         done < <(find "$src" -type f -print0 | sort -z)
+        # A file under $dst with no counterpart under $src: cp -a only ever adds/overwrites, so without this a
+        # DLL dropped between publishes (or its .deps.json) would stay in /opt forever.
+        while IFS= read -r -d '' file; do
+            rel=${file#"$dst"/}
+            [[ -f "$src/$rel" ]] || stale_files+=("$rel")
+        done < <(find "$dst" -type f -print0 | sort -z)
+        stale=${#stale_files[@]}
     else
         changed=$count
     fi
-    if ((changed == 0)); then
+    if ((changed == 0 && stale == 0)); then
         say "$dst: already installed ($count file(s), unchanged)"
         return 0
     fi
     wrote=1
     if ((dry_run)); then
         say "would install $changed of $count file(s) into $dst (root:root, dirs and files 0755)"
+        if ((stale > 0)); then
+            say "would also remove $stale stale file(s) no longer under $src:"
+            printf '    %s\n' "${stale_files[@]}"
+        fi
     else
         install -d -o root -g root -m 0755 -- "$dst"
         # Mirrors the source tree (subdirectories too, e.g. Kokoro's voices/ is not part of this tree, but a plugin
@@ -167,6 +182,13 @@ put_tree() {
         chown -R root:root -- "$dst"
         find "$dst" -type d -exec chmod 0755 {} +
         find "$dst" -type f -exec chmod 0755 {} +
+        if ((stale > 0)); then
+            for rel in "${stale_files[@]}"; do
+                rm -f -- "$dst/$rel"
+            done
+            find "$dst" -mindepth 1 -type d -empty -delete
+            say "removed $stale stale file(s) no longer under $src"
+        fi
         say "installed $changed of $count file(s) into $dst"
     fi
 }
@@ -175,9 +197,9 @@ put_tree() {
 
 put_secret() {
     local name=$1
-    local dst="$secrets_dir/$name"
+    local dst="$secrets_dir/$name" tmp
     refuse_symlink "$dst"
-    if [[ -f $dst ]]; then
+    if [[ -s $dst ]]; then
         say "$dst: already present"
         return 0
     fi
@@ -189,12 +211,17 @@ put_secret() {
         fi
         return 0
     fi
+    # Via a temp file in the same directory, so a failure partway (disk full, killed) never leaves an empty $dst
+    # that a later run would wrongly treat as "already present" (hence -s above, not -f: an empty file left by an
+    # old run of this bug still needs to be regenerated).
+    tmp=$(mktemp "$secrets_dir/.$name.XXXXXX")
     (
         umask 077
-        openssl rand -hex 32 >"$dst"
+        openssl rand -hex 32 >"$tmp"
     )
-    chown root:root -- "$dst"
-    chmod 0600 -- "$dst"
+    chmod 0600 -- "$tmp"
+    chown root:root -- "$tmp"
+    mv -f -- "$tmp" "$dst"
     say "generated $dst (0600; value not printed)"
 }
 
@@ -281,7 +308,7 @@ PY
 # Enables and starts (or restarts, if active but not enabled/changed) unit $1; mirrors install-host-tuning.sh's
 # own unit logic, generalized to any number of units called in order.
 enable_now_unit() {
-    local unit=$1
+    local unit=$1 needs_restart=${2:-0}
     if systemctl is-enabled --quiet "$unit" 2>/dev/null; then
         say "$unit: already enabled"
     else
@@ -291,6 +318,11 @@ enable_now_unit() {
         if ! run systemctl start "$unit"; then
             die "$unit did not start; see: systemctl status $unit"
         fi
+    elif ((needs_restart)); then
+        say "$unit: already active, but its binaries or unit file changed; restarting so the change takes effect"
+        if ! run systemctl restart "$unit"; then
+            die "$unit did not restart; see: systemctl status $unit"
+        fi
     else
         say "$unit: already active"
     fi
@@ -298,6 +330,7 @@ enable_now_unit() {
 
 disable_now_unit() {
     local unit=$1
+    wrote=0
     if [[ -e "$unit_dir/$unit" ]] || systemctl is-enabled --quiet "$unit" 2>/dev/null; then
         run systemctl disable --now "$unit"
     else
@@ -327,7 +360,7 @@ apply() {
     local server_src="$repo_root/deploy/systemd/$server_unit"
     [[ -f $voice_host_src && -f $gateway_src && -f $server_src ]] || die "deploy/systemd unit sources are missing; run from a checkout of the repository"
 
-    local src_dir
+    local src_dir host_tree_changed=0 gateway_tree_changed=0
     if [[ -n $publish_dir ]]; then
         verify_publish_dir "$publish_dir"
         src_dir=$publish_dir
@@ -341,7 +374,9 @@ apply() {
     run install -d -o root -g root -m 0755 -- "$opt_dir"
     if [[ -n $src_dir ]]; then
         put_tree "$src_dir/$voice_host_app" "$opt_dir/$voice_host_app"
+        host_tree_changed=$wrote
         put_tree "$src_dir/$phone_gateway_app" "$opt_dir/$phone_gateway_app"
+        gateway_tree_changed=$wrote
         if [[ -z $publish_dir && -n $src_dir ]]; then
             rm -rf -- "$src_dir"
         fi
@@ -374,8 +409,8 @@ apply() {
     if ((host_changed || gateway_changed || server_changed)); then
         run systemctl daemon-reload
     fi
-    enable_now_unit "$host_unit"
-    enable_now_unit "$gateway_unit"
+    enable_now_unit "$host_unit" "$((host_tree_changed || host_changed))"
+    enable_now_unit "$gateway_unit" "$((gateway_tree_changed || gateway_changed))"
 
     if ((!dry_run)); then
         say "status:"
@@ -386,13 +421,14 @@ apply() {
 
 revert() {
     disable_now_unit "$gateway_unit"
+    local gateway_disabled=$wrote
     disable_now_unit "$host_unit"
-    local gateway_wrote=$wrote
+    local host_disabled=$wrote
     drop_file "$unit_dir/$gateway_unit"
     local gateway_dropped=$wrote
     drop_file "$unit_dir/$host_unit"
     local host_dropped=$wrote
-    if ((gateway_wrote || gateway_dropped || host_dropped)); then
+    if ((gateway_disabled || host_disabled || gateway_dropped || host_dropped)); then
         run systemctl daemon-reload
     fi
     if ((purge)); then
