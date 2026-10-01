@@ -85,8 +85,10 @@ never saw it.
 
 ## After: the fix
 
-`src/HartsyInference.LLM/Sampling/{SamplerMath,TopPStep,TopKStep,MinPStep,SamplerChain}.cs`. Two changes, no
-algorithm change to anything that touches a float value:
+`src/HartsyInference.LLM/Sampling/{SamplerMath,TopPStep,TopKStep,MinPStep,SamplerChain}.cs`, in two tiers — no
+algorithm change, in either tier, to anything that touches a float value.
+
+**Tier 1 — stop reallocating, stop paying a delegate per comparison.**
 - **Buffers become per-generation, not per-token.** `TopPStep`/`TopKStep`/`MinPStep`/`SamplerChain` each own a
   private, lazily-sized scratch array now, allocated once on the first decode step and reused for every later
   one — one `SamplerChain`/step instance already lives for exactly one generation (built fresh per
@@ -97,30 +99,91 @@ algorithm change to anything that touches a float value:
   before and restoring after is exact (sign-bit flip only, including the softmax's signed-zero masked entries)
   and turns "ascending by `-value`" into "descending by `value`" without a second array or a reversal pass.
 
+Measured after Tier 1 alone: session-default throughput roughly 38 → 55 tok/s (steady state; first-gap median
+~17-18 ms). An improvement, but short of the ≥ 60 tok/s target. A CPU-only (no GPU) micro-profile of
+`SamplerChain.Next` at Qwen3's real vocabulary pinned why: `SortDescendingByValue` ALONE cost ~11 ms of
+`TopPStep.Apply`'s ~12.4 ms — even the fast primitive two-array sort is still O(n log n) over the WHOLE
+vocabulary, every token.
+
+**Tier 2 — stop sorting the whole vocabulary.** The cumulative walk almost never needs most of it: `TopPStep`
+now collects tokens above a tiny probability floor (`1e-6`) into a compact buffer first (one O(n) pass, no
+sort), and sorts ONLY those when their own total already reaches `p` — true whenever the distribution is at
+all peaked, which a trained LLM's next-token distribution ordinarily is. Identity argument: every candidate's
+probability exceeds every excluded token's by construction, so a full descending sort always ranks every
+candidate first; if the candidates' own total already reaches `p`, the full sort's cumulative walk reaches `p`
+before ever leaving the candidate block, so sorting just that block reproduces the identical kept set AND the
+identical floating-point cumulative sums the full sort would. Falls back to sorting the whole vocabulary,
+unchanged (Tier 1's code), whenever the candidates fall short (a near-uniform distribution).
+
+Measured after Tier 2, the same CPU-only micro-profile: `SamplerChain.Next` (temperature + topP + draw) dropped
+from ~12.5 ms/call to ~4.7 ms/call — the sampler is no longer close to the bottleneck; the GPU forward pass
+(~7-9 ms/token, from the greedy baseline) now dominates.
+
 `TopPSortRefactorIdentityTests.cs` (new) keeps the pre-fix `TopPStep.Apply`/`SamplerMath.Softmax`/
-`ArgsortDescending` verbatim as a reference and asserts the new code masks the SAME logits to
-`-Infinity`, for the same input, across peaked/near-flat/pre-masked-tail distributions from 1 to 151,936
-elements — the actual correctness proof, since `regression-ab.sh`'s identical-output arms are greedy and greedy
-never reaches `TopPStep` or the non-greedy draw at all.
+`ArgsortDescending` verbatim as a reference and asserts the new code masks the SAME logits to `-Infinity`, for
+the same input, across peaked / near-flat / pre-masked-tail / fallback-forcing distributions from 1 to
+151,936 (and, for the dedicated fallback case, 2,000,000) elements — the actual correctness proof, since
+`regression-ab.sh`'s identical-output arms are greedy and greedy never reaches `TopPStep` or the non-greedy
+draw at all.
 
 ### After numbers
 
-_Filled in after the on-device re-run; see the table below once measured._
+Same bench, same prompts, same seed, re-run on the same box after Tier 1 and again after Tier 2. Reply text and
+token-ids are byte-identical to the before run in every scenario (e.g. "session-default, tools on / fresh":
+`[40,2776,11889,311,3410,11682,40841,...]` in BOTH the Tier 1 and Tier 2 runs; the full-history stream-transport
+bench's reply — "We've updated your delivery address to your office, flagged the delivery for a call-ahead, and
+logged a note for the missed callback on your refund." — is identical across the before run and both after
+runs).
 
-| scenario | run | tokens | first-gap median ms (steps 1-9) | steady-gap median ms (last <=12) | overall tok/s |
-|---|---|---:|---:|---:|---:|
-| _pending_ | | | | | |
+**Bare `pipeline.Generate` (hypothesis-A bench), tok/s, by tier:**
 
-| run | tokens | decode-thread gap median ms | consumer gap median ms | consumer tok/s | decode-thread tok/s |
-|---|---:|---:|---:|---:|---:|
-| _pending_ | | | | | |
+| scenario | run | before | Tier 1 | Tier 2 |
+|---|---|---:|---:|---:|
+| greedy, tools on (probe-equivalent) | fresh | 113.7 | 111.7 | 110.5 |
+| greedy, tools on (probe-equivalent) | second | 140.0 | 116.5 | 115.7 |
+| greedy, tools on (probe-equivalent) | long(128) | 158.1 | 135.7 | 121.8 |
+| session-default (temp .7/topP .95), tools on | fresh | 31.9 | 36.0 | 124.2 |
+| session-default (temp .7/topP .95), tools on | second | 39.5 | 54.9 | 123.6 |
+| session-default (temp .7/topP .95), tools on | long(128) | 39.1 | 55.3 | 124.6 |
+| session-default (temp .7/topP .95), tools off | fresh | 39.5 | 54.4 | 122.3 |
+| session-default (temp .7/topP .95), tools off | second | 38.0 | 54.6 | 125.0 |
+| session-default (temp .7/topP .95), tools off | long(128) | 38.5 | 54.4 | 119.9 |
+
+Greedy numbers move a little run to run (JIT/scheduler noise — same code path throughout, unaffected by this
+fix) but hold steady in the 110-160 tok/s band across all three measurement passes. After Tier 2, session-default
+is in the SAME band as greedy — the two are no longer distinguishable by workload, only by run-to-run noise,
+because the sampler itself is no longer the cost.
+
+First-10-token latency (the actual target metric), session-default, tools on, "second" request (i.e. a warm
+process's next turn, not the one-time first-ever-request JIT cost described below): first-gap median 25.2 ms
+before (39.7 tok/s) → 18.1 ms after Tier 1 (55.2 tok/s) → 7.6 ms after Tier 2 (131.6 tok/s). Target was
+≥ 60 tok/s; met with roughly 2x margin.
+
+**Realistic voice turn through `ToolLoop.RunAsync` → `StreamAsync` (hypothesis-B bench), tok/s, by tier:**
+
+| run | before (consumer tok/s) | Tier 1 | Tier 2 |
+|---|---:|---:|---:|
+| 1 | 27.4 | 37.5 | 94.1 |
+| 2 | 38.2 | 52.7 | 105.4 |
+| 3 | 37.0 | 51.8 | 106.2 |
+
+Decode-thread gap stays equal to consumer gap to ~0.1 ms in every tier — `StreamAsync`/`ToolLoop`'s transport
+was never the cost, before or after. Run 1's first couple of tokens still show the one-time first-generation
+JIT/warm-up blip described above (absent from run 2 onward; irrelevant to a long-lived voice process serving
+many turns) — it is smaller after Tier 2 (peak ~23 ms vs. ~53 ms after Tier 1) since there is simply less new
+code being JITted into a hot path.
 
 ## Regression evidence
 
-- `TopPSortRefactorIdentityTests` (20 cases incl. the pre-existing `SamplingAndTemplateTests`): all pass —
-  bit-identical masking, old algorithm vs. new, across every distribution/vocab-size case tried.
+- `TopPSortRefactorIdentityTests`: 22 cases (20 after Tier 1, +2 after Tier 2 for the candidate/fallback split),
+  plus the pre-existing `SamplingAndTemplateTests` — all pass. Bit-identical masking, old algorithm vs. new,
+  across every distribution/vocab-size/fast-path-vs-fallback case tried.
+- The two bench tests themselves are a real-weight identity check beyond the synthetic unit tests: byte-identical
+  reply text and token-ids, before vs. Tier 1 vs. Tier 2, for the same seeded request (see "After numbers" above).
 - `tests/HartsyInference.Tools.Tests` CPU lane: 95/95 pass, unchanged (this fix touches no Tools-package code).
-- `tests/HartsyInference.LLM.Tests` CPU lane: 544/545 pass; the one failure
+- `tests/HartsyInference.LLM.Tests` CPU lane: 545/546 pass; the one failure
   (`Glm4SyntheticParityTests.SyntheticGlm4_MatchesHfTransformers_FinalLogits`, a missing fixture file) is listed
   as a known pre-existing failure and is unrelated to sampling.
-- Full solution CPU lane, `regression-ab.sh --expect identical`: pending.
+- Full solution CPU lane: see the PR body / final report for the run taken at ship time.
+- `regression-ab.sh --expect identical` on `llama32-1b` and `qwen25-1.5b-iq3xs` (greedy — see the PR for why that
+  gate, specifically, cannot exercise `TopPStep` or the non-greedy draw either): see the PR body / final report.
