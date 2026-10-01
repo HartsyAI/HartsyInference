@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -216,17 +217,31 @@ public sealed class TextService : ITextService, IDisposable
             onToken = _ => _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
         }
 
+        // Opt-in (null key = today's behavior, unchanged): checked OUT of the slot's store so a second concurrent
+        // request on the same busy key finds nothing and falls back to this same uncached path, and checked back
+        // IN from `finally` below whatever the outcome — success, a filter stop, or a genuine exception all leave
+        // `reuse` in a state TextGenerationPipeline.Generate already decided is safe to store (see its doc).
+        RetainedSequence? reuse = request.PrefixCacheKey is { Length: > 0 } cacheKey && slot.SsmPipeline is null
+            ? (slot.PrefixCache ??= NewPrefixCacheStore()).Checkout(cacheKey) ?? new RetainedSequence()
+            : null;
         GenerationResult result;
         try
         {
             result = slot.SsmPipeline is not null ? slot.SsmPipeline.Generate(genRequest, onToken, generation)
-                : slot.Pipeline!.Generate(genRequest, onToken, generation);
+                : slot.Pipeline!.Generate(genRequest, reuse, onToken, generation);
         }
         catch (OperationCanceledException) when (filterSink is { Stopped: true } && !cancel.IsCancellationRequested)
         {
             // ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.
             StopReason filterStop = filterSink.ToolCall is null ? StopReason.Stop : StopReason.ToolCall;
             return new GenOutcome(filterSink.Text, filterStop, promptTokens, count, filterSink.ToolCall);
+        }
+        finally
+        {
+            if (reuse is not null)
+            {
+                slot.PrefixCache!.CheckIn(request.PrefixCacheKey!, reuse);
+            }
         }
         if (parser is not null) parser.Finish(emit!);
 
@@ -630,9 +645,21 @@ public sealed class TextService : ITextService, IDisposable
         _slots.Clear();
     }
 
+    /// <summary>A fresh prefix-cache store sized from the <c>vram.prefixCache*</c> knobs, for a slot's first request that opts in.</summary>
+    private static RetainedSequenceStore NewPrefixCacheStore() =>
+        new(EngineKnobs.PrefixCacheMaxEntries.Value, EngineKnobs.PrefixCacheMaxBytes.Value);
+
     /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
     private static bool UnloadSlot(TextDeviceSlot slot)
     {
+        // Disposed BEFORE FreeAllDeviceMemory below: a retained entry's KV Tensors reference this backend's
+        // device allocations directly, and FreeAllDeviceMemory resets the backend's allocator wholesale — a
+        // Tensor.Dispose() call after that would free an already-invalidated pointer.
+        if (slot.PrefixCache is not null)
+        {
+            slot.PrefixCache.Dispose();
+            slot.PrefixCache = null;
+        }
         slot.SpliceVision?.Dispose();
         slot.SpliceVision = null;
         slot.MllamaVision?.Dispose();
@@ -864,6 +891,7 @@ public sealed class TextService : ITextService, IDisposable
             GraphDecode = request.GraphDecode,
             SpeculativeDecode = request.SpeculativeDecode,
             EnableThinking = request.EnableThinking,
+            PrefixCacheCapacityHint = request.PrefixCacheCapacityHint,
         };
         if (rawCompletion)
         {

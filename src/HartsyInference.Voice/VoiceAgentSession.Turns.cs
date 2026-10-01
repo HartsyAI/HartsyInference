@@ -16,6 +16,49 @@ public sealed partial class VoiceAgentSession
 {
     private const double SamplesPerMs = VoiceAudioFrontend.SampleRate / 1000.0;
 
+    /// <summary>Chat-template overhead (role markers, tool-schema rendering) a token-counted history budget does
+    /// not account for; added so the FIRST retained KV allocation covers every turn's templated prompt and is
+    /// never resized mid-call.</summary>
+    private const int PrefixCacheCapacityMargin = 512;
+
+    /// <summary>Sizes this call's retained KV sequence once, from the history and reply budgets it will actually
+    /// hit across every turn, instead of from whichever turn happens to allocate it first.</summary>
+    private int PrefixCacheCapacityHint => _options.MaxHistoryTokens + _options.MaxReplyTokens + PrefixCacheCapacityMargin;
+
+    /// <summary>Pre-fills the system+tools prefix under <see cref="_prefixCacheKey"/> right after the call starts
+    /// (e.g. while the greeting plays), so turn 1's real request — which shares that same prefix — finds it
+    /// already warm instead of paying its prefill cost on the caller's first utterance. Fire-and-forget: it
+    /// competes for the same device-slot lock as any real turn, so a caller who speaks very fast may still queue
+    /// behind it, but the total prefill work done is the same either way — this only moves turn 1's share of it
+    /// earlier. Losing the race, or any other failure, just means turn 1 runs as it would without this step; never
+    /// surfaced as a session error.</summary>
+    private async Task PrimePrefixCacheAsync(CancellationToken cancel)
+    {
+        try
+        {
+            TextRequest request = new()
+            {
+                Messages = [new TextMessage { Role = TextRole.System, Content = _options.SystemPrompt }],
+                Device = _options.LlmDevice,
+                EnableThinking = false,
+                MaxTokens = 1,
+                Tools = _tools.Count > 0 ? _tools.Definitions : null,
+                AlwaysFreeMemory = false,
+                PrefixCacheKey = _prefixCacheKey,
+                PrefixCacheCapacityHint = PrefixCacheCapacityHint,
+            };
+            await _text.GenerateAsync(_llm, request, cancel).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            Logs.Debug("[Voice] Prefix-cache priming did not finish before the call ended.");
+        }
+        catch (Exception ex)
+        {
+            Logs.Debug($"[Voice] Prefix-cache priming failed (turn 1 runs uncached instead): {ex.Message}");
+        }
+    }
+
     private async Task RunTurnsAsync()
     {
         CancellationToken ending = _ending.Token;
@@ -121,6 +164,8 @@ public sealed partial class VoiceAgentSession
         MaxTokens = _options.MaxReplyTokens,
         Tools = _tools.Count > 0 ? _tools.Definitions : null,
         AlwaysFreeMemory = false,
+        PrefixCacheKey = _prefixCacheKey,
+        PrefixCacheCapacityHint = _prefixCacheKey is null ? null : PrefixCacheCapacityHint,
     };
 
     private void AddUserTurn(int turnId, string text)

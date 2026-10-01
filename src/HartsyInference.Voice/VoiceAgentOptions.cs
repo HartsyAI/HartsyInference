@@ -84,6 +84,13 @@ public sealed record VoiceAgentOptions
     /// recognizer, so <c>true</c> is rejected.</summary>
     public bool PartialTranscripts { get; init; }
 
+    /// <summary>Reuses the language model's KV cache across a call's turns (<c>TextRequest.PrefixCacheKey</c>):
+    /// each turn prefills only what diverges from the retained conversation instead of the whole growing history,
+    /// and the system+tools prefix is pre-filled once at <see cref="VoiceAgentSession.StartAsync"/> so turn 1 is
+    /// warm too. Default true; false restores the original per-turn-from-scratch behavior (e.g. to isolate whether
+    /// a regression is reuse-related).</summary>
+    public bool EnablePrefixCache { get; init; } = true;
+
     /// <summary>Throws when a field is out of range or asks for something this version cannot do.</summary>
     public void Validate()
     {

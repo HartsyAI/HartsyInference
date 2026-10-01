@@ -53,4 +53,10 @@ internal sealed class TextDeviceSlot
 
     /// <summary>The loaded sidecar mmproj path, or null when the model is text-only.</summary>
     public string? VisionPath { get; set; }
+
+    /// <summary>Per-key retained KV sequences for opt-in prefix-cache reuse against <see cref="Pipeline"/>; null
+    /// until the first such request on this slot. Bound to <see cref="Model"/>'s weights — disposed and cleared
+    /// whenever the slot's model/backend is torn down (reload, explicit unload), never carried over to a
+    /// different model.</summary>
+    public RetainedSequenceStore? PrefixCache { get; set; }
 }

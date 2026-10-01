@@ -69,4 +69,18 @@ public sealed record TextRequest
 
     /// <summary>Per-request engine settings (profile + individual overrides); null keeps the machine's configuration.</summary>
     public RequestSettings? Settings { get; init; }
+
+    /// <summary>Opt-in prefix-KV reuse key: calls sharing the same non-null key on the same device/model slot reuse
+    /// the longest common token-id prefix of their rendered prompts instead of each prefilling from scratch — e.g.
+    /// one phone call's conversation across turns. Null (the default) is the original per-call behavior: every
+    /// request prefills its whole prompt and the KV cache is discarded when the call returns. A second concurrent
+    /// request on a busy key (already mid-generation) runs uncached rather than waiting or corrupting it. See
+    /// <see cref="HartsyInference.LLM.Generation.RetainedSequenceStore"/>.</summary>
+    public string? PrefixCacheKey { get; init; }
+
+    /// <summary>Sizes a brand-new retained sequence's KV capacity (tokens) the first time <see cref="PrefixCacheKey"/>
+    /// is used; null sizes it to just this request's own prompt + <see cref="MaxTokens"/>. Pass the caller's own
+    /// growth ceiling (e.g. a conversation's history token budget + its reply budget) so the cache is allocated
+    /// once instead of being reallocated as the prompt grows across calls under the same key.</summary>
+    public int? PrefixCacheCapacityHint { get; init; }
 }
