@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.228
+## alpha.227
 
 - **Whisper transcription is GPU-resident; small.en meets the phone-agent STT gate on the RTX 3060.** Per utterance
   (in-process, warm): 2 / 5 / 10 s in 124 / 116 / 194 ms median at 16 kHz (narrowband 8 k → 16 k: 122 / 113 / 201 ms),
