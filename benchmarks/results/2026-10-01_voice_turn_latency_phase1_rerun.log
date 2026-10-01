@@ -1,0 +1,156 @@
+# PR3 Phase 1 audio re-run — 2026-10-01 — raw evidence
+# Tree d64638d05e87a0c55c8975265311e27bef048707 (bench/voice-turn-latency on c1a180c4, alpha.229), driver 595.91.07,
+# RTX 3060 GPU-b2198524-73ad-f200-16ef-6fc368d0599f at engine ordinal 1, CUDA_VISIBLE_DEVICES unset.
+# Env: HARTSYINFERENCE_MODELS_DIR=/mnt/model-storage/Models HARTSY_VOICE_BENCH=1 HARTSY_REQUIRE_REAL_WEIGHTS=1
+#      MSBUILDDISABLENODEREUSE=1; one probe per `dotnet test --no-build` process.
+#
+# Swarm quiet window (tests/swarm-quiet-window.sh --gpu 3060, fixed gate): OK at 03:31:09Z, 615 s, 22 polls since
+# 03:20:54Z — global queue 0/0/0, nothing on the 3060, no request line in the swarmui-run.sh journal.
+# Bench lock orch_bench.lock held as "pr195 2026-10-01T03:59:56Z" until 04:01:42Z (Probes A and C).
+#
+# Runner guard lines, as printed (pre-check = 8 s whole-box sample; verify = --verify-since from the probe start):
+# Probe B 03:38:48Z  pre-check QUIET 0.69/16 cores, no foreign dotnet build/test; 3060 before: no apps, 53 C
+#                    in-run sample t+10s: 61 C, SM 1950 MHz, throttle 0x0, no foreign build/test, no other 3060 app
+#                    verify: 0 Swarm request/activity lines, queue 0/0/0 -> VERIFY OK; dotnet exit 0 after 10 s
+# Probe A 04:00:17Z  pre-check QUIET 0.66/16 cores; 3060 before: no apps, 54 C; run 9 s (no in-run sample)
+#                    verify: 0 lines, queue 0/0/0 -> VERIFY OK; dotnet exit 0
+# Probe C 04:01:01Z  pre-check QUIET 0.69/16 cores; 3060 before: no apps, 55 C
+#                    in-run sample t+10s: 58 C, SM 1807 MHz, throttle 0x0, no foreign build/test, no other 3060 app
+#                    verify: 0 lines, queue 0/0/0 -> VERIFY OK; dotnet exit 0 after 14 s
+# (The monitor's in-run "foreign CPU" figure is not evidence: it counted the probe's own test host — fixed since.)
+#
+# Below: each probe's `dotnet test --logger console;verbosity=detailed` output, verbatim.
+
+################ Probe B — pr195_probeB_a1 ################
+Test run for /home/hartsy/Desktop/HartsyInference/.claude/worktrees/agent-a4c5d68376d12e452/tests/HartsyInference.Audio.Tests/bin/Release/net10.0/HartsyInference.Audio.Tests.dll (.NETCoreApp,Version=v10.0)
+VSTest version 18.0.2 (x64)
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+/home/hartsy/Desktop/HartsyInference/.claude/worktrees/agent-a4c5d68376d12e452/tests/HartsyInference.Audio.Tests/bin/Release/net10.0/HartsyInference.Audio.Tests.dll
+[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v2.8.2+699d445a1a (64-bit .NET 10.0.12)
+[xUnit.net 00:00:00.09]   Discovering: HartsyInference.Audio.Tests
+[xUnit.net 00:00:00.26]   Discovered:  HartsyInference.Audio.Tests
+[xUnit.net 00:00:00.27]   Starting:    HartsyInference.Audio.Tests
+[INF] [Cuda] device 1: NVIDIA GeForce RTX 3060 (SM 8.6)
+[INF] [cuDNN] cuDNN 9.24.0 (built for CUDA 13) from the OS library path — convolution + fused-attention fast paths ENABLED.
+[INF] [Cuda] perf flags: SdpaCudnn=True ConvCudnn=True NativeFp8Gemm=False NativeFp4Gemm=False MempoolKeep=True EpilogueFusion=True Dp4aGemv=True TensorCoreGemm=False HighPrecisionGemm=False CacheWeightCasts=True AutoPromoteWeights=True Tf32Gemm=True.
+[INF] [Cuda] cuBLAS version 130101 (~13.1) loaded from /home/hartsy/.local/lib/cuda13/libcublasLt.so.13.
+libnvToolsExt.so.1: cannot open shared object file: No such file or directory
+[INF] [cuDNN conv] audio conv1d engine engaged (cuDNN 92400)
+[xUnit.net 00:00:08.60]   Finished:    HartsyInference.Audio.Tests
+  Passed HartsyInference.Audio.Tests.VoiceTurnBenchTests.ProbeB_Kokoro_Sentences_Via_EnglishG2P [8 s]
+  Standard Output Messages:
+ CUDA ordinal 1: NVIDIA GeForce RTX 3060; models root /mnt/model-storage/Models; audio cache /mnt/model-storage/Models/audio
+ cmudict: /mnt/model-storage/Models/audio/cmudict.dict (126052 entries)
+ Kokoro + openai/whisper-small.en loaded in 0.8s (excluded from every row)
+ Kokoro 5w: first 130.6 ms, median 86.0 ms p95 116.1 min 83.7 | 2.10s audio | G2P 0.0 ms | verify recall 100% | Please hold while I check.
+ Kokoro 15w: first 238.2 ms, median 156.6 ms p95 170.5 min 141.6 | 5.60s audio | G2P 0.0 ms | verify recall 90% | Thanks for calling. I can see your appointment is booked for Tuesday afternoon at 3.
+ Kokoro 30w: first 329.4 ms, median 276.9 ms p95 279.5 min 232.9 | 10.18s audio | G2P 0.1 ms | verify recall 95% | I have updated the delivery address on your order. The driver will call you when they are 10 minutes away and you will receive a message with the tracking link.
+ ### Probe B — Kokoro af_heart per sentence (3060, in-process; G2P timed separately)
+ 
+ | Words | first-run ms (new text) | warm median ms | p95 ms | min ms | audio s | RTF (median/audio) | G2P ms | Whisper-verify recall | verify transcript |
+ |---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+ | 5 | 130.6 | 86.0 | 116.1 | 83.7 | 2.10 | 0.041 | 0.0 | 100% | Please hold while I check. |
+ | 15 | 238.2 | 156.6 | 170.5 | 141.6 | 5.60 | 0.028 | 0.0 | 90% | Thanks for calling. I can see your appointment is booked for Tuesday afternoon at 3. |
+ | 30 | 329.4 | 276.9 | 279.5 | 232.9 | 10.18 | 0.027 | 0.1 | 95% | I have updated the delivery address on your order. The driver will call you when they are 10 minutes away and you will receive a message with the tracking link. |
+ 
+ appended to /tmp/claude-1000/-home-hartsy-Desktop-HartsyInference/f104d553-97e9-44c1-900f-967c0f79bdf6/scratchpad/pr195_probeB_a1.md
+
+
+
+Test Run Successful.
+Total tests: 1
+     Passed: 1
+ Total time: 9.2759 Seconds
+Results File: /tmp/claude-1000/-home-hartsy-Desktop-HartsyInference/f104d553-97e9-44c1-900f-967c0f79bdf6/scratchpad/pr195_trx/pr195_probeB_a1.trx
+
+################ Probe A — pr195_probeA_a1 ################
+Test run for /home/hartsy/Desktop/HartsyInference/.claude/worktrees/agent-a4c5d68376d12e452/tests/HartsyInference.Audio.Tests/bin/Release/net10.0/HartsyInference.Audio.Tests.dll (.NETCoreApp,Version=v10.0)
+VSTest version 18.0.2 (x64)
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+/home/hartsy/Desktop/HartsyInference/.claude/worktrees/agent-a4c5d68376d12e452/tests/HartsyInference.Audio.Tests/bin/Release/net10.0/HartsyInference.Audio.Tests.dll
+[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v2.8.2+699d445a1a (64-bit .NET 10.0.12)
+[xUnit.net 00:00:00.09]   Discovering: HartsyInference.Audio.Tests
+[xUnit.net 00:00:00.26]   Discovered:  HartsyInference.Audio.Tests
+[xUnit.net 00:00:00.27]   Starting:    HartsyInference.Audio.Tests
+[INF] [Cuda] device 1: NVIDIA GeForce RTX 3060 (SM 8.6)
+[INF] [cuDNN] cuDNN 9.24.0 (built for CUDA 13) from the OS library path — convolution + fused-attention fast paths ENABLED.
+[INF] [Cuda] perf flags: SdpaCudnn=True ConvCudnn=True NativeFp8Gemm=False NativeFp4Gemm=False MempoolKeep=True EpilogueFusion=True Dp4aGemv=True TensorCoreGemm=False HighPrecisionGemm=False CacheWeightCasts=True AutoPromoteWeights=True Tf32Gemm=True.
+[INF] [Cuda] cuBLAS version 130101 (~13.1) loaded from /home/hartsy/.local/lib/cuda13/libcublasLt.so.13.
+libnvToolsExt.so.1: cannot open shared object file: No such file or directory
+[xUnit.net 00:00:07.73]   Finished:    HartsyInference.Audio.Tests
+  Passed HartsyInference.Audio.Tests.VoiceTurnBenchTests.ProbeA_WhisperSmallEn_Slices_16k_And_Narrowband [7 s]
+  Standard Output Messages:
+ CUDA ordinal 1: NVIDIA GeForce RTX 3060; models root /mnt/model-storage/Models; audio cache /mnt/model-storage/Models/audio
+ SKIPPED optional row: openai/whisper-medium.en not cached under /mnt/model-storage/Models/audio/stt/openai--whisper-medium.en
+ openai/whisper-small.en loaded in 0.3s (excluded from every row)
+ openai/whisper-small.en 2s 16k: first 139.3 ms, median 115.1 ms p95 128.2 min 108.9 | And so, my fellow Americans,
+ openai/whisper-small.en 2s narrowband 8k→16k: first 115.0 ms, median 93.7 ms p95 107.4 min 93.1 | And so, my fellow Americans,
+ openai/whisper-small.en 5s 16k: first 113.5 ms, median 111.0 ms p95 113.1 min 109.7 | And so, my fellow Americans, ask not.
+ openai/whisper-small.en 5s narrowband 8k→16k: first 111.4 ms, median 112.1 ms p95 116.6 min 109.3 | And so, my fellow Americans, ask not.
+ openai/whisper-small.en 10s 16k: first 222.1 ms, median 185.9 ms p95 191.5 min 182.3 | And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.
+ openai/whisper-small.en 10s narrowband 8k→16k: first 183.3 ms, median 185.0 ms p95 187.5 min 179.8 | And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.
+ ### Probe A — Whisper `.en` per-utterance wall (3060, in-process, 30 s pad)
+ 
+ | Model | Slice | Variant | first-call ms | median ms | p95 ms | min ms | transcript |
+ |---|---:|---|---:|---:|---:|---:|---|
+ | openai/whisper-medium.en | — | — | SKIPPED | — | — | — | weights not cached |
+ | openai/whisper-small.en | 2 s | 16k | 139.3 | 115.1 | 128.2 | 108.9 | And so, my fellow Americans, |
+ | openai/whisper-small.en | 2 s | narrowband 8k→16k | 115.0 | 93.7 | 107.4 | 93.1 | And so, my fellow Americans, |
+ | openai/whisper-small.en | 5 s | 16k | 113.5 | 111.0 | 113.1 | 109.7 | And so, my fellow Americans, ask not. |
+ | openai/whisper-small.en | 5 s | narrowband 8k→16k | 111.4 | 112.1 | 116.6 | 109.3 | And so, my fellow Americans, ask not. |
+ | openai/whisper-small.en | 10 s | 16k | 222.1 | 185.9 | 191.5 | 182.3 | And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. |
+ | openai/whisper-small.en | 10 s | narrowband 8k→16k | 183.3 | 185.0 | 187.5 | 179.8 | And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. |
+ 
+ appended to /tmp/claude-1000/-home-hartsy-Desktop-HartsyInference/f104d553-97e9-44c1-900f-967c0f79bdf6/scratchpad/pr195_probeA_a1.md
+
+
+
+Test Run Successful.
+Total tests: 1
+     Passed: 1
+ Total time: 8.4093 Seconds
+Results File: /tmp/claude-1000/-home-hartsy-Desktop-HartsyInference/f104d553-97e9-44c1-900f-967c0f79bdf6/scratchpad/pr195_trx/pr195_probeA_a1.trx
+
+################ Probe C — pr195_probeC_a1 ################
+Test run for /home/hartsy/Desktop/HartsyInference/.claude/worktrees/agent-a4c5d68376d12e452/tests/HartsyInference.Audio.Tests/bin/Release/net10.0/HartsyInference.Audio.Tests.dll (.NETCoreApp,Version=v10.0)
+VSTest version 18.0.2 (x64)
+
+Starting test execution, please wait...
+A total of 1 test files matched the specified pattern.
+/home/hartsy/Desktop/HartsyInference/.claude/worktrees/agent-a4c5d68376d12e452/tests/HartsyInference.Audio.Tests/bin/Release/net10.0/HartsyInference.Audio.Tests.dll
+[xUnit.net 00:00:00.00] xUnit.net VSTest Adapter v2.8.2+699d445a1a (64-bit .NET 10.0.12)
+[xUnit.net 00:00:00.09]   Discovering: HartsyInference.Audio.Tests
+[xUnit.net 00:00:00.26]   Discovered:  HartsyInference.Audio.Tests
+[xUnit.net 00:00:00.26]   Starting:    HartsyInference.Audio.Tests
+[INF] [Cuda] device 1: NVIDIA GeForce RTX 3060 (SM 8.6)
+[INF] [cuDNN] cuDNN 9.24.0 (built for CUDA 13) from the OS library path — convolution + fused-attention fast paths ENABLED.
+[INF] [Cuda] perf flags: SdpaCudnn=True ConvCudnn=True NativeFp8Gemm=False NativeFp4Gemm=False MempoolKeep=True EpilogueFusion=True Dp4aGemv=True TensorCoreGemm=False HighPrecisionGemm=False CacheWeightCasts=True AutoPromoteWeights=True Tf32Gemm=True.
+[INF] [Cuda] cuBLAS version 130101 (~13.1) loaded from /home/hartsy/.local/lib/cuda13/libcublasLt.so.13.
+libnvToolsExt.so.1: cannot open shared object file: No such file or directory
+[xUnit.net 00:00:12.23]   Finished:    HartsyInference.Audio.Tests
+  Passed HartsyInference.Audio.Tests.VoiceTurnBenchTests.ProbeC_Narrowband_Recall_With_And_Without_Rnnoise [11 s]
+  Standard Output Messages:
+ CUDA ordinal 1: NVIDIA GeForce RTX 3060; models root /mnt/model-storage/Models; audio cache /mnt/model-storage/Models/audio
+ 16k recall 100% | narrowband recall 100% (Δ 0 pts)
+ narrowband + RNNoise recall 100% (Δ 0 pts); RNNoise pass median 794.6 ms
+ ### Probe C — narrowband content-word recall vs the 16 kHz baseline (small.en, full 11 s clip)
+ 
+ | Input | recall | Δ vs 16k (pts) | STT median ms | p95 ms | RNNoise (CPU, whole clip) median ms | transcript |
+ |---|---:|---:|---:|---:|---:|---|
+ | 16 kHz baseline | 100% | 0 | 203.8 | 272.9 | — | And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. |
+ | narrowband 8k→16k | 100% | 0 | 187.6 | 198.5 | — | And so, my fellow Americans, ask not what your country can do for you. Ask what you can do for your country. |
+ | narrowband + RNNoise | 100% | 0 | 187.7 | 200.5 | 794.6 | And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. |
+ 
+ appended to /tmp/claude-1000/-home-hartsy-Desktop-HartsyInference/f104d553-97e9-44c1-900f-967c0f79bdf6/scratchpad/pr195_probeC_a1.md
+
+
+
+Test Run Successful.
+Total tests: 1
+     Passed: 1
+ Total time: 12.9407 Seconds
+Results File: /tmp/claude-1000/-home-hartsy-Desktop-HartsyInference/f104d553-97e9-44c1-900f-967c0f79bdf6/scratchpad/pr195_trx/pr195_probeC_a1.trx
