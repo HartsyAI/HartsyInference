@@ -60,15 +60,25 @@ public static class ModelResolver
         if (File.Exists(modelArg) || Directory.Exists(modelArg))
             return Path.GetFullPath(modelArg);
 
+        // The store may spell folders in another case (SwarmUI's root has llm/ and audio/ for LLM/ and Audio/). Those
+        // are tried only after every exact spelling missed, so whatever resolved before still resolves the same.
+        return LocateUnderModelsRoot(modelArg, catalog, modality, ignoreCase: false)
+            ?? LocateUnderModelsRoot(modelArg, catalog, modality, ignoreCase: true);
+    }
+
+    /// <summary>The catalog's primary asset, then the per-modality folder guess, under the models root, with every
+    /// folder spelled exactly or, with <paramref name="ignoreCase"/>, matched ignoring case.</summary>
+    private static string? LocateUnderModelsRoot(
+        string modelArg, CatalogEntry? catalog, Modality modality, bool ignoreCase)
+    {
         // A catalog entry's Assets record where its files ACTUALLY land (TargetSubdir/FileName) — for several
         // families (e.g. image/video's "Stable-Diffusion/<Family>") that's a different folder than the coarse
         // per-modality guess below ("Image"/"Video"). Prefer the authoritative asset path when it's actually on
         // disk; only fall through to the guess for catalog-less entries or ones with no defined Assets.
-        if (catalog is { Assets.Count: > 0 })
+        if (catalog is { Assets.Count: > 0 } && ModelDownloader.PrimaryAsset(catalog) is ModelAsset asset
+            && ModelDownloader.FindExisting(asset, ignoreCase) is string primary)
         {
-            string? primary = ModelDownloader.PrimaryLocalPath(catalog);
-            if (primary is not null && File.Exists(primary))
-                return Path.GetFullPath(primary);
+            return Path.GetFullPath(primary);
         }
 
         string subdir = ModalitySubdir.TryGetValue(modality, out string? s) ? s : "";
@@ -79,8 +89,9 @@ public static class ModelResolver
         {
             return null;
         }
-        // The store may spell these folders in another case: SwarmUI's root has llm/ and audio/ for LLM/ and Audio/.
-        string candidate = CaseInsensitivePath.ResolveEntry(RepoPaths.ModelsRoot(), Path.Combine(subdir, id));
+        string root = RepoPaths.ModelsRoot();
+        string relative = Path.Combine(subdir, id);
+        string candidate = ignoreCase ? CaseInsensitivePath.ResolveEntry(root, relative) : Path.Combine(root, relative);
         if (File.Exists(candidate))
             return Path.GetFullPath(candidate);
         if (Directory.Exists(candidate))

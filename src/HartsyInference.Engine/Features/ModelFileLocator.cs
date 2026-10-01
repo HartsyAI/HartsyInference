@@ -9,7 +9,7 @@ public static class ModelFileLocator
     /// <summary>Extensions tried, in order, when the supplied name carries none.</summary>
     private static readonly string[] _extensions = [".safetensors", ".sft", ".bin", ".pth", ".pt", ".ckpt"];
 
-    /// <summary>Resolves <paramref name="nameOrPath"/> to an existing file, searching the given models-root-relative <paramref name="subfolders"/> (recursively, each matched ignoring case when not spelled that way on disk) and trying the common weight extensions. Returns null when nothing matches.</summary>
+    /// <summary>Resolves <paramref name="nameOrPath"/> to an existing file, searching the given models-root-relative <paramref name="subfolders"/> (recursively) and trying the common weight extensions; a subfolder that is missing under its own spelling but exists in another case is searched only after the spelled ones found nothing. Returns null when nothing matches.</summary>
     public static string? Find(string? nameOrPath, params string[] subfolders)
     {
         if (string.IsNullOrWhiteSpace(nameOrPath))
@@ -26,13 +26,32 @@ public static class ModelFileLocator
         {
             return rooted;
         }
-        string[] folders = Array.ConvertAll(subfolders, sub => CaseInsensitivePath.ResolveDirectory(root, sub));
+        string[] folders = Array.ConvertAll(subfolders, sub => Path.Combine(root, sub));
+        // Case variants come second, so a file the spelled folders hold is still the one returned.
+        return Search(nameOrPath, root, folders) ?? Search(nameOrPath, null, CaseVariants(root, subfolders, folders));
+    }
+
+    /// <summary>Resolves like <see cref="Find"/> but throws a descriptive error instead of returning null.</summary>
+    public static string Require(string? nameOrPath, string role, params string[] subfolders)
+    {
+        return Find(nameOrPath, subfolders)
+            ?? throw new InvalidOperationException(
+                $"{role} '{nameOrPath}' was not found under '{RepoPaths.ModelsRoot()}' (searched: {string.Join(", ", subfolders)}).");
+    }
+
+    /// <summary>Each name candidate directly under <paramref name="root"/> (when given) and in each folder, then a
+    /// recursive scan of the folders for the bare stem.</summary>
+    private static string? Search(string nameOrPath, string? root, string[] folders)
+    {
         foreach (string candidate in NameCandidates(nameOrPath))
         {
-            string direct = Path.Combine(root, candidate);
-            if (File.Exists(direct))
+            if (root is not null)
             {
-                return direct;
+                string direct = Path.Combine(root, candidate);
+                if (File.Exists(direct))
+                {
+                    return direct;
+                }
             }
             foreach (string folder in folders)
             {
@@ -69,12 +88,20 @@ public static class ModelFileLocator
         return null;
     }
 
-    /// <summary>Resolves like <see cref="Find"/> but throws a descriptive error instead of returning null.</summary>
-    public static string Require(string? nameOrPath, string role, params string[] subfolders)
+    /// <summary>The subfolders missing under their own spelling that exist in another case, resolved; always empty on
+    /// a case-insensitive filesystem.</summary>
+    private static string[] CaseVariants(string root, string[] subfolders, string[] spelled)
     {
-        return Find(nameOrPath, subfolders)
-            ?? throw new InvalidOperationException(
-                $"{role} '{nameOrPath}' was not found under '{RepoPaths.ModelsRoot()}' (searched: {string.Join(", ", subfolders)}).");
+        List<string>? variants = null;
+        for (int i = 0; i < subfolders.Length; i++)
+        {
+            string resolved = CaseInsensitivePath.ResolveDirectory(root, subfolders[i]);
+            if (!string.Equals(resolved, spelled[i], StringComparison.Ordinal) && Directory.Exists(resolved))
+            {
+                (variants ??= []).Add(resolved);
+            }
+        }
+        return variants is null ? [] : [.. variants];
     }
 
     private static IEnumerable<string> NameCandidates(string name)

@@ -1,5 +1,4 @@
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.IO;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Adapters;
@@ -663,7 +662,7 @@ public static class IpAdapterResolver
         string root = RepoPaths.ModelsRoot();
         foreach (string sub in DetectorFolders)
         {
-            string dir = CaseInsensitivePath.ResolveDirectory(root, sub);
+            string dir = Path.Combine(root, sub);
             if (!Directory.Exists(dir))
             {
                 continue;
