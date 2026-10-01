@@ -9,13 +9,14 @@
     "livenessTimeoutSeconds": 20
   },
   "models": {
-    // Until the model-folder case fix lands, "qwen3" does not resolve on Linux; name the checkpoint path locally.
     "llmModel": "qwen3",
     "llmDevice": "cuda:0",
     "audioDevice": "cuda:1",
     "sttModel": "whisper:openai/whisper-small.en",
     "ttsModel": "kokoro:af_heart",
-    "denoise": false,
+    // Matches VoiceAgentOptions' own default (true); keep it true here too, or an install from this template runs
+    // without RNNoise and voice.endpoint.ms silently loses the denoiser's ~40 ms. See VoiceHostConfigTests.TheShippedExampleParsesAndMapsOntoTheSessionOptions.
+    "denoise": true,
     "wakeModelRoot": null
   },
   "agent": {
