@@ -387,7 +387,8 @@ class GpuSampler:
 
 
 def swarm_status(session_id, base_url):
-    r = requests.post(f"{base_url}/API/GetCurrentStatus", json={"session_id": session_id}, timeout=20)
+    # GetGlobalStatus sums every session; GetCurrentStatus counts only this session's own gens.
+    r = requests.post(f"{base_url}/API/GetGlobalStatus", json={"session_id": session_id}, timeout=20)
     r.raise_for_status()
     return r.json().get("status", {})
 

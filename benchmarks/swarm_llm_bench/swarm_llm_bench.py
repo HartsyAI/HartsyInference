@@ -35,8 +35,9 @@ with the chunk count reported alongside as a sanity cross-check.
   that lands on the 3060 is bounding context for the wrong card and is flagged as such.
 
   Gate: refuses to run unless --quiet-window-passed is given (run tests/swarm-quiet-window.sh --gpu 4090
-  first) and re-checks GetCurrentStatus before every call; foreign Swarm activity or a foreign GPU process
-  aborts the batch.
+  first) and re-checks GetGlobalStatus (every session's queue) before every call; foreign Swarm activity or a
+  foreign GPU process aborts the batch. After the batch, `tests/swarm-quiet-window.sh --verify-since <start>`
+  confirms no request landed in Swarm's journal during it.
 
   Usage: python3 swarm_llm_bench.py --voice-qwen3 --quiet-window-passed [--host 192.168.10.188]
                                     [--voice-out benchmarks/results/swarm_voice_llm.json]
@@ -328,7 +329,8 @@ class GpuSampler:
 
 
 def swarm_status(sid):
-    return http_post("/API/GetCurrentStatus", {"session_id": sid}).get("status", {})
+    # GetGlobalStatus sums every session; GetCurrentStatus counts only this session's own gens.
+    return http_post("/API/GetGlobalStatus", {"session_id": sid}).get("status", {})
 
 
 def assert_swarm_idle(sid, when):
