@@ -2,6 +2,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Cpu;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Services;
 using HartsyInference.Tools;
 using HartsyInference.Voice.Tests.Fakes;
 using Xunit;
@@ -10,7 +11,8 @@ namespace HartsyInference.Voice.Tests;
 
 /// <summary>The model set's load-time contract without weights: a missing denoiser or VAD fails loudly (never a silent
 /// passthrough), the engine must sit on the audio device, sessions must match its models, the CPU thread cap lives
-/// exactly as long as the set, and the speech models are released on the GPU thread.</summary>
+/// exactly as long as the set, the warm-up synthesizes one text per length bucket, each as its own GPU job, and the
+/// speech models are released on the GPU thread.</summary>
 public sealed class VoiceModelSetTests
 {
     [Fact]
@@ -104,7 +106,7 @@ public sealed class VoiceModelSetTests
 
         await models.WarmAsync(text).WaitAsync(TimeSpan.FromSeconds(10));
 
-        Assert.Single(speech.Synthesized);
+        Assert.Equal(VoiceModelSet.WarmTexts, speech.Synthesized);
         Assert.Single(speech.TranscribedSamples, 16_000);
         Assert.All(speech.Threads, thread => Assert.Equal(models.Gpu.ManagedThreadId, thread));
         TextRequest warm = Assert.Single(text.Requests);
@@ -112,6 +114,29 @@ public sealed class VoiceModelSetTests
         Assert.False(warm.EnableThinking);
         Assert.Equal("cuda:0", warm.Device);
         Assert.False(warm.AlwaysFreeMemory);
+    }
+
+    [Fact]
+    public async Task WarmUpSynthesizesOneTextPerLengthBucketOnceThroughTheLeaseEachAsItsOwnGpuJob()
+    {
+        FakeSynthesizerLease synthesizer = new(1);
+        FakeTranscriberLease transcriber = new(1);
+        VoiceLeaseSpeech speech = await VoiceLeaseSpeech.OpenAsync(_ => Task.FromResult<ISynthesizerLease>(synthesizer),
+            _ => Task.FromResult<ITranscriberLease>(transcriber), voice: "af_heart", CancellationToken.None);
+        using CpuBackend cpu = new();
+        RecordingDevice device = RecordingDevice.Wrap(cpu);
+        await using VoiceModelSet models = new(VoiceHarness.DefaultOptions(), speech, device.Backend, () => new LevelVadModel(), createDenoiser: null);
+
+        await models.WarmAsync(new ScriptedTextService()).WaitAsync(TimeSpan.FromSeconds(10));
+
+        // Five texts of growing length, one per power-of-two frame bucket from 32 to 512, each synthesized once.
+        int[] words = [.. VoiceModelSet.WarmTexts.Select(text => text.Split(' ').Length)];
+        Assert.Equal(5, words.Length);
+        Assert.All(words.Zip(words.Skip(1)), pair => Assert.True(pair.Second >= 2 * pair.First, $"{pair.First} then {pair.Second} words"));
+        Assert.Equal(VoiceModelSet.WarmTexts, synthesizer.Texts);
+        Assert.All(synthesizer.Threads, thread => Assert.Equal(models.Gpu.ManagedThreadId, thread));
+        // Each synthesis and the recognition ran as its own GPU job: one activation free per job.
+        Assert.Equal(Enumerable.Repeat(RecordingDevice.FreeKeepingPool, words.Length + 1), device.Calls);
     }
 
     private static string EmptyDirectory()

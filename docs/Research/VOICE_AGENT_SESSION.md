@@ -11,6 +11,15 @@ and its only language-model dependency is `ITextService`, so an in-process engin
 Telephony tools (hang up, DTMF, transfer) are registered by the host; the session only dispatches through the
 `ToolRegistry` it is given.
 
+`VoiceModelSet.WarmAsync` prepares every model before the first call:
+
+- It synthesizes five texts, each as its own GPU job: "Okay.", a 3-word, a 6-word, a 13-word and a 30-word sentence.
+  They are one per power-of-two bucket of Kokoro's 25 ms alignment frames, from 32 to 512, estimated at about 15
+  frames a word.
+- Kokoro builds its convolution plans per length, or per length bucket once the engine buckets them. The first
+  sentence of a call therefore finds its bucket already built; the 256 bucket holds the 15-word sentences.
+- It recognizes a second of silence on the GPU thread, and generates one token on the language model's device.
+
 ## Threads and locks
 
 ```

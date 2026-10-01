@@ -170,8 +170,23 @@ public sealed class VoiceModelSet : IAsyncDisposable
     /// <summary>The language model's spec for <paramref name="options"/>.</summary>
     internal static ModelSpec ResolveLlm(VoiceAgentOptions options) => ModelResolver.Resolve(options.LlmModel, null, Modality.Text);
 
-    /// <summary>Loads every model into memory before the first call: one synthesis and one recognition of a second of
-    /// silence on the GPU thread, and a one-token generation on the language model's device.</summary>
+    /// <summary>What the warm-up synthesizes: one text per power-of-two bucket of Kokoro's 25 ms alignment frames, from
+    /// 32 to 512 (estimated at about 15 frames a word: roughly 30, 50, 90, 195 and 450). Kokoro chooses its convolution
+    /// plans per length, or per length bucket once the engine buckets them, so the first sentence a caller hears finds
+    /// its bucket's plans already built. The 256 bucket holds the 15-word sentences.</summary>
+    internal static IReadOnlyList<string> WarmTexts { get; } =
+    [
+        "Okay.",
+        "Thanks for calling.",
+        "Let me check that for you.",
+        "Your order is on its way, and it should arrive by Thursday afternoon.",
+        "I have updated the delivery address on your order, the driver will call you when they are ten minutes away, "
+            + "and you will receive a message with the tracking link.",
+    ];
+
+    /// <summary>Loads every model into memory and builds its per-length state before the first call: one synthesis per
+    /// text of <see cref="WarmTexts"/> and one recognition of a second of silence, each its own job on the GPU thread,
+    /// and a one-token generation on the language model's device.</summary>
     public async Task WarmAsync(ITextService text, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(text);
@@ -196,7 +211,11 @@ public sealed class VoiceModelSet : IAsyncDisposable
 
     private async Task WarmSpeechAsync(float[] silence, CancellationToken cancel)
     {
-        await Gpu.RunAsync(VoiceGpuJobKind.Warm, () => _speech.Synthesize("Hello, this is a warm-up."), cancel).ConfigureAwait(false);
+        // One job per text, each under its own gate hold, as a turn's sentences are.
+        foreach (string sentence in WarmTexts)
+        {
+            await Gpu.RunAsync(VoiceGpuJobKind.Warm, () => _speech.Synthesize(sentence), cancel).ConfigureAwait(false);
+        }
         await Gpu.RunAsync(VoiceGpuJobKind.Warm, () => _speech.Transcribe(silence), cancel).ConfigureAwait(false);
     }
 
