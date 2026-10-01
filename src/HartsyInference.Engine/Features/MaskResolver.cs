@@ -17,14 +17,14 @@ public static class MaskResolver
         byte[] maskBytes = FeatureImaging.ResizeGrayscale(inpaint.Mask, targetWidth, targetHeight);
         if (inpaint.Grow > 0)
         {
-            FeatureImaging.DilateInPlace(maskBytes, targetWidth, targetHeight, inpaint.Grow);
+            FeatureImaging.DilateInPlace(maskBytes, targetWidth, targetHeight, FeatureImaging.GrowRadius(inpaint.Grow));
         }
         if (inpaint.Blur > 0)
         {
             // "Mask Blur" is loosely a kernel size in pixels; sigma = blur / 2 puts the half-power radius at the user's intent.
             FeatureImaging.GaussianBlurInPlace(maskBytes, targetWidth, targetHeight, inpaint.Blur / 2.0f);
         }
-        if (inpaint.ShrinkGrow != 0)
+        if (inpaint.CropsToMask)
         {
             throw new InvalidOperationException(
                 $"Inpaint.ShrinkGrow ({inpaint.ShrinkGrow}) reached the mask resolver still set. 'Inpaint only masked' is "

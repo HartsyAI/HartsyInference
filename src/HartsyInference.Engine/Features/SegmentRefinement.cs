@@ -130,7 +130,7 @@ public static class SegmentRefinement
         }
         Regional regional = resolved.Regional
             ?? new Regional { Plan = resolved.Prompt };
-        int oversize = regional.MaskOversize == 0 ? DefaultMaskOversize : regional.MaskOversize;
+        int oversize = regional.ExactMaskOversize || regional.MaskOversize != 0 ? regional.MaskOversize : DefaultMaskOversize;
 
         ImageResult current = generated;
         int refined = 0;
@@ -162,7 +162,7 @@ public static class SegmentRefinement
                 Prompt = seg.Prompt,
                 Regional = null,
                 Img2Img = new Img2Img { InitImage = currentImage, Creativity = seg.Strength2, Mode = Img2ImgMode.Denoise },
-                Inpaint = new Inpaint { Mask = maskImage, Grow = regional.MaskGrow, Blur = regional.MaskBlur, ShrinkGrow = oversize },
+                Inpaint = new Inpaint { Mask = maskImage, Grow = regional.MaskGrow, Blur = regional.MaskBlur, ShrinkGrow = oversize, CropToMask = true },
                 Steps = regional.Steps ?? resolved.Steps,
                 CfgScale = regional.CfgScale.HasValue ? (float)regional.CfgScale.Value : resolved.CfgScale,
             };

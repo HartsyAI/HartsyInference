@@ -21,11 +21,11 @@ public static class InpaintOnlyMasked
     public sealed record Plan(int X, int Y, int CropWidth, int CropHeight, int GenerateWidth, int GenerateHeight,
         ImageData OriginalInit, ImageData CroppedInit, byte[] CroppedMask);
 
-    /// <summary>Resolves the crop for <paramref name="request"/>, or null when this run is not an "inpaint only masked" one — no init image, no mask, <see cref="Inpaint.ShrinkGrow"/> at 0, or a mask that selects nothing. <paramref name="request"/> must already have its defaults applied, since the crop is scaled to the resolution the model will actually run at.</summary>
+    /// <summary>Resolves the crop for <paramref name="request"/>, or null when this run is not an "inpaint only masked" one — no init image, no mask, <see cref="Inpaint.CropsToMask"/> false, or a mask that selects nothing. <paramref name="request"/> must already have its defaults applied, since the crop is scaled to the resolution the model will actually run at.</summary>
     public static Plan? Prepare(ImageRequest request)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (request.Inpaint is null || request.Img2Img is null || request.Inpaint.ShrinkGrow == 0)
+        if (request.Inpaint is null || request.Img2Img is null || !request.Inpaint.CropsToMask)
         {
             return null;
         }
@@ -35,7 +35,7 @@ public static class InpaintOnlyMasked
         byte[] mask = FeatureImaging.ResizeGrayscale(request.Inpaint.Mask, init.Width, init.Height);
         if (request.Inpaint.Grow > 0)
         {
-            FeatureImaging.DilateInPlace(mask, init.Width, init.Height, request.Inpaint.Grow);
+            FeatureImaging.DilateInPlace(mask, init.Width, init.Height, FeatureImaging.GrowRadius(request.Inpaint.Grow));
         }
         if (request.Inpaint.Blur > 0)
         {

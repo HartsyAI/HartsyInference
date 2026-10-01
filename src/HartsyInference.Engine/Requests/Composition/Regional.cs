@@ -15,8 +15,11 @@ public sealed record Regional
     /// <summary>Blur radius for each segment mask, in pixels.</summary>
     public int MaskBlur { get; init; }
 
-    /// <summary>Oversize padding around each segment crop, in pixels.</summary>
+    /// <summary>Oversize padding around each segment crop, in pixels; 0 means the default of 16 unless <see cref="ExactMaskOversize"/>.</summary>
     public int MaskOversize { get; init; }
+
+    /// <summary>Use <see cref="MaskOversize"/> as given, so 0 crops tight.</summary>
+    public bool ExactMaskOversize { get; init; }
 
     /// <summary>Per-segment refinement step count; null reuses the base steps.</summary>
     public int? Steps { get; init; }

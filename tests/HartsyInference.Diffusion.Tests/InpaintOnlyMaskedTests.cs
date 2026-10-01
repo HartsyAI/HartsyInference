@@ -31,20 +31,52 @@ public sealed class InpaintOnlyMaskedTests
         return new ImageData { Rgb = rgb, Width = CanvasWidth, Height = CanvasHeight };
     }
 
-    private static ImageRequest RequestWith(ImageData mask, int shrinkGrow, byte initValue = 40) =>
+    private static ImageRequest RequestWith(ImageData mask, int shrinkGrow, byte initValue = 40, int grow = 0, bool crop = false) =>
         new ImageRequest
         {
             Prompt = "test",
             Width = 512,
             Height = 512,
             Img2Img = new Img2Img { InitImage = SolidImage(CanvasWidth, CanvasHeight, initValue) },
-            Inpaint = new Inpaint { Mask = mask, ShrinkGrow = shrinkGrow },
+            Inpaint = new Inpaint { Mask = mask, ShrinkGrow = shrinkGrow, Grow = grow, CropToMask = crop },
         };
 
     [Fact]
     public void Prepare_WithoutShrinkGrow_ReturnsNull()
     {
         Assert.Null(InpaintOnlyMasked.Prepare(RequestWith(MaskWithRect(64, 48, 32, 24), shrinkGrow: 0)));
+    }
+
+    /// <summary>SwarmUI's Mask Shrink Grow is a toggle: on at 0 it crops exactly to the mask, it does not mean off.</summary>
+    [Fact]
+    public void Prepare_WithCropToMaskAndZeroShrinkGrow_CropsTightToTheMask()
+    {
+        InpaintOnlyMasked.Plan? plan = InpaintOnlyMasked.Prepare(RequestWith(MaskWithRect(64, 48, 32, 24), shrinkGrow: 0, crop: true));
+
+        Assert.NotNull(plan);
+        Assert.Equal(64, plan!.X);
+        Assert.Equal(48, plan.Y);
+        Assert.Equal(32, plan.CropWidth);
+        Assert.Equal(24, plan.CropHeight);
+    }
+
+    /// <summary>Mask Grow matches SwarmMaskGrow: about half the stated pixels per side, not the full amount.</summary>
+    [Theory]
+    [InlineData(0, 0)]
+    [InlineData(1, 1)]
+    [InlineData(2, 1)]
+    [InlineData(8, 4)]
+    [InlineData(9, 5)]
+    public void Prepare_MaskGrowExpandsTheMaskByHalfTheValuePerSide(int grow, int expectedPerSide)
+    {
+        InpaintOnlyMasked.Plan? plan = InpaintOnlyMasked.Prepare(
+            RequestWith(MaskWithRect(64, 48, 32, 24), shrinkGrow: 0, grow: grow, crop: true));
+
+        Assert.NotNull(plan);
+        Assert.Equal(64 - expectedPerSide, plan!.X);
+        Assert.Equal(48 - expectedPerSide, plan.Y);
+        Assert.Equal(32 + 2 * expectedPerSide, plan.CropWidth);
+        Assert.Equal(24 + 2 * expectedPerSide, plan.CropHeight);
     }
 
     [Fact]
@@ -134,6 +166,7 @@ public sealed class InpaintOnlyMaskedTests
         Assert.Equal(plan.CropWidth, applied.Inpaint!.Mask.Width);
         // Cleared so the downstream resolver treats it as an ordinary inpaint, and re-running grow/blur cannot double it.
         Assert.Equal(0, applied.Inpaint.ShrinkGrow);
+        Assert.False(applied.Inpaint.CropToMask);
         Assert.Equal(0, applied.Inpaint.Grow);
         Assert.Equal(0, applied.Inpaint.Blur);
         Assert.Equal("test", applied.Prompt);

@@ -167,6 +167,9 @@ public static class FeatureImaging
         }
     }
 
+    /// <summary>Per-side dilation radius for a Mask Grow value; SwarmMaskGrow runs (grow + 1) / 2 single-pixel passes.</summary>
+    public static int GrowRadius(int grow) => grow > 0 ? (grow + 1) / 2 : 0;
+
     /// <summary>Separable max-filter dilation over a Chebyshev window of <paramref name="radius"/>: two 1-D passes, O(W·H·R) instead of O(W·H·R²). Approximates a square morphological dilation — close enough for mask edges.</summary>
     public static void DilateInPlace(byte[] mask, int width, int height, int radius)
     {
