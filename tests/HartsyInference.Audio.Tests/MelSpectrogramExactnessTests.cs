@@ -27,6 +27,10 @@ public sealed class MelSpectrogramExactnessTests
         {
             Norm = MelSpectrogramExtractor.Normalization.None, LogBase = MelSpectrogramExtractor.LogBase.None, PowerSpectrum = false,
         }],
+        // ChatterboxVoiceEncoder's inline front end: centered, rounded to 512 points, raw power mel.
+        ["chatterboxVoiceEncoder", new MelSpectrogramExtractor.Config(16_000, 400, 400, 160, 40, 0.0, 8_000.0,
+            MelSpectrogramExtractor.Normalization.None, false, MelSpectrogramExtractor.LogBase.None, null, 0f, 0f, 1f, true,
+            Center: true)],
     ];
 
     /// <summary>Zero-padded windows at every boundary that matters. Whisper's 30 s window: empty, a partial first
