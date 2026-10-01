@@ -102,7 +102,9 @@ The reader never blocks or allocates, also while the producer waits:
   - over 1000 reads with a cancellable playback wait pending, and on the read that wakes it;
   - over 1000 reads while a writer waits for space (250 wakes);
   - while the reader plays a whole turn.
-- The first wake in a process allocated once: 192 B in a fresh test process, and 32 B over a session's first turn.
+- The one-time cost is per thread, and it is the runtime's: the first continuation a thread queues to the pool
+  allocates once on that thread (32 B, or 192 B on a freshly started thread). The sender thread pays it on its first
+  wake and never again.
 
 ## Inbound backlog
 

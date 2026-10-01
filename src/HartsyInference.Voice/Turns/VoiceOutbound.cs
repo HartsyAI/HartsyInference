@@ -15,7 +15,9 @@ namespace HartsyInference.Voice.Turns;
 /// read. The reader never blocks and never allocates: the waiter's only continuation is the producer's own, so
 /// completing it queues that continuation and nothing else, and cancellation completes the waiter from the token's
 /// side. The allocation a wait does need (its waiter, its registration and, once it suspends, the async state
-/// machine) is the producer's, on the turn loop. There is one producer, so at most one wait is ever armed.</remarks>
+/// machine) is the producer's, on the turn loop. There is one producer, so at most one wait is ever armed. The one
+/// exception on the reader is the runtime's: the first continuation a thread ever queues to the pool allocates once on
+/// that thread (32 B, or 192 B on a freshly started thread), and none after that.</remarks>
 internal sealed class VoiceOutbound
 {
     private readonly SpscRing<float> _ring;
