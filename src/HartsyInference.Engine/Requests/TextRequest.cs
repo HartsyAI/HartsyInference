@@ -83,4 +83,12 @@ public sealed record TextRequest
     /// growth ceiling (e.g. a conversation's history token budget + its reply budget) so the cache is allocated
     /// once instead of being reallocated as the prompt grows across calls under the same key.</summary>
     public int? PrefixCacheCapacityHint { get; init; }
+
+    /// <summary>Overrides the device backend's <c>CacheWeightCasts</c> (cache a dequantized copy of quantized
+    /// weights vs. a transient per-GEMM dequant); null leaves the backend's own default (on). Takes effect when
+    /// the slot's backend is first created for this device, like <see cref="LowVramQuant"/> — a later request on
+    /// an already-loaded slot does not change it without a reload. Measured on Qwen3-4B-Q4_K_M/4090: on costs
+    /// ~7.3 GB resident once warm; off costs a ~50 ms fixed dequant tax per prefill call (prompt-length
+    /// independent — decode's quantized GEMV path is unaffected either way) but nothing else resident.</summary>
+    public bool? CacheWeightCasts { get; init; }
 }

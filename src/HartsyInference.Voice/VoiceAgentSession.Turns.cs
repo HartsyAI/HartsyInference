@@ -46,6 +46,7 @@ public sealed partial class VoiceAgentSession
                 AlwaysFreeMemory = false,
                 PrefixCacheKey = _prefixCacheKey,
                 PrefixCacheCapacityHint = PrefixCacheCapacityHint,
+                CacheWeightCasts = _options.CacheWeightCasts,
             };
             await _text.GenerateAsync(_llm, request, cancel).ConfigureAwait(false);
         }
@@ -141,6 +142,11 @@ public sealed partial class VoiceAgentSession
         if (!ending.IsCancellationRequested && !_inputs.Reader.TryPeek(out _))
         {
             _models.Gpu.RequestTrim();
+            // The LLM backend has no dedicated worker thread to queue this behind (unlike the audio devices'
+            // VoiceGpuWorker), so it races whatever the turn loop does next; TrimMemoryPool itself is a short,
+            // best-effort, non-blocking try against the slot lock (skipped outright if busy), same spirit as
+            // RequestTrim -- never something a real turn waits on.
+            _ = _text.TrimMemoryPool(_options.LlmDevice);
             SetState(VoiceAgentState.Listening, turnId);
         }
     }
@@ -166,6 +172,7 @@ public sealed partial class VoiceAgentSession
         AlwaysFreeMemory = false,
         PrefixCacheKey = _prefixCacheKey,
         PrefixCacheCapacityHint = _prefixCacheKey is null ? null : PrefixCacheCapacityHint,
+        CacheWeightCasts = _options.CacheWeightCasts,
     };
 
     private void AddUserTurn(int turnId, string text)

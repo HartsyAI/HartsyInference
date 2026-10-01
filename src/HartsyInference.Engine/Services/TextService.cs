@@ -366,6 +366,7 @@ public sealed class TextService : ITextService, IDisposable
             buildSelector = fallbackDevice;
         }
         IBackend backend = slot.Backend ??= CreateBackendFor(buildSelector);
+        ApplyCacheWeightCastsOverride(request, [backend]);
         // A backend that cannot read quantized weights needs them dequantized on the way in. Asking the backend
         // what it supports rather than what class it is means Vulkan gets the right answer the moment it publishes
         // SupportsQuantized, instead of silently paying an F32 expansion forever because it is not CUDA.
@@ -503,6 +504,7 @@ public sealed class TextService : ITextService, IDisposable
         slot.Placement = placement;
         slot.Backend = placement.LastBackend;
         slot.ExtraStageBackends = [.. stages.Select(s => s.Backend).Where(b => !ReferenceEquals(b, placement.LastBackend))];
+        ApplyCacheWeightCastsOverride(request, stages.Select(s => s.Backend));
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer,
             placement.LastBackend, slot.Model.Template, placement);
         slot.LoadedPath = path;
@@ -535,6 +537,7 @@ public sealed class TextService : ITextService, IDisposable
         bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
         GgufLanguageModel.TpCheckpoint checkpoint = GgufLanguageModel.LoadForTensorParallel(path, lowVram);
         List<IBackend> backends = [.. rankDevices.Select(CreateBackendFor)];
+        ApplyCacheWeightCastsOverride(request, backends);
         ICollectiveComm comm = CollectiveComm.Create(backends);
         TensorParallelTransformer tp = new(checkpoint.Config, new TpPlacement(backends, comm));
         tp.LoadWeights(checkpoint.Weights, "model");
@@ -648,6 +651,57 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>A fresh prefix-cache store sized from the <c>vram.prefixCache*</c> knobs, for a slot's first request that opts in.</summary>
     private static RetainedSequenceStore NewPrefixCacheStore() =>
         new(EngineKnobs.PrefixCacheMaxEntries.Value, EngineKnobs.PrefixCacheMaxBytes.Value);
+
+    /// <summary>Applies <see cref="TextRequest.CacheWeightCasts"/> to every backend just created for a slot; a no-op
+    /// when the request leaves it null (the backend's own default stands).</summary>
+    private static void ApplyCacheWeightCastsOverride(TextRequest request, IEnumerable<IBackend> backends)
+    {
+        if (request.CacheWeightCasts is not { } value)
+        {
+            return;
+        }
+        foreach (IBackend backend in backends)
+        {
+            backend.CacheWeightCasts = value;
+        }
+    }
+
+    /// <inheritdoc/>
+    public async Task TrimMemoryPool(string? device = null)
+    {
+        IEnumerable<TextDeviceSlot> targets = string.IsNullOrWhiteSpace(device)
+            ? _slots.Values
+            : _slots.TryGetValue(NormalizeDeviceKey(device), out TextDeviceSlot? found) ? [found] : [];
+        foreach (TextDeviceSlot slot in targets)
+        {
+            // Best-effort and non-blocking: a slot mid-generation is skipped rather than waited on, since this is
+            // background hygiene (pool slack an idle point returns to the driver), never something a live request
+            // should queue behind.
+            if (!await slot.Lock.WaitAsync(0).ConfigureAwait(false))
+            {
+                continue;
+            }
+            try
+            {
+                slot.Backend?.TrimMemoryPool();
+                if (slot.ExtraStageBackends is not null)
+                {
+                    foreach (IBackend stage in slot.ExtraStageBackends)
+                    {
+                        stage.TrimMemoryPool();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"[TextService] TrimMemoryPool failed on a slot: {ex.Message}");
+            }
+            finally
+            {
+                slot.Lock.Release();
+            }
+        }
+    }
 
     /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
     private static bool UnloadSlot(TextDeviceSlot slot)

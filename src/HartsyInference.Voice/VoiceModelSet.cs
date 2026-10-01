@@ -242,6 +242,8 @@ public sealed class VoiceModelSet : IAsyncDisposable
             MaxTokens = warmToolPath ? WarmToolMaxTokens : 1,
             Tools = warmToolPath ? tools : null,
             AlwaysFreeMemory = false,
+            // Takes effect here: this is the FIRST request on the slot, which is where its backend is created.
+            CacheWeightCasts = Options.CacheWeightCasts,
         };
         // Different devices, so the language model warms while the GPU thread does. A throwaway request with its own
         // Messages, never touching a session's conversation or the sentence splitter, so it cannot change what a real

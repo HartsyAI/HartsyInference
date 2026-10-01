@@ -91,6 +91,15 @@ public sealed record VoiceAgentOptions
     /// a regression is reuse-related).</summary>
     public bool EnablePrefixCache { get; init; } = true;
 
+    /// <summary>Whether the language model's device backend caches a dequantized copy of its quantized weights.
+    /// Default false: measured on Qwen3-4B-Q4_K_M/4090, "on" costs ~7.3 GB resident once warm (the dominant
+    /// share of the model's VRAM footprint) for a prefill that is a fixed ~50 ms faster; "off" keeps weights
+    /// compressed with a transient per-GEMM dequant, trading that fixed ~50 ms of every prefill call (prompt
+    /// length does not change it — decode's quantized GEMV path is unaffected either way, and so is tokens/sec)
+    /// for staying off the model's own memory. True restores the backend's own default (on) — e.g. to isolate
+    /// whether a regression is residency-related.</summary>
+    public bool CacheWeightCasts { get; init; }
+
     /// <summary>Throws when a field is out of range or asks for something this version cannot do.</summary>
     public void Validate()
     {
