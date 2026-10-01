@@ -51,8 +51,11 @@ internal sealed class VoiceHarness : IAsyncDisposable
 
     public OutboundReader Reader => _reader ?? throw new InvalidOperationException("No reader started.");
 
-    /// <summary>Defaults for the harness: synthesis and playback at the same rate, so played samples are the markers.</summary>
-    public static VoiceAgentOptions DefaultOptions() => new() { OutboundSampleRate = 24_000, LlmDevice = "cpu", AudioDevice = "cpu" };
+    /// <summary>Defaults for the harness: synthesis and playback at the same rate, so played samples are the markers.
+    /// Denoise off: every fake-model constructor here passes <c>createDenoiser: null</c>, and
+    /// <see cref="VoiceAgentOptions.Denoise"/> now defaults on, which the real <see cref="VoiceModelSet"/> constructor
+    /// would otherwise refuse.</summary>
+    public static VoiceAgentOptions DefaultOptions() => new() { OutboundSampleRate = 24_000, LlmDevice = "cpu", AudioDevice = "cpu", Denoise = false };
 
     /// <summary>A session on fake models. <paramref name="device"/> wraps the CPU audio device, for a test that records
     /// what the GPU thread asks of it.</summary>

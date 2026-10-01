@@ -52,9 +52,11 @@ public sealed record VoiceAgentOptions
     /// and the tail of the caller's turn cannot interrupt it.</summary>
     public int BargeInHoldoffMs { get; init; } = 300;
 
-    /// <summary>Run RNNoise ahead of the VAD. Loading fails when the weights are absent; it never falls back to raw
-    /// audio.</summary>
-    public bool Denoise { get; init; }
+    /// <summary>Run RNNoise ahead of the VAD, at int8 (the voice front-end gate was only met at that precision; the
+    /// wake stack's own loader always stays Float). Loading fails when either the F32 weights or the int8 tables
+    /// beside them are absent; it never falls back to raw audio. Default true: adds 640 samples (40 ms) of
+    /// algorithmic delay ahead of endpointing and barge-in detection.</summary>
+    public bool Denoise { get; init; } = true;
 
     /// <summary>First message of every conversation.</summary>
     public string SystemPrompt { get; init; } = DefaultSystemPrompt;

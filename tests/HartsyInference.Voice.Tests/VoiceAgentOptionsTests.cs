@@ -23,7 +23,7 @@ public sealed class VoiceAgentOptionsTests
         Assert.Equal(0.6f, options.BargeInProbability);
         Assert.Equal(200, options.BargeInMinMs);
         Assert.Equal(300, options.BargeInHoldoffMs);
-        Assert.False(options.Denoise);
+        Assert.True(options.Denoise);
         Assert.Equal(4, options.MaxToolRoundsPerTurn);
         Assert.Equal(3_000, options.MaxHistoryTokens);
         Assert.Equal(200, options.MaxReplyTokens);

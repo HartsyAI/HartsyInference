@@ -133,7 +133,10 @@ public sealed class VoiceModelSet : IAsyncDisposable
 
     /// <summary>Loads the per-session front-end weights from <paramref name="wakeModelRoot"/> (the wake models'
     /// <c>vad</c> and <c>denoise</c> folders). Silero is required; RNNoise is required when
-    /// <see cref="VoiceAgentOptions.Denoise"/> is on, and its absence fails here rather than degrading to raw audio.</summary>
+    /// <see cref="VoiceAgentOptions.Denoise"/> is on, loaded at <see cref="RnnoisePrecision.Int8"/> (the voice front
+    /// end's gate was only met at that precision), and its absence — either the F32 weights or the int8 tables
+    /// beside them — fails here rather than degrading to raw audio. The wake stack's own loader always stays Float
+    /// (<see cref="WakeModelSet.LoadDenoiser()"/>); this is a second, independent instance.</summary>
     internal static WakeModelSet LoadFrontEnd(string wakeModelRoot, VoiceAgentOptions options, out Func<IVadModel> createVad,
         out Func<RnnoiseStream>? createDenoiser)
     {
@@ -142,11 +145,19 @@ public sealed class VoiceModelSet : IAsyncDisposable
         WakeModelSet wake = new(wakeModelRoot);
         try
         {
-            if (options.Denoise && !wake.LoadDenoiser())
+            if (options.Denoise)
             {
-                throw new FileNotFoundException(
-                    $"Denoise is on but no usable RNNoise weights were found at '{Path.Combine(wakeModelRoot, "denoise", "rnnoise.safetensors")}'. "
-                    + "Install them or set Denoise to false; the voice session never substitutes unprocessed audio for a missing denoiser.");
+                string weightsPath = RnnoiseInstaller.WeightsPath(wakeModelRoot);
+                string tablesPath = RnnoiseInstaller.Int8TablesPath(wakeModelRoot);
+                // Checked ahead of the load so a missing int8 table names itself rather than surfacing as the
+                // generic "no usable weights" message LoadDenoiser logs for the (always-present) F32 file.
+                if (!File.Exists(tablesPath) || !wake.LoadDenoiser(RnnoisePrecision.Int8))
+                {
+                    throw new FileNotFoundException(
+                        $"Denoise is on but no usable int8 RNNoise weights were found (looked for '{weightsPath}' and '{tablesPath}'). "
+                        + "Install them with RnnoiseInstaller.EnsureAsync(root, cancel, RnnoisePrecision.Int8) or set Denoise to false; "
+                        + "the voice session never substitutes unprocessed audio for a missing denoiser.");
+                }
             }
             if (!wake.LoadVad())
             {

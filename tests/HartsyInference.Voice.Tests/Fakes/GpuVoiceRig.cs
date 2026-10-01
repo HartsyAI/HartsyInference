@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Engine;
 using HartsyInference.Tests.Common;
 
@@ -42,7 +43,10 @@ internal static class GpuVoiceRig
         OutboundSampleRate = 16_000,
     };
 
-    /// <summary>Every asset a session on Whisper small.en and Kokoro needs.</summary>
+    /// <summary>Every asset a session on Whisper small.en and Kokoro needs, including RNNoise's F32 weights and int8
+    /// tables: <see cref="VoiceAgentOptions.Denoise"/> defaults on, so a session built from <see cref="Options"/>
+    /// loads the denoiser at <see cref="RnnoisePrecision.Int8"/>.</summary>
     public static string[] Assets() =>
-        [VoiceAssets.SileroWeights, VoiceAssets.Jfk, .. VoiceAssets.WhisperFiles("openai/whisper-small.en"), .. VoiceAssets.KokoroFiles()];
+        [VoiceAssets.SileroWeights, VoiceAssets.RnnoiseWeights, VoiceAssets.RnnoiseInt8Tables, VoiceAssets.Jfk,
+            .. VoiceAssets.WhisperFiles("openai/whisper-small.en"), .. VoiceAssets.KokoroFiles()];
 }

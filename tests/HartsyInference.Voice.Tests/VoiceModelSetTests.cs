@@ -25,6 +25,30 @@ public sealed class VoiceModelSetTests
             FileNotFoundException error = Assert.Throws<FileNotFoundException>(() =>
                 VoiceModelSet.LoadFrontEnd(root, new VoiceAgentOptions { Denoise = true }, out _, out _));
             Assert.Contains("rnnoise.safetensors", error.Message, StringComparison.Ordinal);
+            Assert.Contains("rnnoise_int8.safetensors", error.Message, StringComparison.Ordinal);
+            Assert.Contains("never substitutes unprocessed audio", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DenoiseWithOnlyFloatWeightsFailsLoudlyNamingTheInt8Tables()
+    {
+        // VoiceModelSet always asks for Int8 (the front-end gate was only met at that precision), so a directory
+        // that has the F32 weights xiph's installer always writes but not yet the int8 tables must still fail
+        // loudly, naming the tables rather than quietly running on a precision the gate never cleared.
+        string root = EmptyDirectory();
+        try
+        {
+            string denoiseDir = Path.Combine(root, "denoise");
+            Directory.CreateDirectory(denoiseDir);
+            File.WriteAllBytes(Path.Combine(denoiseDir, "rnnoise.safetensors"), []);
+            FileNotFoundException error = Assert.Throws<FileNotFoundException>(() =>
+                VoiceModelSet.LoadFrontEnd(root, new VoiceAgentOptions { Denoise = true }, out _, out _));
+            Assert.Contains("rnnoise_int8.safetensors", error.Message, StringComparison.Ordinal);
             Assert.Contains("never substitutes unprocessed audio", error.Message, StringComparison.Ordinal);
         }
         finally
@@ -39,8 +63,10 @@ public sealed class VoiceModelSetTests
         string root = EmptyDirectory();
         try
         {
+            // Denoise off explicitly: it defaults on now, and the denoiser is checked first in LoadFrontEnd, which
+            // would otherwise throw about RNNoise instead of exercising the VAD path this test is about.
             FileNotFoundException error = Assert.Throws<FileNotFoundException>(() =>
-                VoiceModelSet.LoadFrontEnd(root, new VoiceAgentOptions(), out _, out _));
+                VoiceModelSet.LoadFrontEnd(root, new VoiceAgentOptions { Denoise = false }, out _, out _));
             Assert.Contains("Silero VAD", error.Message, StringComparison.Ordinal);
         }
         finally

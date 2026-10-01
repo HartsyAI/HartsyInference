@@ -61,10 +61,15 @@ no language token at all, which Whisper tiny answered with `S-N-S-N-…` loops o
 ## Endpointing and barge-in
 
 - One clock: samples pushed through the VAD. The capture ring, the hangover, the hold-off and the barge-in run are all
-  counted in it, so decisions do not depend on how fast audio arrives.
+  counted in it, so decisions do not depend on how fast audio arrives. With `Denoise` on (the default), RNNoise sits
+  ahead of the VAD in the per-frame pipeline and its output lags its input by `RnnoiseStream.LatencySamples` (640
+  samples, 40 ms at 16 kHz: a 2-frame resampler round trip to RNNoise's native 48 kHz plus one analysis window). The
+  clock counts samples at the VAD, after that lag, so every figure below measured against it — the 736 ms endpoint
+  hangover, the barge-in stop time — is 40 ms later in wall-clock terms than the sample count alone suggests whenever
+  denoising runs; nothing in the pipeline subtracts it back out today.
 - `SileroVadStream(minSpeechMs 250, minSilenceMs EndOfTurnSilenceMs, speechPadMs 30)`: the segment it closes is the
-  endpoint. With 512-sample windows the decision lands 736 ms after the end of speech for the 700 ms default. A segment
-  still open at `MaxUtteranceMs` is flushed and answered.
+  endpoint. With 512-sample windows the decision lands 736 ms after the end of speech for the 700 ms default (plus
+  RNNoise's 40 ms when denoising). A segment still open at `MaxUtteranceMs` is flushed and answered.
 - Barge-in: while a reply is audible and past `BargeInHoldoffMs` (counted from the first window the audio thread sees
   the reply), `BargeInMinMs` of consecutive windows at `BargeInProbability` or above. One compare-and-swap on the
   speaking turn decides it, so a reply that finished playing cannot be flushed and a barge-in cannot be lost to a
@@ -132,7 +137,7 @@ keeps listening.
 | `OutboundSampleRate` | 16000 | session |
 | `EndOfTurnSilenceMs`, `MaxUtteranceMs` | 700, 15000 | session |
 | `BargeInEnabled`, `BargeInProbability`, `BargeInMinMs`, `BargeInHoldoffMs` | true, 0.6, 200, 300 | session |
-| `Denoise` | false | model set; true fails at load when RNNoise weights are missing, never a passthrough |
+| `Denoise` | **true** | model set; loads RNNoise at int8 (the front-end gate was only met at that precision — see [Measured](#measured)); fails at load when either the F32 weights or the int8 tables beside them are missing, never a passthrough. Voice only: the wake stack's own `WakeModelSet.LoadDenoiser()` call always stays Float. Adds 640 samples (40 ms) of algorithmic delay ahead of both endpointing and barge-in detection (`RnnoiseStream.LatencySamples`), which the sample-clock figures below do not yet subtract out |
 | `SystemPrompt`, `MaxToolRoundsPerTurn`, `MaxHistoryTokens`, `MaxReplyTokens` | phone prompt, 4, 3000, 200 | session |
 | `FirstSentenceMinChars`, `MaxSentenceChars` | 12, 180 | session |
 | `CpuThreadCap` | 0 | model set; sets `numerics.cpuThreads` while loaded and restores the previous value on dispose |
@@ -152,14 +157,18 @@ to the reader's discard). The gateway's stages (`voice.rtp.*`) are measured by t
 | Stage | Where | Result |
 |---|---|---|
 | Silero per 20 ms frame, audio-thread path | i7-6900K, CPU, JFK | mean 0.57 ms, p99 1.68 ms, max 1.75 ms; 749 managed bytes per frame, all from the CPU kernels' dispatch closures (the session's own per-frame path allocates 0 bytes over 1000 frames) |
-| RNNoise + Silero per 20 ms frame | same, weights from the in-flight RNNoise bring-up | mean 6.2 ms, p99 20.7 ms, max 30.8 ms; 101.6 KB managed per frame. **Misses the 2 ms gate.** The 960-point FFTs take `Fft`'s Bluestein path, which allocates two 2048-float arrays per transform and locks the plan cache per call |
+| RNNoise + Silero per 20 ms frame, F32 (historical) | same, weights from the in-flight RNNoise bring-up | mean 6.2 ms, p99 20.7 ms, max 30.8 ms; 101.6 KB managed per frame. **Missed the original 2 ms back-to-back gate.** The 960-point FFTs took `Fft`'s Bluestein path, which allocates two 2048-float arrays per transform and locks the plan cache per call |
+| RNNoise + Silero per 20 ms frame, **int8 (current, `Denoise` default)** | i7-6900K, CPU 0, `schedutil`, spinning 20 ms cadence (the redefined gate; see `CHANGELOG.md` alpha.234) | quiet p50 1.07-1.08 ms, p99 1.20-1.59 ms (gate: p50 ≤ 3, p99 ≤ 5 ms — **met**); 4 streaming threads p50 1.80-2.11, p99 3.56-4.25 ms, none late. `TurnEndpointerRealVadTests.RnnoiseAndSileroSplitJfkWithinTheFrameBudget` (this package, back-to-back over the JFK clip, no live-cadence pacing or thread contention — that variant is the Audio package's int8 bench above) confirms the wiring: p50/p99 well inside the same budget. The wake stack's own loader stays Float; only the voice front end asks for int8 |
 | JFK endpointing, 700 ms | Silero | 3 utterances (0.32-2.27, 3.27-4.45, 5.38-11.04 s), hangover 736 ms each |
 | Whisper tiny through the session, CPU | JFK | content-word recall 100 %; narrowband (16k→8k→16k, gateway resamplers) 91 %; narrowband through RNNoise 91 % |
 
 On the RTX 3060 (`CUDA_VISIBLE_DEVICES=1`, after a 10-minute Swarm quiet window, under the bench lock),
-`VoiceSessionEndToEndTests` gave the rows below. That build had Kokoro's length-bucketed convolution plans
-(alpha.232), the bucket warm-up, and per-job frees that keep the memory pool. The language model is scripted, so the
-LLM stages are not measured here.
+`VoiceSessionEndToEndTests` gave the rows below **with `Denoise` off** (its default at the time). That build had
+Kokoro's length-bucketed convolution plans (alpha.232), the bucket warm-up, and per-job frees that keep the memory
+pool. The language model is scripted, so the LLM stages are not measured here. `Denoise` now defaults on: RNNoise's
+640-sample (40 ms) lag sits ahead of the endpoint and barge-in decisions these rows measure, so the endpoint hangover
+and everything downstream of it are about 40 ms later with denoising on than the `voice.endpoint.ms` row below shows;
+a rerun with `Denoise` on is the next entry below once taken.
 
 | Stage | Budget | Result |
 |---|---|---|

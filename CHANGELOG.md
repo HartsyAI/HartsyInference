@@ -40,15 +40,19 @@ stable release will require. Dates are UTC.
   answered, and is counted. Two user or two plain assistant messages in a row merge, so turns stay alternating.
 - A revoked lease (engine free-memory, backend switch) is reopened once outside the gate and the job retried.
 - Per-turn `VoiceTurnMetrics` are logged as `[Voice] turn N: …` with every `voice.*` stage.
-- Tests (`tests/HartsyInference.Voice.Tests`, 76 unit tests on fakes): endpointing, barge-in, the flush protocol
+- Tests (`tests/HartsyInference.Voice.Tests`, 77 unit tests on fakes): endpointing, barge-in, the flush protocol
   (with a concurrent-flush ordering stress), GPU-thread jobs (every job keeps the pool, one trim per turn),
   conversation trimming, model-set load contract, the warm-up (one synthesis per length bucket), whole turns, lease
   revocation, and zero allocation on the audio thread and on the reader (0 B over 1000 reads with a cancellable
-  wait pending, one wake at its position).
+  wait pending, one wake at its position); a missing int8 RNNoise table fails the load loudly and names the table,
+  even when the F32 weights are present.
 - Integration tests (CPU, real weights):
   - JFK endpointing: Silero 0.57 ms per 20 ms frame.
   - Whisper tiny through the session: 100 % JFK content-word recall, 91 % narrowband.
-- GPU classes pass on the RTX 3060:
+  - RNNoise (int8) + Silero per 20 ms frame, back-to-back over the JFK clip: p50/p99 against the redefined gate
+    (3 / 5 ms) — see the RNNoise entry below.
+- GPU classes pass on the RTX 3060 (measured with `Denoise` off, its default at the time; a rerun with the new
+  int8-on-by-default follows):
   - Session end to end, scripted LLM: Whisper small.en 89-156 ms per utterance (gate 350 ms). Kokoro takes 195 ms
     median for a 15-word sentence (gate 250 ms) and 241 ms for a turn's first sentence (18 words, first synthesis),
     within the 250 ms budget, with alpha.232's length-bucketed conv plans and the bucket warm-up. The first turn
@@ -56,8 +60,12 @@ stable release will require. Dates are UTC.
   - Barge-in: no reply audio read after the decision, flush applied 4.1 ms later (gate 100 ms).
   - Pinned runners: the leases survive memory-pressure switches with no reopen.
   - A Slow Qwen3 class runs only with an explicit 4090 grant.
-- With the in-flight RNNoise weights, RNNoise + Silero measured 6.2 ms per 20 ms frame (gate 2 ms), so `Denoise`
-  defaults off. Design: `docs/Research/VOICE_AGENT_SESSION.md`.
+- **RNNoise now loads at `RnnoisePrecision.Int8` for the voice front end, and `Denoise` defaults to true.** The
+  front-end gate (redefined in the RNNoise int8 PR) was only met at int8: quiet p50 1.07-1.08 ms, p99 1.20-1.59 ms
+  against a 3 / 5 ms budget (`WakeModelSet.LoadDenoiser(RnnoisePrecision)` overload; the wake stack's own
+  `LoadDenoiser()` call keeps loading Float, so wake scoring is unaffected). A missing int8 table fails the load the
+  same way a missing weights file always has — loudly, never a passthrough. RNNoise adds 640 samples (40 ms) of
+  algorithmic delay ahead of both the endpoint and barge-in decisions. Design: `docs/Research/VOICE_AGENT_SESSION.md`.
 
 ## alpha.236
 

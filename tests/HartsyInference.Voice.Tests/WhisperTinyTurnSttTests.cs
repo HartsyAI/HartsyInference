@@ -49,5 +49,8 @@ public sealed class WhisperTinyTurnSttTests
         AudioDevice = "cpu",
         LlmDevice = "cpu",
         OutboundSampleRate = 16_000,
+        // The plain (non-denoised) baseline: NarrowbandSttTests builds its own `with { Denoise = true }` variant
+        // from this, and Denoise now defaults on, so this must be explicit or that comparison loses its baseline.
+        Denoise = false,
     };
 }

@@ -1,7 +1,9 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
+using HartsyInference.Engine.Audio.Wake;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Tests.Common;
 
@@ -19,6 +21,9 @@ internal static class VoiceAssets
     public static string SileroWeights => Path.Combine(WakeRoot, "vad", "silero_vad_16k.safetensors");
 
     public static string RnnoiseWeights => Path.Combine(WakeRoot, "denoise", "rnnoise.safetensors");
+
+    /// <summary>The int8 tables <see cref="RnnoisePrecision.Int8"/> needs beside <see cref="RnnoiseWeights"/>.</summary>
+    public static string RnnoiseInt8Tables => RnnoiseInstaller.Int8TablesPath(WakeRoot);
 
     public static string Jfk => Path.Combine(RepoRoot.Path, "tests", "python-reference", "silerovad_reference", "jfk.wav");
 
