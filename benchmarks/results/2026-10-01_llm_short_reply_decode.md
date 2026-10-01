@@ -194,21 +194,26 @@ and set `p` in the gap between them when one exists, which is exactly the scenar
 
 ## Regression evidence
 
-- `TopPSortRefactorIdentityTests`: 22 cases (20 after Tier 1, +2 after Tier 2 for the candidate/fallback split),
-  plus the pre-existing `SamplingAndTemplateTests` — all pass. Bit-identical masking, old algorithm vs. new,
-  across every distribution/vocab-size/fast-path-vs-fallback case tried.
+- `TopPSortRefactorIdentityTests`: 17 cases (14 after Tier 2's candidate/fallback split, +3
+  `AtTheCandidateSumRoundingBoundary` cases added for the review-caught float-order gap above), plus the
+  pre-existing `SamplingAndTemplateTests` (7 cases) — 24/24 pass. Bit-identical masking, old algorithm vs. new,
+  across every distribution/vocab-size/fast-path-vs-fallback-vs-rounding-boundary case tried.
 - The two bench tests themselves are a real-weight identity check beyond the synthetic unit tests: byte-identical
   reply text and token-ids, before vs. Tier 1 vs. Tier 2, for the same seeded request (see "After numbers" above).
 - `tests/HartsyInference.Tools.Tests` CPU lane: 95/95 pass, unchanged (this fix touches no Tools-package code).
-- `tests/HartsyInference.LLM.Tests` CPU lane: 545/546 pass; the one failure
-  (`Glm4SyntheticParityTests.SyntheticGlm4_MatchesHfTransformers_FinalLogits`, a missing fixture file) is listed
-  as a known pre-existing failure and is unrelated to sampling.
+- `tests/HartsyInference.LLM.Tests` CPU lane: 548/549 pass (548 = 545 before the review fix + 3 new boundary
+  cases); the one failure (`Glm4SyntheticParityTests.SyntheticGlm4_MatchesHfTransformers_FinalLogits`, a missing
+  fixture file) is listed as a known pre-existing failure and is unrelated to sampling.
 - **Full solution CPU lane** (`dotnet test HartsyInference.sln`, the task's exact filter, GPUs hidden via
   `CUDA_VISIBLE_DEVICES=""` for the Cuda.Tests project specifically — the others don't vary with GPU
-  visibility), run project by project (21 projects, 7,459 tests total): **7,399 pass, 60 fail, and every one of
-  the 60 matches a category the task names as pre-existing** — 51 `Cuda.Tests` with the GPU hidden, 5 Audio
+  visibility), run project by project (21 projects; 7,459 tests at the time of this specific run, taken just
+  before the review-fix's 3 extra LLM.Tests cases were added): **7,399 pass, 60 fail, and every one of the 60
+  matches a category the task names as pre-existing** — 51 `Cuda.Tests` with the GPU hidden, 5 Audio
   G2P/tokenizer (`EnglishG2PTests` x2, `AudioTextFrontendTests` x3), 2 `YueTokenizerTests`, 1
-  `Glm4SyntheticParityTests`, 1 `LtxVideo25DistilledRoutingTests`. Zero new failures.
+  `Glm4SyntheticParityTests`, 1 `LtxVideo25DistilledRoutingTests`. Zero new failures. Only `HartsyInference.LLM.Tests`
+  changed after this run (the review fix added tests, not production-package changes outside `src/HartsyInference.LLM`),
+  and it was re-verified separately above (548/549, same single pre-existing failure, +3 new passing cases) —
+  the full-solution total after the review fix is 7,402/7,462 by direct extrapolation, not a second full sweep.
 - **`tests/regression-ab.sh --gpu 0 --tag "" --filter llama32-1b,qwen25-1.5b-iq3xs --reps 1 --expect identical`**
   on the 3060 (`--tag quant` alone would have silently dropped `llama32-1b`, which is tagged `baseline,core` not
   `quant` in `regression-cases.sh`; `--tag ""` plus an explicit `--filter` runs exactly the two named cases
