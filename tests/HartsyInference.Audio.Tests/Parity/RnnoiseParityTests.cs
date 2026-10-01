@@ -4,6 +4,7 @@ using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Audio.Tests.Parity;
 
@@ -13,10 +14,13 @@ namespace HartsyInference.Audio.Tests.Parity;
 /// waveform produced by the C build, neither of which is committed.</para>
 ///
 /// <para><b>Regenerating the fixtures</b> — build upstream (<c>xiph/rnnoise</c>) after
-/// <c>./download_model.sh</c>, then:</para>
+/// <c>./download_model.sh</c> with <c>./configure --enable-dnn-debug-float</c>: that build runs every layer in
+/// float from the same checkpoint the weights are converted from, so it is the like-for-like reference. A stock
+/// <c>./configure</c> runs conv2 and the GRUs on int8 copies, and differs from the float build by about as much
+/// as this port differs from it — a comparison against it measures upstream's quantization, not the port. Then:</para>
 /// <code>
 ///   ./examples/rnnoise_demo input48k.raw reference48k.raw     # 48 kHz mono s16le, both files
-///   python tools/convert_pth_to_safetensors.py models/rnnoise10Ga_12.pth -o rnnoise.safetensors
+///   python tools/convert_rnnoise.py rnnoise_data-*.tar.gz rnnoise.safetensors   # or RnnoiseInstaller
 ///   export HARTSYINFERENCE_RNNOISE_WEIGHTS=/path/to/rnnoise.safetensors
 ///   export HARTSYINFERENCE_RNNOISE_REF_DIR=/path/containing/input48k.raw+reference48k.raw
 /// </code>
@@ -25,11 +29,11 @@ namespace HartsyInference.Audio.Tests.Parity;
 /// over 960 points where <see cref="Preprocessing.Fft"/> falls back to Bluestein, the high-pass is a recursive
 /// biquad that accumulates the difference, and the pitch search takes an <i>integer</i> argmax over correlations
 /// computed from those spectra. When a tie tips, that frame's comb filter mixes a different harmonic structure
-/// and the error spikes for a few frames before the gain smoothing reconverges. Measured over 10 s of real
-/// speech: median per-frame error 0.04% of signal RMS, with 7 frames of 1014 above 5%. The assertions below are
+/// and the error spikes for a few frames before the gain smoothing reconverges. The assertions below are
 /// therefore on the <b>distribution</b> — overall energy, and a median — rather than a max-abs bound, which
-/// would only be testing whether a pitch tie happened to tip on this particular clip.</para></summary>
-public sealed class RnnoiseParityTests
+/// would only be testing whether a pitch tie happened to tip on this particular clip. Measured distributions are
+/// in docs/Checklists/PARITY_VERIFICATION.md.</para></summary>
+public sealed class RnnoiseParityTests(ITestOutputHelper log)
 {
     private const int Frame = RnnoiseDenoiser.FrameSize;
 
@@ -106,6 +110,9 @@ public sealed class RnnoiseParityTests
         Array.Sort(frameError);
         double median = frameError[frameCount / 2];
         double p99 = frameError[(int)(frameCount * 0.99)];
+        int over5 = frameError.Count(e => e > 0.05);
+        log.WriteLine($"{frameCount} frames, RMS out {rmsOut:F1} vs reference {rmsRef:F1}; per-frame error median "
+            + $"{median:P3}, p99 {p99:P2}, max {frameError[^1]:P2}, {over5} frames above 5%");
 
         Assert.True(median < 0.01, $"median per-frame error {median:P2} exceeds 1% of signal RMS");
         Assert.True(p99 < 0.25, $"99th-percentile per-frame error {p99:P2} exceeds 25% of signal RMS");
@@ -150,6 +157,7 @@ public sealed class RnnoiseParityTests
         }
         Assert.True(counted > 0);
         double suppression = 20 * Math.Log10(Math.Sqrt(sumOut / sumIn));
+        log.WriteLine($"white noise at int16 scale suppressed by {suppression:F1} dB");
         Assert.True(suppression < -6.0, $"white noise suppressed by only {suppression:F1} dB");
     }
 }

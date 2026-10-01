@@ -6,6 +6,43 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.226
+
+- **RNNoise installs from xiph's own release.** The wake stack and the voice front end load
+  `{wake root}/denoise/rnnoise.safetensors`, and nothing produced it: no one hosts a converted copy, so the AudioLab
+  extension shipped an empty `DenoiserUrl`. `RnnoiseInstaller` (Engine) fetches
+  `rnnoise_data-0a8755f8e2d834eff6a54714ecc7d75f9932e845df35f8b59bc52a7cfe6e8b37.tar.gz` — the tarball xiph/rnnoise's
+  `download_model.sh` fetches from media.xiph.org — refuses it unless its SHA-256 is the one upstream pins in
+  `model_version`, and converts its `models/rnnoise10Ga_12.pth`, the checkpoint behind the C library's default
+  `rnnoise_data.c`, in C# through `RnnoiseCheckpoint` (Audio) and the safe-subset pickle loader. `EnsureAsync` downloads
+  when the file is missing; `InstallFromTarball` installs offline from a copy. Nothing is re-hosted; the weights are
+  BSD-3-Clause. The tarball's other checkpoint, `rnnoise10Gb_15.pth`, backs the smaller `_little` tables and is unused.
+- `tools/convert_rnnoise.py` is the offline reference conversion (torch with `weights_only`); `--check-c-tables`
+  proves the checkpoint is the one the C library compiles in by matching the three float tables bit for bit. Its output
+  and the C# installer's are tensor-identical.
+- `RnnoiseWeights.Load` refuses a missing or mis-shaped tensor by name — a checkpoint with upstream's default 256-wide
+  GRU used to load and fail on the first speech frame — and a load that throws part-way no longer leaks the tensors it
+  had already bound. `WakeModelSet.LoadDenoiser` disposes them too, and its missing-file warning names the installer.
+- `AudioFileFetcher` takes an optional SHA-256 and discards a download that does not match before it reaches its path.
+- Fix: `RnnoiseStream.LatencySamples` counted the denoiser's delay as a window plus a frame. It is one window —
+  overlap-add plus the gain lookahead, 20 ms, which is also upstream's delay — so at 16 kHz it now reports 640 samples,
+  where the output measurably lands, instead of 800.
+- Verified 2026-09-30 on CPU F32 over jfk.wav at 48 kHz, as per-frame error against the reference clip's RMS: against
+  upstream's `--enable-dnn-debug-float` build, median 0.017 % clean and 0.019 % with white noise at 5 dB SNR (p99
+  0.26 % / 0.08 %); against the stock build, whose conv2 and GRUs run on int8 copies, 0.137 % / 0.166 %, which is
+  upstream's own int8-to-float gap (0.131 % / 0.163 %). At 16 kHz through `RnnoiseStream`, jfk with white noise at
+  5 dB SNR: SNR 5.0 dB in, 11.1 dB out, noise in the gaps between words down 32.6 dB, speech level within 0.4 dB.
+- **The voice front-end budget is missed.** The voice plan allows Silero VAD plus RNNoise 2 ms per 20 ms frame on one
+  core; `VoiceFrontendBenchTests` measured p50 5.1 ms, p99 7.0 ms and max 10.9 ms over 2,000 frames on a pinned core
+  (process CPU time over wall time 1.02, no other test run on the box), allocating 102 KB per frame. The time goes to
+  RNNoise's three 960-point FFTs per 10 ms (Bluestein, allocating 16 KB each), its second convolution through the
+  generic Conv1d kernel, Silero's convolutions, and the F32 GRU products. The fix follows in the next version.
+- Tests: `RnnoiseCheckpointTests` (synthetic tarball in the unit lane, the real one as Integration),
+  `RnnoiseInstallerTests` (pin refusal in the unit lane, the real download under `Network=Real`),
+  `AudioFileFetcherTests` (the hash gate), `RnnoiseRealSpeechTests` (Integration), and `VoiceFrontendBenchTests`
+  (Integration, opt-in with `HARTSY_VOICE_FRONTEND_BENCH=1`). `RnnoiseParityTests` now logs the distribution it
+  measures, and its regeneration notes name the debug-float build as the like-for-like reference.
+
 ## alpha.225
 
 - **Phone gateway exe (`src/HartsyInference.PhoneGateway`, not packaged).** The SIP/RTP leg of the phone-call voice

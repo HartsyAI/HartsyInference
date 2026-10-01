@@ -140,18 +140,19 @@ public sealed class WakeModelSet : IDisposable
 
     /// <summary>Loads the RNNoise weights from <c>{ModelRoot}/denoise</c>. Returns false and logs when they are
     /// absent — a missing optional model must not stop the listener from hearing anything, so the caller runs
-    /// without suppression rather than failing to start.</summary>
+    /// without suppression rather than failing to start. <see cref="RnnoiseInstaller"/> puts them there.</summary>
     public bool LoadDenoiser()
     {
-        string path = Path.Combine(ModelRoot, "denoise", "rnnoise.safetensors");
+        string path = RnnoiseInstaller.WeightsPath(ModelRoot);
         if (!File.Exists(path))
         {
-            Logs.Warning($"[Audio][Wake] Noise suppression is enabled but no denoiser was found at '{path}'. Listening without it.");
+            Logs.Warning($"[Audio][Wake] Noise suppression is enabled but no denoiser was found at '{path}'. "
+                + "Listening without it. Install it with RnnoiseInstaller, which fetches xiph's model and converts it.");
             return false;
         }
+        RnnoiseWeights weights = new();
         try
         {
-            RnnoiseWeights weights = new();
             using (SafeTensorsLoader loader = new())
             {
                 loader.Load(path);
@@ -163,6 +164,7 @@ public sealed class WakeModelSet : IDisposable
         }
         catch (Exception ex)
         {
+            weights.Dispose();
             Logs.Error($"[Audio][Wake] Failed to load the denoiser from '{path}'; listening without it.", ex);
             return false;
         }

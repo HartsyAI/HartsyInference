@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.Wake;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Denoise;
@@ -14,7 +15,12 @@ namespace HartsyInference.Audio.Models.Denoise;
 /// is gone.</para></summary>
 public sealed class RnnoiseWeights : IDisposable
 {
-    private const string Source = "rnnoise.safetensors (converted from xiph/rnnoise rnnoise10Ga_*.pth)";
+    /// <summary>Tensors in a complete checkpoint: two convs, three GRUs of four, and two dense heads.</summary>
+    public const int TensorCount = 20;
+
+    private const string Source = "rnnoise.safetensors converted from xiph's rnnoise10Ga_12.pth (RnnoiseCheckpoint)";
+    private const int Gates = 3 * RnnoiseModel.GruSize;
+    private const int CatSize = 4 * RnnoiseModel.GruSize;
 
     private int _disposed;
 
@@ -37,39 +43,55 @@ public sealed class RnnoiseWeights : IDisposable
     public bool IsLoaded { get; private set; }
 
     /// <summary>Takes owned F32 copies via <see cref="WakeWeights"/>, so the loader that supplied them can be
-    /// disposed immediately afterwards.</summary>
+    /// disposed immediately afterwards. Throws naming the tensor when one is missing or shaped for another
+    /// architecture, which would otherwise surface as a shape error on the first speech frame. Call once: a second
+    /// load would orphan the first set, so it throws instead.</summary>
     public void Load(IReadOnlyDictionary<string, Tensor> weights)
     {
         ArgumentNullException.ThrowIfNull(weights);
-        Conv1Weight = WakeWeights.Require(weights, "conv1.weight", Source);
-        Conv1Bias = WakeWeights.Require(weights, "conv1.bias", Source);
-        Conv2Weight = WakeWeights.Require(weights, "conv2.weight", Source);
-        Conv2Bias = WakeWeights.Require(weights, "conv2.bias", Source);
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        if (IsLoaded || Conv1Weight is not null)
+            throw new InvalidOperationException(
+                "RnnoiseWeights are already loaded; build a new instance to load another set.");
+        Conv1Weight = Require(weights, "conv1.weight",
+            new TensorShape(RnnoiseModel.CondSize, RnnoiseModel.InputDim, RnnoiseModel.KernelSize));
+        Conv1Bias = Require(weights, "conv1.bias", new TensorShape(RnnoiseModel.CondSize));
+        Conv2Weight = Require(weights, "conv2.weight",
+            new TensorShape(RnnoiseModel.GruSize, RnnoiseModel.CondSize, RnnoiseModel.KernelSize));
+        Conv2Bias = Require(weights, "conv2.bias", new TensorShape(RnnoiseModel.GruSize));
         for (int i = 0; i < 3; i++)
         {
             string gru = $"gru{i + 1}";
-            GruWeightIh[i] = WakeWeights.Require(weights, $"{gru}.weight_ih_l0", Source);
-            GruWeightHh[i] = WakeWeights.Require(weights, $"{gru}.weight_hh_l0", Source);
-            GruBiasIh[i] = WakeWeights.Require(weights, $"{gru}.bias_ih_l0", Source);
-            GruBiasHh[i] = WakeWeights.Require(weights, $"{gru}.bias_hh_l0", Source);
+            GruWeightIh[i] = Require(weights, $"{gru}.weight_ih_l0", new TensorShape(Gates, RnnoiseModel.GruSize));
+            GruWeightHh[i] = Require(weights, $"{gru}.weight_hh_l0", new TensorShape(Gates, RnnoiseModel.GruSize));
+            GruBiasIh[i] = Require(weights, $"{gru}.bias_ih_l0", new TensorShape(Gates));
+            GruBiasHh[i] = Require(weights, $"{gru}.bias_hh_l0", new TensorShape(Gates));
         }
-        DenseOutWeight = WakeWeights.Require(weights, "dense_out.weight", Source);
-        DenseOutBias = WakeWeights.Require(weights, "dense_out.bias", Source);
-        VadWeight = WakeWeights.Require(weights, "vad_dense.weight", Source);
-        VadBias = WakeWeights.Require(weights, "vad_dense.bias", Source);
+        DenseOutWeight = Require(weights, "dense_out.weight", new TensorShape(RnnoiseModel.OutputDim, CatSize));
+        DenseOutBias = Require(weights, "dense_out.bias", new TensorShape(RnnoiseModel.OutputDim));
+        VadWeight = Require(weights, "vad_dense.weight", new TensorShape(1, CatSize));
+        VadBias = Require(weights, "vad_dense.bias", new TensorShape(1));
         IsLoaded = true;
+    }
+
+    private static Tensor Require(IReadOnlyDictionary<string, Tensor> weights, string name, TensorShape expected)
+    {
+        if (weights.TryGetValue(name, out Tensor? tensor) && tensor.Shape != expected)
+            throw new HartsyInferenceException(
+                $"Weight '{name}' has shape {tensor.Shape}, expected {expected}. Expected {Source}.");
+        return WakeWeights.Require(weights, name, Source);
     }
 
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        if (!IsLoaded) return;
-        Conv1Weight.Dispose(); Conv1Bias.Dispose(); Conv2Weight.Dispose(); Conv2Bias.Dispose();
-        DenseOutWeight.Dispose(); DenseOutBias.Dispose(); VadWeight.Dispose(); VadBias.Dispose();
+        // Null-conditional throughout: a Load that threw part-way has bound only some of these.
+        Conv1Weight?.Dispose(); Conv1Bias?.Dispose(); Conv2Weight?.Dispose(); Conv2Bias?.Dispose();
+        DenseOutWeight?.Dispose(); DenseOutBias?.Dispose(); VadWeight?.Dispose(); VadBias?.Dispose();
         for (int i = 0; i < 3; i++)
         {
-            GruWeightIh[i].Dispose(); GruWeightHh[i].Dispose();
-            GruBiasIh[i].Dispose(); GruBiasHh[i].Dispose();
+            GruWeightIh[i]?.Dispose(); GruWeightHh[i]?.Dispose();
+            GruBiasIh[i]?.Dispose(); GruBiasHh[i]?.Dispose();
         }
     }
 }
