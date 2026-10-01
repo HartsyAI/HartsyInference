@@ -79,6 +79,7 @@ internal static partial class CudnnApi
     internal const int CUDNN_TYPE_HEUR_MODE = 8;
     internal const int CUDNN_TYPE_POINTWISE_MODE = 14;
     internal const int CUDNN_TYPE_BACKEND_DESCRIPTOR = 15;
+    internal const int CUDNN_TYPE_BEHAVIOR_NOTE = 19;
 
     // cudnnBackendAttributeName_t
     internal const int CUDNN_ATTR_POINTWISE_MODE = 0;
@@ -127,6 +128,7 @@ internal static partial class CudnnApi
     internal const int CUDNN_ATTR_VARIANT_PACK_WORKSPACE = 1003;
     internal const int CUDNN_ATTR_ENGINE_OPERATION_GRAPH = 1300;
     internal const int CUDNN_ATTR_ENGINE_GLOBAL_INDEX = 1301;
+    internal const int CUDNN_ATTR_ENGINE_BEHAVIOR_NOTE = 1305;
     internal const int CUDNN_ATTR_MATMUL_COMP_TYPE = 1500;
     internal const int CUDNN_ATTR_OPERATION_MATMUL_ADESC = 1520;
     internal const int CUDNN_ATTR_OPERATION_MATMUL_BDESC = 1521;
@@ -146,6 +148,9 @@ internal static partial class CudnnApi
     // cudnnPointwiseMode_t
     internal const int CUDNN_POINTWISE_ADD = 0;
     internal const int CUDNN_POINTWISE_MUL = 1;
+
+    // cudnnBackendBehaviorNote_t
+    internal const int CUDNN_BEHAVIOR_NOTE_RUNTIME_COMPILATION = 0;
 
     // cudnnBackendHeurMode_t
     internal const int CUDNN_HEUR_MODE_A = 3;

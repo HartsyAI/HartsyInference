@@ -1,7 +1,25 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Globalization;
+using System.Text;
 using static HartsyInference.Cuda.CudnnApi;
 
 namespace HartsyInference.Cuda;
+
+/// <summary>Cumulative cuDNN convolution plan-cache counters for one backend; all zero before its first cuDNN conv.
+/// A plan is built once per distinct shape with the time extent included, so a caller whose sequence length changes
+/// every call builds one plan per conv shape per new length. Read a delta around a call to see what it built.</summary>
+/// <param name="Executions">Convolutions run through cuDNN.</param>
+/// <param name="PlanBuilds">Execution plans built (cache misses).</param>
+/// <param name="CachedPlans">Plans held in the cache now.</param>
+/// <param name="BuildMs">Wall time spent building plans.</param>
+/// <param name="GraphMs">Part of <paramref name="BuildMs"/>: the tensor, operation and graph descriptors.</param>
+/// <param name="HeuristicMs">Part of <paramref name="BuildMs"/>: the heuristic query.</param>
+/// <param name="FinalizeMs">Part of <paramref name="BuildMs"/>: execution-plan finalize, rejected candidates included.</param>
+/// <param name="ConfigsTried">Engine configs finalized across all builds.</param>
+/// <param name="RuntimeCompiledBuilds">Builds whose chosen engine is runtime-compiled.</param>
+public readonly record struct CudnnConvPlanStats(long Executions, long PlanBuilds, int CachedPlans, double BuildMs,
+    double GraphMs, double HeuristicMs, double FinalizeMs, long ConfigsTried, long RuntimeCompiledBuilds);
 
 /// <summary>Convolution forward via cuDNN's backend graph API. Replaces the im2col→cuBLAS GEMM path for F16/BF16 NCHW convolutions: cuDNN's heuristics pick tensor-core implicit-GEMM/Winograd engines that never materialize the im2col matrix (an extra kH·kW-times-input-sized HBM write+read per conv — the dominant conv cost in the SDXL UNet, which runs ~50 convolutions per step). Graph = a single CONVOLUTION_FORWARD op (X ⊛ W → Y) or CONVOLUTION_BACKWARD_DATA op (transposed convolution: DY ⊛ W → DX) — cross-correlation, fp32 accumulate — over NCHW strided tensors, alpha 1 / beta 0. Bias stays a separate kernel in the caller — same numerics as the GEMM path's bias add. Execution plans (heuristics + JIT) are cached by shape+dtype; workspace comes from the stream-ordered pool per execution (capped per plan). Instances are per <see cref="CudaBackend"/> (one cuDNN handle bound to the compute stream). Any failure is caught by the caller, which self-disables the route for the session and falls back to im2col — a wrong shape costs one warning, never a session kill.</summary>
 internal sealed class CudnnConv : IDisposable
@@ -15,6 +33,28 @@ internal sealed class CudnnConv : IDisposable
     private readonly nint _stream;
     private readonly ConcurrentDictionary<string, Plan> _plans = new();
     private bool _disposed;
+
+    // Plan-cache accounting, read through Stats / DescribeFamilies. A family is a plan key without its time extent.
+    private long _executions;
+    private long _planBuilds;
+    private long _buildTicks;
+    private long _graphTicks;
+    private long _heuristicTicks;
+    private long _finalizeTicks;
+    private long _configsTried;
+    private long _runtimeCompiledBuilds;
+    private readonly ConcurrentDictionary<string, FamilyStats> _families = new();
+
+    private sealed class FamilyStats
+    {
+        public long Builds;
+        public long Ticks;
+        public long HeuristicTicks;
+        public long FinalizeTicks;
+        public long ConfigsTried;
+        public long EngineGlobalIndex = -1;
+        public bool RuntimeCompiled;
+    }
 
     private sealed class Plan
     {
@@ -56,7 +96,8 @@ internal sealed class CudnnConv : IDisposable
     {
         string key = $"f|{n},{c},{h},{wIn}|{k},{r},{s}|{strideH},{strideW},{padH},{padWPre},{padWPost}|{dilationH},{dilationW}|{dataType}";
         Plan plan = _plans.GetOrAdd(key, _ => BuildPlan(backwardData: false,
-            n, c, h, wIn, k, r, s, outH, outW, strideH, strideW, padH, padWPre, padWPost, dataType, dilationH, dilationW));
+            n, c, h, wIn, k, r, s, outH, outW, strideH, strideW, padH, padWPre, padWPost, dataType, dilationH, dilationW,
+            family: $"f|{n},{c},{h}|{k},{r},{s}|{strideH},{strideW},{padH},{padWPre},{padWPost}|{dilationH},{dilationW}|{dataType}"));
         Run(plan, x, w, y);
     }
 
@@ -73,7 +114,7 @@ internal sealed class CudnnConv : IDisposable
             long[] dil = new long[strides.Length];
             Array.Fill(dil, 1L);
             return BuildPlanNd(backwardData: false, xDim, ChannelsLastStrides(xDim), wDim, ChannelsLastStrides(wDim),
-                yDim, ChannelsLastStrides(yDim), strides, pads, pads, dil, dataType);
+                yDim, ChannelsLastStrides(yDim), strides, pads, pads, dil, dataType, family: key);
         });
         Run(plan, x, w, y);
     }
@@ -101,7 +142,8 @@ internal sealed class CudnnConv : IDisposable
     {
         string key = $"d|{n},{c},{h},{wIn}|{k},{r},{s}|{strideH},{strideW},{padH},{padWPre},{padWPost}|{dilationH},{dilationW}|{dataType}";
         Plan plan = _plans.GetOrAdd(key, _ => BuildPlan(backwardData: true,
-            n, c, outH, outW, k, r, s, h, wIn, strideH, strideW, padH, padWPre, padWPost, dataType, dilationH, dilationW));
+            n, c, outH, outW, k, r, s, h, wIn, strideH, strideW, padH, padWPre, padWPost, dataType, dilationH, dilationW,
+            family: $"d|{n},{c},{h}|{k},{r},{s}|{strideH},{strideW},{padH},{padWPre},{padWPost}|{dilationH},{dilationW}|{dataType}"));
         Run(plan, dx, w, dy);
     }
 
@@ -110,6 +152,7 @@ internal sealed class CudnnConv : IDisposable
     // (audio codecs build one per shape/dilation) must not each pin a resident workspace for the session.
     private unsafe void Run(Plan plan, ulong xPtr, ulong w, ulong yPtr)
     {
+        Interlocked.Increment(ref _executions);
         nint vp = 0;
         ulong workspace = 0;
         try
@@ -138,17 +181,19 @@ internal sealed class CudnnConv : IDisposable
     // always describes the forward geometry, so callers pass the slot dims accordingly.
     private Plan BuildPlan(bool backwardData, long n, long c, long h, long wIn, long k, long r, long s,
         long outH, long outW, long strideH, long strideW, long padH, long padWPre, long padWPost, int dataType,
-        long dilationH = 1, long dilationW = 1)
+        long dilationH, long dilationW, string family)
         => BuildPlanNd(backwardData,
             [n, c, h, wIn], [c * h * wIn, h * wIn, wIn, 1],
             [k, c, r, s], [c * r * s, r * s, s, 1],
             [n, k, outH, outW], [k * outH * outW, outH * outW, outW, 1],
-            [strideH, strideW], [padH, padWPre], [padH, padWPost], [dilationH, dilationW], dataType);
+            [strideH, strideW], [padH, padWPre], [padH, padWPost], [dilationH, dilationW], dataType, family);
 
     /// <summary>One convolution op over N spatial dims (dims/strides are rank N+2, the rest rank N).</summary>
     private unsafe Plan BuildPlanNd(bool backwardData, long[] xDim, long[] xStr, long[] wDim, long[] wStr,
-        long[] yDim, long[] yStr, long[] strides, long[] prePads, long[] postPads, long[] dilations, int dataType)
+        long[] yDim, long[] yStr, long[] strides, long[] prePads, long[] postPads, long[] dilations, int dataType,
+        string family)
     {
+        long buildStart = Stopwatch.GetTimestamp();
         List<nint> owned = new();
         try
         {
@@ -202,7 +247,10 @@ internal sealed class CudnnConv : IDisposable
             SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_OPS, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1, ops);
             Check(cudnnBackendFinalize(graph), "graph finalize");
 
-            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, MaxWorkspaceBytes, "conv");
+            long graphTicks = Stopwatch.GetTimestamp() - buildStart;
+            PlanBuildProbe probe = new();
+            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, MaxWorkspaceBytes, "conv", probe);
+            RecordBuild(family, Stopwatch.GetTimestamp() - buildStart, graphTicks, probe);
             return new Plan
             {
                 Execution = exec,
@@ -238,6 +286,64 @@ internal sealed class CudnnConv : IDisposable
         return t;
     }
 
+
+    /// <summary>The cumulative counters; see <see cref="CudnnConvPlanStats"/>.</summary>
+    internal CudnnConvPlanStats Stats => new(
+        Interlocked.Read(ref _executions), Interlocked.Read(ref _planBuilds), _plans.Count,
+        TicksToMs(Interlocked.Read(ref _buildTicks)), TicksToMs(Interlocked.Read(ref _graphTicks)),
+        TicksToMs(Interlocked.Read(ref _heuristicTicks)), TicksToMs(Interlocked.Read(ref _finalizeTicks)),
+        Interlocked.Read(ref _configsTried), Interlocked.Read(ref _runtimeCompiledBuilds));
+
+    /// <summary>One line per conv family (a plan key without its time extent), costliest first: plans built, mean build
+    /// time and its heuristic / finalize parts, configs tried per build, and the engine the last build chose.</summary>
+    internal string DescribeFamilies(int top)
+    {
+        StringBuilder text = new();
+        foreach (KeyValuePair<string, FamilyStats> entry in _families.ToArray()
+            .OrderByDescending(e => Interlocked.Read(ref e.Value.Ticks)).Take(top))
+        {
+            FamilyStats f = entry.Value;
+            lock (f)
+            {
+                double builds = Math.Max(1, f.Builds);
+                text.Append(entry.Key).Append(": builds=").Append(f.Builds)
+                    .Append(" mean=").Append(Format(TicksToMs(f.Ticks) / builds))
+                    .Append(" ms (heuristic ").Append(Format(TicksToMs(f.HeuristicTicks) / builds))
+                    .Append(", finalize ").Append(Format(TicksToMs(f.FinalizeTicks) / builds))
+                    .Append(", configs ").Append((f.ConfigsTried / builds).ToString("F1", CultureInfo.InvariantCulture))
+                    .Append(") engine=").Append(f.EngineGlobalIndex)
+                    .Append(f.RuntimeCompiled ? " runtime-compiled" : "")
+                    .AppendLine();
+            }
+        }
+        return text.ToString();
+    }
+
+    private void RecordBuild(string family, long ticks, long graphTicks, PlanBuildProbe probe)
+    {
+        Interlocked.Increment(ref _planBuilds);
+        Interlocked.Add(ref _buildTicks, ticks);
+        Interlocked.Add(ref _graphTicks, graphTicks);
+        Interlocked.Add(ref _heuristicTicks, probe.HeuristicTicks);
+        Interlocked.Add(ref _finalizeTicks, probe.FinalizeTicks);
+        Interlocked.Add(ref _configsTried, probe.ConfigsTried);
+        if (probe.RuntimeCompiled) Interlocked.Increment(ref _runtimeCompiledBuilds);
+        FamilyStats f = _families.GetOrAdd(family, _ => new FamilyStats());
+        lock (f)
+        {
+            f.Builds++;
+            f.Ticks += ticks;
+            f.HeuristicTicks += probe.HeuristicTicks;
+            f.FinalizeTicks += probe.FinalizeTicks;
+            f.ConfigsTried += probe.ConfigsTried;
+            f.EngineGlobalIndex = probe.EngineGlobalIndex;
+            f.RuntimeCompiled = probe.RuntimeCompiled;
+        }
+    }
+
+    private static double TicksToMs(long ticks) => ticks * 1000.0 / Stopwatch.Frequency;
+
+    private static string Format(double ms) => ms.ToString("F2", CultureInfo.InvariantCulture);
 
     public void Dispose()
     {

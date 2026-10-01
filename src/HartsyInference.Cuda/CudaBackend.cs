@@ -131,6 +131,49 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
 
     /// <summary>True once the cuDNN convolution fast path has run at least once — same diagnostic role as <see cref="CudnnSdpaEngaged"/>.</summary>
     public bool CudnnConvEngaged { get; private set; }
+
+    /// <summary>Cumulative cuDNN convolution plan-cache counters (see <see cref="Cuda.CudnnConvPlanStats"/>); all zero
+    /// before the first cuDNN convolution. A caller reads the delta around one call to see the per-shape setup it paid.</summary>
+    public CudnnConvPlanStats CudnnConvPlanStats => _cudnnConv?.Stats ?? default;
+
+    /// <summary>The <paramref name="top"/> costliest cuDNN convolution families (a plan key without its time extent), one
+    /// line each: plans built, mean build time with its heuristic and finalize parts, and the chosen engine.</summary>
+    public string DescribeCudnnConvPlanFamilies(int top = 20) => _cudnnConv?.DescribeFamilies(top) ?? string.Empty;
+
+    /// <summary>cuBLASLt plan-cache counters: plans cached, cache misses (plans built), heuristic queries and the time
+    /// spent building on misses. All zero before the first fused-epilogue GEMM.</summary>
+    public (int CachedPlans, long Misses, long HeuristicQueries, double BuildMs) LtGemmPlanStats
+    {
+        get
+        {
+            LtGemmExecutor? lt = Volatile.Read(ref _ltGemmExecutor);
+            if (lt is null)
+            {
+                return default;
+            }
+            LtGemmExecutor.CacheDiagnostics d = lt.Diagnostics;
+            return (d.Count, d.Misses, d.HeuristicQueries, lt.PlanBuildTicks * 1000.0 / System.Diagnostics.Stopwatch.Frequency);
+        }
+    }
+
+    /// <summary>The device's default stream-ordered pool: bytes reserved from the driver and bytes handed out now. A
+    /// reserved figure that grows across a call is the pool mapping new memory for it (after a trim, every call's first
+    /// allocations do).</summary>
+    public unsafe (long ReservedBytes, long UsedBytes) GetMemPoolUsage()
+    {
+        _context.EnsureCurrent();
+        if (CudaDriverApi.cuDeviceGetDefaultMemPool(out nint pool, _context.DeviceOrdinal) != 0)
+        {
+            return (-1, -1);
+        }
+        ulong reserved = 0, used = 0;
+        if (CudaDriverApi.cuMemPoolGetAttribute(pool, CudaDriverApi.CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT, &reserved) != 0
+            || CudaDriverApi.cuMemPoolGetAttribute(pool, CudaDriverApi.CU_MEMPOOL_ATTR_USED_MEM_CURRENT, &used) != 0)
+        {
+            return (-1, -1);
+        }
+        return ((long)reserved, (long)used);
+    }
     private readonly string? _ptxDir;
 
     private const int LifecycleActive = 0;

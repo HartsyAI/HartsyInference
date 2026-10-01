@@ -47,6 +47,7 @@ public sealed unsafe class LtGemmExecutor : IDisposable
     private long _planCreates;
     private long _planDestroys;
     private long _evictions;
+    private long _planBuildTicks;
     private int _lastComputeType;
     private static long _livePlanCountForTests;
     private static long _liveContextLeaseCountForTests;
@@ -356,7 +357,9 @@ public sealed unsafe class LtGemmExecutor : IDisposable
             else
             {
                 _cacheMisses++;
+                long buildStart = System.Diagnostics.Stopwatch.GetTimestamp();
                 BuildResult built = BuildPlan(key, biasPtr);
+                _planBuildTicks += System.Diagnostics.Stopwatch.GetTimestamp() - buildStart;
                 if (built.Disposition == BuildDisposition.Unsupported)
                 {
                     AddCacheEntry(key, plan: null);
@@ -737,6 +740,18 @@ public sealed unsafe class LtGemmExecutor : IDisposable
                     _planDestroys,
                     _evictions,
                     Volatile.Read(ref _lastComputeType));
+            }
+        }
+    }
+
+    /// <summary>Stopwatch ticks spent building plans on cache misses, the heuristic query included.</summary>
+    internal long PlanBuildTicks
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _planBuildTicks;
             }
         }
     }
