@@ -125,8 +125,24 @@ to the reader's discard). The gateway's stages (`voice.rtp.*`) are measured by t
 | JFK endpointing, 700 ms | Silero | 3 utterances (0.32-2.27, 3.27-4.45, 5.38-11.04 s), hangover 736 ms each |
 | Whisper tiny through the session, CPU | JFK | content-word recall 100 %; narrowband (16k→8k→16k, gateway resamplers) 91 %; narrowband through RNNoise 91 % |
 
-GPU rows (Whisper small.en per utterance, Kokoro per 15-word sentence, turn total, barge-in stop) come from
-`VoiceSessionEndToEndTests`, `BargeInEndToEndTests` and `PinnedRunnersSurviveEvictionTests` on the RTX 3060.
+On the RTX 3060 (`CUDA_VISIBLE_DEVICES=1`, after a 10-minute Swarm quiet window, under the bench lock),
+`VoiceSessionEndToEndTests` gave the rows below. The language model is scripted: the LLM stages are not measured here.
+
+| Stage | Budget | Result |
+|---|---|---|
+| Whisper small.en per utterance (`voice.stt.ms`) | ≤ 350 ms | 110 / 88 / 167 ms for JFK's three utterances (1.9 / 1.2 / 5.7 s) |
+| Kokoro af_heart, 15-word sentence on the GPU thread | ≤ 250 ms | median 187 ms over five runs (254 ms the first time that text was synthesized, then 150-191 ms) |
+| Kokoro first sentence of a turn (`voice.tts.first_chunk_ms`) | ≤ 250 ms | 261 ms for an 18-word sentence synthesized for the first time; 131 ms, then 53 ms, for "Okay." |
+| Endpoint hangover (`voice.endpoint.ms`) | 700 ms (tune 500-800) | 736 ms: 700 ms of silence, the 30 ms pad and 32 ms Silero windows |
+| Resample and queue (`voice.transport.ms`) | ≤ 50 ms | 14 / 0.4 / 2.0 ms |
+| Turn total, end of speech to first reply audio queued (`voice.turn.total_ms`) | ≤ 1.3 s, stretch 1.0 s | turn 1: 1191 ms, of which the scripted LLM took 27 ms (1164 ms without it). Turns 2 and 3 (8064 and 9571 ms) waited behind the reply before them, because the test pushes the whole clip at once |
+| Front-end per 20 ms frame during the call, Silero only (`voice.frontend.ms`) | ≤ 2 ms | p99 bucket ≤ 2 ms in every turn; max 1.9 / 21.7 / 2.4 ms. The test pushes the whole clip at once, so the audio thread works through turn 2's frames while turn 1's recognition and synthesis run; the serial gate is the CPU row above |
+| Whisper-verify, both directions | ≥ 80 % | caller (JFK) 11/11 content words; reply 8/9 ("tomorrow" heard as "row") |
+
+The other two classes ran on the build before the rebase onto the Whisper and Kokoro speed-ups. `BargeInEndToEndTests`:
+the reader read no reply audio after the barge-in decision (0.0 ms) and applied the flush 4.1 ms after it (gate 100
+ms). `PinnedRunnersSurviveEvictionTests`: the pinned Whisper small.en and Kokoro leases survived three
+memory-pressure switches with no reopen, and each transcription stayed word-perfect.
 
 ## Open
 
