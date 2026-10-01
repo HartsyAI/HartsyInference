@@ -61,13 +61,13 @@ public sealed class VoiceTurnBenchTests
     private const string RequiredDeviceSubstring = "3060";
     private const int WarmRuns = 2;
     private const int TimedRuns = 5;
-    private const int SampleRate = 16_000;
-    private const string WhisperSmallEn = "openai/whisper-small.en";
+    internal const int SampleRate = 16_000;
+    internal const string WhisperSmallEn = "openai/whisper-small.en";
     private const string WhisperMediumEn = "openai/whisper-medium.en";
     private const string KokoroRepackRepo = "Hartsy/kokoro-82m-safetensors";
     private const string KokoroRepo = "hexgrad/Kokoro-82M";
     private const string KokoroVoice = "af_heart";
-    private const string JfkTranscript =
+    internal const string JfkTranscript =
         "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.";
     private const string PrimerSentence = "Good morning, this sentence only warms the voice up.";
 
@@ -298,12 +298,12 @@ public sealed class VoiceTurnBenchTests
     /// <summary>Same file <c>WakeModelSet.LoadDenoiser</c> opens: <c>{models}/audio/wake/denoise/rnnoise.safetensors</c>.</summary>
     private static string RnnoisePath() => Path.Combine(ModelsRoot(), "audio", "wake", "denoise", "rnnoise.safetensors");
 
-    private static string JfkPath() =>
+    internal static string JfkPath() =>
         Path.Combine(RepoRoot.Path, "tests", "python-reference", "silerovad_reference", "jfk.wav");
 
     /// <summary>The files <see cref="WhisperPipeline.LoadAsync"/> fetches, resolved through the cache; checking them
     /// first is what keeps the load from downloading.</summary>
-    private static string[] WhisperFiles(string repo)
+    internal static string[] WhisperFiles(string repo)
     {
         string dir = AudioModelCache.GetRepoDirectory(repo, "stt");
         return WhisperPipeline.ModelFiles.Where(f => f.Required).Select(f => Path.Combine(dir, f.Name)).ToArray();
@@ -321,14 +321,14 @@ public sealed class VoiceTurnBenchTests
         ];
     }
 
-    private static float[] LoadJfk16k(string path)
+    internal static float[] LoadJfk16k(string path)
     {
         WavFile.DecodedAudio decoded = WavFile.Read(path);
         float[] mono = decoded.ToMono();
         return decoded.SampleRate == SampleRate ? mono : Resampler.Create(decoded.SampleRate, SampleRate).Resample(mono);
     }
 
-    private static float[] NarrowbandRoundTrip(float[] audio16k)
+    internal static float[] NarrowbandRoundTrip(float[] audio16k)
     {
         float[] down = Resampler.Create(SampleRate, 8_000).Resample(audio16k);
         float[] up = Resampler.Create(8_000, SampleRate).Resample(down);
@@ -336,7 +336,7 @@ public sealed class VoiceTurnBenchTests
     }
 
     /// <summary>RNNoise over a whole clip: int16-scaled in and out, latency flushed with zeros, trailing partial frame dropped.</summary>
-    private static float[] Denoise(IBackend backend, RnnoiseWeights weights, float[] audio16k)
+    internal static float[] Denoise(IBackend backend, RnnoiseWeights weights, float[] audio16k)
     {
         using RnnoiseStream stream = new RnnoiseStream(weights, SampleRate);
         float[] scaled = new float[audio16k.Length + stream.LatencySamples];
@@ -384,7 +384,7 @@ public sealed class VoiceTurnBenchTests
         return (Stats.Of(samples), last, first);
     }
 
-    private static double ContentWordRecall(string reference, string hypothesis)
+    internal static double ContentWordRecall(string reference, string hypothesis)
     {
         HashSet<string> hyp = new HashSet<string>(Words(hypothesis), StringComparer.Ordinal);
         List<string> content = Words(reference).Where(w => !StopWords.Contains(w)).Distinct().ToList();
