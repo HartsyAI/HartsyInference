@@ -83,8 +83,9 @@ public sealed class StreamingIstft
         _fullIm = new float[nFft];
         _accum = new float[nFft];
         _windowSq = new float[nFft];
-        // Planned where the size allows it: Fft.Transform allocates for sizes that are not powers of two.
-        _plan = FftPlan.IsSupported(nFft) ? new FftPlan(nFft) : null;
+        // Planned only where Fft.Transform would take Bluestein, which allocates on every call. Every other size
+        // keeps Fft's own path, and its output.
+        _plan = Fft.UsesBluestein(nFft) && FftPlan.IsSupported(nFft) ? new FftPlan(nFft) : null;
     }
 
     /// <summary>Overlap-adds one frame and writes the <see cref="HopLength"/> samples that this frame completed.

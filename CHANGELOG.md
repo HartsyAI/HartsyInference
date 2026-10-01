@@ -19,9 +19,10 @@ stable release will require. Dates are UTC.
   and it is left open here.
 - `FftPlan` (Audio, `Preprocessing`): a planned mixed-radix complex FFT ported from the kiss_fft RNNoise vendors —
   radix 2, 3, 4 and 5, twiddles and input permutation computed once, nothing allocated per call, upstream's
-  operation order and twiddle table. `StreamingStft`, `StreamingIstft` and RNNoise's pitch transform use it for every
-  size it supports; at RNNoise's 960 points it replaces Bluestein, which ran two padded 2048-point transforms and
-  allocated 16 KB per call. It matches a double-precision DFT to 1e-6 relative at fourteen sizes.
+  operation order and twiddle table. `StreamingStft`, `StreamingIstft` and RNNoise's pitch transform use it only
+  where `Fft` would take Bluestein: a size of 64 or more that is not a power of two. At RNNoise's 960 points Bluestein
+  ran two padded 2048-point transforms and allocated 16 KB per call. Every other size stays on `Fft`, whose
+  output is unchanged. `FftPlan` matches a double-precision DFT to 1e-6 relative at fourteen sizes.
 - RNNoise's two convolutions each produce a single step, so they now run as `Linear` over flattened views of the same
   weights rather than through the generic `Conv1d` kernel, whose per-tap bookkeeping dominated at that length.
 - `SileroVad` runs its STFT as one matrix product over the four hop-spaced windows, and each encoder convolution as
@@ -31,7 +32,9 @@ stable release will require. Dates are UTC.
   scoring as speech.
 - `Resampler.ResampleRange` computes only the requested slice of outputs, running the interior ones as a vector dot
   product over reversed taps, which matches `Resample` to float rounding. `StreamingResampler` uses it and no longer
-  resamples the context padding it throws away. `Resample` itself is unchanged.
+  resamples the context padding it throws away. Its output therefore matches the previous output to float rounding
+  rather than bit for bit, and the rounding follows the CPU's vector width. That applies in `RnnoiseStream` and in the
+  phone gateway's outbound path, its two users. `Resample` itself is unchanged.
 - `RnnoisePitchAnalyzer`'s coarse lag sweep runs a vector of lags at once. Each lane sums its own lag in the original
   order, so the denoiser's output is bit-identical (all 528,000 samples of a 48 kHz test clip).
 - **The front end no longer allocates.** `CpuParallel.For` captured its body in a closure, and C# builds a captured
@@ -48,7 +51,7 @@ stable release will require. Dates are UTC.
   same p99 and max against all four references.
 - Tests: `FftPlanTests` (including a bit-for-bit pin to upstream kiss_fft at 960 points and a comparison with the
   Bluestein path at 960 and 480), `ResamplerTests.ResampleRange_MatchesTheSameSliceOfResample`,
-  `VoiceFrontendAllocationTests` (zero bytes over 1000 frames), `LinearTransBIdentityTests`, and two stateful-`For`
+  `VoiceFrontendAllocationTests` (zero bytes over 1000 frames), `LinearTransBIdentityTests`, and three stateful-`For`
   cases in `CpuParallelInlineScopeTests`. `VoiceFrontendBenchTests` now reports thread CPU time per frame beside wall
   time, and picks the core whose hyperthread pair is idlest. `SileroVadParityTests` logs its maximum difference.
 

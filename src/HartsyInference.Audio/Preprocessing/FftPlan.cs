@@ -17,6 +17,8 @@ public sealed class FftPlan
 {
     // kiss_fft's own ceiling on stages; 5^8 is well past any audio window.
     private const int MaxStages = 8;
+    // kf_bfly2's literal, kept as upstream writes it: the transform's bit parity with rnn_fft_c rests on using
+    // upstream's own constants and twiddles, so do not swap in MathF.Sqrt(0.5f) or a recomputed value.
     private const float Sqrt1Over2 = 0.7071067812f;
 
     private readonly float[] _twiddles;

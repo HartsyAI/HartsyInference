@@ -9,10 +9,12 @@ namespace HartsyInference.Audio.Streaming;
 /// discard one hop — but emits the raw complex spectrum instead of mel energies, because a denoiser has to
 /// resynthesize and the mel path discards phase.</para>
 ///
-/// <para><b>Zero-alloc regime:</b> sizes whose prime factors are 2, 3 and 5 — RNNoise's 960 among them — run on
-/// a <see cref="FftPlan"/> built once here. Other sizes fall back to <see cref="Preprocessing.Fft.RealTransform"/>,
-/// which allocates per call above 1024 points or for sizes that are not powers of two; an always-on stream turns
-/// that into a permanent GC treadmill, so keep such a stream on a planned size.</para>
+/// <para><b>Zero-alloc regime:</b> <see cref="Preprocessing.Fft.RealTransform"/> uses <c>stackalloc</c> up to
+/// 1024 points and the heap above that. A size of 64 or more that is not a power of two takes its Bluestein path,
+/// which allocates on every call. Such a size whose prime factors are 2, 3 and 5, RNNoise's 960 among them, runs on a
+/// <see cref="FftPlan"/> built once here instead. Powers of two stay on <c>Fft</c>, output unchanged. An always-on
+/// stream turns a per-frame allocation into a permanent GC treadmill, so keep it at a power of two up to 1024 or at
+/// a planned size.</para>
 ///
 /// <para>Not thread-safe beyond the ring buffer's own locking: one instance per stream, driven by one
 /// consumer thread.</para></summary>
@@ -58,7 +60,7 @@ public sealed class StreamingStft
         _hopLength = hopLength;
         _window = window ?? HannWindow.Get(nFft);
         _windowed = new float[nFft];
-        _plan = FftPlan.IsSupported(nFft) ? new FftPlan(nFft) : null;
+        _plan = Fft.UsesBluestein(nFft) && FftPlan.IsSupported(nFft) ? new FftPlan(nFft) : null;
         int capacity = bufferCapacity > 0 ? bufferCapacity : nFft * 2 + 4096;
         if (capacity < nFft + hopLength) capacity = nFft + hopLength;
         _ring = new AudioRingBuffer(capacity);
