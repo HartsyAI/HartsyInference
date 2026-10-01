@@ -75,7 +75,7 @@ public sealed unsafe class CudnnConvPlanStatsTests
                 $"the phases ({stats.GraphMs} + {stats.HeuristicMs} + {stats.FinalizeMs} ms) exceed the build ({stats.BuildMs} ms)");
             string[] lines = families.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             Assert.Single(lines);
-            Assert.Contains("plans=2 (from bucket 2) references=2", lines[0], StringComparison.Ordinal);
+            Assert.Contains("plans=2 (from bucket 2) references=2 heuristic builds 2", lines[0], StringComparison.Ordinal);
         });
     }
 

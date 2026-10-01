@@ -15,7 +15,8 @@ namespace HartsyInference.Audio.Tests;
 /// <c>HARTSY_TTS_SPOT_OUT_DIR</c>, <c>&lt;arm&gt;_&lt;nn&gt;.f32</c> plus <c>arms.csv</c>): per sentence, byte identity,
 /// log-spectral correlation and max-abs between the conv engine chosen per length bucket (on) and per exact length (off),
 /// and both against the no-TF32 arm (f32) when there is one; then Whisper small.en on the CPU for every arm, with
-/// content-word recall against the text and whether the transcripts match. Where on and off differ beyond rounding
+/// content-word recall against the text and whether the transcripts match, and each arm's first and repeat synthesis
+/// time (the repeat is the steady state, every plan cached). Where on and off differ beyond rounding
 /// (log-spectral correlation under 0.999) it says what moved: the lag that best aligns them, where the difference energy
 /// sits, and when the two waveforms first part. Opt-in with <c>HARTSY_TTS_SPOT_COMPARE=1</c>; the table goes to the test
 /// log and, with <c>HARTSY_TTS_SPOT_REPORT</c>, to that file.</summary>
@@ -54,14 +55,20 @@ public sealed class TtsConvBucketSpotCheckCompareTests
         StringBuilder table = new StringBuilder();
         table.AppendLine("### cuDNN conv length buckets — spot check, on (per bucket) against off (per length) and f32 (no TF32)");
         table.AppendLine();
-        table.AppendLine("| Model | # | samples off / on | on vs off | off vs f32 | on vs f32 | recall off / on (f32) | transcripts | what moved |");
-        table.AppendLine("|---|---:|---|---|---|---|---|---|---|");
+        table.AppendLine("| Model | # | samples off / on | first ms off / on | repeat ms off / on | on vs off | off vs f32 | on vs f32 "
+            + "| recall off / on (f32) | transcripts | what moved |");
+        table.AppendLine("|---|---:|---|---|---|---|---|---|---|---|---|");
         foreach (string dir in Directory.GetDirectories(root).OrderBy(d => d, StringComparer.Ordinal))
         {
             string model = Path.GetFileName(dir);
-            Dictionary<int, (int Rate, string Text)> sentences = ReadArms(Path.Combine(dir, "arms.csv"));
-            foreach ((int index, (int rate, string text)) in sentences.OrderBy(e => e.Key))
+            Dictionary<(string Arm, int Index), ArmRow> rows = ReadArms(Path.Combine(dir, "arms.csv"));
+            foreach (int index in rows.Keys.Select(k => k.Index).Distinct().Order())
             {
+                if (!rows.TryGetValue(("off", index), out ArmRow? offRow) || !rows.TryGetValue(("on", index), out ArmRow? onRow))
+                {
+                    continue;
+                }
+                (int rate, string text) = (offRow.Rate, offRow.Text);
                 float[]? off = Load(dir, "off", index), on = Load(dir, "on", index), f32 = Load(dir, "f32", index);
                 if (off is null || on is null)
                 {
@@ -78,7 +85,8 @@ public sealed class TtsConvBucketSpotCheckCompareTests
                 bool sameWords = AudioParityMetrics.Words(heardOff).SequenceEqual(AudioParityMetrics.Words(heardOn));
                 double logSpec = off.Length == on.Length ? AudioParityMetrics.LogSpectralCorrelation(off, on) : double.NaN;
                 string moved = !double.IsNaN(logSpec) && logSpec < 0.999 ? WhatMoved(off, on, rate) : "—";
-                table.AppendLine($"| {model} | {index} | {off.Length} / {on.Length} | {Versus(off, on)} "
+                table.AppendLine($"| {model} | {index} | {off.Length} / {on.Length} | {offRow.FirstMs:F1} / {onRow.FirstMs:F1} "
+                    + $"| {offRow.RepeatMs:F1} / {onRow.RepeatMs:F1} | {Versus(off, on)} "
                     + $"| {(f32 is null ? "—" : Versus(f32, off))} | {(f32 is null ? "—" : Versus(f32, on))} | {recall} "
                     + $"| {(sameWords ? "same" : $"off '{AudioParityMetrics.Cell(heardOff)}' / on '{AudioParityMetrics.Cell(heardOn)}'")} "
                     + $"| {moved} |");
@@ -174,24 +182,25 @@ public sealed class TtsConvBucketSpotCheckCompareTests
         return File.Exists(path) ? MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(path)).ToArray() : null;
     }
 
-    /// <summary>Sentence index → (sample rate, text) from an arm's CSV lines: arm,index,rate,samples,ms,plans,bucket,refs,"text".</summary>
-    private static Dictionary<int, (int Rate, string Text)> ReadArms(string csv)
+    /// <summary>One arm's sentence from <c>arms.csv</c>: arm,index,rate,samples,first ms,repeat ms,plans,bucket,refs,"text".</summary>
+    private sealed record ArmRow(int Rate, double FirstMs, double RepeatMs, string Text);
+
+    private static Dictionary<(string Arm, int Index), ArmRow> ReadArms(string csv)
     {
-        Dictionary<int, (int, string)> result = new();
+        Dictionary<(string, int), ArmRow> result = new();
         if (!File.Exists(csv))
         {
             return result;
         }
         foreach (string line in File.ReadAllLines(csv))
         {
-            string[] head = line.Split(',', 9);
-            if (head.Length < 9)
+            string[] f = line.Split(',', 10);
+            if (f.Length < 10)
             {
                 continue;
             }
-            int index = int.Parse(head[1], CultureInfo.InvariantCulture);
-            int rate = int.Parse(head[2], CultureInfo.InvariantCulture);
-            result[index] = (rate, head[8].Trim('"'));
+            result[(f[0], int.Parse(f[1], CultureInfo.InvariantCulture))] = new ArmRow(int.Parse(f[2], CultureInfo.InvariantCulture),
+                double.Parse(f[4], CultureInfo.InvariantCulture), double.Parse(f[5], CultureInfo.InvariantCulture), f[9].Trim('"'));
         }
         return result;
     }

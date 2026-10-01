@@ -67,8 +67,9 @@ internal sealed class CudnnConv : IDisposable
     private readonly ConcurrentDictionary<string, FamilyStats> _families = new();
 
     // Engine choice per (1D conv family, length bucket). Lazy so concurrent first users of a bucket run its heuristic
-    // once, the way CudnnSdpa guards its plans; a null value means the reference build failed and that bucket's lengths
-    // keep their own heuristic. The exact-shape plan cache above stays a plain GetOrAdd, as before.
+    // once, the way CudnnSdpa guards its plans. A null value means no configuration exists at the reference length, and
+    // that bucket's lengths keep their own heuristic; a transient failure is not kept (see ChoiceFor). The exact-shape
+    // plan cache above stays a plain GetOrAdd, as before.
     private readonly ConcurrentDictionary<string, Lazy<EngineChoice?>> _choices = new();
 
     private sealed class FamilyStats
@@ -77,6 +78,7 @@ internal sealed class CudnnConv : IDisposable
         public long BucketBuilds;
         public long References;
         public long Ticks;
+        public long BucketTicks;
         public long HeuristicTicks;
         public long FinalizeTicks;
         public long ConfigsTried;
@@ -274,14 +276,31 @@ internal sealed class CudnnConv : IDisposable
     }
 
     /// <summary>The engine choice of <paramref name="bucket"/>'s family at its reference length, made on first use.</summary>
-    private EngineChoice? ChoiceFor(BucketRequest bucket) =>
-        _choices.GetOrAdd($"{bucket.Family}|b{bucket.Bucket}",
-            _ => new Lazy<EngineChoice?>(() => ComputeChoice(bucket), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
+    /// <remarks>A <see cref="Lazy{T}"/> in this mode caches an exception as readily as a value, and a transient failure
+    /// (host-allocation pressure, a driver hiccup) must not turn a whole bucket's convs into errors for the session. So a
+    /// failure that is not a definitive "no configuration" removes the entry, which the next use of the bucket retries,
+    /// and this length plans the usual way.</remarks>
+    private EngineChoice? ChoiceFor(BucketRequest bucket)
+    {
+        string key = $"{bucket.Family}|b{bucket.Bucket}";
+        Lazy<EngineChoice?> choice = _choices.GetOrAdd(key,
+            _ => new Lazy<EngineChoice?>(() => ComputeChoice(bucket), LazyThreadSafetyMode.ExecutionAndPublication));
+        try
+        {
+            return choice.Value;
+        }
+        catch (Exception)
+        {
+            _choices.TryRemove(new KeyValuePair<string, Lazy<EngineChoice?>>(key, choice));
+            return null;
+        }
+    }
 
     /// <summary>Runs the heuristic for the bucket's family at the bucket's reference length and keeps the configuration it
     /// picks (engine and knobs). The reference plan itself is dropped: a conv at that length plans from the choice like
-    /// every other length in the bucket. Null when no configuration was found or its knobs could not be read,
-    /// so the bucket's lengths keep their own heuristic.</summary>
+    /// every other length in the bucket. Null when no configuration exists at the reference length (no engine config, or a
+    /// permanent cuDNN status) or its knobs could not be read, so the bucket's lengths keep their own heuristic; any
+    /// other failure propagates to <see cref="ChoiceFor"/>, which does not keep it.</summary>
     private EngineChoice? ComputeChoice(BucketRequest bucket)
     {
         Conv1dGeometry g = bucket.Geometry;
@@ -316,7 +335,7 @@ internal sealed class CudnnConv : IDisposable
             RecordReference(bucket.Family, Stopwatch.GetTimestamp() - start, graphTicks, probe);
             return EngineChoice.From(probe);
         }
-        catch (Exception ex) when (ex is CudnnStatusException or InvalidOperationException)
+        catch (Exception ex) when (ex is InvalidOperationException || ex is CudnnStatusException { IsPermanent: true })
         {
             // No configuration at the reference length: the bucket's lengths keep their own heuristic.
             return null;
@@ -465,8 +484,9 @@ internal sealed class CudnnConv : IDisposable
         Interlocked.Read(ref _configsTried), Interlocked.Read(ref _runtimeCompiledBuilds));
 
     /// <summary>One line per conv family (a plan key without its time extent), costliest first: plans built and how many of
-    /// them came from a bucket's choice, reference builds, mean build time with its heuristic and finalize parts, configs
-    /// tried per heuristic build, and every engine the family used.</summary>
+    /// them came from a bucket's choice, reference builds, the mean of a heuristic build (exact-length heuristic or
+    /// reference) with its heuristic and finalize parts and the configs it tried, the mean of a build from a bucket's
+    /// choice, and every engine the family used.</summary>
     internal string DescribeFamilies(int top)
     {
         StringBuilder text = new();
@@ -476,15 +496,17 @@ internal sealed class CudnnConv : IDisposable
             FamilyStats f = entry.Value;
             lock (f)
             {
-                double builds = Math.Max(1, f.Builds + f.References);
-                double heuristicBuilds = Math.Max(1, f.Builds - f.BucketBuilds + f.References);
+                long heuristicBuilds = f.Builds - f.BucketBuilds + f.References;
+                double perHeuristic = Math.Max(1, heuristicBuilds);
                 text.Append(entry.Key).Append(": plans=").Append(f.Builds)
                     .Append(" (from bucket ").Append(f.BucketBuilds).Append(") references=").Append(f.References)
-                    .Append(" mean=").Append(Format(TicksToMs(f.Ticks) / builds))
-                    .Append(" ms (heuristic ").Append(Format(TicksToMs(f.HeuristicTicks) / builds))
-                    .Append(", finalize ").Append(Format(TicksToMs(f.FinalizeTicks) / builds))
-                    .Append(", configs ").Append((f.ConfigsTried / heuristicBuilds).ToString("F1", CultureInfo.InvariantCulture))
-                    .Append(") engines=").Append(string.Join(',', f.Engines))
+                    .Append(" heuristic builds ").Append(heuristicBuilds).Append(" mean=")
+                    .Append(Format(TicksToMs(f.Ticks - f.BucketTicks) / perHeuristic))
+                    .Append(" ms (heuristic ").Append(Format(TicksToMs(f.HeuristicTicks) / perHeuristic))
+                    .Append(", configs ").Append((f.ConfigsTried / perHeuristic).ToString("F1", CultureInfo.InvariantCulture))
+                    .Append(") bucket builds mean=")
+                    .Append(Format(f.BucketBuilds == 0 ? 0 : TicksToMs(f.BucketTicks) / f.BucketBuilds))
+                    .Append(" ms engines=").Append(string.Join(',', f.Engines))
                     .Append(f.RuntimeCompiled ? " runtime-compiled" : "")
                     .AppendLine();
             }
@@ -542,6 +564,7 @@ internal sealed class CudnnConv : IDisposable
             f.Builds++;
             f.BucketBuilds++;
             f.Ticks += ticks;
+            f.BucketTicks += ticks;
             f.FinalizeTicks += finalizeTicks;
             f.Engines.Add(choice.GlobalIndex);
         }
