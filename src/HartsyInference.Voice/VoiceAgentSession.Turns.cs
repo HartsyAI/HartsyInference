@@ -49,6 +49,10 @@ public sealed partial class VoiceAgentSession
                 CacheWeightCasts = _options.CacheWeightCasts,
             };
             await _text.GenerateAsync(_llm, request, cancel).ConfigureAwait(false);
+            // Reclaims this one-token request's own activation/workspace pool usage; the retained KV cache it
+            // just created is a real resident allocation and is untouched by this (trim only returns IDLE pool
+            // blocks to the driver, never anything a live RetainedSequence still references).
+            await _text.TrimMemoryPool(_options.LlmDevice).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -142,11 +146,14 @@ public sealed partial class VoiceAgentSession
         if (!ending.IsCancellationRequested && !_inputs.Reader.TryPeek(out _))
         {
             _models.Gpu.RequestTrim();
-            // The LLM backend has no dedicated worker thread to queue this behind (unlike the audio devices'
-            // VoiceGpuWorker), so it races whatever the turn loop does next; TrimMemoryPool itself is a short,
-            // best-effort, non-blocking try against the slot lock (skipped outright if busy), same spirit as
-            // RequestTrim -- never something a real turn waits on.
-            _ = _text.TrimMemoryPool(_options.LlmDevice);
+            // Unlike the audio devices' VoiceGpuWorker (a dedicated worker thread with its own job queue to
+            // order against), the LLM has no concurrent job to race here: this turn's own generation already
+            // finished earlier in this same call, turns never run in parallel (see the class doc), and
+            // TrimMemoryPool's slot-lock acquisition is a non-blocking try regardless -- so awaiting it is both
+            // safe (nothing else can be holding the lock) and necessary (fire-and-forget let the next turn's
+            // audio and LLM call race ahead of it, which starved it out turn after turn and let pool slack from
+            // each turn's activations accumulate instead of being reclaimed).
+            await _text.TrimMemoryPool(_options.LlmDevice).ConfigureAwait(false);
             SetState(VoiceAgentState.Listening, turnId);
         }
     }
