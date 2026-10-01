@@ -20,7 +20,7 @@ stable release will require. Dates are UTC.
 - Link: `Hello` checked first (version, 16 kHz, token in constant time), else `Error` and close; per-frame sequence
   check; a new connection replaces the current one only after its own `Hello`. A dedicated sender thread on absolute
   20 ms deadlines writes control frames first, then each call's reply audio in 20 ms frames tagged with the producing
-  turn, with a 40 ms prebuffer per burst and catch-up frames; its audio path allocates nothing once warm. A barge-in
+  turn, with a 40 ms prebuffer per burst and catch-up frames; the host's own audio path allocates nothing once warm. A barge-in
   becomes `Flush(turnId)` and nothing of that turn follows it; `OutboundEnd` closes each turn that played. Session
   events go out as `Event` frames (state, final transcript, turn latency).
 - Telephony tools (`send_dtmf`, `transfer`, `hold`, `unhold`, `play_prompt`) are `ToolRequest`/`ToolResult` round trips
@@ -47,7 +47,9 @@ stable release will require. Dates are UTC.
   config and token file, 1200-frame sender cadence with zero allocation), and `[Slow]` loopback calls (sipsorcery
   softphone → real gateway → real host with Kokoro and Whisper small.en on the RTX 3060), including silence on the line
   between the goodbye and the BYE, and a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
-  Six new Voice unit tests cover the tagged read.
+  Measured there: the cancelled reply's last frame left the gateway 6.4 ms after the barge-in decision, the BYE came 24
+  quiet frames after the goodbye, and a killed host's call ended 1.2 s after the 3 s outage period. Six new Voice unit
+  tests cover the tagged read.
 
 ## alpha.237
 

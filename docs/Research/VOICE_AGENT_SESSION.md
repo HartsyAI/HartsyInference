@@ -355,7 +355,9 @@ watchdog timer      nothing received for 20 s, or one write stuck for 20 s → c
 Locks: the server's connection lock and a connection's call-map lock are leaves (nothing is called while holding
 them); a call's lifecycle lock may take the process-wide GC-mode lock, a leaf. The control queue is a
 `ConcurrentQueue` drained by the sender. The sender reads its call list as a published array, so its audio path takes
-no lock and allocates nothing once warm (`AudioPathAllocatedBytes`, asserted 0 over 1200 frames).
+no lock and allocates nothing once warm (`AudioPathAllocatedBytes`, asserted 0 over 1200 frames with a scripted
+session). With the real session, each read also completes the session's producer waiter, which today allocates 32 B
+per read during playback; the fix belongs to the Voice package (see the measured table below).
 
 Outbound pacing: one 20 ms frame per tick, plus 40 ms (`link.prebufferMs`) at the start of each burst of reply audio,
 because the gateway plays what it has at its own 20 ms tick and has no cushion of its own; a late wake-up sends the
@@ -381,15 +383,16 @@ only after the goodbye has played:
 1. It starts when the turn that called the tool ends (`TurnCompleted`, interrupted or not).
 2. It waits until that turn's audio has drained to the gateway: the turn's `OutboundEnd` is written, or the turn was
    flushed, or it had no audio. The sender publishes this per call (`DrainedTurn`) and the hangup polls it every
-   10 ms, so the sender still allocates nothing.
+   10 ms, so publishing it allocates nothing and wakes nobody.
 3. If the goodbye went out whole, it waits 200 ms more (`link.prebufferMs` + 160 ms) for the audio still downstream:
    the prebuffer lead, the gateway resampler's held frame, one RTP tick and the far end's jitter buffer.
 4. The whole wait is capped at the audio the session still held when the turn ended plus 1 s, and at 10 s in any case.
    A goodbye that never drains cannot keep the call open: the host logs a warning and sends the request anyway.
 5. `ToolRequest(hangup)` goes out; the gateway sends its BYE and answers; the host sends `CallEnd(Completed)`.
 
-The session ends a turn only after the sender has read its last sample, so the drain should take one 20 ms tick and
-the request leave about 250 ms after the goodbye's last frame (measured below). A caller who barges in on the goodbye does not
+The session ends a turn only after the sender has read its last sample, so the drain takes one 20 ms tick; in the
+loopback run the request left 226 ms after the goodbye's turn ended, and the BYE reached the phone 24 silent frames
+after the goodbye's last audible one (measured below). A caller who barges in on the goodbye does not
 cancel the hang-up, because the model decided to end the call: the flush empties the goodbye, the turn counts as
 drained at once, and the request follows within a tick or two.
 
@@ -424,23 +427,25 @@ unknown key fails the start):
 
 ### Measured on the RTX 3060 (loopback)
 
-`LoopbackSipCallWithHostTests` and `LoopbackHostKillTests`: a sipsorcery softphone plays the JFK clip at 8 kHz to the
-real gateway, which talks PhoneLink to the real host running Kokoro and Whisper small.en on the RTX 3060; the model is
-scripted. Pending the GPU run.
+`LoopbackSipCallWithHostTests` (3/3) and `LoopbackHostKillTests` (1/1), 2026-10-01 on the RTX 3060
+(`CUDA_VISIBLE_DEVICES=1`, after a 10-minute SwarmUI quiet window, checked clean afterwards with `--verify-since`). A
+sipsorcery softphone plays the JFK clip at 8 kHz to the real gateway, which talks PhoneLink to the real host running
+Kokoro (`af_heart`) and Whisper small.en; the model is scripted, denoise off. Models loaded and warm in 1.9 to 2.4 s.
 
-| Measure | Gate | Test output line | Result |
+| Measure | Gate | Source | Result |
 |---|---|---|---|
-| Caller's question recognized over G.711 ("And so, my fellow Americans") | has "fellow" or "americans" | `host heard: "…"` | pending |
-| Turn latency: STT, TTS first chunk, transport, total | logged | `turn N: stt … ms, … total … ms` | pending |
-| Barge-in: `Flush(T)` at the gateway after the VAD decision | logged | `Flush(T) reached the gateway after … ms` | pending |
-| Barge-in: last audible frame the gateway's RTP tick sent after the decision | ≤ 100 ms | `…, the last at … ms` | pending |
-| Frames of the flushed turn reaching the gateway after `Flush` | 0 | `gateway stale drops …` | pending |
-| Agent hangup: audible goodbye frames before the BYE | ≥ 50 | `… audible frames of goodbye before the BYE` | pending |
-| Agent hangup: BYE after the goodbye's last audible frame | ≥ 2 quiet frames | `the BYE came … ms after the goodbye's last audible frame, … quiet frames later` | pending |
-| Sender lateness p50 / p99 / max, catch-up frames, resyncs | logged | host: `Phone gateway link closed …; sender ticks=… lateness p50=…` | pending |
-| Sender audio-path allocation | 0 B | host: `audioPathAllocated=…B` | pending |
-| Host killed with SIGKILL mid-call: BYE at the phone | ≤ 3 s outage period + 2 s | `host killed; the phone got the BYE … ms later` | pending |
-| Restarted host: stale socket replaced, next call answered, SIGTERM exit 0 and socket removed | all hold | `LoopbackHostKillTests` passes | pending |
+| Caller's question recognized over G.711 ("And so, my fellow Americans") | has "fellow" or "americans" | `host heard: "…"` | "And so, my fellow Americans," |
+| Answer turn, three calls: STT, TTS first chunk, total (736 ms endpoint hangover included) | logged | host: `[Voice] turn 2 (utterance): …` | STT 147.6 / 118.7 / 115.6 ms; TTS first chunk 152.3 / 161.1 / 174.5 ms; transport ≤ 0.16 ms; total 1070 / 1024 / 1027 ms |
+| Barge-in: `Flush(T)` at the gateway after the VAD decision | logged | `Flush(T) reached the gateway after … ms` | 15.9 ms (session `voice.bargein.stop_ms` 15.6) |
+| Barge-in: last audible frame the gateway's RTP tick sent after the decision | ≤ 100 ms | `…, the last at … ms` | 1 frame, at 6.4 ms |
+| Frames of the flushed turn reaching the gateway after `Flush` | 0 | `gateway stale drops …` | 0 (host stale samples 0) |
+| Agent hangup: audible goodbye frames before the BYE | ≥ 50 | `… audible frames of goodbye before the BYE` | 106 |
+| Agent hangup: BYE after the goodbye's last audible frame | ≥ 2 quiet frames | `the BYE came … ms after …, … quiet frames later` | 503 ms, 24 quiet frames (Kokoro's trailing silence included); the host asked 226 ms after the turn ended |
+| Gateway RTP, per call | logged | gateway: `Call N ended …` | out lateness p99 50 µs; in late 0, lost 0; dropped by the link 0 |
+| Sender lateness p50 / p99 / max, catch-up frames, resyncs | logged | host: `Phone gateway link closed …` | p50 and p99 within the 200 µs bucket, max 25.4 ms, over 1339 ticks; 2 catch-up frames; 0 resyncs |
+| Sender audio-path allocation | 0 B | host: `audioPathAllocated=…B` | **Fails: 19 528 B over 1339 ticks; 704 B over the restarted host's 24 measured ticks.** 19 520 B of it (610 reads × 32 B) and all 704 B (22 × 32 B) are the session's producer wake: completing the cancellable `WaitPlayedAsync` waiter queues a 32 B pool work item per read during playback. The host's own path is 0 B with a scripted session. Fix routed to the Voice package (#202) |
+| Host killed with SIGKILL mid-call: BYE at the phone | ≤ 3 s outage period + 2 s | `host killed; the phone got the BYE … ms later` | 4189 ms (1189 ms after the outage period); 1 outage, 1 outage hang-up |
+| Restarted host: stale socket replaced, next call answered, SIGTERM exit 0 and socket removed | all hold | `LoopbackHostKillTests` | all hold (`Removed a stale socket file …`) |
 
 ## Open
 
@@ -456,3 +461,7 @@ scripted. Pending the GPU run.
 - Host: outbound calls start like inbound ones (same prompt, same greeting); per-call instructions (why the agent is
   calling) are not wired. The host keeps one gateway connection; per-call and per-link summaries go to the log only (no
   metrics endpoint on the host side).
+- Host: the sender's audio path is 0 B only with a scripted session. With the real session, completing the producer's
+  cancellable `WaitPlayedAsync` waiter from the read queues a 32 B pool work item per read during playback (measured
+  above). The fix, a wake that allocates nothing or no cross-thread wake from the reader at all, goes into the Voice
+  package.

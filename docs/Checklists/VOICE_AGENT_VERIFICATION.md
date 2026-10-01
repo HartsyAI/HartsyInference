@@ -78,8 +78,9 @@ Start a 2-minute call, then queue SwarmUI generations (the 4090 and the CPUs the
       lateness p99 stays under 2 ms and the maximum under 10 ms; `hartsy_phone_rtp_fifo 1`.
 - [ ] The caller hears no gaps or clicks; the per-call line at the end (`rtp out frames=… silence=… lateness p50=…
       p99=… max=…`) agrees.
-- [ ] The host's link line at the end of the call (`sender ticks=… lateness p50=… p99=… max=… audioPathAllocated=0B`)
-      shows no allocation on the sender's audio path.
+- [ ] The host's link line at the end of the call (`sender ticks=… lateness p50=… p99=… max=… audioPathAllocated=…B`):
+      lateness p99 under a few ms, and `audioPathAllocated=0B` once the Voice package's producer-wake fix is in (before
+      it, about 32 B per frame of reply audio; see the voice session's measured table).
 
 ## Development without systemd
 
