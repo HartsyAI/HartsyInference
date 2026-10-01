@@ -278,6 +278,8 @@ public sealed class RnnoiseModel : IDisposable
 
     /// <summary>A GRU's recurrent projection <c>U·h + b</c> of its current hidden state, into <c>_gh</c>. At int8 the
     /// diagonal of <c>U</c> is applied in float to the F32 state, as upstream keeps it.</summary>
+    /// <remarks>The hidden state's codes go into row 0 of the same buffer the layer's input codes used. In the paired
+    /// path both frames' input projections are already taken by then, so nothing still needs those codes.</remarks>
     private void GruRecurrentProjection(IBackend backend, int layer)
     {
         Tensor hidden = _hidden[layer];

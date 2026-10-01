@@ -8,9 +8,10 @@ namespace HartsyInference.Cpu.Kernels;
 ///
 /// <para><b>Exact sums.</b> Each output starts as the exact int32 sum of its uint8 × int8 products, which is what
 /// RNNoise's default (SSE2) build computes. AVX2's <c>maddubs</c> would be faster, but it saturates each pair of
-/// products at int16, and a weight pair whose magnitudes add up to more than 128 against two codes near 255 does
-/// overflow it. So the AVX2 path widens the bytes to 16 bits and multiplies with <c>pmaddwd</c>, whose pair sums
-/// cannot overflow. The scalar path adds the same products in plain integers. Integer sums do not depend on order,
+/// products at int16: two same-sign weights whose magnitudes add up to more than 128, against two codes of 255,
+/// overflow it. Upstream's tables keep such pairs at 129 or less and its codes reach only 254, so on them its AVX2
+/// build never saturates either; a generic op cannot assume that. So the AVX2 path widens the bytes to 16 bits and
+/// multiplies with <c>pmaddwd</c>, whose pair sums cannot overflow. The scalar path adds the same products in plain integers. Integer sums do not depend on order,
 /// so both paths give the same bits.</para>
 ///
 /// <para><b>Float epilogue.</b> <c>(float)sum·scale</c>, then <c>+ bias</c>, then <c>+ diag·x</c>. Each step is rounded

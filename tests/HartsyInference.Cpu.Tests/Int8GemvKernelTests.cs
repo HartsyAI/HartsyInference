@@ -12,11 +12,13 @@ namespace HartsyInference.Cpu.Tests;
 /// build's at ties.</summary>
 public sealed unsafe class Int8GemvKernelTests
 {
+    /// <summary>RNNoise's shapes and small remainders, plus two wide ones: at K 8192 and 16384 a call holds only
+    /// four or two activation rows' split codes on the stack, so five rows take several passes over the weights.</summary>
     public static TheoryData<int, int, int> Shapes()
     {
         TheoryData<int, int, int> data = new();
         foreach (int m in new[] { 1, 2, 3, 5 })
-            foreach ((int n, int k) in new[] { (8, 4), (8, 12), (16, 32), (24, 40), (1152, 384), (384, 384) })
+            foreach ((int n, int k) in new[] { (8, 4), (8, 12), (16, 32), (24, 40), (1152, 384), (384, 384), (8, 8192), (16, 16384) })
                 data.Add(m, n, k);
         return data;
     }
