@@ -25,6 +25,11 @@ stable release will require. Dates are UTC.
   - **Output moves by design:** transcripts change where the old input tipped a decision. small.en on the 2 s
     narrowband slice now ends "And so my fellow Ameri-", as the reference does on the same samples; JFK stays
     11/11 at 16 kHz and narrowband.
+  - **Latency (RTX 3060, small.en, in-process, two runs per build):** 2 / 5 / 10 s utterances in 95–116 /
+    105–119 / 173–178 ms median against 97–125 / 110–114 / 185–194 ms for the previous build; gate (≤ 350 ms) met
+    at median and p95 (≤ 140 ms). The mel stage itself fell from 4.1 / 8.9 / 16.8 ms to 1.8–2.6 / 3.8–3.9 /
+    3.9–5.2 ms. On the GPU at default precision the decodes equal the HF reference's on all 21 cases the bench and
+    the parity set share (19 before). [Results](benchmarks/results/2026-10-01_whisper_logmel_3060.md).
 - `MelSpectrogramExtractor.Config.ExactFftSize` transforms at exactly `NFft` points, through the allocation-free
   mixed-radix `FftPlan` when that is not a power of two (400 = 4·4·5·5), never Bluestein. Every other preset keeps
   its output bit for bit. `WhisperLegacyPow2Config` keeps the old layout for the S3 speech-tokenizer front end, so
