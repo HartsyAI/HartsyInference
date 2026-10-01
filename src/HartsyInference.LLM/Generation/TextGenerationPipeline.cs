@@ -311,6 +311,13 @@ public sealed class TextGenerationPipeline
                 next = session.Replay();
                 session.Pos++;
                 session.WriteNextPos();   // prep for the NEXT replay
+                // Mirrors DynamicBatchScheduler.ReplayGraphRound: the graph advances the DEVICE-side position
+                // itself, but cache.Length (host-side, what AcquireCache/the retained-sequence bookkeeping in
+                // Generate reads) only moves via this explicit commit. Before prefix-cache reuse, nothing ever
+                // read cache.Length again after a graph-decode run (the cache was always disposed), so this had
+                // no observable effect either way; it matters now that a retained cache's Length needs to be
+                // accurate after a graph-decode turn too.
+                graphModel.CommitReplayedStep(cache);
             }
             return false;
         }
