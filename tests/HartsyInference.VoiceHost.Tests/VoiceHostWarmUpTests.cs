@@ -17,8 +17,9 @@ public sealed class VoiceHostWarmUpTests
     [Fact]
     public async Task TheBootWarmUpOffersTheHostsRealToolDefinitions()
     {
+        using CpuBackend device = new();
         ScriptedRounds text = new();
-        await using VoiceModelSet models = NewFakeModelSet();
+        await using VoiceModelSet models = NewFakeModelSet(device);
 
         await VoiceHostService.WarmModelsAsync(models, text, VoiceHostTools.Names, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
 
@@ -31,8 +32,9 @@ public sealed class VoiceHostWarmUpTests
     [Fact]
     public async Task OnlyTheEnabledToolsAreWarmed()
     {
+        using CpuBackend device = new();
         ScriptedRounds text = new();
-        await using VoiceModelSet models = NewFakeModelSet();
+        await using VoiceModelSet models = NewFakeModelSet(device);
         string[] enabled = [VoiceHostTools.GetTime, VoiceHostTools.Hangup];
 
         await VoiceHostService.WarmModelsAsync(models, text, enabled, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
@@ -44,8 +46,9 @@ public sealed class VoiceHostWarmUpTests
     [Fact]
     public async Task NoEnabledToolsStaysOnTheColdOneTokenPath()
     {
+        using CpuBackend device = new();
         ScriptedRounds text = new();
-        await using VoiceModelSet models = NewFakeModelSet();
+        await using VoiceModelSet models = NewFakeModelSet(device);
 
         await VoiceHostService.WarmModelsAsync(models, text, [], CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10));
 
@@ -67,11 +70,13 @@ public sealed class VoiceHostWarmUpTests
         }
     }
 
-    private static VoiceModelSet NewFakeModelSet()
+    /// <summary>Borrows <paramref name="device"/> (the caller disposes it, after the model set, which is how
+    /// <see cref="VoiceModelSet"/> itself documents the parameter).</summary>
+    private static VoiceModelSet NewFakeModelSet(CpuBackend device)
     {
         // Denoise defaults to true (int8 RNNoise); this fake model set never reaches a denoiser, so turn it off.
         VoiceAgentOptions options = new() { AudioDevice = "cpu", LlmDevice = "cpu", Denoise = false };
-        return new VoiceModelSet(options, new FakeVoiceSpeech(), new CpuBackend(),
+        return new VoiceModelSet(options, new FakeVoiceSpeech(), device,
             static () => throw new InvalidOperationException("The warm-up never touches the VAD."), createDenoiser: null);
     }
 
