@@ -19,7 +19,9 @@ namespace HartsyInference.Audio.Tests;
 /// branches where one frame is silent and the other runs alone, and the test asserts both ran.</para>
 ///
 /// <para>The synthetic-weight cases are in the unit lane, so the comparison runs without the checkpoint. The
-/// real-weight cases repeat it with the shipped model on real speech.</para></summary>
+/// real-weight cases repeat it with the shipped model on real speech. Both run at each
+/// <see cref="RnnoisePrecision"/>: at int8 the paired path quantizes two rows and runs one product over them, and
+/// each row must still get its own frame's bits.</para></summary>
 public sealed class RnnoisePairTests(ITestOutputHelper log)
 {
     private const float Int16Scale = 32768f;
@@ -51,37 +53,44 @@ public sealed class RnnoisePairTests(ITestOutputHelper log)
         RandomSizes,
     }
 
-    public static TheoryData<int, Chunking> Cases()
+    public static TheoryData<int, Chunking, RnnoisePrecision> Cases()
     {
-        TheoryData<int, Chunking> data = new();
-        foreach (int rate in new[] { 16_000, 48_000 })
-            foreach (Chunking chunking in Enum.GetValues<Chunking>())
-                data.Add(rate, chunking);
+        TheoryData<int, Chunking, RnnoisePrecision> data = new();
+        foreach (RnnoisePrecision precision in Enum.GetValues<RnnoisePrecision>())
+            foreach (int rate in new[] { 16_000, 48_000 })
+                foreach (Chunking chunking in Enum.GetValues<Chunking>())
+                    data.Add(rate, chunking, precision);
         return data;
     }
 
     [Theory]
     [MemberData(nameof(Cases))]
-    public void SyntheticWeights_ChunkedStreamMatchesOneFrameAtATime_BitForBit(int rate, Chunking chunking)
+    public void SyntheticWeights_ChunkedStreamMatchesOneFrameAtATime_BitForBit(int rate, Chunking chunking,
+        RnnoisePrecision precision)
     {
         using RnnoiseWeights weights = new();
         VoiceFrontendAllocationTests.Load(VoiceFrontendAllocationTests.RnnoiseLayout, seed: 1, weights.Load);
+        if (precision == RnnoisePrecision.Int8) VoiceFrontendAllocationTests.LoadInt8Tables(weights, seed: 11);
         AssertChunkedMatchesSingle(weights, NoiseBurstsWithGaps(rate), rate, chunking);
     }
 
     [Theory]
     [Trait("Category", "Integration")]
     [MemberData(nameof(Cases))]
-    public void RealWeights_ChunkedStreamMatchesOneFrameAtATime_BitForBit(int rate, Chunking chunking)
+    public void RealWeights_ChunkedStreamMatchesOneFrameAtATime_BitForBit(int rate, Chunking chunking,
+        RnnoisePrecision precision)
     {
         string weightsPath = RnnoiseRealSpeechTests.WeightsPath();
         string clipPath = Path.Combine(RepoRoot.Path, "tests", "python-reference", "silerovad_reference", "jfk.wav");
-        if (!RealWeightGate.Require(log.WriteLine, weightsPath, clipPath)) return;
+        string[] required = precision == RnnoisePrecision.Int8
+            ? [weightsPath, RnnoiseRealSpeechTests.Int8TablesPath(), clipPath]
+            : [weightsPath, clipPath];
+        if (!RealWeightGate.Require(log.WriteLine, required)) return;
 
         WavFile.DecodedAudio clip = WavFile.Read(clipPath);
         float[] speech = clip.ToMono();
         if (clip.SampleRate != rate) speech = Resampler.Create(clip.SampleRate, rate).Resample(speech);
-        using RnnoiseWeights weights = RnnoiseRealSpeechTests.LoadWeights(weightsPath);
+        using RnnoiseWeights weights = RnnoiseRealSpeechTests.LoadWeights(weightsPath, precision);
         AssertChunkedMatchesSingle(weights, SpeechWithNoiseAndGaps(speech, rate), rate, chunking);
     }
 
