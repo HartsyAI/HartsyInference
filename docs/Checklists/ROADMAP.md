@@ -95,11 +95,11 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] Voice session (`HartsyInference.Voice`) follow-ups: partial transcripts need a streaming recognizer
   (`PartialTranscripts` is rejected until then); after a barge-in the history keeps the generated text rather than
   what the caller heard. Design in [voice session](../Research/VOICE_AGENT_SESSION.md).
-- [x] KV reuse across turns (`perf/llm-voice-prefix-reuse`, alpha.239): opt-in prefix-KV reuse in
+- [x] KV reuse across turns (`perf/llm-voice-prefix-reuse`, alpha.239-240): opt-in prefix-KV reuse in
   `TextGenerationPipeline`/`TextService` (`TextRequest.PrefixCacheKey`, `RetainedSequence`/`RetainedSequenceStore`),
   wired into the voice session per call plus a call-start priming request. 4090 VRAM also addressed
-  (`TextRequest.CacheWeightCasts`, `ITextService.TrimMemoryPool`) but the ≤ 6 GB target is not fully met (~7.27 GB
-  measured, flat across turns) — see PR #217 for the breakdown and the two unused levers to close the rest.
+  (`TextRequest.CacheWeightCasts`, `TextRequest.PreloadRedundantWeightSplits`, `ITextService.TrimMemoryPool`) —
+  the ≤ 6 GB target is now met (5.81 GB measured, flat across turns) — see PR #217 for the breakdown.
 - [x] Phone voice host and deployment (`HartsyInference.VoiceHost`, alpha.230): PhoneLink server, one session per
   call, turn-tagged reply audio with `Flush(turnId)` on barge-in, telephony tools over the link, systemd units for the
   host and the gateway. Install and call checks: [runbook](VOICE_AGENT_VERIFICATION.md).
