@@ -29,10 +29,13 @@ internal static class LoopbackAssets
         ];
     }
 
-    /// <summary>The JFK clip as 16 kHz mono PCM16 bytes, what the softphone plays.</summary>
-    public static byte[] Jfk16kPcm()
+    /// <summary>Rate of <see cref="JfkPhonePcm"/>: the G.711 line rate, so the softphone plays it without resampling.</summary>
+    public const int PhoneRate = 8_000;
+
+    /// <summary>The JFK clip as 8 kHz mono PCM16 bytes, what the softphone plays.</summary>
+    public static byte[] JfkPhonePcm()
     {
-        float[] samples = AudioClipCodec.DecodeMono(new AudioClip { Data = File.ReadAllBytes(Jfk), Format = "wav" }, 16_000);
+        float[] samples = AudioClipCodec.DecodeMono(new AudioClip { Data = File.ReadAllBytes(Jfk), Format = "wav" }, PhoneRate);
         byte[] pcm = new byte[samples.Length * 2];
         for (int i = 0; i < samples.Length; i++)
         {

@@ -376,6 +376,9 @@ it runs the tool, while the model's goodbye is usually still being synthesized, 
 the host sends the request when that turn's reply has finished playing, then `CallEnd(Completed)`. A caller who barges
 into the goodbye keeps the call.
 
+Events: state changes, final transcripts and turn latencies go to the gateway as `Event` frames. The gateway logs every
+host event at Info, so its journal holds what callers said; treat it like a recording (see the gateway's consent note).
+
 Calls: `CallStart` with `resume=true` (the gateway re-attaching after the link dropped) gets a fresh session and
 `agent.resumeApology` spoken; a new call gets `agent.greeting` when set. `CallEnd` from the gateway ends and disposes the
 session without echoing. A lost link ends that connection's sessions (no `CallEnd`: the gateway re-announces live calls).

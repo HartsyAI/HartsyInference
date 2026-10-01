@@ -1,4 +1,3 @@
-using System.Net.Sockets;
 using HartsyInference.PhoneLink;
 using HartsyInference.Voice;
 using HartsyInference.VoiceHost.Link;
@@ -182,17 +181,15 @@ public sealed class CallLifecycleTests
     }
 
     [Fact]
-    public async Task AStaleSocketFileIsReplacedButALiveListenerIsNot()
+    public async Task AFileLeftAtTheSocketPathIsReplacedButALiveListenerIsNot()
     {
         string directory = HostRig.NewSocketDirectory();
         string path = Path.Combine(directory, "phone.sock");
         try
         {
-            using (Socket dead = new(AddressFamily.Unix, SocketType.Stream, ProtocolType.Unspecified))
-            {
-                dead.Bind(new UnixDomainSocketEndPoint(path));
-            }
-            Assert.True(File.Exists(path), "the stand-in for a killed host left no socket file.");
+            // .NET removes its own socket file on dispose, so a killed host's leftover is stood in for by a plain file;
+            // the SIGKILL loopback test covers the real one.
+            await File.WriteAllBytesAsync(path, []);
             await using (PhoneLinkServer revived = new(new PhoneLinkServerOptions { SocketPath = path }, new FakeSessionFactory()))
             {
                 revived.Start();

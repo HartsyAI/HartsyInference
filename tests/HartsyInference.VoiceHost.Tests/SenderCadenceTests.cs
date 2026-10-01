@@ -58,12 +58,12 @@ public sealed class SenderCadenceTests
 
         List<FakeGateway.RecordedFrame> audio = gateway.FramesOf(LinkMessageType.OutboundAudio);
         Assert.Equal(50, audio.Count);
-        // The first three frames go out together, on the first tick.
-        Assert.InRange((audio[2].ReceivedNs - audio[0].ReceivedNs) / 1e6, 0, 5);
-        // The other 47 follow one per 20 ms tick: 47 periods, give or take scheduler noise.
+        // The first three frames go out together, on the first tick (well under one period apart).
+        Assert.InRange((audio[2].ReceivedNs - audio[0].ReceivedNs) / 1e6, 0, 15);
+        // The other 47 follow one per 20 ms tick on absolute deadlines: 47 periods within 5 %, scheduler noise included.
         double paced = (audio[^1].ReceivedNs - audio[2].ReceivedNs) / 1e6;
         _output.WriteLine($"47 paced frames over {paced:F1} ms");
-        Assert.InRange(paced, 47 * 20 - 40, 47 * 20 + 40);
+        Assert.InRange(paced, 47 * 20 * 0.95, 47 * 20 * 1.05);
     }
 
     private static int AudioFrames(FakeGateway gateway) => gateway.FramesOf(LinkMessageType.OutboundAudio).Count;

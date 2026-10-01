@@ -55,9 +55,9 @@ internal sealed class LoopbackPhone : IDisposable
         return Agent.Call($"sip:agent@127.0.0.1:{gatewayPort}", null, null, CreateSession(), 10);
     }
 
-    /// <summary>Sends <paramref name="pcm16k"/> (16 kHz PCM16) into the call, then goes back to silence.</summary>
-    public Task SpeakAsync(byte[] pcm16k) =>
-        _source?.SendAudioFromStream(new MemoryStream(pcm16k), AudioSamplingRatesEnum.Rate16KHz)
+    /// <summary>Sends <paramref name="pcm8k"/> (8 kHz PCM16, the line rate) into the call, then goes back to silence.</summary>
+    public Task SpeakAsync(byte[] pcm8k) =>
+        _source?.SendAudioFromStream(new MemoryStream(pcm8k), AudioSamplingRatesEnum.Rate8KHz)
             ?? throw new InvalidOperationException("No call is up.");
 
     /// <summary>Received packets, oldest first.</summary>

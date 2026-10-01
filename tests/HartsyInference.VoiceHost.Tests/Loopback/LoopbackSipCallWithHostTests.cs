@@ -207,9 +207,9 @@ public sealed class LoopbackSipCallWithHostTests : IClassFixture<LoopbackHostFix
 
     private static byte[] Slice(double fromSeconds, double toSeconds)
     {
-        byte[] all = LoopbackAssets.Jfk16kPcm();
-        int from = (int)(fromSeconds * 16_000) * 2;
-        int to = Math.Min(all.Length, (int)(toSeconds * 16_000) * 2);
+        byte[] all = LoopbackAssets.JfkPhonePcm();
+        int from = (int)(fromSeconds * LoopbackAssets.PhoneRate) * 2;
+        int to = Math.Min(all.Length, (int)(toSeconds * LoopbackAssets.PhoneRate) * 2);
         return all[from..to];
     }
 }
