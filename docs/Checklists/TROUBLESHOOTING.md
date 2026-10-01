@@ -993,16 +993,16 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   arms (`numerics.highPrecisionGemm=true`, `numerics.noTf32=true`, `numerics.audioConvCudnn=false`) the two builds
   were waveform-identical (correlation 1.000000). Measure the model's own TF32-vs-F32 band first; a floor inside it
   cannot tell a regression from rounding.
-- **Every new sentence length paid about 39 cuDNN heuristic queries, 60-80 ms on the 3060, so new text ran slower
-  than a repeat.** cuDNN plans are shape-exact with the time extent included, and building one is ~97 % heuristic
-  query (~2 ms; finalize ~0.01 ms; no runtime-compiled engines). A per-shape plan cache only helps repeats, and a call
-  rarely repeats a sentence. Since alpha.232 a 1D conv takes its engine configuration (engine and knobs) from its conv
-  family's power-of-two length bucket, chosen by the heuristic run at the bucket's own length, and a new length only
-  finalizes a plan from it (`numerics.audioConvLengthBuckets`). The choice depends on the length alone, so the audio
-  does not depend on which lengths came first; a configuration that does not finalize for a length falls back to that
-  length's own heuristic. Measure before guessing: per-phase plan counters (`CudaBackend.CudnnConvPlanStats`) found
-  it, while GPU clocks (P2 throughout), the per-job pool trim and cuBLASLt planning (0.3 ms) were ruled out by
-  samples and counters.
+- **Every new sentence length paid about 39 cuDNN heuristic queries, 60-80 ms on the 3060, so new text ran slower than a
+  repeat.** cuDNN plans are shape-exact with the time extent included, and building one is ~97 % heuristic query (~2 ms;
+  finalize ~0.01 ms; no runtime-compiled engines). A per-shape plan cache only helps repeats, and a call rarely repeats
+  a sentence. Since alpha.232 a 1D conv takes its engine configuration (engine and knobs) from its conv family's
+  power-of-two length bucket, chosen by the heuristic run at the bucket's own length, and a new length only finalizes a
+  plan from it; `numerics.audioConvLengthBuckets=false` is the kill switch back to the per-length heuristic. The choice
+  depends on the length alone, so the audio does not depend on which lengths came first; a configuration that does not
+  finalize for a length falls back to that length's own heuristic. Measure before guessing: per-phase plan counters
+  (`CudaBackend.CudnnConvPlanStats`) found it, while GPU clocks (P2 throughout), the per-job pool trim and cuBLASLt
+  planning (0.3 ms) were ruled out by samples and counters.
 - **A 2-5 s idle gap made host-bound synthesis 20-35 ms slower while the GPU stayed in P2 at full clock.** Kokoro's
   plan heuristics, NSF DSP and kernel launches run on the host, and the `schedutil` governor plus C6 had clocked the
   cores down during the gap (the CPU-only heuristic time rose from 61 to 73 ms per sentence with it). Sample host
