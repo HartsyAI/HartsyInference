@@ -24,7 +24,12 @@ namespace HartsyInference.Audio.Models.Denoise;
 ///
 /// <para>Holds streaming state (conv history, three GRU hidden vectors) and <b>borrows</b> its
 /// <see cref="RnnoiseWeights"/>; one instance per stream, not thread-safe. Disposing this leaves the weights
-/// alone, so they outlive any number of streams built on them.</para></summary>
+/// alone, so they outlive any number of streams built on them.</para>
+///
+/// <para>At <see cref="RnnoisePrecision.Int8"/>, conv2 and the GRUs run as upstream's default C build runs them: each
+/// input is encoded to uint8 (<see cref="IBackend.QuantizeActivationsU8"/>) and multiplied by the int8 table
+/// (<see cref="IBackend.LinearI8U8"/>) with the SU bias, and the recurrent products add their float diagonal on the F32
+/// hidden state. conv1 and the two heads stay F32, as there. Everything else, the gate math included, is shared.</para></summary>
 public sealed class RnnoiseModel : IDisposable
 {
     /// <summary>Feature vector width — see <see cref="RnnoiseBands.FeatureCount"/>.</summary>
@@ -83,6 +88,10 @@ public sealed class RnnoiseModel : IDisposable
     private readonly Tensor _gains2 = new(new TensorShape(2, OutputDim), DType.F32);
     private readonly Tensor _vadLogit2 = new(new TensorShape(2, 1), DType.F32);
     private readonly Tensor _vadOut2 = new(new TensorShape(2, 1), DType.F32);
+
+    // uint8 codes of up to two rows of a product's input, at Int8 only. Every int8 product here takes 384 inputs.
+    private readonly Tensor? _codes;
+    private readonly Tensor? _codesRow;
     private int _disposed;
 
     /// <summary>Builds a stream over shared <paramref name="weights"/>, which must already be loaded and which
@@ -100,6 +109,11 @@ public sealed class RnnoiseModel : IDisposable
         _hidden = [.. Enumerable.Range(0, 3).Select(_ => new Tensor(new TensorShape(1, GruSize), DType.F32))];
         _hiddenNext = [.. Enumerable.Range(0, 3).Select(_ => new Tensor(new TensorShape(1, GruSize), DType.F32))];
         _gi2Rows = [_gi2.SliceRows(0, 1), _gi2.SliceRows(1, 1)];
+        if (weights.Precision == RnnoisePrecision.Int8)
+        {
+            _codes = new Tensor(new TensorShape(2, GruSize), DType.U8);
+            _codesRow = _codes.SliceRows(0, 1);
+        }
         Reset();
     }
 
@@ -122,7 +136,7 @@ public sealed class RnnoiseModel : IDisposable
         backend.Tanh(_conv1Act, _conv1Out);
 
         ShiftIn(_conv2Input.AsSpan<float>(), _conv1Act.AsSpan<float>(), CondSize);
-        backend.Linear(_conv2Out, _conv2Window, _conv2Matrix, _weights.Conv2Bias);
+        Conv2(backend, _conv2Out, _conv2Window);
         backend.Tanh(_conv2Act, _conv2Out);
 
         Span<float> cat = _cat.AsSpan<float>();
@@ -132,8 +146,8 @@ public sealed class RnnoiseModel : IDisposable
         cat[..GruSize].CopyTo(gruInput);
         for (int layer = 0; layer < 3; layer++)
         {
-            backend.Linear(_gi, _gruInput, _weights.GruWeightIh[layer], _weights.GruBiasIh[layer]);
-            backend.Linear(_gh, _hidden[layer], _weights.GruWeightHh[layer], _weights.GruBiasHh[layer]);
+            GruInputProjection(backend, layer, _gi, _gruInput);
+            GruRecurrentProjection(backend, layer);
             GruOps.GateAndUpdate(_gi, _gh, _hidden[layer], _hiddenNext[layer], 1, GruSize);
             (_hidden[layer], _hiddenNext[layer]) = (_hiddenNext[layer], _hidden[layer]);
             Span<float> h = _hidden[layer].AsSpan<float>();
@@ -193,7 +207,7 @@ public sealed class RnnoiseModel : IDisposable
         conv2State.CopyTo(conv2Windows[..conv2Width]);
         ShiftIn(conv2State, conv1Act[CondSize..], CondSize);
         conv2State.CopyTo(conv2Windows[conv2Width..]);
-        backend.Linear(_conv2Out2, _conv2Windows, _conv2Matrix, _weights.Conv2Bias);
+        Conv2(backend, _conv2Out2, _conv2Windows);
         backend.Tanh(_conv2Act2, _conv2Out2);
 
         Span<float> cat = _cat2.AsSpan<float>();
@@ -208,10 +222,10 @@ public sealed class RnnoiseModel : IDisposable
         for (int layer = 0; layer < 3; layer++)
         {
             // Both frames' input projections in one pass over W; the recurrence then runs a frame at a time.
-            backend.Linear(_gi2, _gruInput2, _weights.GruWeightIh[layer], _weights.GruBiasIh[layer]);
+            GruInputProjection(backend, layer, _gi2, _gruInput2);
             for (int frame = 0; frame < 2; frame++)
             {
-                backend.Linear(_gh, _hidden[layer], _weights.GruWeightHh[layer], _weights.GruBiasHh[layer]);
+                GruRecurrentProjection(backend, layer);
                 GruOps.GateAndUpdate(_gi2Rows[frame], _gh, _hidden[layer], _hiddenNext[layer], 1, GruSize);
                 (_hidden[layer], _hiddenNext[layer]) = (_hiddenNext[layer], _hidden[layer]);
                 Span<float> h = _hidden[layer].AsSpan<float>();
@@ -233,6 +247,52 @@ public sealed class RnnoiseModel : IDisposable
         firstSpeech = speech[0];
         secondSpeech = speech[1];
     }
+
+    /// <summary>conv2 on one or two flattened windows (<paramref name="windows"/>, one per row): F32, or the int8 table
+    /// on their uint8 codes.</summary>
+    private void Conv2(IBackend backend, Tensor output, Tensor windows)
+    {
+        if (_codes is null)
+        {
+            backend.Linear(output, windows, _conv2Matrix, _weights.Conv2Bias);
+            return;
+        }
+        Tensor codes = CodesFor(windows);
+        backend.QuantizeActivationsU8(codes, windows);
+        backend.LinearI8U8(output, codes, _weights.Conv2Int8!, _weights.Conv2Scale!, _weights.Conv2Subias!);
+    }
+
+    /// <summary>A GRU's input projection <c>W·x + b</c> for one or two rows of <paramref name="input"/>.</summary>
+    private void GruInputProjection(IBackend backend, int layer, Tensor output, Tensor input)
+    {
+        if (_codes is null)
+        {
+            backend.Linear(output, input, _weights.GruWeightIh[layer], _weights.GruBiasIh[layer]);
+            return;
+        }
+        Tensor codes = CodesFor(input);
+        backend.QuantizeActivationsU8(codes, input);
+        backend.LinearI8U8(output, codes, _weights.GruInputInt8[layer]!, _weights.GruInputScale[layer]!,
+            _weights.GruInputSubias[layer]!);
+    }
+
+    /// <summary>A GRU's recurrent projection <c>U·h + b</c> of its current hidden state, into <c>_gh</c>. At int8 the
+    /// diagonal of <c>U</c> is applied in float to the F32 state, as upstream keeps it.</summary>
+    private void GruRecurrentProjection(IBackend backend, int layer)
+    {
+        Tensor hidden = _hidden[layer];
+        if (_codes is null)
+        {
+            backend.Linear(_gh, hidden, _weights.GruWeightHh[layer], _weights.GruBiasHh[layer]);
+            return;
+        }
+        backend.QuantizeActivationsU8(_codesRow!, hidden);
+        backend.LinearI8U8(_gh, _codesRow!, _weights.GruRecurrentInt8[layer]!, _weights.GruRecurrentScale[layer]!,
+            _weights.GruRecurrentSubias[layer]!, _weights.GruRecurrentDiag[layer], hidden);
+    }
+
+    /// <summary>The code buffer rows for an input of one or two rows.</summary>
+    private Tensor CodesFor(Tensor input) => input.Shape[0] == 1 ? _codesRow! : _codes!;
 
     /// <summary>Slides a channels-first <c>[1, C, 3]</c> conv window one frame left and writes the newest frame
     /// into the last slot. Channels-first means each channel's three timesteps are contiguous, so the shift is
@@ -282,5 +342,6 @@ public sealed class RnnoiseModel : IDisposable
         yield return _conv2Windows; yield return _conv2Out2; yield return _conv2Act2;
         yield return _cat2; yield return _gruInput2; yield return _gi2;
         yield return _gainLogits2; yield return _gains2; yield return _vadLogit2; yield return _vadOut2;
+        yield return _codes;
     }
 }
