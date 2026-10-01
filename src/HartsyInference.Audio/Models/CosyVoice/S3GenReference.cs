@@ -15,7 +15,8 @@ public static class S3GenReference
     /// <summary>Tokenizes a 16 kHz reference into 25 Hz S3 speech tokens via the Whisper-style 128-bin log-mel front-end (center=True → reflect-pad n_fft/2).</summary>
     public static int[] SpeechTokens(IBackend backend, S3Tokenizer s3, ReadOnlySpan<float> audio16k)
     {
-        MelSpectrogramExtractor s3Mel = new(MelSpectrogramExtractor.WhisperConfig(128));
+        // The pre-parity 512-point layout keeps CosyVoice 2's and Chatterbox's tokens unchanged until they get their own check.
+        MelSpectrogramExtractor s3Mel = new(MelSpectrogramExtractor.WhisperLegacyPow2Config(128));
         float[] centered = ReflectPad(audio16k, s3Mel.Configuration.NFft / 2);
         using Tensor feat = ChannelMajorTensor(s3Mel.Compute(centered));            // [1, 128, T]
         return s3.Forward(backend, feat);

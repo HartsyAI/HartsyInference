@@ -20,6 +20,7 @@ public sealed class FftPlanTests
     [InlineData(32)]
     [InlineData(60)]
     [InlineData(240)]
+    [InlineData(400)]
     [InlineData(480)]
     [InlineData(512)]
     [InlineData(960)]
@@ -128,6 +129,28 @@ public sealed class FftPlanTests
         plan.Forward(x, new float[N], fullRe, fullIm);
         Assert.Equal(fullRe[..(N / 2 + 1)], re);
         Assert.Equal(fullIm[..(N / 2 + 1)], im);
+    }
+
+    /// <summary>The overload that takes the caller's work buffer is the same transform bit for bit, whatever the
+    /// buffer held before: it is what lets parallel STFT blocks share one plan.</summary>
+    [Theory]
+    [InlineData(400)]
+    [InlineData(960)]
+    public void ForwardReal_InACallerWorkBuffer_IsBitIdentical(int n)
+    {
+        Random rng = new(n + 5);
+        float[] x = new float[n];
+        for (int i = 0; i < n; i++) x[i] = (float)(rng.NextDouble() * 2 - 1);
+        FftPlan plan = new(n);
+        float[] re = new float[n / 2 + 1], im = new float[n / 2 + 1];
+        plan.ForwardReal(x, re, im);
+        float[] work = new float[plan.WorkLength + 3];
+        Array.Fill(work, float.NaN);
+        float[] callerRe = new float[n / 2 + 1], callerIm = new float[n / 2 + 1];
+        plan.ForwardReal(x, callerRe, callerIm, work);
+        Assert.Equal(re.Select(BitConverter.SingleToInt32Bits), callerRe.Select(BitConverter.SingleToInt32Bits));
+        Assert.Equal(im.Select(BitConverter.SingleToInt32Bits), callerIm.Select(BitConverter.SingleToInt32Bits));
+        Assert.Throws<ArgumentException>(() => plan.ForwardReal(x, callerRe, callerIm, new float[plan.WorkLength - 1]));
     }
 
     /// <summary>Same input, same answer: the work buffer is fully overwritten each call, so nothing leaks from

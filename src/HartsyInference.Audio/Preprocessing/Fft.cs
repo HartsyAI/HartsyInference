@@ -7,9 +7,10 @@ namespace HartsyInference.Audio.Preprocessing;
 /// on the hot path: the twiddle table is computed once per size and cached on the
 /// static type, and the in-place transform reuses caller-provided real/imag buffers.
 ///
-/// <para>Whisper uses <c>n_fft=400</c>, which we zero-pad to 512 before each STFT
-/// frame. Kokoro / StyleTTS use <c>n_fft=2048</c>. Both sizes get their twiddle
-/// tables built on first use and held for the lifetime of the process.</para>
+/// <para>Mel presets without an exact FFT size zero-pad their window to the next power of
+/// two (Kokoro / StyleTTS use <c>n_fft=2048</c>); Whisper's exact 400-point STFT runs
+/// through <see cref="FftPlan"/> instead. Each size gets its twiddle table built on first
+/// use and held for the lifetime of the process.</para>
 ///
 /// <para>This is the same algorithm any first-year DSP textbook would describe; what
 /// matters is that the layout and rounding match

@@ -333,6 +333,16 @@ internal static partial class CudaDriverApi
     /// <summary>Memory pool attribute: amount of reserved memory in bytes to hold onto before trying to release back to the OS on the next sync. Value type is <c>cuuint64_t</c> (a 64-bit unsigned integer). Set to 0 to be aggressive.</summary>
     internal const int CU_MEMPOOL_ATTR_RELEASE_THRESHOLD = 4;
 
+    /// <summary>Reads a memory pool attribute into <paramref name="value"/> (a <c>cuuint64_t</c> for the byte counters).</summary>
+    [LibraryImport(LibName)]
+    internal static unsafe partial int cuMemPoolGetAttribute(nint pool, int attr, void* value);
+
+    /// <summary>Memory pool attribute: bytes the pool currently holds from the driver (<c>cuuint64_t</c>, read-only).</summary>
+    internal const int CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT = 5;
+
+    /// <summary>Memory pool attribute: bytes currently handed out to allocations (<c>cuuint64_t</c>, read-only).</summary>
+    internal const int CU_MEMPOOL_ATTR_USED_MEM_CURRENT = 7;
+
     // ── Error Handling ──────────────────────────────────────────────────
 
     [LibraryImport(LibName)]

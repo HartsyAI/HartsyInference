@@ -41,6 +41,7 @@ public sealed class LowRankAdjunctCoverageTests
         ["LinearHeadGated"] = AdjunctCoverage.Applies,
         ["LinearMulti"] = AdjunctCoverage.Applies,
         ["QuantizedMatMul"] = AdjunctCoverage.Applies,
+        ["LinearI8U8"] = AdjunctCoverage.Refuses,
         ["MatMul"] = AdjunctCoverage.Refuses,
         ["BatchedMatMul"] = AdjunctCoverage.Refuses,
         ["Conv2D"] = AdjunctCoverage.Refuses,
@@ -185,6 +186,21 @@ public sealed class LowRankAdjunctCoverageTests
         // the weight cannot reach a GEMM here at all.
         Assert.Throws<NotSupportedException>(
             () => harness.Backend.QuantizedMatMul(output, harness.Input, harness.Patched, null));
+    }
+
+    /// <summary>An int8 table cannot carry a LoRA: the product reads only its packed bytes, so an adjunct would be
+    /// dropped without a word. It is refused by name instead.</summary>
+    [Fact]
+    public void LinearI8U8_RefusesAnAdjunctWeightByName()
+    {
+        using Harness harness = new Harness();
+        using Tensor codes = new Tensor(new TensorShape(Batch, Cols), DType.U8);
+        using Tensor scale = new Tensor(new TensorShape(Rows), DType.F32);
+        using Tensor output = new Tensor(new TensorShape(Batch, Rows), DType.F32);
+        NotSupportedException error = Assert.Throws<NotSupportedException>(
+            () => harness.Backend.LinearI8U8(output, codes, harness.Patched, scale, null));
+        Assert.Contains("LinearI8U8", error.Message);
+        Assert.Contains("LoRA adjunct", error.Message);
     }
 
     [Fact]

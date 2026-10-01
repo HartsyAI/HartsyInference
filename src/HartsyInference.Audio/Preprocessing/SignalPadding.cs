@@ -14,9 +14,9 @@ public static class SignalPadding
         return outp;
     }
 
-    // Folds an out-of-range index back into [0, len) by mirroring about both edges without repeating them,
-    // so a pad wider than the signal keeps reflecting periodically instead of throwing.
-    private static int ReflectIndex(int j, int len)
+    /// <summary>The source index <see cref="Reflect"/> reads for position <paramref name="j"/> relative to the signal
+    /// start: mirrored about both edges without repeating them, periodically when a pad is wider than the signal.</summary>
+    internal static int ReflectIndex(int j, int len)
     {
         if (len <= 1) return 0;
         int period = 2 * (len - 1);

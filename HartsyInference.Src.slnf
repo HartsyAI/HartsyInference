@@ -19,6 +19,8 @@
       "src\\HartsyInference.Tools\\HartsyInference.Tools.csproj",
       "src\\HartsyInference.Video\\HartsyInference.Video.csproj",
       "src\\HartsyInference.Vision\\HartsyInference.Vision.csproj",
+      "src\\HartsyInference.Voice\\HartsyInference.Voice.csproj",
+      "src\\HartsyInference.VoiceHost\\HartsyInference.VoiceHost.csproj",
       "src\\HartsyInference.Vulkan\\HartsyInference.Vulkan.csproj",
       "src\\HartsyInference.World\\HartsyInference.World.csproj"
     ]

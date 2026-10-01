@@ -138,34 +138,43 @@ public sealed class WakeModelSet : IDisposable
     /// <summary>Whether noise suppression is available, i.e. <see cref="LoadDenoiser"/> found weights.</summary>
     public bool DenoiseAvailable => _denoiseWeights?.IsLoaded == true;
 
-    /// <summary>Loads the RNNoise weights from <c>{ModelRoot}/denoise</c>. Returns false and logs when they are
-    /// absent — a missing optional model must not stop the listener from hearing anything, so the caller runs
-    /// without suppression rather than failing to start. <see cref="RnnoiseInstaller"/> puts them there.</summary>
-    public bool LoadDenoiser()
+    /// <summary>The precision the denoiser loaded at, or null without one. The wake stack itself always calls the
+    /// no-argument <see cref="LoadDenoiser()"/>, which is Float; a caller sharing this loader for another purpose
+    /// (the voice front end) can ask <see cref="LoadDenoiser(RnnoisePrecision)"/> for int8 instead.</summary>
+    public RnnoisePrecision? DenoisePrecision => _denoiseWeights?.Precision;
+
+    /// <summary>Loads the RNNoise weights from <c>{ModelRoot}/denoise</c> at <see cref="RnnoisePrecision.Float"/>,
+    /// what the wake stack always runs. Returns false and logs when they are absent — a missing optional model must
+    /// not stop the listener from hearing anything, so the caller runs without suppression rather than failing to
+    /// start. <see cref="RnnoiseInstaller"/> puts them there.</summary>
+    public bool LoadDenoiser() => LoadDenoiser(RnnoisePrecision.Float);
+
+    /// <summary>Loads the RNNoise weights from <c>{ModelRoot}/denoise</c> at <paramref name="precision"/>. An
+    /// overload rather than a default parameter: this type ships in the Engine NuGet package, where a defaulted
+    /// parameter is a binary break for a caller built against an older version. Same soft-fail contract as
+    /// <see cref="LoadDenoiser()"/>: returns false and logs rather than throwing, so a caller that must not run
+    /// without suppression (the voice front end, at <see cref="RnnoisePrecision.Int8"/>) turns the false into a hard
+    /// failure itself.</summary>
+    public bool LoadDenoiser(RnnoisePrecision precision)
     {
         string path = RnnoiseInstaller.WeightsPath(ModelRoot);
         if (!File.Exists(path))
         {
-            Logs.Warning($"[Audio][Wake] Noise suppression is enabled but no denoiser was found at '{path}'. "
-                + "Listening without it. Install it with RnnoiseInstaller, which fetches xiph's model and converts it.");
+            // Caller-neutral: the wake stack listens without it on false, but a caller with a stricter contract
+            // (the voice front end) turns this into a hard failure instead, so this must not claim either outcome.
+            Logs.Warning($"[Audio][Wake] No denoiser was found at '{path}'. "
+                + "Install it with RnnoiseInstaller, which fetches xiph's model and converts it.");
             return false;
         }
-        RnnoiseWeights weights = new();
         try
         {
-            using (SafeTensorsLoader loader = new())
-            {
-                loader.Load(path);
-                weights.Load(loader.GetAllTensors());
-            }
-            _denoiseWeights = weights;
-            Logs.Info($"[Audio][Wake] Noise suppression enabled (weights from '{path}').");
+            _denoiseWeights = RnnoiseWeights.LoadFile(path, precision);
+            Logs.Info($"[Audio][Wake] Noise suppression enabled at {precision} (weights from '{path}').");
             return true;
         }
         catch (Exception ex)
         {
-            weights.Dispose();
-            Logs.Error($"[Audio][Wake] Failed to load the denoiser from '{path}'; listening without it.", ex);
+            Logs.Error($"[Audio][Wake] Failed to load the denoiser from '{path}' at {precision}.", ex);
             return false;
         }
     }

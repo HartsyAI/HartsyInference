@@ -32,6 +32,9 @@ namespace HartsyInference.Audio.Pipelines;
 /// <c>WhisperDecoder</c> runs fused SDPA without surfacing attention weights.</para></summary>
 public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 {
+    /// <summary>Whisper's input window: 30 s at 16 kHz.</summary>
+    internal const int WindowSamples = 30 * 16_000;
+
     private readonly WhisperConfig _cfg;
     private readonly WhisperEncoder _encoder;
     private readonly WhisperDecoder _decoder;
@@ -178,22 +181,25 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             mono16k = resampler.Resample(audio);
         }
 
-        // Zero-pad / clip to exactly 30 s (480 000 samples).
-        const int n30s = 30 * 16_000;
-        int copyLen = Math.Min(mono16k.Length, n30s);
-        int frames = _melExtractor.OutputFrames(n30s);
+        int frames = _melExtractor.OutputFrames(WindowSamples);
         Tensor mel = new(new TensorShape(1, _cfg.NumMelBins, frames), DType.F32);
         try
         {
-            _melExtractor.ComputeZeroPadded(mono16k.AsSpan(0, copyLen), n30s, mel.AsSpan<float>());
+            ComputeWindowMel(_melExtractor, mono16k, mel.AsSpan<float>());
         }
         catch
         {
             mel.Dispose();
             throw;
         }
-        return (mel, copyLen / 16_000.0);
+        return (mel, Math.Min(mono16k.Length, WindowSamples) / 16_000.0);
     }
+
+    /// <summary>The <c>[n_mels, 3000]</c> log-mel of the first 30 s of <paramref name="mono16k"/>, zero-padded to 30 s
+    /// first and only then reflect-padded at its edges, as HF's <c>WhisperFeatureExtractor</c> truncates and pads before
+    /// its STFT.</summary>
+    internal static void ComputeWindowMel(MelSpectrogramExtractor extractor, ReadOnlySpan<float> mono16k, Span<float> output)
+        => extractor.ComputeZeroPadded(mono16k[..Math.Min(mono16k.Length, WindowSamples)], WindowSamples, output);
 
     /// <summary>Lower-level entry point that takes a pre-computed mel spectrogram of
     /// shape <c>[n_mels, n_frames]</c>. Exposed for tests that want to bypass the audio

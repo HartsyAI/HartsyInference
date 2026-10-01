@@ -92,6 +92,14 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
   (`TextStreamPump`, alpha.220). Buffering is unbounded by decision: the sink runs on the decode thread inside
   the slot lock and device gate, so a blocking writer would stall decode while holding the GPU.
 - [ ] SSM recurrence profiling and long-context/quantized quality checks; per-architecture gaps are in LLM status.
+- [ ] Voice session (`HartsyInference.Voice`) follow-ups: partial transcripts need a streaming recognizer
+  (`PartialTranscripts` is rejected until then); after a barge-in the history keeps the generated text rather than
+  what the caller heard; KV reuse across turns. Design in [voice session](../Research/VOICE_AGENT_SESSION.md).
+- [x] Phone voice host and deployment (`HartsyInference.VoiceHost`, alpha.230): PhoneLink server, one session per
+  call, turn-tagged reply audio with `Flush(turnId)` on barge-in, telephony tools over the link, systemd units for the
+  host and the gateway. Install and call checks: [runbook](VOICE_AGENT_VERIFICATION.md).
+- [ ] Voice host follow-ups: per-call instructions for outbound calls (why the agent is calling); a host-side metrics
+  endpoint (per-call summaries are log lines today).
 
 ## 6. Diffusion / acceleration
 

@@ -41,6 +41,14 @@ public sealed class RnnoiseParityTests(ITestOutputHelper log)
     private static string? WeightsPath => Environment.GetEnvironmentVariable("HARTSYINFERENCE_RNNOISE_WEIGHTS");
     private static string? RefDir => Environment.GetEnvironmentVariable("HARTSYINFERENCE_RNNOISE_REF_DIR");
 
+    /// <summary>Output of upstream's default build, whose conv2 and GRUs run on int8: the reference for
+    /// <see cref="RnnoisePrecision.Int8"/>. Same file names as <see cref="RefDir"/>, from a stock <c>./configure</c>
+    /// build of the same tree.</summary>
+    private static string? Int8RefDir => Environment.GetEnvironmentVariable("HARTSYINFERENCE_RNNOISE_INT8_REF_DIR");
+
+    /// <summary>The int8 tables; by default <see cref="RnnoiseInt8Tables.FileName"/> beside the weights.</summary>
+    private static string? Int8TablesPath => Environment.GetEnvironmentVariable("HARTSYINFERENCE_RNNOISE_INT8_TABLES");
+
     private static float[] ReadS16(string path)
     {
         byte[] raw = File.ReadAllBytes(path);
@@ -57,19 +65,53 @@ public sealed class RnnoiseParityTests(ITestOutputHelper log)
         string? weights = WeightsPath;
         string? dir = RefDir;
         if (weights is null || dir is null) return;   // tier-lint: guarded
-        string inputPath = Path.Combine(dir, "input48k.raw");
-        string referencePath = Path.Combine(dir, "reference48k.raw");
-        if (!File.Exists(weights) || !File.Exists(inputPath) || !File.Exists(referencePath)) return;
+        if (!File.Exists(weights) || !HasFixture(dir)) return;
 
-        float[] input = ReadS16(inputPath);
-        float[] reference = ReadS16(referencePath);
+        using RnnoiseWeights shared = RnnoiseWeights.LoadFile(weights);
+        CompareWithReference(shared, dir, "F32 port vs upstream's float build");
+    }
 
-        using SafeTensorsLoader loader = new SafeTensorsLoader();
-        loader.Load(weights);
-        Dictionary<string, Tensor> tensors = loader.GetAllTensors();
-        using RnnoiseWeights shared = new RnnoiseWeights();
-        shared.Load(tensors);
-        foreach (Tensor t in tensors.Values) t.Dispose();
+    /// <summary>The int8 port against upstream's default (int8) build. Their int8 products are the same exact sums
+    /// of the same tables and codes, so what remains is what separates the F32 port from upstream's float build:
+    /// conv1 and the heads sum in a different order, the activations are exact here where upstream approximates tanh
+    /// and sigmoid, and the front end (FFT scaling, pitch search) differs as described above. A slightly different
+    /// activation can move a uint8 code by one step, so the int8 path cannot be closer than that.</summary>
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void Denoiser_Int8_MatchesUpstreamsDefaultBuild_OnRealSpeech()
+    {
+        string? weights = WeightsPath;
+        string? dir = Int8RefDir;
+        if (weights is null || dir is null) return;   // tier-lint: guarded
+        if (!File.Exists(weights) || !HasFixture(dir)) return;
+        string tables = Int8TablesPath
+            ?? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(weights))!, RnnoiseInt8Tables.FileName);
+        if (!File.Exists(tables)) return;
+
+        using RnnoiseWeights shared = RnnoiseWeights.LoadFile(weights, RnnoisePrecision.Int8, tables);
+        Assert.Equal(RnnoisePrecision.Int8, shared.Precision);
+        CompareWithReference(shared, dir, "int8 port vs upstream's default (int8) build");
+
+        // How far apart upstream's own two builds are, on the same input, for scale.
+        if (RefDir is string floatDir && HasFixture(floatDir)
+            && File.ReadAllBytes(Path.Combine(floatDir, "input48k.raw")).AsSpan()
+                .SequenceEqual(File.ReadAllBytes(Path.Combine(dir, "input48k.raw"))))
+        {
+            float[] floatBuild = ReadS16(Path.Combine(floatDir, "reference48k.raw"));
+            float[] int8Build = ReadS16(Path.Combine(dir, "reference48k.raw"));
+            (double median, double p99, double max) = FrameErrors(floatBuild, 0, int8Build);
+            log.WriteLine($"for scale, upstream's float build vs its int8 build: per-frame error median {median:P3}, "
+                + $"p99 {p99:P2}, max {max:P2}");
+        }
+    }
+
+    private static bool HasFixture(string dir) =>
+        File.Exists(Path.Combine(dir, "input48k.raw")) && File.Exists(Path.Combine(dir, "reference48k.raw"));
+
+    private void CompareWithReference(RnnoiseWeights shared, string dir, string label)
+    {
+        float[] input = ReadS16(Path.Combine(dir, "input48k.raw"));
+        float[] reference = ReadS16(Path.Combine(dir, "reference48k.raw"));
         using IBackend backend = new CpuBackend();
         using RnnoiseDenoiser denoiser = new RnnoiseDenoiser(shared);
 
@@ -82,19 +124,34 @@ public sealed class RnnoiseParityTests(ITestOutputHelper log)
         int count = Math.Min(reference.Length, actual.Length - Frame);
         Assert.True(count > 48_000, $"need at least a second of reference audio, got {count} samples");
 
-        double sumSqRef = 0, sumSqOut = 0;
-        for (int i = 0; i < count; i++)
-        {
-            sumSqRef += (double)reference[i] * reference[i];
-            sumSqOut += (double)actual[i + Frame] * actual[i + Frame];
-        }
-        double rmsRef = Math.Sqrt(sumSqRef / count);
-        double rmsOut = Math.Sqrt(sumSqOut / count);
+        double rmsRef = Rms(reference, 0, count);
+        double rmsOut = Rms(actual, Frame, count);
 
         // Same amount of noise removed, to within a couple of percent.
         Assert.True(Math.Abs(rmsOut - rmsRef) / rmsRef < 0.05,
             $"output RMS {rmsOut:F1} differs from reference {rmsRef:F1} by more than 5%");
 
+        (double median, double p99, double max) = FrameErrors(actual, Frame, reference);
+        log.WriteLine($"{label}: {count / Frame} frames, RMS out {rmsOut:F1} vs reference {rmsRef:F1}; per-frame error "
+            + $"median {median:P3}, p99 {p99:P2}, max {max:P2}");
+
+        Assert.True(median < 0.01, $"median per-frame error {median:P2} exceeds 1% of signal RMS");
+        Assert.True(p99 < 0.25, $"99th-percentile per-frame error {p99:P2} exceeds 25% of signal RMS");
+    }
+
+    private static double Rms(float[] x, int offset, int count)
+    {
+        double sum = 0;
+        for (int i = 0; i < count; i++) sum += (double)x[offset + i] * x[offset + i];
+        return Math.Sqrt(sum / count);
+    }
+
+    /// <summary>Per-frame RMS difference between <paramref name="actual"/> (from <paramref name="offset"/>) and
+    /// <paramref name="reference"/>, normalized by the reference clip's RMS so silent frames do not divide by ~0.</summary>
+    private static (double Median, double P99, double Max) FrameErrors(float[] actual, int offset, float[] reference)
+    {
+        int count = Math.Min(reference.Length, actual.Length - offset);
+        double rmsRef = Rms(reference, 0, count);
         int frameCount = count / Frame;
         double[] frameError = new double[frameCount];
         for (int f = 0; f < frameCount; f++)
@@ -102,21 +159,13 @@ public sealed class RnnoiseParityTests(ITestOutputHelper log)
             double sum = 0;
             for (int i = 0; i < Frame; i++)
             {
-                double d = actual[f * Frame + Frame + i] - reference[f * Frame + i];
+                double d = actual[offset + f * Frame + i] - reference[f * Frame + i];
                 sum += d * d;
             }
-            // Normalized by the whole clip's RMS, so silent frames don't divide by ~0.
             frameError[f] = Math.Sqrt(sum / Frame) / rmsRef;
         }
         Array.Sort(frameError);
-        double median = frameError[frameCount / 2];
-        double p99 = frameError[(int)(frameCount * 0.99)];
-        int over5 = frameError.Count(e => e > 0.05);
-        log.WriteLine($"{frameCount} frames, RMS out {rmsOut:F1} vs reference {rmsRef:F1}; per-frame error median "
-            + $"{median:P3}, p99 {p99:P2}, max {frameError[^1]:P2}, {over5} frames above 5%");
-
-        Assert.True(median < 0.01, $"median per-frame error {median:P2} exceeds 1% of signal RMS");
-        Assert.True(p99 < 0.25, $"99th-percentile per-frame error {p99:P2} exceeds 25% of signal RMS");
+        return (frameError[frameCount / 2], frameError[(int)(frameCount * 0.99)], frameError[^1]);
     }
 
     /// <summary>Guards the input-scale contract independently of the reference waveform. At ±1 scale every frame

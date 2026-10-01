@@ -46,7 +46,6 @@ public sealed class SharedBlockRegressionTests
     private const string OutDirEnvVar = "HARTSY_SHARED_BLOCK_OUT_DIR";
     private const string RefDirEnvVar = "HARTSY_SHARED_BLOCK_REF_DIR";
     private const string ExactEnvVar = "HARTSY_SHARED_BLOCK_EXACT";
-    private const string RequiredDeviceSubstring = "3060";
     private const int WhisperRate = 16_000;
     private const string WhisperTiny = "openai/whisper-tiny";
     private const string WhisperMedium = "openai/whisper-medium";
@@ -80,7 +79,8 @@ public sealed class SharedBlockRegressionTests
         }
         string models = Environment.GetEnvironmentVariable(ModelsEnvVar) ?? "styletts2,cosyvoice2";
         string jfk = Path.Combine(RepoRoot.Path, "tests", "python-reference", "silerovad_reference", "jfk.wav");
-        if (!RealWeightGate.Require(_out.WriteLine, WhisperFiles(WhisperTiny).Concat(WhisperFiles(WhisperMedium)).Concat([jfk]).ToArray()))
+        if (!RealWeightGate.Require(_out.WriteLine,
+                GpuBenchSupport.WhisperFiles(WhisperTiny).Concat(GpuBenchSupport.WhisperFiles(WhisperMedium)).Concat([jfk]).ToArray()))
         {
             return;
         }
@@ -101,7 +101,7 @@ public sealed class SharedBlockRegressionTests
         }
         try
         {
-            using IBackend backend = OpenBackend();
+            using IBackend backend = GpuBenchSupport.Open3060(_out.WriteLine, OrdinalEnvVar);
             using WhisperPipeline tiny = await WhisperPipeline.LoadAsync(WhisperTiny);
             using WhisperPipeline medium = await WhisperPipeline.LoadAsync(WhisperMedium);
             Verifiers verifiers = new Verifiers(tiny, medium);
@@ -124,7 +124,7 @@ public sealed class SharedBlockRegressionTests
                 float[] jfk24k = Resampler.Create(decoded.SampleRate, 24_000).Resample(decoded.ToMono());
                 RunCosyVoice2(backend, verifiers, jfk24k, outDir, refDir, table);
             }
-            Emit(table);
+            GpuBenchSupport.Emit(_out.WriteLine, table, OutEnvVar);
         }
         finally
         {
@@ -261,41 +261,6 @@ public sealed class SharedBlockRegressionTests
     {
         float[] audio16k = rate == WhisperRate ? wave : Resampler.Create(rate, WhisperRate).Resample(wave);
         return whisper.TranscribeAudio(backend, audio16k, WhisperRate, new WhisperOptions { Language = "en" });
-    }
-
-    private IBackend OpenBackend()
-    {
-        string? ordinalText = Environment.GetEnvironmentVariable(OrdinalEnvVar);
-        int ordinal = string.IsNullOrEmpty(ordinalText) ? 1 : int.Parse(ordinalText, CultureInfo.InvariantCulture);
-        Assert.True(CudaContext.IsAvailable(), $"CUDA unavailable: {CudaContext.LastUnavailableReason}");
-        string? ptx = BackendGate.KernelDir("Ptx", "HartsyInference.Cuda");
-        Assert.False(ptx is null, "no compiled PTX directory beside the tests or in the repo");
-        CudaBackend backend = new CudaBackend(ordinal, ptx);
-        string device = backend.Capabilities.DeviceName;
-        _out.WriteLine($"CUDA ordinal {ordinal}: {device}; audio cache {AudioModelCache.CacheRoot}");
-        if (!device.Contains(RequiredDeviceSubstring, StringComparison.Ordinal))
-        {
-            backend.Dispose();
-            Assert.Fail($"ordinal {ordinal} is '{device}', not a {RequiredDeviceSubstring}. Set {OrdinalEnvVar} to the 3060's engine ordinal.");
-        }
-        return backend;
-    }
-
-    private static string[] WhisperFiles(string repo)
-    {
-        string dir = AudioModelCache.GetRepoDirectory(repo, "stt");
-        return WhisperPipeline.ModelFiles.Where(f => f.Required).Select(f => Path.Combine(dir, f.Name)).ToArray();
-    }
-
-    private void Emit(StringBuilder table)
-    {
-        string text = table.ToString();
-        _out.WriteLine(text);
-        string? outPath = Environment.GetEnvironmentVariable(OutEnvVar);
-        if (!string.IsNullOrEmpty(outPath))
-        {
-            File.AppendAllText(outPath, text + Environment.NewLine);
-        }
     }
 
     /// <summary>The two ASR models every clip is transcribed with.</summary>

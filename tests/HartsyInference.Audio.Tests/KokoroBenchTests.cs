@@ -47,14 +47,11 @@ public sealed class KokoroBenchTests
     private const string RefDirEnvVar = "HARTSY_KOKORO_BENCH_REF_DIR";
     private const string ProfileEnvVar = "HARTSY_KOKORO_BENCH_PROFILE";
     private const string ExactEnvVar = "HARTSY_KOKORO_BENCH_EXACT";
-    private const string RequiredDeviceSubstring = "3060";
     private const int WarmRuns = 2;
     private const int TimedRuns = 5;
     private const int WhisperRate = 16_000;
     private const string WhisperTiny = "openai/whisper-tiny";
-    private const string KokoroRepackRepo = "Hartsy/kokoro-82m-safetensors";
-    private const string KokoroRepo = "hexgrad/Kokoro-82M";
-    private const string KokoroVoice = "af_heart";
+    private const string KokoroVoice = GpuBenchSupport.KokoroVoice;
 
     private static readonly (int Words, string Text)[] Sentences =
     [
@@ -76,8 +73,9 @@ public sealed class KokoroBenchTests
             _out.WriteLine($"SKIPPED: set {GateEnvVar}=1 to run the Kokoro 3060 bench.");
             return;
         }
-        string cmudict = Path.Combine(ModelsRoot(), "audio", "cmudict.dict");
-        if (!RealWeightGate.Require(_out.WriteLine, KokoroFiles().Concat(WhisperFiles(WhisperTiny)).Concat([cmudict]).ToArray()))
+        string cmudict = GpuBenchSupport.Cmudict();
+        if (!RealWeightGate.Require(_out.WriteLine,
+                GpuBenchSupport.KokoroFiles().Concat(GpuBenchSupport.WhisperFiles(WhisperTiny)).Concat([cmudict]).ToArray()))
         {
             return;
         }
@@ -113,7 +111,7 @@ public sealed class KokoroBenchTests
 
     private async Task RunAsync(string cmudict, string? outDir, string? refDir, bool exact)
     {
-        using IBackend backend = OpenBackend();
+        using IBackend backend = GpuBenchSupport.Open3060(_out.WriteLine, OrdinalEnvVar);
 
         EnglishG2P g2p = new EnglishG2P(cmudict);
         Stopwatch load = Stopwatch.StartNew();
@@ -180,7 +178,7 @@ public sealed class KokoroBenchTests
                 + $"{audioSeconds:F2}s audio | {syncs} D2H syncs | sha {digest} | ref max-abs {maxAbs} corr {corr} log-spec corr {specCorr} | "
                 + $"recall {recall:P0} | {heard.Trim()}");
         }
-        Emit(table);
+        GpuBenchSupport.Emit(_out.WriteLine, table, OutEnvVar);
 
         if (Environment.GetEnvironmentVariable(ProfileEnvVar) == "1")
         {
@@ -231,78 +229,14 @@ public sealed class KokoroBenchTests
         }
     }
 
-    /// <summary>Opens the CUDA device named by <see cref="OrdinalEnvVar"/> (default 1) and asserts it is the 3060.</summary>
-    private IBackend OpenBackend()
-    {
-        string? ordinalText = Environment.GetEnvironmentVariable(OrdinalEnvVar);
-        int ordinal = string.IsNullOrEmpty(ordinalText) ? 1 : int.Parse(ordinalText, CultureInfo.InvariantCulture);
-        Assert.True(CudaContext.IsAvailable(), $"CUDA unavailable: {CudaContext.LastUnavailableReason}");
-        string? ptx = BackendGate.KernelDir("Ptx", "HartsyInference.Cuda");
-        Assert.False(ptx is null, "no compiled PTX directory beside the tests or in the repo");
-        CudaBackend backend = new CudaBackend(ordinal, ptx);
-        string device = backend.Capabilities.DeviceName;
-        _out.WriteLine($"CUDA ordinal {ordinal}: {device}; models root {ModelsRoot()}; audio cache {AudioModelCache.CacheRoot}");
-        if (!device.Contains(RequiredDeviceSubstring, StringComparison.Ordinal))
-        {
-            backend.Dispose();
-            Assert.Fail($"ordinal {ordinal} is '{device}', not a {RequiredDeviceSubstring}. Set {OrdinalEnvVar} to the 3060's engine ordinal.");
-        }
-        return backend;
-    }
-
-    private static string ModelsRoot() =>
-        EngineKnobs.ModelsRoot.Value is { Length: > 0 } root ? Path.GetFullPath(root) : TestPaths.ModelsDir;
-
-    private static string[] WhisperFiles(string repo)
-    {
-        string dir = AudioModelCache.GetRepoDirectory(repo, "stt");
-        return WhisperPipeline.ModelFiles.Where(f => f.Required).Select(f => Path.Combine(dir, f.Name)).ToArray();
-    }
-
-    private static string[] KokoroFiles()
-    {
-        string repack = AudioModelCache.GetRepoDirectory(KokoroRepackRepo, "tts");
-        string canonical = AudioModelCache.GetRepoDirectory(KokoroRepo, "tts");
-        return
-        [
-            Path.Combine(repack, "kokoro-82m.safetensors"),
-            Path.Combine(canonical, "config.json"),
-            Path.Combine(canonical, "voices", KokoroVoice + ".bin"),
-        ];
-    }
-
     private static string Ms(double seconds) => AudioParityMetrics.Ms(seconds);
-
-    private void Emit(StringBuilder table)
-    {
-        string text = table.ToString();
-        _out.WriteLine(text);
-        string? outPath = Environment.GetEnvironmentVariable(OutEnvVar);
-        if (!string.IsNullOrEmpty(outPath))
-        {
-            File.AppendAllText(outPath, text + Environment.NewLine);
-            _out.WriteLine($"appended to {outPath}");
-        }
-    }
 
     private readonly record struct Stats(double Median, double P95, double Min)
     {
         public static Stats Of(List<double> samples)
         {
             List<double> sorted = samples.OrderBy(s => s).ToList();
-            return new Stats(Percentile(sorted, 0.5), Percentile(sorted, 0.95), sorted[0]);
-        }
-
-        private static double Percentile(List<double> sorted, double p)
-        {
-            if (sorted.Count == 1)
-            {
-                return sorted[0];
-            }
-            double position = p * (sorted.Count - 1);
-            int low = (int)Math.Floor(position);
-            int high = Math.Min(low + 1, sorted.Count - 1);
-            return sorted[low] + (sorted[high] - sorted[low]) * (position - low);
+            return new Stats(GpuBenchSupport.Percentile(sorted, 0.5), GpuBenchSupport.Percentile(sorted, 0.95), sorted[0]);
         }
     }
 }

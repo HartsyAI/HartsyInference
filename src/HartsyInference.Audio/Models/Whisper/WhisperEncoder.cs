@@ -118,12 +118,13 @@ public sealed unsafe class WhisperEncoder : IDisposable
         WhisperOps.PreloadOrStream(backend, _deviceWeights, "encoder", ref _streamWarned);
 
         // Stage 1: Conv1 (stride=1, pad=1) + GELU. Treat 1-D conv as Conv2D with H=1.
+        // Every Whisper GELU is the exact erf form (F.gelu); backend.Gelu is the tanh approximation.
         Tensor mel4d = mel.Reshape(new TensorShape(batch, _cfg.NumMelBins, 1, nFrames));
         Tensor conv1Out = new(new TensorShape(batch, d, 1, nFrames), DType.F32);
         backend.Conv2D(conv1Out, mel4d, _conv1Weight!, _conv1Bias, strideH: 1, strideW: 1, padH: 0, padW: 1);
         mel4d.Dispose();
         Tensor gelu1 = new(conv1Out.Shape, DType.F32);
-        backend.Gelu(gelu1, conv1Out);
+        backend.GeluErf(gelu1, conv1Out);
         conv1Out.Dispose();
 
         // Stage 2: Conv2 (stride=2, pad=1) + GELU.
@@ -132,7 +133,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
         backend.Conv2D(conv2Out, gelu1, _conv2Weight!, _conv2Bias, strideH: 1, strideW: 2, padH: 0, padW: 1);
         gelu1.Dispose();
         Tensor gelu2 = new(conv2Out.Shape, DType.F32);
-        backend.Gelu(gelu2, conv2Out);
+        backend.GeluErf(gelu2, conv2Out);
         conv2Out.Dispose();
 
         // Stage 3: transpose [B, d, 1, T] → [B, T, d]. Transpose2D reads the flat buffer with explicit dims, so the
@@ -178,7 +179,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
     }
 
     /// <summary>A view of the table's leading <paramref name="seqLen"/> rows, kept so its device copy is reused by
-    /// every forward at that length (1499 for a 30 s window); a different length replaces it.</summary>
+    /// every forward at that length (all 1500 for a 30 s window); a different length replaces it.</summary>
     private Tensor PositionRows(int seqLen)
     {
         if (_positionRows is not null && _positionRows.Shape[0] == seqLen)
@@ -334,7 +335,7 @@ internal sealed unsafe class WhisperEncoderLayer
         Tensor fc1 = WhisperOps.ProjectLinear(backend, normed2, _fc1Weight!, _fc1Bias, batch, seqLen, d, _cfg.IntermediateSize);
         normed2.Dispose();
         Tensor activated = new(new TensorShape(batch, seqLen, _cfg.IntermediateSize), DType.F32);
-        backend.Gelu(activated, fc1);
+        backend.GeluErf(activated, fc1);
         fc1.Dispose();
 
         Tensor fc2 = WhisperOps.ProjectLinear(backend, activated, _fc2Weight!, _fc2Bias, batch, seqLen, _cfg.IntermediateSize, d);

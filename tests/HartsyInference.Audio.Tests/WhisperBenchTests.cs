@@ -19,9 +19,13 @@ namespace HartsyInference.Audio.Tests;
 
 /// <summary>Whisper per-utterance latency bench on the RTX 3060: the numbers the phone-call plan's STT bring-up gate
 /// (small.en ≤ 350 ms per utterance for 2 / 5 / 10 s of speech, narrowband content-word recall ≥ the 16 kHz baseline
-/// − 10 points, JFK 11/11 words) is evaluated against, plus token-level regression evidence for every other Whisper
-/// checkpoint. Opt-in with <c>HARTSY_WHISPER_BENCH=1</c>; otherwise it returns early so the CPU lane and unattended GPU
-/// runs never pay for it.
+/// − 10 points on the full clip and on every slice but the 2 s one, JFK 11/11 words) is evaluated against, plus
+/// token-level regression evidence for every other Whisper checkpoint. Opt-in with <c>HARTSY_WHISPER_BENCH=1</c>;
+/// otherwise it returns early so the CPU lane and unattended GPU runs never pay for it.
+///
+/// <para>The 2 s slice is timed but its recall is informational: the cut lands inside "Americans", and the reference
+/// model itself drops the word's end on the narrowband samples there, so its recall measures the cut, not narrowband
+/// robustness.</para>
 ///
 /// <para>Device rule: opens <c>CudaBackend(ordinal)</c> with <c>HARTSY_WHISPER_BENCH_CUDA_ORDINAL</c> and fails unless
 /// the device name contains "3060". Without the variable the ordinal is 0 when <c>CUDA_VISIBLE_DEVICES</c> names one
@@ -71,6 +75,18 @@ public sealed class WhisperBenchTests
     private const int RegressionWarmRuns = 1;
     private const int RegressionTimedRuns = 2;
     private const double GateMs = 350;
+    // Narrowband may lose at most this many recall points against the 16 kHz transcript, on the full clip and on
+    // every slice except UngatedRecallSliceSeconds.
+    private const double RecallFloorPoints = 10;
+    // The one slice whose recall is not gated, and why. The 2.0 s cut of the JFK clip lands inside "Americans", and
+    // the reference model drops the word's end there too (HF small.en on the same samples: 1.9 s gives "Ameri-" in
+    // both bands; 2.0 s gives "Americans," at 16 kHz by a 0.008 logit margin and "Ameri-" narrowband; 2.1-2.5 s
+    // give "Americans" in both), so recall at this cut measures where the cut falls, not narrowband robustness.
+    // Decided by the orchestrator, delegated by the user (2026-10-01). It exempts exactly this slice: any other
+    // slice, including one added to SliceSeconds later, is gated unless it is given its own measured reason here.
+    private const int UngatedRecallSliceSeconds = 2;
+    private const string UngatedRecallSliceNote =
+        "informational: the 2 s cut lands inside \"Americans\", so recall here measures the cut, not narrowband robustness";
     private const string JfkTranscript =
         "And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country.";
 
@@ -185,26 +201,28 @@ public sealed class WhisperBenchTests
         }
         table.AppendLine();
 
-        table.AppendLine("| Recall case | recall | Δ vs 16 kHz (pts) | JFK words | transcript |");
-        table.AppendLine("|---|---:|---:|---:|---|");
+        table.AppendLine($"| Recall case | recall | Δ vs 16 kHz (pts) | gate (≥ −{RecallFloorPoints:0} pts) | JFK words | transcript |");
+        table.AppendLine("|---|---:|---:|---|---:|---|");
         List<int> full16kIds = whisper.TranscribeTokenIds(backend, audio16k, SampleRate, options);
         List<int> fullNarrowIds = whisper.TranscribeTokenIds(backend, narrowband, SampleRate, options);
         string full16k = whisper.DecodeText(full16kIds);
         string fullNarrow = whisper.DecodeText(fullNarrowIds);
         double baseRecall = ContentWordRecall(JfkTranscript, full16k);
         double nbRecall = ContentWordRecall(JfkTranscript, fullNarrow);
-        table.AppendLine($"| full clip, 16 kHz | {baseRecall:P0} | 0 | {JfkWordHits(full16k)}/{JfkWords.Length} | {Cell(full16k)} |");
-        table.AppendLine($"| full clip, narrowband | {nbRecall:P0} | {Points(nbRecall - baseRecall)} | "
+        table.AppendLine($"| full clip, 16 kHz | {baseRecall:P0} | 0 | baseline | {JfkWordHits(full16k)}/{JfkWords.Length} | {Cell(full16k)} |");
+        table.AppendLine($"| full clip, narrowband | {nbRecall:P0} | {Points(nbRecall - baseRecall)} | {RecallGate(nbRecall - baseRecall)} | "
             + $"{JfkWordHits(fullNarrow)}/{JfkWords.Length} | {Cell(fullNarrow)} |");
         table.AppendLine($"| full clip tokens vs ref | 16 kHz: {CompareAndDump(CaseName(whisper, "full_16k"), full16kIds, full16k)} | "
-            + $"narrowband: {CompareAndDump(CaseName(whisper, "full_narrowband"), fullNarrowIds, fullNarrow)} | — | — |");
+            + $"narrowband: {CompareAndDump(CaseName(whisper, "full_narrowband"), fullNarrowIds, fullNarrow)} | — | — | — |");
         foreach (int seconds in SliceSeconds)
         {
-            // Words the 16 kHz slice decoded that the narrowband slice lost: the gate's "baseline − 10 pts" per length.
+            // Words the 16 kHz slice decoded that the narrowband slice lost.
             string wide = heard[(seconds, "16k")];
             string narrow = heard[(seconds, "narrowband")];
             double sliceRecall = ContentWordRecall(wide, narrow);
-            table.AppendLine($"| {seconds} s narrowband vs its 16 kHz transcript | {sliceRecall:P0} | {Points(sliceRecall - 1)} | — | {Cell(narrow)} |");
+            string gate = seconds == UngatedRecallSliceSeconds ? UngatedRecallSliceNote : RecallGate(sliceRecall - 1);
+            table.AppendLine($"| {seconds} s narrowband vs its 16 kHz transcript | {sliceRecall:P0} | {Points(sliceRecall - 1)} | {gate} | — | "
+                + $"{Cell(narrow)} |");
         }
         table.AppendLine();
 
@@ -490,6 +508,9 @@ public sealed class WhisperBenchTests
     }
 
     private static string Gate(double seconds) => seconds * 1000 <= GateMs ? "met" : "MISSED";
+
+    /// <summary>The recall gate for a narrowband-minus-16 kHz recall difference (a fraction).</summary>
+    private static string RecallGate(double delta) => delta * 100 >= -RecallFloorPoints - 1e-9 ? "met" : "MISSED";
 
     private static string Ms(double seconds) => (seconds * 1000).ToString("F1", CultureInfo.InvariantCulture);
 

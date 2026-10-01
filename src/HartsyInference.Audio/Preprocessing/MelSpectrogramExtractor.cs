@@ -1,3 +1,5 @@
+using HartsyInference.Core.Numerics;
+
 namespace HartsyInference.Audio.Preprocessing;
 
 /// <summary>Composes <see cref="HannWindow"/>, <see cref="Fft"/>, and
@@ -7,15 +9,20 @@ namespace HartsyInference.Audio.Preprocessing;
 /// <para>Preset configurations are provided as static factories — one per model family in
 /// scope. Custom configurations are constructed directly via the constructor.</para>
 ///
-/// <para><b>Allocation contract:</b> the extractor pre-allocates all scratch buffers
-/// at construction. <see cref="Compute"/> writes into a caller-provided output buffer
-/// of shape <c>[n_mels, n_frames]</c> (row-major; channel-first layout matching every
-/// model's expected input). No allocations happen on the hot path.</para>
+/// <para><b>Allocation contract:</b> the window, filterbank and FFT plan are built at construction.
+/// <see cref="Compute(ReadOnlySpan{float}, float[,])"/> and <see cref="ComputeZeroPadded"/> write into a
+/// caller-provided output of shape <c>[n_mels, n_frames]</c> (row-major; channel-first layout matching every model's
+/// expected input) and fan frame blocks out through <see cref="CpuParallel"/>, each block renting its scratch from
+/// <see cref="ArrayPool{T}.Shared"/>, so a warm extractor allocates nothing of its own per call. The blocks are fixed
+/// by the FFT size alone and every frame is computed the same way inline or fanned out, so the output never depends on
+/// the core count.</para>
 ///
 /// <para>Validation target: each preset must match its Python reference within 1e-4
-/// per element (the standard whisper.cpp tolerance) on a fixed sine-wave clip.</para></summary>
+/// per element (the standard whisper.cpp tolerance).</para></summary>
 public sealed class MelSpectrogramExtractor
 {
+    private static readonly Action<int, FrameBlocks> FrameBlockBody = RunFrameBlock;
+
     /// <summary>Parameter set defining a specific mel preprocessing pipeline. The trailing
     /// <paramref name="Scale"/> / <paramref name="SlaneyNorm"/> / <paramref name="Center"/> parameters default
     /// to the librosa Slaney convention used by most presets; F5-TTS/Vocos overrides them to HTK + no-norm +
@@ -26,15 +33,20 @@ public sealed class MelSpectrogramExtractor
     /// <param name="AdditiveLogFloor">Zonos's speaker front-end applies log(mel + floor) (additive) rather than
     /// log(max(mel, floor)) (clamp). The two agree for mel ≫ floor but diverge near-silent bins; Zonos needs the
     /// additive form.</param>
+    /// <param name="ExactFftSize">Transforms at exactly NFft points with the filterbank on its NFft/2 + 1 bins, as
+    /// torch.stft and numpy's rfft do; a size that is not a power of two runs through an <see cref="FftPlan"/>, so its
+    /// prime factors must be 2, 3 and 5. Off, NFft is rounded up to a power of two and the frame zero-padded to it,
+    /// the layout every preset but Whisper's was validated with.</param>
     public readonly record struct Config(int SampleRate, int NFft, int WinLength, int HopLength, int NMels, double Fmin,
         double Fmax, Normalization Norm, bool DropLastStftFrame, LogBase LogBase, float? LogFloor, float DynamicRangeDb,
         float NormOffset, float NormScale, bool PowerSpectrum, MelScale Scale = MelScale.Slaney, bool SlaneyNorm = true,
-        bool Center = false, bool CenterWindowInFft = false, bool AdditiveLogFloor = false);
+        bool Center = false, bool CenterWindowInFft = false, bool AdditiveLogFloor = false, bool ExactFftSize = false);
 
-    /// <summary>Whisper preset: 16kHz, n_fft=400, hop=160, 80 mel bins, log10,
-    /// power spectrum, drop-last-frame, +4/4 normalization. Used by all Whisper
-    /// sizes through large-v2 and turbo (80 bins). Pass <paramref name="nMels"/>=128
-    /// for Whisper-large-v3+ which uses 128 bins.</summary>
+    /// <summary>Whisper preset, the log-mel of OpenAI's <c>log_mel_spectrogram</c> and HF's
+    /// <c>WhisperFeatureExtractor</c>: 16 kHz, a 400-point STFT (201 bins) of a periodic Hann window at hop 160,
+    /// centered by reflect padding of 200, last frame dropped (3000 frames for 30 s), power spectrum, Slaney filters to
+    /// 8 kHz, log10 floored at 1e-10, then the max − 8 clamp and (x + 4) / 4. 80 bins through large-v2; pass
+    /// <paramref name="nMels"/> = 128 for large-v3, large-v3-turbo and the distil-large-v3 models.</summary>
     public static Config WhisperConfig(int nMels = 80) => new(
         SampleRate: 16_000,
         NFft: 400,
@@ -50,7 +62,16 @@ public sealed class MelSpectrogramExtractor
         DynamicRangeDb: 8.0f,
         NormOffset: 4.0f,
         NormScale: 4.0f,
-        PowerSpectrum: true);
+        PowerSpectrum: true,
+        Center: true,
+        ExactFftSize: true);
+
+    /// <summary>The Whisper preset before it matched Whisper: the 400-sample window zero-padded into a 512-point FFT
+    /// (257 bins) and no centering. Only for the S3 speech-tokenizer front-end (<c>S3GenReference</c>), which pads the
+    /// reference itself and must keep its output until it gets its own parity check; new callers use
+    /// <see cref="WhisperConfig"/>.</summary>
+    public static Config WhisperLegacyPow2Config(int nMels = 80)
+        => WhisperConfig(nMels) with { Center = false, ExactFftSize = false };
 
     /// <summary>StyleTTS 2 / Kokoro preset: 24kHz, n_fft=2048, hop=300, win=1200,
     /// 80 mel bins, magnitude spectrum, no normalization.</summary>
@@ -177,6 +198,12 @@ public sealed class MelSpectrogramExtractor
     private readonly float[] _window;
     private readonly int _numBins;
     private readonly int _fftSize;
+    // Window position in the FFT frame: torch.stft centers a shorter window, the default left-aligns it.
+    private readonly int _windowOffset;
+    // Reflect padding of a centered STFT; frame t reads virtual samples from t·hop − _centerPad.
+    private readonly int _centerPad;
+    // The exact transform for a size that is not a power of two; null runs the radix-2 path.
+    private readonly FftPlan? _plan;
 
     // The filterbank row-major and flat, with each row's nonzero bin range: a mel filter is a triangle a few bins
     // wide, so summing only [start, end) skips products that are exactly +0 and leaves every sum bit-identical for
@@ -185,20 +212,32 @@ public sealed class MelSpectrogramExtractor
     private readonly int[] _filterStart;       // [n_mels]
     private readonly int[] _filterEnd;         // [n_mels]
 
-    // Reusable scratch arrays (one set per extractor instance).
-    private readonly float[] _frame;       // [_fftSize] zero-padded windowed frame
-    private readonly float[] _stftRe;      // [_numBins]
-    private readonly float[] _stftIm;      // [_numBins]
-    private readonly float[] _power;       // [_numBins]
-    private readonly float[] _melCol;      // [n_mels]
+    // The column of a frame whose samples are all zero: what transforming one produces, so it is filled instead.
+    private readonly float _silent;
 
+    // A frame's scratch: frame | re | im | power | mel | plan work. Blocks rent theirs; this one is ComputeFrame's.
+    private readonly int _scratchLength;
+    private readonly float[] _frameScratch;
+
+    /// <summary>Builds the window, filterbank and FFT plan for <paramref name="cfg"/>.</summary>
     public MelSpectrogramExtractor(Config cfg)
     {
+        _fftSize = cfg.ExactFftSize ? cfg.NFft : Fft.NextPow2(cfg.NFft);
+        if (cfg.HopLength < 1 || cfg.WinLength < 1 || cfg.WinLength > _fftSize || cfg.NMels < 1)
+            throw new ArgumentException(
+                $"invalid STFT: win {cfg.WinLength}, hop {cfg.HopLength}, FFT {_fftSize}, mels {cfg.NMels}.", nameof(cfg));
+        if (cfg.ExactFftSize && (_fftSize & (_fftSize - 1)) != 0)
+        {
+            if (!FftPlan.IsSupported(_fftSize))
+                throw new ArgumentException(
+                    $"an exact {_fftSize}-point STFT needs prime factors of 2, 3 and 5 only.", nameof(cfg));
+            _plan = new FftPlan(_fftSize);
+        }
         _cfg = cfg;
         _window = HannWindow.Get(cfg.WinLength);
-        // FFT size must be a power of two; round up if NFft is not.
-        _fftSize = Fft.NextPow2(cfg.NFft);
         _numBins = _fftSize / 2 + 1;
+        _windowOffset = cfg.CenterWindowInFft ? (_fftSize - cfg.WinLength) / 2 : 0;
+        _centerPad = cfg.Center ? cfg.NFft / 2 : 0;
         float[,] filterbank = MelFilterbank.Get(cfg.SampleRate, _fftSize, cfg.NMels, cfg.Fmin, cfg.Fmax, cfg.Scale, cfg.SlaneyNorm);
         _filterWeights = new float[cfg.NMels * _numBins];
         _filterStart = new int[cfg.NMels];
@@ -218,11 +257,9 @@ public sealed class MelSpectrogramExtractor
             _filterEnd[m] = end;
         }
 
-        _frame = new float[_fftSize];
-        _stftRe = new float[_numBins];
-        _stftIm = new float[_numBins];
-        _power = new float[_numBins];
-        _melCol = new float[cfg.NMels];
+        _silent = Compress(0f);
+        _scratchLength = MelOffset + cfg.NMels + (_plan?.WorkLength ?? 0);
+        _frameScratch = new float[_scratchLength];
     }
 
     /// <summary>The number of mel frames a given input audio length will produce.</summary>
@@ -248,10 +285,7 @@ public sealed class MelSpectrogramExtractor
         {
             return;
         }
-
-        // torch.stft(center=True): reflect-pad by n_fft/2 so frame t is centered at t*hop.
-        float[]? padded = _cfg.Center ? SignalPadding.Reflect(audio, _cfg.NFft / 2) : null;
-        ComputeInto(padded ?? audio, frames, MemoryMarshal.CreateSpan(ref output[0, 0], output.Length), output.GetLength(1));
+        ComputeInto(audio, audio.Length, frames, MemoryMarshal.CreateSpan(ref output[0, 0], output.Length), output.GetLength(1));
     }
 
     /// <summary>Computes a single mel frame from <c>WinLength</c> samples of audio. Used
@@ -262,68 +296,68 @@ public sealed class MelSpectrogramExtractor
     /// <para><paramref name="windowAudio"/> must be exactly <c>WinLength</c> samples (or
     /// shorter, in which case zeros pad to <c>FFT size</c>). <paramref name="melColumn"/>
     /// must be exactly <c>NMels</c> values.</para></summary>
+    /// <remarks>Not thread-safe: it writes the extractor's own scratch, unlike <see cref="Compute(ReadOnlySpan{float}, float[,])"/>
+    /// and <see cref="ComputeZeroPadded"/>, whose blocks rent theirs.</remarks>
     public void ComputeFrame(ReadOnlySpan<float> windowAudio, Span<float> melColumn)
     {
         if (melColumn.Length != _cfg.NMels)
             throw new ArgumentException($"melColumn must be length {_cfg.NMels}, got {melColumn.Length}.", nameof(melColumn));
 
         // Windowed frame, zero-padded to FFT size.
+        Span<float> scratch = _frameScratch;
+        Span<float> frame = scratch[.._fftSize];
         int n = Math.Min(windowAudio.Length, _cfg.WinLength);
-        for (int i = 0; i < n; i++) _frame[i] = windowAudio[i] * _window[i];
-        for (int i = n; i < _fftSize; i++) _frame[i] = 0f;
+        for (int i = 0; i < n; i++) frame[i] = windowAudio[i] * _window[i];
+        frame[n..].Clear();
 
-        Fft.RealTransform(_frame, _stftRe, _stftIm, _fftSize);
-        SpectrumToMel();
-
-        for (int m = 0; m < _cfg.NMels; m++) melColumn[m] = Compress(_melCol[m]);
+        TransformToMel(scratch);
+        ReadOnlySpan<float> mel = scratch.Slice(MelOffset, _cfg.NMels);
+        for (int m = 0; m < _cfg.NMels; m++) melColumn[m] = Compress(mel[m]);
     }
 
     /// <summary>The log-mel of <paramref name="audio"/> zero-padded to <paramref name="paddedLength"/> samples, written
     /// row-major <c>[n_mels, OutputFrames(paddedLength)]</c> into <paramref name="output"/>: bit-for-bit what
     /// <see cref="Compute(ReadOnlySpan{float}, float[,])"/> returns for the padded buffer, without building it. A frame
-    /// whose window lies wholly in the padding is all zeros, so its column is one constant and skips the transform —
-    /// most of Whisper's 30 s window for a short utterance. Only for non-centered presets: reflect padding would read
-    /// the tail.</summary>
+    /// whose window reads only padding, through the reflection at either edge too for a centered preset, is all zeros,
+    /// so its column is one constant and skips the transform — most of Whisper's 30 s window for a short
+    /// utterance.</summary>
     public void ComputeZeroPadded(ReadOnlySpan<float> audio, int paddedLength, Span<float> output)
     {
-        if (_cfg.Center)
-            throw new InvalidOperationException("ComputeZeroPadded needs a non-centered STFT; centered presets reflect-pad the tail.");
         if (audio.Length > paddedLength)
             throw new ArgumentException($"audio has {audio.Length} samples, more than the padded length {paddedLength}.", nameof(audio));
         int frames = OutputFrames(paddedLength);
         if (output.Length < _cfg.NMels * frames)
             throw new ArgumentException($"output must hold [{_cfg.NMels}, {frames}] values.", nameof(output));
-        ComputeInto(audio, frames, output, frames);
+        ComputeInto(audio, paddedLength, frames, output, frames);
     }
 
-    /// <summary>The log-mel of <paramref name="frames"/> frames of <paramref name="src"/> into row-major
-    /// <paramref name="output"/> (row stride <paramref name="stride"/>), normalized per the preset. Samples past the
-    /// end of <paramref name="src"/> read as zero, so a frame whose window lies wholly past it is all zeros: its column
-    /// is the one constant a transform of zeros produces, filled without transforming.</summary>
-    private void ComputeInto(ReadOnlySpan<float> src, int frames, Span<float> output, int stride)
+    /// <summary>The log-mel of <paramref name="frames"/> frames into row-major <paramref name="output"/> (row stride
+    /// <paramref name="stride"/>), normalized per the preset. The signal is <paramref name="signalLength"/> samples, of
+    /// which <paramref name="src"/> holds the leading ones and the rest are zero; a centered preset reflects at the
+    /// signal's edges as <see cref="SignalPadding.Reflect"/> would, without materializing anything. Frames fan out in
+    /// size-fixed blocks; each frame's column depends only on its own samples, and the max the Whisper clamp needs is
+    /// taken afterwards, so the result is the same however the blocks are scheduled.</summary>
+    private unsafe void ComputeInto(ReadOnlySpan<float> src, int signalLength, int frames, Span<float> output, int stride)
     {
-        int woff = _cfg.CenterWindowInFft ? (_fftSize - _cfg.WinLength) / 2 : 0;
-        float silent = Compress(0f);
-        float globalMax = float.MinValue;
-        for (int t = 0; t < frames; t++)
+        int framesPerBlock = FramePartition.FramesPerBlock(_fftSize, FramePartition.TransformBudget);
+        int blocks = FramePartition.BlockCount(frames, framesPerBlock);
+        fixed (float* srcPtr = src)
+        fixed (float* outPtr = output)
         {
-            int start = t * _cfg.HopLength;
-            bool allPadding = start + woff >= src.Length;
-            if (!allPadding)
-            {
-                TransformFrame(src, start);
-            }
-            for (int m = 0; m < _cfg.NMels; m++)
-            {
-                float l = allPadding ? silent : Compress(_melCol[m]);
-                output[m * stride + t] = l;
-                if (l > globalMax) globalMax = l;
-            }
+            FrameBlocks job = new(this, srcPtr, src.Length, signalLength, frames, framesPerBlock, outPtr, stride);
+            CpuParallel.For(blocks, frames * FramePartition.TransformWork(_fftSize), job, FrameBlockBody);
         }
 
         // Post-pass normalization (Whisper: dynamic-range clamp + (+4)/4 shift).
         if (_cfg.Norm == Normalization.WhisperDynamicRange)
         {
+            float globalMax = float.MinValue;
+            for (int m = 0; m < _cfg.NMels; m++)
+            {
+                ReadOnlySpan<float> row = output.Slice(m * stride, frames);
+                for (int t = 0; t < frames; t++)
+                    if (row[t] > globalMax) globalMax = row[t];
+            }
             float clampMin = globalMax - _cfg.DynamicRangeDb;
             float invScale = 1f / _cfg.NormScale;
             for (int m = 0; m < _cfg.NMels; m++)
@@ -335,46 +369,119 @@ public sealed class MelSpectrogramExtractor
         }
     }
 
-    /// <summary>Windows the frame starting at <paramref name="start"/> (samples past the end of <paramref name="src"/>
-    /// read as zero), transforms it and leaves the filterbank output in <c>_melCol</c>.</summary>
-    private void TransformFrame(ReadOnlySpan<float> src, int start)
+    /// <summary>One block of <see cref="ComputeInto"/>'s frames, in scratch rented for the block.</summary>
+    private static unsafe void RunFrameBlock(int block, FrameBlocks job)
     {
-        // Windowed frame, zero-padded to FFT size. torch.stft centers a shorter window in the FFT frame;
-        // the default left-aligns it (moot when WinLength == NFft).
-        int woff = _cfg.CenterWindowInFft ? (_fftSize - _cfg.WinLength) / 2 : 0;
-        for (int i = 0; i < _fftSize; i++) _frame[i] = 0f;
-        for (int i = 0; i < _cfg.WinLength; i++)
+        MelSpectrogramExtractor self = job.Extractor;
+        float[] scratch = ArrayPool<float>.Shared.Rent(self._scratchLength);
+        try
         {
-            float sample = (start + woff + i) < src.Length ? src[start + woff + i] : 0f;
-            _frame[woff + i] = sample * _window[i];
+            ReadOnlySpan<float> src = new(job.Source, job.SourceLength);
+            int end = Math.Min(job.Frames, (block + 1) * job.FramesPerBlock);
+            for (int t = block * job.FramesPerBlock; t < end; t++)
+                self.ComputeColumn(src, job.SignalLength, t, scratch, job.Output, job.Stride);
         }
-
-        Fft.RealTransform(_frame, _stftRe, _stftIm, _fftSize);
-        SpectrumToMel();
+        finally
+        {
+            ArrayPool<float>.Shared.Return(scratch);
+        }
     }
 
-    /// <summary>Power or magnitude of the transformed frame, then the filterbank, into <c>_melCol</c>.</summary>
-    private void SpectrumToMel()
+    /// <summary>Writes frame <paramref name="t"/>'s compressed mel column into <paramref name="output"/>.</summary>
+    private unsafe void ComputeColumn(ReadOnlySpan<float> src, int signalLength, int t, Span<float> scratch, float* output,
+        int stride)
     {
+        // Virtual index of the window's first sample: negative or past the signal end means reflected.
+        int first = t * _cfg.HopLength - _centerPad + _windowOffset;
+        int last = first + _cfg.WinLength - 1;
+        if (ReadsOnlyPadding(first, last, src.Length, signalLength))
+        {
+            for (int m = 0; m < _cfg.NMels; m++) output[(long)m * stride + t] = _silent;
+            return;
+        }
+
+        Span<float> frame = scratch[.._fftSize];
+        frame[.._windowOffset].Clear();
+        frame[(_windowOffset + _cfg.WinLength)..].Clear();
+        Span<float> windowed = frame.Slice(_windowOffset, _cfg.WinLength);
+        if (first >= 0 && (!_cfg.Center || last < signalLength))
+        {
+            // No reflection: samples past the end of src are the zero padding (a +0 product with the window).
+            int real = Math.Clamp(src.Length - first, 0, _cfg.WinLength);
+            for (int i = 0; i < real; i++) windowed[i] = src[first + i] * _window[i];
+            windowed[real..].Clear();
+        }
+        else
+        {
+            // torch.stft(center=True) reflects at both signal edges; past the reflect padding a read is zero.
+            int limit = signalLength + _centerPad;
+            for (int i = 0; i < _cfg.WinLength; i++)
+            {
+                int j = first + i;
+                int index = j < limit ? SignalPadding.ReflectIndex(j, signalLength) : int.MaxValue;
+                float sample = index < src.Length ? src[index] : 0f;
+                windowed[i] = sample * _window[i];
+            }
+        }
+
+        TransformToMel(scratch);
+        ReadOnlySpan<float> mel = scratch.Slice(MelOffset, _cfg.NMels);
+        for (int m = 0; m < _cfg.NMels; m++) output[(long)m * stride + t] = Compress(mel[m]);
+    }
+
+    /// <summary>Whether every sample the window <c>[first, last]</c> reads is padding: at or past
+    /// <paramref name="realLength"/>, including the ones a centered preset mirrors back from past the signal end.
+    /// False wherever the read would mirror more than once; transforming zeros gives the same column anyway.</summary>
+    private bool ReadsOnlyPadding(int first, int last, int realLength, int signalLength)
+    {
+        if (first < realLength) return false;
+        if (!_cfg.Center || last < signalLength) return true;
+        int limit = signalLength + _centerPad;
+        if (first >= limit) return true;
+        return 2L * (signalLength - 1) - Math.Min(last, limit - 1) >= realLength;
+    }
+
+    /// <summary>Transforms the frame at the start of <paramref name="scratch"/> and leaves the power or magnitude
+    /// spectrum through the filterbank in its mel slot. Reads only immutable state, so blocks run it
+    /// concurrently.</summary>
+    private void TransformToMel(Span<float> scratch)
+    {
+        Span<float> frame = scratch[.._fftSize];
+        Span<float> re = scratch.Slice(_fftSize, _numBins);
+        Span<float> im = scratch.Slice(_fftSize + _numBins, _numBins);
+        Span<float> power = scratch.Slice(_fftSize + 2 * _numBins, _numBins);
+        Span<float> mel = scratch.Slice(MelOffset, _cfg.NMels);
+        if (_plan is not null)
+        {
+            _plan.ForwardReal(frame, re, im, scratch.Slice(MelOffset + _cfg.NMels, _plan.WorkLength));
+        }
+        else
+        {
+            Fft.RealTransform(frame, re, im, _fftSize);
+        }
+
         if (_cfg.PowerSpectrum)
         {
             for (int k = 0; k < _numBins; k++)
-                _power[k] = _stftRe[k] * _stftRe[k] + _stftIm[k] * _stftIm[k];
+                power[k] = re[k] * re[k] + im[k] * im[k];
         }
         else
         {
             for (int k = 0; k < _numBins; k++)
-                _power[k] = MathF.Sqrt(_stftRe[k] * _stftRe[k] + _stftIm[k] * _stftIm[k]);
+                power[k] = MathF.Sqrt(re[k] * re[k] + im[k] * im[k]);
         }
 
         for (int m = 0; m < _cfg.NMels; m++)
         {
             float acc = 0f;
             int row = m * _numBins;
-            for (int k = _filterStart[m]; k < _filterEnd[m]; k++) acc += _filterWeights[row + k] * _power[k];
-            _melCol[m] = acc;
+            for (int k = _filterStart[m]; k < _filterEnd[m]; k++) acc += _filterWeights[row + k] * power[k];
+            mel[m] = acc;
         }
     }
+
+    /// <summary>Offset of the mel slot in a frame's scratch.</summary>
+    private int MelOffset => _fftSize + 3 * _numBins;
 
     /// <summary>Log compression of one mel value (identity for <see cref="LogBase.None"/>).</summary>
     private float Compress(float mel)
@@ -399,5 +506,20 @@ public sealed class MelSpectrogramExtractor
         float[,] result = new float[_cfg.NMels, frames];
         Compute(audio, result);
         return result;
+    }
+
+    /// <summary>One <see cref="ComputeInto"/> call, passed to the static block body rather than captured, so the
+    /// delegate is built once and a call that runs inline allocates nothing.</summary>
+    private readonly unsafe struct FrameBlocks(MelSpectrogramExtractor extractor, float* source, int sourceLength,
+        int signalLength, int frames, int framesPerBlock, float* output, int stride)
+    {
+        public readonly MelSpectrogramExtractor Extractor = extractor;
+        public readonly float* Source = source;
+        public readonly int SourceLength = sourceLength;
+        public readonly int SignalLength = signalLength;
+        public readonly int Frames = frames;
+        public readonly int FramesPerBlock = framesPerBlock;
+        public readonly float* Output = output;
+        public readonly int Stride = stride;
     }
 }

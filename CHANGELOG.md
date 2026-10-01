@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.231
+## Unreleased
 
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
   pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
@@ -20,6 +20,406 @@ stable release will require. Dates are UTC.
   the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
+
+## alpha.238
+
+- **Voice host exe (`src/HartsyInference.VoiceHost`, not packaged).** The phone-call voice agent's model process: a
+  generic host (from the ASP.NET Core shared framework; built empty, so nothing reads the environment or an appsettings
+  file) that builds the engine on the audio card (`cuda:1`) with `ToolCalling.Install`, loads and warms the voice model
+  set, and serves the PhoneLink socket the gateway dials. One `VoiceAgentSession` per call; the models outlive calls;
+  every language-model request names `LlmDevice` (`cuda:0`).
+- **Boot warm-up offers the host's real tool set.** `VoiceHostTools.WarmDefinitions` builds the same
+  `ToolDefinition`s a real call's registry would (the six telephony tools plus `get_time`, for whichever of them
+  `tools.enabled` names), with request/hang-up delegates that throw if ever invoked — warm-up only offers tools to
+  the chat template and the tool-call grammar/stream filter (`VoiceModelSet.WarmAsync` streams and discards), it
+  never dispatches one. `VoiceHostService.StartAsync` passes them to `WarmAsync`, so production warm-up takes the
+  tool-aware `WarmToolMaxTokens`-token path instead of staying on the cold one-token path a tool-less warm-up takes.
+- Typed options from `/etc/hartsyinference/voice.json` (`link`, `models`, `agent`, `tools`, `engine`, `logging`; `{}` is
+  valid, an unknown key fails the start, every error names its JSON path). The link token comes from a secret file
+  (`LoadCredential=`), refused when group or others can read it and never logged; `engine.cpuThreadCap` is
+  `numerics.cpuThreads` for the host's life.
+- Link: `Hello` checked first (version, 16 kHz, token in constant time), else `Error` and close; at most four
+  connections in their handshake at once; per-frame sequence check; a new connection replaces the current one only
+  after its own `Hello`. A dedicated sender thread on absolute
+  20 ms deadlines writes control frames first, then each call's reply audio in 20 ms frames tagged with the producing
+  turn, with a 40 ms prebuffer per burst and catch-up frames; its audio path, the session's read included, allocates
+  nothing once warm. A barge-in
+  becomes `Flush(turnId)` and nothing of that turn follows it; `OutboundEnd` closes each turn that played. Session
+  events go out as `Event` frames (state, final transcript, turn latency).
+- Telephony tools (`send_dtmf`, `transfer`, `hold`, `unhold`, `play_prompt`) are `ToolRequest`/`ToolResult` round trips
+  with a timeout; `get_time` is answered on the host; `hangup` goes to the gateway only once the goodbye of the turn
+  that called it has drained to the link (its `OutboundEnd` written, or the turn flushed) plus 200 ms for the audio
+  still downstream, capped at the audio the session still held plus 1 s and at 10 s, so the caller hears the goodbye
+  and a stuck drain cannot keep the call open; a barge-in on the goodbye cuts it short but still ends the call. A
+  resumed call gets a fresh session and an apology line; any session failure ends only
+  its call with `CallEnd(Failed)`; SIGTERM ends calls with `CallEnd(LocalHangup)`. Workstation concurrent GC,
+  `SustainedLowLatency` while calls are up, pool floor `numerics.cpuThreads + 8`.
+- **`HartsyInference.Voice`: `ReadOutbound(Span<float>, out int turnId)`** returns one turn's audio at a time and names
+  the turn that wrote it (each turn publishes a mark before its first sample), so a remote player can drop a flushed
+  turn by id. The untagged read is unchanged. `OutboundQueuedSamples` reports the reply audio still queued.
+- **`SecretFile` moved to Core** (`HartsyInference.Core.Configuration`), with the caller's exception factory; the gateway
+  reads its secrets through it unchanged.
+- **Deployment:** `deploy/systemd/hartsyinference-voice-host.service` (`Restart=always`, `RuntimeDirectory`,
+  `AllowedCPUs=0-6,8-14`, token credential) and `hartsyinference-phone-gateway.service` (`Requires=` the host,
+  `LimitRTPRIO=50`, `Nice=-10`, `AllowedCPUs=7,15`, a 64 MB gen0 budget, three credentials, no service-wide FIFO);
+  `AllowedCPUs=0-6,8-14` on the API unit, whose start-limit settings now sit in `[Unit]`, where systemd reads them.
+  Runbook: `docs/Checklists/VOICE_AGENT_VERIFICATION.md`.
+- **Host tuning:** `deploy/install-host-tuning.sh` installs two things. One is `hartsyinference-cpu-performance.service`,
+  a oneshot unit that sets every CPU's frequency governor to `performance` at boot through sysfs. The other is
+  `/etc/security/limits.d/hartsy-rt.conf` (`hartsy - rtprio 50`, for runs without systemd). The script is a dry run by
+  default, with `--apply`, `--revert` and `--dry-run --revert`. `--revert` puts every CPU on `performance` back on
+  `schedutil`, leaves other governors alone, and fails if a CPU cannot go back. The script is idempotent, needs root
+  only to change anything, refuses to write through a symlink, and prints its sources' SHA-256 so an apply can be
+  checked against the dry run. These are optimizations: under `schedutil`, the idle
+  gaps between turns cost Kokoro about 33 ms per sentence and the paced front end about 0.7 ms per frame, but every
+  gate passes either way.
+- Tests (`tests/HartsyInference.VoiceHost.Tests`): 87 unit tests against a fake gateway on a temporary socket with
+  scripted sessions (handshake refusals, call lifecycle and faults, PCM16 scale and sequence checks, flush and stale-turn
+  rules, tool round trips and timeouts, hangup after the goodbye's last frame, its cap and a barge-in on the goodbye,
+  config and token file, 1200-frame sender cadence with zero allocation, zero allocation while the sender's reads wake a
+  producer waiting for playback, as the real session's do, and the boot warm-up's tool definitions against a fake
+  `VoiceModelSet`), and `[Slow]` loopback calls (sipsorcery
+  softphone → real gateway → real host with Kokoro and Whisper small.en on the RTX 3060), including silence on the line
+  between the goodbye and the BYE, and a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
+  Six new Voice unit tests cover the tagged read.
+- **Rebased onto `main` (#202, alpha.237) and re-run on the RTX 3060 with `Denoise` at its new default (on, int8).**
+  `LoopbackAssets.All()` named Silero, Whisper, Kokoro and the JFK clip but not RNNoise; added its weights and int8
+  tables, since `VoiceModelSet.LoadFrontEnd` now needs them and never substitutes raw audio for a missing denoiser (the
+  weights were present on this box, so this did not change the result below, only the gate's correctness on a host that
+  lacks them). Quiet window on the 3060 only (the scripted-LLM loopback calls need no 4090), `--verify-since` clean
+  after. `LoopbackSipCallWithHostTests` 3/3, `LoopbackHostKillTests` 1/1, same as the `Denoise`-off run:
+  - Barge-in: `Flush` reached the gateway 8.0 ms after the VAD decision; the cancelled reply's last audible frame left
+    the gateway 6.3 ms after the decision (was 6.4 ms off `Denoise`); 0 frames of the flushed turn after `Flush`.
+  - Agent hangup: 106 audible goodbye frames, then 24 quiet frames before the BYE (identical frame counts to the
+    `Denoise`-off run); the host asked 225 ms after the turn ended.
+  - Host killed with SIGKILL mid-call: the phone got the BYE 1186 ms after the 3 s outage period (was 1.2 s off
+    `Denoise`); the restarted host replaced the stale socket and took the next call.
+  - `voice.endpoint.ms` now reads 776.00 (was 736.00 off `Denoise` — the 40 ms RNNoise lag `VoiceTurnMetrics` picked up
+    from #202); every other stage is unaffected by denoising, as expected.
+  - **Allocation (open in #202, confirmed fixed here):** the link-close line reads `audioPathAllocated=0B` on both the
+    long-lived call host (1333 ticks) and the SIGKILL test's two short-lived hosts, where the earlier `Denoise`-off run
+    measured 19 528 B.
+  - Sender: lateness p50/p99 within the 200 µs bucket, max 29.1 ms, 1 catch-up frame, 0 resyncs over 1333 ticks (was
+    max 25.4 ms, 2 catch-up frames, 0 resyncs over 1339 ticks off `Denoise` — noise at this precision, same shape).
+
+## alpha.237
+
+- **`HartsyInference.Voice`: opt-in per-call voice agent.** New packable library (references Audio, Engine and Tools;
+  not in the meta package). `VoiceModelSet.LoadAsync(engine, options)` opens Whisper and Kokoro runner leases on an
+  engine built on `AudioDevice` (checked) and loads the per-session front-end weights from the wake models' `vad` and
+  `denoise` folders: Silero is required, and RNNoise is required when `Denoise` is on, failing at load rather than
+  passing raw audio through. `WarmAsync` runs five syntheses and one recognition of a second of silence on the model
+  set's GPU thread, plus a generation on `LlmDevice`: a one-token request without tools, or, when the caller passes
+  its tool set, `WarmToolMaxTokens` (8) real tokens with tools offered, through `StreamAsync` rather than
+  `GenerateAsync` so the tool-call grammar, its stream filter and parser, and the template's tools branch are all hot
+  before the first caller — see the Qwen3 re-measurement below. The five texts cover Kokoro's
+  power-of-two frame-length buckets from 32 to 512, so a reply's first sentence finds its bucket's convolution plans
+  already built. `VoiceAgentSession(models, ITextService, ToolRegistry, options)` is one call: `StartAsync`,
+  `PushInbound` (never blocks; 30 s, oldest dropped and counted), `ReadOutbound` (never blocks; zero-fills),
+  `SpeakAsync`, `PushDtmf` (`[DTMF n]` user turns), `Transcript`, `EventRaised` (in order, on a pool thread),
+  `EndAsync`. States: Created, Warming, Listening, Thinking, Speaking, ToolRunning, Ended.
+- Threads:
+  - The audio thread is dedicated, runs in `CpuParallel`'s inline scope with its own `CpuBackend`, sleeps on a
+    doorbell and allocates nothing per 20 ms frame (asserted over 1000 frames). It runs RNNoise at int16 scale, then
+    Silero endpointing (700 ms silence, 15 s cut), then barge-in (after a 300 ms hold-off, 200 ms at probability
+    0.6 or above; it flushes the outbound queue and `CancelAsync`s the turn).
+  - The GPU thread (owned by the model set) holds the device gate for one job at a time, and frees each job's
+    activations with the pool's reservation kept (`FreeActivations(trimPool: false)`). It queues one pool trim per
+    turn when the session returns to listening, skipped if the next turn's work is already queued.
+  - The turn loop runs the token-trimmed conversation through `ToolLoop` with thinking off and `Device` on every
+    request, then streams sentences to the GPU thread, resamples and queues them.
+- The outbound flush is consumer-applied (the ring allows discards only on the reader): the audio thread bumps an
+  epoch, the reader discards, the writer re-bumps when a frame lands after the discard, and a new turn waits until
+  the reader has applied every flush.
+- `ReadOutbound` allocates nothing, also while a turn waits for playback, space or a flush.
+  - The producer's waiter carries its target, and the reader completes it once, on the read that reaches it.
+  - The token completes the waiter through `UnsafeRegister`, so the wake queues only the producer's continuation.
+  - A full queue wakes its writer once per quarter of the ring.
+- An utterance whose speech lies within the reply (plus a hold-off-long echo tail) and never barged in is not
+  answered, and is counted. Two user or two plain assistant messages in a row merge, so turns stay alternating.
+- A revoked lease (engine free-memory, backend switch) is reopened once outside the gate and the job retried.
+- Per-turn `VoiceTurnMetrics` are logged as `[Voice] turn N: …` with every `voice.*` stage.
+- Tests (`tests/HartsyInference.Voice.Tests`, 83 unit tests on fakes): endpointing, barge-in, the flush protocol
+  (with a concurrent-flush ordering stress), GPU-thread jobs (every job keeps the pool, one trim per turn),
+  conversation trimming, model-set load contract, the warm-up (one synthesis per length bucket), whole turns, lease
+  revocation, and zero allocation on the audio thread and on the reader (0 B over 1000 reads with a cancellable
+  wait pending, one wake at its position); a missing int8 RNNoise table fails the load loudly and names the table,
+  even when the F32 weights are present.
+- Integration tests (CPU, real weights):
+  - JFK endpointing: Silero 0.57 ms per 20 ms frame.
+  - Whisper tiny through the session: 100 % JFK content-word recall, 91 % narrowband.
+  - RNNoise (int8) + Silero per 20 ms frame, back-to-back over the JFK clip: p50/p99 against the redefined gate
+    (3 / 5 ms) — see the RNNoise entry below.
+- GPU classes pass on the RTX 3060 (measured with `Denoise` off, its default at the time; a rerun with the new
+  int8-on-by-default follows):
+  - Session end to end, scripted LLM: Whisper small.en 89-156 ms per utterance (gate 350 ms). Kokoro takes 195 ms
+    median for a 15-word sentence (gate 250 ms) and 241 ms for a turn's first sentence (18 words, first synthesis),
+    within the 250 ms budget, with alpha.232's length-bucketed conv plans and the bucket warm-up. The first turn
+    totals 1195 ms from end of speech to first reply audio (budget 1.3 s). Recall is JFK 11/11, reply 8/9.
+  - Barge-in: no reply audio read after the decision, flush applied 4.1 ms later (gate 100 ms).
+  - Pinned runners: the leases survive memory-pressure switches with no reopen.
+  - A Slow Qwen3 class runs only with an explicit 4090 grant.
+- **RNNoise now loads at `RnnoisePrecision.Int8` for the voice front end, and `Denoise` defaults to true.** The
+  front-end gate (redefined in the RNNoise int8 PR) was only met at int8: quiet p50 1.07-1.08 ms, p99 1.20-1.59 ms
+  against a 3 / 5 ms budget (`WakeModelSet.LoadDenoiser(RnnoisePrecision)` overload; the wake stack's own
+  `LoadDenoiser()` call keeps loading Float, so wake scoring is unaffected). A missing int8 table fails the load the
+  same way a missing weights file always has — loudly, never a passthrough. RNNoise adds 640 samples (40 ms) of
+  algorithmic delay ahead of both the endpoint and barge-in decisions. Design: `docs/Research/VOICE_AGENT_SESSION.md`.
+- **GPU re-run with `Denoise` on (RTX 3060, quiet window verified clean):** `VoiceSessionEndToEndTests` passed;
+  turn 1 `voice.frontend.ms` p50/p99/max 1.00/2.00/1.11 ms (int8 RNNoise + Silero, live call), STT 133.26 ms,
+  Kokoro median 195.4 ms, `voice.endpoint.ms` **unchanged at 736.00 ms** (a sample-counted interval is blind to
+  RNNoise's fixed delay — it is paid once before the count starts, so the caller's real wait is nearer 776 ms),
+  turn total 1209.39 ms (≤ 1.3 s budget; ~117 ms left for a real model's first sentence). Recall 11/11 caller,
+  8/9 reply. `VoiceSessionQwen3EndToEndTests` (real Qwen3-4B on the 4090, audio on the 3060, both cards visible)
+  also passed: `qwen3` now resolves (#205's case fix), `voice.llm.ttft_ms` 357.36 ms and `first_sentence_ms`
+  949.65 ms on this cold first live turn (tools installed, real prompt — not the plan's isolated, pre-warmed
+  152 ms/151 tok/s probe), turn total **1974.72 ms, over the 1.3 s budget**, almost entirely from the LLM stage.
+  Recall 100 % both directions.
+- **LLM voice-turn latency bring-up — budget met on every stage, every turn.** Two causes, both fixed now:
+  1. `WarmAsync` warmed the LLM with a one-token, no-tools request, so the tool-call grammar, `ToolCallStreamFilter`/
+     `ToolCallParser`, the Jinja template's tools branch, and every decode step past the first were cold on the real
+     first turn. Fixed above (`WarmAsync` accepts the host's tool definitions and runs `WarmToolMaxTokens` tokens
+     through `StreamAsync` when given any).
+  2. The first re-measurement (357 → 65-78 ms TTFT, but `first_sentence` still 90-120 ms over its 200 ms budget)
+     pointed at decode throughput: 38-40 tok/s in the session against the plan's isolated probe's 151 tok/s with the
+     same grammar armed. That pointed at session-path transport at the time, but the real cause, found and fixed on
+     `main` (alpha.236, `perf/llm-short-reply-decode`, #215): the probe sampled greedy; the voice session's
+     `TextRequest` defaults to `Temperature=0.7, TopP=0.95, Greedy=false`, and `TopPStep`'s nucleus filter argsorted
+     the full ~152K-token vocabulary through a `Comparison<int>` delegate and allocated three vocab-sized arrays —
+     every decode step, only on that non-greedy path. Fixed there (reused scratch buffers, a delegate-free sort,
+     sorting only the candidate subset when it suffices); this PR just rebased onto it.
+
+  `VoiceSessionQwen3EndToEndTests` drives 4 turns of the same utterance (conversation history grows each turn) with
+  two independent timelines — `RecordingDiagnostics` (raw per-token events via `EngineOptions.Diagnostics`) and a
+  `TimestampingTextService` decorator (the chunks the session streams, after the tool-call filter) — plus a
+  best-effort read of `CudaBackend.LtGemmPlanStats` after warm-up and every turn. Re-measured after the rebase
+  (RTX 3060 + 4090, both cards visible, clean quiet window, verified clean afterwards):
+
+  | Turn | `llm.ttft_ms` (≤ 150) | `llm.first_sentence_ms` (≤ 200) | decode tok/s | `turn.total_ms` (≤ 1.3 s) |
+  |---|---:|---:|---:|---:|
+  | 1 (cold) | 63.7 | 152.2 | 101.5 | 1226.6 |
+  | 2 | 46.4 | 120.3 | 121.7 | 1092.4 |
+  | 3 | 62.4 | 148.7 | 102.5 | 1124.0 |
+  | 4 | 81.9 | 172.1 | 99.8 | 1133.5 |
+
+  **Every stage met its budget on every turn, cold or warm, this run** (one run; tightest margins are turn 1's
+  total, 73 ms, and turn 4's first sentence, 28 ms — needs the engine at alpha.236+ for #215's sampler fix, or the
+  real number is back to ~290 ms regardless of this PR). TTFT 357 → 46-82 ms; `first_sentence` 950 → 120-172
+  ms (was still 291-319 ms, over budget, before the sampler fix); `turn.total` 1975 → 1092-1227 ms. Decode is 99.8-
+  121.7 tok/s (was 37-40), matching the sampler fix's own cited 94-106 tok/s for a realistic `ToolLoop` turn.
+  `LtGemmPlanStats` stayed `(0,0,0,0)` throughout both re-measurements — this GGUF-quantized model's decode never
+  reaches cuBLASLt's fused-epilogue GEMM path, confirming the plan-cache counter was never going to explain either
+  gap. `voice.endpoint.ms` reads **776.00 on every turn = 736 + RNNoise's 40 ms lag**, confirming the endpoint-metric
+  fix below in a real session. Recall 100 % both directions on turn 1, no `<think>` text in any turn.
+- `voice.endpoint.ms` now adds the denoiser's algorithmic lag (`RnnoiseStream.LatencySamples`, exposed as
+  `VoiceAudioFrontend.DenoiserLatencySamples`, 0 when `Denoise` is off) to the sample-counted hangover, so the metric
+  (and `turn.total_ms`, which folds it in) reports the caller's real wall-clock wait instead of being silently short
+  by 40 ms whenever denoising runs — see the live-session confirmation above. Pinned by a CPU test: a real Silero VAD
+  + a real RNNoise instance over the JFK clip, one turn through a full `VoiceAgentSession` (fake speech/LLM), reports
+  `EndpointMs` 736.00 with `Denoise` off and 776.00 on — exactly the 40 ms lag, every run.
+- **Still open for PR9 (`feat/voice-host-and-deploy`, stacked on this branch):** `VoiceHost`'s boot-time
+  `WarmAsync` call must pass its tool set too, or production warm-up stays on the cold one-token path this fix
+  addresses only when a caller opts in.
+
+## alpha.236
+
+- **Non-greedy sampling (temperature/top-p) no longer sorts the whole vocabulary from scratch every token.**
+  The phone voice agent's short replies were measured streaming at 37-40 tok/s on the 4090 against an isolated
+  probe's 151 tok/s for what looked like the same request. Neither named suspect (per-generation CUDA/KV-cache
+  startup cost; `StreamAsync`/`ToolLoop`'s detokenizer/filter/channel transport) held up when measured directly
+  — both are flat/negligible. The probe measured only greedy decoding; the voice session's `TextRequest`
+  defaults to `Temperature=0.7, TopP=0.95, Greedy=false`, and `TopPStep`'s nucleus filter allocated three
+  vocab-sized arrays and argsorted the full ~152K-token vocabulary through a `Comparison<int>` delegate — every
+  decode step, only on the non-greedy path.
+  - **Fix.** `TopPStep`/`TopKStep`/`MinPStep`/`SamplerChain` reuse per-generation scratch buffers instead of
+    allocating fresh ones every token. `SamplerMath.SortDescendingByValue` sorts via `Array.Sort(float[], int[])`
+    (no delegate dispatch) instead of a comparer. `TopPStep` additionally sorts only the candidate tokens whose
+    probability already clears a tiny floor when their own total reaches `p` (provably identical to sorting the
+    whole vocabulary whenever it applies — see the type's remarks), falling back to a full sort otherwise.
+  - **Numbers (Qwen3-4B Q4_K_M, 4090):** session-default sampling's first-10-token latency: 25.2 ms/token before
+    (39.7 tok/s) → 7.6 ms/token after (131.6 tok/s); the realistic voice-turn bench (`ToolLoop.RunAsync` →
+    `StreamAsync`) moves from 27-38 tok/s to 94-106 tok/s. Greedy decoding (unaffected code path) holds steady at
+    110-160 tok/s across every measurement pass. Reply text and token-ids are byte-identical to the pre-fix
+    output in every case measured. [Results](benchmarks/results/2026-10-01_llm_short_reply_decode.md).
+- `TopPSortRefactorIdentityTests` keeps the pre-fix sampler algorithm verbatim as a reference and checks the new
+  code masks identical logits across peaked/near-flat/pre-masked-tail/fallback-forcing distributions up to
+  151,936 (Qwen3's vocabulary) and 2,000,000 elements — `regression-ab.sh`'s identical-output arms are greedy
+  and never reach this code at all.
+
+## alpha.235
+
+- **Whisper's GELU is now the exact erf form Whisper uses.** OpenAI's Whisper applies `F.gelu` after both conv-stem
+  convolutions and `nn.GELU()` in every MLP, and HF's configs say `activation_function: "gelu"`. `WhisperEncoder`
+  and `WhisperDecoder` called `backend.Gelu`, the tanh approximation, which differs by up to 4.7e-4 per activation;
+  they now call `backend.GeluErf` (CUDA `gelu_erf_f32`, Vulkan `gelu_exact`, the `IBackend` default on CPU).
+  - **Tokens:** with the alpha.233 log-mel, CPU greedy decodes against `WhisperForConditionalGeneration` on the
+    reference features, with the engine's decoding rule, are identical on all 144 cases — tiny, base, small.en,
+    medium, distil-large-v3 and v3.5, 12 clips, with and without timestamps — where the tanh form left 4 near-ties
+    (reference margins 0.0037–0.032 logits) resolved the other way.
+  - **Latency (RTX 3060, small.en):** unchanged — 2 / 5 / 10 s in 111–122 / 112–115 / 187–189 ms median on the old
+    512-point log-mel and 106–119 / 106–110 / 177–189 ms on alpha.233's, gate met; GPU tokens identical to the
+    respective previous build on every bench case. [Results](benchmarks/results/2026-10-01_whisper_erf_gelu_3060.md).
+- `WhisperExactGeluTests` reduces a tiny synthetic Whisper to its GELUs and layer norms and checks the encoder and
+  the decoder against the exact form in double precision; the tanh form at any one of the four sites fails it.
+- `WhisperBenchTests` exempts exactly the 2 s slice from the narrowband recall gate, with the measured reason beside
+  the constant. It used to exempt every slice under 5 s, so a shorter slice added later would have gone ungated
+  unnoticed.
+
+## alpha.234
+
+- **RNNoise has an opt-in int8 precision, and with it the voice front end meets its gate.**
+  `RnnoisePrecision.Int8` runs conv2 and the three GRUs on the int8 tables that upstream's default C build compiles
+  in. conv1 and the two heads stay F32, as they do there. A 10 ms frame reads 3.2 MB of weights instead of 11.5 MB,
+  and a paired 20 ms frame 4.5 MB instead of 16.9 MB.
+  - **Tables.** `RnnoiseInt8Tables` reads them out of `src/rnnoise_data.c` in the pinned xiph tarball into
+    `rnnoise_int8.safetensors`. All 24 arrays are byte-equal to what gcc compiles from that file (a SHA-256 per array
+    in `RnnoiseInt8TablesTests`). The GRU index lists are dense, and the conversion checks that.
+  - **Numerics.** Upstream's default `./configure` build is its SSE2 path, not AVX2: `--enable-x86-rtcd` defaults to
+    off and nothing adds `-march`. It codes activations as `127 + floor(0.5 + fl(127·x))` and sums the uint8 × int8
+    products exactly in int32. This follows that build. The AVX2 path differs: its `maddubs` saturates each pair at
+    int16, and it rounds `fma(x, 127, 127)` half-to-even.
+  - **Op.** `IBackend.QuantizeActivationsU8` and `IBackend.LinearI8U8`, implemented on the CPU backend in
+    `Int8GemvKernels`. AVX2 widens the bytes and multiplies with `pmaddwd`; the scalar path gives the same bits.
+    Two activation rows share each weight load, so the paired 20 ms path still reads its shared weights once.
+  - **Selection.** `RnnoiseWeights.LoadFile(path, precision)`. F32 is the default, and the wake stack loads F32,
+    which a test checks. `RnnoiseInstaller` installs the tables when asked for Int8.
+- **Parity with upstream's default build** (48 kHz jfk.wav, per-frame error, clean / 5 dB noise): median
+  0.034 % / 0.053 %, p99 0.46 % / 0.35 %, max 1.57 % / 0.73 %. For scale, the F32 port against upstream's float build
+  is 0.017 % / 0.019 %, and upstream's two builds differ from each other by 0.131 % / 0.163 %. The int8 sums are exact,
+  so what remains is what separates the F32 port from upstream's float build: summation order in conv1 and the heads,
+  exact against approximated tanh and sigmoid, and the front end. A slightly different activation can move a code by
+  one step.
+- **Quality, int8 against F32.**
+  - SNR goes from 5.0 to 11.1 dB at both precisions. Noise between words drops 33.0 dB at int8 and 32.6 dB at F32,
+    and speech moves 0.4 dB at both.
+  - Whisper small.en's content-word recall through the full chain is 100 % at both precisions: clean and at 5 dB SNR,
+    at 16 kHz and narrowband.
+- **The gate, measured at int8** (2026-10-01; i7-6900K, CPU 0, `schedutil`, spinning 20 ms clock, 2,000 frames per
+  run, interleaved, every run checked for foreign builds, tests and SwarmUI requests):
+  - Quiet: p50 1.07–1.08 ms, p99 1.20–1.59 ms (gate: 3 / 5 ms).
+  - 4 streaming threads: p50 1.80–2.11 ms, p99 3.56–4.25 ms, none late (gate: none late, p99 10 ms).
+  - 8 streaming threads, not gated: p50 2.66–3.24 ms, p99 4.34–6.17 ms, none late.
+  - Every run allocated 0 bytes and ran no GC. F32 measured p50 6.6–7.3 ms and p99 10.5–11.1 ms under 4 threads the
+    same morning, which misses.
+- **Sleeping clock.** A new bench mode, `HARTSY_VOICE_FRONTEND_BENCH_PACED=sleep`, sleeps to each tick as the voice
+  host's audio thread does.
+  - Under `schedutil` the core then idles between frames and runs at 1.3–1.7 GHz mean instead of 3.5 GHz.
+  - Quiet: p50 2.93–2.94 ms, p99 3.91–4.05 ms.
+  - 4 streaming threads: p50 3.63–4.12 ms, p99 5.84–6.90 ms, none late.
+  - Wake-up delay after the tick: p50 0.08–0.15 ms.
+- **Bench.** `VoiceFrontendBenchTests` now asserts the redefined gate on the spinning clock. It also takes
+  `HARTSY_VOICE_FRONTEND_BENCH_PRECISION=int8`.
+- **Tests.**
+  - Kernel: exact sums, the epilogue, AVX2 against scalar, and row independence, plus the tie rule of the codes.
+  - Table conversion: the gcc digests, and refusal of sparse or misshapen arrays.
+  - Weights: gate order and conv2's column order.
+  - Pairing, allocation and real speech, now at both precisions.
+  - Parity against the default build, the wake stack's F32, and recall. `LinearI8U8` refuses LoRA adjuncts.
+
+## alpha.233
+
+- **Whisper now sees the log-mel it was trained on.** The front end zero-padded the 400-sample window into a
+  512-point FFT (257 bins at 31.25 Hz instead of 201 at 40 Hz) and did not center the STFT, so a 30 s window was
+  2997 frames and 1499 encoder positions instead of 3000 and 1500. It now runs the 400-point STFT with reflect
+  padding of 200 and drops the last frame, as OpenAI's `log_mel_spectrogram` and HF's `WhisperFeatureExtractor` do.
+  - **Features:** against `WhisperFeatureExtractor` (transformers 5.15, CPU) on 12 clips — JFK at 16 kHz and
+    8 → 16 kHz narrowband, whole and cut to 2 / 5 / 10 s, 5 s of silence, 5 s of white noise, 30 s and 44 s of
+    speech — the largest difference on the normalized log-mel is 1.6e-5 at 80 mels and 2.6e-5 at 128 (mean
+    ≤ 1.1e-7), the size of the reference's own torch-versus-numpy spread (1.3e-5 and 1.4e-5).
+  - **Tokens:** greedy decodes, with and without timestamps, against `WhisperForConditionalGeneration` run on the
+    reference's features with the engine's decoding rule, CPU backend: 70 of 72 identical for tiny, base and
+    small.en (58 of 72 before), 24 of 24 for medium and distil-large-v3.5, 22 of 24 for distil-large-v3. The
+    four that differ are near-ties the reference itself wins by 0.0037–0.032 logits, and the engine picks the
+    reference's runner-up. Whisper uses the exact (erf) GELU where the engine uses the tanh form; with the exact
+    form tiny, base and small.en are identical on all 72. That swap is not in this release.
+  - **Output moves by design:** transcripts change where the old input tipped a decision. small.en on the 2 s
+    narrowband slice now ends "And so my fellow Ameri-", as the reference does on the same samples; JFK stays
+    11/11 at 16 kHz and narrowband.
+  - **Latency (RTX 3060, small.en, in-process, two runs per build):** 2 / 5 / 10 s utterances in 95–116 /
+    105–119 / 173–178 ms median against 97–125 / 110–114 / 185–194 ms for the previous build; gate (≤ 350 ms) met
+    at median and p95 (≤ 140 ms). The mel stage itself fell from 4.1 / 8.9 / 16.8 ms to 1.8–2.6 / 3.8–3.9 /
+    3.9–5.2 ms. On the GPU at default precision the decodes equal the HF reference's on all 21 cases the bench and
+    the parity set share (19 before). [Results](benchmarks/results/2026-10-01_whisper_logmel_3060.md).
+- `MelSpectrogramExtractor.Config.ExactFftSize` transforms at exactly `NFft` points, through the allocation-free
+  mixed-radix `FftPlan` when that is not a power of two (400 = 4·4·5·5), never Bluestein. Every other preset keeps
+  its output bit for bit. `WhisperLegacyPow2Config` keeps the old layout for the S3 speech-tokenizer front end, so
+  CosyVoice 2 and Chatterbox do not move with Whisper.
+- `ComputeZeroPadded` takes centered presets, reading the reflect padding at both edges of the zero-padded window
+  through index arithmetic; `Compute` no longer builds the reflect-padded copy. Frames fan out through
+  `CpuParallel.For` in blocks sized by the FFT alone, each renting its scratch, so a warm extractor allocates
+  nothing; `FftPlan.ForwardReal` takes a caller-owned work buffer so blocks share one plan.
+- `WhisperBenchTests` evaluates the narrowband recall gate (≥ the 16 kHz baseline − 10 pts) on the full clip and on
+  slices of 5 s and longer, and prints a gate column. The 2 s slice is still timed, but its recall is informational:
+  its cut lands inside "Americans", where the reference model also drops the word's end on the narrowband samples.
+
+## alpha.232
+
+- **Kokoro's first synthesis of new text is no longer slower than a repeat.** Each new sentence length used to build
+  about 39 cuDNN convolution plans, and building one is ~97 % heuristic query (~2 ms; finalize ~0.01 ms), so new
+  text paid 60-80 ms that a repeat did not.
+  - A 1D cuDNN conv now takes its engine configuration (engine and knobs) from its conv family's power-of-two length
+    bucket. The heuristic runs once per family and bucket, at the bucket's top length minus one, and each new length
+    only finalizes a plan from that configuration (~0.1 ms).
+  - The reference is odd so the chosen configuration handles a ragged final tile and fits every length in the
+    bucket; at a power-of-two reference the heuristic picked edge-free tiles that refused unaligned lengths. A
+    configuration that still does not finalize for a length falls back to that length's own heuristic.
+  - The choice depends on the length alone, so the audio does not depend on which lengths came first: the same 20
+    sentences in reverse order give byte-identical audio.
+  - Applies to every `groups == 1` `Conv1d` / `ConvTranspose1d` on CUDA (vocoders and codecs); 2D and 3D convs are
+    unchanged. `numerics.audioConvLengthBuckets=false` is the kill switch back to the per-length heuristic.
+- **Measured on the RTX 3060** (20 new 15-word sentences, then the same 20 again; p50 / p95):
+  - Back to back: 212.9 / 255.6 → 180.1 / 220.3 ms. With 2-5 s idle gaps: 245.4 / 296.1 → 195.3 / 227.9 ms. The
+    250 ms gate now holds for new text in both modes.
+  - Repeats are unchanged (175.5 → 176.3 ms). Conv plan building per new sentence fell from 61 ms to 6 ms, with no
+    fallbacks. A cold bucket still pays one heuristic round (about 70 ms) once per process, which a session warm-up
+    across the 32-512-frame buckets removes.
+- **Bounded, not byte-identical.** The per-length heuristic already picked different engines (46 / 55 / 56) for
+  different lengths of the same conv, so no single choice per bucket reproduces it.
+  - Kokoro: log-spectral correlation ≥ 0.99995 and max-abs ≤ 5.2e-3 against the previous build, same lengths, same
+    Whisper recall. With the buckets switched off the build is byte-identical to the previous one.
+  - Piper (VITS): same lengths; log-spectral correlation 1.000000 on four of six sentences, 0.99993 and 0.99497 on
+    the other two.
+- **Per-shape setup counters on `CudaBackend`:** `CudnnConvPlanStats` (plans built and how many came from a bucket,
+  reference builds, fallbacks, build time split into graph, heuristic and finalize), `DescribeCudnnConvPlanFamilies`,
+  `LtGemmPlanStats` and `GetMemPoolUsage`.
+- Tests:
+  - `CudnnConvPlanStatsTests` (CUDA): bucket and reference-length math, one plan per length from its bucket, the
+    per-length heuristic with buckets off, byte-identical output whichever order two lengths of a bucket arrive in, and
+    forward and transposed bucketed output within TF32 of the per-length heuristic.
+  - `KokoroFirstSynthesisBenchTests`: the opt-in 3060 first-synthesis bench (back to back or with gaps, forward or
+    reverse order, against reference audio). `ConvLengthBucketDigestTests`: the Piper A/B. `TtsConvBucketSpotCheckTests`
+    and `TtsConvBucketSpotCheckCompareTests`: per-model arms on the 3060, scored on the CPU with Whisper.
+
+## alpha.231
+
+- **RNNoise runs the two 10 ms frames of a 20 ms voice frame layer by layer, bit for bit.** Per 20 ms frame it now
+  reads 16.9 MB of weights instead of 23.1 MB.
+  - `RnnoiseModel.ProcessPair` puts both frames' conv windows through each conv in one product, both frames'
+    GRU input projections `W·x` through one pass over `W`, and both rows through the dense heads. Only the
+    recurrent `U·h` stays one frame at a time.
+  - That reads the conv weights (0.69 MB), the three input-side `W` (5.32 MB) and the heads (0.20 MB) once per 20 ms
+    instead of twice. The recurrent `U` (5.32 MB, read twice) is 63 % of what remains.
+  - `RnnoiseDenoiser.ProcessPair` analyzes both frames before synthesizing either. When either frame is silent, the
+    other runs alone.
+  - `RnnoiseStream` pairs two whole frames when one call holds them. It never holds one back, so latency is
+    unchanged.
+- **Measured against the previous build** (2026-10-01, i7-6900K, pinned to CPU 0). The builds were interleaved
+  A/B, under the bench lock, with a separate check of running processes and of the SwarmUI journal before and after
+  every run.
+  - Quiet, back to back: p50 1.43–1.52 → 1.32 ms, p99 2.46–2.73 → 1.95–1.98 ms.
+  - Quiet, at the live 20 ms cadence: p50 2.03–2.36 → 2.02–2.10 ms, p99 2.99–3.93 → 2.44–2.85 ms. The gate still
+    misses here.
+  - With 4 / 8 threads streaming memory on other cores: p50 6.1–6.2 → 4.3 ms and 9.5–10.0 → 6.7–7.0 ms. The
+    RNNoise stage's time fell by about a third, a little more than its weight traffic.
+  - Zero allocation and no GC in every run.
+- Tests:
+  - `RnnoisePairTests` runs a stream that takes one frame per call against one fed two frames, one and a half, two
+    and a half, or random sizes per call. At 16 and 48 kHz it compares every output sample, and the speech
+    probability after every call, bit for bit, and asserts that pairs with either frame silent occurred. The
+    synthetic-weight cases run in the unit lane; the real-weight cases, on speech, are Integration.
+  - `LinearTransBIdentityTests` checks that each row of a two-row product has the bits of that row alone, at the
+    paired path's shapes, inline and fanned out.
+  - Both also pass with `DOTNET_EnableAVX2=0`, which forces the scalar kernels.
 
 ## alpha.230
 

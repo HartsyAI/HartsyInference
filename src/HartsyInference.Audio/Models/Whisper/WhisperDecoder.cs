@@ -419,13 +419,13 @@ internal sealed unsafe class WhisperDecoderLayer
         backend.Add(res2, res1, crossProj);
         res1.Dispose(); crossProj.Dispose();
 
-        // --- MLP sub-block ---
+        // --- MLP sub-block --- (Whisper's GELU is the exact erf form; backend.Gelu is the tanh approximation.)
         Tensor normed3 = new(inShape, DType.F32);
         backend.LayerNorm(normed3, res2, _finalLnW!, _finalLnB!, _cfg.LayerNormEps);
         Tensor fc1 = WhisperOps.ProjectLinear(backend, normed3, _fc1W!, _fc1B, 1, newCount, d, _cfg.IntermediateSize);
         normed3.Dispose();
         Tensor activated = new(new TensorShape(1, newCount, _cfg.IntermediateSize), DType.F32);
-        backend.Gelu(activated, fc1);
+        backend.GeluErf(activated, fc1);
         fc1.Dispose();
         Tensor fc2 = WhisperOps.ProjectLinear(backend, activated, _fc2W!, _fc2B, 1, newCount, _cfg.IntermediateSize, d);
         activated.Dispose();

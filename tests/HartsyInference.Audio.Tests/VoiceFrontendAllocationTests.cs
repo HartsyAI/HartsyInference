@@ -16,7 +16,7 @@ public sealed class VoiceFrontendAllocationTests
     private const int Warmup = 50;
     private const int Frames = 1_000;
 
-    private static readonly (string Name, long[] Shape)[] RnnoiseLayout =
+    internal static readonly (string Name, long[] Shape)[] RnnoiseLayout =
     [
         ("conv1.weight", [128, 65, 3]), ("conv1.bias", [128]), ("conv2.weight", [384, 128, 3]), ("conv2.bias", [384]),
         ("gru1.weight_ih_l0", [1152, 384]), ("gru1.weight_hh_l0", [1152, 384]), ("gru1.bias_ih_l0", [1152]),
@@ -36,11 +36,15 @@ public sealed class VoiceFrontendAllocationTests
         ("final_conv.weight", [1, 128, 1]), ("final_conv.bias", [1]),
     ];
 
-    [Fact]
-    public void RnnoiseStream_At16k_AllocatesNothingPerFrame()
+    [Theory]
+    [InlineData(RnnoisePrecision.Float)]
+    [InlineData(RnnoisePrecision.Int8)]
+    public void RnnoiseStream_At16k_AllocatesNothingPerFrame(RnnoisePrecision precision)
     {
         using RnnoiseWeights weights = new();
         Load(RnnoiseLayout, seed: 1, weights.Load);
+        if (precision == RnnoisePrecision.Int8) LoadInt8Tables(weights, seed: 11);
+        Assert.Equal(precision, weights.Precision);
         using CpuBackend backend = new();
         using RnnoiseStream stream = new(weights, 16_000);
         float[] input = new float[320];
@@ -81,9 +85,41 @@ public sealed class VoiceFrontendAllocationTests
         Assert.Equal(0, allocated);
     }
 
+    /// <summary>Random int8 tables in upstream's arrangement (<see cref="RnnoiseInt8Tables.Arrays"/>), scaled so the
+    /// products land where the F32 layers' do, added to already-loaded <paramref name="weights"/>.</summary>
+    internal static void LoadInt8Tables(RnnoiseWeights weights, int seed)
+    {
+        Random rng = new(seed);
+        Dictionary<string, Tensor> tables = new(StringComparer.Ordinal);
+        try
+        {
+            foreach ((string name, int count) in RnnoiseInt8Tables.Arrays)
+            {
+                bool int8 = name.EndsWith("_weights_int8", StringComparison.Ordinal);
+                Tensor tensor = new(new TensorShape(count), int8 ? DType.I8 : DType.F32);
+                tables[name] = tensor;
+                if (int8)
+                {
+                    Span<sbyte> codes = tensor.AsSpan<sbyte>();
+                    for (int i = 0; i < codes.Length; i++) codes[i] = (sbyte)rng.Next(-127, 128);
+                    continue;
+                }
+                bool scale = name.EndsWith("_scale", StringComparison.Ordinal);
+                Span<float> values = tensor.AsSpan<float>();
+                for (int i = 0; i < values.Length; i++)
+                    values[i] = scale ? (float)(3e-6 * (0.5 + rng.NextDouble())) : (float)((rng.NextDouble() * 2 - 1) * 0.05);
+            }
+            weights.LoadInt8Tables(tables);
+        }
+        finally
+        {
+            foreach (Tensor tensor in tables.Values) tensor.Dispose();
+        }
+    }
+
     /// <summary>Hands the model small random weights of the given shapes. Both models copy what they are given, so
-    /// the originals are disposed straight after.</summary>
-    private static void Load((string Name, long[] Shape)[] layout, int seed,
+    /// the originals are disposed straight after. <see cref="RnnoisePairTests"/> uses it too.</summary>
+    internal static void Load((string Name, long[] Shape)[] layout, int seed,
         Action<IReadOnlyDictionary<string, Tensor>> load)
     {
         Random rng = new(seed);
