@@ -168,7 +168,7 @@ public static class Yue2LogitProcessor
     [ThreadStatic] private static float[]? t_negValues;
     [ThreadStatic] private static double[]? t_probabilities;
 
-    private static void ApplyNucleus(Span<float> scores, float topP, int alwaysKeep)
+    internal static void ApplyNucleus(Span<float> scores, float topP, int alwaysKeep)
     {
         // Only finite entries can carry probability, so the nucleus is computed over them alone — identical to the
         // reference's full-vocabulary sort, where every masked entry softmaxes to exactly zero.

@@ -237,7 +237,7 @@ public sealed unsafe class BarkCausalStage : IDisposable
     /// <summary>Upstream semantic sampling: top-p filter on the raw logits (cumulative softmax order), THEN
     /// softmax over <c>filtered / temperature</c>, multinomial draw. Also reports the final probability of
     /// <paramref name="eosSlot"/> for the <c>min_eos_p</c> early stop.</summary>
-    private static int SampleTopPWithProb(Span<float> logits, float temperature, float topP, ref uint rng,
+    internal static int SampleTopPWithProb(Span<float> logits, float temperature, float topP, ref uint rng,
         int eosSlot, out float eosProb)
     {
         int n = logits.Length;
