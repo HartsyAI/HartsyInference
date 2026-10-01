@@ -281,7 +281,6 @@ Whisper implementations agree bit-for-bit (within float32 rounding) when paramet
 
 ## Open Questions
 
-- [ ] FFT implementation choice for C# — options: (a) MathNet.Numerics (managed, ~5x slower than native), (b) implement radix-2 Cooley-Tukey in SIMD (Sse2/Avx2/Avx512), (c) cuFFT/Vulkan FFT on GPU. For n_fft=400 (Whisper), the FFT is tiny — a hand-rolled radix-2 in SIMD with zero-pad to 512 is the right call. For n_fft=2048+ (music), an FFT compute kernel on GPU starts to matter.
 - [ ] Whether to ship a pre-computed filterbank table per model (faster startup) or always compute at startup (no asset shipping). Lean toward compute-at-startup — it's ~milliseconds.
 - [ ] Polyphase resample quality — 64 taps for STT is fine. For music models that take 44.1 kHz input, do we resample once on file load to 24 kHz/16 kHz, or do all internal compute at native sample rate? Decision belongs in each music model's pipeline.
 
@@ -298,7 +297,7 @@ Whisper implementations agree bit-for-bit (within float32 rounding) when paramet
 5. **Drop last STFT frame** for Whisper. The `center=True` STFT produces `n_samples/hop + 1` frames; we want `n_samples/hop`.
 
 6. **Pure C# implementation path**:
-   - **FFT**: hand-roll radix-2 in `System.Runtime.Intrinsics` (Sse2/Avx2). For Whisper's n_fft=400, pad to 512 and do a 512-point radix-2. Pre-compute twiddle factors at module init.
+   - **FFT**: transform at exactly n_fft points. Whisper's n_fft=400 is not a power of two; it runs through the mixed-radix `FftPlan` (4·4·5·5, twiddles and permutation computed once). Zero-padding the 400-sample window into a 512-point radix-2 FFT is NOT equivalent: 257 bins at 31.25 Hz instead of 201 at 40 Hz, a different spectrum under the filterbank. With `center=True` the 30 s window is 3000 frames and 1500 encoder positions; without it, 2997 and 1499.
    - **Resampler**: pure C# polyphase with windowed sinc, pre-compute sinc table.
    - **Filterbank**: pure C# allocation as `Tensor`; computed at startup, cached in model handle.
    - **Mel matmul**: route through `IBackend.MatMul`. Filterbank is a small `[80, 201]` tensor; preload to GPU at model load.

@@ -43,9 +43,9 @@ public sealed class MelSpectrogramExtractor
         bool Center = false, bool CenterWindowInFft = false, bool AdditiveLogFloor = false, bool ExactFftSize = false);
 
     /// <summary>Whisper preset, the log-mel of OpenAI's <c>log_mel_spectrogram</c> and HF's
-    /// <c>WhisperFeatureExtractor</c>: 16 kHz, a 400-point STFT (201 bins) of a periodic Hann window at hop 160, centered
-    /// by reflect padding of 200, last frame dropped (3000 frames for 30 s), power spectrum, Slaney filters to 8 kHz,
-    /// log10 floored at 1e-10, then the max − 8 clamp and (x + 4) / 4. 80 bins through large-v2; pass
+    /// <c>WhisperFeatureExtractor</c>: 16 kHz, a 400-point STFT (201 bins) of a periodic Hann window at hop 160,
+    /// centered by reflect padding of 200, last frame dropped (3000 frames for 30 s), power spectrum, Slaney filters to
+    /// 8 kHz, log10 floored at 1e-10, then the max − 8 clamp and (x + 4) / 4. 80 bins through large-v2; pass
     /// <paramref name="nMels"/> = 128 for large-v3, large-v3-turbo and the distil-large-v3 models.</summary>
     public static Config WhisperConfig(int nMels = 80) => new(
         SampleRate: 16_000,
@@ -198,7 +198,7 @@ public sealed class MelSpectrogramExtractor
     private readonly float[] _window;
     private readonly int _numBins;
     private readonly int _fftSize;
-    // Where the analysis window sits inside the FFT frame: torch.stft centers a shorter window, the default left-aligns.
+    // Window position in the FFT frame: torch.stft centers a shorter window, the default left-aligns it.
     private readonly int _windowOffset;
     // Reflect padding of a centered STFT; frame t reads virtual samples from t·hop − _centerPad.
     private readonly int _centerPad;
@@ -215,8 +215,7 @@ public sealed class MelSpectrogramExtractor
     // The column of a frame whose samples are all zero: what transforming one produces, so it is filled instead.
     private readonly float _silent;
 
-    // One frame's scratch, laid out frame | re | im | power | mel | FFT-plan work. Blocks rent their own;
-    // ComputeFrame, which is single-threaded by contract, keeps this one.
+    // A frame's scratch: frame | re | im | power | mel | plan work. Blocks rent theirs; this one is ComputeFrame's.
     private readonly int _scratchLength;
     private readonly float[] _frameScratch;
 
@@ -225,11 +224,13 @@ public sealed class MelSpectrogramExtractor
     {
         _fftSize = cfg.ExactFftSize ? cfg.NFft : Fft.NextPow2(cfg.NFft);
         if (cfg.HopLength < 1 || cfg.WinLength < 1 || cfg.WinLength > _fftSize || cfg.NMels < 1)
-            throw new ArgumentException($"invalid STFT: win {cfg.WinLength}, hop {cfg.HopLength}, FFT {_fftSize}, mels {cfg.NMels}.", nameof(cfg));
+            throw new ArgumentException(
+                $"invalid STFT: win {cfg.WinLength}, hop {cfg.HopLength}, FFT {_fftSize}, mels {cfg.NMels}.", nameof(cfg));
         if (cfg.ExactFftSize && (_fftSize & (_fftSize - 1)) != 0)
         {
             if (!FftPlan.IsSupported(_fftSize))
-                throw new ArgumentException($"an exact {_fftSize}-point STFT needs prime factors of 2, 3 and 5 only.", nameof(cfg));
+                throw new ArgumentException(
+                    $"an exact {_fftSize}-point STFT needs prime factors of 2, 3 and 5 only.", nameof(cfg));
             _plan = new FftPlan(_fftSize);
         }
         _cfg = cfg;
@@ -316,7 +317,8 @@ public sealed class MelSpectrogramExtractor
     /// row-major <c>[n_mels, OutputFrames(paddedLength)]</c> into <paramref name="output"/>: bit-for-bit what
     /// <see cref="Compute(ReadOnlySpan{float}, float[,])"/> returns for the padded buffer, without building it. A frame
     /// whose window reads only padding, through the reflection at either edge too for a centered preset, is all zeros,
-    /// so its column is one constant and skips the transform — most of Whisper's 30 s window for a short utterance.</summary>
+    /// so its column is one constant and skips the transform — most of Whisper's 30 s window for a short
+    /// utterance.</summary>
     public void ComputeZeroPadded(ReadOnlySpan<float> audio, int paddedLength, Span<float> output)
     {
         if (audio.Length > paddedLength)
@@ -427,7 +429,7 @@ public sealed class MelSpectrogramExtractor
 
     /// <summary>Whether every sample the window <c>[first, last]</c> reads is padding: at or past
     /// <paramref name="realLength"/>, including the ones a centered preset mirrors back from past the signal end.
-    /// Conservative — false — wherever the read would mirror more than once; transforming zeros gives the same column.</summary>
+    /// False wherever the read would mirror more than once; transforming zeros gives the same column anyway.</summary>
     private bool ReadsOnlyPadding(int first, int last, int realLength, int signalLength)
     {
         if (first < realLength) return false;
@@ -438,7 +440,8 @@ public sealed class MelSpectrogramExtractor
     }
 
     /// <summary>Transforms the frame at the start of <paramref name="scratch"/> and leaves the power or magnitude
-    /// spectrum through the filterbank in its mel slot. Reads only immutable state, so blocks run it concurrently.</summary>
+    /// spectrum through the filterbank in its mel slot. Reads only immutable state, so blocks run it
+    /// concurrently.</summary>
     private void TransformToMel(Span<float> scratch)
     {
         Span<float> frame = scratch[.._fftSize];

@@ -986,6 +986,13 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   RTP and audio threads), ignores `CpuParallel.EnterInline()` (which a real-time audio thread enters) and floods the
   shared thread pool that async continuations run on. Size blocks by per-frame cost (`FramePartition`), rent scratch
   from `ArrayPool`, and pin "same bytes under the default fan-out, a cap of 1 and inline" in a test.
+- **A mel front end that rounds `n_fft` up to a power of two computes a different spectrogram, and clean-speech
+  transcripts will not show it.** Zero-padding a 400-sample window into a 512-point FFT gives 257 bins at 31.25 Hz
+  instead of 201 at 40 Hz; dropping `center=True` gives Whisper 2997 frames and 1499 encoder positions instead of
+  3000 and 1500. Whisper still transcribed JFK 11/11 that way. Transform at the reference's own size
+  (`MelSpectrogramExtractor.Config.ExactFftSize`; `FftPlan` runs 2·3·5-smooth sizes allocation-free) and check the
+  frame count against `torch.stft` before comparing values. The presets left on the rounded layout are listed under
+  the affected models in [MODEL_STATUS_AUDIO](MODEL_STATUS_AUDIO.md).
 - **A default-precision A/B can sit below its floor on TF32 rounding alone — run a full-F32 arm before calling it a
   regression.** StyleTTS 2's prosody predictor is recurrent, so moving one GEMV from TF32 to exact F32 moved a
   15-word clone to log-spectral correlation 0.976 against the old build (identical length and transcripts); the old
