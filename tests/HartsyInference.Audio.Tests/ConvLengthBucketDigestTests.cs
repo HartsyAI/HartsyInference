@@ -110,6 +110,9 @@ public sealed class ConvLengthBucketDigestTests
             + (identical == Sentences.Length ? "." : $"; lowest log-spectral correlation among same-length others {lowestLogSpec:F6}."));
         GpuBenchSupport.Emit(_out.WriteLine, table, OutEnvVar);
 
+        // Without cuDNN convs (no cuDNN, or a model change that routes elsewhere) the A/B would compare two identical paths.
+        Assert.True(off.Stats.PlanBuilds > 0 && on.Stats.BucketPlanBuilds > 0,
+            $"Piper's convs did not reach cuDNN ({off.Stats.PlanBuilds} plans off, {on.Stats.BucketPlanBuilds} from buckets on)");
         for (int i = 0; i < Sentences.Length; i++)
         {
             Assert.True(on.Waves[i].AsSpan().SequenceEqual(onReverse.Waves[i]),
