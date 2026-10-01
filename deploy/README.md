@@ -107,8 +107,8 @@ sudo deploy/install-host-tuning.sh --revert   # remove both, put every CPU on pe
 - `--apply` installs this checkout's files as root, so run it from a checkout that only you or root can write. That
   rule is the protection: the dry run and `--apply` both print the two installed files' SHA-256 to compare, but the
   hashes do not cover the script itself, which runs as root.
-- The unit writes `performance` to every CPU. A CPU that does not offer it fails the unit, and `--apply` stops there. All
-  16 CPUs on this box offer it.
+- The unit writes `performance` to every CPU. A CPU that does not offer it fails the unit, and `--apply` stops there,
+  with the unit installed and enabled but not the limits file; `--revert` removes it. All 16 CPUs on this box offer it.
 - `--revert` puts back on `schedutil` only the CPUs that run `performance`, the governor the unit sets. Any other
   governor set by hand is left alone; a CPU put on `performance` by hand moves too, since the script cannot tell the two
   apart. A CPU that does not offer `schedutil` is an error and stays on `performance` until the next boot, which starts
