@@ -5,9 +5,10 @@
 #   /etc/security/limits.d/hartsy-rt.conf                         rtprio 50 for the service user outside systemd
 # Both are optimizations: every voice gate passes under the stock schedutil governor.
 #
-# Only the unit writes "performance"; only --revert writes "schedutil" back. With no option this is a dry run that
-# prints exactly what --apply would write and change; it needs no root. --apply and --revert need root, and running
-# either again changes nothing.
+# Only the unit writes "performance"; only --revert writes "schedutil", and only on CPUs that run "performance". With no
+# option this is a dry run that prints exactly what --apply would write and change; it needs no root. --apply and
+# --revert need root, and running either again changes nothing. --apply installs this checkout's files as root, so run
+# it from a checkout only you or root can write; both runs print the sources' SHA-256 to compare.
 
 set -euo pipefail
 shopt -s nullglob
@@ -17,6 +18,7 @@ readonly deploy_dir
 readonly unit=hartsyinference-cpu-performance.service
 readonly unit_src=$deploy_dir/systemd/$unit
 readonly unit_dst=/etc/systemd/system/$unit
+readonly wants_link=/etc/systemd/system/multi-user.target.wants/$unit
 readonly limits_src=$deploy_dir/limits.d/hartsy-rt.conf
 readonly limits_dst=/etc/security/limits.d/hartsy-rt.conf
 readonly tuned=performance
@@ -39,7 +41,8 @@ usage() {
 Usage: deploy/install-host-tuning.sh [--dry-run] [--apply | --revert]
   (no option), --dry-run  print what --apply would write and change; changes nothing, needs no root
   --apply                 install the governor unit and the rtprio limits file, enable and start the unit
-  --revert                disable and remove the unit, remove the limits file, set every CPU back to schedutil
+  --revert                disable and remove the unit, remove the limits file, set every CPU on performance back to
+                          schedutil (any other governor is left alone)
   --dry-run --revert      print what --revert would do
 --apply and --revert need root; running either again changes nothing.
 EOF
@@ -74,7 +77,7 @@ put_file() {
     wrote=1
     if ((dry_run)); then
         say "would write $dst (root:root, 0644):"
-        sed 's/^/    /' -- "$src"
+        sed 's/^/    /' <"$src"
     else
         install -D -o root -g root -m 0644 -- "$src" "$dst"
         say "wrote $dst"
@@ -139,25 +142,45 @@ check_governors() {
     say "$on of ${#governor_files[@]} CPUs on $want"
 }
 
-# Writes governor $1 to every CPU that offers it and runs another one.
-set_governors() {
-    local want=$1 file current kept=0
+# --revert: puts every CPU on "performance", the governor the unit writes, back on schedutil. A CPU on any other
+# governor was not set by this tuning and is left alone; one that stays on "performance" counts as a failure.
+restore_governors() {
+    local file current back=0 already=0 other=0
     for file in "${governor_files[@]}"; do
         current=$(<"$file")
-        if [[ $current == "$want" ]]; then
-            kept=$((kept + 1))
-        elif ! offers "$file" "$want"; then
-            say "$(cpu_of "$file"): $want is not offered; stays $current"
+        if [[ $current == "$stock" ]]; then
+            already=$((already + 1))
+        elif [[ $current != "$tuned" ]]; then
+            say "$(cpu_of "$file"): on $current, which this tuning does not set; left alone"
+            other=$((other + 1))
+        elif ! offers "$file" "$stock"; then
+            say "$(cpu_of "$file"): $stock is not offered; stays $tuned until the next boot"
+            failures=$((failures + 1))
         elif ((dry_run)); then
-            say "would set $(cpu_of "$file"): $current -> $want"
-        elif printf '%s\n' "$want" >"$file"; then
-            say "$(cpu_of "$file"): $current -> $want"
+            say "would set $(cpu_of "$file"): $tuned -> $stock"
+            back=$((back + 1))
+        elif printf '%s\n' "$stock" >"$file"; then
+            say "$(cpu_of "$file"): $tuned -> $stock"
+            back=$((back + 1))
         else
-            say "$(cpu_of "$file"): writing $want failed; stays $current"
+            say "$(cpu_of "$file"): writing $stock failed; stays $tuned"
             failures=$((failures + 1))
         fi
     done
-    say "$kept of ${#governor_files[@]} CPUs were already on $want"
+    say "$stock: $back CPUs put back, $already already on it, $other on another governor left alone"
+}
+
+# Starts or restarts the unit; a failure (a CPU without "performance" fails its tee) stops the script.
+run_unit() {
+    if ! run systemctl "$1" "$unit"; then
+        die "$unit did not $1; see: systemctl status $unit"
+    fi
+}
+
+# The sources' SHA-256, so the operator can tell that --apply installs what the dry run showed.
+show_sources() {
+    say "sources (compare the dry run with --apply):"
+    sha256sum -- "$unit_src" "$limits_src" | sed 's/^/    /'
 }
 
 apply() {
@@ -166,6 +189,7 @@ apply() {
     fi
     refuse_symlink "$unit_dst"
     refuse_symlink "$limits_dst"
+    show_sources
     put_file "$unit_src" "$unit_dst"
     if ((wrote)); then
         run systemctl daemon-reload
@@ -176,10 +200,10 @@ apply() {
         run systemctl enable "$unit"
     fi
     if ! systemctl is-active --quiet "$unit" 2>/dev/null; then
-        run systemctl start "$unit"
+        run_unit start
     elif (($(count_off "$tuned") > 0)); then
-        # Active but a governor changed since boot: run the unit again, it only writes "performance".
-        run systemctl restart "$unit"
+        # Active, but a governor changed since boot: run the unit again; it only writes "performance".
+        run_unit restart
     else
         say "$unit: already active"
     fi
@@ -188,21 +212,31 @@ apply() {
 }
 
 revert() {
+    local reload=0
     if [[ -e $unit_dst ]] || systemctl is-enabled --quiet "$unit" 2>/dev/null; then
         run systemctl disable --now "$unit"
     else
         say "$unit: not installed"
     fi
+    # A unit file deleted by hand leaves its enable link behind, where disable no longer finds it.
+    if [[ ! -e $unit_dst && -L $wants_link ]]; then
+        run rm -f -- "$wants_link"
+        reload=1
+    fi
     drop_file "$unit_dst"
-    if ((wrote)); then
+    if ((wrote || reload)); then
         run systemctl daemon-reload
     fi
     drop_file "$limits_dst"
-    set_governors "$stock"
+    if ((wrote && !dry_run)); then
+        say "new login sessions no longer get the rtprio limit; existing ones keep it until they end"
+    fi
+    restore_governors
 }
 
 main() {
-    local arg action="" explicit_dry=0
+    local arg action="" explicit_dry=0 self
+    self=$(printf '%q' "$0")
     for arg in "$@"; do
         case $arg in
             --dry-run) explicit_dry=1 ;;
@@ -229,7 +263,7 @@ main() {
     dry_run=$explicit_dry
     command -v systemctl >/dev/null || die "systemctl not found; this installs a systemd unit"
     if ((!dry_run && EUID != 0)); then
-        die "--$action changes system settings and must run as root: sudo $0 --$action"
+        die "--$action changes system settings and must run as root: sudo $self --$action"
     fi
     if ((${#governor_files[@]} == 0)); then
         say "no cpufreq governors under /sys/devices/system/cpu; the unit would change nothing here"
@@ -242,10 +276,10 @@ main() {
         revert) revert ;;
     esac
     if ((failures)); then
-        die "$failures CPU(s) did not take the governor; see above"
+        die "$failures CPU(s) are not on the expected governor; see above"
     fi
     if ((dry_run)); then
-        say "dry run only; to do this: sudo $0 --$action"
+        say "dry run only; to do this: sudo $self --$action"
     else
         say "done"
     fi

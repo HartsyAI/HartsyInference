@@ -1,7 +1,7 @@
 # Host tuning for the phone-call voice agent: the CPU frequency governor "performance" on every CPU, set at boot.
 # Install and remove it with deploy/install-host-tuning.sh; see deploy/README.md, "Host tuning". An optimization: every
-# voice gate passes under the stock schedutil governor. Stopping this unit changes nothing; `--revert` restores
-# schedutil.
+# voice gate passes under the stock schedutil governor. Stopping this unit changes nothing; `--revert` puts the CPUs on
+# performance back on schedutil.
 [Unit]
 Description=HartsyInference host tuning: CPU frequency governor "performance" on every CPU
 Documentation=https://github.com/HartsyAI/HartsyInference/blob/main/deploy/README.md#host-tuning

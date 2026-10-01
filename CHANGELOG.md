@@ -46,8 +46,10 @@ stable release will require. Dates are UTC.
 - **Host tuning:** `deploy/install-host-tuning.sh` installs two things. One is `hartsyinference-cpu-performance.service`,
   a oneshot unit that sets every CPU's frequency governor to `performance` at boot through sysfs. The other is
   `/etc/security/limits.d/hartsy-rt.conf` (`hartsy - rtprio 50`, for runs without systemd). The script is a dry run by
-  default, with `--apply`, `--revert` (back to `schedutil`) and `--dry-run --revert`. It is idempotent, needs root only
-  to change anything, and refuses to write through a symlink. These are optimizations: under `schedutil`, the idle
+  default, with `--apply`, `--revert` and `--dry-run --revert`. `--revert` puts every CPU on `performance` back on
+  `schedutil`, leaves other governors alone, and fails if a CPU cannot go back. The script is idempotent, needs root
+  only to change anything, refuses to write through a symlink, and prints its sources' SHA-256 so an apply can be
+  checked against the dry run. These are optimizations: under `schedutil`, the idle
   gaps between turns cost Kokoro about 33 ms per sentence and the paced front end about 0.7 ms per frame, but every
   gate passes either way.
 - Tests (`tests/HartsyInference.VoiceHost.Tests`): 83 unit tests against a fake gateway on a temporary socket with

@@ -101,20 +101,30 @@ Two optimizations for this box, decided for the deployment and installed togethe
 ```bash
 deploy/install-host-tuning.sh                 # dry run: prints every file it would write and every change; no root
 sudo deploy/install-host-tuning.sh --apply    # install, enable and start; running it again changes nothing
-sudo deploy/install-host-tuning.sh --revert   # remove both, set every CPU back to schedutil
+sudo deploy/install-host-tuning.sh --revert   # remove both, put every CPU on performance back on schedutil
 ```
+
+- `--apply` installs this checkout's files as root, so run it from a checkout that only you or root can write. The dry
+  run and `--apply` both print the sources' SHA-256, so you can check you are installing what you previewed.
+- `--revert` puts back on `schedutil` only the CPUs that run `performance`, the governor the unit sets; a governor set
+  by hand is left alone. A CPU that does not offer `schedutil` is an error and stays on `performance` until the next
+  boot, which starts from the kernel default because the unit is gone. Stopping the unit by hand changes nothing.
+- `power-profiles-daemon`, `thermald`, `tuned`, `tlp` or cpupower could rewrite the governor after boot, and a CPU
+  brought online after boot starts on the kernel default. The governor check in the
+  [runbook](../docs/Checklists/VOICE_AGENT_VERIFICATION.md) shows either, and running `--apply` again restarts the unit.
 
 Why, from the voice bring-up's measurements:
 
 - Under `schedutil`, the 2-5 s idle gaps of a conversation let the cores clock down, and the next turn pays for it:
   about 33 ms per Kokoro sentence (host-bound plan heuristics and DSP run on slowed cores) and about 0.7 ms per 20 ms
   frame of the paced voice front end. `performance` holds the clock.
-- `rtprio 50` lets the gateway's RTP tick thread, and only that thread, run under `SCHED_FIFO` (pinned to CPUs 7 and 15
-  in production) when the gateway runs outside systemd.
+- `rtprio 50` lets the gateway's RTP tick thread run under `SCHED_FIFO` (pinned to CPUs 7 and 15 in production) when
+  the gateway runs outside systemd. The limit permits rather than restricts: any process of `hartsy` may then use FIFO
+  up to 50, and only the tick thread asks for it.
 
 Both are optimizations: every gate was measured and passes under the stock `schedutil` governor, and nothing depends
-on them. `power-profiles-daemon` and `thermald` (enabled on this box) did not change the governor in this bring-up; the
-governor check in the [runbook](../docs/Checklists/VOICE_AGENT_VERIFICATION.md) shows it if anything does.
+on them. `power-profiles-daemon` and `thermald`, both enabled on this box, did not change the governor in this
+bring-up.
 
 Considered and not adopted:
 
