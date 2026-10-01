@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.232
+## alpha.231
 
 - **RNNoise runs the two 10 ms frames of a 20 ms voice frame layer by layer, bit for bit.** Per 20 ms frame it now
   reads 16.9 MB of weights instead of 23.1 MB.
