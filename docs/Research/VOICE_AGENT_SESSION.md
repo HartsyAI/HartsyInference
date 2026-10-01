@@ -446,8 +446,8 @@ unknown key fails the start):
 sipsorcery softphone plays the JFK clip at 8 kHz to the real gateway, which talks PhoneLink to the real host running
 Kokoro (`af_heart`) and Whisper small.en; the model is scripted, denoise off. Models loaded and warm in 1.9 to 2.4 s.
 Two changes came after this run: the hang-up's binding to the turn its `ToolResult` names (from review; the unit tests
-cover it) and the Voice package's allocation-free wake. The next GPU run re-checks the agent hang-up and
-`audioPathAllocated`.
+cover it) and the Voice package's allocation-free wake. Both are re-checked, along with `Denoise`'s new default,
+in the [re-run below](#re-run-after-rebasing-onto-main-202-denoise-at-its-new-default-on-int8).
 
 | Measure | Gate | Source | Result |
 |---|---|---|---|
@@ -463,6 +463,34 @@ cover it) and the Voice package's allocation-free wake. The next GPU run re-chec
 | Sender audio-path allocation | 0 B | host: `audioPathAllocated=…B` | **Fails: 19 528 B over 1339 ticks; 704 B over the restarted host's 24 measured ticks.** 19 520 B of it (610 reads × 32 B) and all 704 B (22 × 32 B) are the session's producer wake: completing the cancellable `WaitPlayedAsync` waiter queues a 32 B pool work item per read during playback. The host's own path is 0 B with a scripted session. Fixed since in the Voice package: one allocation-free wake per wait, 0 B per read and on the waking read in a CPU probe of the tagged read, with the sender's warm-up taking the thread's one-time first queueing. The next GPU run re-checks |
 | Host killed with SIGKILL mid-call: BYE at the phone | ≤ 3 s outage period + 2 s | `host killed; the phone got the BYE … ms later` | 4189 ms (1189 ms after the outage period); 1 outage, 1 outage hang-up |
 | Restarted host: stale socket replaced, next call answered, SIGTERM exit 0 and socket removed | all hold | `LoopbackHostKillTests` | all hold (`Removed a stale socket file …`) |
+
+#### Re-run after rebasing onto `main` (#202), `Denoise` at its new default (on, int8)
+
+Same two classes, same card, 2026-10-01, after this branch's own rebase onto `main` 553de075 (alpha.237, #202's
+`Denoise`-on-by-default merge). `LoopbackAssets.All()` did not name RNNoise's weights, so this run also fixed that gate
+(the weights were present on this box regardless, so it did not change the result). Quiet window on the 3060 only — the
+scripted-LLM loopback calls never touch the 4090 — `--verify-since` clean after. `LoopbackSipCallWithHostTests` 3/3,
+`LoopbackHostKillTests` 1/1:
+
+| Measure | Gate | `Denoise` off (above) | `Denoise` on (this run) |
+|---|---|---:|---:|
+| Barge-in: `Flush(T)` at the gateway after the VAD decision | logged | 15.9 ms | 8.0 ms |
+| Barge-in: last audible frame sent after the decision | ≤ 100 ms | 6.4 ms | 6.3 ms |
+| Frames of the flushed turn after `Flush` | 0 | 0 | 0 |
+| Agent hangup: audible goodbye frames before the BYE | ≥ 50 | 106 | 106 |
+| Agent hangup: quiet frames before the BYE | ≥ 2 | 24 | 24 |
+| Agent hangup: host asked after the turn ended | logged | 226 ms | 225 ms |
+| `voice.endpoint.ms` (turn 2, `[Voice] turn N` line) | 700 ms (tune 500-800) | 736.00 | **776.00** (736 + RNNoise's 40 ms lag, as #202 added) |
+| Sender lateness p50/p99/max, catch-up, resyncs | logged | 200/200µs, 25.4 ms, 2, 0 (1339 ticks) | 200/200µs, 29.1 ms, 1, 0 (1333 ticks) |
+| Sender audio-path allocation | 0 B | **19 528 B / 704 B — open** | **0 B on every host — fixed** |
+| SIGKILL: BYE after the 3 s outage period | ≤ 2 s | 1189 ms | 1186 ms |
+| Restarted host: stale socket replaced, next call answered | all hold | all hold | all hold |
+
+Every measure but `voice.endpoint.ms` lands within noise of the `Denoise`-off run — RNNoise's own frame budget is
+already covered by `TurnEndpointerRealVadTests`/the Audio package's int8 bench, not re-measured here. `endpoint.ms`
+moving by exactly 40 ms is the expected, intended effect of #202's metric fix, not a regression. The sender
+allocation this PR's own review flagged as open (19 528 B, then 704 B on the SIGKILL test's short-lived hosts) now
+reads 0 B everywhere, confirming #202's wake-once fix in the real loopback path, not just the CPU probe.
 
 ## Open
 

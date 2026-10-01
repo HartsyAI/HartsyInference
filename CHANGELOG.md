@@ -66,9 +66,26 @@ stable release will require. Dates are UTC.
   `VoiceModelSet`), and `[Slow]` loopback calls (sipsorcery
   softphone → real gateway → real host with Kokoro and Whisper small.en on the RTX 3060), including silence on the line
   between the goodbye and the BYE, and a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
-  Measured there: the cancelled reply's last frame left the gateway 6.4 ms after the barge-in decision, the BYE came 24
-  quiet frames after the goodbye, and a killed host's call ended 1.2 s after the 3 s outage period. Six new Voice unit
-  tests cover the tagged read.
+  Six new Voice unit tests cover the tagged read.
+- **Rebased onto `main` (#202, alpha.237) and re-run on the RTX 3060 with `Denoise` at its new default (on, int8).**
+  `LoopbackAssets.All()` named Silero, Whisper, Kokoro and the JFK clip but not RNNoise; added its weights and int8
+  tables, since `VoiceModelSet.LoadFrontEnd` now needs them and never substitutes raw audio for a missing denoiser (the
+  weights were present on this box, so this did not change the result below, only the gate's correctness on a host that
+  lacks them). Quiet window on the 3060 only (the scripted-LLM loopback calls need no 4090), `--verify-since` clean
+  after. `LoopbackSipCallWithHostTests` 3/3, `LoopbackHostKillTests` 1/1, same as the `Denoise`-off run:
+  - Barge-in: `Flush` reached the gateway 8.0 ms after the VAD decision; the cancelled reply's last audible frame left
+    the gateway 6.3 ms after the decision (was 6.4 ms off `Denoise`); 0 frames of the flushed turn after `Flush`.
+  - Agent hangup: 106 audible goodbye frames, then 24 quiet frames before the BYE (identical frame counts to the
+    `Denoise`-off run); the host asked 225 ms after the turn ended.
+  - Host killed with SIGKILL mid-call: the phone got the BYE 1186 ms after the 3 s outage period (was 1.2 s off
+    `Denoise`); the restarted host replaced the stale socket and took the next call.
+  - `voice.endpoint.ms` now reads 776.00 (was 736.00 off `Denoise` — the 40 ms RNNoise lag `VoiceTurnMetrics` picked up
+    from #202); every other stage is unaffected by denoising, as expected.
+  - **Allocation (open in #202, confirmed fixed here):** the link-close line reads `audioPathAllocated=0B` on both the
+    long-lived call host (1333 ticks) and the SIGKILL test's two short-lived hosts, where the earlier `Denoise`-off run
+    measured 19 528 B.
+  - Sender: lateness p50/p99 within the 200 µs bucket, max 29.1 ms, 1 catch-up frame, 0 resyncs over 1333 ticks (was
+    max 25.4 ms, 2 catch-up frames, 0 resyncs over 1339 ticks off `Denoise` — noise at this precision, same shape).
 
 ## alpha.237
 
