@@ -6,7 +6,7 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.229
+## alpha.227
 
 - **Folders under the models root are matched ignoring case when the engine's spelling is missing.** On a
   case-sensitive filesystem the catalog's `LLM/qwen3/Qwen3-4B-Q4_K_M.gguf` never found the SwarmUI store's
@@ -19,14 +19,21 @@ stable release will require. Dates are UTC.
     ambiguous, logged once, and keep the engine's spelling;
   - a segment that resolves to nothing keeps its spelling along with the rest of the path, so a download lands in the
     folders that already exist. Only a missing segment costs a listing of its parent.
-- Used by `ModelDownloader.TargetPath` (the catalog path `ModelResolver` checks first, every download target and
-  `MissingAssets`) and the `ModelResolver` modality-folder guess. The readers of the same folders resolve them the same
-  way, so a download and its loader keep agreeing: `AudioModelRoot` (root and weights folders), the downloader's audio
-  stand-in check, the `AudioModelCache` root, `ModelFileLocator` subfolders, `VisionModelPaths`, and the LTX-2
-  latent-upsampler and IP-Adapter face-detector scans. The wake model root is now `WakeService.DefaultModelRoot()`,
-  shared by the service, `SpeakerProfileStore.DefaultDirectory` and `hartsy wake train`.
-- A lookup that used to miss on a store holding a case variant now finds it, e.g. AudioLab's `audio/music/YuE2/` for
-  YuE2's `audio/music/yue2` and `audio/clone/RVC/` for RVC's `clone/rvc`. Documented in `docs/SETTINGS.md`.
+- Matching only fills former misses. A lookup that searches several places tries the engine's spelling in all of them
+  before any case variant, so whatever it found before is still what it finds:
+  - `ModelDownloader.TargetPath`: canonical, then legacy names, exactly, then both ignoring case. This covers the
+    catalog path `ModelResolver` checks first, every download target and `MissingAssets`;
+  - `ModelResolver`: catalog file, then modality-folder guess, exactly, then both ignoring case;
+  - `ModelFileLocator`: its whole search over the named folders, then over folders that exist only in another case.
+    This covers the CAM++ `audio/speaker` lookup;
+  - `VisionModelPaths.FindYolo` scans `yolov8` exactly before its name probe.
+- Single-place lookups match case variants directly: the `VisionModelPaths` conventional folders, the LTX-2
+  latent-upsampler scan, the `AudioModelCache` root and the downloader's audio stand-in check.
+- Below the audio root nothing is matched in another case. `AudioModelRoot` and `AudioModelCache` resolve only the
+  `audio` folder itself, so RVC, YuE2 and Demucs look exactly where they did. YuE reads its checkpoint folder from
+  `TargetPath`, so the loader reads where a download writes.
+- The wake model root is now `WakeService.DefaultModelRoot()`, shared by the service,
+  `SpeakerProfileStore.DefaultDirectory` and `hartsy wake train`. Documented in `docs/SETTINGS.md`.
 
 ## alpha.227
 

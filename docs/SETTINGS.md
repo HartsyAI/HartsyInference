@@ -90,9 +90,12 @@ for such a value.
 The models root is shared with SwarmUI and other tools, which may spell a folder differently from the engine:
 SwarmUI's root has `llm/` where the catalog names `LLM/`. Every folder is looked up with the engine's spelling
 first. When that folder is missing, the one folder whose name differs from it only in case is used, and a
-download goes into it rather than into a second folder beside it. Two such folders (`llm/` and `Llm/` with no
-`LLM/`) are ambiguous: the lookup logs a warning once and keeps the engine's spelling, so merge them into one.
-Windows and macOS ignore case already, so nothing changes there.
+download goes into it rather than into a second folder beside it. A lookup that searches several places tries the
+engine's spelling in all of them before any such folder, so whatever it found before is still what it finds. Two
+such folders (`llm/` and `Llm/` with no `LLM/`) are ambiguous: the lookup logs a warning once and keeps the engine's
+spelling, so merge them into one. Hand-placed audio checkpoints (RVC voices, YuE2, Demucs) are the exception: their
+folders below `audio/` must keep the engine's spelling. Windows and macOS ignore case already, so nothing changes
+there.
 
 ## Scope: when a setting takes effect
 
