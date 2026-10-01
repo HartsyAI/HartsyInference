@@ -6,6 +6,20 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.235
+
+- **Whisper's GELU is now the exact erf form Whisper uses.** OpenAI's Whisper applies `F.gelu` after both conv-stem
+  convolutions and `nn.GELU()` in every MLP, and HF's configs say `activation_function: "gelu"`. `WhisperEncoder`
+  and `WhisperDecoder` called `backend.Gelu`, the tanh approximation, which differs by up to 4.7e-4 per activation;
+  they now call `backend.GeluErf` (CUDA `gelu_erf_f32`, Vulkan `gelu_exact`, the `IBackend` default on CPU).
+  - **Tokens:** with #211's log-mel, CPU greedy decodes against `WhisperForConditionalGeneration` on the reference
+    features PLACEHOLDER_TOKENS.
+  - **Latency (RTX 3060, small.en):** unchanged — 2 / 5 / 10 s in 111–122 / 112–115 / 187–189 ms median on the
+    previous log-mel and 106–119 / 106–110 / 177–189 ms on #211's, gate met; GPU tokens identical to the respective
+    previous build on every bench case. [Results](benchmarks/results/2026-10-01_whisper_erf_gelu_3060.md).
+- `WhisperExactGeluTests` reduces a tiny synthetic Whisper to its GELUs and layer norms and checks the encoder and
+  the decoder against the exact form in double precision; the tanh form at any one of the four sites fails it.
+
 ## alpha.234
 
 - **RNNoise has an opt-in int8 precision, and with it the voice front end meets its gate.**
