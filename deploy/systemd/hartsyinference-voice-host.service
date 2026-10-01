@@ -1,0 +1,42 @@
+[Unit]
+Description=HartsyInference voice host (phone-call voice agent: engine, speech models, PhoneLink socket)
+Documentation=https://github.com/HartsyAI/HartsyInference/blob/main/docs/Research/VOICE_AGENT_SESSION.md
+After=network.target
+# A crash loop (a config error fails on every start) stops after 5 starts in 2 minutes and waits for a human.
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=exec
+# The account that owns the model cache (~/.cache/hartsyinference) and the engine settings
+# (~/.config/hartsyinference/settings.json, paths.modelsRoot); it needs the GPU device nodes too.
+User=hartsy
+Group=hartsy
+# Adjust to wherever `dotnet publish -c Release src/HartsyInference.VoiceHost` was copied.
+WorkingDirectory=/opt/hartsyinference/voice-host
+ExecStart=/usr/bin/dotnet /opt/hartsyinference/voice-host/HartsyInference.VoiceHost.dll --config /etc/hartsyinference/voice.json
+
+# The PhoneLink socket (/run/hartsyinference/phone.sock, mode 0660) lives here. Only this unit declares the directory:
+# systemd removes a RuntimeDirectory when the unit that declares it stops, so a second declaration in the gateway unit
+# would delete the host's socket whenever the gateway stopped. 0750 keeps everyone but the owner and its group out.
+RuntimeDirectory=hartsyinference
+RuntimeDirectoryMode=0750
+
+# The PhoneLink token as a credential: systemd copies the root-owned file to
+# /run/credentials/hartsyinference-voice-host.service/phone-link-token, readable only by this service, and voice.json's
+# link.tokenFile names that path. The gateway loads the same source file under its own unit.
+LoadCredential=phone-link-token:/etc/hartsyinference/secrets/phone-link-token
+
+# Every CPU but the hyperthread pair of core 7 (CPUs 7 and 15, see `lscpu -e`), which the phone gateway's RTP tick thread
+# owns. numerics.cpuThreads=14 to match comes from voice.json (engine.cpuThreadCap), not from the environment.
+AllowedCPUs=0-6,8-14
+
+Restart=always
+RestartSec=2
+# Loading and warming the speech models on a cold card takes a while.
+TimeoutStartSec=300
+# SIGTERM ends every call (CallEnd to the gateway), then releases the models; the host allows itself 20 s for that.
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

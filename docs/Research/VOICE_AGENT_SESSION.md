@@ -125,6 +125,14 @@ The reader never blocks or allocates, also while the producer waits:
   allocates once on that thread (32 B, or 192 B on a freshly started thread). The sender thread pays it on its first
   wake and never again.
 
+Turn tags: a player that forwards audio elsewhere (the voice host, over PhoneLink) reads with
+`ReadOutbound(destination, out turnId)`, which returns one turn's samples at most and names the turn that wrote them.
+Before a turn's first write it publishes a mark (turn id and write position); the reader takes the ring's fill level
+before it reads the marks, so every sample it returns is covered by a mark it has seen, and it stops at the next mark.
+The flush rules above leave one window: a write that lands after the reader's discard can be read before the
+producer's re-check bumps the epoch again. Tagged, those samples carry the cancelled turn's id, so a remote player drops
+them by id; the untagged `ReadOutbound(destination)` reads across marks as before.
+
 ## Inbound backlog
 
 The ring drops the newest samples when full, so the audio thread enforces drop-oldest itself: when it is more than
@@ -319,6 +327,81 @@ turn 1, no `<think>` text in any turn. `CudaBackend.LtGemmPlanStats` stayed `(0,
 confirming it was never going to show either the warm-up or the sampler effect for this model's quantized GEMM
 path.
 
+## Voice host (`HartsyInference.VoiceHost`)
+
+The phone deployment's model process: a generic-host exe (net10.0, not packed) that the phone gateway dials over
+[PhoneLink](PHONE_LINK_PROTOCOL.md). At start it builds `InferenceEngine` on `AudioDevice` (`cuda:1`, the RTX 3060)
+with `ToolCalling.Install` (format detected from `LlmModel`), loads and warms the `VoiceModelSet`, then listens on the
+socket. Every call gets its own `VoiceAgentSession` on that model set; the models outlive calls. The engine reaches the
+language model only through each request's `Device = LlmDevice` (`cuda:0`, the 4090): a request without it would load
+the LLM onto the audio card, and the session never sends one. Units and install steps: [deploy](../../deploy/README.md);
+end-to-end checks: [runbook](../Checklists/VOICE_AGENT_VERIFICATION.md).
+
+```
+voice-link-accept   accept() only; each connection's handshake runs on its own reader
+voice-link-reader   per connection: Hello (first frame, version 1, 16 kHz, token compared in constant time on SHA-256
+                    digests) → HelloAck or Error + close; then every frame, sequence checked (a gap closes the link):
+                    CallStart → session (started on the pool) · InboundAudio PCM16 → ±1 (×1/32768) → PushInbound ·
+                    DtmfEvent → PushDtmf · ToolResult → pending request · Ping → Pong · CallEnd → end the session
+voice-link-sender   per connection, the only writer after the handshake; absolute 20 ms deadlines (MonotonicClock),
+                    no spin, no FIFO; per tick: queued control frames first, then each call's audio:
+                    ReadOutbound(out turnId), one turn and at most 20 ms per frame → OutboundAudio(turnId)
+pool                each session's turn loop and event pump; session events → Event / Flush / OutboundEnd items;
+                    telephony tools awaiting the gateway; call start and end
+watchdog timer      nothing received for 20 s, or one write stuck for 20 s → close the link
+```
+
+Locks: the server's connection lock and a connection's call-map lock are leaves (nothing is called while holding
+them); a call's lifecycle lock may take the process-wide GC-mode lock, a leaf. The control queue is a
+`ConcurrentQueue` drained by the sender. The sender reads its call list as a published array, so its audio path takes
+no lock and allocates nothing once warm (`AudioPathAllocatedBytes`, asserted 0 over 1200 frames).
+
+Outbound pacing: one 20 ms frame per tick, plus 40 ms (`link.prebufferMs`) at the start of each burst of reply audio,
+because the gateway plays what it has at its own 20 ms tick and has no cushion of its own; a late wake-up sends the
+missed frames at once (up to five), a later one re-bases the clock. The session therefore counts audio as played about
+one prebuffer ahead of the caller's ear.
+
+Barge-in across the socket: the session's `BargeIn(T)` event becomes `Flush(T)`, written first on the sender's next
+tick; from then on the sender drops any audio tagged T or lower that the session still hands it (the window in
+[Outbound queue and flushes](#outbound-queue-and-flushes)), and the gateway drops anything at or below T that was
+already on the socket. `OutboundEnd(T)` goes out before the next turn's first frame, or once the session reports T
+finished and nothing of it is left, because the gateway's 16k→8k resampler holds T's last frame until then; a flushed
+turn gets none.
+
+Telephony tools are per call, each an `IToolHandler` bound to that call: `send_dtmf`, `transfer`, `hold`, `unhold` and
+`play_prompt` (`name` only: `one-moment`, `goodbye`; the gateway's `file` form is not offered to the model) send
+`ToolRequest` and return the gateway's `ToolResult` as `{"status","message"}`, or `Failed` after `tools.timeoutMs` or at
+the end of the call. `get_time` is answered on the host. **`hangup` is deferred:** the gateway sends its BYE the moment
+it runs the tool, while the model's goodbye is usually still being synthesized, so the handler answers `Ok` at once and
+the host sends the request when that turn's reply has finished playing, then `CallEnd(Completed)`. A caller who barges
+into the goodbye keeps the call.
+
+Calls: `CallStart` with `resume=true` (the gateway re-attaching after the link dropped) gets a fresh session and
+`agent.resumeApology` spoken; a new call gets `agent.greeting` when set. `CallEnd` from the gateway ends and disposes the
+session without echoing. A lost link ends that connection's sessions (no `CallEnd`: the gateway re-announces live calls).
+Any session failure (creation, start, its audio thread, a throw on a link thread) ends only that call with
+`CallEnd(Failed)`. SIGTERM ends every call with `CallEnd(LocalHangup)`, lets the sender put those frames on the wire,
+closes the link, releases the models and removes the socket file. A socket file left by a killed host is removed at
+start after a connect probe finds nobody listening; a live listener there fails the start.
+
+Process: workstation concurrent GC; `GCLatencyMode.SustainedLowLatency` while at least one call is up, restored after
+the last. The pool's minimum worker threads are `numerics.cpuThreads + 8`: `CpuParallel` fans out on the shared pool, up
+to `numerics.cpuThreads` workers at once across all callers, so a synthesis or a decode can hold that many; the turn
+loops, event pumps, tool calls, GPU job continuations and socket completions need a few more runnable at the same
+moment, and above the minimum the pool adds threads too slowly for a live turn.
+
+`/etc/hartsyinference/voice.json` (template `src/HartsyInference.VoiceHost/voice.example.json`; `{}` is valid; an
+unknown key fails the start):
+
+| Section | Settings |
+|---|---|
+| `link` | `socketPath` (`/run/hartsyinference/phone.sock`), `socketMode` (0600-0660), `tokenFile` (absolute, 0600/0400, a `LoadCredential=` path; empty = no token, which the gateway must match), `prebufferMs` (40), `livenessTimeoutSeconds` (20) |
+| `models` | `llmModel`, `llmDevice`, `audioDevice`, `sttModel`, `ttsModel`, `denoise`, `wakeModelRoot`; defaults are the session's |
+| `agent` | `systemPrompt`, `greeting`, `resumeApology`, `outboundSampleRate` (a PhoneLink rate), and the session's turn, barge-in and history settings |
+| `tools` | `enabled` (all seven by default), `timeoutMs` (10000) |
+| `engine` | `cpuThreadCap` (`numerics.cpuThreads` for the host's life; 14 under the unit), `settingsFile` (an engine settings file instead of the service user's) |
+| `logging` | `level` |
+
 ## Open
 
 - Partial transcripts need a streaming recognizer; `PartialTranscripts = true` is rejected.
@@ -330,3 +413,6 @@ path.
   cross-model Cpu change with its own A/B.
 - `VoiceHost` (PR9)'s boot-time `WarmAsync` call needs updating to pass its own tool set, or production warm-up
   stays on the cold one-token path.
+- Host: outbound calls start like inbound ones (same prompt, same greeting); per-call instructions (why the agent is
+  calling) are not wired. The host keeps one gateway connection; per-call and per-link summaries go to the log only (no
+  metrics endpoint on the host side).

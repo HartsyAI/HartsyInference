@@ -6,6 +6,42 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.237 (tentative)
+
+- **Voice host exe (`src/HartsyInference.VoiceHost`, not packaged).** The phone-call voice agent's model process: a
+  generic host (from the ASP.NET Core shared framework; built empty, so nothing reads the environment or an appsettings
+  file) that builds the engine on the audio card (`cuda:1`) with `ToolCalling.Install`, loads and warms the voice model
+  set, and serves the PhoneLink socket the gateway dials. One `VoiceAgentSession` per call; the models outlive calls;
+  every language-model request names `LlmDevice` (`cuda:0`).
+- Typed options from `/etc/hartsyinference/voice.json` (`link`, `models`, `agent`, `tools`, `engine`, `logging`; `{}` is
+  valid, an unknown key fails the start, every error names its JSON path). The link token comes from a secret file
+  (`LoadCredential=`), refused when group or others can read it and never logged; `engine.cpuThreadCap` is
+  `numerics.cpuThreads` for the host's life.
+- Link: `Hello` checked first (version, 16 kHz, token in constant time), else `Error` and close; per-frame sequence
+  check; a new connection replaces the current one only after its own `Hello`. A dedicated sender thread on absolute
+  20 ms deadlines writes control frames first, then each call's reply audio in 20 ms frames tagged with the producing
+  turn, with a 40 ms prebuffer per burst and catch-up frames; its audio path allocates nothing once warm. A barge-in
+  becomes `Flush(turnId)` and nothing of that turn follows it; `OutboundEnd` closes each turn that played. Session
+  events go out as `Event` frames (state, final transcript, turn latency).
+- Telephony tools (`send_dtmf`, `transfer`, `hold`, `unhold`, `play_prompt`) are `ToolRequest`/`ToolResult` round trips
+  with a timeout; `get_time` is answered on the host; `hangup` is sent once the reply that asked for it has played, so
+  the caller hears the goodbye. A resumed call gets a fresh session and an apology line; any session failure ends only
+  its call with `CallEnd(Failed)`; SIGTERM ends calls with `CallEnd(LocalHangup)`. Workstation concurrent GC,
+  `SustainedLowLatency` while calls are up, pool floor `numerics.cpuThreads + 8`.
+- **`HartsyInference.Voice`: `ReadOutbound(Span<float>, out int turnId)`** returns one turn's audio at a time and names
+  the turn that wrote it (each turn publishes a mark before its first sample), so a remote player can drop a flushed
+  turn by id. The untagged read is unchanged.
+- **`SecretFile` moved to Core** (`HartsyInference.Core.Configuration`), with the caller's exception factory; the gateway
+  reads its secrets through it unchanged.
+- **Deployment:** `deploy/systemd/hartsyinference-voice-host.service` (`Restart=always`, `RuntimeDirectory`,
+  `AllowedCPUs=0-6,8-14`, token credential) and `hartsyinference-phone-gateway.service` (`Requires=` the host,
+  `LimitRTPRIO=50`, `Nice=-10`, `AllowedCPUs=7,15`, a 64 MB gen0 budget, three credentials, no service-wide FIFO);
+  `AllowedCPUs=0-6,8-14` on the API unit, whose start-limit settings now sit in `[Unit]`, where systemd reads them.
+  Runbook: `docs/Checklists/VOICE_AGENT_VERIFICATION.md`.
+- Tests (`tests/HartsyInference.VoiceHost.Tests`): unit tests against a fake gateway on a temporary socket with scripted
+  sessions, and `[Slow]` loopback calls (sipsorcery softphone → real gateway → real host with Kokoro and Whisper small.en
+  on the RTX 3060), including a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
+
 ## alpha.237
 
 - **`HartsyInference.Voice`: opt-in per-call voice agent.** New packable library (references Audio, Engine and Tools;
