@@ -12,12 +12,12 @@ stable release will require. Dates are UTC.
   convolutions and `nn.GELU()` in every MLP, and HF's configs say `activation_function: "gelu"`. `WhisperEncoder`
   and `WhisperDecoder` called `backend.Gelu`, the tanh approximation, which differs by up to 4.7e-4 per activation;
   they now call `backend.GeluErf` (CUDA `gelu_erf_f32`, Vulkan `gelu_exact`, the `IBackend` default on CPU).
-  - **Tokens:** with #211's log-mel, CPU greedy decodes against `WhisperForConditionalGeneration` on the reference
+  - **Tokens:** with the alpha.233 log-mel, CPU greedy decodes against `WhisperForConditionalGeneration` on the reference
     features, with the engine's decoding rule, are identical on all 144 cases — tiny, base, small.en, medium,
     distil-large-v3 and v3.5, 12 clips, with and without timestamps — where the tanh form left 4 near-ties
     (reference margins 0.0037–0.032 logits) resolved the other way.
   - **Latency (RTX 3060, small.en):** unchanged — 2 / 5 / 10 s in 111–122 / 112–115 / 187–189 ms median on the
-    previous log-mel and 106–119 / 106–110 / 177–189 ms on #211's, gate met; GPU tokens identical to the respective
+    old 512-point log-mel and 106–119 / 106–110 / 177–189 ms on alpha.233's, gate met; GPU tokens identical to the respective
     previous build on every bench case. [Results](benchmarks/results/2026-10-01_whisper_erf_gelu_3060.md).
 - `WhisperExactGeluTests` reduces a tiny synthetic Whisper to its GELUs and layer norms and checks the encoder and
   the decoder against the exact form in double precision; the tanh form at any one of the four sites fails it.
