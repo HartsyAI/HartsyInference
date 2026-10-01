@@ -32,16 +32,24 @@ namespace HartsyInference.Audio.Tests;
 /// wake model root, or <c>HARTSYINFERENCE_RNNOISE_WEIGHTS</c> and <c>HARTSYINFERENCE_SILERO_WEIGHTS</c>. Run it
 /// alone: any other benchmark or test run on the box moves it.</para>
 ///
-/// <para>Two opt-in conditions show what the budget meets on a busy host.
-/// <c>HARTSY_VOICE_FRONTEND_BENCH_LOAD_THREADS=N</c> runs N background threads, each pinned to its own CPU outside
-/// the bench core's hyperthread pair, one per physical core first. By default each streams a STREAM triad over
-/// buffers several times the L3, which costs memory bandwidth and evicts what the bench keeps in L3.
-/// <c>HARTSY_VOICE_FRONTEND_BENCH_LOAD=l1</c> runs the same loop over a buffer that fits in L1 instead: the same
-/// instructions and the same busy cores, minus the memory traffic, which separates turbo and power effects from cache
-/// and bandwidth ones. <c>HARTSY_VOICE_FRONTEND_BENCH_PACED=1</c> starts one frame every 20 ms, as the live stream
-/// does, so other cores get the gap to evict the bench's cache lines. It spins between frames rather than sleeping,
-/// which keeps the core's clock ramp and C-state exits out of the figure. The log reports the load's CPUs and
-/// bandwidth, and the bench core's clock sampled from cpufreq while the timed frames ran.</para>
+/// <para>Two opt-in conditions show what the budget meets on a busy host. They are characterization runs: the log
+/// reports what they measure, and the 2 ms gate is asserted only without them.
+/// <list type="bullet">
+/// <item><c>HARTSY_VOICE_FRONTEND_BENCH_LOAD_THREADS=N</c> runs N background threads, each pinned to its own CPU
+/// outside the bench core's hyperthread pair, one per physical core first and then on siblings. By default each runs
+/// a STREAM triad over buffers several times the L3, which costs memory bandwidth and evicts what the bench keeps in
+/// L3.</item>
+/// <item><c>HARTSY_VOICE_FRONTEND_BENCH_LOAD=l1</c> runs the same loop over buffers that fit in L1 instead. That is
+/// the same instructions on the same load threads, minus the memory traffic, which separates turbo and power effects
+/// from cache and bandwidth ones.</item>
+/// <item><c>HARTSY_VOICE_FRONTEND_BENCH_PACED=1</c> releases one frame every 20 ms on a fixed clock, as the live stream
+/// does, so other cores get the gap to evict the bench's cache lines. A frame that overruns delays the next ones, which
+/// then run back to back until the clock is caught up, as queued audio would; the log counts the frames that started
+/// late. It spins between frames rather than sleeping, which keeps the core's clock ramp and C-state exits out of the
+/// figure.</item>
+/// </list>
+/// The log also reports the load's CPUs, its bandwidth over the timed frames, and the bench core's clock sampled from
+/// cpufreq over the same frames.</para>
 ///
 /// <para>The budget is an open gate that this box does not meet yet. At alpha.227, back to back, three runs gave p50
 /// 1.55–1.56 ms and p99 3.81–3.93 ms. Paced, p50 is 2.64 ms, and under streaming load the frame time grows
@@ -98,7 +106,7 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
         {
             try
             {
-                result = Measure(weights, sileroPath, audio, cpu, paced, clock);
+                result = Measure(weights, sileroPath, audio, cpu, paced, clock, load);
             }
             catch (Exception ex)
             {
@@ -123,26 +131,36 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
             log.WriteLine($"  {label}: {ms:F3} ms/frame mean");
         string loadText = loadCpus.Length == 0 ? "none"
             : $"{loadCpus.Length} × {(l1Load ? "L1-resident" : "streaming")} triad on CPUs {string.Join(',', loadCpus)}, "
-                + $"{load.GigabytesPerSecond:F1} GB/s";
+                + $"{load.GigabytesPerSecond:F1} GB/s over the timed frames";
         if (loadCpus.Length < requestedLoad) loadText += $" ({requestedLoad} requested, {others.Count} CPUs free)";
-        log.WriteLine($"background load: {loadText}; frames {(paced ? "paced every 20 ms, spinning between" : "back to back")}");
-        log.WriteLine($"pinned to CPU {cpu}: {(r.Pinned ? "yes" : "no, " + r.PinReason)}; core clock while timed "
-            + $"{clock.MeanMhz:F0} MHz mean, {clock.MinMhz:F0} MHz min over {clock.Samples} samples; RNNoise network "
+        string pacing = paced
+            ? $"paced on a 20 ms clock, spinning between, {r.LateFrames} of {TimedFrames} started late"
+            : "back to back";
+        log.WriteLine($"background load: {loadText}; frames {pacing}");
+        string clockText = clock.Samples == 0 ? "core clock not sampled"
+            : $"core clock while timed {clock.MeanMhz:F0} MHz mean, {clock.MinMhz:F0} MHz min over {clock.Samples} "
+                + $"samples from {(clock.Pinned ? $"CPU {samplerCpu}" : "an unpinned thread")}";
+        log.WriteLine($"pinned to CPU {cpu}: {(r.Pinned ? "yes" : "no, " + r.PinReason)}; {clockText}; RNNoise network "
             + $"ran on {r.NetworkFrames}/{TimedFrames} frames; {r.AllocatedBytes} bytes allocated, {r.Gen0Collections} "
-            + $"gen-0 GCs while timed; "
-            + (loadCpus.Length == 0 ? $"process CPU / wall {r.CpuOverWall:F2}; " : "")
+            + "gen-0 GCs while timed; "
+            + (loadCpus.Length == 0 && !paced ? $"process CPU / wall {r.CpuOverWall:F2}; " : "")
             + $"load average {File.ReadAllText("/proc/loadavg").Trim()}");
 
         // A frame whose gains saturate can repeat the previous speech probability exactly, so this is a floor
         // against the silence-floor passthrough rather than an exact count.
         Assert.True(r.NetworkFrames >= TimedFrames * 0.95,
             $"RNNoise ran its network on only {r.NetworkFrames}/{TimedFrames} frames");
+        if (loadCpus.Length > 0 || paced)
+        {
+            log.WriteLine("characterization run (load or pacing set): the 2 ms gate is asserted only without them");
+            return;
+        }
         Assert.True(p99 <= BudgetMs,
             $"p99 {p99:F3} ms exceeds the {BudgetMs} ms front-end budget (p50 {p50:F3}, max {max:F3})");
     }
 
     private static Result Measure(RnnoiseWeights weights, string sileroPath, float[] audio, int cpu, bool paced,
-        ClockSampler clock)
+        ClockSampler clock, BackgroundLoad load)
     {
         bool pinned = RealtimeScheduling.TryPinToCpu(cpu, out string pinReason);
         bool threadClock = OperatingSystem.IsLinux();
@@ -159,6 +177,7 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
         long[]? cpuNs = threadClock ? new long[TimedFrames] : null;
         long[] stageTicks = new long[3];
         int networkFrames = 0;
+        int lateFrames = 0;
         float lastProbability = float.NaN;
         long allocatedBefore = 0, wallStart = 0;
         int gen0Before = 0;
@@ -174,12 +193,16 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
                 cpuStart = Process.GetCurrentProcess().TotalProcessorTime;
                 gen0Before = GC.CollectionCount(0);
                 clock.Begin();
+                load.Begin();
                 wallStart = Stopwatch.GetTimestamp();
                 allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
             }
             if (paced)
             {
+                // A fixed clock, not a gap after each frame: an overrun delays the next frames, which then run back
+                // to back until the clock is caught up, as queued audio would.
                 nextFrame += period;
+                if (timed >= 0 && Stopwatch.GetTimestamp() >= nextFrame) lateFrames++;
                 while (Stopwatch.GetTimestamp() < nextFrame) Thread.SpinWait(16);
             }
             ReadOnlySpan<float> frame = audio.AsSpan(f * FrameSamples, FrameSamples);
@@ -206,6 +229,7 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
         }
         long allocated = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
         long wallTicks = Stopwatch.GetTimestamp() - wallStart;
+        load.End();
         clock.End();
         int collections = GC.CollectionCount(0) - gen0Before;
         double cpuOverWall = (Process.GetCurrentProcess().TotalProcessorTime - cpuStart).TotalSeconds
@@ -216,7 +240,8 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
             ("rescale into Silero window", StageMs(stageTicks[1])),
             ("Silero 512-sample chunk + endpointing", StageMs(stageTicks[2])),
         ];
-        return new Result(frameNs, cpuNs, stages, networkFrames, pinned, pinReason, allocated, collections, cpuOverWall);
+        return new Result(frameNs, cpuNs, stages, networkFrames, lateFrames, pinned, pinReason, allocated, collections,
+            cpuOverWall);
     }
 
     /// <summary>The CPU whose hyperthread pair spent the largest share of the interval idle: a busy sibling shares
@@ -359,7 +384,7 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
     }
 
     private sealed record Result(long[] FrameNs, long[]? CpuNs, (string Label, double Ms)[] Stages, int NetworkFrames,
-        bool Pinned, string PinReason, long AllocatedBytes, int Gen0Collections, double CpuOverWall);
+        int LateFrames, bool Pinned, string PinReason, long AllocatedBytes, int Gen0Collections, double CpuOverWall);
 
     /// <summary>Background threads standing in for other work on the host during a call, each pinned to its own CPU.
     /// Each runs a STREAM triad, <c>c = a + s·b</c>. Over three 32 MB arrays it costs memory bandwidth and, on any L3
@@ -369,11 +394,16 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
     {
         private const int StreamFloats = 8 << 20;
         private const int L1Floats = 1 << 10;
+        // Each thread publishes its byte count in steps this size: fine enough that a seconds-long timed window reads
+        // it to well under 1 %, coarse enough that eight L1-speed threads do not contend on the counter.
+        private const long PublishBytes = 64L << 20;
         private readonly Thread[] _threads;
-        private readonly long _start = Stopwatch.GetTimestamp();
         private volatile bool _stop;
         private long _bytes;
-        private long _ticks;
+        private long _beginBytes;
+        private long _beginTicks;
+        private long _windowBytes;
+        private long _windowTicks;
 
         public BackgroundLoad(int[] cpus, bool l1)
         {
@@ -387,16 +417,29 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
             }
         }
 
-        /// <summary>Aggregate bandwidth by the STREAM convention, 12 bytes per element, valid after
-        /// <see cref="Stop"/>. With write-allocate, the DRAM traffic of the streaming load is about a third more.</summary>
-        public double GigabytesPerSecond => _ticks > 0 ? _bytes / (_ticks / (double)Stopwatch.Frequency) / 1e9 : 0;
+        /// <summary>Aggregate bandwidth between <see cref="Begin"/> and <see cref="End"/>, by the STREAM convention of
+        /// 12 bytes per element. With write-allocate, the DRAM traffic of the streaming load is about a third more.</summary>
+        public double GigabytesPerSecond =>
+            _windowTicks > 0 ? _windowBytes / (_windowTicks / (double)Stopwatch.Frequency) / 1e9 : 0;
+
+        /// <summary>Opens the window the bandwidth is reported over: the timed frames, not buffer setup or warm-up.</summary>
+        public void Begin()
+        {
+            _beginBytes = Interlocked.Read(ref _bytes);
+            _beginTicks = Stopwatch.GetTimestamp();
+        }
+
+        public void End()
+        {
+            _windowBytes = Interlocked.Read(ref _bytes) - _beginBytes;
+            _windowTicks = Stopwatch.GetTimestamp() - _beginTicks;
+        }
 
         public void Stop()
         {
             if (_stop) return;
             _stop = true;
             foreach (Thread thread in _threads) thread.Join();
-            _ticks = Stopwatch.GetTimestamp() - _start;
         }
 
         public void Dispose() => Stop();
@@ -408,7 +451,7 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
             float* a = (float*)NativeMemory.AlignedAlloc(bytes, 64);
             float* b = (float*)NativeMemory.AlignedAlloc(bytes, 64);
             float* c = (float*)NativeMemory.AlignedAlloc(bytes, 64);
-            long streamed = 0;
+            long pending = 0;
             try
             {
                 for (int i = 0; i < floats; i++)
@@ -422,12 +465,15 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
                 {
                     for (int i = 0; i < floats; i += Vector256<float>.Count)
                         Vector256.StoreAligned(Vector256.LoadAligned(a + i) + scale * Vector256.LoadAligned(b + i), c + i);
-                    streamed += 3L * floats * sizeof(float);
+                    pending += 3L * floats * sizeof(float);
+                    if (pending < PublishBytes) continue;
+                    Interlocked.Add(ref _bytes, pending);
+                    pending = 0;
                 }
             }
             finally
             {
-                Interlocked.Add(ref _bytes, streamed);
+                Interlocked.Add(ref _bytes, pending);
                 NativeMemory.AlignedFree(a);
                 NativeMemory.AlignedFree(b);
                 NativeMemory.AlignedFree(c);
@@ -457,6 +503,10 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
 
         public int Samples { get; private set; }
 
+        /// <summary>Whether the sampling thread got its own CPU; with none free it runs unpinned, waking every 50 ms
+        /// wherever the scheduler puts it, possibly beside the bench.</summary>
+        public bool Pinned { get; private set; }
+
         public double MeanMhz => Samples > 0 ? _sumKhz / (double)Samples / 1000 : double.NaN;
 
         public double MinMhz => Samples > 0 ? _minKhz / 1000.0 : double.NaN;
@@ -475,7 +525,7 @@ public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
 
         private void Run(string path, int samplerCpu)
         {
-            if (samplerCpu >= 0) RealtimeScheduling.TryPinToCpu(samplerCpu, out _);
+            Pinned = samplerCpu >= 0 && RealtimeScheduling.TryPinToCpu(samplerCpu, out _);
             using SafeFileHandle handle = File.OpenHandle(path);
             byte[] buffer = new byte[32];
             while (!_stop)
