@@ -11,10 +11,13 @@
 #   unshare -rm -- bash tests/deploy/install-voice-agent.test.sh   # equivalent, explicit
 #
 # A new mount namespace means every mount this makes disappears when the process exits; nothing here touches the
-# real host. /opt and /etc are replaced with tmpfs (with /etc/passwd, /etc/group restored from the real ones so
-# root/$SUDO_USER name resolution still works); a fake systemctl on PATH records calls and tracks per-unit
-# enabled/active state in files, so apply/revert/idempotence can be checked without a real systemd; a fake sudo
-# and dotnet exercise the default (no --publish-dir) publish path without a real, slow, disk-heavy build.
+# real host. /opt, /etc and /tmp are each replaced with their own tmpfs (with /etc/passwd, /etc/group restored
+# from the real ones so root/$SUDO_USER name resolution still works) -- /tmp too, or a leaked-temp-dir check would
+# be counting entries in the real, shared /tmp, where another process (this box runs several agents at once) can
+# add or remove its own tmp.* between the "before" and "after" snapshot and produce a false pass or fail. A fake
+# systemctl on PATH records calls and tracks per-unit enabled/active state in files, so apply/revert/idempotence
+# can be checked without a real systemd; a fake sudo and dotnet exercise the default (no --publish-dir) publish
+# path without a real, slow, disk-heavy build.
 set -uo pipefail
 
 if [[ "${1:-}" != "--in-namespace" ]]; then
@@ -28,11 +31,6 @@ fi
 
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 SCRIPT="$REPO/deploy/install-voice-agent.sh"
-SCRATCH=$(mktemp -d)
-FAKE_BIN="$SCRATCH/bin"
-export FAKE_SYSTEMCTL_STATE="$SCRATCH/systemctl-state"
-FAKE_PUBLISH="$SCRATCH/fake-publish"
-trap 'rm -rf -- "$SCRATCH"' EXIT
 
 pass=0
 fail=0
@@ -59,20 +57,28 @@ check_not() {
     fi
 }
 
-# ---- isolate /opt and /etc, keep root/name resolution working --------------------------------------------------
+# ---- isolate /opt, /etc and /tmp; keep root/name resolution working --------------------------------------------
 passwd_snap=$(cat /etc/passwd)
 group_snap=$(cat /etc/group)
 nsswitch_snap=$(cat /etc/nsswitch.conf 2>/dev/null || true)
 
 mount -t tmpfs tmpfs /opt
 mount -t tmpfs tmpfs /etc
+mount -t tmpfs tmpfs /tmp
 printf '%s\n' "$passwd_snap" >/etc/passwd
 printf '%s\n' "$group_snap" >/etc/group
 [[ -n $nsswitch_snap ]] && printf '%s\n' "$nsswitch_snap" >/etc/nsswitch.conf
 mkdir -p /etc/systemd/system
 
+# Only now, so it lands inside the fresh, isolated /tmp above, not the real one.
+SCRATCH=$(mktemp -d)
+FAKE_BIN="$SCRATCH/bin"
+export FAKE_SYSTEMCTL_STATE="$SCRATCH/systemctl-state"
+FAKE_PUBLISH="$SCRATCH/fake-publish"
+trap 'rm -rf -- "$SCRATCH"' EXIT
+
 echo "id inside the namespace: $(id)"
-echo "/opt and /etc are now tmpfs: $(findmnt -no SOURCE,FSTYPE /opt 2>/dev/null) / $(findmnt -no SOURCE,FSTYPE /etc 2>/dev/null)"
+echo "/opt, /etc and /tmp are now tmpfs: $(findmnt -no SOURCE,FSTYPE /opt 2>/dev/null) / $(findmnt -no SOURCE,FSTYPE /etc 2>/dev/null) / $(findmnt -no SOURCE,FSTYPE /tmp 2>/dev/null)"
 
 mkdir -p "$FAKE_BIN" "$FAKE_SYSTEMCTL_STATE" "$FAKE_PUBLISH/voice-host" "$FAKE_PUBLISH/phone-gateway"
 
@@ -323,6 +329,20 @@ run_script --revert --purge >/dev/null 2>&1 || true
 check "default-path apply (no --publish-dir) exits 0" run_script --apply
 check "voice-host dll installed via the default path" test -f /opt/hartsyinference/voice-host/HartsyInference.VoiceHost.dll
 check "phone-gateway dll installed via the default path" test -f /opt/hartsyinference/phone-gateway/HartsyInference.PhoneGateway.dll
+
+echo
+echo "=== scenario: a symlinked destination with the default publish path leaks no temp dir ==="
+# put_tree's refuse_symlink dies via exit, not a plain command failure -- the specific path an ERR trap would
+# miss and only an EXIT trap catches. Still the default (no --publish-dir) path, so this exercises
+# publish_as_user()'s real mktemp -d too, not a fake one.
+rm -f /opt/hartsyinference/voice-host/HartsyInference.VoiceHost.dll
+ln -s /etc/hartsyinference/secrets/sip-password /opt/hartsyinference/voice-host/HartsyInference.VoiceHost.dll
+tmp_before=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
+check_not "apply refuses to write through the symlinked binary" run_script --apply
+tmp_after=$(find /tmp -maxdepth 1 -name 'tmp.*' 2>/dev/null | wc -l)
+check "no temp dir leaked by the symlink refusal" test "$tmp_before" = "$tmp_after"
+rm -f /opt/hartsyinference/voice-host/HartsyInference.VoiceHost.dll
+check "apply recovers once the symlink is removed" run_script --apply
 unset SUDO_USER
 
 echo

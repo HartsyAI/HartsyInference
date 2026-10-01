@@ -135,12 +135,16 @@ gen_secrets() {
             say "$f: already present"
         else
             # Via a temp file in the same directory: a failure partway (disk full, killed) never leaves an empty
-            # $f that a later run would wrongly treat as already generated (-s above, not -f).
+            # $f that a later run would wrongly treat as already generated (-s above, not -f). If/then, not a
+            # trap: this runs after main() already set `trap stop_all EXIT`, which a trap here would replace.
             tmp=$(mktemp "$secrets_dir/.$name.XXXXXX")
-            (
+            if ! (
                 umask 077
                 openssl rand -hex 32 >"$tmp"
-            )
+            ); then
+                rm -f -- "$tmp"
+                die "openssl rand failed while generating $f"
+            fi
             chmod 0600 -- "$tmp"
             mv -f -- "$tmp" "$f"
             say "generated $f (0600; value not printed)"
@@ -175,7 +179,9 @@ render_voice_json() {
     local template="$repo_root/src/HartsyInference.VoiceHost/voice.example.json" tmp
     [[ -f $template ]] || die "missing $template"
     tmp=$(mktemp)
-    python3 - "$template" "$tmp" "$socket_path" "$secrets_dir/phone-link-token" <<'PY'
+    # if/then, not a trap: render_voice_json runs after main() already set `trap stop_all EXIT`, and a trap set
+    # here would replace that one for the rest of this call, not stack with it.
+    if ! python3 - "$template" "$tmp" "$socket_path" "$secrets_dir/phone-link-token" <<'PY'
 import json, sys
 template, out, socket_path, token_file = sys.argv[1:5]
 with open(template, encoding="utf-8") as f:
@@ -190,6 +196,10 @@ with open(out, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 PY
+    then
+        rm -f -- "$tmp"
+        die "rendering $voice_json from $template failed"
+    fi
     install_rendered "$tmp" "$voice_json"
 }
 
@@ -197,7 +207,8 @@ render_phone_json() {
     local template="$repo_root/src/HartsyInference.PhoneGateway/phone.example.json" tmp
     [[ -f $template ]] || die "missing $template"
     tmp=$(mktemp)
-    python3 - "$template" "$tmp" "$socket_path" "$secrets_dir/phone-link-token" "$secrets_dir/phone-admin-token" \
+    # if/then, not a trap: same reason as render_voice_json -- this must not replace main()'s `trap stop_all EXIT`.
+    if ! python3 - "$template" "$tmp" "$socket_path" "$secrets_dir/phone-link-token" "$secrets_dir/phone-admin-token" \
         "$secrets_dir/sip-password" <<'PY'
 import json, sys
 template, out, socket_path, link_token, admin_token, sip_password = sys.argv[1:7]
@@ -217,6 +228,10 @@ with open(out, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 PY
+    then
+        rm -f -- "$tmp"
+        die "rendering $phone_json from $template failed"
+    fi
     install_rendered "$tmp" "$phone_json"
 }
 
@@ -404,8 +419,12 @@ main() {
     # EXIT, not just INT/TERM: a die() after this point (a host or gateway readiness timeout, a start failure)
     # must not leave a started process running and holding VRAM with nothing left to stop it. stop_all() is a
     # no-op when nothing from this invocation is up, so it is safe on every exit path, including the normal one
-    # at the end of main() below.
+    # at the end of main() below. A process killed by an uncaught signal exits 128+signal regardless of what an
+    # EXIT trap does, so Ctrl+C/TERM would otherwise report 130/143 instead of the clean stop this script means
+    # by them (tail_both's own exit code, propagated below, is what distinguishes an actual crash); the explicit
+    # exit 0 here is what makes a deliberate stop read as success.
     trap stop_all EXIT
+    trap 'exit 0' INT TERM
 
     install -d -m 0700 -- "$state_dir" "$socket_dir"
     install -d -- "$log_dir"

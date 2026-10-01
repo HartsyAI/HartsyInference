@@ -115,18 +115,22 @@ publish_as_user() {
         "run-voice-agent-dev.sh and pass its output to --publish-dir instead)"
     local tmp
     tmp=$(sudo -u "$SUDO_USER" mktemp -d)
-    # A failed publish below exits under set -e before the final line runs, so apply()'s own cleanup
-    # (rm -rf -- "$src_dir") never happens -- it never received a value. Clean up $tmp here instead, the moment
-    # this function's own command fails; cleared once both publishes succeed, so it never fires for an unrelated
-    # later failure.
-    trap 'rm -rf -- "$tmp"' ERR
+    # Belt and suspenders, not the primary defense: called as `src_dir=$(publish_as_user)`, a plain failing
+    # command below (dotnet publish returning non-zero, not an explicit exit) would not actually abort this
+    # function under set -e -- bash does not apply errexit's abort inside a command substitution assigned to a
+    # variable, a well-known gotcha, confirmed by testing it directly: execution would fall through to
+    # `trap - EXIT` and return an incomplete $tmp as if nothing had failed. Hence the explicit `|| { ...; die; }`
+    # on each publish below, rather than trusting set -e to stop at the first one that fails.
+    trap 'rm -rf -- "$tmp"' EXIT
     # Everything here must go to stderr: the caller captures this function's stdout as the return value
     # (src_dir=$(publish_as_user)), and say()/dotnet publish both write to stdout otherwise, which would corrupt
     # the path with log lines.
     say "publishing as $SUDO_USER -> $tmp" >&2
-    sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.VoiceHost" -o "$tmp/$voice_host_app" >&2
-    sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.PhoneGateway" -o "$tmp/$phone_gateway_app" >&2
-    trap - ERR
+    sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.VoiceHost" -o "$tmp/$voice_host_app" >&2 \
+        || { rm -rf -- "$tmp"; die "dotnet publish failed for HartsyInference.VoiceHost"; }
+    sudo -u "$SUDO_USER" dotnet publish -c Release "$repo_root/src/HartsyInference.PhoneGateway" -o "$tmp/$phone_gateway_app" >&2 \
+        || { rm -rf -- "$tmp"; die "dotnet publish failed for HartsyInference.PhoneGateway"; }
+    trap - EXIT
     printf '%s' "$tmp"
 }
 
@@ -228,6 +232,7 @@ put_secret() {
     # that a later run would wrongly treat as "already present" (hence -s above, not -f: an empty file left by an
     # old run of this bug still needs to be regenerated).
     tmp=$(mktemp "$secrets_dir/.$name.XXXXXX")
+    trap 'rm -f -- "$tmp"' EXIT
     (
         umask 077
         openssl rand -hex 32 >"$tmp"
@@ -235,6 +240,7 @@ put_secret() {
     chmod 0600 -- "$tmp"
     chown root:root -- "$tmp"
     mv -f -- "$tmp" "$dst"
+    trap - EXIT
     say "generated $dst (0600; value not printed)"
 }
 
@@ -273,6 +279,7 @@ render_voice_json() {
     [[ -f $template ]] || die "missing $template"
     refuse_symlink "$etc_dir/voice.json"
     tmp=$(mktemp)
+    trap 'rm -f -- "$tmp"' EXIT
     python3 - "$template" "$tmp" <<'PY'
 import json, sys
 template, out = sys.argv[1:3]
@@ -288,6 +295,7 @@ with open(out, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 PY
+    trap - EXIT
     put_config "$etc_dir/voice.json" "$tmp"
 }
 
@@ -296,6 +304,7 @@ render_phone_json() {
     [[ -f $template ]] || die "missing $template"
     refuse_symlink "$etc_dir/phone.json"
     tmp=$(mktemp)
+    trap 'rm -f -- "$tmp"' EXIT
     python3 - "$template" "$tmp" <<'PY'
 import json, sys
 template, out = sys.argv[1:3]
@@ -313,6 +322,7 @@ with open(out, "w", encoding="utf-8") as f:
     json.dump(cfg, f, indent=2)
     f.write("\n")
 PY
+    trap - EXIT
     put_config "$etc_dir/phone.json" "$tmp"
 }
 
@@ -392,15 +402,16 @@ apply() {
     run install -d -o root -g root -m 0755 -- "$opt_dir"
     if [[ -n $src_dir ]]; then
         # Covers put_tree() dying partway (refuse_symlink, for one) between here and our own rm -rf below, which
-        # publish_as_user()'s own ERR trap (already cleared by the time we get here) does not: that one only
-        # covers a failed publish itself, not what happens to its output afterward.
-        ((own_src_dir)) && trap 'rm -rf -- "$src_dir"' ERR
+        # publish_as_user()'s own EXIT trap (already cleared by the time we get here) does not: that one only
+        # covers a failed publish itself, not what happens to its output afterward. EXIT, not ERR: put_tree's
+        # failure path is refuse_symlink -> die() -> exit, and ERR does not fire on an explicit exit.
+        ((own_src_dir)) && trap 'rm -rf -- "$src_dir"' EXIT
         put_tree "$src_dir/$voice_host_app" "$opt_dir/$voice_host_app"
         host_tree_changed=$wrote
         put_tree "$src_dir/$phone_gateway_app" "$opt_dir/$phone_gateway_app"
         gateway_tree_changed=$wrote
         if ((own_src_dir)); then
-            trap - ERR
+            trap - EXIT
             rm -rf -- "$src_dir"
         fi
     fi
