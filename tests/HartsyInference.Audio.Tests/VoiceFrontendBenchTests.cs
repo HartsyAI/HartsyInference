@@ -26,7 +26,9 @@ namespace HartsyInference.Audio.Tests;
 ///
 /// <para>The gate, asserted in the spinning paced mode (<c>HARTSY_VOICE_FRONTEND_BENCH_PACED=1</c>): quiet, wall-clock
 /// p50 ≤ 3 ms and p99 ≤ 5 ms; with 4 memory-streaming threads, no late frame and p99 ≤ 10 ms; and in every run, nothing
-/// allocated and no GC while timed. Beside it, the thread's own CPU time per frame (Linux) separates the work
+/// allocated and no GC while timed. The voice front end meets it at <see cref="RnnoisePrecision.Int8"/>, so run the
+/// gate with <c>HARTSY_VOICE_FRONTEND_BENCH_PRECISION=int8</c>; at F32 the 4-thread condition fails by design. Beside
+/// it, the thread's own CPU time per frame (Linux) separates the work
 /// from time the scheduler gave to something else — the voice host runs this thread SCHED_FIFO on a reserved core,
 /// a desktop test run cannot — along with allocations, GC count and process CPU time against wall time. Opt in with
 /// <c>HARTSY_VOICE_FRONTEND_BENCH=1</c>. The core is the one whose hyperthread pair was idlest while the weights
