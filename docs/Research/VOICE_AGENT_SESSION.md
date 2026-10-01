@@ -435,6 +435,8 @@ unknown key fails the start):
 (`CUDA_VISIBLE_DEVICES=1`, after a 10-minute SwarmUI quiet window, checked clean afterwards with `--verify-since`). A
 sipsorcery softphone plays the JFK clip at 8 kHz to the real gateway, which talks PhoneLink to the real host running
 Kokoro (`af_heart`) and Whisper small.en; the model is scripted, denoise off. Models loaded and warm in 1.9 to 2.4 s.
+The hang-up's binding to the turn its `ToolResult` names came from review after this run; the unit tests cover it, and
+the agent-hangup case is re-run on the GPU after the Voice package's allocation fix.
 
 | Measure | Gate | Source | Result |
 |---|---|---|---|
