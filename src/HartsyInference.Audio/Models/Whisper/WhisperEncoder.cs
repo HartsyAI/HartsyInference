@@ -49,6 +49,9 @@ public sealed unsafe class WhisperEncoder : IDisposable
     // Everything a device op reads, kept resident across forwards. The position table is read through a row view
     // (see PositionRows), which auto-promotes and demotes with the view's own lifetime.
     private Tensor[] _deviceWeights = [];
+    private int _streamWarned;
+
+    // One forward at a time, like the pipeline that owns this encoder: a call at another length replaces the view.
     private Tensor? _positionRows;
 
     private bool _weightsLoaded;
@@ -112,7 +115,7 @@ public sealed unsafe class WhisperEncoder : IDisposable
 
         // Idempotent, so an eviction since the last forward is simply undone; the biases and norms are below the
         // auto-promotion floor and would otherwise upload on every op.
-        backend.PreloadWeights(_deviceWeights);
+        WhisperOps.PreloadOrStream(backend, _deviceWeights, "encoder", ref _streamWarned);
 
         // Stage 1: Conv1 (stride=1, pad=1) + GELU. Treat 1-D conv as Conv2D with H=1.
         Tensor mel4d = mel.Reshape(new TensorShape(batch, _cfg.NumMelBins, 1, nFrames));

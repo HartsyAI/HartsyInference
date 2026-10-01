@@ -1,4 +1,6 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Whisper;
@@ -18,6 +20,24 @@ internal static unsafe class WhisperOps
         Tensor output = new(new TensorShape(batch, seqLen, outDim), DType.F32);
         backend.Linear(output, input, weight, bias);
         return output;
+    }
+
+    /// <summary>Keeps <paramref name="weights"/> resident on <paramref name="backend"/>. A card that cannot hold them falls
+    /// back to the backend's own per-use upload and headroom-gated promotion, as before preloading, instead of failing
+    /// the call; <paramref name="warned"/> limits the warning to once per caller.</summary>
+    public static void PreloadOrStream(IBackend backend, Tensor[] weights, string component, ref int warned)
+    {
+        try
+        {
+            backend.PreloadWeights(weights);
+        }
+        catch (OutOfVramException ex)
+        {
+            if (Interlocked.Exchange(ref warned, 1) == 0)
+            {
+                Logs.Warning($"[Whisper] {component} weights do not fit in free VRAM ({ex.Message}); they stream per use instead.");
+            }
+        }
     }
 
     /// <summary><see cref="IBackend.Linear"/> with <see cref="IBackend.HighPrecisionGemm"/> forced on for this call, so F32

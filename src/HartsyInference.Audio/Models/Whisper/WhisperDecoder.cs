@@ -32,6 +32,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
 
     // Everything a device op reads, kept resident for the decode (the position table is only read on the host).
     private Tensor[] _deviceWeights = [];
+    private int _streamWarned;
 
     private bool _weightsLoaded;
     private int _disposed;
@@ -89,7 +90,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
         _weightsLoaded = true;
     }
 
-    /// <summary>Fails fast when a <c>[vocab, d_model]</c> weight disagrees with the config: the logits loop reads exactly <see cref="WhisperConfig.VocabSize"/> rows, so an oversized config silently reads whatever tensor follows the embedding in the file as an extra logit (the English-only releases are one row short of the multilingual 51865).</summary>
+    /// <summary>Fails fast when a <c>[vocab, d_model]</c> weight disagrees with the config: the logits tensor and the greedy argmax span exactly <see cref="WhisperConfig.VocabSize"/> entries and the host embedding lookup indexes rows by token id, so an oversized config would argmax over logits the GEMM never wrote or read past the table (the English-only releases are one row short of the multilingual 51865).</summary>
     private void RequireVocabShape(Tensor weight, string name)
     {
         if (weight.Shape.Rank == 2 && weight.Shape[0] == _cfg.VocabSize && weight.Shape[1] == _cfg.HiddenSize) return;
@@ -153,7 +154,7 @@ public sealed unsafe class WhisperDecoder : IDisposable
 
         // Idempotent, so an eviction since the last utterance is simply undone; small tensors (biases, norms) are
         // below the auto-promotion floor and would otherwise upload on every op of every step.
-        backend.PreloadWeights(_deviceWeights);
+        WhisperOps.PreloadOrStream(backend, _deviceWeights, "decoder", ref _streamWarned);
         DecodeState state = new(_cfg, encSeq);
         try
         {

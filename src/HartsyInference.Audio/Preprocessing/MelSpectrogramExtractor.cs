@@ -179,7 +179,8 @@ public sealed class MelSpectrogramExtractor
     private readonly int _fftSize;
 
     // The filterbank row-major and flat, with each row's nonzero bin range: a mel filter is a triangle a few bins
-    // wide, so summing only [start, end) skips products that are exactly +0 and leaves every sum bit-identical.
+    // wide, so summing only [start, end) skips products that are exactly +0 and leaves every sum bit-identical for
+    // finite input (a NaN or infinite bin times a zero weight is NaN, which the full sum would have carried).
     private readonly float[] _filterWeights;   // [n_mels * _numBins]
     private readonly int[] _filterStart;       // [n_mels]
     private readonly int[] _filterEnd;         // [n_mels]
@@ -243,33 +244,14 @@ public sealed class MelSpectrogramExtractor
         int frames = OutputFrames(audio.Length);
         if (output.GetLength(0) != _cfg.NMels || output.GetLength(1) < frames)
             throw new ArgumentException($"output must be [{_cfg.NMels}, >={frames}]");
+        if (frames == 0)
+        {
+            return;
+        }
 
         // torch.stft(center=True): reflect-pad by n_fft/2 so frame t is centered at t*hop.
         float[]? padded = _cfg.Center ? SignalPadding.Reflect(audio, _cfg.NFft / 2) : null;
-        ReadOnlySpan<float> src = padded ?? audio;
-
-        float globalMax = float.MinValue;
-
-        for (int t = 0; t < frames; t++)
-        {
-            TransformFrame(src, t * _cfg.HopLength);
-            for (int m = 0; m < _cfg.NMels; m++)
-            {
-                float l = Compress(_melCol[m]);
-                output[m, t] = l;
-                if (l > globalMax) globalMax = l;
-            }
-        }
-
-        // Post-pass normalization (Whisper: dynamic-range clamp + (+4)/4 shift).
-        if (_cfg.Norm == Normalization.WhisperDynamicRange)
-        {
-            float clampMin = globalMax - _cfg.DynamicRangeDb;
-            float invScale = 1f / _cfg.NormScale;
-            for (int m = 0; m < _cfg.NMels; m++)
-                for (int t = 0; t < frames; t++)
-                    output[m, t] = (MathF.Max(output[m, t], clampMin) + _cfg.NormOffset) * invScale;
-        }
+        ComputeInto(padded ?? audio, frames, MemoryMarshal.CreateSpan(ref output[0, 0], output.Length), output.GetLength(1));
     }
 
     /// <summary>Computes a single mel frame from <c>WinLength</c> samples of audio. Used
@@ -311,35 +293,45 @@ public sealed class MelSpectrogramExtractor
         int frames = OutputFrames(paddedLength);
         if (output.Length < _cfg.NMels * frames)
             throw new ArgumentException($"output must hold [{_cfg.NMels}, {frames}] values.", nameof(output));
+        ComputeInto(audio, frames, output, frames);
+    }
 
+    /// <summary>The log-mel of <paramref name="frames"/> frames of <paramref name="src"/> into row-major
+    /// <paramref name="output"/> (row stride <paramref name="stride"/>), normalized per the preset. Samples past the
+    /// end of <paramref name="src"/> read as zero, so a frame whose window lies wholly past it is all zeros: its column
+    /// is the one constant a transform of zeros produces, filled without transforming.</summary>
+    private void ComputeInto(ReadOnlySpan<float> src, int frames, Span<float> output, int stride)
+    {
         int woff = _cfg.CenterWindowInFft ? (_fftSize - _cfg.WinLength) / 2 : 0;
         float silent = Compress(0f);
         float globalMax = float.MinValue;
         for (int t = 0; t < frames; t++)
         {
             int start = t * _cfg.HopLength;
-            if (start + woff >= audio.Length)
+            bool allPadding = start + woff >= src.Length;
+            if (!allPadding)
             {
-                for (int m = 0; m < _cfg.NMels; m++) output[m * frames + t] = silent;
-                if (silent > globalMax) globalMax = silent;
-                continue;
+                TransformFrame(src, start);
             }
-            TransformFrame(audio, start);
             for (int m = 0; m < _cfg.NMels; m++)
             {
-                float l = Compress(_melCol[m]);
-                output[m * frames + t] = l;
+                float l = allPadding ? silent : Compress(_melCol[m]);
+                output[m * stride + t] = l;
                 if (l > globalMax) globalMax = l;
             }
         }
 
+        // Post-pass normalization (Whisper: dynamic-range clamp + (+4)/4 shift).
         if (_cfg.Norm == Normalization.WhisperDynamicRange)
         {
             float clampMin = globalMax - _cfg.DynamicRangeDb;
             float invScale = 1f / _cfg.NormScale;
-            Span<float> values = output[..(_cfg.NMels * frames)];
-            for (int i = 0; i < values.Length; i++)
-                values[i] = (MathF.Max(values[i], clampMin) + _cfg.NormOffset) * invScale;
+            for (int m = 0; m < _cfg.NMels; m++)
+            {
+                Span<float> row = output.Slice(m * stride, frames);
+                for (int t = 0; t < frames; t++)
+                    row[t] = (MathF.Max(row[t], clampMin) + _cfg.NormOffset) * invScale;
+            }
         }
     }
 
