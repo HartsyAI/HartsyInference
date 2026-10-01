@@ -4,9 +4,11 @@ using HartsyInference.Cpu;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.Tests.Common;
 using HartsyInference.Tools;
 using HartsyInference.Voice.Tests.Fakes;
 using Xunit;
+using Xunit.Abstractions;
 
 namespace HartsyInference.Voice.Tests;
 
@@ -16,6 +18,11 @@ namespace HartsyInference.Voice.Tests;
 /// speech models are released on the GPU thread.</summary>
 public sealed class VoiceModelSetTests
 {
+    private readonly ITestOutputHelper _output;
+
+    public VoiceModelSetTests(ITestOutputHelper output) => _output = output;
+
+
     [Fact]
     public void DenoiseWithoutWeightsFailsLoudly()
     {
@@ -46,6 +53,57 @@ public sealed class VoiceModelSetTests
             string denoiseDir = Path.Combine(root, "denoise");
             Directory.CreateDirectory(denoiseDir);
             File.WriteAllBytes(Path.Combine(denoiseDir, "rnnoise.safetensors"), []);
+            FileNotFoundException error = Assert.Throws<FileNotFoundException>(() =>
+                VoiceModelSet.LoadFrontEnd(root, new VoiceAgentOptions { Denoise = true }, out _, out _));
+            Assert.Contains("rnnoise_int8.safetensors", error.Message, StringComparison.Ordinal);
+            Assert.Contains("never substitutes unprocessed audio", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DenoiseWithOnlyInt8TablesFailsLoudly()
+    {
+        // The reverse of the float-only case: tables present, F32 weights missing. LoadDenoiser(Int8) never reaches
+        // the tables file — it fails on File.Exists(weightsPath) first — so a placeholder tables file is enough;
+        // nothing here needs to be a real, parseable asset.
+        string root = EmptyDirectory();
+        try
+        {
+            string denoiseDir = Path.Combine(root, "denoise");
+            Directory.CreateDirectory(denoiseDir);
+            File.WriteAllBytes(Path.Combine(denoiseDir, "rnnoise_int8.safetensors"), []);
+            FileNotFoundException error = Assert.Throws<FileNotFoundException>(() =>
+                VoiceModelSet.LoadFrontEnd(root, new VoiceAgentOptions { Denoise = true }, out _, out _));
+            Assert.Contains("rnnoise.safetensors", error.Message, StringComparison.Ordinal);
+            Assert.Contains("never substitutes unprocessed audio", error.Message, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void DenoiseWithUnreadableInt8TablesFailsLoudly()
+    {
+        // Both files present, but the tables are garbage: the pre-check's File.Exists(tablesPath) passes, the real
+        // F32 weights load fine, and RnnoiseWeights.LoadFile throws inside LoadInt8Tables. Needs the real weights
+        // file to get that far, so it is gated like the other real-weight tests.
+        if (!RealWeightGate.Require(_output.WriteLine, VoiceAssets.RnnoiseWeights))
+        {
+            return;
+        }
+        string root = EmptyDirectory();
+        try
+        {
+            string denoiseDir = Path.Combine(root, "denoise");
+            Directory.CreateDirectory(denoiseDir);
+            File.Copy(VoiceAssets.RnnoiseWeights, Path.Combine(denoiseDir, "rnnoise.safetensors"));
+            File.WriteAllBytes(Path.Combine(denoiseDir, "rnnoise_int8.safetensors"), [1, 2, 3, 4, 5, 6, 7, 8]);
             FileNotFoundException error = Assert.Throws<FileNotFoundException>(() =>
                 VoiceModelSet.LoadFrontEnd(root, new VoiceAgentOptions { Denoise = true }, out _, out _));
             Assert.Contains("rnnoise_int8.safetensors", error.Message, StringComparison.Ordinal);

@@ -160,8 +160,10 @@ public sealed class WakeModelSet : IDisposable
         string path = RnnoiseInstaller.WeightsPath(ModelRoot);
         if (!File.Exists(path))
         {
-            Logs.Warning($"[Audio][Wake] Noise suppression is enabled but no denoiser was found at '{path}'. "
-                + "Listening without it. Install it with RnnoiseInstaller, which fetches xiph's model and converts it.");
+            // Caller-neutral: the wake stack listens without it on false, but a caller with a stricter contract
+            // (the voice front end) turns this into a hard failure instead, so this must not claim either outcome.
+            Logs.Warning($"[Audio][Wake] No denoiser was found at '{path}'. "
+                + "Install it with RnnoiseInstaller, which fetches xiph's model and converts it.");
             return false;
         }
         try
@@ -172,7 +174,7 @@ public sealed class WakeModelSet : IDisposable
         }
         catch (Exception ex)
         {
-            Logs.Error($"[Audio][Wake] Failed to load the denoiser from '{path}' at {precision}; listening without it.", ex);
+            Logs.Error($"[Audio][Wake] Failed to load the denoiser from '{path}' at {precision}.", ex);
             return false;
         }
     }

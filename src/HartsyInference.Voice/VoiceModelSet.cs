@@ -153,8 +153,11 @@ public sealed class VoiceModelSet : IAsyncDisposable
                 // generic "no usable weights" message LoadDenoiser logs for the (always-present) F32 file.
                 if (!File.Exists(tablesPath) || !wake.LoadDenoiser(RnnoisePrecision.Int8))
                 {
+                    // "no usable" rather than "not found": either file can also be present but unreadable, in which
+                    // case WakeModelSet.LoadDenoiser already logged the real reason above this throw.
                     throw new FileNotFoundException(
-                        $"Denoise is on but no usable int8 RNNoise weights were found (looked for '{weightsPath}' and '{tablesPath}'). "
+                        $"Denoise is on but no usable int8 RNNoise weights (missing or unreadable; looked for "
+                        + $"'{weightsPath}' and '{tablesPath}' — see the preceding log line for the reason if both exist). "
                         + "Install them with RnnoiseInstaller.EnsureAsync(root, cancel, RnnoisePrecision.Int8) or set Denoise to false; "
                         + "the voice session never substitutes unprocessed audio for a missing denoiser.");
                 }
