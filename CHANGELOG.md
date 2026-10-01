@@ -6,6 +6,44 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.232
+
+- **Kokoro's first synthesis of new text is no longer slower than a repeat.** Each new sentence length used to build
+  about 39 cuDNN convolution plans, and building one is ~97 % heuristic query (~2 ms; finalize ~0.01 ms), so new
+  text paid 60-80 ms that a repeat did not.
+  - A 1D cuDNN conv now takes its engine configuration (engine and knobs) from its conv family's power-of-two length
+    bucket. The heuristic runs once per family and bucket, at the bucket's top length minus one, and each new length
+    only finalizes a plan from that configuration (~0.1 ms).
+  - The reference is odd so the chosen configuration handles a ragged final tile and fits every length in the
+    bucket; at a power-of-two reference the heuristic picked edge-free tiles that refused unaligned lengths. A
+    configuration that still does not finalize for a length falls back to that length's own heuristic.
+  - The choice depends on the length alone, so the audio does not depend on which lengths came first: the same 20
+    sentences in reverse order give byte-identical audio.
+  - Applies to every `groups == 1` `Conv1d` / `ConvTranspose1d` on CUDA (vocoders and codecs); 2D and 3D convs are
+    unchanged. `numerics.audioConvLengthBuckets=false` is the kill switch back to the per-length heuristic.
+- **Measured on the RTX 3060** (20 new 15-word sentences, then the same 20 again; p50 / p95):
+  - Back to back: 212.9 / 255.6 → 180.1 / 220.3 ms. With 2-5 s idle gaps: 245.4 / 296.1 → 195.3 / 227.9 ms. The
+    250 ms gate now holds for new text in both modes.
+  - Repeats are unchanged (175.5 → 176.3 ms). Conv plan building per new sentence fell from 61 ms to 6 ms, with no
+    fallbacks. A cold bucket still pays one heuristic round (about 70 ms) once per process, which a session warm-up
+    across the 32-512-frame buckets removes.
+- **Bounded, not byte-identical.** The per-length heuristic already picked different engines (46 / 55 / 56) for
+  different lengths of the same conv, so no single choice per bucket reproduces it.
+  - Kokoro: log-spectral correlation ≥ 0.99995 and max-abs ≤ 5.2e-3 against the previous build, same lengths, same
+    Whisper recall. With the buckets switched off the build is byte-identical to the previous one.
+  - Piper (VITS): same lengths; log-spectral correlation 1.000000 on four of six sentences, 0.99993 and 0.99497 on
+    the other two.
+- **Per-shape setup counters on `CudaBackend`:** `CudnnConvPlanStats` (plans built and how many came from a bucket,
+  reference builds, fallbacks, build time split into graph, heuristic and finalize), `DescribeCudnnConvPlanFamilies`,
+  `LtGemmPlanStats` and `GetMemPoolUsage`.
+- Tests:
+  - `CudnnConvPlanStatsTests` (CUDA): bucket and reference-length math, one plan per length from its bucket, the
+    per-length heuristic with buckets off, byte-identical output whichever order two lengths of a bucket arrive in, and
+    forward and transposed bucketed output within TF32 of the per-length heuristic.
+  - `KokoroFirstSynthesisBenchTests`: the opt-in 3060 first-synthesis bench (back to back or with gaps, forward or
+    reverse order, against reference audio). `ConvLengthBucketDigestTests`: the Piper A/B. `TtsConvBucketSpotCheckTests`
+    and `TtsConvBucketSpotCheckCompareTests`: per-model arms on the 3060, scored on the CPU with Whisper.
+
 ## alpha.231
 
 - **RNNoise runs the two 10 ms frames of a 20 ms voice frame layer by layer, bit for bit.** Per 20 ms frame it now

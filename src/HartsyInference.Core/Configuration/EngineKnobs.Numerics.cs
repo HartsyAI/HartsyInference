@@ -8,6 +8,11 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> AudioConvCudnn =
         Bool("numerics.audioConvCudnn", true, KnobScope.Runtime, KnobDomain.Numerics, "Routes audio conv1d through cuDNN (1D-as-2D, TF32) instead of the direct kernel; 0 disables.");
 
+    /// <summary>Picks an audio conv's cuDNN engine once per power-of-two length bucket (heuristic at the bucket's length)
+    /// and plans every length in it from that choice; 0 runs the heuristic for every new length.</summary>
+    public static readonly Knob<bool> AudioConvLengthBuckets =
+        Bool("numerics.audioConvLengthBuckets", true, KnobScope.Runtime, KnobDomain.Numerics, "Picks an audio conv's cuDNN engine once per power-of-two length bucket and plans every length in it from that choice; 0 runs the heuristic for every new length.");
+
     /// <summary>Kill-switch for AuraFlow's device-resident packed-token denoise loop; 0 reverts to the host reference loop.</summary>
     public static readonly Knob<bool> AuraflowPacked =
         Bool("numerics.auraflowPacked", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for AuraFlow's device-resident packed-token denoise loop; 0 reverts to the host reference loop.");

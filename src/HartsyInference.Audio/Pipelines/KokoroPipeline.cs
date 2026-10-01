@@ -81,6 +81,11 @@ public sealed class KokoroPipeline : IDisposable
     private int _disposed;
 
     public KokoroConfig Config => _cfg;
+
+    /// <summary>The token count <see cref="Synthesize"/> sees for <paramref name="phonemes"/> (diagnostics: the text
+    /// encoder and the voice-pack row depend on it).</summary>
+    internal int CountTokens(string phonemes) => _tokenizer.Encode(phonemes).Length;
+
     public string ModelName => "hexgrad/Kokoro-82M";
 
     private KokoroPipeline(KokoroConfig cfg, KokoroPhonemeTokenizer tok, KokoroPlBert plBert, KokoroTextEncoder textEnc,
