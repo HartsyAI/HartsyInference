@@ -52,7 +52,7 @@ namespace HartsyInference.Audio.Tests;
 /// The log also reports the load's CPUs, its bandwidth over the timed frames, and the bench core's clock sampled from
 /// cpufreq over the same frames.</para>
 ///
-/// <para>The budget is an open gate that this box does not meet yet. At alpha.227, back to back, five runs gave p50
+/// <para>The budget is an open gate that this box does not meet yet. At alpha.229, back to back, five runs gave p50
 /// 1.57–1.70 ms and p99 3.72–5.72 ms. Paced, p50 is 2.61–2.76 ms, and under streaming load the frame time grows
 /// with the weight bytes each frame reads (see CHANGELOG). Until the weights' precision and cache residency are
 /// settled, a p99 failure in the default mode is that open gate. A regression shows up instead as a higher p50, or as
