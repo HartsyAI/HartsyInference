@@ -18,7 +18,8 @@ internal interface IVoiceCallSession : IAsyncDisposable
     /// <summary>Caller audio, 16 kHz, ±1. Never blocks.</summary>
     void PushInbound(ReadOnlySpan<float> samples);
 
-    /// <summary>One turn's reply audio at most; <paramref name="turnId"/> is the turn that produced it. Never blocks.</summary>
+    /// <summary>One turn's reply audio at most; <paramref name="turnId"/> is the turn that produced it, 1 or more for any
+    /// audio (the host drops audio tagged 0, as it drops a flushed turn's). Never blocks.</summary>
     int ReadOutbound(Span<float> destination, out int turnId);
 
     Task SpeakAsync(string text, CancellationToken cancel);

@@ -13,6 +13,9 @@ namespace HartsyInference.VoiceHost.Tests.Loopback;
 /// speak a clip, and records the level of every G.711 packet it receives with the time it arrived.</summary>
 internal sealed class LoopbackPhone : IDisposable
 {
+    /// <summary>Peak level above which a G.711 frame carries sound: A-law has no zero code, so its silence decodes to ±8.</summary>
+    public const int AudiblePeak = 16;
+
     private readonly SIPTransport _transport = new();
     private readonly object _framesLock = new();
     private readonly List<(long Ns, int Peak)> _frames = [];

@@ -20,7 +20,7 @@ namespace HartsyInference.VoiceHost.Tests.Loopback;
 [Trait("Category", "RealWeights")]
 public sealed class LoopbackSipCallWithHostTests : IClassFixture<LoopbackHostFixture>
 {
-    private const int Audible = 1;
+    private const int Audible = LoopbackPhone.AudiblePeak;
     private const double BargeInGateMs = 100;
     private const string LongReply = "Let me tell you about our opening hours. We open at nine in the morning on weekdays. "
         + "On Saturdays we open a little later, at ten. Sundays we are closed all day. Holidays follow the Sunday hours. "
@@ -129,7 +129,7 @@ public sealed class LoopbackSipCallWithHostTests : IClassFixture<LoopbackHostFix
 
             Assert.Equal((uint)bargeIn.Turn, flush.Turn);
             Assert.True(lastSentMs <= BargeInGateMs, $"the cancelled reply was still on the wire {lastSentMs:F1} ms after the barge-in.");
-            Assert.DoesNotContain(gateway.ReplyFrames, f => f.Ns > flush.Ns && f.Turn <= flush.Turn);
+            // The gateway counts every frame at or below a flushed turn that arrives after the Flush: the host sent none.
             Assert.Equal(staleBefore, gateway.Link.StaleOutboundDropped);
         }
         finally

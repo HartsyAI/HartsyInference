@@ -45,6 +45,7 @@ public sealed class LoopbackHostKillTests
             string config = WriteConfig(directory, socket, device);
             using LoopbackGateway gateway = LoopbackGateway.Start(socket, Token, OutageHangupMs);
             using LoopbackPhone phone = new();
+            using LoopbackPhone nextPhone = new();
 
             using (HostProcess first = HostProcess.Start(config, "Okay."))
             {
@@ -53,7 +54,7 @@ public sealed class LoopbackHostKillTests
                     Assert.True(gateway.WaitUntil(() => gateway.Link.IsConnected, HostStartMs), "the first host never came up.");
                     long start = MonotonicClock.NowNs();
                     Assert.True(await phone.CallAsync(gateway.Port), $"call failed: {phone.LastFailure}");
-                    Assert.True(gateway.WaitUntil(() => phone.AudibleSince(start, 1) >= 25, 30_000), "the greeting never reached the phone.");
+                    Assert.True(gateway.WaitUntil(() => phone.AudibleSince(start, LoopbackPhone.AudiblePeak) >= 25, 30_000), "the greeting never reached the phone.");
 
                     long killed = MonotonicClock.NowNs();
                     first.Kill();
@@ -76,9 +77,10 @@ public sealed class LoopbackHostKillTests
             {
                 Assert.True(gateway.WaitUntil(() => gateway.Link.IsConnected, HostStartMs), "the gateway never reconnected to the new host.");
                 long again = MonotonicClock.NowNs();
-                Assert.True(await phone.CallAsync(gateway.Port), $"the next call was refused: {phone.LastFailureStatus} {phone.LastFailure}");
-                Assert.True(gateway.WaitUntil(() => phone.AudibleSince(again, 1) >= 25, 30_000), "the new host's greeting never reached the phone.");
-                phone.Agent.Hangup();
+                Assert.True(await nextPhone.CallAsync(gateway.Port), $"the next call was refused: {nextPhone.LastFailureStatus} {nextPhone.LastFailure}");
+                Assert.True(gateway.WaitUntil(() => nextPhone.AudibleSince(again, LoopbackPhone.AudiblePeak) >= 25, 30_000),
+                    "the new host's greeting never reached the phone.");
+                nextPhone.Agent.Hangup();
                 Assert.True(gateway.WaitUntil(() => gateway.Controller.State == CallState.Idle, 10_000));
                 Assert.True(second.Terminate(30_000), "the host did not stop on SIGTERM.");
                 Assert.Equal(0, second.ExitCode);
