@@ -35,8 +35,9 @@ namespace HartsyInference.Audio.Tests.Parity;
 /// it. Tables go to the test output and, with <c>HARTSY_WHISPER_TOKEN_PARITY_OUT</c>, are appended to that file.
 /// <c>HARTSY_WHISPER_TOKEN_PARITY_EXPLAIN=0</c> skips the teacher-forced explanation. The prompt and the suppressed
 /// ids must equal the reference's; token differences are reported, and fail the test only with
-/// <c>HARTSY_WHISPER_TOKEN_PARITY_STRICT=1</c>: the engine's tanh GELU against the reference's exact one is known to
-/// flip near-ties.</para></summary>
+/// <c>HARTSY_WHISPER_TOKEN_PARITY_STRICT=1</c>. With Whisper's exact GELU all 144 decodes (six models) match on the CPU
+/// backend (2026-10-01, AVX2), but the reference's closest calls are 0.004 logits apart, so another summation order
+/// (vector width, backend) can flip one without a bug.</para></summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class WhisperTokenParityTests(ITestOutputHelper output)
