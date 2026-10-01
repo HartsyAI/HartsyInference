@@ -20,8 +20,8 @@ PushInbound (host, one thread) ─► SpscRing<float> 30 s ─► T1 voice-audio
 T3 turn loop (async, one turn at a time)
    utterance ─► T2: Whisper lease ─► VoiceConversation (token-trimmed) ─► ToolLoop (thinking off, Device = LlmDevice)
    deltas ─► SentenceChunkedSynthesis (run = post to T2, 2 in flight) ─► StreamingResampler ─► VoiceOutbound
-T2 voice-gpu (dedicated thread, owned by VoiceModelSet): one DeviceGate hold per job, FreeActivations per job,
-   TrimMemoryPool queued once per turn on the return to listening, skipped if the next turn's work is behind it
+T2 voice-gpu (dedicated thread, owned by VoiceModelSet): one DeviceGate hold per job, FreeActivations(trimPool: false)
+   per job, TrimMemoryPool queued once per turn on the return to listening, skipped if the next turn's work is behind it
 ReadOutbound (host, one thread) ◄─ VoiceOutbound: SpscRing<float> 30 s, applies flushes, zero-fills, never blocks
 Events: channel ─► one pump task on the pool (never T1 or T2), in order
 ```
@@ -77,8 +77,23 @@ publishes the epoch it applied. Two rules keep a flush from eating the wrong aud
   next reply's opening.
 
 A concurrent-flush stress test holds the reader to never hearing an older turn after a newer one. The producer waits
-for space rather than dropping. The reader never blocks or allocates; it completes the producer's waiter after reads
-that made progress.
+for space rather than dropping.
+
+The reader never blocks or allocates, also while the producer waits:
+
+- The waiter carries what it waits for: a played position, free space, or an applied flush epoch. The reader completes
+  it once, on the read that reaches it. A turn waiting for its playback costs the reader nothing per read.
+- The producer awaits the waiter's task directly, and the cancellation token completes the waiter through
+  `UnsafeRegister`. The producer's own continuation is then the only one, so the reader's single completion queues it
+  and allocates nothing. Awaiting `Task.WaitAsync(token)` instead cost the reader 32 B per read: a new invoker for the
+  cancellation promise on every wake.
+- A writer that finds the queue full waits for its remaining write or a quarter of the ring, whichever is smaller. A
+  full queue then costs one wake per quarter rather than one per read.
+- Measured on a dedicated reader thread (tests), the reader allocates 0 B:
+  - over 1000 reads with a cancellable playback wait pending, and on the read that wakes it;
+  - over 1000 reads while a writer waits for space (250 wakes);
+  - while the reader plays a whole turn.
+- The first wake in a process allocated once: 192 B in a fresh test process, and 32 B over a session's first turn.
 
 ## Inbound backlog
 
@@ -127,6 +142,9 @@ to the reader's discard). The gateway's stages (`voice.rtp.*`) are measured by t
 
 On the RTX 3060 (`CUDA_VISIBLE_DEVICES=1`, after a 10-minute Swarm quiet window, under the bench lock),
 `VoiceSessionEndToEndTests` gave the rows below. The language model is scripted: the LLM stages are not measured here.
+At that point every GPU job also trimmed the device's memory pool, through the parameterless `FreeActivations`. Since
+then each job keeps the pool and only the turn trims it, so the next GPU run should show faster Whisper and Kokoro
+calls than these.
 
 | Stage | Budget | Result |
 |---|---|---|
