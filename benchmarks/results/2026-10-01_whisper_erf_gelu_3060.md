@@ -44,5 +44,7 @@ between 195 and 261 ms across arms of the same code. Neither tracks the GELU.
 
 Of the 21 bench cases the CPU parity set also covers, this branch alone decodes 19 exactly as the HF reference does —
 the same 19 as the baseline, since its log-mel is still the old one — and #211 plus this branch all 21, as #211 alone
-does. On the GPU's TF32 GEMMs the four CPU near-ties do not arise in these cases; the CPU parity is where the GELU
-shows (PLACEHOLDER).
+does. None of the four CPU near-ties is among these 21 cases, so the GELU shows in the CPU parity instead: with #211's
+log-mel, the CPU-backend decodes equal the HF reference's on all 144 cases of the parity set (six models, 12 clips,
+with and without timestamps), from 140 with the tanh form
+([parity](../../docs/Checklists/PARITY_VERIFICATION.md#stt)).
