@@ -20,8 +20,8 @@ Telephony tools (hang up, DTMF, transfer) are registered by the host; the sessio
   registered gets) the request is unchanged from before: one token, no grammar. The warm-up's own `Messages` never
   touch a session's conversation or the sentence splitter, so it changes nothing about what the first real turn
   generates. This is what the Qwen3-4B [measurement](#qwen3-4b-on-the-rtx-4090-audio-on-the-3060-both-cards-visible)
-  below is re-measured against; `VoiceHost` (PR9) must be updated to pass its own tool set at boot, or production
-  warm-up stays on the cold one-token path.
+  below is re-measured against. `VoiceHost` boots with its own tool definitions (the six telephony tools plus
+  `get_time`), so production warm-up takes this tool-aware path too — see [the host section](#voice-host-hartsyinferencevoicehost).
 - It synthesizes five texts, each as its own GPU job: "Okay.", a 3-word, a 6-word, a 13-word and a 30-word sentence.
 - On the RTX 3060 these gave 58, 70, 81, 195 and 407 of Kokoro's 25 ms alignment frames. That is the power-of-two
   buckets 64, 128, 128, 256 and 512, every bucket a sentence reaches:
@@ -298,8 +298,9 @@ caller utterance back to back (history grows each turn), clean quiet window on b
   non-greedy path — not session-path transport (detokenization, the filter/parser, the channel), which is what the
   per-token timeline's steady spacing had pointed at. Fixed there: reused scratch buffers, a delegate-free sort,
   sorting only the candidate subset when it already reaches `p`.
-- **Open for PR9**: `VoiceHost`'s boot-time `WarmAsync` call must pass its own tool set, or production warm-up
-  stays on the cold one-token path this fix only helps when a caller opts in.
+- **Done for PR9**: `VoiceHost`'s boot-time warm-up now passes its own tool definitions
+  (`VoiceHostTools.WarmDefinitions`, built the same way a real call's registry is), so production warm-up takes the
+  tool-aware path this fix enables rather than staying on the cold one-token path.
 
 #### Re-measured after the sampler fix (main alpha.236, #215), same 4 turns
 
@@ -331,8 +332,11 @@ path.
 
 The phone deployment's model process: a generic-host exe (net10.0, not packed) that the phone gateway dials over
 [PhoneLink](PHONE_LINK_PROTOCOL.md). At start it builds `InferenceEngine` on `AudioDevice` (`cuda:1`, the RTX 3060)
-with `ToolCalling.Install` (format detected from `LlmModel`), loads and warms the `VoiceModelSet`, then listens on the
-socket. Every call gets its own `VoiceAgentSession` on that model set; the models outlive calls. The engine reaches the
+with `ToolCalling.Install` (format detected from `LlmModel`), loads and warms the `VoiceModelSet` — with the tool
+definitions `config.tools.enabled` names (`VoiceHostTools.WarmDefinitions`: the same registry-building code a real
+call uses, built with request/hang-up delegates that throw if ever invoked, since warm-up only offers tools to the
+chat template and never dispatches one), so the tool-call grammar sampler and its stream filter/parser are hot before
+the first caller — then listens on the
 language model only through each request's `Device = LlmDevice` (`cuda:0`, the 4090): a request without it would load
 the LLM onto the audio card, and the session never sends one. Units and install steps: [deploy](../../deploy/README.md);
 end-to-end checks: [runbook](../Checklists/VOICE_AGENT_VERIFICATION.md).
@@ -469,8 +473,6 @@ cover it) and the Voice package's allocation-free wake. The next GPU run re-chec
 - No hallucination filter beyond "only VAD-closed segments reach the recognizer" and the no-words discard.
 - The CPU kernels' per-call dispatch closures make real Silero allocate on the audio thread; fixing them is a
   cross-model Cpu change with its own A/B.
-- `VoiceHost` (PR9)'s boot-time `WarmAsync` call needs updating to pass its own tool set, or production warm-up
-  stays on the cold one-token path.
 - Host: outbound calls start like inbound ones (same prompt, same greeting); per-call instructions (why the agent is
   calling) are not wired. The host keeps one gateway connection; per-call and per-link summaries go to the log only (no
   metrics endpoint on the host side).

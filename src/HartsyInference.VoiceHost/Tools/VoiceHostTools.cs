@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Requests;
 using HartsyInference.PhoneLink;
 using HartsyInference.Tools;
 
@@ -49,6 +50,18 @@ public static class VoiceHostTools
         }
         return registry;
     }
+
+    /// <summary>The <see cref="ToolDefinition"/>s warm-up offers the model for <paramref name="enabled"/>: the same
+    /// definitions a real call's <see cref="Build"/> would give it, built with request and hang-up delegates that
+    /// throw if ever invoked. Warm-up only offers tools to the chat template and the tool-call grammar/parser
+    /// (<see cref="Voice.VoiceModelSet.WarmAsync"/> streams and discards); it never dispatches one.</summary>
+    internal static IReadOnlyList<ToolDefinition> WarmDefinitions(IReadOnlyList<string> enabled) =>
+        Build(enabled, NeverRequestedAsync, NeverRequestedHangup, TimeProvider.System).Definitions;
+
+    private static Task<ToolResultMessage> NeverRequestedAsync(ToolRequestMessage request, CancellationToken cancel) =>
+        throw new InvalidOperationException($"Warm-up offers '{request.Name}' to the model; it must never invoke it.");
+
+    private static void NeverRequestedHangup() => throw new InvalidOperationException("Warm-up must never invoke hangup.");
 
     private static string Description(string name) => name switch
     {

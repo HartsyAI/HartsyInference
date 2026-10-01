@@ -13,6 +13,12 @@ stable release will require. Dates are UTC.
   file) that builds the engine on the audio card (`cuda:1`) with `ToolCalling.Install`, loads and warms the voice model
   set, and serves the PhoneLink socket the gateway dials. One `VoiceAgentSession` per call; the models outlive calls;
   every language-model request names `LlmDevice` (`cuda:0`).
+- **Boot warm-up offers the host's real tool set.** `VoiceHostTools.WarmDefinitions` builds the same
+  `ToolDefinition`s a real call's registry would (the six telephony tools plus `get_time`, for whichever of them
+  `tools.enabled` names), with request/hang-up delegates that throw if ever invoked — warm-up only offers tools to
+  the chat template and the tool-call grammar/stream filter (`VoiceModelSet.WarmAsync` streams and discards), it
+  never dispatches one. `VoiceHostService.StartAsync` passes them to `WarmAsync`, so production warm-up takes the
+  tool-aware `WarmToolMaxTokens`-token path instead of staying on the cold one-token path a tool-less warm-up takes.
 - Typed options from `/etc/hartsyinference/voice.json` (`link`, `models`, `agent`, `tools`, `engine`, `logging`; `{}` is
   valid, an unknown key fails the start, every error names its JSON path). The link token comes from a secret file
   (`LoadCredential=`), refused when group or others can read it and never logged; `engine.cpuThreadCap` is
@@ -52,11 +58,12 @@ stable release will require. Dates are UTC.
   checked against the dry run. These are optimizations: under `schedutil`, the idle
   gaps between turns cost Kokoro about 33 ms per sentence and the paced front end about 0.7 ms per frame, but every
   gate passes either way.
-- Tests (`tests/HartsyInference.VoiceHost.Tests`): 83 unit tests against a fake gateway on a temporary socket with
+- Tests (`tests/HartsyInference.VoiceHost.Tests`): 87 unit tests against a fake gateway on a temporary socket with
   scripted sessions (handshake refusals, call lifecycle and faults, PCM16 scale and sequence checks, flush and stale-turn
   rules, tool round trips and timeouts, hangup after the goodbye's last frame, its cap and a barge-in on the goodbye,
   config and token file, 1200-frame sender cadence with zero allocation, zero allocation while the sender's reads wake a
-  producer waiting for playback, as the real session's do), and `[Slow]` loopback calls (sipsorcery
+  producer waiting for playback, as the real session's do, and the boot warm-up's tool definitions against a fake
+  `VoiceModelSet`), and `[Slow]` loopback calls (sipsorcery
   softphone → real gateway → real host with Kokoro and Whisper small.en on the RTX 3060), including silence on the line
   between the goodbye and the BYE, and a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
   Measured there: the cancelled reply's last frame left the gateway 6.4 ms after the barge-in decision, the BYE came 24

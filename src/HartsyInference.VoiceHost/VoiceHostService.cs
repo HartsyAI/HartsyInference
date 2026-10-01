@@ -11,6 +11,7 @@ using HartsyInference.VoiceHost.Calls;
 using HartsyInference.VoiceHost.Config;
 using HartsyInference.VoiceHost.Link;
 using HartsyInference.VoiceHost.Runtime;
+using HartsyInference.VoiceHost.Tools;
 using Microsoft.Extensions.Hosting;
 
 namespace HartsyInference.VoiceHost;
@@ -60,7 +61,7 @@ public sealed class VoiceHostService : IHostedService
                 + $"the language model {agent.LlmModel} runs on {agent.LlmDevice}.");
             _models = await VoiceModelSet.LoadAsync(_engine, agent, config.Models.WakeModelRoot, cancellationToken).ConfigureAwait(false);
             ITextService text = _text(_engine);
-            await _models.WarmAsync(text, cancellationToken).ConfigureAwait(false);
+            await WarmModelsAsync(_models, text, config.Tools.Enabled, cancellationToken).ConfigureAwait(false);
             Logs.Info($"[VoiceHost] {agent.SttModel}, {agent.TtsModel} and {agent.LlmModel} loaded and warm in "
                 + $"{(MonotonicClock.NowNs() - started) / 1_000_000} ms; denoise {(_models.DenoiseEnabled ? "on" : "off")}.");
             _server = new PhoneLinkServer(ServerOptions(_settings), new VoiceAgentCallFactory(_models, text, agent));
@@ -77,6 +78,18 @@ public sealed class VoiceHostService : IHostedService
     {
         Logs.Info("[VoiceHost] Stopping: ending calls, then releasing the models.");
         await ReleaseAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Warms <paramref name="models"/> with the same tool definitions a real call on <paramref name="enabledTools"/>
+    /// would offer (<see cref="VoiceHostTools.Build"/>, via <see cref="VoiceHostTools.WarmDefinitions"/>), so the
+    /// tool-call grammar sampler, its stream filter/parser and the chat template's tools branch are hot before the
+    /// first caller, not just the cold one-token path a tool-less warm-up takes.</summary>
+    internal static Task WarmModelsAsync(VoiceModelSet models, ITextService text, IReadOnlyList<string> enabledTools, CancellationToken cancel)
+    {
+        ArgumentNullException.ThrowIfNull(models);
+        ArgumentNullException.ThrowIfNull(text);
+        ArgumentNullException.ThrowIfNull(enabledTools);
+        return models.WarmAsync(text, VoiceHostTools.WarmDefinitions(enabledTools), cancel);
     }
 
     /// <summary>The server options <paramref name="settings"/> describe.</summary>
