@@ -11,9 +11,6 @@ public static class InpaintOnlyMasked
     /// <summary>Mask values below this are treated as unselected when finding the bounding box, matching the 0.01 threshold SwarmUI applies before <c>SwarmMaskBounds</c>.</summary>
     private const byte BoundsThreshold = 3;
 
-    /// <summary>Smallest nonzero mask value; composites below it are dropped (SwarmUI thresholds at 0.001).</summary>
-    private const byte CompositeThreshold = 1;
-
     /// <summary>Generated dimensions are rounded to this so every family's own snapping is a no-op — the widest VAE downscale × patch factor in the engine is 16.</summary>
     private const int SizeAlignment = 16;
 
@@ -114,15 +111,7 @@ public static class InpaintOnlyMasked
             Height = plan.CropHeight,
         };
         byte[] compositeMask = (byte[])plan.CroppedMask.Clone();
-        // Hard edge like SwarmUI unless Mask Composite Unthresholded asks for the soft one.
-        if (plan.CompositeUnthresholded)
-        {
-            FeatureImaging.ThresholdInPlace(compositeMask, CompositeThreshold);
-        }
-        else
-        {
-            FeatureImaging.BinarizeInPlace(compositeMask, CompositeThreshold);
-        }
+        FeatureImaging.ApplyCompositePolicy(compositeMask, plan.CompositeUnthresholded);
         ImageData composited = FeatureImaging.CompositeRgb24(plan.OriginalInit, scaledBack, compositeMask, plan.X, plan.Y);
 
         Dictionary<string, string> meta = new Dictionary<string, string>(generated.Meta, StringComparer.OrdinalIgnoreCase)

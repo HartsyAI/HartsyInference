@@ -155,6 +155,19 @@ public static class FeatureImaging
         }
     }
 
+    /// <summary>Prepares a mask for the final paste: hard-edged like SwarmUI's ThresholdMask, or soft with the lowest values dropped when <paramref name="unthresholded"/>. Any nonzero byte counts (1/255 is above SwarmUI's 0.001).</summary>
+    public static void ApplyCompositePolicy(byte[] mask, bool unthresholded)
+    {
+        if (unthresholded)
+        {
+            ThresholdInPlace(mask, 1);
+        }
+        else
+        {
+            BinarizeInPlace(mask, 1);
+        }
+    }
+
     /// <summary>Hard threshold like SwarmUI's ThresholdMask: values at or above <paramref name="threshold"/> become 255, the rest 0.</summary>
     public static void BinarizeInPlace(byte[] mask, byte threshold)
     {

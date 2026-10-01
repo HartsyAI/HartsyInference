@@ -15,6 +15,8 @@ stable release will require. Dates are UTC.
   `Inpaint.RecompositeMask` turns the full-canvas paste off (Init Image Recomposite Mask); the crop and segment paths
   always paste. `RecipeImg2ImgBinder` switches the pipelines' own paste off whenever a mask is present, so a caller
   driving a recipe pipeline directly with a mask gets no paste and should go through `IImagesService`.
+  `MaskCompositeUnthresholded` and `RecompositeMask` are request fields for library callers (the SwarmUI extension);
+  the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
 

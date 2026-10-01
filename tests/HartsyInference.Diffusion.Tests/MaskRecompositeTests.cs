@@ -106,6 +106,43 @@ public sealed class MaskRecompositeTests
         Assert.Equal(Original, At(result, 20, 10));
     }
 
+    /// <summary>A family that snaps its dimensions returns a different size than the init image; the paste is made at the output size.</summary>
+    [Fact]
+    public void Apply_WhenTheOutputSizeDiffersFromTheInit_PastesAtTheOutputSize()
+    {
+        const int outSize = Size / 2;
+        ImageResult smaller = new ImageResult
+        {
+            Rgb = Enumerable.Repeat(Generated, outSize * outSize * 3).ToArray(),
+            Width = outSize,
+            Height = outSize,
+            Seed = 5,
+            Meta = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+        };
+
+        ImageResult result = MaskRecomposite.Apply(Request(HalfMaskImage(255)), smaller);
+
+        Assert.Equal(outSize, result.Width);
+        Assert.Equal(outSize * outSize * 3, result.Rgb.Length);
+        Assert.Equal(Generated, result.Rgb[(4 * outSize + 2) * 3]);
+        Assert.Equal(Original, result.Rgb[(4 * outSize + 13) * 3]);
+    }
+
+    /// <summary>An empty mask declines the crop; the fallback then resolves a mask instead of tripping the resolver's guard.</summary>
+    [Fact]
+    public void WithoutCrop_AfterADeclinedCropOnAnEmptyMask_ResolvesWithoutThrowing()
+    {
+        ImageRequest request = Request(Solid(0)) with
+        {
+            Inpaint = new Inpaint { Mask = Solid(0), ShrinkGrow = 8 },
+        };
+
+        Assert.Null(InpaintOnlyMasked.Prepare(request));
+        ImageRequest fallback = InpaintOnlyMasked.WithoutCrop(request);
+
+        Assert.NotNull(MaskResolver.ResolveBytes(fallback.Inpaint, Size, Size));
+    }
+
     [Fact]
     public void BinarizeInPlace_MapsAtOrAboveTheThresholdToFullAndTheRestToZero()
     {
