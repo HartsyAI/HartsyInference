@@ -6,6 +6,57 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.234
+
+- **RNNoise has an opt-in int8 precision, and with it the voice front end meets its gate.**
+  `RnnoisePrecision.Int8` runs conv2 and the three GRUs on the int8 tables that upstream's default C build compiles
+  in. conv1 and the two heads stay F32, as they do there. A 10 ms frame reads 3.2 MB of weights instead of 11.5 MB,
+  and a paired 20 ms frame 4.5 MB instead of 16.9 MB.
+  - **Tables.** `RnnoiseInt8Tables` reads them out of `src/rnnoise_data.c` in the pinned xiph tarball into
+    `rnnoise_int8.safetensors`. All 24 arrays are byte-equal to what gcc compiles from that file (a SHA-256 per array
+    in `RnnoiseInt8TablesTests`). The GRU index lists are dense, and the conversion checks that.
+  - **Numerics.** Upstream's default `./configure` build is its SSE2 path, not AVX2: `--enable-x86-rtcd` defaults to
+    off and nothing adds `-march`. It codes activations as `127 + floor(0.5 + fl(127·x))` and sums the uint8 × int8
+    products exactly in int32. This follows that build. The AVX2 path differs: its `maddubs` saturates each pair at
+    int16, and it rounds `fma(x, 127, 127)` half-to-even.
+  - **Op.** `IBackend.QuantizeActivationsU8` and `IBackend.LinearI8U8`, implemented on the CPU backend in
+    `Int8GemvKernels`. AVX2 widens the bytes and multiplies with `pmaddwd`; the scalar path gives the same bits.
+    Two activation rows share each weight load, so the paired 20 ms path still reads its shared weights once.
+  - **Selection.** `RnnoiseWeights.LoadFile(path, precision)`. F32 is the default, and the wake stack loads F32,
+    which a test checks. `RnnoiseInstaller` installs the tables when asked for Int8.
+- **Parity with upstream's default build** (48 kHz jfk.wav, per-frame error, clean / 5 dB noise): median
+  0.034 % / 0.053 %, p99 0.46 % / 0.35 %, max 1.57 % / 0.73 %. For scale, the F32 port against upstream's float build
+  is 0.017 % / 0.019 %, and upstream's two builds differ from each other by 0.131 % / 0.163 %. The int8 sums are exact,
+  so what remains is what separates the F32 port from upstream's float build: summation order in conv1 and the heads,
+  exact against approximated tanh and sigmoid, and the front end. A slightly different activation can move a code by
+  one step.
+- **Quality, int8 against F32.**
+  - SNR goes from 5.0 to 11.1 dB at both precisions. Noise between words drops 33.0 dB at int8 and 32.6 dB at F32,
+    and speech moves 0.4 dB at both.
+  - Whisper small.en's content-word recall through the full chain is 100 % at both precisions: clean and at 5 dB SNR,
+    at 16 kHz and narrowband.
+- **The gate, measured at int8** (2026-10-01; i7-6900K, CPU 0, `schedutil`, spinning 20 ms clock, 2,000 frames per
+  run, interleaved, every run checked for foreign builds, tests and SwarmUI requests):
+  - Quiet: p50 1.07–1.08 ms, p99 1.20–1.59 ms (gate: 3 / 5 ms).
+  - 4 streaming threads: p50 1.80–2.11 ms, p99 3.56–4.25 ms, none late (gate: none late, p99 10 ms).
+  - 8 streaming threads, not gated: p50 2.66–3.24 ms, p99 4.34–6.17 ms, none late.
+  - Every run allocated 0 bytes and ran no GC. F32 measured p50 6.6–7.3 ms and p99 10.5–11.1 ms under 4 threads the
+    same morning, which misses.
+- **Sleeping clock.** A new bench mode, `HARTSY_VOICE_FRONTEND_BENCH_PACED=sleep`, sleeps to each tick as the voice
+  host's audio thread does.
+  - Under `schedutil` the core then idles between frames and runs at 1.3–1.7 GHz mean instead of 3.5 GHz.
+  - Quiet: p50 2.93–2.94 ms, p99 3.91–4.05 ms.
+  - 4 streaming threads: p50 3.63–4.12 ms, p99 5.84–6.90 ms, none late.
+  - Wake-up delay after the tick: p50 0.08–0.15 ms.
+- **Bench.** `VoiceFrontendBenchTests` now asserts the redefined gate on the spinning clock. It also takes
+  `HARTSY_VOICE_FRONTEND_BENCH_PRECISION=int8`.
+- **Tests.**
+  - Kernel: exact sums, the epilogue, AVX2 against scalar, and row independence, plus the tie rule of the codes.
+  - Table conversion: the gcc digests, and refusal of sparse or misshapen arrays.
+  - Weights: gate order and conv2's column order.
+  - Pairing, allocation and real speech, now at both precisions.
+  - Parity against the default build, the wake stack's F32, and recall. `LinearI8U8` refuses LoRA adjuncts.
+
 ## alpha.233
 
 - **Whisper now sees the log-mel it was trained on.** The front end zero-padded the 400-sample window into a
