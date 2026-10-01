@@ -130,7 +130,7 @@ public sealed class RnnoiseRealSpeechTests(ITestOutputHelper log)
         return noisy;
     }
 
-    private static RnnoiseWeights LoadWeights(string path)
+    internal static RnnoiseWeights LoadWeights(string path)
     {
         using SafeTensorsLoader loader = new();
         loader.Load(path);

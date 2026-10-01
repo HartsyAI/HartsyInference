@@ -67,6 +67,22 @@ public sealed class RnnoiseModel : IDisposable
     private readonly Tensor _gains = new(new TensorShape(1, OutputDim), DType.F32);
     private readonly Tensor _vadLogit = new(new TensorShape(1, 1), DType.F32);
     private readonly Tensor _vadOut = new(new TensorShape(1, 1), DType.F32);
+
+    // Two frames at a time, one row each; see ProcessPair.
+    private readonly Tensor _conv1Windows = new(new TensorShape(2, InputDim * KernelSize), DType.F32);
+    private readonly Tensor _conv1Out2 = new(new TensorShape(2, CondSize), DType.F32);
+    private readonly Tensor _conv1Act2 = new(new TensorShape(2, CondSize), DType.F32);
+    private readonly Tensor _conv2Windows = new(new TensorShape(2, CondSize * KernelSize), DType.F32);
+    private readonly Tensor _conv2Out2 = new(new TensorShape(2, GruSize), DType.F32);
+    private readonly Tensor _conv2Act2 = new(new TensorShape(2, GruSize), DType.F32);
+    private readonly Tensor _cat2 = new(new TensorShape(2, CatSize), DType.F32);
+    private readonly Tensor _gruInput2 = new(new TensorShape(2, GruSize), DType.F32);
+    private readonly Tensor _gi2 = new(new TensorShape(2, Gates), DType.F32);
+    private readonly Tensor[] _gi2Rows;
+    private readonly Tensor _gainLogits2 = new(new TensorShape(2, OutputDim), DType.F32);
+    private readonly Tensor _gains2 = new(new TensorShape(2, OutputDim), DType.F32);
+    private readonly Tensor _vadLogit2 = new(new TensorShape(2, 1), DType.F32);
+    private readonly Tensor _vadOut2 = new(new TensorShape(2, 1), DType.F32);
     private int _disposed;
 
     /// <summary>Builds a stream over shared <paramref name="weights"/>, which must already be loaded and which
@@ -83,6 +99,7 @@ public sealed class RnnoiseModel : IDisposable
         _conv2Matrix = weights.Conv2Weight.Reshape(new TensorShape(GruSize, CondSize * KernelSize));
         _hidden = [.. Enumerable.Range(0, 3).Select(_ => new Tensor(new TensorShape(1, GruSize), DType.F32))];
         _hiddenNext = [.. Enumerable.Range(0, 3).Select(_ => new Tensor(new TensorShape(1, GruSize), DType.F32))];
+        _gi2Rows = [_gi2.SliceRows(0, 1), _gi2.SliceRows(1, 1)];
         Reset();
     }
 
@@ -133,6 +150,90 @@ public sealed class RnnoiseModel : IDisposable
         speechProbability = _vadOut.AsSpan<float>()[0];
     }
 
+    /// <summary>Runs two consecutive frames, <paramref name="first"/> then <paramref name="second"/>, with the same
+    /// results and the same state afterwards as two <see cref="Process"/> calls, bit for bit.</summary>
+    /// <remarks><para>What changes is how often each weight is read. One frame's forward reads every weight once,
+    /// which is 11.5 MB of F32. When other cores keep that out of the cache, the frame costs that much DRAM traffic.
+    /// Run layer by layer across the pair instead:</para>
+    /// <list type="bullet">
+    /// <item>both conv windows go through each conv in one product;</item>
+    /// <item>each GRU's input projection <c>W·x</c> takes both frames' inputs in one pass over <c>W</c>;</item>
+    /// <item>the two dense heads take both rows of the concatenation.</item>
+    /// </list>
+    /// <para>Only the recurrent products <c>U·h</c> stay one frame at a time, since frame two needs frame one's
+    /// state. That reads 5.3 MB of <c>W</c>, 0.7 MB of conv and 0.2 MB of head weights once per pair instead of
+    /// twice, about 16.8 MB in place of 23.1 MB. Every output element is the same sum in the same order as in
+    /// <see cref="Process"/>: the products are row-independent, and the elementwise activations do not care which
+    /// row an element sits in.</para></remarks>
+    public void ProcessPair(IBackend backend, ReadOnlySpan<float> first, ReadOnlySpan<float> second,
+        Span<float> firstGains, Span<float> secondGains, out float firstSpeech, out float secondSpeech)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        if (first.Length < InputDim || second.Length < InputDim)
+            throw new ArgumentException($"features must hold {InputDim} values per frame.", nameof(first));
+        if (firstGains.Length < OutputDim || secondGains.Length < OutputDim)
+            throw new ArgumentException($"gains must hold {OutputDim} values per frame.", nameof(firstGains));
+
+        // Each frame's window is the persistent window after that frame is shifted in, as Process would see it.
+        Span<float> conv1State = _conv1Input.AsSpan<float>();
+        Span<float> conv1Windows = _conv1Windows.AsSpan<float>();
+        int conv1Width = InputDim * KernelSize;
+        ShiftIn(conv1State, first, InputDim);
+        conv1State.CopyTo(conv1Windows[..conv1Width]);
+        ShiftIn(conv1State, second, InputDim);
+        conv1State.CopyTo(conv1Windows[conv1Width..]);
+        backend.Linear(_conv1Out2, _conv1Windows, _conv1Matrix, _weights.Conv1Bias);
+        backend.Tanh(_conv1Act2, _conv1Out2);
+
+        Span<float> conv1Act = _conv1Act2.AsSpan<float>();
+        Span<float> conv2State = _conv2Input.AsSpan<float>();
+        Span<float> conv2Windows = _conv2Windows.AsSpan<float>();
+        int conv2Width = CondSize * KernelSize;
+        ShiftIn(conv2State, conv1Act[..CondSize], CondSize);
+        conv2State.CopyTo(conv2Windows[..conv2Width]);
+        ShiftIn(conv2State, conv1Act[CondSize..], CondSize);
+        conv2State.CopyTo(conv2Windows[conv2Width..]);
+        backend.Linear(_conv2Out2, _conv2Windows, _conv2Matrix, _weights.Conv2Bias);
+        backend.Tanh(_conv2Act2, _conv2Out2);
+
+        Span<float> cat = _cat2.AsSpan<float>();
+        Span<float> gruInput = _gruInput2.AsSpan<float>();
+        Span<float> conv2Act = _conv2Act2.AsSpan<float>();
+        for (int frame = 0; frame < 2; frame++)
+        {
+            ReadOnlySpan<float> row = conv2Act.Slice(frame * GruSize, GruSize);
+            row.CopyTo(cat.Slice(frame * CatSize, GruSize));
+            row.CopyTo(gruInput.Slice(frame * GruSize, GruSize));
+        }
+        for (int layer = 0; layer < 3; layer++)
+        {
+            // Both frames' input projections in one pass over W; the recurrence then runs a frame at a time.
+            backend.Linear(_gi2, _gruInput2, _weights.GruWeightIh[layer], _weights.GruBiasIh[layer]);
+            for (int frame = 0; frame < 2; frame++)
+            {
+                backend.Linear(_gh, _hidden[layer], _weights.GruWeightHh[layer], _weights.GruBiasHh[layer]);
+                GruOps.GateAndUpdate(_gi2Rows[frame], _gh, _hidden[layer], _hiddenNext[layer], 1, GruSize);
+                (_hidden[layer], _hiddenNext[layer]) = (_hiddenNext[layer], _hidden[layer]);
+                Span<float> h = _hidden[layer].AsSpan<float>();
+                h.CopyTo(cat.Slice(frame * CatSize + (layer + 1) * GruSize, GruSize));
+                // This layer's projections are already taken, so the row can carry the next layer's input.
+                h.CopyTo(gruInput.Slice(frame * GruSize, GruSize));
+            }
+        }
+
+        backend.Linear(_gainLogits2, _cat2, _weights.DenseOutWeight, _weights.DenseOutBias);
+        backend.Sigmoid(_gains2, _gainLogits2);
+        backend.Linear(_vadLogit2, _cat2, _weights.VadWeight, _weights.VadBias);
+        backend.Sigmoid(_vadOut2, _vadLogit2);
+
+        ReadOnlySpan<float> gains = _gains2.AsSpan<float>();
+        gains[..OutputDim].CopyTo(firstGains);
+        gains[OutputDim..(2 * OutputDim)].CopyTo(secondGains);
+        ReadOnlySpan<float> speech = _vadOut2.AsSpan<float>();
+        firstSpeech = speech[0];
+        secondSpeech = speech[1];
+    }
+
     /// <summary>Slides a channels-first <c>[1, C, 3]</c> conv window one frame left and writes the newest frame
     /// into the last slot. Channels-first means each channel's three timesteps are contiguous, so the shift is
     /// per-channel rather than one block move.</summary>
@@ -177,5 +278,9 @@ public sealed class RnnoiseModel : IDisposable
         yield return _conv2Input; yield return _conv2Out; yield return _conv2Act;
         yield return _cat; yield return _gruInput; yield return _gi; yield return _gh;
         yield return _gainLogits; yield return _gains; yield return _vadLogit; yield return _vadOut;
+        yield return _conv1Windows; yield return _conv1Out2; yield return _conv1Act2;
+        yield return _conv2Windows; yield return _conv2Out2; yield return _conv2Act2;
+        yield return _cat2; yield return _gruInput2; yield return _gi2;
+        yield return _gainLogits2; yield return _gains2; yield return _vadLogit2; yield return _vadOut2;
     }
 }

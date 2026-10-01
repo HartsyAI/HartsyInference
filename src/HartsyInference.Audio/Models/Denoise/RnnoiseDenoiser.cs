@@ -73,24 +73,17 @@ public sealed class RnnoiseDenoiser : IDisposable
 
     private readonly float[] _highPassed = new float[FrameSize];
     private readonly float[] _hpMem = new float[2];
-    private readonly float[] _xRe = new float[Bins];
-    private readonly float[] _xIm = new float[Bins];
-    private readonly float[] _pRe = new float[Bins];
-    private readonly float[] _pIm = new float[Bins];
+    private readonly AnalyzedFrame _first = new();
+    private readonly AnalyzedFrame _second = new();
     private readonly float[] _delayedRe = new float[Bins];
     private readonly float[] _delayedIm = new float[Bins];
     private readonly float[] _delayedPRe = new float[Bins];
     private readonly float[] _delayedPIm = new float[Bins];
     private readonly float[] _pitchWindow = new float[WindowSize];
-    private readonly float[] _ex = new float[Bands];
-    private readonly float[] _ep = new float[Bands];
-    private readonly float[] _exp = new float[Bands];
     private readonly float[] _ly = new float[Bands];
     private readonly float[] _delayedEx = new float[Bands];
     private readonly float[] _delayedEp = new float[Bands];
     private readonly float[] _delayedExp = new float[Bands];
-    private readonly float[] _features = new float[RnnoiseBands.FeatureCount];
-    private readonly float[] _gains = new float[Bands];
     private readonly float[] _lastGains = new float[Bands];
     private readonly float[] _scratchBands = new float[Bands];
     private readonly float[] _binGain = new float[Bins];
@@ -99,6 +92,13 @@ public sealed class RnnoiseDenoiser : IDisposable
     /// <summary>The VAD head's output for the most recent non-silent frame. A by-product of denoising, and a
     /// far better speech/noise signal than the RMS gate it could replace upstream of wake scoring.</summary>
     public float SpeechProbability { get; private set; }
+
+    /// <summary>Pairs in which only the first frame was silent, so the second ran alone; counted so a test can show
+    /// it covered that branch.</summary>
+    internal int PairsWithFirstSilent { get; private set; }
+
+    /// <summary>Pairs in which only the second frame was silent, so the first ran alone.</summary>
+    internal int PairsWithSecondSilent { get; private set; }
 
     /// <summary>Builds a stream over shared <paramref name="weights"/>, which are borrowed, not owned.</summary>
     public RnnoiseDenoiser(RnnoiseWeights weights)
@@ -115,33 +115,96 @@ public sealed class RnnoiseDenoiser : IDisposable
     public void Process(IBackend backend, ReadOnlySpan<float> input, Span<float> output)
     {
         ArgumentNullException.ThrowIfNull(backend);
+        CheckFrame(input, output);
+
+        Analyze(input, _first);
+        if (!_first.Silent)
+        {
+            _model.Process(backend, _first.Features, _first.Gains, out float vad);
+            SpeechProbability = vad;
+        }
+        Synthesize(_first, output);
+    }
+
+    /// <summary>Denoises two consecutive frames, <paramref name="first"/> then <paramref name="second"/>, with the
+    /// same output and the same state afterwards as two <see cref="Process"/> calls, bit for bit.</summary>
+    /// <remarks>Both frames are analyzed before either is synthesized. Analysis depends only on the input and
+    /// synthesis only on the gains and the delayed spectrum, so the reordering changes nothing. It lets the network
+    /// run the pair layer by layer through <see cref="RnnoiseModel.ProcessPair"/>, which reads the weights shared by
+    /// the two frames once instead of twice. When either frame is silent, each non-silent one runs alone, as it would
+    /// have.</remarks>
+    public void ProcessPair(IBackend backend, ReadOnlySpan<float> first, ReadOnlySpan<float> second,
+        Span<float> firstOutput, Span<float> secondOutput)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        CheckFrame(first, firstOutput);
+        CheckFrame(second, secondOutput);
+
+        Analyze(first, _first);
+        Analyze(second, _second);
+        if (!_first.Silent && !_second.Silent)
+        {
+            _model.ProcessPair(backend, _first.Features, _second.Features, _first.Gains, _second.Gains,
+                out _, out float vad);
+            SpeechProbability = vad;
+        }
+        else
+        {
+            if (!_first.Silent)
+            {
+                _model.Process(backend, _first.Features, _first.Gains, out float vad);
+                SpeechProbability = vad;
+                PairsWithSecondSilent++;
+            }
+            if (!_second.Silent)
+            {
+                _model.Process(backend, _second.Features, _second.Gains, out float vad);
+                SpeechProbability = vad;
+                PairsWithFirstSilent++;
+            }
+        }
+        Synthesize(_first, firstOutput);
+        Synthesize(_second, secondOutput);
+    }
+
+    private static void CheckFrame(ReadOnlySpan<float> input, Span<float> output)
+    {
         if (input.Length != FrameSize)
             throw new ArgumentException($"input must be {FrameSize} samples, got {input.Length}.", nameof(input));
         if (output.Length < FrameSize)
             throw new ArgumentException($"output must hold {FrameSize} samples.", nameof(output));
+    }
 
+    /// <summary>The input half of a frame: high-pass, spectrum, pitch spectrum, band energies and features. Reads and
+    /// advances only input-side state, so the next frame can be analyzed before this one is synthesized.</summary>
+    private void Analyze(ReadOnlySpan<float> input, AnalyzedFrame frame)
+    {
         HighPass(input, _highPassed);
         _stft.AddSamples(_highPassed);
-        if (!_stft.TryExtractFrame(_xRe, _xIm))
+        if (!_stft.TryExtractFrame(frame.XRe, frame.XIm))
             throw new InvalidOperationException("StreamingStft did not yield a frame; analysis priming is wrong.");
-        Scale(_xRe, _xIm, ForwardFftScale);
+        Scale(frame.XRe, frame.XIm, ForwardFftScale);
 
-        RnnoiseBands.ComputeBandEnergy(_xRe, _xIm, _ex);
-        bool silence = ComputeFeatures();
+        RnnoiseBands.ComputeBandEnergy(frame.XRe, frame.XIm, frame.Ex);
+        frame.Silent = ComputeFeatures(frame);
+    }
 
-        if (!silence)
+    /// <summary>The output half: apply the frame's gains, which the network has already written, to the delayed
+    /// spectrum, synthesize it, and keep this frame's spectra as the next frame's delayed ones.</summary>
+    private void Synthesize(AnalyzedFrame frame, Span<float> output)
+    {
+        if (!frame.Silent)
         {
-            _model.Process(backend, _features, _gains, out float vad);
-            SpeechProbability = vad;
-            PitchFilter();
+            float[] gains = frame.Gains;
+            PitchFilter(gains);
             for (int i = 0; i < Bands; i++)
             {
-                _gains[i] = MathF.Max(_gains[i], GainDecay * _lastGains[i]);
+                gains[i] = MathF.Max(gains[i], GainDecay * _lastGains[i]);
                 // Rescale by the energy change across the frame, so a rising transient does not carry the
                 // previous frame's permissive gain and leak noise with it.
-                _lastGains[i] = MathF.Min(1f, _gains[i] * (_delayedEx[i] + 1e-3f) / (_ex[i] + 1e-3f));
+                _lastGains[i] = MathF.Min(1f, gains[i] * (_delayedEx[i] + 1e-3f) / (frame.Ex[i] + 1e-3f));
             }
-            RnnoiseBands.InterpolateBandGain(_gains, _binGain);
+            RnnoiseBands.InterpolateBandGain(gains, _binGain);
             for (int k = 0; k < Bins; k++)
             {
                 _delayedRe[k] *= _binGain[k];
@@ -154,35 +217,39 @@ public sealed class RnnoiseDenoiser : IDisposable
         Scale(_delayedRe, _delayedIm, WindowSize);
         _istft.PushFrame(_delayedRe, _delayedIm, output);
 
-        _xRe.CopyTo(_delayedRe, 0);
-        _xIm.CopyTo(_delayedIm, 0);
-        _pRe.CopyTo(_delayedPRe, 0);
-        _pIm.CopyTo(_delayedPIm, 0);
-        _ex.CopyTo(_delayedEx, 0);
-        _ep.CopyTo(_delayedEp, 0);
-        _exp.CopyTo(_delayedExp, 0);
+        frame.XRe.CopyTo(_delayedRe, 0);
+        frame.XIm.CopyTo(_delayedIm, 0);
+        frame.PRe.CopyTo(_delayedPRe, 0);
+        frame.PIm.CopyTo(_delayedPIm, 0);
+        frame.Ex.CopyTo(_delayedEx, 0);
+        frame.Ep.CopyTo(_delayedEp, 0);
+        frame.Exp.CopyTo(_delayedExp, 0);
     }
 
-    /// <summary>Builds the 65-value feature vector for the current frame. Returns true when the frame is silent,
-    /// in which case the features are zeroed and the caller must skip the network.</summary>
-    private bool ComputeFeatures()
+    /// <summary>Builds the 65-value feature vector for the frame being analyzed. Returns true when the frame is
+    /// silent, in which case the features are zeroed and the caller must skip the network.</summary>
+    private bool ComputeFeatures(AnalyzedFrame frame)
     {
         _pitch.Push(_highPassed);
         int period = _pitch.Analyze(out _);
         period = Math.Clamp(period, RnnoisePitchAnalyzer.MinPeriod, RnnoisePitchAnalyzer.MaxPeriod);
 
+        float[] features = frame.Features;
+        float[] ex = frame.Ex;
+        float[] ep = frame.Ep;
+        float[] exp = frame.Exp;
         ReadOnlySpan<float> history = _pitch.History;
         int start = RnnoisePitchAnalyzer.BufferSize - WindowSize - period;
         for (int i = 0; i < WindowSize; i++) _pitchWindow[i] = history[start + i] * _window[i];
-        _fft.ForwardReal(_pitchWindow, _pRe, _pIm);
-        Scale(_pRe, _pIm, ForwardFftScale);
+        _fft.ForwardReal(_pitchWindow, frame.PRe, frame.PIm);
+        Scale(frame.PRe, frame.PIm, ForwardFftScale);
 
-        RnnoiseBands.ComputeBandEnergy(_pRe, _pIm, _ep);
-        RnnoiseBands.ComputeBandCorrelation(_xRe, _xIm, _pRe, _pIm, _exp);
+        RnnoiseBands.ComputeBandEnergy(frame.PRe, frame.PIm, ep);
+        RnnoiseBands.ComputeBandCorrelation(frame.XRe, frame.XIm, frame.PRe, frame.PIm, exp);
         for (int i = 0; i < Bands; i++)
-            _exp[i] /= MathF.Sqrt(0.001f + _ex[i] * _ep[i]);
-        RnnoiseBands.Dct(_exp, _features.AsSpan(Bands));
-        _features[2 * Bands] = 0.01f * (period - 300);
+            exp[i] /= MathF.Sqrt(0.001f + ex[i] * ep[i]);
+        RnnoiseBands.Dct(exp, features.AsSpan(Bands));
+        features[2 * Bands] = 0.01f * (period - 300);
 
         // Log band energies, floored twice: against the loudest band (-70 dB) and against a per-band decay, so a
         // single quiet band cannot dominate the cepstrum.
@@ -191,35 +258,35 @@ public sealed class RnnoiseDenoiser : IDisposable
         float energy = 0f;
         for (int i = 0; i < Bands; i++)
         {
-            float ly = MathF.Log10(1e-2f + _ex[i]);
+            float ly = MathF.Log10(1e-2f + ex[i]);
             ly = MathF.Max(logMax - 7f, MathF.Max(follow - 1.5f, ly));
             logMax = MathF.Max(logMax, ly);
             follow = MathF.Max(follow - 1.5f, ly);
             _ly[i] = ly;
-            energy += _ex[i];
+            energy += ex[i];
         }
 
         if (energy < SilenceEnergy)
         {
-            Array.Clear(_features);
+            Array.Clear(features);
             return true;
         }
 
-        RnnoiseBands.Dct(_ly, _features);
-        _features[0] -= 12f;
-        _features[1] -= 4f;
+        RnnoiseBands.Dct(_ly, features);
+        features[0] -= 12f;
+        features[1] -= 4f;
         return false;
     }
 
     /// <summary>Comb-filters the delayed spectrum toward its pitch harmonics: where the pitch correlation beats
     /// the network's gain, some of the pitch-shifted spectrum is mixed back in, then each band is renormalized
     /// to the energy it had. This restores harmonic structure the band gains alone would have flattened.</summary>
-    private void PitchFilter()
+    private void PitchFilter(float[] gains)
     {
         for (int i = 0; i < Bands; i++)
         {
             float corr = _delayedExp[i];
-            float g = _gains[i];
+            float g = gains[i];
             float r;
             if (corr > g) r = 1f;
             else
@@ -312,5 +379,21 @@ public sealed class RnnoiseDenoiser : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _model.Dispose();
+    }
+
+    /// <summary>One frame's analysis and the gains the network writes for it. Two of these let a pair of frames
+    /// both be analyzed before either is synthesized.</summary>
+    private sealed class AnalyzedFrame
+    {
+        public readonly float[] XRe = new float[Bins];
+        public readonly float[] XIm = new float[Bins];
+        public readonly float[] PRe = new float[Bins];
+        public readonly float[] PIm = new float[Bins];
+        public readonly float[] Ex = new float[Bands];
+        public readonly float[] Ep = new float[Bands];
+        public readonly float[] Exp = new float[Bands];
+        public readonly float[] Features = new float[RnnoiseBands.FeatureCount];
+        public readonly float[] Gains = new float[Bands];
+        public bool Silent;
     }
 }

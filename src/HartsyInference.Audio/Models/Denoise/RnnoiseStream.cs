@@ -33,7 +33,9 @@ public sealed class RnnoiseStream : IDisposable
     private readonly StreamingResampler? _fromNative;
     private readonly float[] _pending;
     private readonly float[] _native;
+    private readonly float[] _nativeSecond;
     private readonly float[] _denoised;
+    private readonly float[] _denoisedSecond;
     private readonly float[] _sourceFrame;
     private int _pendingCount;
     private int _disposed;
@@ -52,6 +54,9 @@ public sealed class RnnoiseStream : IDisposable
     /// <summary>The denoiser's VAD head for the most recent non-silent frame.</summary>
     public float SpeechProbability => _denoiser.SpeechProbability;
 
+    /// <summary>The wrapped 48 kHz denoiser, for tests that inspect which pair branches ran.</summary>
+    internal RnnoiseDenoiser Denoiser => _denoiser;
+
     /// <summary>Creates a denoiser for <paramref name="sampleRate"/> over shared, already-loaded
     /// <paramref name="weights"/>. Rates other than 48 kHz are converted; the rate must divide into whole
     /// 10 ms frames.</summary>
@@ -69,7 +74,9 @@ public sealed class RnnoiseStream : IDisposable
         _pending = new float[FrameSize];
         _sourceFrame = new float[FrameSize];
         _native = new float[RnnoiseDenoiser.FrameSize];
+        _nativeSecond = new float[RnnoiseDenoiser.FrameSize];
         _denoised = new float[RnnoiseDenoiser.FrameSize];
+        _denoisedSecond = new float[RnnoiseDenoiser.FrameSize];
 
         int resamplerLatency = 0;
         if (sampleRate != NativeRate)
@@ -104,11 +111,43 @@ public sealed class RnnoiseStream : IDisposable
             input = input[take..];
             if (_pendingCount < FrameSize) break;
 
-            ProcessFrame(backend, _pending, output.Slice(written, FrameSize));
-            written += FrameSize;
+            // When this call also holds the next whole frame, denoise the two together: same output, but the
+            // network reads its shared weights once for both (RnnoiseDenoiser.ProcessPair). A frame is never held
+            // back for a partner, so latency does not change.
+            if (input.Length >= FrameSize)
+            {
+                ProcessPair(backend, _pending, input[..FrameSize], output.Slice(written, 2 * FrameSize));
+                input = input[FrameSize..];
+                written += 2 * FrameSize;
+            }
+            else
+            {
+                ProcessFrame(backend, _pending, output.Slice(written, FrameSize));
+                written += FrameSize;
+            }
             _pendingCount = 0;
         }
         return written;
+    }
+
+    private void ProcessPair(IBackend backend, ReadOnlySpan<float> first, ReadOnlySpan<float> second,
+        Span<float> destination)
+    {
+        Span<float> firstOut = destination[..FrameSize];
+        Span<float> secondOut = destination.Slice(FrameSize, FrameSize);
+        if (_toNative is null || _fromNative is null)
+        {
+            _denoiser.ProcessPair(backend, first, second, firstOut, secondOut);
+            return;
+        }
+        // Each converter is its own stream, so running it twice in a row keeps both in the order they would see.
+        _toNative.Process(first, _native);
+        _toNative.Process(second, _nativeSecond);
+        _denoiser.ProcessPair(backend, _native, _nativeSecond, _denoised, _denoisedSecond);
+        _fromNative.Process(_denoised, _sourceFrame);
+        _sourceFrame.AsSpan(0, FrameSize).CopyTo(firstOut);
+        _fromNative.Process(_denoisedSecond, _sourceFrame);
+        _sourceFrame.AsSpan(0, FrameSize).CopyTo(secondOut);
     }
 
     private void ProcessFrame(IBackend backend, ReadOnlySpan<float> source, Span<float> destination)
