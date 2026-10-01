@@ -20,8 +20,8 @@ Telephony tools (hang up, DTMF, transfer) are registered by the host; the sessio
   registered gets) the request is unchanged from before: one token, no grammar. The warm-up's own `Messages` never
   touch a session's conversation or the sentence splitter, so it changes nothing about what the first real turn
   generates. This is what the Qwen3-4B [measurement](#qwen3-4b-on-the-rtx-4090-audio-on-the-3060-both-cards-visible)
-  below is re-measured against; `VoiceHost` (PR9) must be updated to pass its own tool set at boot, or production
-  warm-up stays on the cold one-token path.
+  below is re-measured against. `VoiceHost` boots with its own tool definitions (the six telephony tools plus
+  `get_time`), so production warm-up takes this tool-aware path too — see [the host section](#voice-host-hartsyinferencevoicehost).
 - It synthesizes five texts, each as its own GPU job: "Okay.", a 3-word, a 6-word, a 13-word and a 30-word sentence.
 - On the RTX 3060 these gave 58, 70, 81, 195 and 407 of Kokoro's 25 ms alignment frames. That is the power-of-two
   buckets 64, 128, 128, 256 and 512, every bucket a sentence reaches:
@@ -124,6 +124,14 @@ The reader never blocks or allocates, also while the producer waits:
 - The one-time cost is per thread, and it is the runtime's: the first continuation a thread queues to the pool
   allocates once on that thread (32 B, or 192 B on a freshly started thread). The sender thread pays it on its first
   wake and never again.
+
+Turn tags: a player that forwards audio elsewhere (the voice host, over PhoneLink) reads with
+`ReadOutbound(destination, out turnId)`, which returns one turn's samples at most and names the turn that wrote them.
+Before a turn's first write it publishes a mark (turn id and write position); the reader takes the ring's fill level
+before it reads the marks, so every sample it returns is covered by a mark it has seen, and it stops at the next mark.
+The flush rules above leave one window: a write that lands after the reader's discard can be read before the
+producer's re-check bumps the epoch again. Tagged, those samples carry the cancelled turn's id, so a remote player drops
+them by id; the untagged `ReadOutbound(destination)` reads across marks as before.
 
 ## Inbound backlog
 
@@ -290,8 +298,9 @@ caller utterance back to back (history grows each turn), clean quiet window on b
   non-greedy path — not session-path transport (detokenization, the filter/parser, the channel), which is what the
   per-token timeline's steady spacing had pointed at. Fixed there: reused scratch buffers, a delegate-free sort,
   sorting only the candidate subset when it already reaches `p`.
-- **Open for PR9**: `VoiceHost`'s boot-time `WarmAsync` call must pass its own tool set, or production warm-up
-  stays on the cold one-token path this fix only helps when a caller opts in.
+- **Done for PR9**: `VoiceHost`'s boot-time warm-up now passes its own tool definitions
+  (`VoiceHostTools.WarmDefinitions`, built the same way a real call's registry is), so production warm-up takes the
+  tool-aware path this fix enables rather than staying on the cold one-token path.
 
 #### Re-measured after the sampler fix (main alpha.236, #215), same 4 turns
 
@@ -319,6 +328,170 @@ turn 1, no `<think>` text in any turn. `CudaBackend.LtGemmPlanStats` stayed `(0,
 confirming it was never going to show either the warm-up or the sampler effect for this model's quantized GEMM
 path.
 
+## Voice host (`HartsyInference.VoiceHost`)
+
+The phone deployment's model process: a generic-host exe (net10.0, not packed) that the phone gateway dials over
+[PhoneLink](PHONE_LINK_PROTOCOL.md). At start it builds `InferenceEngine` on `AudioDevice` (`cuda:1`, the RTX 3060)
+with `ToolCalling.Install` (format detected from `LlmModel`), loads and warms the `VoiceModelSet` — with the tool
+definitions `config.tools.enabled` names (`VoiceHostTools.WarmDefinitions`: the same registry-building code a real
+call uses, built with request/hang-up delegates that throw if ever invoked, since warm-up only offers tools to the
+chat template and never dispatches one), so the tool-call grammar sampler and its stream filter/parser are hot before
+the first caller — then listens on the
+language model only through each request's `Device = LlmDevice` (`cuda:0`, the 4090): a request without it would load
+the LLM onto the audio card, and the session never sends one. Units and install steps: [deploy](../../deploy/README.md);
+end-to-end checks: [runbook](../Checklists/VOICE_AGENT_VERIFICATION.md).
+
+```
+voice-link-accept   accept() only; each connection's handshake runs on its own reader, at most 4 at once (more are
+                    closed at accept)
+voice-link-reader   per connection: Hello (first frame, version 1, 16 kHz, token compared in constant time on SHA-256
+                    digests) → HelloAck or Error + close; then every frame, sequence checked (a gap closes the link):
+                    CallStart → session (started on the pool) · InboundAudio PCM16 → ±1 (×1/32768) → PushInbound ·
+                    DtmfEvent → PushDtmf · ToolResult → pending request · Ping → Pong · CallEnd → end the session
+voice-link-sender   per connection, the only writer after the handshake; absolute 20 ms deadlines (MonotonicClock),
+                    no spin, no FIFO; per tick: queued control frames first, then each call's audio:
+                    ReadOutbound(out turnId), one turn and at most 20 ms per frame → OutboundAudio(turnId);
+                    publishes each call's drained turn for the hangup
+pool                each session's turn loop and event pump; session events → Event / Flush / OutboundEnd items;
+                    telephony tools awaiting the gateway; call start and end
+watchdog timer      nothing received for 20 s, or one write stuck for 20 s → close the link
+```
+
+Locks: the server's connection lock and a connection's call-map lock are leaves (nothing is called while holding
+them); a call's lifecycle lock may take the process-wide GC-mode lock, a leaf. The control queue is a
+`ConcurrentQueue` drained by the sender. The sender reads its call list as a published array, so its audio path takes
+no lock and allocates nothing once warm (`AudioPathAllocatedBytes`, asserted 0 over 1200 frames with a scripted
+session). The real session's read is 0 B too, now that the reply queue wakes its producer once per wait without
+allocating ([Outbound queue and flushes](#outbound-queue-and-flushes)). A CPU probe of the tagged read the sender uses,
+on one long-lived reader thread with a cancellable playback wait pending, measured 0 B per read, and 0 B on the read
+that wakes the producer. The exception is the first continuation a thread ever queues to the pool: it allocates once,
+32 B (192 B on a brand-new thread). The sender queues one such continuation itself before its allocation baseline, so
+a session's first wake does not count. `TheAudioPathStaysAtZeroWhenItsReadsWakeAProducerWaitingForPlayback` checks
+this: five playback waits completed from the sender, 0 B, against 192 B without that warm-up. The loopback run below
+predates the fix and measured 32 B per read.
+
+Outbound pacing: one 20 ms frame per tick, plus 40 ms (`link.prebufferMs`) at the start of each burst of reply audio,
+because the gateway plays what it has at its own 20 ms tick and has no cushion of its own; a late wake-up sends the
+missed frames at once (up to five), a later one re-bases the clock. The session therefore counts audio as played about
+one prebuffer ahead of the caller's ear.
+
+Barge-in across the socket: the session's `BargeIn(T)` event becomes `Flush(T)`, written first on the sender's next
+tick; from then on the sender drops any audio tagged T or lower that the session still hands it (the window in
+[Outbound queue and flushes](#outbound-queue-and-flushes)), and the gateway drops anything at or below T that was
+already on the socket. `OutboundEnd(T)` goes out before the next turn's first frame, or once the session reports T
+finished and nothing of it is left, because the gateway's 16k→8k resampler holds T's last frame until then; a flushed
+turn gets none.
+
+Telephony tools are per call, each an `IToolHandler` bound to that call: `send_dtmf`, `transfer`, `hold`, `unhold` and
+`play_prompt` (`name` only: `one-moment`, `goodbye`; the gateway's `file` form is not offered to the model) send
+`ToolRequest` and return the gateway's `ToolResult` as `{"status","message"}`, or `Failed` after `tools.timeoutMs` or at
+the end of the call. `get_time` is answered on the host.
+
+**`hangup` waits for the goodbye, within a cap.** The gateway sends its BYE the moment it runs the tool, while the
+model's goodbye is usually still being synthesized, so the handler answers `Ok` at once and the host sends the request
+only after the goodbye has played:
+
+1. It starts when the turn that called the tool ends (`TurnCompleted`, interrupted or not). The handler marks that the
+   tool ran, and the session's `ToolResult` event for it, which arrives after the handler and before that turn's
+   `TurnCompleted`, names the turn. A `ToolResult` whose handler never ran (the tool disabled) arms nothing, and a later
+   turn finishing first disarms it rather than hang up on a caller who is still talking.
+2. It waits until that turn's audio has drained to the gateway: the turn's `OutboundEnd` is written, or the turn was
+   flushed, or it had no audio. The sender publishes this per call (`DrainedTurn`) and the hangup polls it every
+   10 ms, so publishing it allocates nothing and wakes nobody.
+3. If the goodbye went out whole, it waits 200 ms more (`link.prebufferMs` + 160 ms) for the audio still downstream:
+   the prebuffer lead, the gateway resampler's held frame, one RTP tick and the far end's jitter buffer.
+4. The whole wait is capped at the audio the session still held when the turn ended plus 1 s, and at 10 s in any case.
+   A goodbye that never drains cannot keep the call open: the host logs a warning and sends the request anyway.
+5. `ToolRequest(hangup)` goes out; the gateway sends its BYE and answers; the host sends `CallEnd(Completed)`.
+
+The session ends a turn only after the sender has read its last sample, so the drain takes one 20 ms tick; in the
+loopback run the request left 226 ms after the goodbye's turn ended, and the BYE reached the phone 24 silent frames
+after the goodbye's last audible one (measured below). A caller who barges in on the goodbye does not
+cancel the hang-up, because the model decided to end the call: the flush empties the goodbye, the turn counts as
+drained at once, and the request follows within a tick or two.
+
+Events: state changes, final transcripts and turn latencies go to the gateway as `Event` frames. The gateway logs every
+host event at Info, so its journal holds what callers said; treat it like a recording (see the gateway's consent note).
+
+Calls: `CallStart` with `resume=true` (the gateway re-attaching after the link dropped) gets a fresh session and
+`agent.resumeApology` spoken; a new call gets `agent.greeting` when set. `CallEnd` from the gateway ends and disposes the
+session without echoing. A lost link ends that connection's sessions (no `CallEnd`: the gateway re-announces live calls).
+Any session failure (creation, start, its audio thread, a throw on a link thread) ends only that call with
+`CallEnd(Failed)`. SIGTERM ends every call with `CallEnd(LocalHangup)`, lets the sender put those frames on the wire,
+closes the link, releases the models and removes the socket file. A socket file left by a killed host is removed at
+start after a connect probe finds nobody listening; a live listener there fails the start.
+
+Process: workstation concurrent GC; `GCLatencyMode.SustainedLowLatency` while at least one call is up, restored after
+the last. The pool's minimum worker threads are `numerics.cpuThreads + 8`: `CpuParallel` fans out on the shared pool, up
+to `numerics.cpuThreads` workers at once across all callers, so a synthesis or a decode can hold that many; the turn
+loops, event pumps, tool calls, GPU job continuations and socket completions need a few more runnable at the same
+moment, and above the minimum the pool adds threads too slowly for a live turn.
+
+`/etc/hartsyinference/voice.json` (template `src/HartsyInference.VoiceHost/voice.example.json`; `{}` is valid; an
+unknown key fails the start):
+
+| Section | Settings |
+|---|---|
+| `link` | `socketPath` (`/run/hartsyinference/phone.sock`), `socketMode` (0600-0660), `tokenFile` (absolute, 0600/0400, a `LoadCredential=` path; empty = no token, which the gateway must match), `prebufferMs` (40), `livenessTimeoutSeconds` (20) |
+| `models` | `llmModel`, `llmDevice`, `audioDevice`, `sttModel`, `ttsModel`, `denoise`, `wakeModelRoot`; defaults are the session's |
+| `agent` | `systemPrompt`, `greeting`, `resumeApology`, `outboundSampleRate` (a PhoneLink rate), and the session's turn, barge-in and history settings |
+| `tools` | `enabled` (all seven by default), `timeoutMs` (10000) |
+| `engine` | `cpuThreadCap` (`numerics.cpuThreads` for the host's life; 14 under the unit), `settingsFile` (an engine settings file instead of the service user's) |
+| `logging` | `level` |
+
+### Measured on the RTX 3060 (loopback)
+
+`LoopbackSipCallWithHostTests` (3/3) and `LoopbackHostKillTests` (1/1), 2026-10-01 on the RTX 3060
+(`CUDA_VISIBLE_DEVICES=1`, after a 10-minute SwarmUI quiet window, checked clean afterwards with `--verify-since`). A
+sipsorcery softphone plays the JFK clip at 8 kHz to the real gateway, which talks PhoneLink to the real host running
+Kokoro (`af_heart`) and Whisper small.en; the model is scripted, denoise off. Models loaded and warm in 1.9 to 2.4 s.
+Two changes came after this run: the hang-up's binding to the turn its `ToolResult` names (from review; the unit tests
+cover it) and the Voice package's allocation-free wake. Both are re-checked, along with `Denoise`'s new default,
+in the [re-run below](#re-run-after-rebasing-onto-main-202-denoise-at-its-new-default-on-int8).
+
+| Measure | Gate | Source | Result |
+|---|---|---|---|
+| Caller's question recognized over G.711 ("And so, my fellow Americans") | has "fellow" or "americans" | `host heard: "…"` | "And so, my fellow Americans," |
+| Answer turn, three calls: STT, TTS first chunk, total (736 ms endpoint hangover included) | logged | host: `[Voice] turn 2 (utterance): …` | STT 147.6 / 118.7 / 115.6 ms; TTS first chunk 152.3 / 161.1 / 174.5 ms; transport ≤ 0.16 ms; total 1070 / 1024 / 1027 ms |
+| Barge-in: `Flush(T)` at the gateway after the VAD decision | logged | `Flush(T) reached the gateway after … ms` | 15.9 ms (session `voice.bargein.stop_ms` 15.6) |
+| Barge-in: last audible frame the gateway's RTP tick sent after the decision | ≤ 100 ms | `…, the last at … ms` | 1 frame, at 6.4 ms |
+| Frames of the flushed turn reaching the gateway after `Flush` | 0 | `gateway stale drops …` | 0 (host stale samples 0) |
+| Agent hangup: audible goodbye frames before the BYE | ≥ 50 | `… audible frames of goodbye before the BYE` | 106 |
+| Agent hangup: BYE after the goodbye's last audible frame | ≥ 2 quiet frames | `the BYE came … ms after …, … quiet frames later` | 503 ms, 24 quiet frames (Kokoro's trailing silence included); the host asked 226 ms after the turn ended |
+| Gateway RTP, per call | logged | gateway: `Call N ended …` | out lateness p99 50 µs; in late 0, lost 0; dropped by the link 0 |
+| Sender lateness p50 / p99 / max, catch-up frames, resyncs | logged | host: `Phone gateway link closed …` | p50 and p99 within the 200 µs bucket, max 25.4 ms, over 1339 ticks; 2 catch-up frames; 0 resyncs |
+| Sender audio-path allocation | 0 B | host: `audioPathAllocated=…B` | **Fails: 19 528 B over 1339 ticks; 704 B over the restarted host's 24 measured ticks.** 19 520 B of it (610 reads × 32 B) and all 704 B (22 × 32 B) are the session's producer wake: completing the cancellable `WaitPlayedAsync` waiter queues a 32 B pool work item per read during playback. The host's own path is 0 B with a scripted session. Fixed since in the Voice package: one allocation-free wake per wait, 0 B per read and on the waking read in a CPU probe of the tagged read, with the sender's warm-up taking the thread's one-time first queueing. The next GPU run re-checks |
+| Host killed with SIGKILL mid-call: BYE at the phone | ≤ 3 s outage period + 2 s | `host killed; the phone got the BYE … ms later` | 4189 ms (1189 ms after the outage period); 1 outage, 1 outage hang-up |
+| Restarted host: stale socket replaced, next call answered, SIGTERM exit 0 and socket removed | all hold | `LoopbackHostKillTests` | all hold (`Removed a stale socket file …`) |
+
+#### Re-run after rebasing onto `main` (#202), `Denoise` at its new default (on, int8)
+
+Same two classes, same card, 2026-10-01, after this branch's own rebase onto `main` 553de075 (alpha.237, #202's
+`Denoise`-on-by-default merge). `LoopbackAssets.All()` did not name RNNoise's weights, so this run also fixed that gate
+(the weights were present on this box regardless, so it did not change the result). Quiet window on the 3060 only — the
+scripted-LLM loopback calls never touch the 4090 — `--verify-since` clean after. `LoopbackSipCallWithHostTests` 3/3,
+`LoopbackHostKillTests` 1/1:
+
+| Measure | Gate | `Denoise` off (above) | `Denoise` on (this run) |
+|---|---|---:|---:|
+| Barge-in: `Flush(T)` at the gateway after the VAD decision | logged | 15.9 ms | 8.0 ms |
+| Barge-in: last audible frame sent after the decision | ≤ 100 ms | 6.4 ms | 6.3 ms |
+| Frames of the flushed turn after `Flush` | 0 | 0 | 0 |
+| Agent hangup: audible goodbye frames before the BYE | ≥ 50 | 106 | 106 |
+| Agent hangup: quiet frames before the BYE | ≥ 2 | 24 | 24 |
+| Agent hangup: host asked after the turn ended | logged | 226 ms | 225 ms |
+| `voice.endpoint.ms` (turn 2, `[Voice] turn N` line) | 700 ms (tune 500-800) | 736.00 | **776.00** (736 + RNNoise's 40 ms lag, as #202 added) |
+| Sender lateness p50/p99/max, catch-up, resyncs | logged | 200/200µs, 25.4 ms, 2, 0 (1339 ticks) | 200/200µs, 29.1 ms, 1, 0 (1333 ticks) |
+| Sender audio-path allocation | 0 B | **19 528 B / 704 B — open** | **0 B on every host — fixed** |
+| SIGKILL: BYE after the 3 s outage period | ≤ 2 s | 1189 ms | 1186 ms |
+| Restarted host: stale socket replaced, next call answered | all hold | all hold | all hold |
+
+Every measure but `voice.endpoint.ms` lands within noise of the `Denoise`-off run — RNNoise's own frame budget is
+already covered by `TurnEndpointerRealVadTests`/the Audio package's int8 bench, not re-measured here. `endpoint.ms`
+moving by exactly 40 ms is the expected, intended effect of #202's metric fix, not a regression. The sender
+allocation this PR's own review flagged as open (19 528 B, then 704 B on the SIGKILL test's short-lived hosts) now
+reads 0 B everywhere, confirming #202's wake-once fix in the real loopback path, not just the CPU probe.
+
 ## Open
 
 - Partial transcripts need a streaming recognizer; `PartialTranscripts = true` is rejected.
@@ -328,5 +501,9 @@ path.
 - No hallucination filter beyond "only VAD-closed segments reach the recognizer" and the no-words discard.
 - The CPU kernels' per-call dispatch closures make real Silero allocate on the audio thread; fixing them is a
   cross-model Cpu change with its own A/B.
-- `VoiceHost` (PR9)'s boot-time `WarmAsync` call needs updating to pass its own tool set, or production warm-up
-  stays on the cold one-token path.
+- Host: outbound calls start like inbound ones (same prompt, same greeting); per-call instructions (why the agent is
+  calling) are not wired. The host keeps one gateway connection; per-call and per-link summaries go to the log only (no
+  metrics endpoint on the host side).
+- Host: the next GPU loopback run re-checks two things that changed after the measured run above: `audioPathAllocated`
+  with the Voice package's allocation-free wake (the CPU probe gives 0 B per read), and the hang-up's binding to the
+  turn its `ToolResult` names.

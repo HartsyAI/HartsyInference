@@ -1,6 +1,11 @@
 [Unit]
 Description=HartsyInference server (OpenAI-compatible LLM/diffusion HTTP API)
 After=network.target
+# Prevents a true crash-loop (e.g. a config error that fails on every start) from hammering the box —
+# after 5 restarts within 60s, systemd stops trying and leaves the unit failed for a human to look at.
+# These are [Unit] settings: under [Service] systemd ignores StartLimitIntervalSec (systemd-analyze verify says so).
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -18,6 +23,11 @@ ExecStart=/usr/bin/dotnet /opt/hartsyinference/HartsyInference.API.dll
 # Environment=HartsyInference__CudaDevice=0
 # Environment=HartsyInference__ApiKey=changeme
 
+# --- CPUs ---
+# Every CPU but the hyperthread pair of core 7 (CPUs 7 and 15), which the phone gateway's RTP tick thread owns
+# (deploy/systemd/hartsyinference-phone-gateway.service). Harmless on a box without the phone agent.
+AllowedCPUs=0-6,8-14
+
 # --- Restart policy ---
 # This is the primary reason this unit exists: some native/unsafe code paths in this engine can raise a
 # corrupted-state exception (e.g. AccessViolationException) that .NET Core cannot catch in-process — the
@@ -28,10 +38,6 @@ ExecStart=/usr/bin/dotnet /opt/hartsyinference/HartsyInference.API.dll
 # this restart path at all — if it's firing often, that's a signal something upstream of it regressed.
 Restart=always
 RestartSec=2
-# Prevents a true crash-loop (e.g. a config error that fails on every start) from hammering the box —
-# after 5 restarts within 60s, systemd stops trying and leaves the unit failed for a human to look at.
-StartLimitIntervalSec=60
-StartLimitBurst=5
 
 # Not sandboxed by default: this process needs GPU device access (/dev/nvidia*) and typically runs as a
 # dedicated service account with access to model files, not as a hardened/isolated unit. Add NoNewPrivileges,

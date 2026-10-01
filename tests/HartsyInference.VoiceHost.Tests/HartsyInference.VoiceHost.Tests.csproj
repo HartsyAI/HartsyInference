@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+    <RootNamespace>HartsyInference.VoiceHost.Tests</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <PackageReference Include="coverlet.collector" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- The host under test, the real gateway the loopback tests drive, and the stand-in host process they kill. -->
+    <ProjectReference Include="..\..\src\HartsyInference.VoiceHost\HartsyInference.VoiceHost.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.PhoneGateway\HartsyInference.PhoneGateway.csproj" />
+    <ProjectReference Include="..\..\src\HartsyInference.PhoneLink\HartsyInference.PhoneLink.csproj" />
+    <ProjectReference Include="..\HartsyInference.VoiceHost.TestHost\HartsyInference.VoiceHost.TestHost.csproj" />
+    <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
+  </ItemGroup>
+
+</Project>

@@ -6,6 +6,87 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.238
+
+- **Voice host exe (`src/HartsyInference.VoiceHost`, not packaged).** The phone-call voice agent's model process: a
+  generic host (from the ASP.NET Core shared framework; built empty, so nothing reads the environment or an appsettings
+  file) that builds the engine on the audio card (`cuda:1`) with `ToolCalling.Install`, loads and warms the voice model
+  set, and serves the PhoneLink socket the gateway dials. One `VoiceAgentSession` per call; the models outlive calls;
+  every language-model request names `LlmDevice` (`cuda:0`).
+- **Boot warm-up offers the host's real tool set.** `VoiceHostTools.WarmDefinitions` builds the same
+  `ToolDefinition`s a real call's registry would (the six telephony tools plus `get_time`, for whichever of them
+  `tools.enabled` names), with request/hang-up delegates that throw if ever invoked — warm-up only offers tools to
+  the chat template and the tool-call grammar/stream filter (`VoiceModelSet.WarmAsync` streams and discards), it
+  never dispatches one. `VoiceHostService.StartAsync` passes them to `WarmAsync`, so production warm-up takes the
+  tool-aware `WarmToolMaxTokens`-token path instead of staying on the cold one-token path a tool-less warm-up takes.
+- Typed options from `/etc/hartsyinference/voice.json` (`link`, `models`, `agent`, `tools`, `engine`, `logging`; `{}` is
+  valid, an unknown key fails the start, every error names its JSON path). The link token comes from a secret file
+  (`LoadCredential=`), refused when group or others can read it and never logged; `engine.cpuThreadCap` is
+  `numerics.cpuThreads` for the host's life.
+- Link: `Hello` checked first (version, 16 kHz, token in constant time), else `Error` and close; at most four
+  connections in their handshake at once; per-frame sequence check; a new connection replaces the current one only
+  after its own `Hello`. A dedicated sender thread on absolute
+  20 ms deadlines writes control frames first, then each call's reply audio in 20 ms frames tagged with the producing
+  turn, with a 40 ms prebuffer per burst and catch-up frames; its audio path, the session's read included, allocates
+  nothing once warm. A barge-in
+  becomes `Flush(turnId)` and nothing of that turn follows it; `OutboundEnd` closes each turn that played. Session
+  events go out as `Event` frames (state, final transcript, turn latency).
+- Telephony tools (`send_dtmf`, `transfer`, `hold`, `unhold`, `play_prompt`) are `ToolRequest`/`ToolResult` round trips
+  with a timeout; `get_time` is answered on the host; `hangup` goes to the gateway only once the goodbye of the turn
+  that called it has drained to the link (its `OutboundEnd` written, or the turn flushed) plus 200 ms for the audio
+  still downstream, capped at the audio the session still held plus 1 s and at 10 s, so the caller hears the goodbye
+  and a stuck drain cannot keep the call open; a barge-in on the goodbye cuts it short but still ends the call. A
+  resumed call gets a fresh session and an apology line; any session failure ends only
+  its call with `CallEnd(Failed)`; SIGTERM ends calls with `CallEnd(LocalHangup)`. Workstation concurrent GC,
+  `SustainedLowLatency` while calls are up, pool floor `numerics.cpuThreads + 8`.
+- **`HartsyInference.Voice`: `ReadOutbound(Span<float>, out int turnId)`** returns one turn's audio at a time and names
+  the turn that wrote it (each turn publishes a mark before its first sample), so a remote player can drop a flushed
+  turn by id. The untagged read is unchanged. `OutboundQueuedSamples` reports the reply audio still queued.
+- **`SecretFile` moved to Core** (`HartsyInference.Core.Configuration`), with the caller's exception factory; the gateway
+  reads its secrets through it unchanged.
+- **Deployment:** `deploy/systemd/hartsyinference-voice-host.service` (`Restart=always`, `RuntimeDirectory`,
+  `AllowedCPUs=0-6,8-14`, token credential) and `hartsyinference-phone-gateway.service` (`Requires=` the host,
+  `LimitRTPRIO=50`, `Nice=-10`, `AllowedCPUs=7,15`, a 64 MB gen0 budget, three credentials, no service-wide FIFO);
+  `AllowedCPUs=0-6,8-14` on the API unit, whose start-limit settings now sit in `[Unit]`, where systemd reads them.
+  Runbook: `docs/Checklists/VOICE_AGENT_VERIFICATION.md`.
+- **Host tuning:** `deploy/install-host-tuning.sh` installs two things. One is `hartsyinference-cpu-performance.service`,
+  a oneshot unit that sets every CPU's frequency governor to `performance` at boot through sysfs. The other is
+  `/etc/security/limits.d/hartsy-rt.conf` (`hartsy - rtprio 50`, for runs without systemd). The script is a dry run by
+  default, with `--apply`, `--revert` and `--dry-run --revert`. `--revert` puts every CPU on `performance` back on
+  `schedutil`, leaves other governors alone, and fails if a CPU cannot go back. The script is idempotent, needs root
+  only to change anything, refuses to write through a symlink, and prints its sources' SHA-256 so an apply can be
+  checked against the dry run. These are optimizations: under `schedutil`, the idle
+  gaps between turns cost Kokoro about 33 ms per sentence and the paced front end about 0.7 ms per frame, but every
+  gate passes either way.
+- Tests (`tests/HartsyInference.VoiceHost.Tests`): 87 unit tests against a fake gateway on a temporary socket with
+  scripted sessions (handshake refusals, call lifecycle and faults, PCM16 scale and sequence checks, flush and stale-turn
+  rules, tool round trips and timeouts, hangup after the goodbye's last frame, its cap and a barge-in on the goodbye,
+  config and token file, 1200-frame sender cadence with zero allocation, zero allocation while the sender's reads wake a
+  producer waiting for playback, as the real session's do, and the boot warm-up's tool definitions against a fake
+  `VoiceModelSet`), and `[Slow]` loopback calls (sipsorcery
+  softphone → real gateway → real host with Kokoro and Whisper small.en on the RTX 3060), including silence on the line
+  between the goodbye and the BYE, and a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
+  Six new Voice unit tests cover the tagged read.
+- **Rebased onto `main` (#202, alpha.237) and re-run on the RTX 3060 with `Denoise` at its new default (on, int8).**
+  `LoopbackAssets.All()` named Silero, Whisper, Kokoro and the JFK clip but not RNNoise; added its weights and int8
+  tables, since `VoiceModelSet.LoadFrontEnd` now needs them and never substitutes raw audio for a missing denoiser (the
+  weights were present on this box, so this did not change the result below, only the gate's correctness on a host that
+  lacks them). Quiet window on the 3060 only (the scripted-LLM loopback calls need no 4090), `--verify-since` clean
+  after. `LoopbackSipCallWithHostTests` 3/3, `LoopbackHostKillTests` 1/1, same as the `Denoise`-off run:
+  - Barge-in: `Flush` reached the gateway 8.0 ms after the VAD decision; the cancelled reply's last audible frame left
+    the gateway 6.3 ms after the decision (was 6.4 ms off `Denoise`); 0 frames of the flushed turn after `Flush`.
+  - Agent hangup: 106 audible goodbye frames, then 24 quiet frames before the BYE (identical frame counts to the
+    `Denoise`-off run); the host asked 225 ms after the turn ended.
+  - Host killed with SIGKILL mid-call: the phone got the BYE 1186 ms after the 3 s outage period (was 1.2 s off
+    `Denoise`); the restarted host replaced the stale socket and took the next call.
+  - `voice.endpoint.ms` now reads 776.00 (was 736.00 off `Denoise` — the 40 ms RNNoise lag `VoiceTurnMetrics` picked up
+    from #202); every other stage is unaffected by denoising, as expected.
+  - **Allocation (open in #202, confirmed fixed here):** the link-close line reads `audioPathAllocated=0B` on both the
+    long-lived call host (1333 ticks) and the SIGKILL test's two short-lived hosts, where the earlier `Denoise`-off run
+    measured 19 528 B.
+  - Sender: lateness p50/p99 within the 200 µs bucket, max 29.1 ms, 1 catch-up frame, 0 resyncs over 1333 ticks (was
+    max 25.4 ms, 2 catch-up frames, 0 resyncs over 1339 ticks off `Denoise` — noise at this precision, same shape).
+
 ## alpha.237
 
 - **`HartsyInference.Voice`: opt-in per-call voice agent.** New packable library (references Audio, Engine and Tools;

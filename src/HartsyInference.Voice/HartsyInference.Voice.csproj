@@ -8,6 +8,9 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.Voice.Tests" />
+    <!-- VoiceHost.Tests builds a fake VoiceModelSet (IVoiceSpeech) to test the boot warm-up's tool wiring without a
+         real engine or model weights. -->
+    <InternalsVisibleTo Include="HartsyInference.VoiceHost.Tests" />
   </ItemGroup>
 
   <ItemGroup>

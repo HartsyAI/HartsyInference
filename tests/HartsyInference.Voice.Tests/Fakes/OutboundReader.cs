@@ -3,14 +3,16 @@ using HartsyInference.Core.Runtime;
 namespace HartsyInference.Voice.Tests.Fakes;
 
 /// <summary>The session's single outbound consumer for a test, on a thread of its own as the host's sender is: reads
-/// <c>chunk</c> samples, keeps the real ones with the time they were read, pauses, repeats. <see cref="Paused"/> stops
-/// reading without ending the consumer; <see cref="ReadAllocatedBytes"/> counts what the reads themselves allocated.</summary>
+/// <c>chunk</c> samples with the turn-tagged read, keeps the real ones with the time they were read and the turn each
+/// belongs to, pauses, repeats. <see cref="Paused"/> stops reading without ending the consumer;
+/// <see cref="ReadAllocatedBytes"/> counts what the reads themselves allocated.</summary>
 internal sealed class OutboundReader : IAsyncDisposable
 {
     private readonly VoiceAgentSession _session;
     private readonly int _chunk;
     private readonly TimeSpan _pause;
     private readonly List<float> _samples = [];
+    private readonly List<int> _turns = [];
     private readonly List<(long Ns, int Count)> _reads = [];
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _loop;
@@ -42,6 +44,18 @@ internal sealed class OutboundReader : IAsyncDisposable
             lock (_samples)
             {
                 return [.. _samples];
+            }
+        }
+    }
+
+    /// <summary>The turn id the session tagged each sample in <see cref="Samples"/> with.</summary>
+    public int[] Turns
+    {
+        get
+        {
+            lock (_samples)
+            {
+                return [.. _turns];
             }
         }
     }
@@ -80,13 +94,14 @@ internal sealed class OutboundReader : IAsyncDisposable
             if (!_paused)
             {
                 long before = GC.GetAllocatedBytesForCurrentThread();
-                int real = _session.ReadOutbound(buffer);
+                int real = _session.ReadOutbound(buffer, out int turnId);
                 Volatile.Write(ref _readAllocated, _readAllocated + GC.GetAllocatedBytesForCurrentThread() - before);
                 if (real > 0)
                 {
                     lock (_samples)
                     {
                         _samples.AddRange(buffer.AsSpan(0, real));
+                        _turns.AddRange(Enumerable.Repeat(turnId, real));
                         _reads.Add((MonotonicClock.NowNs(), real));
                     }
                 }

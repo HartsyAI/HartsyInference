@@ -17,6 +17,8 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.PhoneGateway.Tests" />
+    <!-- The voice host's loopback test watches the frames the tick thread sends (CallController.MediaCreated). -->
+    <InternalsVisibleTo Include="HartsyInference.VoiceHost.Tests" />
   </ItemGroup>
 
   <ItemGroup>

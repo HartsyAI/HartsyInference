@@ -26,7 +26,7 @@ namespace HartsyInference.Voice;
 /// The session's state lock is never held across an await; the rings and queues it may touch while holding it are
 /// leaves, and T1 never takes it. Events are raised on a pool thread, never on T1 or T2, in order.
 /// <para>Threading contract for the host: <see cref="PushInbound"/> from one producer thread and
-/// <see cref="ReadOutbound"/> from one consumer thread; both never block. Everything else is thread-safe.</para></remarks>
+/// <see cref="ReadOutbound(Span{float})"/> from one consumer thread; both never block. Everything else is thread-safe.</para></remarks>
 public sealed partial class VoiceAgentSession : IAsyncDisposable
 {
     private const int RingSeconds = 30;
@@ -133,8 +133,12 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         }
     }
 
-    /// <summary>Rate of the audio <see cref="ReadOutbound"/> returns.</summary>
+    /// <summary>Rate of the audio <see cref="ReadOutbound(Span{float})"/> returns.</summary>
     public int OutboundSampleRate => _options.OutboundSampleRate;
+
+    /// <summary>Reply samples queued and not yet read: how much of the reply in progress is still to play. Readable from
+    /// any thread, as a snapshot.</summary>
+    public int OutboundQueuedSamples => Math.Max(0, _outbound.Queued);
 
     /// <summary>Caller samples lost because the audio thread fell behind.</summary>
     public long InboundDroppedSamples => _audio.DroppedSamples;
@@ -204,6 +208,12 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
     /// zero-fills what the queue could not supply. Returns how many samples were reply audio. Never blocks; call from one
     /// thread at the playback cadence. A barge-in drops the queued reply on the next call.</summary>
     public int ReadOutbound(Span<float> destination) => _outbound.Read(destination);
+
+    /// <summary>Like <see cref="ReadOutbound(Span{float})"/>, but returns one turn's audio at most: a read stops where
+    /// the next turn's audio begins, and <paramref name="turnId"/> is the turn that produced the samples (0 when none
+    /// were read). A player that forwards audio elsewhere tags it with this id, so a barge-in on turn T can drop
+    /// anything at or below T that is still in flight. Same threading rules; use one overload per session.</summary>
+    public int ReadOutbound(Span<float> destination, out int turnId) => _outbound.Read(destination, out turnId);
 
     /// <summary>Says <paramref name="text"/> without asking the model (a greeting, a hold message). It is queued behind
     /// any turn in progress, becomes part of the conversation, and can be barged in on. Completes when it has played
