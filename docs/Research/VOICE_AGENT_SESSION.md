@@ -271,27 +271,49 @@ caller utterance back to back (history grows each turn), clean quiet window on b
 - **`turn.total_ms`**: turns 2 and 3 meet the 1.3 s budget; turn 4 misses by 1.4 ms (noise); turn 1 misses by 66 ms,
   all of it `tts.first_chunk_ms` (142 ms — Kokoro's first-synthesis-of-new-text cost, a known item, not an LLM or
   warm-up residue: turn 1's LLM numbers are indistinguishable from turns 2-4's).
-- **`llm.first_sentence_ms` still misses its 200 ms budget by 90-120 ms, every turn, cold or warm — not a warm-up
+- **`llm.first_sentence_ms` still missed its 200 ms budget by 90-120 ms, every turn, cold or warm — not a warm-up
   problem.** The reply is one sentence ("Hello, how can I assist you today?"); `StreamingSentenceSplitter` cannot
   know a sentence is complete until the stream ends (nothing later confirms the boundary), so for a one-sentence
-  reply `first_sentence` = TTFT + the full decode + its EOS step. Turn 1's per-token timeline confirms it exactly:
+  reply `first_sentence` = TTFT + the full decode + its EOS step. Turn 1's per-token timeline confirmed it exactly:
   9 tokens roughly 25 ms apart (65 TTFT + 8×25 decode + 25 for the EOS step ≈ 290 ms, measured 291.34); turns 3-4
   were not timelined per token, only by their aggregate rate (37-38 tok/s), consistent with the same shape. The
-  lever is decode throughput: the session streams at **38-40 tok/s**, steady spacing, no bursts (nothing is held by
-  the tool-call filter — confirmed separately: Hermes markers are `<tool_call>` / `{"name"` / line-start `{`, so a
-  reply starting "Hello" matches none of them and is forwarded a character at a time, see
+  lever was decode throughput: the session streamed at **38-40 tok/s**, steady spacing, no bursts (nothing was held
+  by the tool-call filter — confirmed separately: Hermes markers are `<tool_call>` / `{"name"` / line-start `{`, so
+  a reply starting "Hello" matches none of them and is forwarded a character at a time, see
   `ToolCallParserTests.PlainTextIsForwardedUnchangedWithoutCopying`). The plan's own isolated probe
   (`VoiceLlmTurnBenchTests`, `benchmarks/results/2026-09-30_voice_turn_latency.md`) measured **151.1 tok/s with the
-  same sentinel grammar armed** (tools-on vs. tools-off differ by 0.5 tok/s there, so the grammar step itself is not
-  the cost). The ~4x gap is session-path overhead the probe's bare `onToken` callback never pays: per-token
-  incremental detokenization, the tool-call filter/parser's character scan, and the parsed-event/channel plumbing
-  between `TextService` and `VoiceAgentSession`, all paid once per decode step. At the probe's rate the same
-  9-token reply lands near 125 ms, inside budget. **Not fixed here**: it needs its own engine/Tools PR with
-  per-stage profiling to find which layer costs the ~18 ms/token difference, which two GPU runs were not spent
-  chasing further; the splitter and `FirstSentenceMinChars` were deliberately left alone — changing either would
-  move the number without touching the actual cost.
+  same sentinel grammar armed** (tools-on vs. tools-off differ by 0.5 tok/s there, ruling out the grammar step as
+  the cost) — but that probe samples greedily, and the voice session's `TextRequest` defaults to
+  `Temperature=0.7, TopP=0.95, Greedy=false`. **Root cause, found and fixed on `main`** (alpha.236,
+  `perf/llm-short-reply-decode`, #215): `TopPStep`'s nucleus filter argsorted the full ~152K-token vocabulary
+  through a `Comparison<int>` delegate and allocated three vocab-sized arrays, every decode step, only on that
+  non-greedy path — not session-path transport (detokenization, the filter/parser, the channel), which is what the
+  per-token timeline's steady spacing had pointed at. Fixed there: reused scratch buffers, a delegate-free sort,
+  sorting only the candidate subset when it already reaches `p`.
 - **Open for PR9**: `VoiceHost`'s boot-time `WarmAsync` call must pass its own tool set, or production warm-up
   stays on the cold one-token path this fix only helps when a caller opts in.
+
+#### Re-measured after the sampler fix (main alpha.236, #215), same 4 turns
+
+Rebased onto `main` 553de075 and re-ran the same 4-turn scenario, same gates (quiet window on both cards, VRAM
+wait-loop, bench lock, `--verify-since` clean after):
+
+| Turn | `llm.ttft_ms` (≤ 150) | `llm.first_sentence_ms` (≤ 200) | decode tok/s | `tts.first_chunk_ms` | `voice.endpoint.ms` | `turn.total_ms` (≤ 1.3 s) |
+|---|---:|---:|---:|---:|---:|---:|
+| 1 (cold) | 63.7 | 152.2 | 101.5 | 132.8 | 776.0 | 1226.6 |
+| 2 | 46.4 | 120.3 | 121.7 | 91.7 | 776.0 | 1092.4 |
+| 3 | 62.4 | 148.7 | 102.5 | 98.4 | 776.0 | 1124.0 |
+| 4 | 81.9 | 172.1 | 99.8 | 81.4 | 776.0 | 1133.5 |
+
+**Every stage meets its budget on every turn, cold or warm.** TTFT 357 → 46-82 ms (unchanged from the warm-up fix,
+as expected — the sampler fix is a decode-step change, not a prefill one). `first_sentence` 950 → 120-172 ms,
+inside its 200 ms budget for the first time, consistent with decode at 99.8-121.7 tok/s (was 37-40) — close to the
+sampler fix's own cited 94-106 tok/s for a realistic `ToolLoop` turn. `turn.total` 1975 → 1093-1227 ms, inside its
+1.3 s budget on every turn (turn 1's 1226.6 ms is the highest, still 73 ms under). `voice.endpoint.ms` reads
+776.00 again, unaffected (a decode-rate fix has nothing to do with the front end). Recall 100 % both directions on
+turn 1, no `<think>` text in any turn. `CudaBackend.LtGemmPlanStats` stayed `(0,0,0,0)` through this run too,
+confirming it was never going to show either the warm-up or the sampler effect for this model's quantized GEMM
+path.
 
 ## Open
 
@@ -302,10 +324,5 @@ caller utterance back to back (history grows each turn), clean quiet window on b
 - No hallucination filter beyond "only VAD-closed segments reach the recognizer" and the no-words discard.
 - The CPU kernels' per-call dispatch closures make real Silero allocate on the audio thread; fixing them is a
   cross-model Cpu change with its own A/B.
-- `llm.first_sentence_ms` misses its 200 ms budget by 90-120 ms on every turn (cold or warm): the session streams
-  decode at 38-40 tok/s against the plan's isolated probe's 151.1 tok/s with the same grammar armed — see
-  [the Qwen3 re-measurement](#re-measured-after-the-warmasync-fix-4-turns-both-cards-visible). Needs an engine/Tools
-  PR with per-stage profiling of the per-token path (`TextService`'s incremental detokenizer, the tool-call
-  filter/parser, the parsed-event/channel plumbing) to find the ~18 ms/token difference; not chased further here.
 - `VoiceHost` (PR9)'s boot-time `WarmAsync` call needs updating to pass its own tool set, or production warm-up
   stays on the cold one-token path.

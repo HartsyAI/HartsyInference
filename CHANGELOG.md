@@ -79,46 +79,40 @@ stable release will require. Dates are UTC.
   949.65 ms on this cold first live turn (tools installed, real prompt — not the plan's isolated, pre-warmed
   152 ms/151 tok/s probe), turn total **1974.72 ms, over the 1.3 s budget**, almost entirely from the LLM stage.
   Recall 100 % both directions.
-- **LLM voice-turn latency bring-up.** Root cause of the cold-call numbers above: `WarmAsync` warmed the LLM with a
-  one-token, no-tools request, so the tool-call grammar, `ToolCallStreamFilter`/`ToolCallParser`, the Jinja template's
-  tools branch, and every decode step past the first were cold on the real first turn. Fixed above (`WarmAsync`
-  accepts the host's tool definitions and runs `WarmToolMaxTokens` tokens through `StreamAsync` when given any).
-  `VoiceSessionQwen3EndToEndTests` now drives 4 turns of the same utterance (conversation history grows each turn)
-  with two independent timelines — `RecordingDiagnostics` (raw per-token events via `EngineOptions.Diagnostics`) and
-  a `TimestampingTextService` decorator (the chunks the session streams, after the tool-call filter) — plus a
-  best-effort read of `CudaBackend.LtGemmPlanStats` after warm-up and every turn. Re-measured (RTX 3060 + 4090, both
-  cards visible, clean quiet window, verified clean afterwards):
+- **LLM voice-turn latency bring-up — budget met on every stage, every turn.** Two causes, both fixed now:
+  1. `WarmAsync` warmed the LLM with a one-token, no-tools request, so the tool-call grammar, `ToolCallStreamFilter`/
+     `ToolCallParser`, the Jinja template's tools branch, and every decode step past the first were cold on the real
+     first turn. Fixed above (`WarmAsync` accepts the host's tool definitions and runs `WarmToolMaxTokens` tokens
+     through `StreamAsync` when given any).
+  2. The first re-measurement (357 → 65-78 ms TTFT, but `first_sentence` still 90-120 ms over its 200 ms budget)
+     pointed at decode throughput: 38-40 tok/s in the session against the plan's isolated probe's 151 tok/s with the
+     same grammar armed. That pointed at session-path transport at the time, but the real cause, found and fixed on
+     `main` (alpha.236, `perf/llm-short-reply-decode`, #215): the probe sampled greedy; the voice session's
+     `TextRequest` defaults to `Temperature=0.7, TopP=0.95, Greedy=false`, and `TopPStep`'s nucleus filter argsorted
+     the full ~152K-token vocabulary through a `Comparison<int>` delegate and allocated three vocab-sized arrays —
+     every decode step, only on that non-greedy path. Fixed there (reused scratch buffers, a delegate-free sort,
+     sorting only the candidate subset when it suffices); this PR just rebased onto it.
 
-  | Turn | `llm.ttft_ms` (≤ 150) | `llm.first_sentence_ms` (≤ 200) | `turn.total_ms` (≤ 1.3 s) |
-  |---|---:|---:|---:|
-  | 1 (cold) | 65.2 | 291.3 | 1366.3 |
-  | 2 | 77.1 | 308.5 | 1295.2 |
-  | 3 | 71.7 | 307.2 | 1284.7 |
-  | 4 | 77.7 | 318.7 | 1301.4 |
+  `VoiceSessionQwen3EndToEndTests` drives 4 turns of the same utterance (conversation history grows each turn) with
+  two independent timelines — `RecordingDiagnostics` (raw per-token events via `EngineOptions.Diagnostics`) and a
+  `TimestampingTextService` decorator (the chunks the session streams, after the tool-call filter) — plus a
+  best-effort read of `CudaBackend.LtGemmPlanStats` after warm-up and every turn. Re-measured after the rebase
+  (RTX 3060 + 4090, both cards visible, clean quiet window, verified clean afterwards):
 
-  TTFT: **357 → 65-78 ms, meets budget on every turn, cold or warm** (`LtGemmPlanStats` stayed `(0,0,0,0)`
-  throughout — this GGUF-quantized model's decode path never reaches cuBLASLt's fused-epilogue GEMM, so the fix is
-  not plan-cache priming specifically; warming the real request shape, the grammar sampler and 8 decode steps is
-  what moved it, and nothing isolates which of those three the remaining credit belongs to). `voice.endpoint.ms`
-  reads **776.00 on every turn = 736 + RNNoise's 40 ms lag**, confirming the endpoint-metric fix below in a real
-  session (the unit test can only prove the arithmetic; a live RNNoise instance suppresses the harness's level-
-  scripted fake VAD as noise, so it cannot drive a turn). `turn.total_ms`: turns 2 and 3 meet budget; turn 4 misses
-  by 1.4 ms (noise); turn 1 misses by 66 ms, all of it `tts.first_chunk_ms` (142 ms, Kokoro's known first-synthesis-
-  of-new-text cost, not an LLM or warm-up residue — turn 1's LLM numbers, 65/291, are indistinguishable from turns
-  2-4's). **`llm.first_sentence_ms` still misses its 200 ms budget by 90-120 ms on every turn, cold or warm**, and is
-  not a warm-up problem: the reply is one sentence, and `StreamingSentenceSplitter` cannot know it is complete until
-  the stream ends (no later text to confirm the boundary), so `first_sentence` = TTFT + the full decode + its EOS
-  step — measured 65 + 8×25 + 25 ≈ 290 ms, matching the per-chunk timeline (turns 1-2; turns 3-4 only by their
-  aggregate rate) to within 2 ms. The real lever is decode throughput: the session streams at **38-40 tok/s**
-  (steady ~25 ms/token, no bursts — nothing is being held by the filter), against the plan's own isolated probe
-  (`VoiceLlmTurnBenchTests`, `benchmarks/results/2026-09-30_voice_turn_latency.md`) at **151.1 tok/s with the same
-  sentinel grammar armed** (tools-on vs tools-off differ by 0.5 tok/s there, so the grammar step itself is not the
-  cost). The ~4x gap is session-path overhead the probe's bare `onToken` callback never pays: per-token incremental
-  detokenization, `ToolCallStreamFilter`/`ToolCallParser` character scanning, and the parsed-event/channel plumbing
-  between the engine and `VoiceAgentSession`, all per decode step. At the probe's rate the same 9-token reply would
-  land near 125 ms, inside budget. Fixing this needs its own engine/Tools PR with per-stage profiling (not done
-  here — the one 4090 run spent on this measurement does not point at one line); flagged as a follow-up task
-  (`task_f93453aa`), not bypassed and not worked around by changing the splitter or `FirstSentenceMinChars`.
+  | Turn | `llm.ttft_ms` (≤ 150) | `llm.first_sentence_ms` (≤ 200) | decode tok/s | `turn.total_ms` (≤ 1.3 s) |
+  |---|---:|---:|---:|---:|
+  | 1 (cold) | 63.7 | 152.2 | 101.5 | 1226.6 |
+  | 2 | 46.4 | 120.3 | 121.7 | 1092.4 |
+  | 3 | 62.4 | 148.7 | 102.5 | 1124.0 |
+  | 4 | 81.9 | 172.1 | 99.8 | 1133.5 |
+
+  **Every stage meets its budget on every turn, cold or warm**: TTFT 357 → 46-82 ms; `first_sentence` 950 → 120-172
+  ms (was still 291-319 ms, over budget, before the sampler fix); `turn.total` 1975 → 1092-1227 ms. Decode is 99.8-
+  121.7 tok/s (was 37-40), matching the sampler fix's own cited 94-106 tok/s for a realistic `ToolLoop` turn.
+  `LtGemmPlanStats` stayed `(0,0,0,0)` throughout both re-measurements — this GGUF-quantized model's decode never
+  reaches cuBLASLt's fused-epilogue GEMM path, confirming the plan-cache counter was never going to explain either
+  gap. `voice.endpoint.ms` reads **776.00 on every turn = 736 + RNNoise's 40 ms lag**, confirming the endpoint-metric
+  fix below in a real session. Recall 100 % both directions on turn 1, no `<think>` text in any turn.
 - `voice.endpoint.ms` now adds the denoiser's algorithmic lag (`RnnoiseStream.LatencySamples`, exposed as
   `VoiceAudioFrontend.DenoiserLatencySamples`, 0 when `Denoise` is off) to the sample-counted hangover, so the metric
   (and `turn.total_ms`, which folds it in) reports the caller's real wall-clock wait instead of being silently short
