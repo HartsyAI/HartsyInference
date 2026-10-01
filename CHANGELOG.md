@@ -38,9 +38,12 @@ stable release will require. Dates are UTC.
   `LimitRTPRIO=50`, `Nice=-10`, `AllowedCPUs=7,15`, a 64 MB gen0 budget, three credentials, no service-wide FIFO);
   `AllowedCPUs=0-6,8-14` on the API unit, whose start-limit settings now sit in `[Unit]`, where systemd reads them.
   Runbook: `docs/Checklists/VOICE_AGENT_VERIFICATION.md`.
-- Tests (`tests/HartsyInference.VoiceHost.Tests`): unit tests against a fake gateway on a temporary socket with scripted
-  sessions, and `[Slow]` loopback calls (sipsorcery softphone → real gateway → real host with Kokoro and Whisper small.en
-  on the RTX 3060), including a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
+- Tests (`tests/HartsyInference.VoiceHost.Tests`): 73 unit tests against a fake gateway on a temporary socket with
+  scripted sessions (handshake refusals, call lifecycle and faults, PCM16 scale and sequence checks, flush and stale-turn
+  rules, tool round trips and timeouts, deferred hangup, config and token file, 1200-frame sender cadence with zero
+  allocation), and `[Slow]` loopback calls (sipsorcery softphone → real gateway → real host with Kokoro and Whisper
+  small.en on the RTX 3060), including a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
+  Six new Voice unit tests cover the tagged read.
 
 ## alpha.237
 
