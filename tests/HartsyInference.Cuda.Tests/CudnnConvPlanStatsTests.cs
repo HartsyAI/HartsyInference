@@ -31,6 +31,18 @@ public sealed unsafe class CudnnConvPlanStatsTests
     public void LengthBucket_IsTheNextPowerOfTwo(long length, long bucket) =>
         Assert.Equal(bucket, CudnnConv.LengthBucket(length));
 
+    [Theory]
+    [InlineData(1, 1)]
+    [InlineData(2, 2)]
+    [InlineData(4, 3)]
+    [InlineData(128, 127)]
+    [InlineData(32_768, 32_767)]
+    public void ReferenceLength_IsTheOddLengthBelowTheBucketTop(long bucket, long reference)
+    {
+        Assert.Equal(reference, CudnnConv.ReferenceLength(bucket));
+        Assert.Equal(bucket, CudnnConv.LengthBucket(Math.Max(reference, bucket / 2 + 1)));
+    }
+
     [Fact]
     public void AudioConv1d_PlansEachLengthFromItsBucket()
     {

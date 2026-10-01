@@ -34,9 +34,11 @@ public readonly record struct CudnnConvPlanStats(long Executions, long PlanBuild
 /// <remarks>Plans are shape-exact, the time extent included, and building one is almost all heuristic query: on the 3060
 /// about 2 ms of heuristic against 0.01 ms of finalize per plan, and a new Kokoro sentence length needs about 39 of them.
 /// So a 1D conv (H = 1) takes its engine configuration from its length bucket. The heuristic runs once per conv family and
-/// power-of-two length bucket, at the bucket's own length, and every length in the bucket finalizes its plan from that
-/// configuration (engine and knobs). The choice depends on the length alone, never on which length came first. A
-/// configuration that does not finalize for a length falls back to that length's own heuristic.
+/// power-of-two length bucket, at the bucket's reference length, and every length in the bucket finalizes its plan from
+/// that configuration (engine and knobs). The reference is odd (the bucket's top length minus one), so the heuristic picks
+/// a configuration that handles a ragged final tile and therefore fits every length in the bucket; at a power of two it
+/// picked edge-free tiles that only fit aligned lengths. The choice depends on the length alone, never on which length
+/// came first. A configuration that does not finalize for a length falls back to that length's own heuristic.
 /// <c>numerics.audioConvLengthBuckets=false</c> runs the heuristic for every new length, as before.</remarks>
 internal sealed class CudnnConv : IDisposable
 {
@@ -93,9 +95,13 @@ internal sealed class CudnnConv : IDisposable
             : (length + PadPre + PadPost - Dilation * (Kernel - 1) - 1) / Stride + 1;
     }
 
-    /// <summary>Where a 1D plan build takes its engine choice from: the geometry, the bucket's reference length, and the
-    /// family it is accounted under.</summary>
-    private sealed record BucketRequest(Conv1dGeometry Geometry, long ReferenceLength, string Family);
+    /// <summary>Where a 1D plan build takes its engine choice from: the geometry, the length bucket, and the family it is
+    /// accounted under.</summary>
+    private sealed record BucketRequest(Conv1dGeometry Geometry, long Bucket, string Family)
+    {
+        /// <summary>The length the bucket's heuristic runs at; see <see cref="CudnnConv.ReferenceLength"/>.</summary>
+        public long ReferenceLength => CudnnConv.ReferenceLength(Bucket);
+    }
 
     private sealed class Plan
     {
@@ -253,6 +259,11 @@ internal sealed class CudnnConv : IDisposable
     /// is also the length the bucket's heuristic runs at.</summary>
     internal static long LengthBucket(long length) => length <= 1 ? 1 : (long)BitOperations.RoundUpToPowerOf2((ulong)length);
 
+    /// <summary>The length a bucket's heuristic runs at: the bucket's top length minus one. An odd length is not a multiple of
+    /// any tile, so the configuration the heuristic picks there handles a ragged final tile and finalizes for every length
+    /// in the bucket. Buckets 1 and 2 use their own length.</summary>
+    internal static long ReferenceLength(long bucket) => bucket > 2 ? bucket - 1 : bucket;
+
     /// <summary>The bucket a 1D conv of input length <paramref name="length"/> plans from, or null when buckets are off or
     /// the caller's output length is not the one the geometry implies (that shape keeps its own heuristic).</summary>
     private static BucketRequest? BucketFor(Conv1dGeometry geometry, long length, long outLength, string family)
@@ -264,12 +275,12 @@ internal sealed class CudnnConv : IDisposable
 
     /// <summary>The engine choice of <paramref name="bucket"/>'s family at its reference length, made on first use.</summary>
     private EngineChoice? ChoiceFor(BucketRequest bucket) =>
-        _choices.GetOrAdd($"{bucket.Family}|b{bucket.ReferenceLength}",
+        _choices.GetOrAdd($"{bucket.Family}|b{bucket.Bucket}",
             _ => new Lazy<EngineChoice?>(() => ComputeChoice(bucket), LazyThreadSafetyMode.ExecutionAndPublication)).Value;
 
     /// <summary>Runs the heuristic for the bucket's family at the bucket's reference length and keeps the configuration it
-    /// picks (engine and knobs). The reference plan itself is dropped: a conv at exactly that length plans from the
-    /// choice like every other length in the bucket. Null when no configuration was found or its knobs could not be read,
+    /// picks (engine and knobs). The reference plan itself is dropped: a conv at that length plans from the choice like
+    /// every other length in the bucket. Null when no configuration was found or its knobs could not be read,
     /// so the bucket's lengths keep their own heuristic.</summary>
     private EngineChoice? ComputeChoice(BucketRequest bucket)
     {
