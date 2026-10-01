@@ -357,7 +357,8 @@ public sealed class VoiceTurnBenchTests
     }
 
     /// <summary>Two warm-ups then five timed calls; the first warm-up's own wall time is returned as
-    /// <c>First</c> (the case's first sight of its input) and is never part of the warm statistics.</summary>
+    /// <c>First</c> (the case's first sight of its input) and is never part of the warm statistics. <c>Last</c> is
+    /// the final timed call's output, representative only because greedy Whisper and Kokoro are deterministic.</summary>
     private static (Stats Stats, T Last, double First) Measure<T>(Func<T> run)
     {
         T last = default!;

@@ -161,7 +161,10 @@ protocol is unchanged; the first call is the first of the two warm-ups.
 
 Reading:
 - **Gate met.** The 15-word warm median is 156.6 ms against 250 ms (p95 170.5, min 141.6).
-- The first synthesis of that new text, 238.2 ms, is also inside the gate, but only by 12 ms.
+- The first synthesis of that new text, 238.2 ms, is also inside the gate, but only by 12 ms. That figure is a
+  **single observation** — each length's first run is one call, with no spread — so it shows that a new 15-word
+  text can land inside 250 ms, not that it reliably does. The open new-text item should verify against first runs
+  of several distinct sentences per length.
 - A new text's first synthesis costs more than a repeat: +45 / +82 / +53 ms at 5 / 15 / 30 words. This is the open
   item being worked: the voice-session e2e saw 254 ms against 150–191 ms for 15 words. A live call only ever
   synthesizes new text, so the first-run column is what a caller hears.
@@ -196,8 +199,10 @@ Reading:
 | narrowband + RNNoise | 100% | 0 | 187.7 | 200.5 | 794.6 | And so, my fellow Americans, ask not what your country can do for you, ask what you can do for your country. |
 
 Reading:
-- **Gate met:** narrowband recall is 100 % against a 100 % baseline (Δ 0). The clip is clean studio speech, so
-  this checks the band-limiting round trip, not phone-line noise.
+- **Gate met:** narrowband recall is 100 % against a 100 % baseline (Δ 0). Both sit at the ceiling on one clean
+  studio clip, though, so as measured this gate cannot fail: it confirms the band-limiting round trip loses no
+  content words on easy speech, not how narrowband degrades harder material. A discriminating check needs more,
+  harder clips; PR8's e2e is the next place it is measured.
 - The RNNoise row is data, not a gate: the front-end gate (≤ 2 ms per frame) is open and awaits a user decision.
   - Recall is unchanged at 100 % after denoising.
   - The whole-clip pass on the CPU backend took a median 794.6 ms for 11 s of audio. That runs at the backend's
@@ -290,8 +295,8 @@ lands before any PR that touches that model.
 | Gate | Where checked | Measured (Phase 1) | Status |
 |---|---|---|---|
 | Whisper small.en per-utterance ≤ 350 ms on the 3060 | PR3 probe A, PR8 e2e | re-run 2026-10-01 (alpha.229): warm medians 93.7–185.9 ms, worst p95 191.5 ms, worst first call 222.1 ms (10 s, 16 kHz) | **met** — the first run was invalid (token-layout bug, fixed in #196); #204 brought the latency in |
-| Whisper narrowband recall ≥ 16k baseline − 10 pts | PR3 probe C, PR8 e2e | re-run: 100 % vs 100 % (Δ 0), full 11 s clip | **met** (the first run was invalid, same bug) |
-| Kokoro 15-word sentence ≤ 250 ms on the 3060 | PR3 probe B, PR8 e2e | re-run: warm median 156.6 ms (p95 170.5, min 141.6); first synthesis of the new text 238.2 ms | **met** — warm by 93 ms; the first run of new text is inside by only 12 ms (open item: new text costs +45–82 ms over a repeat). The first run (2788 ms, pre-#199, contended) stopped the plan until #199 |
+| Whisper narrowband recall ≥ 16k baseline − 10 pts | PR3 probe C, PR8 e2e | re-run: 100 % vs 100 % (Δ 0), full 11 s clip | **met**, but at the ceiling on one clean clip, so not discriminating; harder material in PR8 e2e (the first run was invalid, same bug) |
+| Kokoro 15-word sentence ≤ 250 ms on the 3060 | PR3 probe B, PR8 e2e | re-run: warm median 156.6 ms (p95 170.5, min 141.6); first synthesis of the new text 238.2 ms | **met** — warm by 93 ms; the first run of new text is inside by only 12 ms, and that is a single observation (open item: new text costs +45–82 ms over a repeat). The first run (2788 ms, pre-#199, contended) stopped the plan until #199 |
 | Kokoro Whisper-verify recall ≥ 80 % | PR3 probe B, PR8 e2e | re-run: 100 / 90 / 95 % at 5 / 15 / 30 words (misses are numerals: "three" → "3", "ten" → "10") | **met** |
 | Qwen3-4B TTFT ≤ 150 ms with tools on (graph/spec decode off) on the 4090 | PR3 LLM probe | 152.0 ms median (p95 160.3, min 150.7), 631 prompt tokens | **met at the boundary** — the 152.0 ms median is 2.0 ms (1.3 %) over the 150 ms target, within run-to-run noise (p95 160.3); recorded as met by the plan owner, no perf task opened |
 | Qwen3-4B ≥ 60 tok/s with tools on (graph/spec decode off) on the 4090 | PR3 LLM probe | 151.1 tok/s median (p95 152.6, min 150.1) | **met** |
