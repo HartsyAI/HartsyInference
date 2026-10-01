@@ -13,6 +13,10 @@ public sealed class SamplerChain
     private readonly List<ISamplerStep> _steps;
     private readonly bool _greedy;
     private uint _rngState;
+    // One SamplerChain lives for exactly one generation (built fresh per FromOptions call, which Generate calls
+    // once per request) and Next runs once per decode step of that SAME generation — sized once, on the first
+    // non-greedy token, and reused for every later one instead of a fresh vocab-sized array per token.
+    private float[]? _drawProbs;
 
     private SamplerChain(List<ISamplerStep> steps, bool greedy, ulong seed)
     {
@@ -87,7 +91,11 @@ public sealed class SamplerChain
             return Argmax(logits);
         }
         int count = logits.Length;
-        float[] probs = new float[count];
+        if (_drawProbs is null || _drawProbs.Length != count)
+        {
+            _drawProbs = new float[count];
+        }
+        float[] probs = _drawProbs;
         SamplerMath.Softmax(logits, probs);
         float sum = 0.0f;
         for (int i = 0; i < count; i++)

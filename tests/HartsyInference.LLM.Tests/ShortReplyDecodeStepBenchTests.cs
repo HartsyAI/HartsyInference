@@ -118,7 +118,13 @@ public sealed class ShortReplyDecodeStepBenchTests
         int steadyCount = Math.Min(12, gaps.Count);
         double steadyMedian = Median(gaps.Skip(Math.Max(0, gaps.Count - steadyCount)).ToList());
         double overallRate = gaps.Count > 0 ? gaps.Count / gaps.Sum() * 1000.0 : 0.0;
+        // Token-id digest (not just the decoded text): lets a before/after re-run prove the fix changed no
+        // output, same spirit as regression-ab's identical-output arms, for the sampling configs it can't reach
+        // (its greedy arms never touch TopPStep or the non-greedy draw — see TopPSortRefactorIdentityTests).
+        string digest = string.Join(",", result.TokenIds);
         _out.WriteLine($"{scenario} / {run}: {result.TokenIds.Count} tokens, gaps(ms)=[{string.Join(", ", gaps.Select(g => g.ToString("F1")))}]");
+        _out.WriteLine($"{scenario} / {run}: text=\"{result.Text.Trim().Replace('\n', ' ')}\"");
+        _out.WriteLine($"{scenario} / {run}: token-ids=[{digest}]");
         table.AppendLine($"| {scenario} | {run} | {result.TokenIds.Count} | {firstMedian:F1} | {steadyMedian:F1} | {overallRate:F1} |");
     }
 

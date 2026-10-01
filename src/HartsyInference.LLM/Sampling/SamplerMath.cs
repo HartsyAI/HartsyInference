@@ -41,15 +41,37 @@ internal static class SamplerMath
         }
     }
 
-    /// <summary>Returns the indices of <paramref name="values"/> ordered from largest to smallest.</summary>
-    public static int[] ArgsortDescending(float[] values)
+    /// <summary>Sorts <paramref name="values"/> into descending order in place and fills <paramref name="order"/>
+    /// (same length) with the original index of each now-relocated element — i.e. <c>order[rank]</c> is the
+    /// pre-sort index of the rank-th largest value, same contract a caller would get from sorting
+    /// <c>Enumerable.Range(0, n)</c> by <c>values[i]</c> descending.</summary>
+    /// <remarks>Both buffers are caller-owned (reused across calls — e.g. one <see cref="TopPStep"/> instance's
+    /// per-generation scratch arrays — so this allocates nothing): a prior <see cref="ArgumentException"/>-style
+    /// length mismatch is the caller's bug, not guarded here, since every caller sizes both from the same vocab
+    /// count.
+    ///
+    /// <para>Previously a delegate comparer (<c>Array.Sort(order, (a, b) =&gt; values[b].CompareTo(values[a]))</c>):
+    /// correct, but every one of the O(n log n) comparisons paid a virtual delegate dispatch, which dominates the
+    /// per-token sampler cost at a ~152K-token vocabulary (measured ~20+ ms/token — see
+    /// <c>benchmarks/results/2026-10-01_llm_short_reply_decode.md</c>). <see cref="Array.Sort{TKey, TValue}(TKey[],
+    /// TValue[])"/> sorts the primitive <c>float</c> keys directly (no delegate indirection), but only ascending —
+    /// negating before and after is exact (sign-bit flip, no rounding, including the softmax's signed-zero masked
+    /// entries: <c>-(-0.0f) == 0.0f</c> bit-for-bit) and turns "ascending by -value" into "descending by value"
+    /// without a second array or a reversal pass. Ties (two different vocab indices with bit-identical softmax
+    /// probability — not seen in practice with real model logits) can land in either relative order under either
+    /// algorithm; neither the old nor the new sort documents or guarantees a specific tie-break.</para></remarks>
+    public static void SortDescendingByValue(float[] values, int[] order)
     {
-        int[] order = new int[values.Length];
-        for (int i = 0; i < values.Length; i++)
+        int n = order.Length;
+        for (int i = 0; i < n; i++)
         {
             order[i] = i;
+            values[i] = -values[i];
         }
-        Array.Sort(order, (int a, int b) => values[b].CompareTo(values[a]));
-        return order;
+        Array.Sort(values, order);
+        for (int i = 0; i < n; i++)
+        {
+            values[i] = -values[i];
+        }
     }
 }
