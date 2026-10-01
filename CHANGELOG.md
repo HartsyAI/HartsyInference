@@ -6,6 +6,21 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.239
+
+- **`WakeService.Claim`/`Release`**: an opt-in, per-device host handoff for the wake listener. A host can claim
+  one connected satellite's turns (typically from a `Detected` handler) and receive its decoded inbound audio
+  (16 kHz mono float, post-denoise when noise suppression is on, normalized from the wake path's internal
+  int16 scale) through `WakeDeviceClaim.OnFrame` instead of the service's own wake scoring, end-of-speech
+  capture and transcription, which are suspended for that device only. The connection, ping/pong keepalive and
+  outbound audio path (`BeginAudio`/`SendAudioAsync`) are unaffected. `Release` returns the device to normal
+  listening; a disconnect while claimed auto-releases and calls `WakeDeviceClaim.OnDisconnected` once. Zero
+  change for a device nothing has claimed — `WakeSession.Claim` defaults to null and the existing
+  scoring/VAD branch is reached exactly as before; proven against the full existing wake suite
+  (`WakeTransportTests` and the rest) with real backbone/head/denoiser weights, not just by inspection. This is
+  the engine-side requirement for `SwarmUI-AudioLab`'s satellite voice-agent Session mode, which could not
+  otherwise get continuous raw audio for a device past its own wake detection.
+
 ## alpha.238
 
 - **Voice host exe (`src/HartsyInference.VoiceHost`, not packaged).** The phone-call voice agent's model process: a
