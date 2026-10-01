@@ -21,6 +21,72 @@ stable release will require. Dates are UTC.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
 
+## PLACEHOLDER_VERSION_2
+
+- **Voice LLM VRAM, round 2: redundant weight-split preload.** `TextService.LoadInto`'s single-device weight
+  upload called `GenericTransformer.EnumerateWeights()` with its default (`includeRedundantSplits: true`),
+  unlike `LoadSharded` and `GenericTransformerModel.PreloadDecodeWeights`, which already pass `false`. On
+  Qwen3-4B-Q4_K_M the load-time-fused Q/K/V and gate/up projections leave their pre-fusion split originals
+  resident too (tensor-level measurement: 1.21 GiB of the 3.53 GiB a default single-device load uploads, vs.
+  2.32 GiB deduplicated — matching the 2.33 GiB file almost exactly); nothing on `TextGenerationPipeline`'s
+  single-sequence decode/prefill path reads them (only the batch scheduler's mixed-dtype split-projection
+  path does, via its own lazy auto-promotion, unaffected by this change). Checked and ruled out as explanations
+  for the same gap: `AutoPromoteWeights` (a residency-pinning decision only — it uploads a weight already
+  twice-missed in its native dtype, never a dequantized copy) and the tied embedding/`lm_head` (kept quantized
+  at ~304 MiB via the existing `_lmHeadQuant` fused-GEMV path, not dequantized to F16/F32 as its size alone
+  would suggest). `TextRequest.PreloadRedundantWeightSplits` (null = unchanged default) opts a request out;
+  `VoiceAgentOptions.PreloadRedundantWeightSplits` defaults to `false` and is wired through warm-up, the
+  call's priming request and every turn, identically to `CacheWeightCasts`.
+- **Voice gate, re-measured on real weights (Qwen3-4B-Q4_K_M/4090, same 10-turn real-tool-set call as
+  alpha.239):** every latency budget still holds — `voice.llm.ttft_ms` 85.7-105.4 ms (gate ≤ 150 ms),
+  `voice.llm.first_sentence_ms` 139.1-158.1 ms (gate ≤ 200 ms), `voice.turn.total_ms` 1095.8-1225.1 ms
+  (gate ≤ 1300 ms), decode 89-102 tok/s (unchanged within noise — decode always reads the fused tensors
+  regardless of whether the split originals are also resident). VRAM: primed and flat for all ten turns at
+  **5.81 GB, now under the ≤ 6 GB target** (down from ~7.27 GB before this change, ~13.8 GB before
+  `CacheWeightCasts=false`). Both VRAM levers from alpha.239 (a smaller `PrefixCacheCapacityHint`;
+  `vram.kvF16`) remain unused.
+
+## PLACEHOLDER_VERSION_1
+
+- **Opt-in prefix-KV reuse for `TextGenerationPipeline`.** A new `Generate` overload takes a `RetainedSequence`
+  (`HartsyInference.LLM.Generation`): it reuses the longest common token-id prefix between the retained cache and
+  the current prompt, `Truncate`s the divergent tail and prefills only the diverging suffix (always leaving the
+  final prompt token to be prefilled fresh, so sampling always has a real logits row), instead of prefilling the
+  whole prompt from an empty cache every call. `RetainedSequence`/`RetainedSequenceStore` are generic (count- and
+  byte-bounded, LRU, checkout/checkin so a second concurrent request on a busy key runs uncached) and live
+  entirely in the engine, independent of any caller. `TextRequest.PrefixCacheKey` (null by default) opts a caller
+  in; `TextRequest.PrefixCacheCapacityHint` sizes a fresh retained sequence once instead of letting it be
+  reallocated turn over turn. `TextService` keeps one store per device slot (`vram.prefixCacheMaxEntries`/
+  `vram.prefixCacheMaxBytes`), disposed before `FreeAllDeviceMemory` on every unload/reload path. Capacity
+  growth past a retained sequence's own cache reallocates transparently; the tensor-parallel path is
+  unaffected (no `ISequenceState` to retain). `GenerationResult.ReusedPromptTokens` reports how much of a
+  call's prompt came from the cache. The tensor-parallel path and `DynamicBatchScheduler`/`PagedKvPool` are
+  untouched — this is the single-sequence `TextGenerationPipeline` path only.
+- **Voice turns reuse their call's own prefix.** `VoiceAgentSession` gives each call a key (carried through
+  `BuildRequest` and so through every `ToolLoop` round too, since each round's request is `request with {...}`) and
+  `EnablePrefixCache` (default true) controls it. `StartAsync` fires a one-token priming request for the
+  system+tools prefix so turn 1 is warm as well, racing the greeting instead of delaying it.
+- **Voice LLM VRAM.** `TextRequest.CacheWeightCasts` (null = backend default) overrides the device backend's
+  `CacheWeightCasts` when its slot's backend is first created; `VoiceAgentOptions.CacheWeightCasts` defaults to
+  `false`. Measured on Qwen3-4B-Q4_K_M/4090: the backend's own default (cache a dequantized F16/BF16 copy of
+  every quantized weight) costs ~7.3 GB resident once warm on top of the ~5.5 GB the weights themselves take —
+  the dominant share of the model's footprint; off, weights stay compressed with a transient per-GEMM dequant,
+  for a fixed ~50 ms tax per prefill call (prompt-length independent; decode's quantized GEMV path and tokens/sec
+  are unaffected either way). `ITextService.TrimMemoryPool` (default no-op, so an existing implementation keeps
+  compiling) is `TextService`'s per-slot, best-effort, non-blocking equivalent of `Unload` that returns pool slack
+  to the driver without unloading weights; the voice turn loop awaits it at the same idle point
+  `VoiceGpuWorker.RequestTrim` already uses for the audio backend, and `VoiceModelSet.WarmAsync` and the session's
+  priming request each trim their own transient usage once done with it.
+- **Voice gate, measured on real weights (Qwen3-4B-Q4_K_M/4090, Whisper small.en + Kokoro/3060, the host's real
+  7-tool set, 10-turn growing history):** `voice.llm.ttft_ms` flat at ~87-98 ms across every turn regardless of
+  history length (gate ≤ 150 ms; was 200-302 ms and growing before this), `voice.llm.first_sentence_ms`
+  ~133-166 ms (gate ≤ 200 ms), `voice.turn.total_ms` ~1092-1250 ms (gate ≤ 1300 ms) — every turn meets every
+  budget. VRAM: ~7.27 GB resident once the call is warm and primed, flat for all ten turns (down from ~13.8 GB
+  before `CacheWeightCasts=false`, and does not grow with the conversation) but still above the ≤ 6 GB target —
+  the retained prefix sequence's own KV capacity (sized for the full `MaxHistoryTokens` + `MaxReplyTokens`
+  ceiling) accounts for most of the remainder. See PR #217 for the breakdown and the two unused levers to close
+  the rest (a smaller capacity hint; `vram.kvF16`, a numerics change not made unilaterally here).
+
 ## alpha.239
 
 - **Audio: fixed the vocab-sized delegate-sort allocation anti-pattern in the TTS samplers** — the same
@@ -98,47 +164,6 @@ stable release will require. Dates are UTC.
   separately) to profile. Not fixed in this PR. zipvoice (named in the original slow-model list) has no
   token-sampling path at
   all — a flow-matching model, out of scope for this fix entirely.
-
-## PLACEHOLDER_VERSION_1
-
-- **Opt-in prefix-KV reuse for `TextGenerationPipeline`.** A new `Generate` overload takes a `RetainedSequence`
-  (`HartsyInference.LLM.Generation`): it reuses the longest common token-id prefix between the retained cache and
-  the current prompt, `Truncate`s the divergent tail and prefills only the diverging suffix (always leaving the
-  final prompt token to be prefilled fresh, so sampling always has a real logits row), instead of prefilling the
-  whole prompt from an empty cache every call. `RetainedSequence`/`RetainedSequenceStore` are generic (count- and
-  byte-bounded, LRU, checkout/checkin so a second concurrent request on a busy key runs uncached) and live
-  entirely in the engine, independent of any caller. `TextRequest.PrefixCacheKey` (null by default) opts a caller
-  in; `TextRequest.PrefixCacheCapacityHint` sizes a fresh retained sequence once instead of letting it be
-  reallocated turn over turn. `TextService` keeps one store per device slot (`vram.prefixCacheMaxEntries`/
-  `vram.prefixCacheMaxBytes`), disposed before `FreeAllDeviceMemory` on every unload/reload path. Capacity
-  growth past a retained sequence's own cache reallocates transparently; the tensor-parallel path is
-  unaffected (no `ISequenceState` to retain). `GenerationResult.ReusedPromptTokens` reports how much of a
-  call's prompt came from the cache. The tensor-parallel path and `DynamicBatchScheduler`/`PagedKvPool` are
-  untouched — this is the single-sequence `TextGenerationPipeline` path only.
-- **Voice turns reuse their call's own prefix.** `VoiceAgentSession` gives each call a key (carried through
-  `BuildRequest` and so through every `ToolLoop` round too, since each round's request is `request with {...}`) and
-  `EnablePrefixCache` (default true) controls it. `StartAsync` fires a one-token priming request for the
-  system+tools prefix so turn 1 is warm as well, racing the greeting instead of delaying it.
-- **Voice LLM VRAM.** `TextRequest.CacheWeightCasts` (null = backend default) overrides the device backend's
-  `CacheWeightCasts` when its slot's backend is first created; `VoiceAgentOptions.CacheWeightCasts` defaults to
-  `false`. Measured on Qwen3-4B-Q4_K_M/4090: the backend's own default (cache a dequantized F16/BF16 copy of
-  every quantized weight) costs ~7.3 GB resident once warm on top of the ~5.5 GB the weights themselves take —
-  the dominant share of the model's footprint; off, weights stay compressed with a transient per-GEMM dequant,
-  for a fixed ~50 ms tax per prefill call (prompt-length independent; decode's quantized GEMV path and tokens/sec
-  are unaffected either way). `ITextService.TrimMemoryPool` (default no-op, so an existing implementation keeps
-  compiling) is `TextService`'s per-slot, best-effort, non-blocking equivalent of `Unload` that returns pool slack
-  to the driver without unloading weights; the voice turn loop awaits it at the same idle point
-  `VoiceGpuWorker.RequestTrim` already uses for the audio backend, and `VoiceModelSet.WarmAsync` and the session's
-  priming request each trim their own transient usage once done with it.
-- **Voice gate, measured on real weights (Qwen3-4B-Q4_K_M/4090, Whisper small.en + Kokoro/3060, the host's real
-  7-tool set, 10-turn growing history):** `voice.llm.ttft_ms` flat at ~87-98 ms across every turn regardless of
-  history length (gate ≤ 150 ms; was 200-302 ms and growing before this), `voice.llm.first_sentence_ms`
-  ~133-166 ms (gate ≤ 200 ms), `voice.turn.total_ms` ~1092-1250 ms (gate ≤ 1300 ms) — every turn meets every
-  budget. VRAM: ~7.27 GB resident once the call is warm and primed, flat for all ten turns (down from ~13.8 GB
-  before `CacheWeightCasts=false`, and does not grow with the conversation) but still above the ≤ 6 GB target —
-  the retained prefix sequence's own KV capacity (sized for the full `MaxHistoryTokens` + `MaxReplyTokens`
-  ceiling) accounts for most of the remainder. See PR #217 for the breakdown and the two unused levers to close
-  the rest (a smaller capacity hint; `vram.kvF16`, a numerics change not made unilaterally here).
 
 ## alpha.238
 
