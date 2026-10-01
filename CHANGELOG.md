@@ -6,6 +6,34 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.233
+
+- **Whisper now sees the log-mel it was trained on.** The front end zero-padded the 400-sample window into a
+  512-point FFT (257 bins at 31.25 Hz instead of 201 at 40 Hz) and did not center the STFT, so a 30 s window was
+  2997 frames and 1499 encoder positions instead of 3000 and 1500. It now runs the 400-point STFT with reflect
+  padding of 200 and drops the last frame, as OpenAI's `log_mel_spectrogram` and HF's `WhisperFeatureExtractor` do.
+  - **Features:** against `WhisperFeatureExtractor` (transformers 5.15, CPU) on 12 clips — JFK at 16 kHz and
+    8 → 16 kHz narrowband, whole and cut to 2 / 5 / 10 s, 5 s of silence, 5 s of white noise, 30 s and 44 s of
+    speech — the largest difference on the normalized log-mel is 1.6e-5 at 80 mels and 2.6e-5 at 128 (mean
+    ≤ 1.1e-7), the size of the reference's own torch-versus-numpy spread (1.3e-5 and 1.4e-5).
+  - **Tokens:** greedy decodes, with and without timestamps, against `WhisperForConditionalGeneration` run on the
+    reference's features with the engine's decoding rule, CPU backend: 70 of 72 identical for tiny, base and
+    small.en (58 of 72 before), 24 of 24 for medium and distil-large-v3.5, 22 of 24 for distil-large-v3. The
+    four that differ are near-ties the reference itself wins by 0.0037–0.032 logits, and the engine picks the
+    reference's runner-up. Whisper uses the exact (erf) GELU where the engine uses the tanh form; with the exact
+    form tiny, base and small.en are identical on all 72. That swap is not in this release.
+  - **Output moves by design:** transcripts change where the old input tipped a decision. small.en on the 2 s
+    narrowband slice now ends "And so my fellow Ameri-", as the reference does on the same samples; JFK stays
+    11/11 at 16 kHz and narrowband.
+- `MelSpectrogramExtractor.Config.ExactFftSize` transforms at exactly `NFft` points, through the allocation-free
+  mixed-radix `FftPlan` when that is not a power of two (400 = 4·4·5·5), never Bluestein. Every other preset keeps
+  its output bit for bit. `WhisperLegacyPow2Config` keeps the old layout for the S3 speech-tokenizer front end, so
+  CosyVoice 2 and Chatterbox do not move with Whisper.
+- `ComputeZeroPadded` takes centered presets, reading the reflect padding at both edges of the zero-padded window
+  through index arithmetic; `Compute` no longer builds the reflect-padded copy. Frames fan out through
+  `CpuParallel.For` in blocks sized by the FFT alone, each renting its scratch, so a warm extractor allocates
+  nothing; `FftPlan.ForwardReal` takes a caller-owned work buffer so blocks share one plan.
+
 ## alpha.232
 
 - **Kokoro's first synthesis of new text is no longer slower than a repeat.** Each new sentence length used to build
