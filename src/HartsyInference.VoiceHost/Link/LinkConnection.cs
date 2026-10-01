@@ -492,6 +492,7 @@ internal sealed class LinkConnection
 
     private void SenderMain()
     {
+        WarmContinuationQueueing();
         long period = _options.SenderPeriodNs;
         int maxCatchUp = _options.MaxCatchUpFrames;
         long t0 = MonotonicClock.NowNs();
@@ -547,6 +548,18 @@ internal sealed class LinkConnection
             Close("the sender failed");
         }
     }
+
+    /// <summary>The first continuation a thread queues to the pool allocates once (32 B on .NET 10, more on a brand-new
+    /// thread). A session's read does exactly that when it wakes a producer waiting for playback, so the sender queues
+    /// one here, before its allocation baseline, and the audio path counts zero with a real session too.</summary>
+    private static void WarmContinuationQueueing()
+    {
+        TaskCompletionSource source = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        _ = ContinueAfterAsync(source.Task);
+        source.SetResult();
+    }
+
+    private static async Task ContinueAfterAsync(Task task) => await task.ConfigureAwait(false);
 
     private void WriteControlFrames()
     {

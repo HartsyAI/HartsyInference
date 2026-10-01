@@ -49,6 +49,26 @@ public sealed class SenderCadenceTests
     }
 
     [Fact]
+    public async Task TheAudioPathStaysAtZeroWhenItsReadsWakeAProducerWaitingForPlayback()
+    {
+        // The real session's read completes its turn's playback wait from the sender thread; the first continuation a
+        // thread queues to the pool allocates once, which the sender's warm-up takes before its baseline.
+        await using HostRig rig = HostRig.Start(options => options with { SenderWarmUpTicks = 5 });
+        rig.Factory.WakeOnPlayed = true;
+        (FakeGateway gateway, FakeCallSession session) = await rig.StartCallAsync();
+        await Task.Delay(200);
+        for (int turn = 1; turn <= 5; turn++)
+        {
+            await session.QueueReplyAndWaitAsync(turnId: turn, samples: 4 * Frame).WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        LinkConnection connection = rig.Server.Current!;
+        _output.WriteLine($"{session.PlayedWakes} playback waits completed by the sender; audio path allocated {connection.AudioPathAllocatedBytes} B");
+        Assert.Equal(5, session.PlayedWakes);
+        Assert.Equal(0, connection.AudioPathAllocatedBytes);
+    }
+
+    [Fact]
     public async Task AtTheRealPeriodABurstStartsWithThePrebufferThenKeeps20MsPerFrame()
     {
         await using HostRig rig = HostRig.Start();

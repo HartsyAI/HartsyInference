@@ -21,7 +21,8 @@ stable release will require. Dates are UTC.
   connections in their handshake at once; per-frame sequence check; a new connection replaces the current one only
   after its own `Hello`. A dedicated sender thread on absolute
   20 ms deadlines writes control frames first, then each call's reply audio in 20 ms frames tagged with the producing
-  turn, with a 40 ms prebuffer per burst and catch-up frames; the host's own audio path allocates nothing once warm. A barge-in
+  turn, with a 40 ms prebuffer per burst and catch-up frames; its audio path, the session's read included, allocates
+  nothing once warm. A barge-in
   becomes `Flush(turnId)` and nothing of that turn follows it; `OutboundEnd` closes each turn that played. Session
   events go out as `Event` frames (state, final transcript, turn latency).
 - Telephony tools (`send_dtmf`, `transfer`, `hold`, `unhold`, `play_prompt`) are `ToolRequest`/`ToolResult` round trips
@@ -42,10 +43,11 @@ stable release will require. Dates are UTC.
   `LimitRTPRIO=50`, `Nice=-10`, `AllowedCPUs=7,15`, a 64 MB gen0 budget, three credentials, no service-wide FIFO);
   `AllowedCPUs=0-6,8-14` on the API unit, whose start-limit settings now sit in `[Unit]`, where systemd reads them.
   Runbook: `docs/Checklists/VOICE_AGENT_VERIFICATION.md`.
-- Tests (`tests/HartsyInference.VoiceHost.Tests`): 82 unit tests against a fake gateway on a temporary socket with
+- Tests (`tests/HartsyInference.VoiceHost.Tests`): 83 unit tests against a fake gateway on a temporary socket with
   scripted sessions (handshake refusals, call lifecycle and faults, PCM16 scale and sequence checks, flush and stale-turn
   rules, tool round trips and timeouts, hangup after the goodbye's last frame, its cap and a barge-in on the goodbye,
-  config and token file, 1200-frame sender cadence with zero allocation), and `[Slow]` loopback calls (sipsorcery
+  config and token file, 1200-frame sender cadence with zero allocation, zero allocation while the sender's reads wake a
+  producer waiting for playback, as the real session's do), and `[Slow]` loopback calls (sipsorcery
   softphone → real gateway → real host with Kokoro and Whisper small.en on the RTX 3060), including silence on the line
   between the goodbye and the BYE, and a host killed with SIGKILL mid-call (`tests/HartsyInference.VoiceHost.TestHost`).
   Measured there: the cancelled reply's last frame left the gateway 6.4 ms after the barge-in decision, the BYE came 24

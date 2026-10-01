@@ -13,7 +13,10 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
     public const float EndlessLevel = 0.25f;
 
     private readonly object _lock = new();
-    private readonly Queue<(int Turn, float[] Samples)> _replies = new();
+    private readonly Queue<(int Turn, float[] Samples, TaskCompletionSource? Played)> _replies = new();
+    private readonly CancellationTokenSource _ending = new();
+    private TaskCompletionSource? _currentPlayed;
+    private int _playedWakes;
     private readonly List<float> _inbound = [];
     private readonly List<char> _dtmf = [];
     private readonly List<string> _spoken = [];
@@ -111,15 +114,37 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
         }
     }
 
+    /// <summary>When set, a producer waits for each queued reply's last sample to be read, the way the real session's
+    /// turn waits for playback (a cancellable wait, the token registered on the waiter itself), and the read that takes
+    /// that sample completes the wait on the reader's thread.</summary>
+    public bool WakeOnPlayed { get; init; }
+
+    /// <summary>Playback waits the reader completed.</summary>
+    public int PlayedWakes => Volatile.Read(ref _playedWakes);
+
     /// <summary>Queues <paramref name="samples"/> of reply audio for <paramref name="turnId"/> at <paramref name="level"/>.</summary>
-    public void QueueReply(int turnId, int samples, float level = 0.5f)
+    public void QueueReply(int turnId, int samples, float level = 0.5f) => _ = QueueReplyAndWaitAsync(turnId, samples, level);
+
+    /// <summary><see cref="QueueReply"/>, returning the producer's wait for that reply to be read with
+    /// <see cref="WakeOnPlayed"/>, else a completed task.</summary>
+    public Task QueueReplyAndWaitAsync(int turnId, int samples, float level = 0.5f)
     {
         float[] audio = new float[samples];
         Array.Fill(audio, level);
+        TaskCompletionSource? played = WakeOnPlayed ? new(TaskCreationOptions.RunContinuationsAsynchronously) : null;
+        Task waiting = played is null ? Task.CompletedTask : WaitPlayedAsync(played, _ending.Token);
         lock (_lock)
         {
-            _replies.Enqueue((turnId, audio));
+            _replies.Enqueue((turnId, audio, played));
         }
+        return waiting;
+    }
+
+    private static async Task WaitPlayedAsync(TaskCompletionSource played, CancellationToken cancel)
+    {
+        using CancellationTokenRegistration registration = cancel.UnsafeRegister(
+            static (state, token) => ((TaskCompletionSource)state!).TrySetCanceled(token), played);
+        await played.Task.ConfigureAwait(false);
     }
 
     /// <summary>Raises <paramref name="item"/> on the calling thread, the way the real session's pump would.</summary>
@@ -171,7 +196,7 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
         {
             if (_current is null || _offset == _current.Length)
             {
-                if (!_replies.TryDequeue(out (int Turn, float[] Samples) next))
+                if (!_replies.TryDequeue(out (int Turn, float[] Samples, TaskCompletionSource? Played) next))
                 {
                     _current = null;
                     destination.Clear();
@@ -180,6 +205,7 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
                 }
                 _current = next.Samples;
                 _currentTurn = next.Turn;
+                _currentPlayed = next.Played;
                 _offset = 0;
             }
             int count = Math.Min(destination.Length, _current.Length - _offset);
@@ -187,6 +213,14 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
             destination[count..].Clear();
             _offset += count;
             turnId = _currentTurn;
+            if (_offset == _current.Length && _currentPlayed is { } played)
+            {
+                _currentPlayed = null;
+                if (played.TrySetResult())
+                {
+                    Volatile.Write(ref _playedWakes, _playedWakes + 1);
+                }
+            }
             return count;
         }
     }
@@ -222,7 +256,11 @@ internal sealed class FakeCallSession(uint callId, ToolRegistry tools) : IVoiceC
 
     public ValueTask DisposeAsync()
     {
-        Interlocked.Exchange(ref _disposed, 1);
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            // Releases any playback wait still pending, the way ending the real session cancels its turn.
+            _ending.Cancel();
+        }
         return ValueTask.CompletedTask;
     }
 }

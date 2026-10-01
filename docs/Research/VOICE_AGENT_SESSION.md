@@ -357,8 +357,14 @@ Locks: the server's connection lock and a connection's call-map lock are leaves 
 them); a call's lifecycle lock may take the process-wide GC-mode lock, a leaf. The control queue is a
 `ConcurrentQueue` drained by the sender. The sender reads its call list as a published array, so its audio path takes
 no lock and allocates nothing once warm (`AudioPathAllocatedBytes`, asserted 0 over 1200 frames with a scripted
-session). With the real session, each read also completes the session's producer waiter, which today allocates 32 B
-per read during playback; the fix belongs to the Voice package (see the measured table below).
+session). The real session's read is 0 B too, now that the reply queue wakes its producer once per wait without
+allocating ([Outbound queue and flushes](#outbound-queue-and-flushes)). A CPU probe of the tagged read the sender uses,
+on one long-lived reader thread with a cancellable playback wait pending, measured 0 B per read, and 0 B on the read
+that wakes the producer. The exception is the first continuation a thread ever queues to the pool: it allocates once,
+32 B (192 B on a brand-new thread). The sender queues one such continuation itself before its allocation baseline, so
+a session's first wake does not count. `TheAudioPathStaysAtZeroWhenItsReadsWakeAProducerWaitingForPlayback` checks
+this: five playback waits completed from the sender, 0 B, against 192 B without that warm-up. The loopback run below
+predates the fix and measured 32 B per read.
 
 Outbound pacing: one 20 ms frame per tick, plus 40 ms (`link.prebufferMs`) at the start of each burst of reply audio,
 because the gateway plays what it has at its own 20 ms tick and has no cushion of its own; a late wake-up sends the
@@ -435,8 +441,9 @@ unknown key fails the start):
 (`CUDA_VISIBLE_DEVICES=1`, after a 10-minute SwarmUI quiet window, checked clean afterwards with `--verify-since`). A
 sipsorcery softphone plays the JFK clip at 8 kHz to the real gateway, which talks PhoneLink to the real host running
 Kokoro (`af_heart`) and Whisper small.en; the model is scripted, denoise off. Models loaded and warm in 1.9 to 2.4 s.
-The hang-up's binding to the turn its `ToolResult` names came from review after this run; the unit tests cover it, and
-the agent-hangup case is re-run on the GPU after the Voice package's allocation fix.
+Two changes came after this run: the hang-up's binding to the turn its `ToolResult` names (from review; the unit tests
+cover it) and the Voice package's allocation-free wake. The next GPU run re-checks the agent hang-up and
+`audioPathAllocated`.
 
 | Measure | Gate | Source | Result |
 |---|---|---|---|
@@ -449,7 +456,7 @@ the agent-hangup case is re-run on the GPU after the Voice package's allocation 
 | Agent hangup: BYE after the goodbye's last audible frame | ≥ 2 quiet frames | `the BYE came … ms after …, … quiet frames later` | 503 ms, 24 quiet frames (Kokoro's trailing silence included); the host asked 226 ms after the turn ended |
 | Gateway RTP, per call | logged | gateway: `Call N ended …` | out lateness p99 50 µs; in late 0, lost 0; dropped by the link 0 |
 | Sender lateness p50 / p99 / max, catch-up frames, resyncs | logged | host: `Phone gateway link closed …` | p50 and p99 within the 200 µs bucket, max 25.4 ms, over 1339 ticks; 2 catch-up frames; 0 resyncs |
-| Sender audio-path allocation | 0 B | host: `audioPathAllocated=…B` | **Fails: 19 528 B over 1339 ticks; 704 B over the restarted host's 24 measured ticks.** 19 520 B of it (610 reads × 32 B) and all 704 B (22 × 32 B) are the session's producer wake: completing the cancellable `WaitPlayedAsync` waiter queues a 32 B pool work item per read during playback. The host's own path is 0 B with a scripted session. Fix routed to the Voice package (#202) |
+| Sender audio-path allocation | 0 B | host: `audioPathAllocated=…B` | **Fails: 19 528 B over 1339 ticks; 704 B over the restarted host's 24 measured ticks.** 19 520 B of it (610 reads × 32 B) and all 704 B (22 × 32 B) are the session's producer wake: completing the cancellable `WaitPlayedAsync` waiter queues a 32 B pool work item per read during playback. The host's own path is 0 B with a scripted session. Fixed since in the Voice package: one allocation-free wake per wait, 0 B per read and on the waking read in a CPU probe of the tagged read, with the sender's warm-up taking the thread's one-time first queueing. The next GPU run re-checks |
 | Host killed with SIGKILL mid-call: BYE at the phone | ≤ 3 s outage period + 2 s | `host killed; the phone got the BYE … ms later` | 4189 ms (1189 ms after the outage period); 1 outage, 1 outage hang-up |
 | Restarted host: stale socket replaced, next call answered, SIGTERM exit 0 and socket removed | all hold | `LoopbackHostKillTests` | all hold (`Removed a stale socket file …`) |
 
@@ -467,7 +474,6 @@ the agent-hangup case is re-run on the GPU after the Voice package's allocation 
 - Host: outbound calls start like inbound ones (same prompt, same greeting); per-call instructions (why the agent is
   calling) are not wired. The host keeps one gateway connection; per-call and per-link summaries go to the log only (no
   metrics endpoint on the host side).
-- Host: the sender's audio path is 0 B only with a scripted session. With the real session, completing the producer's
-  cancellable `WaitPlayedAsync` waiter from the read queues a 32 B pool work item per read during playback (measured
-  above). The fix, a wake that allocates nothing or no cross-thread wake from the reader at all, goes into the Voice
-  package.
+- Host: the next GPU loopback run re-checks two things that changed after the measured run above: `audioPathAllocated`
+  with the Voice package's allocation-free wake (the CPU probe gives 0 B per read), and the hang-up's binding to the
+  turn its `ToolResult` names.

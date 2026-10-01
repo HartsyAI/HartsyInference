@@ -23,6 +23,9 @@ internal sealed class FakeSessionFactory : IVoiceCallSessionFactory
     /// <summary>When set, the next session's end completes only with it.</summary>
     public Task? EndGate { get; set; }
 
+    /// <summary>When set, sessions wait for each reply to be read, as the real one does (<see cref="FakeCallSession.WakeOnPlayed"/>).</summary>
+    public bool WakeOnPlayed { get; set; }
+
     public IReadOnlyList<FakeCallSession> Sessions => [.. _sessions];
 
     public IVoiceCallSession Create(uint callId, ToolRegistry tools)
@@ -32,7 +35,7 @@ internal sealed class FakeSessionFactory : IVoiceCallSessionFactory
             CreateFailure = null;
             throw failure;
         }
-        FakeCallSession session = new(callId, tools) { StartFailure = StartFailure, StartGate = StartGate, EndGate = EndGate };
+        FakeCallSession session = new(callId, tools) { StartFailure = StartFailure, StartGate = StartGate, EndGate = EndGate, WakeOnPlayed = WakeOnPlayed };
         StartFailure = null;
         StartGate = null;
         EndGate = null;
