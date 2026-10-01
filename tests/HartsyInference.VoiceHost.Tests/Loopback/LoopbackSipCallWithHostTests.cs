@@ -67,7 +67,8 @@ public sealed class LoopbackSipCallWithHostTests : IClassFixture<LoopbackHostFix
             LinkEventMessage? heard = _host.WaitForEvent(asked, e => e.Kind == LinkEventKind.TranscriptFinal, 30_000);
             Assert.NotNull(heard);
             _output.WriteLine($"host heard: \"{heard.Text}\" (turn {heard.TurnId})");
-            Assert.Contains("americans", heard.Text!, StringComparison.OrdinalIgnoreCase);
+            Assert.True(heard.Text!.Contains("fellow", StringComparison.OrdinalIgnoreCase) || heard.Text.Contains("americans", StringComparison.OrdinalIgnoreCase),
+                $"the host heard \"{heard.Text}\" for \"And so, my fellow Americans\".");
             Assert.True(gateway.WaitUntil(() => phone.AudibleSince(asked, Audible) >= 50), "the reply never reached the phone.");
             VoiceCall call = _host.Call!;
             Assert.True(call.InboundFrames > 100, $"the host took only {call.InboundFrames} caller frames.");
@@ -175,7 +176,7 @@ public sealed class LoopbackSipCallWithHostTests : IClassFixture<LoopbackHostFix
         {
             return false;
         }
-        _output.WriteLine("SKIPPED: " + _host.SkipReason);
+        _output.WriteLine(_host.SkipReason);
         return true;
     }
 

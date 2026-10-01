@@ -83,8 +83,9 @@ internal sealed class HostProcess : IDisposable
     /// copy beside the tests.</summary>
     private static string Locate()
     {
+        // .../bin/<configuration>/<framework>/
         DirectoryInfo testBin = new(AppContext.BaseDirectory.TrimEnd(Path.DirectorySeparatorChar));
-        string configuration = testBin.Parent?.Parent?.Name ?? "Release";
+        string configuration = testBin.Parent?.Name ?? "Release";
         string own = Path.Combine(RepoRoot.Path, "tests", AssemblyName, "bin", configuration, testBin.Name, AssemblyName + ".dll");
         string beside = Path.Combine(AppContext.BaseDirectory, AssemblyName + ".dll");
         foreach (string candidate in new[] { own, beside })

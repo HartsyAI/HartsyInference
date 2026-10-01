@@ -92,6 +92,7 @@ public sealed class VoiceHostConfigTests : IDisposable
 
     [Theory]
     [InlineData("""{"link":{"socketPath":"phone.sock"}}""", "link.socketPath")]
+    [InlineData("""{"link":{"socketPath":"/run/hartsyinference/a-socket-path-that-is-far-too-long-for-sun-path-on-linux/which-holds-108-bytes/phone.sock"}}""", "link.socketPath")]
     [InlineData("""{"link":{"socketMode":"0666"}}""", "link.socketMode")]
     [InlineData("""{"link":{"socketMode":"0400"}}""", "link.socketMode")]
     [InlineData("""{"link":{"socketMode":"0680"}}""", "link.socketMode")]

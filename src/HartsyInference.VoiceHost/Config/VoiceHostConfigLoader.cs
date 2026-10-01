@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text;
 using System.Text.Json;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
@@ -17,6 +18,8 @@ public static class VoiceHostConfigLoader
     /// <summary>Where the systemd unit's host reads its configuration.</summary>
     public const string DefaultPath = "/etc/hartsyinference/voice.json";
 
+    // sun_path is 108 bytes on Linux, one of them the terminating NUL.
+    private const int MaxSocketPathBytes = 107;
     private const UnixFileMode OwnerReadWrite = UnixFileMode.UserRead | UnixFileMode.UserWrite;
     private const UnixFileMode WidestSocketMode = OwnerReadWrite | UnixFileMode.GroupRead | UnixFileMode.GroupWrite;
 
@@ -115,6 +118,8 @@ public static class VoiceHostConfigLoader
         {
             throw new VoiceHostConfigException($"link.socketPath '{link.SocketPath}' must be an absolute path.");
         }
+        Require(Encoding.UTF8.GetByteCount(link.SocketPath) <= MaxSocketPathBytes,
+            $"link.socketPath '{link.SocketPath}' is longer than the {MaxSocketPathBytes} bytes a Unix socket path can hold.");
         ParseSocketMode(link.SocketMode);
         RequireAbsoluteOrEmpty(link.TokenFile, "link.tokenFile");
         Require(link.PrebufferMs is >= 0 and <= 200, $"link.prebufferMs {link.PrebufferMs} must be 0..200.");
