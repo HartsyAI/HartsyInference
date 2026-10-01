@@ -43,10 +43,11 @@ namespace HartsyInference.Audio.Tests;
 /// which keeps the core's clock ramp and C-state exits out of the figure. The log reports the load's CPUs and
 /// bandwidth, and the bench core's clock sampled from cpufreq while the timed frames ran.</para>
 ///
-/// <para>The p99 budget is an open gate that this box does not meet yet: at alpha.227, three runs gave p50
-/// 1.55–1.56 ms and p99 3.81–3.93 ms (see CHANGELOG). Until the GRU weight precision or the SCHED_FIFO measurement
-/// settles it, a p99 failure here is that open gate. A regression shows up instead as a higher p50, or as any
-/// allocation or GC while timed.</para></summary>
+/// <para>The budget is an open gate that this box does not meet yet. At alpha.227, back to back, three runs gave p50
+/// 1.55–1.56 ms and p99 3.81–3.93 ms. Paced, p50 is 2.64 ms, and under streaming load the frame time grows
+/// with the weight bytes each frame reads (see CHANGELOG). Until the weights' precision and cache residency are
+/// settled, a p99 failure in the default mode is that open gate. A regression shows up instead as a higher p50, or as
+/// any allocation or GC while timed.</para></summary>
 public sealed partial class VoiceFrontendBenchTests(ITestOutputHelper log)
 {
     private const int Rate = 16_000;

@@ -8,7 +8,7 @@ stable release will require. Dates are UTC.
 
 ## alpha.229
 
-- **The voice front end is 3.3× faster at p50 and allocation-free, and still misses its p99 budget on this box.**
+- **The voice front end is 3.3× faster at p50 and allocation-free, and still misses its 2 ms budget on this box.**
   Silero VAD plus RNNoise per 20 ms frame on one pinned core (`VoiceFrontendBenchTests`, three runs with no other
   test running): p50 1.55–1.56 ms, p99 3.81–3.93 ms, max 4.6–5.6 ms. In alpha.226 it was p50 5.1 ms, p99 7.0 ms and max
   10.9 ms; the voice plan allows 2 ms. The thread's own CPU time matches wall time within 0.01 ms, so the slow frames
@@ -17,6 +17,19 @@ stable release will require. Dates are UTC.
   Most of what remains is RNNoise's six F32 GRU products per 10 ms (1152×384 each), about 0.7 ms of every 20 ms and
   bound by memory bandwidth. F16 weights would halve that and int8 would quarter it; that is a precision decision,
   and it is left open here.
+- **What the budget meets off the quiet bench: weight traffic decides it.** Measured 2026-10-01 on the i7-6900K
+  (20 MB L3), pinned to CPU 0.
+  - **At the live 20 ms cadence with no extra load**, p50 is 2.64 ms and p99 4.75 ms, so p50 misses too. Between
+    frames, other work on the box evicts weights that the back-to-back bench re-reads every 1.6 ms and keeps hot.
+  - **With 4 or 8 threads streaming over large buffers on other cores**, p50 is 12.2 / 18.7 ms and p99 29.2 / 32.5 ms.
+    That load saturates this box's DRAM at 19–21 GB/s. The thread's CPU time rises with its wall time, so these are
+    memory stalls, and the clock stayed at 3.5 GHz.
+  - **The same 8 cores kept busy on L1-resident buffers change nothing**: p50 1.54 ms.
+  - **Under load, each stage's time is its weight bytes over the bench thread's share of DRAM bandwidth.** That share
+    is about 1.9 GB/s against 4 threads and 1.2–1.3 GB/s against 8. RNNoise reads its 11.5 MB of F32 weights twice per
+    frame, and Silero reads its 1.2 MB once.
+  - By that arithmetic, F16 or int8 GRU weights shrink the stall in proportion, but neither gets under 2 ms against
+    saturating load unless the weights also stay in L3.
 - `FftPlan` (Audio, `Preprocessing`): a planned mixed-radix complex FFT ported from the kiss_fft RNNoise vendors —
   radix 2, 3, 4 and 5, twiddles and input permutation computed once, nothing allocated per call, upstream's
   operation order and twiddle table. `StreamingStft`, `StreamingIstft` and RNNoise's pitch transform use it only
@@ -53,8 +66,15 @@ stable release will require. Dates are UTC.
   Bluestein path at 960 and 480), `StreamingStftTests.Frames_ComeFromThePlanOnlyAtBluesteinSizes` (bit for bit: 512
   stays on `Fft`, 960 plans), `ResamplerTests.ResampleRange_MatchesTheSameSliceOfResample`,
   `VoiceFrontendAllocationTests` (zero bytes over 1000 frames), `LinearTransBIdentityTests`, and three stateful-`For`
-  cases in `CpuParallelInlineScopeTests`. `VoiceFrontendBenchTests` now reports thread CPU time per frame beside wall
-  time, and picks the core whose hyperthread pair is idlest. `SileroVadParityTests` logs its maximum difference.
+  cases in `CpuParallelInlineScopeTests`. `SileroVadParityTests` logs its maximum difference.
+- `VoiceFrontendBenchTests` changes:
+  - It reports thread CPU time per frame beside wall time, and picks the core whose hyperthread pair is idlest.
+  - It logs the bench core's clock from cpufreq.
+  - Three new opt-in knobs:
+    - `HARTSY_VOICE_FRONTEND_BENCH_LOAD_THREADS=N` runs a STREAM triad on N other cores, pinned outside the bench core's
+      hyperthread pair.
+    - `HARTSY_VOICE_FRONTEND_BENCH_LOAD=l1` keeps that load's buffers in L1, as a control without memory traffic.
+    - `HARTSY_VOICE_FRONTEND_BENCH_PACED=1` starts one frame every 20 ms, spinning in between.
 
 ## alpha.228
 
