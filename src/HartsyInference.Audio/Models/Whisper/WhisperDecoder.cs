@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -23,6 +24,15 @@ public sealed unsafe class WhisperDecoder : IDisposable
     // Output projection (often weight-tied to embed_tokens)
     private Tensor? _projOutWeight;
     private bool _projOutIsTied;
+
+    // Host pointers taken at load: the token table is also the device-resident logits weight, and a per-step
+    // DataPointer read would give that device copy up. Weights are never written, so the host bytes stay exact.
+    private float* _embedTokensHost;
+    private float* _embedPositionsHost;
+
+    // Everything a device op reads, kept resident for the decode (the position table is only read on the host).
+    private Tensor[] _deviceWeights = [];
+    private int _streamWarned;
 
     private bool _weightsLoaded;
     private int _disposed;
@@ -63,10 +73,24 @@ public sealed unsafe class WhisperDecoder : IDisposable
             _projOutWeight = _embedTokens;
             _projOutIsTied = true;
         }
+        if (_embedPositions.Shape.Rank != 2 || _embedPositions.Shape[0] < _cfg.MaxTextPositions || _embedPositions.Shape[1] != _cfg.HiddenSize)
+        {
+            throw new InvalidOperationException(
+                $"{prefix}.embed_positions.weight has shape {_embedPositions.Shape}; expected at least [{_cfg.MaxTextPositions}, {_cfg.HiddenSize}].");
+        }
+        _embedTokensHost = (float*)_embedTokens.DataPointer;
+        _embedPositionsHost = (float*)_embedPositions.DataPointer;
+
+        List<Tensor> device = [];
+        foreach (WhisperDecoderLayer layer in _layers) device.AddRange(layer.EnumerateWeights());
+        device.Add(_finalLnWeight);
+        device.Add(_finalLnBias);
+        device.Add(_projOutWeight);
+        _deviceWeights = [.. device];
         _weightsLoaded = true;
     }
 
-    /// <summary>Fails fast when a <c>[vocab, d_model]</c> weight disagrees with the config: the logits loop reads exactly <see cref="WhisperConfig.VocabSize"/> rows, so an oversized config silently reads whatever tensor follows the embedding in the file as an extra logit (the English-only releases are one row short of the multilingual 51865).</summary>
+    /// <summary>Fails fast when a <c>[vocab, d_model]</c> weight disagrees with the config: the logits tensor and the greedy argmax span exactly <see cref="WhisperConfig.VocabSize"/> entries and the host embedding lookup indexes rows by token id, so an oversized config would argmax over logits the GEMM never wrote or read past the table (the English-only releases are one row short of the multilingual 51865).</summary>
     private void RequireVocabShape(Tensor weight, string name)
     {
         if (weight.Shape.Rank == 2 && weight.Shape[0] == _cfg.VocabSize && weight.Shape[1] == _cfg.HiddenSize) return;
@@ -87,6 +111,9 @@ public sealed unsafe class WhisperDecoder : IDisposable
         public Tensor[] SelfValue { get; }
         /// <summary>Number of tokens written into the self-attention cache so far.</summary>
         public int CurrentPos { get; set; }
+
+        /// <summary>Stage attribution for each step's embed / layers / logits parts; null unless profiling.</summary>
+        internal StageTimer? Timer { get; set; }
 
         public DecodeState(WhisperConfig cfg, int encoderSeqLen)
         {
@@ -125,9 +152,25 @@ public sealed unsafe class WhisperDecoder : IDisposable
         if (batch != 1) throw new NotSupportedException("WhisperDecoder currently supports batch=1 only.");
         int encSeq = (int)encoderHidden.Shape[1];
 
+        // Idempotent, so an eviction since the last utterance is simply undone; small tensors (biases, norms) are
+        // below the auto-promotion floor and would otherwise upload on every op of every step.
+        WhisperOps.PreloadOrStream(backend, _deviceWeights, "decoder", ref _streamWarned);
         DecodeState state = new(_cfg, encSeq);
-        for (int i = 0; i < _layers.Length; i++)
-            _layers[i].PrecomputeCrossKv(backend, encoderHidden, state.CrossKey[i], state.CrossValue[i], encSeq);
+        try
+        {
+            for (int i = 0; i < _layers.Length; i++)
+            {
+                // The self-attention cache lives on the device for the whole decode; each step appends in place.
+                backend.ResidentAllocateKv(state.SelfKey[i]);
+                backend.ResidentAllocateKv(state.SelfValue[i]);
+                _layers[i].PrecomputeCrossKv(backend, encoderHidden, state.CrossKey[i], state.CrossValue[i], encSeq);
+            }
+        }
+        catch
+        {
+            state.Dispose();
+            throw;
+        }
         return state;
     }
 
@@ -143,40 +186,52 @@ public sealed unsafe class WhisperDecoder : IDisposable
 
         int d = _cfg.HiddenSize;
         int posStart = state.CurrentPos;
+        int totalPos = posStart + newCount;
 
         // Embed the new tokens. hidden shape: [1, newCount, d_model].
         Tensor hidden = new(new TensorShape(1, newCount, d), DType.F32);
         EmbedAndAddPos(hidden, tokenIds, posStart, d);
+        state.Timer?.Accumulate("step.embed");
 
-        // Run through decoder layers.
-        for (int i = 0; i < _layers.Length; i++)
+        // Run through decoder layers; every layer sees the same causal mask for these positions.
+        Tensor causalMask = WhisperDecoderLayer.BuildIncrementalCausalMask(posStart, newCount, totalPos);
+        try
         {
-            Tensor next = _layers[i].Forward(backend, hidden,
-                state.SelfKey[i], state.SelfValue[i],
-                state.CrossKey[i], state.CrossValue[i],
-                posStart, newCount);
-            hidden.Dispose();
-            hidden = next;
+            for (int i = 0; i < _layers.Length; i++)
+            {
+                Tensor next = _layers[i].Forward(backend, hidden,
+                    state.SelfKey[i], state.SelfValue[i],
+                    state.CrossKey[i], state.CrossValue[i],
+                    posStart, newCount, causalMask);
+                hidden.Dispose();
+                hidden = next;
+            }
         }
+        finally
+        {
+            causalMask.Dispose();
+        }
+        state.Timer?.Accumulate("step.layers");
 
         // Final LN.
         Tensor normed = new(hidden.Shape, DType.F32);
         backend.LayerNorm(normed, hidden, _finalLnWeight!, _finalLnBias!, _cfg.LayerNormEps);
         hidden.Dispose();
 
-        // Compute logits for the LAST token only (the only one we sample on).
-        // Slice [1, 1, d] out of [1, newCount, d].
-        Tensor lastHidden = new(new TensorShape(1, 1, d), DType.F32);
-        float* normedPtr = (float*)normed.DataPointer;
-        float* lastPtr = (float*)lastHidden.DataPointer;
-        int srcOff = (newCount - 1) * d;
-        for (int k = 0; k < d; k++) lastPtr[k] = normedPtr[srcOff + k];
-        normed.Dispose();
+        // Logits for the LAST token only (the only one we sample on): slice [1, 1, d] out of [1, newCount, d].
+        Tensor lastHidden = normed;
+        if (newCount > 1)
+        {
+            lastHidden = new Tensor(new TensorShape(1, 1, d), DType.F32);
+            backend.SliceRows(lastHidden, normed, newCount - 1);
+            normed.Dispose();
+        }
 
-        // Logits = lastHidden @ embed^T (weight-tied case) or lastHidden @ proj_out^T.
+        // Logits = lastHidden @ proj_out^T (the token table when tied), at full F32 because its argmax is the token.
         Tensor logits = new(new TensorShape(1, _cfg.VocabSize), DType.F32);
-        ComputeLogits(lastHidden, logits, _cfg.VocabSize, d);
+        WhisperOps.LinearFullPrecision(backend, logits, lastHidden, _projOutWeight!, bias: null);
         lastHidden.Dispose();
+        state.Timer?.Accumulate("step.logits");
 
         state.CurrentPos += newCount;
         return logits;
@@ -185,35 +240,19 @@ public sealed unsafe class WhisperDecoder : IDisposable
     private void EmbedAndAddPos(Tensor hidden, ReadOnlySpan<int> tokenIds, int posStart, int d)
     {
         float* hPtr = (float*)hidden.DataPointer;
-        float* eTok = (float*)_embedTokens!.DataPointer;
-        float* ePos = (float*)_embedPositions!.DataPointer;
+        float* eTok = _embedTokensHost;
+        float* ePos = _embedPositionsHost;
         for (int s = 0; s < tokenIds.Length; s++)
         {
             int tok = tokenIds[s];
+            if ((uint)tok >= (uint)_cfg.VocabSize)
+                throw new ArgumentOutOfRangeException(nameof(tokenIds), tok, $"Token id is outside the vocabulary [0, {_cfg.VocabSize}).");
             int pos = posStart + s;
             int hOff = s * d;
             int tokOff = tok * d;
             int posOff = pos * d;
             for (int k = 0; k < d; k++) hPtr[hOff + k] = eTok[tokOff + k] + ePos[posOff + k];
         }
-    }
-
-    private void ComputeLogits(Tensor hidden, Tensor logits, int vocab, int d)
-    {
-        // logits[v] = sum_k hidden[k] * embed[v, k]. The embed weight is stored as
-        // [vocab, d_model] — no transpose needed here, the row already corresponds to a
-        // vocab entry. (Same layout when proj_out exists, which HF stores as [vocab, d].)
-        float* hPtr = (float*)hidden.DataPointer;
-        float* wPtr = (float*)_projOutWeight!.DataPointer;
-        float* lPtr = (float*)logits.DataPointer;
-        for (int v = 0; v < vocab; v++)
-        {
-            float acc = 0f;
-            int wRow = v * d;
-            for (int k = 0; k < d; k++) acc += hPtr[k] * wPtr[wRow + k];
-            lPtr[v] = acc;
-        }
-        _ = _projOutIsTied; // tied vs untied are computed identically; field kept for debugging.
     }
 
     /// <summary>Enumerates every loaded weight tensor for backend preload.</summary>
@@ -299,19 +338,20 @@ internal sealed unsafe class WhisperDecoderLayer
         // Project K, V from encoder hidden [1, encSeq, d] → [1, encSeq, d].
         Tensor k = WhisperOps.ProjectLinear(backend, encHidden, _crossKW!, bias: null, 1, encSeqLen, d, d);
         Tensor v = WhisperOps.ProjectLinear(backend, encHidden, _crossVW!, _crossVB, 1, encSeqLen, d, d);
-        // Reshape into [1, H, encSeq, headDim] directly into the state tensors.
-        WhisperOps.ReshapeToMultiHead4D(outK, k, 1, encSeqLen, _cfg.NumHeads, _cfg.HeadDim);
-        WhisperOps.ReshapeToMultiHead4D(outV, v, 1, encSeqLen, _cfg.NumHeads, _cfg.HeadDim);
+        // Permute into [1, H, encSeq, headDim] directly into the state tensors, which stay on the device.
+        backend.Permute0213(outK, k, encSeqLen, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(outV, v, encSeqLen, _cfg.NumHeads, _cfg.HeadDim);
         k.Dispose(); v.Dispose();
     }
 
-    /// <summary>Forward pass for a chunk of <paramref name="newCount"/> new positions starting at absolute position <paramref name="posStart"/>; updates the self-attn KV cache slots [posStart, posStart+newCount).</summary>
+    /// <summary>Forward pass for a chunk of <paramref name="newCount"/> new positions starting at absolute position <paramref name="posStart"/>; updates the self-attn KV cache slots [posStart, posStart+newCount). <paramref name="causalMask"/> is <see cref="BuildIncrementalCausalMask"/> for these positions.</summary>
     public Tensor Forward(IBackend backend, Tensor hidden,
         Tensor selfK, Tensor selfV, Tensor crossK, Tensor crossV,
-        int posStart, int newCount)
+        int posStart, int newCount, Tensor causalMask)
     {
         int d = _cfg.HiddenSize;
         int totalPos = posStart + newCount;
+        int heads = _cfg.NumHeads, headDim = _cfg.HeadDim;
         TensorShape inShape = new(1, newCount, d);
 
         // --- Self-attention sub-block (causal, with KV cache append) ---
@@ -322,36 +362,35 @@ internal sealed unsafe class WhisperDecoderLayer
         Tensor v = WhisperOps.ProjectLinear(backend, normed, _selfVW!, _selfVB, 1, newCount, d, d);
         normed.Dispose();
 
-        TensorShape mhNew = new(1, _cfg.NumHeads, newCount, _cfg.HeadDim);
+        TensorShape mhNew = new(1, heads, newCount, headDim);
         Tensor qMh = new(mhNew, DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(qMh, q, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(qMh, q, newCount, heads, headDim);
         q.Dispose();
 
         // Write new K, V into the cache slots [posStart..posStart+newCount).
         Tensor kMhNew = new(mhNew, DType.F32);
         Tensor vMhNew = new(mhNew, DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(kMhNew, k, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);
-        WhisperOps.ReshapeToMultiHead4D(vMhNew, v, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(kMhNew, k, newCount, heads, headDim);
+        backend.Permute0213(vMhNew, v, newCount, heads, headDim);
         k.Dispose(); v.Dispose();
-        AppendToKvCache(selfK, kMhNew, posStart, _cfg.NumHeads, _cfg.MaxTextPositions, _cfg.HeadDim, newCount);
-        AppendToKvCache(selfV, vMhNew, posStart, _cfg.NumHeads, _cfg.MaxTextPositions, _cfg.HeadDim, newCount);
+        backend.KvCacheAppend(selfK, kMhNew, posStart);
+        backend.KvCacheAppend(selfV, vMhNew, posStart);
         kMhNew.Dispose(); vMhNew.Dispose();
 
-        // Build a view of the cache covering [0..totalPos).
-        Tensor kCached = SliceKvPrefix(selfK, _cfg.NumHeads, totalPos, _cfg.MaxTextPositions, _cfg.HeadDim);
-        Tensor vCached = SliceKvPrefix(selfV, _cfg.NumHeads, totalPos, _cfg.MaxTextPositions, _cfg.HeadDim);
+        // Contiguous [1, H, totalPos, D] copies of the valid prefix: attention reads exactly the keys and values it
+        // always did, through the same kernel.
+        Tensor kCached = new(new TensorShape(1, heads, totalPos, headDim), DType.F32);
+        Tensor vCached = new(new TensorShape(1, heads, totalPos, headDim), DType.F32);
+        backend.SliceTimeRange(kCached, selfK, 0, totalPos);
+        backend.SliceTimeRange(vCached, selfV, 0, totalPos);
 
-        // Causal mask for the new positions: each new position s attends to cached
-        // positions [0..posStart+s]. Mask shape: [1, 1, newCount, totalPos].
-        Tensor causalMask = BuildIncrementalCausalMask(posStart, newCount, totalPos);
-
-        float scale = 1f / MathF.Sqrt(_cfg.HeadDim);
+        float scale = 1f / MathF.Sqrt(headDim);
         Tensor attnOut = new(mhNew, DType.F32);
         backend.ScaledDotProductAttention(attnOut, qMh, kCached, vCached, causalMask, scale);
-        qMh.Dispose(); kCached.Dispose(); vCached.Dispose(); causalMask.Dispose();
+        qMh.Dispose(); kCached.Dispose(); vCached.Dispose();
 
         Tensor merged = new(inShape, DType.F32);
-        WhisperOps.ReshapeFromMultiHead4D(merged, attnOut, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(merged, attnOut, heads, newCount, headDim);
         attnOut.Dispose();
         Tensor selfProj = WhisperOps.ProjectLinear(backend, merged, _selfOutW!, _selfOutB, 1, newCount, d, d);
         merged.Dispose();
@@ -365,14 +404,14 @@ internal sealed unsafe class WhisperDecoderLayer
         Tensor crossQ = WhisperOps.ProjectLinear(backend, normed2, _crossQW!, _crossQB, 1, newCount, d, d);
         normed2.Dispose();
         Tensor crossQMh = new(mhNew, DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(crossQMh, crossQ, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(crossQMh, crossQ, newCount, heads, headDim);
         crossQ.Dispose();
 
         Tensor crossAttn = new(mhNew, DType.F32);
         backend.ScaledDotProductAttention(crossAttn, crossQMh, crossK, crossV, mask: null, scale);
         crossQMh.Dispose();
         Tensor crossMerged = new(inShape, DType.F32);
-        WhisperOps.ReshapeFromMultiHead4D(crossMerged, crossAttn, 1, newCount, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(crossMerged, crossAttn, heads, newCount, headDim);
         crossAttn.Dispose();
         Tensor crossProj = WhisperOps.ProjectLinear(backend, crossMerged, _crossOutW!, _crossOutB, 1, newCount, d, d);
         crossMerged.Dispose();
@@ -396,42 +435,8 @@ internal sealed unsafe class WhisperDecoderLayer
         return res3;
     }
 
-    /// <summary>Writes <paramref name="src"/> ([1, H, newCount, D]) into <paramref name="cache"/> ([1, H, MaxPos, D]) starting at position <paramref name="posStart"/>.</summary>
-    private static void AppendToKvCache(Tensor cache, Tensor src, int posStart, int heads, int maxPos, int headDim, int newCount)
-    {
-        float* cPtr = (float*)cache.DataPointer;
-        float* sPtr = (float*)src.DataPointer;
-        for (int h = 0; h < heads; h++)
-            for (int s = 0; s < newCount; s++)
-            {
-                int sOff = (h * newCount + s) * headDim;
-                int cOff = (h * maxPos + posStart + s) * headDim;
-                for (int d = 0; d < headDim; d++) cPtr[cOff + d] = sPtr[sOff + d];
-            }
-    }
-
-    /// <summary>Returns a fresh [1, H, totalPos, D] tensor copied out of the MaxPos-allocated cache; materialized rather than viewed because SDPA expects a contiguous [S_kv, D] inner block per head and the cache is over-allocated.</summary>
-    private static Tensor SliceKvPrefix(Tensor cache, int heads, int totalPos, int maxPos, int headDim)
-    {
-        Tensor sliced = new(new TensorShape(1, heads, totalPos, headDim), DType.F32);
-        float* cPtr = (float*)cache.DataPointer;
-        float* sPtr = (float*)sliced.DataPointer;
-        for (int h = 0; h < heads; h++)
-        {
-            int cBase = h * maxPos * headDim;
-            int sBase = h * totalPos * headDim;
-            for (int p = 0; p < totalPos; p++)
-            {
-                int cOff = cBase + p * headDim;
-                int sOff = sBase + p * headDim;
-                for (int d = 0; d < headDim; d++) sPtr[sOff + d] = cPtr[cOff + d];
-            }
-        }
-        return sliced;
-    }
-
     /// <summary>Builds the mask for new-token self-attention, shape [1, 1, newCount, totalPos]: position s in the new chunk (= absolute position posStart+s) can see cache positions [0..posStart+s], everything beyond is -inf.</summary>
-    private static Tensor BuildIncrementalCausalMask(int posStart, int newCount, int totalPos)
+    internal static Tensor BuildIncrementalCausalMask(int posStart, int newCount, int totalPos)
     {
         Tensor mask = new(new TensorShape(1, 1, newCount, totalPos), DType.F32);
         float* p = (float*)mask.DataPointer;

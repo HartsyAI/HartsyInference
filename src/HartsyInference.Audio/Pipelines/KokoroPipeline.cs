@@ -1,5 +1,6 @@
 using System.IO;
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Audio.Models.Kokoro;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
@@ -244,7 +245,7 @@ public sealed class KokoroPipeline : IDisposable
     private float[] SynthesizeCore(IBackend backend, int[] tokenIds, Tensor sDec, Tensor sPred, float speed)
     {
         EnsureWeightsResident(backend);
-        KokoroStageTimer? timer = KokoroStageTimer.Start(backend);
+        StageTimer? timer = StageTimer.Start(backend, "Kokoro");
         // The two style halves feed every AdaIN in the graph; resident for the call, they cost one upload
         // instead of one per consumer. Released before the caller disposes them.
         Tensor[] styles = [sDec, sPred];

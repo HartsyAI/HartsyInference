@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -45,6 +46,14 @@ public sealed unsafe class WhisperEncoder : IDisposable
     private Tensor? _finalLnWeight;
     private Tensor? _finalLnBias;
 
+    // Everything a device op reads, kept resident across forwards. The position table is read through a row view
+    // (see PositionRows), which auto-promotes and demotes with the view's own lifetime.
+    private Tensor[] _deviceWeights = [];
+    private int _streamWarned;
+
+    // One forward at a time, like the pipeline that owns this encoder: a call at another length replaces the view.
+    private Tensor? _positionRows;
+
     private bool _weightsLoaded;
     private int _disposed;
 
@@ -79,11 +88,20 @@ public sealed unsafe class WhisperEncoder : IDisposable
 
         _finalLnWeight = WhisperOps.EnsureF32(weights[$"{prefix}.layer_norm.weight"]);
         _finalLnBias = WhisperOps.EnsureF32(weights[$"{prefix}.layer_norm.bias"]);
+
+        List<Tensor> device = [_conv1Weight, _conv1Bias, _conv2Weight, _conv2Bias];
+        foreach (WhisperEncoderLayer layer in _layers) device.AddRange(layer.EnumerateWeights());
+        device.Add(_finalLnWeight);
+        device.Add(_finalLnBias);
+        _deviceWeights = [.. device];
         _weightsLoaded = true;
     }
 
     /// <summary>Forward pass: <c>mel [B, n_mels, n_frames]</c> → <c>features [B, n_frames/2, d_model]</c>; <paramref name="mel"/> typically has <c>n_frames = 3000</c> (Whisper's 30-second chunk) but the encoder runs on any frame count for ablations / unit tests.</summary>
-    public Tensor Forward(IBackend backend, Tensor mel)
+    public Tensor Forward(IBackend backend, Tensor mel) => Forward(backend, mel, timer: null);
+
+    /// <summary><see cref="Forward(IBackend, Tensor)"/> with the stem and each layer attributed to <paramref name="timer"/>.</summary>
+    internal Tensor Forward(IBackend backend, Tensor mel, StageTimer? timer)
     {
         ThrowIfDisposed();
         if (!_weightsLoaded) throw new InvalidOperationException("Call LoadWeights before Forward.");
@@ -95,10 +113,15 @@ public sealed unsafe class WhisperEncoder : IDisposable
         int nFrames = (int)mel.Shape[2];
         int d = _cfg.HiddenSize;
 
+        // Idempotent, so an eviction since the last forward is simply undone; the biases and norms are below the
+        // auto-promotion floor and would otherwise upload on every op.
+        WhisperOps.PreloadOrStream(backend, _deviceWeights, "encoder", ref _streamWarned);
+
         // Stage 1: Conv1 (stride=1, pad=1) + GELU. Treat 1-D conv as Conv2D with H=1.
         Tensor mel4d = mel.Reshape(new TensorShape(batch, _cfg.NumMelBins, 1, nFrames));
         Tensor conv1Out = new(new TensorShape(batch, d, 1, nFrames), DType.F32);
         backend.Conv2D(conv1Out, mel4d, _conv1Weight!, _conv1Bias, strideH: 1, strideW: 1, padH: 0, padW: 1);
+        mel4d.Dispose();
         Tensor gelu1 = new(conv1Out.Shape, DType.F32);
         backend.Gelu(gelu1, conv1Out);
         conv1Out.Dispose();
@@ -112,24 +135,24 @@ public sealed unsafe class WhisperEncoder : IDisposable
         backend.Gelu(gelu2, conv2Out);
         conv2Out.Dispose();
 
-        // Stage 3: drop H=1 axis and transpose [B, d, T] → [B, T, d].
-        Tensor squeezed = gelu2.Reshape(new TensorShape(batch, d, nFrames2));
+        // Stage 3: transpose [B, d, 1, T] → [B, T, d]. Transpose2D reads the flat buffer with explicit dims, so the
+        // H=1 axis needs no Reshape view — which would read the device-resident activation back to the host.
         Tensor transposed = new(new TensorShape(batch, nFrames2, d), DType.F32);
-        backend.Transpose2D(transposed, squeezed, d, nFrames2);
+        backend.Transpose2D(transposed, gelu2, d, nFrames2);
         gelu2.Dispose();
-        // squeezed shares memory with gelu2 (Reshape returns a view) — already freed via gelu2.Dispose.
 
         // Stage 4: add sinusoidal positional embedding [n_frames2, d], broadcast over batch.
         // The HF checkpoint stores 1500 positions; we slice the leading nFrames2 rows.
-        AddSinusoidalPosBroadcast(transposed, _embedPositions!, batch, nFrames2, d);
+        Tensor hidden = AddPositions(backend, transposed, batch, nFrames2, d);
+        timer?.Accumulate("enc.stem");
 
         // Stage 5: N residual attention blocks.
-        Tensor hidden = transposed;
         for (int i = 0; i < _layers.Length; i++)
         {
             Tensor next = _layers[i].Forward(backend, hidden);
             hidden.Dispose();
             hidden = next;
+            timer?.Accumulate("enc.layer");
         }
 
         // Stage 6: final layer norm.
@@ -137,6 +160,39 @@ public sealed unsafe class WhisperEncoder : IDisposable
         backend.LayerNorm(normed, hidden, _finalLnWeight!, _finalLnBias!, _cfg.LayerNormEps);
         hidden.Dispose();
         return normed;
+    }
+
+    /// <summary>Adds positions <c>[0, seqLen)</c> of the sinusoidal table to <paramref name="x"/>, disposing it and
+    /// returning the sum: one backend add at batch 1 (every Whisper decode), the host loop for larger batches.</summary>
+    private Tensor AddPositions(IBackend backend, Tensor x, int batch, int seqLen, int d)
+    {
+        if (batch != 1)
+        {
+            AddSinusoidalPosBroadcast(x, _embedPositions!, batch, seqLen, d);
+            return x;
+        }
+        Tensor sum = new(x.Shape, DType.F32);
+        backend.Add(sum, x, PositionRows(seqLen));
+        x.Dispose();
+        return sum;
+    }
+
+    /// <summary>A view of the table's leading <paramref name="seqLen"/> rows, kept so its device copy is reused by
+    /// every forward at that length (1499 for a 30 s window); a different length replaces it.</summary>
+    private Tensor PositionRows(int seqLen)
+    {
+        if (_positionRows is not null && _positionRows.Shape[0] == seqLen)
+        {
+            return _positionRows;
+        }
+        if ((long)seqLen > _embedPositions!.Shape[0])
+        {
+            throw new ArgumentException(
+                $"The encoder has {_embedPositions.Shape[0]} positions; {seqLen} frames after the conv stem need more.");
+        }
+        _positionRows?.Dispose();
+        _positionRows = _embedPositions.SliceRows(0, seqLen);
+        return _positionRows;
     }
 
     private static void AddSinusoidalPosBroadcast(Tensor target, Tensor pos, int batch, int seqLen, int hiddenSize)
@@ -177,6 +233,8 @@ public sealed unsafe class WhisperEncoder : IDisposable
         {
             // Cast-allocated tensors (when source was non-F32) are owned by EnsureF32's caller.
             // Pass-through F32 tensors are owned by the safetensors loader. We don't double-dispose.
+            // The row view borrows the table's bytes; disposing it only drops its device copy.
+            _positionRows?.Dispose();
         }
     }
 }
@@ -243,13 +301,14 @@ internal sealed unsafe class WhisperEncoderLayer
         Tensor v = WhisperOps.ProjectLinear(backend, normed, _vWeight!, _vBias, batch, seqLen, d, d);
         normed.Dispose();
 
+        // Head split and merge are backend permutes: the projections and the attention stay on the device.
         TensorShape mh = new(batch, _cfg.NumHeads, seqLen, _cfg.HeadDim);
         Tensor qMh = new(mh, DType.F32);
         Tensor kMh = new(mh, DType.F32);
         Tensor vMh = new(mh, DType.F32);
-        WhisperOps.ReshapeToMultiHead4D(qMh, q, batch, seqLen, _cfg.NumHeads, _cfg.HeadDim);
-        WhisperOps.ReshapeToMultiHead4D(kMh, k, batch, seqLen, _cfg.NumHeads, _cfg.HeadDim);
-        WhisperOps.ReshapeToMultiHead4D(vMh, v, batch, seqLen, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(qMh, q, seqLen, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(kMh, k, seqLen, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(vMh, v, seqLen, _cfg.NumHeads, _cfg.HeadDim);
         q.Dispose(); k.Dispose(); v.Dispose();
 
         float scale = 1f / MathF.Sqrt(_cfg.HeadDim);
@@ -258,7 +317,7 @@ internal sealed unsafe class WhisperEncoderLayer
         qMh.Dispose(); kMh.Dispose(); vMh.Dispose();
 
         Tensor merged = new(shape, DType.F32);
-        WhisperOps.ReshapeFromMultiHead4D(merged, attnOut, batch, seqLen, _cfg.NumHeads, _cfg.HeadDim);
+        backend.Permute0213(merged, attnOut, _cfg.NumHeads, seqLen, _cfg.HeadDim);
         attnOut.Dispose();
 
         Tensor projected = WhisperOps.ProjectLinear(backend, merged, _outWeight!, _outBias, batch, seqLen, d, d);

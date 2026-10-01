@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Diagnostics;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
@@ -124,10 +125,22 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     public string TranscribeAudio(IBackend backend, float[] audio, int sampleRate, WhisperOptions? options = null)
     {
         ThrowIfDisposed();
-        WhisperOptions opts = options ?? new WhisperOptions();
-        (float[,] mel, double _) = PrepareMel(audio, sampleRate);
-        return TranscribeFromMel(backend, mel, opts);
+        return _tokenizer.Decode(TranscribeTokenIds(backend, audio, sampleRate, options ?? new WhisperOptions()).ToArray());
     }
+
+    /// <summary>The ids <see cref="TranscribeAudio"/> decodes (timestamp tokens included when
+    /// <see cref="WhisperOptions.WithTimestamps"/> is set), for token-level comparisons across builds.</summary>
+    internal List<int> TranscribeTokenIds(IBackend backend, float[] audio, int sampleRate, WhisperOptions options)
+    {
+        ThrowIfDisposed();
+        StageTimer? timer = StageTimer.Start(backend, "Whisper");
+        (Tensor mel, double _) = PrepareMel(audio, sampleRate);
+        timer?.Mark("mel");
+        return DecodeTokens(backend, mel, options, timer);
+    }
+
+    /// <summary>The text <see cref="TranscribeAudio"/> returns for <paramref name="ids"/>.</summary>
+    internal string DecodeText(List<int> ids) => _tokenizer.Decode(ids.ToArray());
 
     /// <summary>Transcribes with Whisper's native <c>&lt;|t|&gt;</c> timestamp tokens enabled and returns the decoded
     /// spans. <b>Segment granularity, not word granularity</b> — see <see cref="WhisperSegment"/>. Like
@@ -138,8 +151,10 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     {
         ThrowIfDisposed();
         WhisperOptions opts = options ?? new WhisperOptions();
-        (float[,] mel, double seconds) = PrepareMel(audio, sampleRate);
-        return SegmentFromMel(backend, mel, seconds, opts);
+        StageTimer? timer = StageTimer.Start(backend, "Whisper");
+        (Tensor mel, double seconds) = PrepareMel(audio, sampleRate);
+        timer?.Mark("mel");
+        return ParseSegments(DecodeTokens(backend, mel, opts with { WithTimestamps = true }, timer), seconds);
     }
 
     /// <summary>Timestamped decode from a pre-computed mel; <paramref name="audioSeconds"/> only closes a span the
@@ -147,12 +162,14 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     public IReadOnlyList<WhisperSegment> SegmentFromMel(IBackend backend, float[,] mel, double audioSeconds, WhisperOptions options)
     {
         ThrowIfDisposed();
-        List<int> tokens = DecodeTokens(backend, mel, options with { WithTimestamps = true });
+        List<int> tokens = DecodeTokens(backend, MelToTensor(mel), options with { WithTimestamps = true }, StageTimer.Start(backend, "Whisper"));
         return ParseSegments(tokens, audioSeconds);
     }
 
-    /// <summary>Resamples to 16 kHz, zero-pads/clips to the 30 s chunk, and returns the mel plus the pre-pad duration.</summary>
-    private (float[,] Mel, double Seconds) PrepareMel(float[] audio, int sampleRate)
+    /// <summary>Resamples to 16 kHz, zero-pads/clips to the 30 s chunk, and returns the <c>[1, n_mels, n_frames]</c>
+    /// mel (owned by the caller) plus the pre-pad duration. The padding is never materialized: frames that lie wholly
+    /// in it are a constant the extractor fills without transforming.</summary>
+    private (Tensor Mel, double Seconds) PrepareMel(float[] audio, int sampleRate)
     {
         float[] mono16k = audio;
         if (sampleRate != 16_000)
@@ -163,10 +180,19 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
 
         // Zero-pad / clip to exactly 30 s (480 000 samples).
         const int n30s = 30 * 16_000;
-        float[] padded = new float[n30s];
         int copyLen = Math.Min(mono16k.Length, n30s);
-        Array.Copy(mono16k, padded, copyLen);
-        return (_melExtractor.Compute(padded), copyLen / 16_000.0);
+        int frames = _melExtractor.OutputFrames(n30s);
+        Tensor mel = new(new TensorShape(1, _cfg.NumMelBins, frames), DType.F32);
+        try
+        {
+            _melExtractor.ComputeZeroPadded(mono16k.AsSpan(0, copyLen), n30s, mel.AsSpan<float>());
+        }
+        catch
+        {
+            mel.Dispose();
+            throw;
+        }
+        return (mel, copyLen / 16_000.0);
     }
 
     /// <summary>Lower-level entry point that takes a pre-computed mel spectrogram of
@@ -175,31 +201,30 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     public string TranscribeFromMel(IBackend backend, float[,] mel, WhisperOptions options)
     {
         ThrowIfDisposed();
-        return _tokenizer.Decode(DecodeTokens(backend, mel, options).ToArray());
+        return _tokenizer.Decode(DecodeTokens(backend, MelToTensor(mel), options, StageTimer.Start(backend, "Whisper")).ToArray());
     }
 
-    /// <summary>Encoder forward + greedy decode, returning the raw generated ids (timestamp tokens included when
-    /// <see cref="WhisperOptions.WithTimestamps"/> is set).</summary>
-    private List<int> DecodeTokens(IBackend backend, float[,] mel, WhisperOptions options)
+    /// <summary>Encoder forward + greedy decode over a <c>[1, n_mels, n_frames]</c> mel it takes ownership of, returning
+    /// the raw generated ids (timestamp tokens included when <see cref="WhisperOptions.WithTimestamps"/> is set).</summary>
+    private List<int> DecodeTokens(IBackend backend, Tensor mel, WhisperOptions options, StageTimer? timer)
     {
-        int nMels = mel.GetLength(0);
-        int nFrames = mel.GetLength(1);
-        if (nMels != _cfg.NumMelBins)
-            throw new ArgumentException($"mel has {nMels} bins but model expects {_cfg.NumMelBins}");
-
-        // Wrap the 2-D mel into a [1, n_mels, n_frames] Tensor.
-        Tensor melTensor = MelToTensor(mel, nMels, nFrames);
+        int nFrames = (int)mel.Shape[2];
         Tensor encoded;
         try
         {
-            encoded = _encoder.Forward(backend, melTensor);
+            encoded = _encoder.Forward(backend, mel, timer);
         }
-        finally { melTensor.Dispose(); }
+        finally { mel.Dispose(); }
+        timer?.Mark("encoder");
 
         try
         {
             using WhisperDecoder.DecodeState state = _decoder.StartDecode(backend, encoded);
-            return GreedyDecode(backend, state, options);
+            timer?.Mark("crossKv");
+            state.Timer = timer;
+            List<int> tokens = GreedyDecode(backend, state, options, timer);
+            timer?.Report($"frames={nFrames} tokens={tokens.Count}");
+            return tokens;
         }
         finally { encoded.Dispose(); }
     }
@@ -244,7 +269,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         }
     }
 
-    private List<int> GreedyDecode(IBackend backend, WhisperDecoder.DecodeState state, WhisperOptions opts)
+    private List<int> GreedyDecode(IBackend backend, WhisperDecoder.DecodeState state, WhisperOptions opts, StageTimer? timer)
     {
         // Prompt: [SOT, <|lang|>, transcribe|translate, <|notimestamps|>?] — or [SOT, <|notimestamps|>?] English-only.
         int[] prompt = _tokenizer.BuildPromptIds(opts.Language, opts.Translate, opts.WithTimestamps);
@@ -252,8 +277,10 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
         // Run the prompt through the decoder in a single pass — the logits at the last
         // prompt position are the distribution we sample our first text token from.
         Tensor logits = _decoder.DecodeStep(backend, prompt, state);
-        int nextToken = ArgMaxIgnoringSpecial(logits, _tokenizer);
+        int nextToken = ArgMaxIgnoringSpecial(logits, _tokenizer, timer);
         logits.Dispose();
+        timer?.Accumulate("step.argmax");
+        timer?.Mark("prompt");
 
         List<int> generated = new(opts.MaxNewTokens);
         int[] singleBuf = new int[1];
@@ -265,9 +292,11 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             // Feed only the new token forward; the cache holds everything prior.
             singleBuf[0] = nextToken;
             Tensor stepLogits = _decoder.DecodeStep(backend, singleBuf, state);
-            nextToken = ArgMaxIgnoringSpecial(stepLogits, _tokenizer);
+            nextToken = ArgMaxIgnoringSpecial(stepLogits, _tokenizer, timer);
             stepLogits.Dispose();
+            timer?.Accumulate("step.argmax");
         }
+        timer?.Mark($"decode[{generated.Count} steps]");
 
         return generated;
     }
@@ -279,7 +308,7 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
     /// list (~99 entries including punctuation heuristics) lands with temperature
     /// fallback later. Ids come from the tokenizer, not the config — only it knows
     /// whether this checkpoint uses the v3 (100-language) or the English-only layout.</summary>
-    private static unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperTokenizer tokenizer)
+    private static unsafe int ArgMaxIgnoringSpecial(Tensor logits, WhisperTokenizer tokenizer, StageTimer? timer)
     {
         int vocab = (int)logits.Shape[logits.Shape.Rank - 1];
         float* p = (float*)logits.DataPointer;
@@ -297,11 +326,25 @@ public sealed class WhisperPipeline : IAudioPipeline, IDisposable
             float val = p[v];
             if (val > bestV) { bestV = val; best = v; }
         }
+        if (timer is not null)
+        {
+            float second = float.NegativeInfinity;
+            for (int v = 0; v < vocab; v++)
+            {
+                if (v != best && p[v] > second) second = p[v];
+            }
+            timer.NoteMinimum("top1-top2 logit margin", bestV - second);
+        }
         return best;
     }
 
-    private static unsafe Tensor MelToTensor(float[,] mel, int nMels, int nFrames)
+    /// <summary>Wraps a caller's 2-D <c>[n_mels, n_frames]</c> mel into the <c>[1, n_mels, n_frames]</c> tensor the encoder takes.</summary>
+    private unsafe Tensor MelToTensor(float[,] mel)
     {
+        int nMels = mel.GetLength(0);
+        int nFrames = mel.GetLength(1);
+        if (nMels != _cfg.NumMelBins)
+            throw new ArgumentException($"mel has {nMels} bins but model expects {_cfg.NumMelBins}");
         TensorShape shape = new(1, nMels, nFrames);
         Tensor t = new(shape, DType.F32);
         float* dst = (float*)t.DataPointer;
