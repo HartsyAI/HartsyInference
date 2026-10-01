@@ -16,7 +16,8 @@ namespace HartsyInference.Audio.Tests;
 /// log-spectral correlation and max-abs between the conv engine chosen per length bucket (on) and per exact length (off),
 /// and both against the no-TF32 arm (f32) when there is one; then Whisper small.en on the CPU for every arm, with
 /// content-word recall against the text and whether the transcripts match, and each arm's first and repeat synthesis
-/// time (the repeat is the steady state, every plan cached). Where on and off differ beyond rounding
+/// time (the repeat is the steady state, every plan cached). Each arm's repeat against its first synthesis is the
+/// model's own run-to-run noise floor, which on against off is judged against. Where on and off differ beyond rounding
 /// (log-spectral correlation under 0.999) it says what moved: the lag that best aligns them, where the difference energy
 /// sits, and when the two waveforms first part. Opt-in with <c>HARTSY_TTS_SPOT_COMPARE=1</c>; the table goes to the test
 /// log and, with <c>HARTSY_TTS_SPOT_REPORT</c>, to that file.</summary>
@@ -55,9 +56,9 @@ public sealed class TtsConvBucketSpotCheckCompareTests
         StringBuilder table = new StringBuilder();
         table.AppendLine("### cuDNN conv length buckets — spot check, on (per bucket) against off (per length) and f32 (no TF32)");
         table.AppendLine();
-        table.AppendLine("| Model | # | samples off / on | first ms off / on | repeat ms off / on | on vs off | off vs f32 | on vs f32 "
-            + "| recall off / on (f32) | transcripts | what moved |");
-        table.AppendLine("|---|---:|---|---|---|---|---|---|---|---|---|");
+        table.AppendLine("| Model | # | samples off / on | first ms off / on | repeat ms off / on | on vs off "
+            + "| noise floor: repeat vs first, off / on | off vs f32 | on vs f32 | recall off / on (f32) | transcripts | what moved |");
+        table.AppendLine("|---|---:|---|---|---|---|---|---|---|---|---|---|");
         foreach (string dir in Directory.GetDirectories(root).OrderBy(d => d, StringComparer.Ordinal))
         {
             string model = Path.GetFileName(dir);
@@ -87,6 +88,7 @@ public sealed class TtsConvBucketSpotCheckCompareTests
                 string moved = !double.IsNaN(logSpec) && logSpec < 0.999 ? WhatMoved(off, on, rate) : "—";
                 table.AppendLine($"| {model} | {index} | {off.Length} / {on.Length} | {offRow.FirstMs:F1} / {onRow.FirstMs:F1} "
                     + $"| {offRow.RepeatMs:F1} / {onRow.RepeatMs:F1} | {Versus(off, on)} "
+                    + $"| {Floor(dir, "off", index, off)} / {Floor(dir, "on", index, on)} "
                     + $"| {(f32 is null ? "—" : Versus(f32, off))} | {(f32 is null ? "—" : Versus(f32, on))} | {recall} "
                     + $"| {(sameWords ? "same" : $"off '{AudioParityMetrics.Cell(heardOff)}' / on '{AudioParityMetrics.Cell(heardOn)}'")} "
                     + $"| {moved} |");
@@ -99,6 +101,13 @@ public sealed class TtsConvBucketSpotCheckCompareTests
         {
             File.WriteAllText(report, rendered);
         }
+    }
+
+    /// <summary>An arm's repeat against its first synthesis (<see cref="Versus"/>), or "—" when no repeat was saved.</summary>
+    private static string Floor(string dir, string arm, int index, float[] first)
+    {
+        string path = Path.Combine(dir, $"{arm}_{index:D2}r.f32");
+        return File.Exists(path) ? Versus(first, MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(path)).ToArray()) : "—";
     }
 
     /// <summary>Byte identity, else log-spectral correlation and max-abs (or the length change).</summary>
@@ -182,7 +191,8 @@ public sealed class TtsConvBucketSpotCheckCompareTests
         return File.Exists(path) ? MemoryMarshal.Cast<byte, float>(File.ReadAllBytes(path)).ToArray() : null;
     }
 
-    /// <summary>One arm's sentence from <c>arms.csv</c>: arm,index,rate,samples,first ms,repeat ms,plans,bucket,refs,"text".</summary>
+    /// <summary>One arm's sentence from <c>arms.csv</c>: arm,index,rate,samples,first ms,repeat ms,[repeat same|differs,]
+    /// plans,bucket,refs,"text" (the repeat column arrived later; rows without it still parse).</summary>
     private sealed record ArmRow(int Rate, double FirstMs, double RepeatMs, string Text);
 
     private static Dictionary<(string Arm, int Index), ArmRow> ReadArms(string csv)
@@ -194,13 +204,15 @@ public sealed class TtsConvBucketSpotCheckCompareTests
         }
         foreach (string line in File.ReadAllLines(csv))
         {
-            string[] f = line.Split(',', 10);
-            if (f.Length < 10)
+            int quote = line.IndexOf('"', StringComparison.Ordinal);
+            string[] f = (quote < 0 ? line : line[..quote]).Split(',', StringSplitOptions.RemoveEmptyEntries);
+            if (quote < 0 || f.Length < 9)
             {
                 continue;
             }
             result[(f[0], int.Parse(f[1], CultureInfo.InvariantCulture))] = new ArmRow(int.Parse(f[2], CultureInfo.InvariantCulture),
-                double.Parse(f[4], CultureInfo.InvariantCulture), double.Parse(f[5], CultureInfo.InvariantCulture), f[9].Trim('"'));
+                double.Parse(f[4], CultureInfo.InvariantCulture), double.Parse(f[5], CultureInfo.InvariantCulture),
+                line[quote..].Trim('"'));
         }
         return result;
     }

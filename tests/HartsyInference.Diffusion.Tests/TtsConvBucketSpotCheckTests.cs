@@ -18,7 +18,9 @@ namespace HartsyInference.Diffusion.Tests;
 /// heuristic), or with no TF32 anywhere (<c>f32</c>: direct F32 conv kernels, full-precision GEMMs; an exact-math reference
 /// for models whose output does not go through sampling). Same text, seed and reference audio in every arm, so the arms
 /// differ only in conv numerics. Each sentence is synthesized twice: the first time pays the per-length setup, the
-/// second is the steady state with every plan cached, and must give the same bytes. Opt-in with <c>HARTSY_TTS_SPOT=1</c>.
+/// second is the steady state with every plan cached. The repeat is saved too (<c>&lt;arm&gt;_&lt;nn&gt;r.f32</c>): a model
+/// that is not run-to-run deterministic on the GPU (CosyVoice 2's flow) shows its own noise floor there, which is what an
+/// on-against-off difference is judged against. Opt-in with <c>HARTSY_TTS_SPOT=1</c>.
 ///
 /// <para><c>HARTSY_TTS_SPOT_MODEL</c> is a speech catalog id (<c>piper</c>, <c>cosyvoice</c>, <c>kyutaitts</c>,
 /// <c>csm</c>, <c>orpheus</c>, <c>dia</c>), <c>HARTSY_TTS_SPOT_VARIANT</c> an optional variant,
@@ -107,13 +109,15 @@ public sealed class TtsConvBucketSpotCheckTests
                 long again = Stopwatch.GetTimestamp();
                 float[] repeat = runner.Synthesize(backend, Job(texts[i], reference));
                 double repeatMs = Stopwatch.GetElapsedTime(again).TotalMilliseconds;
-                Assert.True(repeat.AsSpan().SequenceEqual(wave), $"{model} {arm} sentence {i + 1}: a repeat gave different audio");
+                bool repeatIdentical = repeat.AsSpan().SequenceEqual(wave);
                 string name = $"{arm}_{i + 1:D2}";
+                File.WriteAllBytes(Path.Combine(outDir, name + "r.f32"), MemoryMarshal.AsBytes<float>(repeat).ToArray());
                 File.WriteAllBytes(Path.Combine(outDir, name + ".f32"), MemoryMarshal.AsBytes<float>(wave).ToArray());
                 WavFile.WriteMono16(Path.Combine(outDir, name + ".wav"), wave, runner.SampleRate);
                 string line = string.Join(',', arm, (i + 1).ToString(CultureInfo.InvariantCulture),
                     runner.SampleRate.ToString(CultureInfo.InvariantCulture), wave.Length.ToString(CultureInfo.InvariantCulture),
                     ms.ToString("F1", CultureInfo.InvariantCulture), repeatMs.ToString("F1", CultureInfo.InvariantCulture),
+                    repeatIdentical ? "same" : "differs",
                     (after.PlanBuilds - before.PlanBuilds).ToString(CultureInfo.InvariantCulture),
                     (after.BucketPlanBuilds - before.BucketPlanBuilds).ToString(CultureInfo.InvariantCulture),
                     (after.ReferenceBuilds - before.ReferenceBuilds).ToString(CultureInfo.InvariantCulture),
