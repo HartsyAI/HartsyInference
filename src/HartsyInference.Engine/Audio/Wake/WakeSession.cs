@@ -108,6 +108,17 @@ public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline,
     /// <summary>Frame codec for this connection, replaced when the device reconnects.</summary>
     public WakeFrameCodec? Codec { get; set; }
 
+    /// <summary>The host claim currently in effect, or null when the service's own scoring, capture and
+    /// transcription own this device — the default, and the only state before any claim exists.
+    ///
+    /// <para>A plain field, not a property, so <see cref="WakeService.Claim"/>/<see cref="WakeService.Release"/>
+    /// and the disconnect path in <see cref="WakeListener"/> can swap it through <see cref="Interlocked"/>:
+    /// those run on whatever thread the host or the socket loop is on, while the wake worker reads it once per
+    /// drain on its own thread, so this needs the same lock-free cross-thread handoff
+    /// <see cref="LastSpeechTicks"/> already uses, not a lock the worker would have to take every iteration.
+    /// </para></summary>
+    public WakeDeviceClaim? Claim;
+
     public WakeSessionState State { get; set; } = WakeSessionState.Handshake;
 
     /// <summary>When the current connection last produced any traffic; drives the liveness timeout.</summary>

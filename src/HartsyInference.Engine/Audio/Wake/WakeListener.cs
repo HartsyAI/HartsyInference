@@ -174,6 +174,11 @@ public sealed class WakeListener : IDisposable
             {
                 session.Codec = null;
                 session.State = WakeSessionState.Handshake;
+                // Unconditional, not CAS-matched against a specific claim: whatever is here is now stale
+                // regardless of which claim it is, because the connection it was reading just ended. A host
+                // that already released before the disconnect sees this as a harmless null-to-null exchange.
+                WakeDeviceClaim? claim = Interlocked.Exchange(ref session.Claim, null);
+                claim?.OnDisconnected?.Invoke();
             }
         }
     }

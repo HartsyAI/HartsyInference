@@ -291,6 +291,50 @@ public sealed class WakeService : IDisposable
     /// new to see, and above ~100 ms the poll itself would show up in the latency it is measuring.</summary>
     private const int PollIntervalMs = 50;
 
+    /// <summary>Claims a connected device's turns: while held, its decoded inbound audio goes to
+    /// <paramref name="onFrame"/> instead of this service's own wake scoring, end-of-speech capture and
+    /// transcription, which are suspended for it — see <see cref="WakeDeviceClaim"/>'s own remarks for exactly
+    /// what does and does not change. Typically called from a <see cref="Detected"/> handler, once the host has
+    /// decided to run this device's next turn itself.</summary>
+    /// <param name="deviceId">The satellite to claim.</param>
+    /// <param name="onFrame">See <see cref="WakeDeviceClaim.OnFrame"/>.</param>
+    /// <param name="onDisconnected">See <see cref="WakeDeviceClaim.OnDisconnected"/>.</param>
+    /// <returns>A claim to pass back to <see cref="Release"/> when done, or null when the device has no live
+    /// connection to claim.</returns>
+    /// <exception cref="InvalidOperationException">The device is already claimed.</exception>
+    public WakeDeviceClaim? Claim(string deviceId, WakeInboundFrameHandler onFrame, Action? onDisconnected = null)
+    {
+        ArgumentNullException.ThrowIfNull(onFrame);
+        if (string.IsNullOrEmpty(deviceId) || !_sessions.TryGetValue(deviceId, out WakeSession? session) || session.Codec is null)
+        {
+            return null;
+        }
+        WakeDeviceClaim claim = new(onFrame, onDisconnected);
+        if (Interlocked.CompareExchange(ref session.Claim, claim, null) is not null)
+        {
+            throw new InvalidOperationException($"Device '{deviceId}' is already claimed.");
+        }
+        return claim;
+    }
+
+    /// <summary>Releases <paramref name="claim"/>, returning the device to this service's own wake scoring and
+    /// capture/transcription. A no-op if <paramref name="claim"/> is no longer the device's current claim —
+    /// already released, superseded, or cleared by a disconnect, all of which are safe to release again.</summary>
+    public void Release(string deviceId, WakeDeviceClaim claim)
+    {
+        ArgumentNullException.ThrowIfNull(claim);
+        if (!_sessions.TryGetValue(deviceId, out WakeSession? session))
+        {
+            return;
+        }
+        if (Interlocked.CompareExchange(ref session.Claim, null, claim) == claim)
+        {
+            // A reset, not a resume: the pipeline and VAD saw none of the audio while claimed, and feeding them
+            // a splice across that gap is exactly what a sequence gap or a reconnect already resets for.
+            session.RequestReset = true;
+        }
+    }
+
     /// <summary>Runs the satellite protocol over a caller-supplied stream, joining the same session machinery the
     /// TCP listener uses.
     ///
