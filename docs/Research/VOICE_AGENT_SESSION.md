@@ -14,11 +14,16 @@ Telephony tools (hang up, DTMF, transfer) are registered by the host; the sessio
 `VoiceModelSet.WarmAsync` prepares every model before the first call:
 
 - It synthesizes five texts, each as its own GPU job: "Okay.", a 3-word, a 6-word, a 13-word and a 30-word sentence.
-  They are one per power-of-two bucket of Kokoro's 25 ms alignment frames, from 32 to 512, estimated at about 15
-  frames a word.
-- Kokoro builds its convolution plans per length, or per length bucket once the engine buckets them. The first
-  sentence of a call therefore finds its bucket already built; the 256 bucket holds the 15-word sentences.
+- On the RTX 3060 these gave 58, 70, 81, 195 and 407 of Kokoro's 25 ms alignment frames. That is the power-of-two
+  buckets 64, 128, 128, 256 and 512, every bucket a sentence reaches:
+  - even "Okay." carries about a second of edge audio, so nothing reaches the 32 bucket;
+  - `MaxSentenceChars` keeps a sentence within the 512 bucket.
+- Kokoro chooses its convolution plans per length bucket (alpha.232), so the first sentence of a call finds its bucket
+  already built. The 256 bucket holds the 15-word sentences.
 - It recognizes a second of silence on the GPU thread, and generates one token on the language model's device.
+- It logs one `[Voice] Warm-up` line with each job's time and each synthesis's audio length. On the 3060 the
+  syntheses took 595.2 / 122.7 / 94.9 / 229.0 / 363.3 ms. The first carries Kokoro's one-time first-call cost. The
+  recognition took 287.7 ms.
 
 ## Threads and locks
 
@@ -152,21 +157,23 @@ to the reader's discard). The gateway's stages (`voice.rtp.*`) are measured by t
 | Whisper tiny through the session, CPU | JFK | content-word recall 100 %; narrowband (16k→8k→16k, gateway resamplers) 91 %; narrowband through RNNoise 91 % |
 
 On the RTX 3060 (`CUDA_VISIBLE_DEVICES=1`, after a 10-minute Swarm quiet window, under the bench lock),
-`VoiceSessionEndToEndTests` gave the rows below. The language model is scripted: the LLM stages are not measured here.
-At that point every GPU job also trimmed the device's memory pool, through the parameterless `FreeActivations`. Since
-then each job keeps the pool and only the turn trims it, so the next GPU run should show faster Whisper and Kokoro
-calls than these.
+`VoiceSessionEndToEndTests` gave the rows below. That build had Kokoro's length-bucketed convolution plans
+(alpha.232), the bucket warm-up, and per-job frees that keep the memory pool. The language model is scripted, so the
+LLM stages are not measured here.
 
 | Stage | Budget | Result |
 |---|---|---|
-| Whisper small.en per utterance (`voice.stt.ms`) | ≤ 350 ms | 110 / 88 / 167 ms for JFK's three utterances (1.9 / 1.2 / 5.7 s) |
-| Kokoro af_heart, 15-word sentence on the GPU thread | ≤ 250 ms | median 187 ms over five runs (254 ms the first time that text was synthesized, then 150-191 ms) |
-| Kokoro first sentence of a turn (`voice.tts.first_chunk_ms`) | ≤ 250 ms | **Over budget:** 261 ms for an 18-word sentence synthesized for the first time; 131 ms, then 53 ms, for "Okay.". The first synthesis of a new text runs 60-80 ms slower than repeats; open with the Kokoro bring-up |
+| Whisper small.en per utterance (`voice.stt.ms`) | ≤ 350 ms | 139 / 89 / 156 ms for JFK's three utterances (1.9 / 1.2 / 5.7 s) |
+| Kokoro af_heart, 15-word sentence on the GPU thread | ≤ 250 ms | median 195 ms over five runs (198 ms the first time that text was synthesized, then 156-228 ms) |
+| Kokoro first sentence of a turn (`voice.tts.first_chunk_ms`) | ≤ 250 ms | 241 ms for an 18-word sentence synthesized for the first time; 78 ms, then 58 ms, for "Okay." |
 | Endpoint hangover (`voice.endpoint.ms`) | 700 ms (tune 500-800) | 736 ms: 700 ms of silence, the 30 ms pad and 32 ms Silero windows |
-| Resample and queue (`voice.transport.ms`) | ≤ 50 ms | 14 / 0.4 / 2.0 ms |
-| Turn total, end of speech to first reply audio queued (`voice.turn.total_ms`) | ≤ 1.3 s, stretch 1.0 s | turn 1: 1191 ms = endpoint 736 + STT 110 + scripted LLM 27 + Kokoro 261 + transport 14, plus 43 ms of turn overhead; 1164 ms without the LLM, which leaves 136 ms for a real model's first sentence within 1.3 s. The endpoint hangover dominates; tuning it within 500-800 ms is a product decision, and the default stays 700 ms. Turns 2 and 3 (8064 and 9571 ms) waited behind the reply before them, because the test pushes the whole clip at once |
-| Front-end per 20 ms frame during the call, Silero only (`voice.frontend.ms`) | ≤ 2 ms | p99 bucket ≤ 2 ms in every turn; max 1.9 / 21.7 / 2.4 ms. The test pushes the whole clip at once, so the audio thread works through turn 2's frames while turn 1's recognition and synthesis run; the serial gate is the CPU row above |
+| Resample and queue (`voice.transport.ms`) | ≤ 50 ms | 9.7 / 0.5 / 0.2 ms |
+| Turn total, end of speech to first reply audio queued (`voice.turn.total_ms`) | ≤ 1.3 s, stretch 1.0 s | turn 1: 1195 ms = endpoint 736 + STT 139 + scripted LLM 17 + Kokoro 241 + transport 10, plus 52 ms of turn overhead; 1179 ms without the LLM, which leaves 121 ms for a real model's first sentence within 1.3 s. The endpoint hangover dominates; tuning it within 500-800 ms is a product decision, and the default stays 700 ms. Turns 2 and 3 (8047 and 9626 ms) waited behind the reply before them, because the test pushes the whole clip at once |
+| Front-end per 20 ms frame during the call, Silero only (`voice.frontend.ms`) | ≤ 2 ms | p99 bucket ≤ 2 ms in every turn; max 1.5 / 1.2 / 0.8 ms. The test pushes the whole clip at once, so the audio thread works through later turns' frames while earlier turns' recognition and synthesis run; the serial gate is the CPU row above |
 | Whisper-verify, both directions | ≥ 80 % | caller (JFK) 11/11 content words; reply 8/9 ("tomorrow" heard as "row") |
+
+The run before (pool trimmed after every job, plans chosen per exact length) put a turn's first sentence at 261 ms,
+over the 250 ms budget, and the 15-word median at 187 ms with its first synthesis at 254 ms.
 
 The other two classes ran on the build before the rebase onto the Whisper and Kokoro speed-ups. `BargeInEndToEndTests`:
 the reader read no reply audio after the barge-in decision (0.0 ms) and applied the flush 4.1 ms after it (gate 100

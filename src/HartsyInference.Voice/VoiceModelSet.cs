@@ -172,10 +172,15 @@ public sealed class VoiceModelSet : IAsyncDisposable
     /// <summary>The language model's spec for <paramref name="options"/>.</summary>
     internal static ModelSpec ResolveLlm(VoiceAgentOptions options) => ModelResolver.Resolve(options.LlmModel, null, Modality.Text);
 
-    /// <summary>What the warm-up synthesizes: one text per power-of-two bucket of Kokoro's 25 ms alignment frames, from
-    /// 32 to 512 (estimated at about 15 frames a word: roughly 30, 50, 90, 195 and 450). Kokoro chooses its convolution
-    /// plans per length, or per length bucket once the engine buckets them, so the first sentence a caller hears finds
-    /// its bucket's plans already built. The 256 bucket holds the 15-word sentences.</summary>
+    /// <summary>What the warm-up synthesizes: texts of 1, 3, 6, 13 and 30 words. On the RTX 3060 they gave 1.45, 1.75,
+    /// 2.03, 4.88 and 10.18 s of audio, so 58, 70, 81, 195 and 407 of Kokoro's 25 ms alignment frames. Those fall in
+    /// the power-of-two buckets 64, 128, 128, 256 and 512, which are all the buckets a sentence reaches:
+    /// <list type="bullet">
+    /// <item>even "Okay." carries about a second of edge audio, so nothing lands in the 32 bucket;</item>
+    /// <item><see cref="VoiceAgentOptions.MaxSentenceChars"/> keeps a sentence within the 512 bucket.</item>
+    /// </list>
+    /// Kokoro chooses its convolution plans per length bucket, so the first sentence a caller hears finds its bucket's
+    /// plans already built. The 256 bucket holds the 15-word sentences.</summary>
     internal static IReadOnlyList<string> WarmTexts { get; } =
     [
         "Okay.",
