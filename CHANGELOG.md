@@ -8,26 +8,28 @@ stable release will require. Dates are UTC.
 
 ## alpha.229
 
-- **The voice front end is 3.3× faster at p50 and allocation-free, and still misses its 2 ms budget on this box.**
-  Silero VAD plus RNNoise per 20 ms frame on one pinned core (`VoiceFrontendBenchTests`, three runs with no other
-  test running): p50 1.55–1.56 ms, p99 3.81–3.93 ms, max 4.6–5.6 ms. In alpha.226 it was p50 5.1 ms, p99 7.0 ms and max
+- **The voice front end is about 3× faster at p50 and allocation-free, and still misses its 2 ms budget on this
+  box.** Silero VAD plus RNNoise per 20 ms frame, on one pinned core with frames back to back
+  (`VoiceFrontendBenchTests`): p50 1.57–1.70 ms, p99 3.72–3.92 ms, max 4.3–4.6 ms. These are three runs on the final
+  head, each with no foreign build or test before or after. In alpha.226 it was p50 5.1 ms, p99 7.0 ms and max
   10.9 ms; the voice plan allows 2 ms. The thread's own CPU time matches wall time within 0.01 ms, so the slow frames
-  are not preemption. They arrive in bursts that do not follow the audio, which points at cache and memory contention
-  from other work on the shared machine. Allocation fell from 102 KB per frame to none, and no GC ran while timed.
-  Most of what remains is RNNoise's six F32 GRU products per 10 ms (1152×384 each), about 0.7 ms of every 20 ms and
-  bound by memory bandwidth. F16 weights would halve that and int8 would quarter it; that is a precision decision,
-  and it is left open here.
-- **What the budget meets off the quiet bench: weight traffic decides it.** Measured 2026-10-01 on the i7-6900K
-  (20 MB L3), pinned to CPU 0.
-  - **At the live 20 ms cadence with no extra load**, p50 is 2.64 ms and p99 4.75 ms, so p50 misses too. Between
-    frames, other work on the box evicts weights that the back-to-back bench re-reads every 1.6 ms and keeps hot.
-  - **With 4 or 8 threads streaming over large buffers on other cores**, p50 is 12.2 / 18.7 ms and p99 29.2 / 32.5 ms.
+  are not preemption. Allocation fell from 102 KB per frame to none, and no GC ran while timed. Most of what remains
+  is RNNoise's six F32 GRU products per 10 ms (1152×384 each), which are bound by memory bandwidth. F16 weights would
+  halve that and int8 would quarter it; that is a precision decision, and it is left open here.
+- **Off the quiet bench, weight traffic decides the budget.** Measured 2026-10-01 on the i7-6900K (20 MB L3), pinned
+  to CPU 0, with no foreign build or test before or after any run.
+  - **At the live 20 ms cadence with no extra load**, p50 is 2.61 ms and p99 4.50 ms, so p50 misses too. Between
+    frames, other work on the box evicts the weights that the back-to-back bench keeps hot by re-reading them every
+    1.6 ms.
+  - **With 4 or 8 threads streaming over large buffers on other cores**, p50 is 10.7 / 16.4 ms and p99 18.6 / 28.2 ms.
     That load saturates this box's DRAM at 19–21 GB/s. The thread's CPU time rises with its wall time, so these are
     memory stalls, and the clock stayed at 3.5 GHz.
-  - **The same 8 cores kept busy on L1-resident buffers change nothing**: p50 1.54 ms.
+  - **At the live cadence against 8 streaming threads**, 632 of 2,000 frames started late, so the front end barely
+    keeps up with real time.
+  - **The same 8 load threads on L1-resident buffers change nothing**: p50 1.54 ms.
   - **Under load, each stage's time is its weight bytes over the bench thread's share of DRAM bandwidth.** That share
-    is about 1.9 GB/s against 4 threads and 1.2–1.3 GB/s against 8. RNNoise reads its 11.5 MB of F32 weights twice per
-    frame, and Silero reads its 1.2 MB once.
+    is about 2.2 GB/s against 4 threads and 1.4 GB/s against 8, and RNNoise and Silero agree on it within 3 %.
+    RNNoise reads its 11.5 MB of F32 weights twice per frame; Silero reads its 1.2 MB once.
   - By that arithmetic, F16 or int8 GRU weights shrink the stall in proportion, but neither gets under 2 ms against
     saturating load unless the weights also stay in L3.
 - `FftPlan` (Audio, `Preprocessing`): a planned mixed-radix complex FFT ported from the kiss_fft RNNoise vendors —
