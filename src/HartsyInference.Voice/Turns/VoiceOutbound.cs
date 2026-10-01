@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HartsyInference.Core.Runtime;
 
 namespace HartsyInference.Voice.Turns;
@@ -13,7 +14,8 @@ namespace HartsyInference.Voice.Turns;
 /// on a waiter that carries what it waits for; the reader completes it once, on the read that reaches it, not on every
 /// read. The reader never blocks and never allocates: the waiter's only continuation is the producer's own, so
 /// completing it queues that continuation and nothing else, and cancellation completes the waiter from the token's
-/// side.</remarks>
+/// side. The allocation a wait does need (its waiter, its registration and, once it suspends, the async state
+/// machine) is the producer's, on the turn loop. There is one producer, so at most one wait is ever armed.</remarks>
 internal sealed class VoiceOutbound
 {
     private readonly SpscRing<float> _ring;
@@ -163,7 +165,8 @@ internal sealed class VoiceOutbound
             cancel.ThrowIfCancellationRequested();
             Waiter waiter = new(condition, target);
             // Exchange is a full fence: the re-check below cannot be ordered before the waiter is visible to the reader.
-            Interlocked.Exchange(ref _waiter, waiter);
+            Waiter? armed = Interlocked.Exchange(ref _waiter, waiter);
+            Debug.Assert(armed is null, "A second producer wait overlapped the first; the queue has a single producer.");
             if (Satisfied(condition, target))
             {
                 Interlocked.CompareExchange(ref _waiter, null, waiter);
