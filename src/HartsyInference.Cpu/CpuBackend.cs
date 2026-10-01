@@ -56,6 +56,21 @@ public sealed partial class CpuBackend : IBackend
     }
 
     /// <inheritdoc />
+    public void QuantizeActivationsU8(Tensor output, Tensor input)
+    {
+        ThrowIfDisposed();
+        Int8GemvKernels.QuantizeActivations(output, input);
+    }
+
+    /// <inheritdoc />
+    public void LinearI8U8(Tensor output, Tensor input, Tensor weight, Tensor scale, Tensor? bias, Tensor? diag = null,
+        Tensor? diagInput = null)
+    {
+        ThrowIfDisposed();
+        Int8GemvKernels.Linear(output, input, weight, scale, bias, diag, diagInput);
+    }
+
+    /// <inheritdoc />
     public void Conv2D(Tensor output, Tensor input, Tensor weight, Tensor? bias, int strideH, int strideW, int padH, int padW)
     {
         ThrowIfDisposed();
