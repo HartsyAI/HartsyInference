@@ -351,6 +351,24 @@ tail_both() {
     while kill -0 "$host_pid" 2>/dev/null && kill -0 "$gw_pid" 2>/dev/null; do
         sleep 1
     done
+    # host_pid/gw_pid are this shell's own direct children (the `(exec dotnet ...) &` subshell IS dotnet, exec
+    # replaces it), so wait can reap each one's real exit code -- including after --stop from another shell,
+    # which sends SIGTERM directly to these pids: the .NET apps catch it and exit 0, same as a graceful stop
+    # here. A crash (an unhandled exception, an OOM kill) exits non-zero or dies by an untrapped signal, and a
+    # wrapper around this script (CI, a runbook one-liner) needs to be able to tell the difference.
+    local host_rc=0 gw_rc=0
+    if ! kill -0 "$host_pid" 2>/dev/null; then
+        wait "$host_pid" 2>/dev/null
+        host_rc=$?
+    fi
+    if ! kill -0 "$gw_pid" 2>/dev/null; then
+        wait "$gw_pid" 2>/dev/null
+        gw_rc=$?
+    fi
+    if ((host_rc != 0 || gw_rc != 0)); then
+        say "a process exited with a non-zero code (host=$host_rc, gateway=$gw_rc), not a clean stop; stopping the other."
+        return 1
+    fi
     say "a process exited on its own; stopping the other."
 }
 
@@ -375,6 +393,9 @@ main() {
         say "stopped (if it was running)"
         exit 0
     fi
+
+    command -v openssl >/dev/null || die "openssl not found; needed to generate secrets"
+    command -v python3 >/dev/null || die "python3 not found; needed to render voice.json/phone.json"
 
     if is_running "$host_pidfile" "HartsyInference.VoiceHost.dll" || is_running "$gw_pidfile" "HartsyInference.PhoneGateway.dll"; then
         die "already running; stop it first: $0 --stop"
@@ -401,8 +422,10 @@ main() {
     note_fifo
     start_gateway
     dial_target
-    tail_both
+    local tail_rc=0
+    tail_both || tail_rc=$?
     stop_all
+    exit "$tail_rc"
 }
 
 main "$@"

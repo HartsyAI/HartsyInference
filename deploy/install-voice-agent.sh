@@ -110,7 +110,9 @@ drop_file() {
 # real root to actually run (dry run only describes it).
 publish_as_user() {
     [[ -n ${SUDO_USER:-} ]] || die "no \$SUDO_USER; run via sudo as your login user, not logged in as root: sudo bash $0 --apply"
-    command -v dotnet >/dev/null || die "dotnet not found on PATH"
+    command -v dotnet >/dev/null || die "dotnet not found on PATH (sudo's secure_path can hide a user-local" \
+        "~/.dotnet install that \$SUDO_USER's own shell finds fine; publish yourself with" \
+        "run-voice-agent-dev.sh and pass its output to --publish-dir instead)"
     local tmp
     tmp=$(sudo -u "$SUDO_USER" mktemp -d)
     # A failed publish below exits under set -e before the final line runs, so apply()'s own cleanup
@@ -374,7 +376,7 @@ apply() {
     local server_src="$repo_root/deploy/systemd/$server_unit"
     [[ -f $voice_host_src && -f $gateway_src && -f $server_src ]] || die "deploy/systemd unit sources are missing; run from a checkout of the repository"
 
-    local src_dir host_tree_changed=0 gateway_tree_changed=0
+    local src_dir host_tree_changed=0 gateway_tree_changed=0 own_src_dir=0
     if [[ -n $publish_dir ]]; then
         verify_publish_dir "$publish_dir"
         src_dir=$publish_dir
@@ -383,24 +385,33 @@ apply() {
         src_dir=""
     else
         src_dir=$(publish_as_user)
+        own_src_dir=1
     fi
 
+    refuse_symlink "$opt_dir"
     run install -d -o root -g root -m 0755 -- "$opt_dir"
     if [[ -n $src_dir ]]; then
+        # Covers put_tree() dying partway (refuse_symlink, for one) between here and our own rm -rf below, which
+        # publish_as_user()'s own ERR trap (already cleared by the time we get here) does not: that one only
+        # covers a failed publish itself, not what happens to its output afterward.
+        ((own_src_dir)) && trap 'rm -rf -- "$src_dir"' ERR
         put_tree "$src_dir/$voice_host_app" "$opt_dir/$voice_host_app"
         host_tree_changed=$wrote
         put_tree "$src_dir/$phone_gateway_app" "$opt_dir/$phone_gateway_app"
         gateway_tree_changed=$wrote
-        if [[ -z $publish_dir && -n $src_dir ]]; then
+        if ((own_src_dir)); then
+            trap - ERR
             rm -rf -- "$src_dir"
         fi
     fi
 
+    refuse_symlink "$secrets_dir"
     run install -d -o root -g root -m 0700 -- "$secrets_dir"
     put_secret phone-link-token
     put_secret phone-admin-token
     put_secret sip-password
 
+    refuse_symlink "$etc_dir"
     run install -d -o root -g root -m 0755 -- "$etc_dir"
     render_voice_json
     render_phone_json
@@ -487,6 +498,7 @@ main() {
     dry_run=$explicit_dry
     command -v systemctl >/dev/null || die "systemctl not found; this installs systemd units"
     command -v openssl >/dev/null || die "openssl not found; needed to generate secrets"
+    command -v python3 >/dev/null || die "python3 not found; needed to render voice.json/phone.json"
     if ((!dry_run && EUID != 0)); then
         die "--$action changes system settings and must run as root: sudo bash $self --$action"
     fi
