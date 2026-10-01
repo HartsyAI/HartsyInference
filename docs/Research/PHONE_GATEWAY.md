@@ -240,7 +240,8 @@ the optional SwarmUI drop-in are in [deploy](../../deploy/README.md).
 - `RuntimeDirectory=hartsyinference` belongs to the **host** unit only. systemd removes a runtime directory when the
   unit that declares it stops, so declaring it here too would delete the host's socket whenever the gateway stopped.
 - Development without systemd: `/etc/security/limits.d/hartsy-rt.conf` with `<user> - rtprio 50` and a new
-  login session; `ulimit -r` must show 50.
+  login session; `ulimit -r` must show 50. `sudo deploy/install-host-tuning.sh --apply` installs it for `hartsy`, with
+  the CPU governor unit ([host tuning](../../deploy/README.md#host-tuning)).
 
 ## Voice host side of the link
 

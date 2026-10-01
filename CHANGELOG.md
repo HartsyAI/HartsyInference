@@ -43,6 +43,13 @@ stable release will require. Dates are UTC.
   `LimitRTPRIO=50`, `Nice=-10`, `AllowedCPUs=7,15`, a 64 MB gen0 budget, three credentials, no service-wide FIFO);
   `AllowedCPUs=0-6,8-14` on the API unit, whose start-limit settings now sit in `[Unit]`, where systemd reads them.
   Runbook: `docs/Checklists/VOICE_AGENT_VERIFICATION.md`.
+- **Host tuning:** `deploy/install-host-tuning.sh` installs two things. One is `hartsyinference-cpu-performance.service`,
+  a oneshot unit that sets every CPU's frequency governor to `performance` at boot through sysfs. The other is
+  `/etc/security/limits.d/hartsy-rt.conf` (`hartsy - rtprio 50`, for runs without systemd). The script is a dry run by
+  default, with `--apply`, `--revert` (back to `schedutil`) and `--dry-run --revert`. It is idempotent, needs root only
+  to change anything, and refuses to write through a symlink. These are optimizations: under `schedutil`, the idle
+  gaps between turns cost Kokoro about 33 ms per sentence and the paced front end about 0.7 ms per frame, but every
+  gate passes either way.
 - Tests (`tests/HartsyInference.VoiceHost.Tests`): 83 unit tests against a fake gateway on a temporary socket with
   scripted sessions (handshake refusals, call lifecycle and faults, PCM16 scale and sequence checks, flush and stale-turn
   rules, tool round trips and timeouts, hangup after the goodbye's last frame, its cap and a barge-in on the goodbye,

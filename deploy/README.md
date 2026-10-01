@@ -64,6 +64,9 @@ the API server get `AllowedCPUs=0-6,8-14`, and the host caps the engine's kernel
       `sudo cp deploy/systemd/hartsyinference-{voice-host,phone-gateway,server}.service /etc/systemd/system/`.
 - [ ] `sudo systemctl daemon-reload && sudo systemctl enable --now hartsyinference-voice-host hartsyinference-phone-gateway`
       (and `sudo systemctl restart hartsyinference-server` if it runs, for its new `AllowedCPUs=`).
+- [ ] [Host tuning](#host-tuning): preview with `deploy/install-host-tuning.sh`, then
+      `sudo deploy/install-host-tuning.sh --apply`; `cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort |
+      uniq -c` shows `16 performance`.
 - [ ] Run the checks in the [runbook](../docs/Checklists/VOICE_AGENT_VERIFICATION.md), starting with the journal line
       `RTP tick thread running under SCHED_FIFO 50` on the first call.
 
@@ -71,7 +74,8 @@ The units were checked with `systemd-analyze verify` (no root needed):
 
 ```bash
 systemd-analyze verify deploy/systemd/hartsyinference-voice-host.service \
-  deploy/systemd/hartsyinference-phone-gateway.service deploy/systemd/hartsyinference-server.service
+  deploy/systemd/hartsyinference-phone-gateway.service deploy/systemd/hartsyinference-server.service \
+  deploy/systemd/hartsyinference-cpu-performance.service
 ```
 
 Notes that matter:
@@ -81,6 +85,43 @@ Notes that matter:
 - Never `CPUSchedulingPolicy=fifo` on the gateway: only the tick thread asks for FIFO.
 - `DOTNET_GCgen0size=0x4000000` in the gateway unit is a .NET runtime setting (a 64 MB gen0 budget, logged at start as
   `gen0 budget=64 MB`), not one this repo reads.
+
+## Host tuning
+
+Two optimizations for this box, decided for the deployment and installed together by
+[install-host-tuning.sh](install-host-tuning.sh):
+
+- [hartsyinference-cpu-performance.service](systemd/hartsyinference-cpu-performance.service), a oneshot unit that sets
+  every CPU's frequency governor to `performance` at boot, through
+  `/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` (no packages).
+- [limits.d/hartsy-rt.conf](limits.d/hartsy-rt.conf), installed as `/etc/security/limits.d/hartsy-rt.conf`:
+  `hartsy - rtprio 50`, for runs without systemd (the gateway unit already has `LimitRTPRIO=50`). `hartsy` is the
+  units' `User=`; change both together.
+
+```bash
+deploy/install-host-tuning.sh                 # dry run: prints every file it would write and every change; no root
+sudo deploy/install-host-tuning.sh --apply    # install, enable and start; running it again changes nothing
+sudo deploy/install-host-tuning.sh --revert   # remove both, set every CPU back to schedutil
+```
+
+Why, from the voice bring-up's measurements:
+
+- Under `schedutil`, the 2-5 s idle gaps of a conversation let the cores clock down, and the next turn pays for it:
+  about 33 ms per Kokoro sentence (host-bound plan heuristics and DSP run on slowed cores) and about 0.7 ms per 20 ms
+  frame of the paced voice front end. `performance` holds the clock.
+- `rtprio 50` lets the gateway's RTP tick thread, and only that thread, run under `SCHED_FIFO` (pinned to CPUs 7 and 15
+  in production) when the gateway runs outside systemd.
+
+Both are optimizations: every gate was measured and passes under the stock `schedutil` governor, and nothing depends
+on them. `power-profiles-daemon` and `thermald` (enabled on this box) did not change the governor in this bring-up; the
+governor check in the [runbook](../docs/Checklists/VOICE_AGENT_VERIFICATION.md) shows it if anything does.
+
+Considered and not adopted:
+
+- L3 cache partitioning (Intel CAT through `resctrl`): it is system-wide, so it would squeeze SwarmUI too, and no gate
+  needs it.
+- C-state limits: a box-wide change to idle power and heat, and nothing depends on it.
+- GPU persistence mode: the RTX 3060 stayed in P2 across the idle gaps, so there was nothing for it to keep up.
 
 ## Optional: keep SwarmUI off the gateway's CPUs
 
@@ -99,7 +140,8 @@ Undo with `systemctl --user revert swarmui.service`.
 ## Development without systemd
 
 The tick thread needs an `rtprio` limit to use FIFO; without one it logs the fix once and spins the last 150 µs
-before each deadline instead. Grant it with `/etc/security/limits.d/hartsy-rt.conf`:
+before each deadline instead. Grant it with `/etc/security/limits.d/hartsy-rt.conf`, which
+`sudo deploy/install-host-tuning.sh --apply` installs ([Host tuning](#host-tuning)):
 
 ```
 hartsy - rtprio 50

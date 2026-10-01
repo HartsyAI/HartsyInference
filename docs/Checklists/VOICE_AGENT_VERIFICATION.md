@@ -25,7 +25,10 @@ each run's results in the table at the end.
 5. Units: copy `deploy/systemd/hartsyinference-voice-host.service` and `hartsyinference-phone-gateway.service` to
    `/etc/systemd/system/` (adjust `User=`, `WorkingDirectory=` and `ExecStart=` if the paths differ), then
    `sudo systemctl daemon-reload && sudo systemctl enable --now hartsyinference-voice-host hartsyinference-phone-gateway`.
-6. Optional, an operator decision: keep SwarmUI off CPUs 7 and 15 with the user-unit drop-in in
+6. Host tuning ([deploy](../../deploy/README.md#host-tuning)): preview with `deploy/install-host-tuning.sh`, then
+   `sudo deploy/install-host-tuning.sh --apply`. It installs the CPU governor unit (`performance` at boot) and the
+   rtprio limit for runs without systemd. Undo with `--revert`.
+7. Optional, an operator decision: keep SwarmUI off CPUs 7 and 15 with the user-unit drop-in in
    [deploy](../../deploy/README.md#optional-keep-swarmui-off-the-gateways-cpus).
 
 ## 2. Confirm the install
@@ -40,6 +43,8 @@ each run's results in the table at the end.
       warning). `ps -eLo pid,tid,cls,rtprio,psr,comm | grep phone-rtp-tick` shows class `FF`, rtprio 50, CPU 7.
 - [ ] `curl -s 127.0.0.1:9280/health` reports `"linkConnected": true`.
 - [ ] `taskset -cp $(systemctl show -p MainPID --value hartsyinference-voice-host)` lists `0-6,8-14`.
+- [ ] `cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | sort | uniq -c` shows `16 performance`, after a
+      reboot too, and `systemctl status hartsyinference-cpu-performance` is `active (exited)`.
 
 ## 3. LAN softphone call
 
@@ -83,7 +88,8 @@ Start a 2-minute call, then queue SwarmUI generations (the 4090 and the CPUs the
 
 ## Development without systemd
 
-`/etc/security/limits.d/hartsy-rt.conf` with `hartsy - rtprio 50`, then a new login session (`ulimit -r` prints 50);
+`/etc/security/limits.d/hartsy-rt.conf` with `hartsy - rtprio 50` (`sudo deploy/install-host-tuning.sh --apply`
+installs it), then a new login session (`ulimit -r` prints 50);
 run the host and the gateway by hand with `--config`, after `sudo install -d -o hartsy -m 0750 /run/hartsyinference`
 (or set both `socketPath`s to a directory you own).
 
