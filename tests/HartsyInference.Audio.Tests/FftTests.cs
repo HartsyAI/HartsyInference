@@ -75,10 +75,10 @@ public sealed class FftTests
     }
 
     [Fact]
-    public void Whisper_FftSize_512_RoundTripsConsistently()
+    public void FftSize_512_RoundTripsConsistently()
     {
-        // Whisper uses n_fft=400 zero-padded to 512. Sanity-check that the 512-point
-        // FFT we'll use in the mel pipeline produces consistent results across calls.
+        // The legacy Whisper layout (still the S3 tokenizer's) zero-pads n_fft=400 to 512. Sanity-check that
+        // the 512-point FFT produces consistent results across calls.
         int n = 512;
         Random rng = new(42);
         float[] x = new float[n];

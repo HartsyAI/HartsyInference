@@ -141,14 +141,13 @@ public sealed class SyntheticAudioRoundTripTests
     [Fact]
     public void MelSpectrogramExtractor_FrameCountIsConsistentWithStftMath()
     {
-        // For Whisper preset (n_fft=400, hop=160) and a 1-second 16 kHz clip = 16000 samples:
-        // expected frame count = ((16000 - 400) / 160) + 1 = 98, minus 1 if drop-last-frame.
+        // Whisper's centered STFT (n_fft=400, hop=160) over a 1-second 16 kHz clip = 16000 samples:
+        // 1 + 16000 / 160 = 101 frames, the last dropped — torch.stft's count, 10 ms per frame.
         int sr = 16_000;
         float[] sine = GenerateSine(sr, 440f, 1f);
         MelSpectrogramExtractor extractor = new(MelSpectrogramExtractor.WhisperConfig());
         int frames = extractor.OutputFrames(sine.Length);
-        // Whisper preset has drop-last-frame so we expect 97.
-        Assert.Equal(97, frames);
+        Assert.Equal(100, frames);
     }
 
     [Fact]
