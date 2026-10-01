@@ -47,6 +47,7 @@ public sealed partial class VoiceAgentSession
                 PrefixCacheKey = _prefixCacheKey,
                 PrefixCacheCapacityHint = PrefixCacheCapacityHint,
                 CacheWeightCasts = _options.CacheWeightCasts,
+                PreloadRedundantWeightSplits = _options.PreloadRedundantWeightSplits,
             };
             await _text.GenerateAsync(_llm, request, cancel).ConfigureAwait(false);
             // Reclaims this one-token request's own activation/workspace pool usage; the retained KV cache it
@@ -180,6 +181,7 @@ public sealed partial class VoiceAgentSession
         PrefixCacheKey = _prefixCacheKey,
         PrefixCacheCapacityHint = _prefixCacheKey is null ? null : PrefixCacheCapacityHint,
         CacheWeightCasts = _options.CacheWeightCasts,
+        PreloadRedundantWeightSplits = _options.PreloadRedundantWeightSplits,
     };
 
     private void AddUserTurn(int turnId, string text)

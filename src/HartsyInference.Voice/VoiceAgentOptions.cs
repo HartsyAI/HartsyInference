@@ -100,6 +100,15 @@ public sealed record VoiceAgentOptions
     /// whether a regression is residency-related.</summary>
     public bool CacheWeightCasts { get; init; }
 
+    /// <summary>Whether the language model's initial weight upload includes the load-time-fused Q/K/V and
+    /// gate/up projections' original split tensors alongside their fused replacements (see
+    /// <c>TextRequest.PreloadRedundantWeightSplits</c>). Default false: measured on Qwen3-4B-Q4_K_M/4090, the
+    /// split originals are ~1.21 GiB of pure duplicate upload that nothing on this single-sequence decode/prefill
+    /// path ever reads (only the batch scheduler's mixed-dtype split-projection path does, via its own lazy
+    /// auto-promotion, unaffected by this flag). True restores the engine's long-standing default (included) —
+    /// e.g. to isolate whether a regression is residency-related.</summary>
+    public bool PreloadRedundantWeightSplits { get; init; }
+
     /// <summary>Throws when a field is out of range or asks for something this version cannot do.</summary>
     public void Validate()
     {

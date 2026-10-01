@@ -389,7 +389,10 @@ public sealed class TextService : ITextService, IDisposable
         // Unconditional: PreloadWeights is a no-op on a backend with no device memory, and a backend that HAS
         // device memory wants its weights resident — gating on the class meant Vulkan re-uploaded every weight
         // over PCIe on every op.
-        backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights());
+        // includeRedundantSplits defaults true here (unlike LoadSharded below and PreloadDecodeWeights, which
+        // always pass false) to preserve this path's long-standing behavior for every existing caller; a request
+        // can opt out via PreloadRedundantWeightSplits — see its doc comment on TextRequest for the measured cost.
+        backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights(request.PreloadRedundantWeightSplits ?? true));
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
         slot.LoadedPath = path;
         LoadVisionInto(slot, path);

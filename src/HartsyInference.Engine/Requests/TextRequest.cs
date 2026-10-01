@@ -91,4 +91,17 @@ public sealed record TextRequest
     /// ~7.3 GB resident once warm; off costs a ~50 ms fixed dequant tax per prefill call (prompt-length
     /// independent — decode's quantized GEMV path is unaffected either way) but nothing else resident.</summary>
     public bool? CacheWeightCasts { get; init; }
+
+    /// <summary>Overrides whether a single-device load's initial weight upload includes the load-time-fused
+    /// Q/K/V and gate/up projections' ORIGINAL split tensors, on top of their fused replacements — see
+    /// <see cref="HartsyInference.LLM.Transformer.GenericTransformer.EnumerateWeights"/>'s <c>includeRedundantSplits</c>.
+    /// Null preserves the existing default (included, matching every other caller of this request type historically).
+    /// False excludes them: the fused tensors alone serve every <c>TextGenerationPipeline</c> single-sequence decode
+    /// and prefill path, so for that path the split originals are pure duplicate upload — only the batch scheduler's
+    /// mixed-dtype split-projection path reads them (via its own lazy auto-promotion on first use, unaffected by
+    /// this flag). Takes effect when the slot's backend is first created for this device, like
+    /// <see cref="CacheWeightCasts"/> — a later request on an already-loaded slot does not change it without a
+    /// reload. Measured on Qwen3-4B-Q4_K_M: the split originals are ~1.21 GiB of the ~3.53 GiB default single-device
+    /// upload (file is 2.33 GiB); only the sharded and tensor-parallel load paths already exclude them by default.</summary>
+    public bool? PreloadRedundantWeightSplits { get; init; }
 }
