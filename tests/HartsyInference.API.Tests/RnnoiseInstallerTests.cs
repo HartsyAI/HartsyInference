@@ -72,6 +72,82 @@ public sealed class RnnoiseInstallerTests(ITestOutputHelper log) : IDisposable
         }
     }
 
+    /// <summary>The wake stack scores on F32 by construction: with the int8 tables installed beside the weights for
+    /// the voice front end, it still loads F32 and builds F32 streams.</summary>
+    [Fact]
+    public void WakeStack_LoadsFloat_EvenWithTheInt8TablesInstalled()
+    {
+        Directory.CreateDirectory(Path.Combine(_root, "denoise"));
+        Save(RnnoiseInstaller.WeightsPath(_root), SyntheticFloatWeights());
+        Save(RnnoiseInstaller.Int8TablesPath(_root), SyntheticInt8Tables());
+        using (RnnoiseWeights int8 = RnnoiseWeights.LoadFile(RnnoiseInstaller.WeightsPath(_root), RnnoisePrecision.Int8))
+        {
+            Assert.Equal(RnnoisePrecision.Int8, int8.Precision);   // the tables are loadable, so the F32 below is a choice
+        }
+
+        using WakeModelSet models = new(_root);
+        Assert.True(models.LoadDenoiser());
+        Assert.Equal(RnnoisePrecision.Float, models.DenoisePrecision);
+    }
+
+    private static Dictionary<string, Tensor> SyntheticFloatWeights()
+    {
+        (string Name, long[] Shape)[] layout =
+        [
+            ("conv1.weight", [128, 65, 3]), ("conv1.bias", [128]), ("conv2.weight", [384, 128, 3]), ("conv2.bias", [384]),
+            ("dense_out.weight", [32, 1536]), ("dense_out.bias", [32]), ("vad_dense.weight", [1, 1536]),
+            ("vad_dense.bias", [1]),
+        ];
+        Dictionary<string, Tensor> tensors = new(StringComparer.Ordinal);
+        foreach ((string name, long[] shape) in layout) tensors[name] = Filled(new TensorShape(shape), 0.01f);
+        for (int layer = 1; layer <= 3; layer++)
+        {
+            foreach (string kind in new[] { "ih", "hh" })
+            {
+                tensors[$"gru{layer}.weight_{kind}_l0"] = Filled(new TensorShape(1152, 384), 0.01f);
+                tensors[$"gru{layer}.bias_{kind}_l0"] = Filled(new TensorShape(1152), 0.01f);
+            }
+        }
+        return tensors;
+    }
+
+    private static Dictionary<string, Tensor> SyntheticInt8Tables()
+    {
+        Dictionary<string, Tensor> tables = new(StringComparer.Ordinal);
+        foreach ((string name, int count) in RnnoiseInt8Tables.Arrays)
+        {
+            bool int8 = name.EndsWith("_weights_int8", StringComparison.Ordinal);
+            if (!int8)
+            {
+                tables[name] = Filled(new TensorShape(count), 1e-5f);
+                continue;
+            }
+            Tensor weights = new(new TensorShape(count), DType.I8);
+            weights.AsSpan<sbyte>().Fill(1);
+            tables[name] = weights;
+        }
+        return tables;
+    }
+
+    private static Tensor Filled(TensorShape shape, float value)
+    {
+        Tensor tensor = new(shape, DType.F32);
+        tensor.AsSpan<float>().Fill(value);
+        return tensor;
+    }
+
+    private static void Save(string path, Dictionary<string, Tensor> tensors)
+    {
+        try
+        {
+            SafeTensorsWriter.Save(path, tensors);
+        }
+        finally
+        {
+            foreach (Tensor tensor in tensors.Values) tensor.Dispose();
+        }
+    }
+
     private static void AssertSameTensors(string expectedPath, string actualPath)
     {
         using SafeTensorsLoader expected = new();

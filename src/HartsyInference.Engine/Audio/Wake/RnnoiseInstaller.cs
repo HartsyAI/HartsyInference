@@ -10,6 +10,10 @@ namespace HartsyInference.Engine.Audio.Wake;
 /// one upstream pins (its <c>model_version</c> file, which also names the tarball), and converts the checkpoint in C#
 /// through <see cref="RnnoiseCheckpoint"/>. Nothing is re-hosted, so media.xiph.org is the only source.</para>
 ///
+/// <para>At <see cref="RnnoisePrecision.Int8"/> it also writes the int8 tables of upstream's default C build
+/// (<see cref="RnnoiseInt8Tables"/>) from the same tarball, beside the F32 weights. Only the voice front end asks for
+/// them; the wake stack installs and loads F32.</para>
+///
 /// <para>This is an explicit install and always reaches the network. A caller fetching on its own initiative should
 /// check <c>paths.sideModelAutofetch</c> first.</para></summary>
 public static class RnnoiseInstaller
@@ -25,17 +29,27 @@ public static class RnnoiseInstaller
     /// <summary>The denoiser's path under a wake model root.</summary>
     public static string WeightsPath(string modelRoot) => Path.Combine(modelRoot, "denoise", "rnnoise.safetensors");
 
+    /// <summary>The int8 tables' path under a wake model root, beside <see cref="WeightsPath"/>, where
+    /// <see cref="RnnoiseWeights.LoadFile"/> looks for them.</summary>
+    public static string Int8TablesPath(string modelRoot) =>
+        Path.Combine(modelRoot, "denoise", RnnoiseInt8Tables.FileName);
+
     /// <summary>Downloads, verifies and converts the denoiser into <paramref name="modelRoot"/> unless it is already
-    /// installed, and returns its path. The tarball is deleted once converted. A file already at the path is taken
-    /// as installed without being read; delete it to force a reinstall.</summary>
-    public static async Task<string> EnsureAsync(string modelRoot, CancellationToken cancel)
+    /// installed, and returns the weights' path. <see cref="RnnoisePrecision.Int8"/> also needs
+    /// <see cref="Int8TablesPath"/>. The tarball is deleted once converted. Files already in place are taken as
+    /// installed without being read; delete them to force a reinstall.</summary>
+    public static async Task<string> EnsureAsync(string modelRoot, CancellationToken cancel,
+        RnnoisePrecision precision = RnnoisePrecision.Float)
     {
         ArgumentException.ThrowIfNullOrEmpty(modelRoot);
         string target = WeightsPath(modelRoot);
+        string tables = Int8TablesPath(modelRoot);
         await _gate.WaitAsync(cancel).ConfigureAwait(false);
         try
         {
-            if (File.Exists(target))
+            bool needWeights = !File.Exists(target);
+            bool needTables = precision == RnnoisePrecision.Int8 && !File.Exists(tables);
+            if (!needWeights && !needTables)
             {
                 return target;
             }
@@ -44,13 +58,15 @@ public static class RnnoiseInstaller
             {
                 Logs.Info($"[Audio][Wake] Downloading the RNNoise model from '{TarballUrl}' (one-time, ~59 MB)...");
                 await AudioFileFetcher.EnsureAsync(TarballUrl, tarball, TarballSha256, cancel).ConfigureAwait(false);
-                RnnoiseCheckpoint.ConvertTarball(tarball, target, Metadata());
+                if (needWeights) RnnoiseCheckpoint.ConvertTarball(tarball, target, Metadata());
+                if (needTables) RnnoiseInt8Tables.ConvertTarball(tarball, tables, Int8Metadata());
             }
             finally
             {
                 File.Delete(tarball);
             }
-            Logs.Info($"[Audio][Wake] RNNoise denoiser installed at '{target}'.");
+            Logs.Info($"[Audio][Wake] RNNoise denoiser installed at '{target}'"
+                + (needTables ? $", int8 tables at '{tables}'." : "."));
             return target;
         }
         finally
@@ -60,9 +76,11 @@ public static class RnnoiseInstaller
     }
 
     /// <summary>Installs from a copy of the tarball obtained elsewhere, for a machine without network access, and
-    /// returns the weights path. The copy must be the pinned release; an existing install is replaced.</summary>
+    /// returns the weights path. The copy must be the pinned release; an existing install is replaced, and
+    /// <see cref="RnnoisePrecision.Int8"/> writes the int8 tables too.</summary>
     /// <exception cref="InvalidDataException">The tarball's SHA-256 is not <see cref="TarballSha256"/>.</exception>
-    public static string InstallFromTarball(string tarballPath, string modelRoot)
+    public static string InstallFromTarball(string tarballPath, string modelRoot,
+        RnnoisePrecision precision = RnnoisePrecision.Float)
     {
         ArgumentException.ThrowIfNullOrEmpty(tarballPath);
         ArgumentException.ThrowIfNullOrEmpty(modelRoot);
@@ -81,6 +99,8 @@ public static class RnnoiseInstaller
         try
         {
             RnnoiseCheckpoint.ConvertTarball(tarballPath, target, Metadata());
+            if (precision == RnnoisePrecision.Int8)
+                RnnoiseInt8Tables.ConvertTarball(tarballPath, Int8TablesPath(modelRoot), Int8Metadata());
         }
         finally
         {
@@ -99,5 +119,16 @@ public static class RnnoiseInstaller
         ["hartsy.source_url"] = TarballUrl,
         ["hartsy.source_sha256"] = TarballSha256,
         ["hartsy.source_member"] = RnnoiseCheckpoint.CheckpointMember,
+    };
+
+    /// <summary>Provenance for the int8 tables' header: the same release, a different member.</summary>
+    private static Dictionary<string, string> Int8Metadata() => new(StringComparer.Ordinal)
+    {
+        ["hartsy.component"] = "denoiser-int8-tables",
+        ["hartsy.converter"] = "HartsyInference.RnnoiseInt8Tables",
+        ["hartsy.license"] = RnnoiseCheckpoint.License,
+        ["hartsy.source_url"] = TarballUrl,
+        ["hartsy.source_sha256"] = TarballSha256,
+        ["hartsy.source_member"] = RnnoiseInt8Tables.SourceMember,
     };
 }

@@ -138,6 +138,10 @@ public sealed class WakeModelSet : IDisposable
     /// <summary>Whether noise suppression is available, i.e. <see cref="LoadDenoiser"/> found weights.</summary>
     public bool DenoiseAvailable => _denoiseWeights?.IsLoaded == true;
 
+    /// <summary>The precision the denoiser loaded at, or null without one. Always F32: wake scoring never runs on the
+    /// int8 tables, even when they are installed beside the weights for the voice front end.</summary>
+    public RnnoisePrecision? DenoisePrecision => _denoiseWeights?.Precision;
+
     /// <summary>Loads the RNNoise weights from <c>{ModelRoot}/denoise</c>. Returns false and logs when they are
     /// absent — a missing optional model must not stop the listener from hearing anything, so the caller runs
     /// without suppression rather than failing to start. <see cref="RnnoiseInstaller"/> puts them there.</summary>
@@ -150,21 +154,14 @@ public sealed class WakeModelSet : IDisposable
                 + "Listening without it. Install it with RnnoiseInstaller, which fetches xiph's model and converts it.");
             return false;
         }
-        RnnoiseWeights weights = new();
         try
         {
-            using (SafeTensorsLoader loader = new())
-            {
-                loader.Load(path);
-                weights.Load(loader.GetAllTensors());
-            }
-            _denoiseWeights = weights;
+            _denoiseWeights = RnnoiseWeights.LoadFile(path, RnnoisePrecision.Float);
             Logs.Info($"[Audio][Wake] Noise suppression enabled (weights from '{path}').");
             return true;
         }
         catch (Exception ex)
         {
-            weights.Dispose();
             Logs.Error($"[Audio][Wake] Failed to load the denoiser from '{path}'; listening without it.", ex);
             return false;
         }

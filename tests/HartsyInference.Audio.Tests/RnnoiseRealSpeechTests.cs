@@ -15,26 +15,32 @@ namespace HartsyInference.Audio.Tests;
 /// noise goes down, the speech survives, and the stream's declared latency is where the output really lands.
 ///
 /// <para>jfk.wav (committed) with white noise mixed in at 5 dB SNR. Needs the converted weights, from
-/// <c>HARTSYINFERENCE_RNNOISE_WEIGHTS</c> or the wake model root under <c>HARTSYINFERENCE_MODELS_DIR</c>.</para></summary>
+/// <c>HARTSYINFERENCE_RNNOISE_WEIGHTS</c> or the wake model root under <c>HARTSYINFERENCE_MODELS_DIR</c>, and at
+/// <see cref="RnnoisePrecision.Int8"/> the int8 tables beside them (<see cref="Int8TablesPath"/>).</para></summary>
 public sealed class RnnoiseRealSpeechTests(ITestOutputHelper log)
 {
     private const int Rate = 16_000;
     private const int Chunk = 320;
     private const float Int16Scale = 32768f;
 
-    [Fact]
+    [Theory]
     [Trait("Category", "Integration")]
-    public void Stream16k_RemovesNoise_KeepsSpeech_AtTheDeclaredLatency()
+    [InlineData(RnnoisePrecision.Float)]
+    [InlineData(RnnoisePrecision.Int8)]
+    public void Stream16k_RemovesNoise_KeepsSpeech_AtTheDeclaredLatency(RnnoisePrecision precision)
     {
         string weightsPath = WeightsPath();
         string clipPath = Path.Combine(RepoRoot.Path, "tests", "python-reference", "silerovad_reference", "jfk.wav");
-        if (!RealWeightGate.Require(log.WriteLine, weightsPath, clipPath)) return;
+        string[] required = precision == RnnoisePrecision.Int8
+            ? [weightsPath, Int8TablesPath(), clipPath]
+            : [weightsPath, clipPath];
+        if (!RealWeightGate.Require(log.WriteLine, required)) return;
 
         float[] clean = WavFile.Read(clipPath).ToMono();
         for (int i = 0; i < clean.Length; i++) clean[i] *= Int16Scale;
         float[] noisy = AddWhiteNoise(clean, snrDb: 5, seed: 1234);
 
-        using RnnoiseWeights weights = LoadWeights(weightsPath);
+        using RnnoiseWeights weights = LoadWeights(weightsPath, precision);
         using CpuBackend backend = new();
         using RnnoiseStream stream = new(weights, Rate);
         int latency = stream.LatencySamples;
@@ -68,7 +74,7 @@ public sealed class RnnoiseRealSpeechTests(ITestOutputHelper log)
         }
         double snrIn = Db(signal / residualIn), snrOut = Db(signal / residualOut);
         double gapSuppression = Db(gapOut / gapIn), speechKept = Db(speechOut / speechClean);
-        log.WriteLine($"SNR {snrIn:F1} dB in, {snrOut:F1} dB out; gaps between words {gapSuppression:F1} dB; "
+        log.WriteLine($"{precision}: SNR {snrIn:F1} dB in, {snrOut:F1} dB out; gaps between words {gapSuppression:F1} dB; "
             + $"speech {speechKept:+0.0;-0.0} dB against the clean clip");
 
         Assert.True(snrOut > snrIn + 4, $"SNR only went from {snrIn:F1} dB to {snrOut:F1} dB");
@@ -78,7 +84,7 @@ public sealed class RnnoiseRealSpeechTests(ITestOutputHelper log)
 
     /// <summary>Pushes the clip through in 20 ms chunks, then enough silence to flush the stream's latency, and
     /// returns the output with the same indexing: sample <c>i + latency</c> is the denoised input sample <c>i</c>.</summary>
-    private static float[] Run(RnnoiseStream stream, CpuBackend backend, float[] input, int latency)
+    internal static float[] Run(RnnoiseStream stream, CpuBackend backend, float[] input, int latency)
     {
         int tail = latency + stream.FrameSize;
         float[] padded = new float[input.Length + tail + Chunk];
@@ -112,7 +118,7 @@ public sealed class RnnoiseRealSpeechTests(ITestOutputHelper log)
         return best;
     }
 
-    private static float[] AddWhiteNoise(float[] clean, double snrDb, int seed)
+    internal static float[] AddWhiteNoise(float[] clean, double snrDb, int seed)
     {
         Random rng = new(seed);
         double[] noise = new double[clean.Length];
@@ -130,16 +136,13 @@ public sealed class RnnoiseRealSpeechTests(ITestOutputHelper log)
         return noisy;
     }
 
-    internal static RnnoiseWeights LoadWeights(string path)
-    {
-        using SafeTensorsLoader loader = new();
-        loader.Load(path);
-        Dictionary<string, Tensor> tensors = loader.GetAllTensors();
-        RnnoiseWeights weights = new();
-        weights.Load(tensors);
-        foreach (Tensor tensor in tensors.Values) tensor.Dispose();
-        return weights;
-    }
+    internal static RnnoiseWeights LoadWeights(string path, RnnoisePrecision precision = RnnoisePrecision.Float) =>
+        RnnoiseWeights.LoadFile(path, precision, precision == RnnoisePrecision.Int8 ? Int8TablesPath() : null);
+
+    /// <summary>The int8 tables: <c>HARTSYINFERENCE_RNNOISE_INT8_TABLES</c>, else beside <see cref="WeightsPath"/>.</summary>
+    internal static string Int8TablesPath() =>
+        Environment.GetEnvironmentVariable("HARTSYINFERENCE_RNNOISE_INT8_TABLES")
+        ?? Path.Combine(Path.GetDirectoryName(Path.GetFullPath(WeightsPath()))!, RnnoiseInt8Tables.FileName);
 
     /// <summary>The file <c>WakeModelSet.LoadDenoiser</c> opens, unless overridden.</summary>
     internal static string WeightsPath() =>
