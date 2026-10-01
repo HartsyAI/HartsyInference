@@ -128,7 +128,7 @@ the warm-up had not touched.
 | 6 | 140800 | 875.9 | 724.3 | 731.3 | log-spec 0.999932, max-abs 1.22e-2 |
 
 Buckets on and on in reverse order are byte-identical on all six. First synthesis of the six took 3175 → 2522 ms
-(heuristic time 313 → 185 ms). Sentence 3's difference is analyzed in the spot check below.
+(heuristic time 313 → 185 ms). Sentence 3 is analyzed against exact math in the spot check below.
 
 ### CUDA tests on the 3060
 
@@ -136,6 +136,57 @@ Buckets on and on in reverse order are byte-identical on all six. First synthesi
 the per-length heuristic); the `GpuIntegration` category in four batches, 99 / 101 / 104 / 9 passed (the two-GPU NCCL
 test and the opt-in soak tests return early with one GPU visible); the untagged cuDNN conv classes (`CudnnConvTests`,
 `Conv1dKernelTests`) 22/22 with the plan-cache tests. No failures.
+
+## Spot check: four more vocoder families, buckets off vs on (engine `6d0e717a`, 2026-10-01 07:27-08:16Z)
+
+Each arm is a fresh process and backend on the 3060, with the same text, seed (1234) and reference audio. Every sentence
+is synthesized twice: first (per-length setup) and repeat (steady state, every plan cached). The repeat against the first
+is the model's own run-to-run noise floor. Piper also has a no-TF32 arm (direct F32 conv kernels, full-precision
+GEMMs) as an exact-math reference; the LM models do not, because changing GEMM precision can flip a sampled token.
+Scored on the CPU: Whisper small.en, log-spectral correlation, max-abs, and for Piper sentence 3 the alignment lag
+and the difference distribution. Every bucketed arm built its plans from buckets with no fallback.
+
+| Model (codec) | # | on vs off | Noise floor (repeat vs first), off / on | Recall off / on | Transcripts |
+|---|---:|---|---|---|---|
+| CosyVoice 2 (HiFT) | 1 | log-spec 0.987337, max-abs 1.10 | ≥ 0.999999, ≤ 8.5e-5 / same | 100 % / 100 % | same |
+| CosyVoice 2 (HiFT) | 2 | log-spec 0.979200, max-abs 1.98 | ≥ 0.999999, ≤ 1.2e-4 / same | 100 % / 100 % | same |
+| Kyutai TTS (Mimi) | 1 | identical | identical / identical | 100 % / 100 % | same |
+| Kyutai TTS (Mimi) | 2 | log-spec 0.999657, max-abs 8.5e-5 | identical / identical | 100 % / 100 % | same |
+| Orpheus (SNAC) | 1 | log-spec 0.999959, max-abs 1.1e-4 | identical / identical | 100 % / 100 % | same |
+| Orpheus (SNAC) | 2 | identical | identical / identical | 100 % / 100 % | same |
+| Piper (VITS) | 1-6 | ≥ 0.999932 except #3 (below) | identical (deterministic) | 0 / 100 / 100 / 100 / 100 / 85 %, both arms | same |
+
+- **Transcripts match for every sentence of every model.** Recall is identical between arms. Piper's "Okay." scores
+  0 % in every arm, including F32, so that is Whisper on a 0.3 s clip, not the change.
+- **Piper sentence 3 against exact math.** Buckets off vs F32: log-spectral correlation 0.995503, max-abs 0.380.
+  Buckets on vs F32: 0.996205, max-abs 0.320. The bucketed arm is no further from exact math than the per-length arm;
+  here it is slightly closer. Every Piper sentence sits 0.9965-0.9992 from F32 in both arms, which is Piper's own TF32
+  band, and on vs off is inside it.
+  - **What moved in sentence 3:** no time shift (best alignment lag 0 samples, correlation 0.9975 either way). The
+    difference is local: 89 % of its energy sits in the top 5 % of 10 ms windows, peaking at 2.85 s of 4.02 s, while
+    the waveforms agree to ~1e-3 elsewhere. A TF32-level difference upstream of the vocoder (the flow) reshaped one
+    short stretch of the waveform; lengths and the transcript are unchanged.
+- **CosyVoice 2 moves most: 0.979 / 0.987, far above its own run-to-run floor (≈ 1.0).** The alignment says what
+  moved: on sentence 2 the best lag is −15 samples (−0.6 ms), and the correlation rises from −0.22 at lag 0 to 0.65.
+  That is the phase drift of an NSF harmonic source (HiFT integrates F0 into phase): its 10-step flow-matching ODE
+  runs a conv estimator, so a TF32-level difference in one step carries through the solve into the mel and F0, and the
+  harmonic phase drifts. The waveform metrics punish phase drift; the transcripts and lengths are unchanged. No F32
+  reference was run for CosyVoice (see above). A conv-only F32 arm (`numerics.audioConvCudnn=false`, GEMMs untouched,
+  so its LM tokens should not move) would place both arms against exact conv math. That is about a minute on the 3060
+  if wanted.
+
+**Timing, buckets off → on** (sum over the model's sentences; first = per-length setup, repeat = steady state):
+
+| Model | First synthesis | Repeat |
+|---|---|---|
+| Piper (6 sentences) | 3021.4 → 2815.5 ms (−6.8 %) | 2495.3 → 2502.0 ms (+0.3 %) |
+| CosyVoice 2 (2) | 19357.9 → 19160.7 ms (−1.0 %) | 18983.5 → 18983.0 ms (0.0 %) |
+| Kyutai TTS (2) | 7485.6 → 7450.9 ms (−0.5 %) | 7319.6 → 7407.4 ms (+1.2 %) |
+| Orpheus (2) | 15481.0 → 14890.0 ms (−3.8 %) | 15229.1 → 14838.5 ms (−2.6 %) |
+
+There is no regression beyond run-to-run noise. Per sentence the arms move up to ±10 % in both directions. For
+example, Kyutai's buckets-on repeat of sentence 2 (4987.4 ms) was slower than its own first synthesis (4922.6 ms),
+which also paid the plan builds.
 
 ## Reproduce
 
