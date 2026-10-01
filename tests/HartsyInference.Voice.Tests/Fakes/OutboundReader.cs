@@ -2,8 +2,9 @@ using HartsyInference.Core.Runtime;
 
 namespace HartsyInference.Voice.Tests.Fakes;
 
-/// <summary>The session's single outbound consumer for a test: reads <c>chunk</c> samples, keeps the real ones with the
-/// time they were read, pauses, repeats. <see cref="Paused"/> stops reading without ending the consumer.</summary>
+/// <summary>The session's single outbound consumer for a test, on a thread of its own as the host's sender is: reads
+/// <c>chunk</c> samples, keeps the real ones with the time they were read, pauses, repeats. <see cref="Paused"/> stops
+/// reading without ending the consumer; <see cref="ReadAllocatedBytes"/> counts what the reads themselves allocated.</summary>
 internal sealed class OutboundReader : IAsyncDisposable
 {
     private readonly VoiceAgentSession _session;
@@ -14,6 +15,7 @@ internal sealed class OutboundReader : IAsyncDisposable
     private readonly CancellationTokenSource _stop = new();
     private readonly Task _loop;
     private volatile bool _paused;
+    private long _readAllocated;
 
     public OutboundReader(VoiceAgentSession session, int chunk, TimeSpan pause)
     {
@@ -28,6 +30,9 @@ internal sealed class OutboundReader : IAsyncDisposable
         get => _paused;
         set => _paused = value;
     }
+
+    /// <summary>Managed bytes allocated on the reader thread inside <see cref="VoiceAgentSession.ReadOutbound"/> calls.</summary>
+    public long ReadAllocatedBytes => Volatile.Read(ref _readAllocated);
 
     /// <summary>Every real sample read so far.</summary>
     public float[] Samples
@@ -74,7 +79,9 @@ internal sealed class OutboundReader : IAsyncDisposable
         {
             if (!_paused)
             {
+                long before = GC.GetAllocatedBytesForCurrentThread();
                 int real = _session.ReadOutbound(buffer);
+                Volatile.Write(ref _readAllocated, _readAllocated + GC.GetAllocatedBytesForCurrentThread() - before);
                 if (real > 0)
                 {
                     lock (_samples)

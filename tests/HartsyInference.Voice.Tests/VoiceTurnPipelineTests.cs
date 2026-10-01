@@ -87,6 +87,25 @@ public sealed class VoiceTurnPipelineTests
     }
 
     [Fact]
+    public async Task ReadingAReplyWhileItsTurnWaitsForPlaybackAllocatesNothing()
+    {
+        // The turn waits for playback with its cancellable token; the reader used to pay 32 B per read for that wait.
+        ScriptedTextService text = new ScriptedTextService().Reply("A first reply warms the reader up.")
+            .Reply("The measured reply plays for a while. It has a second sentence. And a third one to end.");
+        await using VoiceHarness harness = await VoiceHarness.StartAsync(text: text, speech: new FakeSpeech { SamplesPerSentence = 24_000 });
+        harness.Session.PushDtmf('1');
+        await harness.TurnCompletedAsync(1);
+        long allocated = harness.Reader.ReadAllocatedBytes;
+        int reads = harness.Reader.Reads.Count;
+
+        harness.Session.PushDtmf('2');
+        await harness.TurnCompletedAsync(2);
+        int measured = harness.Reader.Reads.Count - reads;
+        Assert.True(measured >= 3 * 24_000 / 320, $"only {measured} reads returned reply audio.");
+        Assert.Equal(allocated, harness.Reader.ReadAllocatedBytes);
+    }
+
+    [Fact]
     public async Task AToolCallRunsAndTheModelIsAskedAgainWithItsResult()
     {
         int invoked = 0;

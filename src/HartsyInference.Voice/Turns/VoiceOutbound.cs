@@ -9,9 +9,11 @@ namespace HartsyInference.Voice.Turns;
 /// publishes the epoch it applied. Two rules keep a flush from eating the wrong audio. The producer re-checks the
 /// epoch after every write and, when it moved, bumps it again, so a frame that landed after the reader's discard is
 /// discarded too. And the producer never starts a turn while the reader has not applied the latest epoch, so a
-/// pending discard can never take the next reply's opening. The producer waits (space, playback, an applied flush)
-/// on one completion the reader signals after every read that made progress; the reader never blocks and never
-/// allocates.</remarks>
+/// pending discard can never take the next reply's opening. The producer waits for space, playback or an applied flush
+/// on a waiter that carries what it waits for; the reader completes it once, on the read that reaches it, not on every
+/// read. The reader never blocks and never allocates: the waiter's only continuation is the producer's own, so
+/// completing it queues that continuation and nothing else, and cancellation completes the waiter from the token's
+/// side.</remarks>
 internal sealed class VoiceOutbound
 {
     private readonly SpscRing<float> _ring;
@@ -23,13 +25,15 @@ internal sealed class VoiceOutbound
     private long _written;
     private long _discarded;
     private long _lastDiscardNs;
-    private TaskCompletionSource? _waiter;
+    private long _wakes;
+    private Waiter? _waiter;
 
     public VoiceOutbound(int capacity, VoiceTurnSignals signals)
     {
         ArgumentNullException.ThrowIfNull(signals);
         _ring = new SpscRing<float>(capacity);
         _signals = signals;
+        RefillSamples = Math.Max(1, _ring.Capacity / 4);
     }
 
     private enum WaitFor
@@ -56,6 +60,17 @@ internal sealed class VoiceOutbound
 
     /// <summary>When the reader last applied a flush, in monotonic nanoseconds; 0 before the first.</summary>
     public long LastDiscardNs => Volatile.Read(ref _lastDiscardNs);
+
+    /// <summary>Free space a blocked writer waits for before it writes again: its whole remaining write when that is
+    /// smaller, otherwise a quarter of the ring, so a full queue costs the reader one wake per quarter rather than one
+    /// per read.</summary>
+    internal int RefillSamples { get; }
+
+    /// <summary>Waits the reader has completed: one per producer wait whose position, space or epoch a read reached.</summary>
+    internal long Wakes => Volatile.Read(ref _wakes);
+
+    /// <summary>Whether the producer is parked on a wait the reader has not completed yet.</summary>
+    internal bool ProducerWaiting => Volatile.Read(ref _waiter) is not null;
 
     /// <summary>Reader: applies a pending flush, copies queued samples, zero-fills the rest of
     /// <paramref name="destination"/> and returns how many samples were real. One thread only; never blocks.</summary>
@@ -110,9 +125,10 @@ internal sealed class VoiceOutbound
                 return false;
             }
             int free = _ring.FreeSpace;
-            if (free == 0)
+            int wanted = Math.Min(count, RefillSamples);
+            if (free < wanted)
             {
-                await WaitAsync(WaitFor.Space, 1, cancel).ConfigureAwait(false);
+                await WaitAsync(WaitFor.Space, wanted, cancel).ConfigureAwait(false);
                 continue;
             }
             int n = Math.Min(free, count);
@@ -144,7 +160,8 @@ internal sealed class VoiceOutbound
     {
         while (!Satisfied(condition, target))
         {
-            TaskCompletionSource waiter = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            cancel.ThrowIfCancellationRequested();
+            Waiter waiter = new(condition, target);
             // Exchange is a full fence: the re-check below cannot be ordered before the waiter is visible to the reader.
             Interlocked.Exchange(ref _waiter, waiter);
             if (Satisfied(condition, target))
@@ -152,7 +169,21 @@ internal sealed class VoiceOutbound
                 Interlocked.CompareExchange(ref _waiter, null, waiter);
                 return;
             }
-            await waiter.Task.WaitAsync(cancel).ConfigureAwait(false);
+            // The token completes the waiter itself. Awaiting waiter.Task.WaitAsync(cancel) would hang a cancellation
+            // promise on the task, and the reader's completion would queue it through a new 32-byte invoker on the
+            // reader's thread; with this method's continuation the only one, completing the waiter allocates nothing there.
+            CancellationTokenRegistration registration = cancel.UnsafeRegister(
+                static (state, token) => ((Waiter)state!).TrySetCanceled(token), waiter);
+            try
+            {
+                await waiter.Task.ConfigureAwait(false);
+            }
+            finally
+            {
+                registration.Dispose();
+                // A cancelled waiter is withdrawn, so the reader never completes it later.
+                Interlocked.CompareExchange(ref _waiter, null, waiter);
+            }
         }
     }
 
@@ -160,10 +191,22 @@ internal sealed class VoiceOutbound
     {
         // Pairs with the fence in WaitAsync: the positions published above are visible before the waiter is read.
         Interlocked.MemoryBarrier();
-        TaskCompletionSource? waiter = Volatile.Read(ref _waiter);
-        if (waiter is not null && Interlocked.CompareExchange(ref _waiter, null, waiter) == waiter)
+        Waiter? waiter = Volatile.Read(ref _waiter);
+        if (waiter is null || !Satisfied(waiter.Condition, waiter.Target))
         {
-            waiter.TrySetResult();
+            return;
         }
+        if (Interlocked.CompareExchange(ref _waiter, null, waiter) == waiter && waiter.TrySetResult())
+        {
+            Volatile.Write(ref _wakes, _wakes + 1);
+        }
+    }
+
+    /// <summary>One producer wait: what it waits for, completed by the reader on the read that reaches it.</summary>
+    private sealed class Waiter(WaitFor condition, long target) : TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)
+    {
+        public WaitFor Condition { get; } = condition;
+
+        public long Target { get; } = target;
     }
 }
