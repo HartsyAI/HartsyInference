@@ -16,7 +16,7 @@ namespace HartsyInference.Core.Tests;
 [Collection(EnvironmentSensitiveCollection.Name)]
 public sealed unsafe class NativeBufferZeroFillTests
 {
-    private const nuint Chunk = 2UL << 20;
+    private const nuint Chunk = (nuint)(2UL << 20);
     private const nuint Large = 32 * Chunk;
 
     private readonly ITestOutputHelper _output;
