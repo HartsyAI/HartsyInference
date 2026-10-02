@@ -32,7 +32,12 @@ public sealed class WakeDeviceClaim
     /// connection (a genuine reconnect, or a device that sends a second <c>hello</c> without reconnecting):
     /// either way the ring buffer, sequence counter and pipeline are reset for a fresh turn, so this claim's
     /// turn is over even though the device id immediately has a live connection again. Re-claim from inside
-    /// this callback to pick the new turn up rather than assuming continuity. Not called by an ordinary
+    /// this callback to pick the new turn up rather than assuming continuity — on the reconnect path this runs
+    /// just before the new connection finishes taking over, so the re-claim lands on it correctly in the
+    /// common case, but can in rare cases land on the connection that is on its way out instead (see the
+    /// residual-race comment where the claim is cleared, in <c>WakeListener</c>'s hello case) and then carry
+    /// over once more; a host that always re-claims here still recovers, just one reconnect later than usual.
+    /// Not called by an ordinary
     /// <see cref="WakeService.Release"/>, and not called at all if the claim was already released before
     /// whatever ended it.</summary>
     public Action? OnDisconnected { get; }
