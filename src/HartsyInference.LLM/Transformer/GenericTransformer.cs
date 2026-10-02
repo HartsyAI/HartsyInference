@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
@@ -547,7 +548,8 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Ends a forward stopped by <paramref name="cancel"/> before layer <paramref name="layer"/>: releases the
     /// running hidden state when this call owns it and the per-layer inputs the remaining layers would have consumed,
-    /// then throws.</summary>
+    /// then throws. Never returns.</summary>
+    [DoesNotReturn]
     private static void StopBetweenLayers(CancellationToken cancel, Tensor hidden, bool ownsHidden, Tensor[]? perLayerInputs,
         int layer)
     {
@@ -556,7 +558,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             for (int i = layer; i < perLayerInputs.Length; i++) perLayerInputs[i].Dispose();
         }
-        cancel.ThrowIfCancellationRequested();
+        throw new OperationCanceledException(cancel);
     }
 
     /// <summary>Gemma-4 per-layer embeddings (PLE): for each layer, mixes a small extra embedding derived two ways — a direct per-token gather from <see cref="_perLayerTokEmbd"/>, and a projection of the main hidden state through <see cref="_perLayerModelProj"/> — averaged via a fixed 1/√2 scale after each is independently normalized/scaled. Returns one <c>[1, T, PerLayerEmbeddingDim]</c> tensor per layer, each consumed (disposed) by its layer's <see cref="Layer.Forward"/>. Ported from llama.cpp's <c>build_inp_per_layer</c>/<c>project_per_layer_inputs</c>.</summary>

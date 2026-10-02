@@ -24,7 +24,8 @@ public interface IGenerationModel : IDisposable
     /// <summary>As <see cref="Prefill(in PrefillChunk, ISequenceState)"/>, stopping with <see cref="OperationCanceledException"/>
     /// once <paramref name="cancel"/> is signalled. A stopped prefill commits nothing: <paramref name="state"/>'s length is
     /// unchanged. The default implementation checks only before the call. An implementation that checks during it must
-    /// leave an uncancelled call's result untouched (<see cref="GenericTransformerModel"/> checks between layers).</summary>
+    /// leave an uncancelled call's result untouched (<see cref="GenericTransformerModel"/> checks between layers), and a
+    /// decorator must forward this overload itself, or the model it wraps is only checked before the call.</summary>
     Tensor Prefill(in PrefillChunk chunk, ISequenceState state, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
