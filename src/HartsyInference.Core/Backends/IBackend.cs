@@ -2329,25 +2329,29 @@ public partial interface IBackend : IDisposable
     /// <c>[1, heads, seq, hd]</c> head-major tensor, in place and accumulating across calls. Same bytes to the same
     /// offsets as concatenating every chunk along dim 2, but without holding the whole chunk list alive alongside the
     /// result — which is what makes long-sequence chunked attention fit (see <c>MiniMaxH3Transformer</c>).</summary>
-    unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
-        => ScatterSeqHeadMajorReference(output, input, seqOffset);
+    void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
+        => ScatterSeqHeadMajor(output, input, seqOffset, input.Shape.Rank > 2 ? (int)input.Shape[2] : 0);
 
-    /// <summary>The managed <see cref="ScatterSeqHeadMajor"/> body, callable directly. A backend override must
-    /// call THIS to fall back — <c>((IBackend)this).ScatterSeqHeadMajor(...)</c> re-enters the override through
-    /// interface dispatch and recurses until the stack overflows.</summary>
-    static unsafe void ScatterSeqHeadMajorReference(Tensor output, Tensor input, int seqOffset)
+    /// <summary>As <see cref="ScatterSeqHeadMajor(Tensor, Tensor, int)"/> for only the first <paramref name="rows"/>
+    /// sequence rows of <paramref name="input"/>, so the two sequence extents are independent: this is how a KV
+    /// cache's committed prefix moves into a larger or smaller buffer. A byte copy, for any non-quantized dtype that
+    /// matches on both sides.</summary>
+    unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset, int rows)
+        => ScatterSeqHeadMajorReference(output, input, seqOffset, rows);
+
+    /// <summary>The managed <see cref="ScatterSeqHeadMajor(Tensor, Tensor, int, int)"/> body, callable directly. A
+    /// backend override must call THIS to fall back — <c>((IBackend)this).ScatterSeqHeadMajor(...)</c> re-enters the
+    /// override through interface dispatch and recurses until the stack overflows.</summary>
+    static unsafe void ScatterSeqHeadMajorReference(Tensor output, Tensor input, int seqOffset, int rows)
     {
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("ScatterSeqHeadMajor default fallback only supports F32.");
-        int heads = (int)output.Shape[1], seq = (int)output.Shape[2], hd = (int)output.Shape[3];
-        int c = (int)input.Shape[2];
-        float* pOut = (float*)output.DataPointer;
-        float* pIn = (float*)input.DataPointer;
-        for (int h = 0; h < heads; h++)
+        SeqHeadMajorScatter geometry = SeqHeadMajorScatterContract.Validate(output, input, seqOffset, rows);
+        if (geometry.IsEmpty) return;
+        byte* pOut = (byte*)output.DataPointer;
+        byte* pIn = (byte*)input.DataPointer;
+        for (int h = 0; h < geometry.Heads; h++)
         {
-            long dst = ((long)h * seq + seqOffset) * hd;
-            long src = (long)h * c * hd;
-            for (long i = 0; i < (long)c * hd; i++) pOut[dst + i] = pIn[src + i];
+            Buffer.MemoryCopy(pIn + geometry.SourceOffset(h), pOut + geometry.DestinationOffset(h),
+                geometry.SliceBytes, geometry.SliceBytes);
         }
     }
 
@@ -2387,7 +2391,7 @@ public partial interface IBackend : IDisposable
     /// <see cref="SliceRowsGeneric"/>. Same bytes to the same offsets as concatenating every chunk along dim 0, but
     /// without holding the whole chunk list alive alongside the result, which is what makes long-sequence chunked
     /// attention/MLP fit (see <c>MiniMaxH3Transformer</c>; the head-major sibling is
-    /// <see cref="ScatterSeqHeadMajor"/>).</summary>
+    /// <see cref="ScatterSeqHeadMajor(Tensor, Tensor, int)"/>).</summary>
     unsafe void ScatterRowsGeneric(Tensor output, Tensor input, int rowOffset)
     {
         if (output.DType != input.DType)

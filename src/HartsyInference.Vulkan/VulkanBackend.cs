@@ -3389,49 +3389,40 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         CacheOutput(output, outBuf);
     }
 
-    /// <summary>Writes a <c>[1, heads, c, hd]</c> chunk into sequence rows <c>[seqOffset, seqOffset + c)</c> of a
-    /// head-major <c>[1, heads, seq, hd]</c> tensor, in place and accumulating across calls.</summary>
-    /// <remarks>One multi-region <c>vkCmdCopyBuffer</c>: a head's chunk rows are contiguous, heads are not. A
+    /// <summary>Writes the first <paramref name="rows"/> sequence rows of a <c>[1, heads, c, hd]</c> tensor into rows
+    /// <c>[seqOffset, seqOffset + rows)</c> of a head-major <c>[1, heads, seq, hd]</c> tensor, in place and
+    /// accumulating across calls.</summary>
+    /// <remarks>One multi-region <c>vkCmdCopyBuffer</c>: a head's rows are contiguous, heads are not. A
     /// destination with no buffer yet is allocated WITHOUT uploading host contents, matching CUDA, so rows outside
     /// every chunk hold whatever the allocation came with — unlike the interface reference, which leaves them
-    /// intact. Every caller fills the whole buffer.</remarks>
-    public unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
+    /// intact. Every caller fills or tracks the rows it later reads.</remarks>
+    public unsafe void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset, int rows)
     {
         using OpScope _op = EnterOp();
-        if (output.DType != DType.F32 || input.DType != DType.F32
-            || output.Shape.Rank != 4 || input.Shape.Rank != 4)
+        SeqHeadMajorScatter geometry = SeqHeadMajorScatterContract.Validate(output, input, seqOffset, rows);
+        if (geometry.IsEmpty)
         {
-            IBackend.ScatterSeqHeadMajorReference(output, input, seqOffset);
             return;
         }
-        int heads = (int)output.Shape[1], seq = (int)output.Shape[2], hd = (int)output.Shape[3];
-        int chunk = (int)input.Shape[2];
-        long elemSize = DType.F32.SizeInBytes;
-        if (heads <= 0 || chunk <= 0 || (int)input.Shape[1] != heads || (int)input.Shape[3] != hd
-            || seqOffset < 0 || (long)seqOffset + chunk > seq)
-        {
-            IBackend.ScatterSeqHeadMajorReference(output, input, seqOffset);
-            return;
-        }
+        int heads = geometry.Heads;
 
         // Both buffers resolved BEFORE the recording buffer is acquired: GetBuffer's cache-miss path submits
         // internally, which would end the command buffer this then records into (see Concat).
         VulkanBuffer inBuf = GetBuffer(input);
         VulkanBuffer outBuf = _xfer.TryGetCached(output, out VulkanBuffer? resident) && resident is not null
             ? resident
-            : _xfer.AllocateDevice((ulong)(output.ElementCount * elemSize));
+            : _xfer.AllocateDevice((ulong)output.DType.ComputeByteCount(output.ElementCount));
         nint cb = _capturingStepGraph ? _stepGraph!.RecordingBuffer : _stream.AcquireRecording();
         VulkanCommandStream.RecordComputeToCopyBarrierOn(cb);
 
         Span<VkBufferCopy> regions = heads <= 128 ? stackalloc VkBufferCopy[heads] : new VkBufferCopy[heads];
-        long sliceBytes = (long)chunk * hd * elemSize;
         for (int h = 0; h < heads; h++)
         {
             regions[h] = new VkBufferCopy
             {
-                srcOffset = (ulong)((long)h * chunk * hd * elemSize),
-                dstOffset = (ulong)((((long)h * seq + seqOffset) * hd) * elemSize),
-                size = (ulong)sliceBytes,
+                srcOffset = (ulong)geometry.SourceOffset(h),
+                dstOffset = (ulong)geometry.DestinationOffset(h),
+                size = (ulong)geometry.SliceBytes,
             };
         }
         fixed (VkBufferCopy* pRegions = regions)
