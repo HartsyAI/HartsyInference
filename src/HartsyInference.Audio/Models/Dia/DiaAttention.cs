@@ -93,11 +93,15 @@ public sealed unsafe class DiaAttention
 
     /// <summary>GPU-resident self-attention (decode + prefill) for autoregressive decoders on a
     /// <see cref="IBackend.FlashDecodeSupported"/> backend. Mirrors the LLM GenericTransformer decode path: Q/K/V
-    /// project straight into head-shaped tensors, GPU interleaved RoPE, in-place append into a fixed-capacity
+    /// project straight into head-shaped tensors, GPU RoPE, in-place append into a fixed-capacity
     /// device KV cache, then GQA-aware FlashAttention over the resident buffer — no host reshape/rope/repeat glue
-    /// and no O(n²) K/V re-upload. <paramref name="cosGpu"/>/<paramref name="sinGpu"/> are <c>[1, t, headDim]</c>
-    /// (first headDim/2 lanes = the interleaved-pair angles for absolute positions [posStart, posStart+t)). The
-    /// caller advances the cache length once after all layers. Requires the interleaved RoPE form (Zonos).</summary>
+    /// and no O(n²) K/V re-upload. Dispatches on the same <c>interleavedRope</c> flag the host
+    /// <see cref="SelfForward"/> path uses, so a caller built with either RoPE convention gets correct rotation:
+    /// <paramref name="cosGpu"/>/<paramref name="sinGpu"/> are <c>[1, t, headDim]</c>, shaped per that convention
+    /// — interleaved (Zonos): first headDim/2 lanes populated, matching <see cref="IBackend.ApplyRopeInterleaved"/>;
+    /// split-half (Dia): the half-width table duplicated into both halves, matching
+    /// <see cref="IBackend.ApplyRope"/>'s <c>cos[i] == cos[i+half]</c> contract — both for absolute positions
+    /// [posStart, posStart+t). The caller advances the cache length once after all layers.</summary>
     public Tensor SelfForwardFlash(IBackend backend, Tensor x, int t, int posStart, IKvCache cache, int layerIndex,
         Tensor cosGpu, Tensor sinGpu)
     {
@@ -112,8 +116,15 @@ public sealed unsafe class DiaAttention
 
         if (_useRope)
         {
-            backend.ApplyRopeInterleaved(q, cosGpu, sinGpu);
-            backend.ApplyRopeInterleaved(k, cosGpu, sinGpu);
+            if (_interleavedRope)
+            {
+                backend.ApplyRopeInterleaved(q, cosGpu, sinGpu);
+                backend.ApplyRopeInterleaved(k, cosGpu, sinGpu);
+            }
+            else
+            {
+                backend.ApplyRope(q, k, cosGpu, sinGpu);
+            }
         }
 
         // [1, t, H, D] → [1, H, t, D] for cache append + flash (GPU permute keeps residency).
