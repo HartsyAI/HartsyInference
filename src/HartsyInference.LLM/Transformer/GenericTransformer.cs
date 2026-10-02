@@ -396,6 +396,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor cos = new(new TensorShape(1, t, ropeTableDim), DType.F32);
         Tensor sin = new(new TensorShape(1, t, ropeTableDim), DType.F32);
         BuildRope(cos, sin, t, posStart, ropeTableDim, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
+        (cos, sin) = MakeRopeTableResident(backend, cos, sin);
         // Gemma-3 dual-RoPE: local (sliding-window) layers use a smaller base frequency. Gemma-4 additionally
         // narrows the local head dimension itself (HeadDimSwa) — not just the RoPE base. Built once, reused.
         Tensor? cosLocal = null, sinLocal = null;
@@ -406,6 +407,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             cosLocal = new(new TensorShape(1, t, dLocal), DType.F32);
             sinLocal = new(new TensorShape(1, t, dLocal), DType.F32);
             BuildRope(cosLocal, sinLocal, t, posStart, dLocal, rotaryLocal, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+            (cosLocal, sinLocal) = MakeRopeTableResident(backend, cosLocal, sinLocal);
         }
 
         // BLOOM applies a LayerNorm to the token embeddings before the first block (same startLayer gate as
@@ -418,6 +420,17 @@ public sealed unsafe class GenericTransformer : IDisposable
             backend.LayerNorm(work, embeds, _embedNorm, _embedNormBias!, _cfg.RmsNormEps);
             ownsWork = true;
         }
+        // Layer 0 reads this tensor twice (norm input, then residual add) before either op binds it as a
+        // cached activation — same uncached-input bug as the RoPE tables above, smaller blast radius (one
+        // tensor, twice, vs. 36 layers × ~4), but it is the exact RmsNorm → GpuTransferHelper.UploadTo frame
+        // that read a retired StreamHandle. `ownsWork` becomes unconditionally true here: we now own this
+        // buffer regardless of whether `work` was the caller's `embeds` or BLOOM's fresh LayerNorm output, and
+        // the caller's own `embeds` is never disposed.
+        Tensor residentWork = new(work.Shape, DType.F32);
+        backend.Scale(residentWork, work, 1f);
+        if (ownsWork) work.Dispose();
+        work = residentWork;
+        ownsWork = true;
 
         // Gemma-4 per-layer embeddings: computed once per call (needs the real token ids, not just their
         // embedding), then each layer consumes (disposes) its own slice inside Layer.Forward.
@@ -749,17 +762,23 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor cos = new(new TensorShape(1, b, d), DType.F32);
         Tensor sin = new(new TensorShape(1, b, d), DType.F32);
         BuildRopeBatched(cos, sin, positions, d, _cfg.RotaryDim, _cfg.RopeTheta, _cfg.RopeScaling);
+        (cos, sin) = MakeRopeTableResident(backend, cos, sin);
         Tensor? cosLocal = null, sinLocal = null;
         if (_cfg.RopeLocalTheta > 0)
         {
             cosLocal = new(new TensorShape(1, b, d), DType.F32);
             sinLocal = new(new TensorShape(1, b, d), DType.F32);
             BuildRopeBatched(cosLocal, sinLocal, positions, d, _cfg.RotaryDim, _cfg.RopeLocalTheta, _cfg.RopeScaling);
+            (cosLocal, sinLocal) = MakeRopeTableResident(backend, cosLocal, sinLocal);
         }
         try
         {
-            Tensor hidden = embeds;
-            bool ownsHidden = false;
+            // Same uncached-input bug as the RoPE tables: layer 0 would otherwise read the caller's `embeds`
+            // twice (norm input, then residual add) before anything binds it as a cached activation. Make our
+            // OWN resident copy and run the loop on that — `embeds` is the caller's and is never disposed here.
+            Tensor hidden = new(embeds.Shape, DType.F32);
+            backend.Scale(hidden, embeds, 1f);
+            bool ownsHidden = true;
             for (int i = 0; i < _layers.Length; i++)
             {
                 bool global = _cfg.IsGlobalLayer(i);
@@ -868,9 +887,33 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Builds duplicated-half cos/sin: <c>cos[s,i] = cos[s,i+half] = cos((posStart+s)·freq_i)</c>, <c>freq_i = theta^(-2i/headDim)</c> — the split-half rotate-half convention of <see cref="IBackend.ApplyRopeSingle"/> (shared by Qwen2/Qwen3/Llama).</summary>
     internal static void BuildRope(Tensor cos, Tensor sin, int t, int posStart, int headDim, int rotaryDim, float theta, RopeScaling scaling)
-    
+
     {
         RopeTables.BuildRope(cos, sin, t, posStart, headDim, rotaryDim, theta, scaling);
+    }
+
+    /// <summary>Uploads a host-built RoPE table once and returns a GPU-resident replacement, so every layer's
+    /// <see cref="IBackend.ApplyRopeSingle"/>/<see cref="IBackend.ApplyRopeInterleaved"/> read of it hits the
+    /// activation cache instead of re-uploading over PCIe. Needed because <see cref="GpuResidencyCache{TBuffer}.CopyToDevice"/>
+    /// only persists a tensor that was bound as SOME op's output — a plain input that misses is uploaded, used,
+    /// and freed in that op's own <c>finally</c>, every single read. <paramref name="cos"/>/<paramref name="sin"/>
+    /// are the SAME two host objects read by every layer this forward call touches (built once above, loop-
+    /// invariant across the layer loop), so an uncached miss here is not one-off — it is ~4 reads/layer × every
+    /// layer, every forward call (prefill AND decode alike), which is exactly what made the 3060 TTFT fix
+    /// necessary (see PR #221 / the residency investigation: this one table pair was ~144 of ~146 PCIe uploads
+    /// recorded per decode step before this fix). <c>Scale(_, _, 1f)</c> is a cheap, backend-agnostic identity op
+    /// whose only purpose here is the ordinary CacheActivation side effect every op's output already gets — no
+    /// new backend API, and no change to the shared rope-apply kernels the diffusion stack also calls. The
+    /// caller disposes the returned tensors exactly as it would have disposed the originals (same <c>finally</c>).</summary>
+    private static (Tensor Cos, Tensor Sin) MakeRopeTableResident(IBackend backend, Tensor cos, Tensor sin)
+    {
+        Tensor residentCos = new(cos.Shape, DType.F32);
+        Tensor residentSin = new(sin.Shape, DType.F32);
+        backend.Scale(residentCos, cos, 1f);
+        backend.Scale(residentSin, sin, 1f);
+        cos.Dispose();
+        sin.Dispose();
+        return (residentCos, residentSin);
     }
 
     private void ThrowIfDisposed()
