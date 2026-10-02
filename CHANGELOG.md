@@ -8,6 +8,18 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: a CUDA op runs in its own backend's context even when another copy of the engine left a different one
+  bound to the thread.** SwarmUI loads a private copy of the engine per extension (AudioLab, LLMAssistant, the image
+  backend), all on one thread pool. `CudaContext.EnsureCurrent` remembered each thread's binding in a `[ThreadStatic]`
+  field, which each copy keeps separately, while the driver's binding belongs to the thread: once LLMAssistant bound
+  the 3060 on a pool thread, AudioLab's copy trusted its own stale note and ran Whisper with the 3060 current. It read
+  the 3060's free VRAM as the 4090's (and evicted on that reading), allocated Whisper's resident weights in the 3060's
+  context, failed an upload into one with `CUDA_ERROR_INVALID_VALUE`, and the next request hit
+  `CUDA_ERROR_ILLEGAL_ADDRESS` (700). That error is sticky on the 4090's context, which every copy shares, so image
+  generation failed until a restart. `EnsureCurrent` and `EnsureRetainedCurrent` now confirm the binding with
+  `cuCtxGetCurrent`, a thread-local driver read, before trusting the cache. Every extension has to take this version:
+  a fixed copy binds its own context, but an unfixed one still runs in whatever context it finds.
+
 ## alpha.242
 
 - **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host

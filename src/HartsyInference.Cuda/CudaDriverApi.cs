@@ -44,7 +44,10 @@ internal static partial class CudaDriverApi
     [LibraryImport(LibName)]
     internal static partial int cuCtxSetCurrent(nint ctx);
 
+    /// <summary>The context bound to the calling thread. A thread-local read inside the driver, cheap enough to check on
+    /// every op entry.</summary>
     [LibraryImport(LibName)]
+    [SuppressGCTransition]
     internal static partial int cuCtxGetCurrent(out nint pctx);
 
     [LibraryImport(LibName)]

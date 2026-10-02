@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 
 namespace HartsyInference.Cuda;
 
-/// <summary>Manages a CUDA context for a specific device. Handles initialization, context creation, and device info queries. <para>Uses the CUDA Driver API <c>cuDevicePrimaryCtxRetain</c> rather than <c>cuCtxCreate</c>: the primary context is one-per-device-per-process, refcounted, and shared with the CUDA Runtime API. This avoids the thread-stack push side-effect of <c>cuCtxCreate</c> (which silently binds the context only to the constructing thread) and lets any thread in the process bind the same context via <see cref="EnsureCurrent"/>.</para> <para>Thread affinity in the Driver API is explicit: every thread that issues CUDA API calls must have the context current on it (via <c>cuCtxSetCurrent</c>). The <see cref="EnsureCurrent"/> method below uses a <c>[ThreadStatic]</c> cache so the binding is set once per worker thread; subsequent calls on the same thread are a TLS read + branch.</para></summary>
+/// <summary>Manages a CUDA context for a specific device. Handles initialization, context creation, and device info queries. <para>Uses the CUDA Driver API <c>cuDevicePrimaryCtxRetain</c> rather than <c>cuCtxCreate</c>: the primary context is one-per-device-per-process, refcounted, and shared with the CUDA Runtime API. This avoids the thread-stack push side-effect of <c>cuCtxCreate</c> (which silently binds the context only to the constructing thread) and lets any thread in the process bind the same context via <see cref="EnsureCurrent"/>.</para> <para>Thread affinity in the Driver API is explicit: every thread that issues CUDA API calls must have the context current on it (via <c>cuCtxSetCurrent</c>). The <see cref="EnsureCurrent"/> method below remembers the binding in a <c>[ThreadStatic]</c> cache and confirms it with <c>cuCtxGetCurrent</c> before trusting it, so a thread already bound costs a TLS read and a thread-local driver read.</para></summary>
 public sealed class CudaContext : IDisposable
 {
     private static int _cudaInitialized;
@@ -117,9 +117,13 @@ public sealed class CudaContext : IDisposable
     }
 
     /// <summary>Ensures this context is current on the calling thread.</summary>
-    /// <remarks>Cheap fast path on already-bound threads (one TLS read + branch). Call from the entry of any code
-    /// that issues CUDA Driver API calls — the single guarantee that makes the backend safe to use from
-    /// <c>Task.Run</c> worker threads, finalizers, and async continuations.</remarks>
+    /// <remarks>Cheap fast path on already-bound threads (a TLS read and a thread-local driver read). Call from the
+    /// entry of any code that issues CUDA Driver API calls — the single guarantee that makes the backend safe to use
+    /// from <c>Task.Run</c> worker threads, finalizers, and async continuations.
+    /// <para>The remembered binding is only a hint. The driver's binding belongs to the thread, but this cache belongs
+    /// to one copy of this assembly: SwarmUI loads a copy per extension, all on the same thread pool, and any other CUDA
+    /// library can rebind a thread too. Trusting the cache alone ran ops in whatever context a neighbour had left
+    /// current, so resident weights were allocated on another card and free VRAM was read from it.</para></remarks>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnsureCurrent()
     {
@@ -130,7 +134,7 @@ public sealed class CudaContext : IDisposable
         // driver reuses primary-context handles after release+retain — a thread
         // could see a numerically-equal handle that's actually backed by a freshly
         // recreated context. The generation counter forces a re-bind in that case.
-        if (_threadCurrentContext == _context && _threadCurrentGeneration == _generation)
+        if (_threadCurrentContext == _context && _threadCurrentGeneration == _generation && IsBoundToThread(_context))
         {
             return;
         }
@@ -160,12 +164,17 @@ public sealed class CudaContext : IDisposable
     {
         if (retainedContext == 0)
             throw new ObjectDisposedException(nameof(CudaContext), "The retained CUDA context lease was already released.");
-        if (_threadCurrentContext == retainedContext && _threadCurrentGeneration == _generation)
+        if (_threadCurrentContext == retainedContext && _threadCurrentGeneration == _generation && IsBoundToThread(retainedContext))
             return;
         CudaDriverApi.cuCtxSetCurrent(retainedContext).ThrowOnError();
         _threadCurrentContext = retainedContext;
         _threadCurrentGeneration = _generation;
     }
+
+    /// <summary>Whether the driver has <paramref name="context"/> bound to the calling thread right now.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool IsBoundToThread(nint context) =>
+        CudaDriverApi.cuCtxGetCurrent(out nint current) == 0 && current == context;
 
     /// <summary>Synchronizes the entire context (all streams).</summary>
     public void Synchronize()
