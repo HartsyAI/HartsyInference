@@ -14,7 +14,8 @@ stable release will require. Dates are UTC.
   read triggered. Hosts worked around it by reading a knob before setting one. Now a read waits for a load in progress
   to finish. `KnobStore.Set`, `KnobStore.Clear`, `KnobFile.Apply` and `KnobFile.Save` load the file first, so a
   host's value lands on top in any order. `Save` also stores the value it was given, coerced, instead of reading the
-  knob back. A first-in-process `Save` could otherwise write the file's old value again. This was the
+  knob back. A first-in-process `Save` could otherwise write the file's old value again. A missing explicit
+  settings file or a malformed one now surfaces from the first `Set` as well as from the first read. This was the
   order-dependent `ModelFolderCaseTests` failure: a temp models root was replaced by the settings file's
   `paths.modelsRoot`.
 - **Fixed: LTX two-stage refinement is refused on distilled checkpoints older than 2.5, even when

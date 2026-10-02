@@ -386,6 +386,9 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
             return "this is not the distilled family — the two-stage sigma schedule and upsample point are only "
                 + "documented for ltx-2.5-distilled";
         }
+        // The keyframe absolute-position embedding is what LTX-2.5 added to the DiT, and the flag the detected
+        // config carries for it is this recipe's one 2.5 signal (the side-model choice above keys off it too). A later
+        // generation that keeps the embedding would pass here; give it its own check when one ships.
         if (!config.UseKeyframesAbsPosEmbedding)
         {
             return "this is an earlier LTX generation than 2.5 — the x2 latent upsampler is a 2.5 model and is "
