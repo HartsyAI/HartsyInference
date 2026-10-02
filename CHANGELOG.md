@@ -8,6 +8,16 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Kokoro stops a cancelled synthesis at its next stage instead of finishing the sentence.**
+  `KokoroPipeline.Synthesize`/`SynthesizeFromStyle` and `KokoroIStftNetDecoder.Forward` take a `CancellationToken`
+  and check it at twelve stage boundaries — before any device work, after PLBERT, the text encoder, the duration
+  predictor, the length regulator and F0/N, after the decoder's encode and decode blocks, after the harmonic source,
+  after each upsample stage and before the iSTFT head — disposing the tensors that stage still holds before throwing.
+  The token reaches Kokoro on every path: sentence streaming, `SpeechService.SynthesizeAsync` (through `TtsJob`), and a
+  new `ISynthesizerLease.Synthesize(text, options, cancel)` overload, which the voice session's GPU thread now calls
+  with the turn's token, so a barge-in stops issuing the sentence's work at the next boundary (on CUDA, kernels already
+  queued still finish). The overload is a default interface method that checks only before the call, so other
+  implementers keep compiling. Output is byte-identical when not cancelled.
 - **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
   instead of guessing the tool-call format from its name: true only when the template references the
   caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,

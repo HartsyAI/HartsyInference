@@ -513,6 +513,23 @@ public sealed class VoiceTurnPipelineTests
     }
 
     [Fact]
+    public async Task ASentenceBeingSynthesizedSeesItsTurnCancelled()
+    {
+        using ManualResetEventSlim hold = new(false);
+        await using VoiceHarness harness = await VoiceHarness.StartAsync(speech: new FakeSpeech { HoldSynthesis = hold });
+        Task prompt = harness.Session.SpeakAsync("This sentence is held on the GPU.");
+        CancellationToken synthesis = await FirstSynthesisTokenAsync(harness.Speech);
+        Assert.False(synthesis.IsCancellationRequested);
+
+        Task ending = harness.Session.EndAsync();
+        // The synthesizer is still inside the sentence: the stop has to reach it there, not after it returns.
+        Assert.True(synthesis.WaitHandle.WaitOne(TimeSpan.FromSeconds(10)), "the sentence's token was never cancelled.");
+        hold.Set();
+        await ending.WaitAsync(TimeSpan.FromSeconds(20));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => prompt.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
+
+    [Fact]
     public async Task EndingCancelsQueuedPromptsAndEndsTheSession()
     {
         using ManualResetEventSlim hold = new(false);
@@ -529,5 +546,18 @@ public sealed class VoiceTurnPipelineTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() => second.WaitAsync(TimeSpan.FromSeconds(5)));
         Assert.Equal(VoiceAgentState.Ended, harness.Session.State);
         Assert.Throws<InvalidOperationException>(() => harness.Session.PushDtmf('1'));
+    }
+
+    /// <summary>The token the first sentence's synthesis was handed, once the GPU thread is inside it.</summary>
+    private static async Task<CancellationToken> FirstSynthesisTokenAsync(FakeSpeech speech)
+    {
+        DateTime deadline = DateTime.UtcNow.AddSeconds(10);
+        CancellationToken token;
+        while (!speech.SynthesisTokens.TryPeek(out token))
+        {
+            Assert.True(DateTime.UtcNow < deadline, "no sentence reached the synthesizer.");
+            await Task.Delay(10);
+        }
+        return token;
     }
 }
