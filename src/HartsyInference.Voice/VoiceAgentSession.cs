@@ -39,6 +39,7 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
     private readonly VoiceAgentOptions _options;
     private readonly ModelSpec _llm;
     private readonly VoiceTurnSignals _signals = new();
+    private readonly string? _prefixCacheKey;
     private readonly CpuBackend _cpu = new();
     private readonly VoiceOutbound _outbound;
     private readonly VoiceAudioWorker _audio;
@@ -81,6 +82,7 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         _tools = tools;
         _options = options;
         _llm = VoiceModelSet.ResolveLlm(options);
+        _prefixCacheKey = options.EnablePrefixCache ? $"voice:{Guid.NewGuid():N}" : null;
         _conversation = new VoiceConversation(options.SystemPrompt);
         long backlogLimit = (long)VoiceAudioFrontend.SampleRate * RingSeconds;
         inboundCapacity = inboundCapacity > 0 ? inboundCapacity : (int)BitOperations.RoundUpToPowerOf2((uint)backlogLimit);
@@ -191,6 +193,11 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         // A single long-lived loop: turns run one after another, never in parallel.
         _turnLoop = RunTurnsAsync();
         SetState(VoiceAgentState.Listening, 0);
+        if (_prefixCacheKey is not null)
+        {
+            // Not awaited: races the greeting (and the caller's first utterance) rather than delaying either.
+            _ = PrimePrefixCacheAsync(_ending.Token);
+        }
     }
 
     /// <summary>Queues caller audio: 16 kHz mono, ±1. Never blocks; when the audio thread is 30 s behind the oldest

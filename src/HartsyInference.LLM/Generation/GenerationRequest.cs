@@ -44,4 +44,7 @@ public sealed record GenerationRequest
 
     /// <summary>Overrides whether prompt-lookup speculative decoding is attempted (null defers to <c>numerics.specDecode</c>); requires greedy non-JSON <see cref="Sampling"/>, is skipped when <see cref="GraphDecode"/> is eligible, and uses no draft model — drafts come from n-gram matches against the prompt/generated-so-far, so it speeds up repetitive content but costs nothing extra on prose (an unmatched draft degenerates to one plain decode step).</summary>
     public bool? SpeculativeDecode { get; init; }
+
+    /// <summary>Sizes a FRESH retained sequence's KV capacity (tokens) when <see cref="TextGenerationPipeline.Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/> is given a prefix-cache entry with nothing cached yet; null sizes it to just this call's own prompt + <see cref="MaxTokens"/>. A caller whose prompt will keep growing across calls under the same key (e.g. a conversation's history budget) passes its own ceiling here so the cache is allocated once instead of reallocated every call as the prompt grows past each prior sizing.</summary>
+    public int? PrefixCacheCapacityHint { get; init; }
 }

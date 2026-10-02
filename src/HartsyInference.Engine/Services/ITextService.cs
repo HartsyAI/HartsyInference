@@ -20,4 +20,11 @@ public interface ITextService
 
     /// <summary>Frees the model resident on <paramref name="device"/> (every device when null), releasing its device and host memory and the slot's backend. Waits for any in-flight generation on the slot rather than racing it. Safe when nothing is loaded; returns whether anything was actually freed.</summary>
     bool Unload(string? device = null);
+
+    /// <summary>Returns cached-but-unused device memory (activation/workspace pool slack retained under
+    /// <c>vram.mempoolKeep</c>) to the driver for <paramref name="device"/> (every loaded device when null),
+    /// without unloading weights. Best-effort and non-blocking: a slot mid-generation is skipped rather than
+    /// waited on. Safe when nothing is loaded. Default no-op so an existing <see cref="ITextService"/> (fakes
+    /// in tests, any other implementation outside this repo) keeps compiling unchanged.</summary>
+    Task TrimMemoryPool(string? device = null) => Task.CompletedTask;
 }

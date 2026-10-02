@@ -53,4 +53,29 @@ internal sealed class TextDeviceSlot
 
     /// <summary>The loaded sidecar mmproj path, or null when the model is text-only.</summary>
     public string? VisionPath { get; set; }
+
+    /// <summary>Per-key retained KV sequences for opt-in prefix-cache reuse against <see cref="Pipeline"/>; null
+    /// until the first such request on this slot. Bound to <see cref="Model"/>'s weights — disposed and cleared
+    /// whenever the slot's model/backend is torn down (reload, explicit unload), never carried over to a
+    /// different model.</summary>
+    public RetainedSequenceStore? PrefixCache { get; set; }
+
+    /// <summary>The effective <see cref="IBackend.CacheWeightCasts"/> value in force since this slot's backend was
+    /// created (whichever request's <c>TextRequest.CacheWeightCasts</c>, if any, happened to be the first on this
+    /// slot — or the backend's own default if none did). Read-only after creation: a later request on an
+    /// already-loaded slot cannot change it without a reload, so this is what <see cref="TextService.LoadInto"/>'s
+    /// early-return compares a mismatched later request against, to log that its own value was ignored.</summary>
+    public bool? CacheWeightCastsApplied { get; set; }
+
+    /// <summary>The effective <c>includeRedundantSplits</c> value <see cref="TextService.LoadInto"/> preloaded
+    /// weights with for this slot (the single-device path's own <c>TextRequest.PreloadRedundantWeightSplits</c>
+    /// decision, or <c>false</c> unconditionally for the sharded/tensor-parallel paths, which never read that
+    /// field). Same read-only-after-creation caveat as <see cref="CacheWeightCastsApplied"/>.</summary>
+    public bool? PreloadRedundantWeightSplitsApplied { get; set; }
+
+    /// <summary>Which load-time settings <see cref="TextService.LoadInto"/> has already logged a mismatch for on
+    /// this slot (by setting name) — a request's own value keeps being ignored every subsequent call on an
+    /// already-loaded slot, so without this a long voice call would repeat the same debug line every turn. Reset
+    /// by <c>UnloadSlot</c>, so a reload gets a fresh warning if it mismatches again.</summary>
+    public HashSet<string> LoggedSettingMismatches { get; } = [];
 }
