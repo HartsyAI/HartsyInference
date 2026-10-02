@@ -116,6 +116,13 @@ stable release will require. Dates are UTC.
   `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
   produced) when timestamps were requested and the pipeline returned any; the plain-text path is
   unchanged byte-for-byte otherwise.
+- **Fixed the `krea2` and `zimage` catalog entries' local target paths.** Both always reported "needs 1
+  file(s) not on disk" even though the real checkpoint was present, because `TargetSubdir`/`TargetName`
+  didn't match where the file actually landed: `krea2` was missing a `/Turbo` segment, and `zimage`
+  pointed at the HF repo's own filename under `Stable-Diffusion/ZImage/` instead of the locally-renamed
+  `Stable-Diffusion/z-image-turbo.safetensors`. `hartsy image -m krea2`/`-m zimage` only ever worked via
+  an explicit `--model-path` that bypassed the catalog check. `Repo`/`RepoPath`/`Sha256` were already
+  correct on both (confirmed against the real HF repos); only the local target path was wrong.
 
 ## alpha.241
 
