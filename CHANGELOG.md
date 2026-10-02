@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.242
+
 - **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host
   Q/K rotation, `Nvfp4Linear`'s BF16 dequant, `VideoRgbFrames.ExtractAllFrames`, the CUDA backend's host W8A8 weight
   quantization and GPT-OSS's CPU-backend expert loop used raw `Parallel.For` / `Parallel.ForEach`, ignoring
