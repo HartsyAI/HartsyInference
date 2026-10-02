@@ -6,6 +6,20 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.243 (provisional -- renumbered at merge)
+
+- **`IBackend.ApplyRope`'s combined q+k overload no longer silently corrupts K under GQA.** CUDA, Vulkan
+  and the CPU default all derived `numHeads`/`totalVecs` from `q` only and reused them to launch K's
+  rotation too -- harmless while every caller was MHA (q/k same head count), but an out-of-bounds device
+  read/write for any GQA caller (q/k different head counts). Found via Dia's new resident decode
+  (alpha.242; 16 query heads, 4 KV heads). All three backends now validate q/k share batch, seqLen and
+  headDim (head count may differ), validate cos/sin against headDim, throw on anything else, then
+  delegate to the existing per-tensor `ApplyRopeSingle`/`ApplyRopeSingleReference` once per tensor -- pure
+  shape/dispatch fix, bit-identical for every existing MHA caller. Tests added:
+  `ApplyRope_Gqa_Cpu_Vs_Cuda`, `ApplyRope_Gqa_Cuda_MatchesApplyRopeSingleTwice`,
+  `ApplyRope_MismatchedHeadDim_Throws` (`DitGlueKernelTests.cs`); full `HartsyInference.Cuda.Tests`
+  (848 tests) green.
+
 ## Unreleased
 
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
