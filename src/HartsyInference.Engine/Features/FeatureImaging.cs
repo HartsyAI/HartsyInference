@@ -155,7 +155,7 @@ public static class FeatureImaging
         }
     }
 
-    /// <summary>Prepares a mask for the final paste: hard-edged like SwarmUI's ThresholdMask, or soft with the lowest values dropped when <paramref name="unthresholded"/>. Any nonzero byte counts (1/255 is above SwarmUI's 0.001).</summary>
+    /// <summary>Prepares a mask for the final paste: hard-edged like SwarmUI's ThresholdMask, or soft (only zero bytes dropped) when <paramref name="unthresholded"/>. Any nonzero byte counts: 1/255 is above SwarmUI's 0.001.</summary>
     public static void ApplyCompositePolicy(byte[] mask, bool unthresholded)
     {
         if (unthresholded)

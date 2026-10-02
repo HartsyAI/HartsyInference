@@ -6,7 +6,7 @@ namespace HartsyInference.Engine.Features;
 /// Applies to any masked request, including one whose family used the init as a reference.</summary>
 public static class MaskRecomposite
 {
-    /// <summary>Composites <paramref name="generated"/> over the init image; unchanged without a mask or with recomposite off.</summary>
+    /// <summary>Composites <paramref name="generated"/> over the init image; unchanged without a mask, an init image or with recomposite off.</summary>
     public static ImageResult Apply(ImageRequest request, ImageResult generated)
     {
         ArgumentNullException.ThrowIfNull(request);

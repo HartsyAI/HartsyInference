@@ -73,6 +73,21 @@ public sealed class MaskRecompositeTests
         Assert.Equal(Original, At(result, 28, 10));
     }
 
+    /// <summary>A mask paired with a reference-mode init is still pasted, as in SwarmUI; pinned so a family that starts consuming the mask itself is a deliberate change.</summary>
+    [Fact]
+    public void Apply_WithAReferenceModeInit_StillPastesThroughTheMask()
+    {
+        ImageRequest request = Request(HalfMaskImage(255)) with
+        {
+            Img2Img = new Img2Img { InitImage = Solid(Original), Mode = Img2ImgMode.Reference },
+        };
+
+        ImageResult result = MaskRecomposite.Apply(request, Result());
+
+        Assert.Equal(Generated, At(result, 4, 10));
+        Assert.Equal(Original, At(result, 28, 10));
+    }
+
     [Fact]
     public void Apply_WhenRecompositeIsOff_ReturnsTheGeneratedImageAsIs()
     {
