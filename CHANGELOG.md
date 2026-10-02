@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.241
+
 - **Fixed an intermittent `CUDA_ERROR_INVALID_VALUE` crash on the first `RmsNorm` call of a prefill.**
   `GpuTransferHelper.UploadTo` and `State.FreeDevice`'s async-free branch read `State.StreamHandle` directly, with
   nothing checking that the backend hadn't been retired (zeroing the handle) since the caller resolved that
@@ -24,18 +26,6 @@ stable release will require. Dates are UTC.
   the layer loop, so all 36-layer rereads hit instead of re-uploading. Under accurate (non-overlapped) timing
   this is a real, modest TTFT reduction (~4-5%); prefill GEMM time dominates the 3060's TTFT and is unaffected
   by this fix (a separate efficiency project is being scoped for that).
-- **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
-  pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
-  `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
-  Blur only softens the in-denoise blend (and, because the grown and blurred mask is thresholded, widens the pasted
-  region by about the blur radius), unless `ImageRequest.MaskCompositeUnthresholded` asks for the soft paste.
-  `Inpaint.RecompositeMask` turns the full-canvas paste off (Init Image Recomposite Mask); the crop and segment paths
-  always paste. `RecipeImg2ImgBinder` switches the pipelines' own paste off whenever a mask is present, so a caller
-  driving a recipe pipeline directly with a mask gets no paste and should go through `IImagesService`.
-  `MaskCompositeUnthresholded` and `RecompositeMask` are request fields for library callers (the SwarmUI extension);
-  the CLI and HTTP API do not expose them yet.
-- A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
-  before the full-canvas run; before, the mask resolver's guard threw.
 - **Fixed: HeartMuLa's quantized GGUF cache ignored `modelsRoot`/`ModelCacheRoot` entirely.** Every other
   audio model resolves its cache location under `AudioModelCache.CacheRoot` (`modelsRoot/audio` when
   `EngineKnobs.ModelsRoot` is configured, honoring the `EngineKnobs.ModelCacheRoot` override too).
@@ -102,6 +92,18 @@ stable release will require. Dates are UTC.
   `voice.turn.total_ms` 1095.8-1225.1 ms (gate ≤ 1300 ms), decode 89-102 tok/s. VRAM primed and flat for all ten
   turns at **5.81 GB, under the ≤ 6 GB target** (was ~13.8 GB). A smaller `PrefixCacheCapacityHint` and
   `vram.kvF16` stay unused.
+- **Dia TTS decode self-attention is GPU-resident; warm generation is ~3.6x faster with bit-identical
+  output.** `DiaAttention.SelfForwardFlash` (gated on `IBackend.FlashDecodeSupported`) replaces the
+  per-step host reshape/RoPE/GQA-repeat/memcpy attention path Dia shared with pre-fix Zonos, mirroring
+  Zonos's own resident decode (`ForwardResident`, `FixedKvCache`). Split-half (NeoX) RoPE is applied via
+  two per-tensor `IBackend.ApplyRopeSingle` calls (q and k separately -- Dia's self-attention is GQA, 16
+  query heads / 4 KV heads, so the combined q+k call corrupted K before #228 fixed it).
+  Verified same seed, same prompt, baseline vs fixed: identical sha256 and duration across 6 reps each;
+  warm median 91.92s -> 25.39s, RTF ~10.9 -> ~3.0. CPU/Vulkan paths are untouched.
+- **Audio regression triage, alpha.183 -> alpha.238: no regression found.** Orpheus, CSM, Qwen3-TTS,
+  Chatterbox and Moonshine (STT) A/B'd on the RTX 4090, same text/voice/seed: all flat to noise, Qwen3-TTS
+  ~24% faster (not chased further). The 176 shared-backend files (Cuda/Core/Gpu) that changed in that
+  window did not slow any of the five models down.
 
 ## alpha.240
 
@@ -124,6 +126,18 @@ stable release will require. Dates are UTC.
 
 ## alpha.239
 
+- **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
+  pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
+  `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
+  Blur only softens the in-denoise blend (and, because the grown and blurred mask is thresholded, widens the pasted
+  region by about the blur radius), unless `ImageRequest.MaskCompositeUnthresholded` asks for the soft paste.
+  `Inpaint.RecompositeMask` turns the full-canvas paste off (Init Image Recomposite Mask); the crop and segment paths
+  always paste. `RecipeImg2ImgBinder` switches the pipelines' own paste off whenever a mask is present, so a caller
+  driving a recipe pipeline directly with a mask gets no paste and should go through `IImagesService`.
+  `MaskCompositeUnthresholded` and `RecompositeMask` are request fields for library callers (the SwarmUI extension);
+  the CLI and HTTP API do not expose them yet.
+- A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
+  before the full-canvas run; before, the mask resolver's guard threw.
 - **Audio: fixed the vocab-sized delegate-sort allocation anti-pattern in the TTS samplers** — the same
   pattern PR #215 fixed in the LLM package's `TopPStep`, independently present in several places in
   `src/HartsyInference.Audio`:
