@@ -28,6 +28,12 @@ stable release will require. Dates are UTC.
   binds for prompts already shown to run away -- a well-formed multi-sentence prompt's own length
   estimate comfortably exceeds what its natural EOS needs. This does not make Dia produce intelligible
   speech from one short sentence; it bounds how long a doomed generation wastes before giving up.
+  **Confirmed model behaviour, not a port bug**: ran upstream nari-labs Dia-1.6B-0626 itself (local
+  weights, no download) on the identical sentence, `[S1]`-tagged, same seed and the same 1720 cap.
+  Upstream also never fires EOS — its own `finished_step_Bx` accounting shows the sequence forced to
+  the cap at step ≈1704 — and Whisper transcribes its output as `[Music]` too. Same inputs, same
+  failure, in the reference implementation; nothing in the C# port's conditioning, CFG, delay pattern,
+  or EOS rule is implicated.
 
 ## alpha.239
 
