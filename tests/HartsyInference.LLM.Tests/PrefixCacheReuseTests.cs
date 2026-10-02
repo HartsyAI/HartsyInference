@@ -1,3 +1,4 @@
+using HartsyInference.Core.Backends;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Generation;
@@ -195,6 +196,74 @@ public sealed class PrefixCacheReuseTests
 
         Assert.Equal(string.Join(",", reference.TokenIds), string.Join(",", actual.TokenIds));
         Assert.True(actual.ReusedPromptTokens > 0, "the retained prefix from turn 1 should still have been reused.");
+
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    /// <summary>Delegates every <see cref="IGenerationModel"/> member to a real <see cref="GenericTransformerModel"/>
+    /// except <see cref="Prefill"/>, which throws <see cref="OperationCanceledException"/> on a caller-chosen call
+    /// index instead of running it — simulating a backend whose <c>Prefill</c> itself observes a cancellation
+    /// mid-operation, which no current backend does (nothing plumbs a token into this call), but which
+    /// <c>TextGenerationPipeline.Generate</c>'s <c>firstPrefillDone</c> guard is defensive against regardless.</summary>
+    private sealed class FaultInjectingModel(GenericTransformerModel inner, int throwOnCallIndex) : IGenerationModel
+    {
+        private int _calls;
+        public GenerationModelInfo Info => inner.Info;
+        public GenerationCapabilities Capabilities => inner.Capabilities;
+        public IBackend OutputBackend => inner.OutputBackend;
+        public ISequenceState CreateSequenceState(SequenceStateOptions options) => inner.CreateSequenceState(options);
+        public Tensor DecodeBatch(ReadOnlySpan<int> tokenIds, ISequenceState[] states) => inner.DecodeBatch(tokenIds, states);
+        public Tensor ProjectLogits(Tensor hidden, int rows) => inner.ProjectLogits(hidden, rows);
+        public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits) => inner.EnumerateWeights(includeRedundantSplits);
+        public long EstimateSequenceBytes(int contextTokens) => inner.EstimateSequenceBytes(contextTokens);
+        public CapacitySnapshot Capacity() => inner.Capacity();
+        public void Dispose() => inner.Dispose();
+
+        public Tensor Prefill(in PrefillChunk chunk, ISequenceState state)
+        {
+            if (_calls++ == throwOnCallIndex) throw new OperationCanceledException("injected: backend observed cancellation mid-prefill");
+            return inner.Prefill(chunk, state);
+        }
+    }
+
+    [Fact]
+    public void OnCancellationDuringTheFirstPrefill_DiscardsCleanly_NoCorruptedReuse()
+    {
+        // Regression (hardening): if a future backend's Prefill itself threw OperationCanceledException during
+        // the very FIRST prefill (cache.Length still short of promptIds.Length — nothing has been committed yet),
+        // treating that as "committed" would store the full prompt in RetainedSequence.TokenIds while the cache
+        // itself only holds part of it: the same class of mismatch as the eager-loop bug above, but for the
+        // call index BEFORE firstPrefillDone is set. Unlike that bug, this one isn't reachable through any public
+        // hook today (no current Prefill call is cancellation-aware), so it's exercised here via a fault-injecting
+        // IGenerationModel instead of a real cancellation path.
+        _rng = 0xB0BACAFEu;
+        TransformerConfig cfg = Cfg();
+        Dictionary<string, Tensor> w = Weights(cfg);
+        using CpuBackend backend = new();
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model");
+        StubTokenizer tokenizer = new();
+        SamplingOptions sampling = SamplingOptions.Default with { Greedy = true };
+        int[] promptIds = [.. Enumerable.Range(0, 6).Select(_ => NextToken(cfg.VocabSize))];
+
+        using GenericTransformerModel real = new(model, backend);
+        FaultInjectingModel faulty = new(real, throwOnCallIndex: 0);   // throws on the very first Prefill call
+        TextGenerationPipeline pipeline = new(faulty, tokenizer);
+        using RetainedSequence retained = new();
+
+        GenerationRequest request = new() { RawTokenIds = promptIds, MaxTokens = 8, Sampling = sampling, PrefixCacheCapacityHint = 64 };
+        Assert.Throws<OperationCanceledException>(() => pipeline.Generate(request, retained));
+
+        // The genuine-fault branch must have run: nothing retained at all, not a cache claiming a partial prompt.
+        Assert.Null(retained.Cache);
+        Assert.Empty(retained.TokenIds);
+
+        // A later call under the same (now-empty) key must run uncached, not throw from a stale/partial cache.
+        TextGenerationPipeline freshPipeline = new(model, tokenizer, backend);
+        GenerationResult actual = freshPipeline.Generate(request, retained);
+        GenerationResult reference = new TextGenerationPipeline(model, tokenizer, backend).Generate(request);
+        Assert.Equal(string.Join(",", reference.TokenIds), string.Join(",", actual.TokenIds));
+        Assert.Equal(0, actual.ReusedPromptTokens);
 
         foreach (Tensor t in w.Values) t.Dispose();
     }

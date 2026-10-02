@@ -88,6 +88,12 @@ public sealed class TextGenerationPipeline
         int maxSeq = promptIds.Length + request.MaxTokens + 1;
         (ISequenceState cache, int reusedLen) = AcquireCache(reuse, promptIds, maxSeq, request.PrefixCacheCapacityHint);
         bool committed = false;
+        // True only once cache.Length is guaranteed >= promptIds.Length (the first prefill below has returned).
+        // The catch block below commits on cancellation ONLY once this is true: today nothing plumbs `ct` into
+        // the first Prefill call, so it cannot itself observe a cancellation, but gating on this explicitly (
+        // rather than relying on that absence) keeps the finally block's cache.Length-vs-promptIds.Length
+        // assumption true by construction instead of by what no current backend happens to do.
+        bool firstPrefillDone = false;
         try
         {
             bool stopped;
@@ -100,6 +106,7 @@ public sealed class TextGenerationPipeline
                 Span<float> lastRow = LastRow(logits, 1, vocab);
                 next = sampler.Next(lastRow, generated);
             }
+            firstPrefillDone = true;
 
             request.OnPrefillCompleted?.Invoke(promptIds.Length);
 
@@ -170,8 +177,11 @@ public sealed class TextGenerationPipeline
             // commits `next` to the cache (eager loop; graph decode's onToken sits at the same spot). So
             // generated.Count can be exactly one ahead of what cache.Length reflects when this fires — the
             // `finally` below reconciles against cache.Length, the one count that is always ground truth,
-            // rather than trusting generated.Count here.
-            committed = true;
+            // rather than trusting generated.Count here. Committing is conditioned on firstPrefillDone: a
+            // cancellation before the prompt itself finished prefilling has no committed state at all (cache.Length
+            // is still short of promptIds.Length), and the finally block's reconciliation formula assumes the full
+            // prompt is already in — falling through to the genuine-fault branch below discards cleanly instead.
+            committed = firstPrefillDone;
             throw;
         }
         finally
