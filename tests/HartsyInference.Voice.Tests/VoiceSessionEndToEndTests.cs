@@ -71,7 +71,7 @@ public sealed class VoiceSessionEndToEndTests
                 kokoroMs[run] = await models.Gpu.RunAsync(VoiceGpuJobKind.Synthesize, () =>
                 {
                     long started = Stopwatch.GetTimestamp();
-                    models.Synthesize(FifteenWords);
+                    models.Synthesize(FifteenWords, CancellationToken.None);
                     return Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                 }, CancellationToken.None);
             }

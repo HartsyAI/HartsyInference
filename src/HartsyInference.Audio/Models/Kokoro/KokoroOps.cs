@@ -13,10 +13,28 @@ namespace HartsyInference.Audio.Models.Kokoro;
 /// <see cref="IBackend.AdaInstanceNorm1d"/> (channel-axis InstanceNorm + affine) or
 /// <see cref="IBackend.LayerNormModulate"/>.</para>
 ///
-/// <para>Every helper here is a backend op: the tensors flowing through the predictor and decoder stay
+/// <para>Every tensor helper here is a backend op: the tensors flowing through the predictor and decoder stay
 /// device-resident, and none of them reads a <c>DataPointer</c> (each such read is a stream drain).</para></summary>
 internal static class KokoroOps
 {
+    /// <summary>A synthesis stage boundary: reports <paramref name="stage"/> to <paramref name="observer"/>, then, once
+    /// <paramref name="cancel"/> is signalled, disposes the stage's <paramref name="live"/> tensors and throws
+    /// <see cref="OperationCanceledException"/>.</summary>
+    public static void StageBoundary(Action<string>? observer, string stage, CancellationToken cancel,
+        params ReadOnlySpan<Tensor> live)
+    {
+        observer?.Invoke(stage);
+        if (!cancel.IsCancellationRequested)
+        {
+            return;
+        }
+        foreach (Tensor tensor in live)
+        {
+            tensor.Dispose();
+        }
+        cancel.ThrowIfCancellationRequested();
+    }
+
     /// <summary>Computes <c>fc(style)</c> and splits the result into gamma + beta halves.
     /// <paramref name="fcW"/> is <c>[2*features, style_dim]</c> and <paramref name="fcB"/>
     /// is <c>[2*features]</c> in PyTorch convention (Linear weight stored as
