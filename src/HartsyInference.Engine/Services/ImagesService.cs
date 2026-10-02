@@ -69,8 +69,12 @@ public sealed class ImagesService : IImagesService
                 // basePass first: the crop is scaled to the resolution the model will actually run at, so it has to see
                 // the defaults-filled request rather than the caller's.
                 InpaintOnlyMasked.Plan? cropPlan = InpaintOnlyMasked.Prepare(basePass);
+                // A declined crop runs as a plain full-canvas inpaint; the mask resolver refuses a lingering crop request.
+                ImageRequest fullCanvas = InpaintOnlyMasked.WithoutCrop(basePass);
                 ImageResult result = cropPlan is null
-                    ? _engine.GenerateWithVramCleanup(() => pipeline.Generate(basePass, progress, cancel))
+                    ? MaskRecomposite.Apply(
+                        fullCanvas,
+                        _engine.GenerateWithVramCleanup(() => pipeline.Generate(fullCanvas, progress, cancel)))
                     : InpaintOnlyMasked.Composite(
                         _engine.GenerateWithVramCleanup(() => pipeline.Generate(InpaintOnlyMasked.Apply(basePass, cropPlan), progress, cancel)),
                         cropPlan);
