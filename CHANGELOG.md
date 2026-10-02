@@ -8,6 +8,20 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **The prompt prefill now observes the request's cancellation token between transformer layers.**
+  `TextGenerationPipeline` hands the token to the first prefill through a new
+  `IGenerationModel.Prefill(chunk, state, cancel)` overload (a default interface method that checks only before the
+  call); `GenericTransformerModel` implements it by checking between layers in `GenericTransformer.Forward`,
+  `ForwardEmbeds` and the layer-split `ForwardEmbedsStaged`, which all take an optional token. The math and the
+  kernel shapes are those of an uncancelled call, so output is identical when nothing is cancelled. A stopped prefill
+  commits nothing: the cache length is not advanced, and the rows the finished layers wrote past it are never read
+  and are overwritten next time. As before, a request with prefix-cache reuse that is cancelled during the prompt
+  prefill drops its retained sequence instead of keeping one the cache never received. On the CPU backend the stop
+  lands at the next layer. On CUDA the host queues layers far ahead of the GPU, so the check stops issuing work only
+  when the cancel lands early, and the layers already queued still run. Measured on an RTX 3060 (Qwen3-4B Q4_K_M,
+  695-token prompt, 1.02 s prefill): a cancel 10 % in throws after 7 ms instead of 913 ms, but the card stays busy
+  for 788 ms instead of 913 ms; from 30 % in, every layer is already queued and nothing changes. Freeing the card
+  early needs a bound on how far the host runs ahead, which is open work.
 - **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
   instead of guessing the tool-call format from its name: true only when the template references the
   caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,
