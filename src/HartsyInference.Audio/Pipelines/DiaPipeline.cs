@@ -302,17 +302,35 @@ public sealed unsafe class DiaPipeline : IDisposable
     internal static int SampleDiaChannel(float[] cond, float[] guided, int channel, DiaConfig cfg, ref uint rng)
         => SampleDiaChannel(cond, guided, channel, cfg, ref rng, cfg.TopK, cfg.Temperature, cfg.TopP);
 
+    // SampleDiaChannel scratch, reused across calls on the same thread (one generation's decode loop samples
+    // its 9 channels/frame synchronously) — grown, never shrunk. `guided`/`cond` are caller-owned per-channel
+    // arrays that must come out unchanged (DiaPipeline logs/reuses neither after this call today, but mutating
+    // a caller's array as a sort side effect is a trap for whoever reads it next), so the sort runs over a
+    // dedicated copy instead of `guided` itself.
+    [ThreadStatic] private static float[]? t_diaGuidedSort;
+    [ThreadStatic] private static int[]? t_diaOrder;
+    [ThreadStatic] private static float[]? t_diaArr;
+
     /// <inheritdoc cref="SampleDiaChannel(float[], float[], int, DiaConfig, ref uint)"/>
     internal static int SampleDiaChannel(float[] cond, float[] guided, int channel, DiaConfig cfg, ref uint rng,
         int topK, float temperature, float topP)
     {
         int v = cfg.AudioVocab;
         int k = Math.Min(topK, v);
-        int[] order = new int[v];
+        // Was a fresh int[v] + a full delegate-comparator Array.Sort every call (the same anti-pattern PR #215
+        // fixed in the LLM package), to find only the top-K WINDOW below — order's post-sort SEQUENCE is never
+        // read, only membership in its first k slots, so this only needs to match the old sort's KEPT SET, which
+        // SortHelpers.SortDescendingByValue does exactly (verified including ties — see SortHelpersTests).
+        if (t_diaGuidedSort is null || t_diaGuidedSort.Length < v) t_diaGuidedSort = new float[v];
+        if (t_diaOrder is null || t_diaOrder.Length < v) t_diaOrder = new int[v];
+        if (t_diaArr is null || t_diaArr.Length < v) t_diaArr = new float[v];
+        float[] guidedSort = t_diaGuidedSort;
+        int[] order = t_diaOrder;
+        float[] arr = t_diaArr;
+        Array.Copy(guided, guidedSort, v);
         for (int i = 0; i < v; i++) order[i] = i;
-        Array.Sort(order, (a, b) => guided[b].CompareTo(guided[a]));
-        float[] arr = new float[v];
-        Array.Fill(arr, float.NegativeInfinity);
+        SortHelpers.SortDescendingByValue(guidedSort, order, v);
+        for (int i = 0; i < v; i++) arr[i] = float.NegativeInfinity;
         // model.py:442-445: the candidate window is the top-K of the CFG-COMBINED logits, but the sampled
         // distribution (EOS-argmax + top_p + multinomial in _sample_next_token) is the CONDITIONAL logits
         // restricted to it (`cond_logits.masked_fill(mask, -inf)`). Filling `guided` here is WRONG: at an
