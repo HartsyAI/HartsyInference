@@ -23,20 +23,17 @@ stable release will require. Dates are UTC.
 
 ## alpha.240
 
-- **Tool-call format detection can read a model's own GGUF `tokenizer.chat_template` instead of guessing from
-  its name.** `ToolCallFormats.TryDetectFromTemplate` returns true only when the template references the
+- **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
+  instead of guessing the tool-call format from its name: true only when the template references the
   caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,
-  Llama-3 `<|python_tag|>`, Mistral `[TOOL_CALLS]`, Gemma `<|tool_call>`) — verified against the real
-  `tokenizer.chat_template` of eight local GGUFs: Qwen3-4B and Qwen2.5-1.5B correctly detect Hermes,
-  gemma-4-E2B-it correctly detects Gemma, and five real templates correctly detect as unsupported for
-  family-specific reasons (Qwen3.5's Qwen3-Coder-style XML-argument dialect; DeepSeek-R1-Distill, which never
-  renders `tools` at all; GLM-4-9B, which lists `tools` but instructs no supported envelope; Llama-3.2-1B,
-  which references `tools` but never renders `<|python_tag|>`; Mistral-7B-v0.3, which has no tool-calling
-  support in this build's template). `ToolCallFormats.Detect`'s name-hint heuristic no longer maps `"glm"` or
-  `"deepseek"` to Hermes — a review found neither family's real wire format matches it (GLM uses XML
-  arguments, DeepSeek uses its own markers and never renders `tools` for new calls) — though a bare name hint
-  for either still reaches the documented unknown-family Hermes fallback, so `Detect`'s observable behavior is
-  unchanged.
+  Llama-3 `<|python_tag|>`, Mistral `[TOOL_CALLS]`, Gemma `<|tool_call>`). Verified against the real template
+  of eight local GGUFs — three detect correctly (Qwen3-4B/Qwen2.5-1.5B → Hermes, gemma-4-E2B-it → Gemma) and
+  five correctly detect as unsupported for family-specific reasons, see
+  `tests/HartsyInference.Tools.Tests/Fixtures/ChatTemplates/README.md`.
+- **Fixed:** `ToolCallFormats.Detect`'s name-hint heuristic no longer maps `"glm"`/`"deepseek"` to Hermes —
+  neither family's real wire format matches it (GLM uses XML arguments, DeepSeek never renders `tools` for
+  new calls). Both still reach the documented unknown-family Hermes fallback, so `Detect`'s observable
+  behavior for a bare name hint is unchanged.
 
 ## alpha.239
 

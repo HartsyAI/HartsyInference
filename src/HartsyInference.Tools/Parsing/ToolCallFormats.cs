@@ -108,7 +108,9 @@ public static partial class ToolCallFormats
     /// instruct Hermes JSON). Normalizes <c>\"</c> → <c>"</c> first: chat templates are Jinja string literals, so
     /// a JSON example embedded in one (e.g. Qwen's <c>"...\"name\": ...\"arguments\": ..."</c>) carries that escape
     /// in the raw GGUF metadata string. Returns <see langword="true"/> only when the template references the
-    /// caller-supplied <c>tools</c> variable AND literally instructs one of four supported envelopes: Hermes JSON
+    /// word <c>tools</c> (a plain substring match — prose that merely mentions "tools" passes this half, but
+    /// still needs a literal envelope marker below it to return true) AND literally instructs one of four
+    /// supported envelopes: Hermes JSON
     /// (<c>&lt;tool_call&gt;</c> followed by a JSON object naming <c>"name"</c> and <c>"arguments"</c>), Llama-3
     /// (<c>&lt;|python_tag|&gt;</c>), Mistral (<c>[TOOL_CALLS]</c>) or Gemma (<c>&lt;|tool_call&gt;</c>). An
     /// XML-argument dialect (GLM's <c>&lt;tool_call&gt;name\n&lt;arg_key&gt;…</c>, Qwen3.5/Qwen3-Coder's

@@ -107,6 +107,23 @@ public sealed class ToolCallTemplateDetectionTests
     }
 
     [Fact]
+    public void SyntheticLlama3Template_PythonTagForBuiltinToolsPlusBareJsonForCustomTools_StillDetectsLlama3()
+    {
+        // Real Llama-3.1/3.2 templates render <|python_tag|> only for the model's own built-in tools (code
+        // interpreter, search, …) — custom user tools get a bare {"name":..,"parameters":..} object instead
+        // (exactly the llama-3.2-1b-instruct real fixture above, which has no <|python_tag|> at all because it
+        // never offers built-in tools). TryDetectFromTemplate doesn't need to know why the marker is there;
+        // its presence anywhere in a tools-aware template is enough.
+        const string template = "{%- if tools %}"
+            + "{%- if builtin_tools %}Environment: ipython<|python_tag|>{%- endif %}"
+            + "Respond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}."
+            + "{%- endif %}";
+        bool detected = ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format);
+        Assert.True(detected);
+        Assert.Equal(ToolCallFormat.Llama3, format);
+    }
+
+    [Fact]
     public void SyntheticMistralTemplate_ToolCallsWithTools_DetectsMistral()
     {
         const string template = "{%- if tools %}[AVAILABLE_TOOLS]{{ tools }}[/AVAILABLE_TOOLS]{%- endif %}[TOOL_CALLS][{\"name\": x}]";
