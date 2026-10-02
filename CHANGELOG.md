@@ -8,6 +8,16 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Bounded the opt-in prefix-KV reuse (`TextRequest.PrefixCacheKey`) for GPUs shared with other models.** A
+  retained KV cache too small for the next request now grows by copying its reusable prefix on device instead of
+  being dropped and prefilled again, which also stops a tool round with a large result from re-prefilling the rest
+  of its turn. What a request retains is copied down to its length plus `vram.prefixCacheHeadroomTokens` (new,
+  default 256) instead of keeping the whole allocation, and a sequence whose kept size would exceed
+  `vram.prefixCacheMaxBytes` is freed after its request rather than retained; the store refuses one too, so the
+  cap is hard. `vram.prefixCacheMaxBytes` now defaults to 1.5 GiB (was 512 MiB, which the newest entry could
+  exceed). `IBackend.ScatterSeqHeadMajor` gains a row-count overload and copies any byte-addressable dtype on CPU,
+  CUDA and Vulkan; `FixedKvCache.CopyWithCapacity` and `IGenerationModel.ResizeSequenceState` expose the resize.
+  `PrefixCacheCapacityHint` now only sizes a sequence's first allocation, so the voice session no longer passes one.
 - **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
   instead of guessing the tool-call format from its name: true only when the template references the
   caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,
