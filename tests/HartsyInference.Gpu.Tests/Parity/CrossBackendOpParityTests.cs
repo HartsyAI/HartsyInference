@@ -554,4 +554,55 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
 
         TensorAssert.Identical(actual, expected, because: $"on {kind}");
     }
+
+    public static IEnumerable<object[]> GpuKindsByCopyDtype =>
+        from object[] row in BackendGate.GpuKinds
+        from string dtype in new[] { "F32", "F16" }
+        select new object[] { row[0], dtype };
+
+    /// <summary>The row-count form a KV cache resize uses: a prefix of an input whose sequence extent differs from
+    /// the output's, into an output both shorter (shrink) and longer (grow) than it, at a nonzero offset, as a byte
+    /// copy in F16 as well as F32. Every output row is written, for the reason given above.</summary>
+    [Theory]
+    [MemberData(nameof(GpuKindsByCopyDtype))]
+    public void ScatterSeqHeadMajor_RowPrefix_Matches_The_Cpu(string kind, string dtypeName)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+        DType dtype = dtypeName == "F16" ? DType.F16 : DType.F32;
+        const int heads = 3, hd = 5;
+        using Tensor source = InDtype(Random(new TensorShape(1, heads, 9, hd), seed: 81), dtype, cpu);
+        using Tensor tail = InDtype(Random(new TensorShape(1, heads, 8, hd), seed: 82), dtype, cpu);
+
+        using Tensor shrunk = new(new TensorShape(1, heads, 6, hd), dtype);
+        using Tensor shrunkExpected = new(shrunk.Shape, dtype);
+        backend.ScatterSeqHeadMajor(shrunk, source, 0, 6);
+        ((IBackend)cpu).ScatterSeqHeadMajor(shrunkExpected, source, 0, 6);
+        TensorAssert.Identical(shrunk, shrunkExpected, because: $"shrink on {kind} {dtypeName}");
+
+        using Tensor grown = new(new TensorShape(1, heads, 12, hd), dtype);
+        using Tensor grownExpected = new(grown.Shape, dtype);
+        backend.ScatterSeqHeadMajor(grown, source, 0, 7);
+        backend.ScatterSeqHeadMajor(grown, tail, 7, 5);
+        ((IBackend)cpu).ScatterSeqHeadMajor(grownExpected, source, 0, 7);
+        ((IBackend)cpu).ScatterSeqHeadMajor(grownExpected, tail, 7, 5);
+        TensorAssert.Identical(grown, grownExpected, because: $"grow on {kind} {dtypeName}");
+    }
+
+    /// <summary><paramref name="f32"/> itself for F32, else its F16 cast (disposing <paramref name="f32"/>).</summary>
+    private static Tensor InDtype(Tensor f32, DType dtype, CpuBackend cpu)
+    {
+        if (dtype == DType.F32)
+        {
+            return f32;
+        }
+        Tensor half = new(f32.Shape, dtype);
+        ((IBackend)cpu).CastToF16(half, f32);
+        f32.Dispose();
+        return half;
+    }
 }

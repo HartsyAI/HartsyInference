@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Reflection;
 using HartsyInference.Engine.Services;
+using HartsyInference.LLM.Generation;
 
 namespace HartsyInference.Voice.Tests.Fakes;
 
@@ -15,26 +16,9 @@ internal static class VramProbe
     /// <c>"cuda:0"</c>), or null when the slot, its backend, or <c>GetVramInfo</c> could not be reached.</summary>
     public static long? UsedBytes(ITextService text, string device)
     {
-        if (text is not TextService textService)
-        {
-            return null;
-        }
+        object? slot = FindSlot(text, device);
         try
         {
-            FieldInfo? slotsField = typeof(TextService).GetField("_slots", BindingFlags.NonPublic | BindingFlags.Instance);
-            if (slotsField?.GetValue(textService) is not IDictionary slots)
-            {
-                return null;
-            }
-            object? slot = null;
-            foreach (DictionaryEntry entry in slots)
-            {
-                if (entry.Key is string key && string.Equals(key, device, StringComparison.OrdinalIgnoreCase))
-                {
-                    slot = entry.Value;
-                    break;
-                }
-            }
             PropertyInfo? backendProperty = slot?.GetType().GetProperty("Backend", BindingFlags.Public | BindingFlags.Instance);
             object? backend = backendProperty?.GetValue(slot);
             MethodInfo? method = backend?.GetType().GetMethod("GetVramInfo", BindingFlags.Public | BindingFlags.Instance);
@@ -56,5 +40,55 @@ internal static class VramProbe
         }
     }
 
+    /// <summary>KV bytes the slot loaded for <paramref name="device"/> currently retains for prefix reuse
+    /// (<c>RetainedSequenceStore.BytesUsed</c>): 0 with nothing retained, null when the slot could not be reached.
+    /// Unlike <see cref="UsedBytes"/> this is the retained sequences alone, not the card's total.</summary>
+    public static long? RetainedPrefixBytes(ITextService text, string device)
+    {
+        if (FindSlot(text, device) is not { } slot)
+        {
+            return null;
+        }
+        try
+        {
+            PropertyInfo? storeProperty =
+                slot.GetType().GetProperty("PrefixCache", BindingFlags.Public | BindingFlags.Instance);
+            return storeProperty?.GetValue(slot) is RetainedSequenceStore store ? store.BytesUsed : 0;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
     public static string Describe(long? usedBytes) => usedBytes is { } b ? $"{b / (1024.0 * 1024):F0} MB" : "(unavailable)";
+
+    private static object? FindSlot(ITextService text, string device)
+    {
+        if (text is not TextService textService)
+        {
+            return null;
+        }
+        try
+        {
+            FieldInfo? slotsField =
+                typeof(TextService).GetField("_slots", BindingFlags.NonPublic | BindingFlags.Instance);
+            if (slotsField?.GetValue(textService) is not IDictionary slots)
+            {
+                return null;
+            }
+            foreach (DictionaryEntry entry in slots)
+            {
+                if (entry.Key is string key && string.Equals(key, device, StringComparison.OrdinalIgnoreCase))
+                {
+                    return entry.Value;
+                }
+            }
+            return null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
 }

@@ -44,9 +44,10 @@ public sealed class MusicService : IMusicService
         MusicModelDescriptor descriptor = MusicCatalog.Resolve(selector.Id);
         IBackend backend = _engine.Backend;
         MusicLoadContext loadContext = BuildLoadContext(backend, request);
-        string key = descriptor.CacheKey(selector) + loadContext.CacheSuffix();
+        string checkpointKey = descriptor.CacheKey(selector);
+        string key = checkpointKey + loadContext.CacheSuffix();
 
-        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Music, key), async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, Job(key, checkpointKey, loadContext), async ct =>
         {
             IMusicRunner runner = await _engine.AudioRuntime.Music
                 .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, selector, token), ct).ConfigureAwait(false);
@@ -107,9 +108,10 @@ public sealed class MusicService : IMusicService
         MusicModelDescriptor descriptor = MusicCatalog.Resolve(selector.Id);
         IBackend backend = _engine.Backend;
         MusicLoadContext loadContext = BuildLoadContext(backend, request);
-        string key = descriptor.CacheKey(selector) + loadContext.CacheSuffix();
+        string checkpointKey = descriptor.CacheKey(selector);
+        string key = checkpointKey + loadContext.CacheSuffix();
 
-        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Music, key), async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, Job(key, checkpointKey, loadContext), async ct =>
         {
             IMusicRunner runner = await _engine.AudioRuntime.Music
                 .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, selector, token), ct).ConfigureAwait(false);
@@ -121,6 +123,20 @@ public sealed class MusicService : IMusicService
                 + $"({result.ScoreTokens} score tokens, {result.BudgetSeconds:0.0}s of audio budget).");
             return result;
         }, cancel, stageBackends: loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null);
+    }
+
+    /// <summary>The runtime job for <paramref name="key"/>'s runner, its weights sized from what the descriptor's
+    /// <paramref name="checkpointKey"/> names before any <c>|</c>: a placed checkpoint file or folder, or a downloaded
+    /// repo. A layer-split load spreads its weights over several devices, so the whole checkpoint is no one device's need.</summary>
+    private AudioJob Job(string key, string checkpointKey, MusicLoadContext loadContext)
+    {
+        if (loadContext.IsSharded)
+        {
+            return new AudioJob(_engine.AudioRuntime.Music, key);
+        }
+        int bar = checkpointKey.IndexOf('|');
+        string weights = bar < 0 ? checkpointKey : checkpointKey[..bar];
+        return new AudioJob(_engine.AudioRuntime.Music, key, () => AudioWeightFootprint.Estimate(weights, "music"));
     }
 
     /// <summary>Builds the load-time context: single-device Q4_K (byte-identical to pre-placement behavior) unless the engine placement has ≥2 <c>ShardDevices</c>, in which case the big-LM loaders (YuE) get the resolved shard backends and default to un-quantized weights pooled across them.</summary>

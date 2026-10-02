@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.ResembleEnhance;
@@ -266,7 +267,7 @@ public sealed unsafe class ResembleUnivNet
             long kBase = (long)di * kLayerStride;
             long bBase = (long)di * outCh * frames;
 
-            System.Threading.Tasks.Parallel.For(0, frames, frame =>
+            CpuParallel.For(frames, (long)upT * outCh * nc * k * 2, frame =>
             {
                 int tStart = frame * hop;
                 int tEnd = Math.Min(tStart + hop, upT);

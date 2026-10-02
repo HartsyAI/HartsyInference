@@ -1,5 +1,6 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors.Quant;
 
 namespace HartsyInference.ModelAssets.BlockScale;
@@ -52,16 +53,23 @@ public static class Exl3Codec
         fixed (float* dst = dest)
         {
             nint srcAddr = (nint)src, dstAddr = (nint)dst;
-            Parallel.For(0, rowBlocks * inBlocks, () => new float[Block * Block], (unit, _, buf) =>
+            CpuParallel.For(rowBlocks * inBlocks, (long)rowBlocks * inBlocks * Block * Block * 8, unit =>
             {
-                int rb = unit / inBlocks, ib = unit % inBlocks, ob = firstOutBlock + rb;
-                DecodeBlock((byte*)srcAddr, outTiles, ib, ob, buf);
-                RotateBlock(buf, (ushort*)suhAddr + ib * Block, (ushort*)svhAddr + ob * Block);
-                float* rows = (float*)dstAddr + (long)rb * Block * cols + (long)ib * Block;
-                for (int ol = 0; ol < Block; ol++)
-                    buf.AsSpan(ol * Block, Block).CopyTo(new Span<float>(rows + ol * cols, Block));
-                return buf;
-            }, static _ => { });
+                float[] buf = ArrayPool<float>.Shared.Rent(Block * Block);
+                try
+                {
+                    int rb = unit / inBlocks, ib = unit % inBlocks, ob = firstOutBlock + rb;
+                    DecodeBlock((byte*)srcAddr, outTiles, ib, ob, buf);
+                    RotateBlock(buf, (ushort*)suhAddr + ib * Block, (ushort*)svhAddr + ob * Block);
+                    float* rows = (float*)dstAddr + (long)rb * Block * cols + (long)ib * Block;
+                    for (int ol = 0; ol < Block; ol++)
+                        buf.AsSpan(ol * Block, Block).CopyTo(new Span<float>(rows + ol * cols, Block));
+                }
+                finally
+                {
+                    ArrayPool<float>.Shared.Return(buf);
+                }
+            });
         }
     }
 

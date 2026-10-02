@@ -8,6 +8,54 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host
+  Q/K rotation, `Nvfp4Linear`'s BF16 dequant, `VideoRgbFrames.ExtractAllFrames`, the CUDA backend's host W8A8 weight
+  quantization and GPT-OSS's CPU-backend expert loop used raw `Parallel.For` / `Parallel.ForEach`, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`. They now go through `CpuParallel`, `FluxRope` in ranges of 1024
+  vectors through `CpuParallel.ForRanges`. The GPT-OSS loop runs a few lanes (at most half the cores, 8, and the cap),
+  each pulling experts from a shared counter and reusing one pair of dequant slices allocated on its first expert, so
+  slice memory stays bounded as before and the dequant and GEMM inside each expert nest on the same capped scheduler.
+  Outputs are byte-identical at any cap, and no raw `Parallel` loop remains outside `CpuParallel` itself.
+- **Bounded the opt-in prefix-KV reuse (`TextRequest.PrefixCacheKey`) for GPUs shared with other models.** A
+  retained KV cache too small for the next request now grows by copying its reusable prefix on device instead of
+  being dropped and prefilled again, which also stops a tool round with a large result from re-prefilling the rest
+  of its turn. What a request retains is copied down to its length plus `vram.prefixCacheHeadroomTokens` (new,
+  default 256) instead of keeping the whole allocation, and a sequence whose kept size would exceed
+  `vram.prefixCacheMaxBytes` is freed after its request rather than retained; the store refuses one too, so the
+  cap is hard. `vram.prefixCacheMaxBytes` now defaults to 1.5 GiB (was 512 MiB, which the newest entry could
+  exceed): now that it also bounds each entry, it has to hold one voice call at its history ceiling on Qwen3-4B —
+  the measured 609-token system-and-tools prefix, the 3,000-token history budget and a 201-token reply allocation,
+  about 3,750 tokens at 288 KiB of F32 KV per token (~1.03 GiB); 512 MiB would drop that call's cache mid-call
+  past ~1,800 tokens. `IBackend.ScatterSeqHeadMajor` gains a row-count overload and copies any byte-addressable
+  dtype on CPU, CUDA and Vulkan; `FixedKvCache.CopyWithCapacity` and `IGenerationModel.ResizeSequenceState` expose
+  the resize. `PrefixCacheCapacityHint` now only sizes a sequence's first allocation, so the voice session no longer
+  passes one.
+- **Fixed: host weight conversions, Mimi's RVQ encode and UnivNet's LVC gate no longer bypass the process CPU
+  thread cap.** Large `Tensor.CastTo` and `DequantFp8E4M3ScaledToF16` casts, the fp8 quantizer's absmax, scale and
+  stochastic-round passes, the NVFP4, MXFP4, FP8-block, affine, EXL3 and INT8-ConvRot host codecs,
+  `LoraBaker.MatMulFma`, the MiniMax-H3 rebasers, Mimi's split-RVQ encode and Resemble-Enhance's UnivNet each fanned
+  out with a raw `Parallel.For` on the shared thread pool, ignoring `numerics.cpuThreads` and
+  `CpuParallel.InlineScope`. Row and tile loops now go through `CpuParallel.For`, with per-row scratch rented from
+  `ArrayPool`, and the range passes through a new `CpuParallel.ForRanges`, whose ranges depend only on the length, so
+  every output is byte-identical at any cap. On a host that lowers the cap (the voice host's unit runs with
+  `engine.cpuThreadCap: 14`) these now use at most that many threads, so checkpoint conversion and LoRA baking there,
+  and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
+  cores than the cap.
+- **Audio model switches now size the incoming model before deciding whether to evict.** `AudioRuntime` used to
+  unload the other resident audio models on a switch only when free VRAM was under a fixed 3 GiB, so a 6-7 GB model
+  arriving with 3-6 GB free evicted nothing: Dia then failed in `PreloadWeights` with `OutOfVramException`, and
+  Orpheus loaded with most of its weights left host-side and streamed them every step. A switch now evicts when free
+  VRAM is under the incoming model's need plus room beside it (a fifth more, and never less than
+  `vram.autopromoteHeadroomMb`, because a weight that would leave less than that free is streamed instead of made
+  resident), with the new `vram.audioEvictFreeVramFloorMb` (default 3072) as the floor. The need is the larger of
+  what the model's latest load in this process left in use and the size of its weight files on disk, with F16/BF16
+  tensors counted at F32 for a runner that widens them (Dia declares it). A model that is already loaded needs only
+  the floor; same-model repeats still never evict, and pinned runners are still never evicted. If a run still throws
+  `OutOfVramException`, the runtime unloads every other unpinned audio model, releases device memory, logs what it
+  dropped, and retries once; a stream retries only if it has not yielded anything yet. Replaying the sweep on an RTX
+  4090 so that Dia arrives with 3.9 GiB free: before this change Dia failed with the same driver refusal and Orpheus
+  took 292 s to generate 6.2 s of audio against 7.5 s on a free card; with it the switch to Dia unloads the five
+  earlier models, Dia succeeds and Orpheus takes 7.6 s, and every model's audio is byte-identical.
 - **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
   pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
   compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
@@ -116,6 +164,25 @@ stable release will require. Dates are UTC.
   `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
   produced) when timestamps were requested and the pipeline returned any; the plain-text path is
   unchanged byte-for-byte otherwise.
+- **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
+  `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
+  not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
+  transcribed the result as `[Music]`; energy stayed high for the full 20s rather than trailing into
+  quiet). `maxTokens` is now capped to the text's own length (20 frames/char, floored at 200), which only
+  applies when the caller left `TtsJob.MaxTokens` unset -- an explicit value is used as-is, uncapped,
+  since a deliberate request isn't the runaway case this exists for. The factor comes from measuring
+  natural (uncapped) EOS behavior on 8 real prompts spanning single-speaker sentences, `[S1]`/`[S2]`
+  dialogues, a `(laughs)`/pauses case and a non-ASCII case: 4 fired a genuine EOS, the other 4 hit the
+  1720 ceiling and were confirmed degenerate by what Whisper actually heard ("[Music]", "[ Silence ]", a
+  one-word fragment) versus the non-ASCII prompt's real EOS at 1142 frames (13.126 frames/char, the
+  max observed -- confirmed as genuine full-duration speech via a language-correct Whisper pass that
+  transcribed it back verbatim). 1.5x that margin sets the factor at 20; it only binds (produces less
+  than the 1720 default) for text under ~86 chars. **Confirmed model behaviour, not a port bug**: ran
+  upstream nari-labs Dia-1.6B-0626 itself (local weights, no download) on the identical sentence,
+  `[S1]`-tagged, same seed and the same 1720 cap. Upstream also never fires EOS -- its own
+  `finished_step_Bx` accounting shows the sequence forced to the cap at step ~1704 -- and Whisper
+  transcribes its output as `[Music]` too. Same inputs, same failure, in the reference implementation;
+  nothing in the C# port's conditioning, CFG, delay pattern, or EOS rule is implicated.
 - **cuDNN backend-graph engines marked `CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC` are now skipped by
   default (`numerics.cudnnDeterministic`, default ON).** Root cause of issue #20 (Chatterbox/CosyVoice2/
   Piper producing different HiFT-vocoder output on identical repeated calls): cuDNN's heuristic search
