@@ -462,6 +462,28 @@ public static class TestPaths
         /// the text sequence, no gated cross-attention). The layer-split staged splice-embeds oracle.</summary>
         public static string Qwen25Vl7BQ4KM => Resolve("QWEN25VL_7B_GGUF_PATH",
             Path.Combine(ModelsDir, "llm", "qwen25-vl", "Qwen2.5-VL-7B-Instruct-Q4_K_M.gguf"));
+
+        /// <summary>Qwen3.5-0.8B, Q4_K_M GGUF — the tool-call template-detection fixtures' real-template source
+        /// for the Qwen3-Coder-style XML-argument dialect (<c>HartsyInference.Tools.Tests</c>).</summary>
+        public static string Qwen35_08BQ4KM => Resolve("QWEN35_08B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen35", "Qwen3.5-0.8B-Q4_K_M.gguf"));
+
+        /// <summary>DeepSeek-R1-Distill-Qwen-1.5B, Q4_K_M GGUF — the tool-call template-detection fixtures' real
+        /// source for a template that renders a prior tool call but never the caller's <c>tools</c> list.</summary>
+        public static string DeepSeekR1DistillQwen15BQ4KM => Resolve("DEEPSEEK_R1_DISTILL_QWEN_15B_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "deepseek-r1", "DeepSeek-R1-Distill-Qwen-1.5B-Q4_K_M.gguf"));
+
+        /// <summary>GLM-4-9B-0414, Q4_K_M GGUF — the tool-call template-detection fixtures' real source for a
+        /// template that renders <c>tools</c> but instructs no supported call envelope.</summary>
+        public static string Glm4_9BQ4KM => Resolve("GLM4_9B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "glm4", "GLM-4-9B-0414-Q4_K_M.gguf"));
+
+        /// <summary>Mistral-7B-Instruct-v0.3, Q4_K_M GGUF — the tool-call template-detection fixtures' real
+        /// source for a template with no tool-calling support at all.</summary>
+        public static string Mistral7BInstructV0_3Q4KM => Resolve("MISTRAL7B_V03_GGUF_PATH",
+            Path.Combine(ModelsDir, "llm", "mistral", "Mistral-7B-Instruct-v0.3-Q4_K_M.gguf"));
+
+        /// <summary>gemma-4-E2B-it, Q4_K_M GGUF — the tool-call template-detection fixtures' real source for the
+        /// Gemma <c>&lt;|tool_call&gt;</c> envelope.</summary>
+        public static string Gemma4E2BItQ4KM => Resolve("GEMMA4_E2B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "gemma4", "gemma-4-E2B-it-Q4_K_M.gguf"));
     }
 
     /// <summary>Oasis-500m (Decart/Etched) world-model paths. The upstream `Etched/oasis-500m` repo is gated;

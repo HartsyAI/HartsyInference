@@ -318,6 +318,11 @@ public sealed class ToolCallParserTests
     [InlineData("Hermes-2-Pro-Llama-3-8B", ToolCallFormat.Hermes)]
     [InlineData("{%- if tools %}[AVAILABLE_TOOLS]{{ tools }}[/AVAILABLE_TOOLS]{%- endif %}[TOOL_CALLS]", ToolCallFormat.Mistral)]
     [InlineData("phi-4", ToolCallFormat.Hermes)]
+    // GLM and DeepSeek carry no rule table of their own (their real formats are XML-argument and marker-based
+    // respectively — see ToolCallFormats.TryDetectFromTemplate); this locks in that a bare name hint still
+    // reaches the documented unknown-family fallback rather than regressing to some other format.
+    [InlineData("glm-4-9b", ToolCallFormat.Hermes)]
+    [InlineData("deepseek-v3.1", ToolCallFormat.Hermes)] // not "...-qwen-..." — would hit the Qwen branch instead
     public void DetectPicksTheFamilyFormat(string? hint, ToolCallFormat expected)
         => Assert.Equal(expected, ToolCallFormats.Detect(hint));
 
