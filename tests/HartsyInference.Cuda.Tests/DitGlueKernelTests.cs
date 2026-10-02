@@ -230,6 +230,101 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(kCpu, kCuda, 1e-5f, "ApplyRope:k");
     }
 
+    /// <summary>GQA regression test: q and k with DIFFERENT head counts (16/4, Dia's decoder shape). The combined
+    /// overload used to derive K's kernel-launch shape from Q and silently rotate only a fraction of K's real
+    /// buffer (an out-of-bounds device access) whenever K had fewer heads -- this never fired before Dia's
+    /// resident attention because every prior caller was MHA (q/k same head count). CPU-vs-CUDA parity under a
+    /// GQA shape, same pattern as <see cref="ApplyRope_Cpu_Vs_Cuda"/>.</summary>
+    [Fact]
+    public void ApplyRope_Gqa_Cpu_Vs_Cuda()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int b = 1, l = 5, nq = 16, nkv = 4, hd = 32;
+        using Tensor cos = Random(new TensorShape(b, l, hd), seed: 61);
+        using Tensor sin = Random(new TensorShape(b, l, hd), seed: 62);
+        using Tensor qSrc = Random(new TensorShape(b, l, nq, hd), seed: 63);
+        using Tensor kSrc = Random(new TensorShape(b, l, nkv, hd), seed: 64);
+
+        long nQ = qSrc.ElementCount, nK = kSrc.ElementCount;
+        using Tensor qCpu = new Tensor(new TensorShape(b, l, nq, hd), DType.F32);
+        using Tensor kCpu = new Tensor(new TensorShape(b, l, nkv, hd), DType.F32);
+        using Tensor qCuda = new Tensor(new TensorShape(b, l, nq, hd), DType.F32);
+        using Tensor kCuda = new Tensor(new TensorShape(b, l, nkv, hd), DType.F32);
+        Buffer.MemoryCopy((void*)qSrc.DataPointer, (void*)qCpu.DataPointer, nQ * 4, nQ * 4);
+        Buffer.MemoryCopy((void*)kSrc.DataPointer, (void*)kCpu.DataPointer, nK * 4, nK * 4);
+        Buffer.MemoryCopy((void*)qSrc.DataPointer, (void*)qCuda.DataPointer, nQ * 4, nQ * 4);
+        Buffer.MemoryCopy((void*)kSrc.DataPointer, (void*)kCuda.DataPointer, nK * 4, nK * 4);
+
+        IBackend cpu = new CpuBackend();
+        cpu.ApplyRope(qCpu, kCpu, cos, sin);
+        cpu.Dispose();
+
+        RunCuda(c => c.ApplyRope(qCuda, kCuda, cos, sin), qCuda, kCuda);
+
+        AssertClose(qCpu, qCuda, 1e-5f, "ApplyRope(GQA):q");
+        AssertClose(kCpu, kCuda, 1e-5f, "ApplyRope(GQA):k");
+    }
+
+    /// <summary>The combined overload on a GQA shape must equal calling the per-tensor <c>ApplyRopeSingle</c>
+    /// twice -- the exact fix applied (<see cref="DiaAttention.SelfForwardFlash"/> now does the latter directly;
+    /// this proves the former, used by every OTHER existing caller, now reduces to the same thing).</summary>
+    [Fact]
+    public void ApplyRope_Gqa_Cuda_MatchesApplyRopeSingleTwice()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int b = 1, l = 5, nq = 16, nkv = 4, hd = 32;
+        using Tensor cos = Random(new TensorShape(b, l, hd), seed: 71);
+        using Tensor sin = Random(new TensorShape(b, l, hd), seed: 72);
+        using Tensor qSrc = Random(new TensorShape(b, l, nq, hd), seed: 73);
+        using Tensor kSrc = Random(new TensorShape(b, l, nkv, hd), seed: 74);
+
+        long nQ = qSrc.ElementCount, nK = kSrc.ElementCount;
+        using Tensor qCombined = new Tensor(new TensorShape(b, l, nq, hd), DType.F32);
+        using Tensor kCombined = new Tensor(new TensorShape(b, l, nkv, hd), DType.F32);
+        using Tensor qSingle = new Tensor(new TensorShape(b, l, nq, hd), DType.F32);
+        using Tensor kSingle = new Tensor(new TensorShape(b, l, nkv, hd), DType.F32);
+        Buffer.MemoryCopy((void*)qSrc.DataPointer, (void*)qCombined.DataPointer, nQ * 4, nQ * 4);
+        Buffer.MemoryCopy((void*)kSrc.DataPointer, (void*)kCombined.DataPointer, nK * 4, nK * 4);
+        Buffer.MemoryCopy((void*)qSrc.DataPointer, (void*)qSingle.DataPointer, nQ * 4, nQ * 4);
+        Buffer.MemoryCopy((void*)kSrc.DataPointer, (void*)kSingle.DataPointer, nK * 4, nK * 4);
+
+        RunCuda(c => c.ApplyRope(qCombined, kCombined, cos, sin), qCombined, kCombined);
+        RunCuda(c =>
+        {
+            c.ApplyRopeSingle(qSingle, cos, sin);
+            c.ApplyRopeSingle(kSingle, cos, sin);
+        }, qSingle, kSingle);
+
+        AssertClose(qCombined, qSingle, 1e-6f, "ApplyRope(GQA) vs ApplyRopeSingle twice:q");
+        AssertClose(kCombined, kSingle, 1e-6f, "ApplyRope(GQA) vs ApplyRopeSingle twice:k");
+    }
+
+    /// <summary>q/k must agree on batch, seqLen and headDim (only head COUNT may differ, for GQA) -- the
+    /// out-of-bounds launch this guards against should throw loudly instead of silently corrupting memory.
+    /// Shape validation runs in managed code before any kernel launch, so this doesn't need CUDA hardware.</summary>
+    [Fact]
+    public void ApplyRope_MismatchedHeadDim_Throws()
+    {
+        const int b = 1, l = 5, nq = 16, nkv = 4, hdQ = 32, hdK = 16;
+        using Tensor cos = Random(new TensorShape(b, l, hdQ), seed: 81);
+        using Tensor sin = Random(new TensorShape(b, l, hdQ), seed: 82);
+        using Tensor q = Random(new TensorShape(b, l, nq, hdQ), seed: 83);
+        using Tensor k = Random(new TensorShape(b, l, nkv, hdK), seed: 84); // headDim differs from q -- invalid
+
+        using IBackend cpu = new CpuBackend();
+        Assert.Throws<NotSupportedException>(() => cpu.ApplyRope(q, k, cos, sin));
+
+        if (CudaContext.IsAvailable())
+        {
+            using CudaBackend cuda = new CudaBackend(0, PtxDir());
+            Assert.Throws<NotSupportedException>(() => cuda.ApplyRope(q, k, cos, sin));
+        }
+        else
+        {
+            _output.WriteLine("CUDA leg SKIPPED: CUDA unavailable");
+        }
+    }
+
     [Fact]
     public void SliceLastDim_Cpu_Vs_Cuda()
     {
