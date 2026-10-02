@@ -6,20 +6,6 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.243 (provisional -- renumbered at merge)
-
-- **`IBackend.ApplyRope`'s combined q+k overload no longer silently corrupts K under GQA.** CUDA, Vulkan
-  and the CPU default all derived `numHeads`/`totalVecs` from `q` only and reused them to launch K's
-  rotation too -- harmless while every caller was MHA (q/k same head count), but an out-of-bounds device
-  read/write for any GQA caller (q/k different head counts). Found via Dia's new resident decode
-  (alpha.242; 16 query heads, 4 KV heads). All three backends now validate q/k share batch, seqLen and
-  headDim (head count may differ), validate cos/sin against headDim, throw on anything else, then
-  delegate to the existing per-tensor `ApplyRopeSingle`/`ApplyRopeSingleReference` once per tensor -- pure
-  shape/dispatch fix, bit-identical for every existing MHA caller. Tests added:
-  `ApplyRope_Gqa_Cpu_Vs_Cuda`, `ApplyRope_Gqa_Cuda_MatchesApplyRopeSingleTwice`,
-  `ApplyRope_MismatchedHeadDim_Throws` (`DitGlueKernelTests.cs`); full `HartsyInference.Cuda.Tests`
-  (848 tests) green.
-
 ## Unreleased
 
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
@@ -34,6 +20,32 @@ stable release will require. Dates are UTC.
   the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
+- **`IBackend.ApplyRope`'s combined q+k overload no longer corrupts K under GQA.** CUDA, Vulkan and the CPU
+  default sized K's rotation from Q's head count: harmless while every caller was MHA, an out-of-bounds device
+  read/write for a GQA caller (found through Dia's resident decode, #224: 16 query heads, 4 KV heads). All three now
+  check that q and k share batch, seqLen and headDim (head counts may differ) and that cos/sin match headDim, throw
+  otherwise, and run the per-tensor `ApplyRopeSingle` once per tensor. Same split-half formula: the Ernie A/B on CUDA
+  is digest-identical; on Vulkan, dtypes other than F32/F16 now take `ApplyRopeSingle`'s reference fallback. Tests:
+  three in `DitGlueKernelTests` and `ApplyRope_QK_Matches_The_Cpu_For_Mha_And_Gqa` on every GPU backend.
+
+## alpha.240
+
+- **Fixed: an unparameterized Piper request 404'd fetching `piper.onnx`.** `AudioModelSelector.Parse` falls
+  back to the bare catalog token (e.g. `"piper"`) for `Variant` whenever the request token has no `':'` —
+  correct for a descriptor that treats a bare id as its own repo/model identifier, but Piper's weights ARE
+  the voice (one `.onnx` per voice), so that bare token is not a voice at all. `SpeechService.ResolveTarget`
+  used to pass it straight through as the load variant for any `VoiceSelectsWeights` descriptor whenever no
+  separate named voice was given, with no way to tell "the catalog id leaked through" from "the caller
+  genuinely asked for a voice named `piper`" — so a request with no voice and no `:variant` 404'd fetching
+  `rhasspy/piper-voices/piper.onnx` (no such file exists; every real Piper voice lives at
+  `<lang>/<lang_REGION>/<name>/<quality>/<id>.onnx`) instead of falling back to Piper's own default voice.
+
+  Fixed in `SpeechService.ResolveVariant` (extracted from `ResolveTarget`): detects the bare-token-fallback
+  shape by comparing `AudioModelSelector.Variant` against `AudioModelSelector.Id`, not by hardcoding
+  Piper's name, so the fix covers any other `VoiceSelectsWeights` model with this same shape, not just
+  Piper. `AudioModelSelector.Parse` itself and `PiperModel.LoadAsync`'s own `"default"`/empty sentinel check
+  are both unchanged — the first is shared, load-bearing logic for every modality's selector, the second
+  already did the right thing once actually given one of those values.
 
 ## alpha.239
 
