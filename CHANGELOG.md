@@ -6,6 +6,16 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.244 (provisional -- renumbered at merge)
+
+- **Orpheus TTS no longer re-prompts to download its SNAC codec on every generation.** `ModelCatalog`'s
+  SNAC asset (`hubertsiuzdak/snac_24khz`) listed `RepoPath = "model.safetensors"`; the real downloaded
+  file is `pytorch_model.bin`, so `ModelAcquisition`'s presence check always reported it missing. The CLI
+  REPL calls `EnsurePresent` once per generation (not once per load), so every Orpheus prompt hit the
+  false-missing path and its interactive `Download these now?` prompt. Fixed the `RepoPath`, and added a
+  per-process confirmed-present cache so the audio-asset check only runs until it first succeeds for a
+  given catalog id.
+
 ## Unreleased
 
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
