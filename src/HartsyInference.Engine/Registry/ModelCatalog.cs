@@ -838,11 +838,7 @@ public static class ModelCatalog
                 CliDrivable = true, // `hartsy image -m zimage` verified end-to-end 2026-07-21
                 Assets = new ModelAsset[]
                 {
-                    // TargetSubdir/TargetName point at where this actually landed locally -- flat under
-                    // Stable-Diffusion/, saved as z-image-turbo.safetensors, not Stable-Diffusion/ZImage/
-                    // under the HF repo's own filename. Confirmed via the HF API that the repo file is real
-                    // (mcmonkey/swarm-models, 6,571,226,600 bytes) and byte-size-identical to the local file,
-                    // i.e. this is the same download under a different local name, not a different model.
+                    // TargetSubdir/TargetName point at where this actually landed locally (flat, renamed) rather than the HF repo's own Stable-Diffusion/ZImage/<repo filename> -- see #239 for the HF-side verification.
                     new() { Repo = "mcmonkey/swarm-models", RepoPath = "SwarmUI_Z-Image-Turbo-FP8Mix.safetensors",
                         TargetSubdir = "Stable-Diffusion", TargetName = "z-image-turbo.safetensors", Role = "transformer",
                         Sha256 = "ba92d3705131c8d9b05ca9c6fefe39444d4eb02db16c30aafa9fcf5f85230e06" },

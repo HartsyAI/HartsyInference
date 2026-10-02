@@ -27,8 +27,11 @@ public sealed class ImageCatalogTargetPathTests
 
         Assert.Equal("Comfy-Org/Krea-2", asset.Repo);
         Assert.Equal("diffusion_models/krea2_turbo_fp8_scaled.safetensors", asset.RepoPath);
-        Assert.Equal(Path.Combine("Stable-Diffusion", "Krea2", "Turbo", "krea2_turbo_fp8_scaled.safetensors"),
-            Path.Combine(asset.TargetSubdir, asset.FileName));
+        // TargetSubdir is a single forward-slash-joined string (every catalog entry's is), so comparing it
+        // against a Path.Combine(...)-built string would pass on Linux/Mac and fail on Windows, where
+        // Path.Combine uses '\' -- compare the exact segment values instead of a combined path.
+        Assert.Equal("Stable-Diffusion/Krea2/Turbo", asset.TargetSubdir);
+        Assert.Equal("krea2_turbo_fp8_scaled.safetensors", asset.FileName);
     }
 
     [Fact]
@@ -38,10 +41,11 @@ public sealed class ImageCatalogTargetPathTests
 
         Assert.Equal("mcmonkey/swarm-models", asset.Repo);
         Assert.Equal("SwarmUI_Z-Image-Turbo-FP8Mix.safetensors", asset.RepoPath);
-        // TargetName deliberately differs from the HF repo's own filename -- see the class doc.
+        // TargetName deliberately differs from the HF repo's own filename -- see the class doc. Compared as
+        // exact segment values, not a combined path -- see the comment in the krea2 case above.
+        Assert.Equal("Stable-Diffusion", asset.TargetSubdir);
         Assert.Equal("z-image-turbo.safetensors", asset.TargetName);
-        Assert.Equal(Path.Combine("Stable-Diffusion", "z-image-turbo.safetensors"),
-            Path.Combine(asset.TargetSubdir, asset.FileName));
+        Assert.Equal("z-image-turbo.safetensors", asset.FileName);
     }
 
     private static ModelAsset Transformer(string catalogId)
