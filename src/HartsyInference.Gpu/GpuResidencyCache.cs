@@ -356,6 +356,8 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         // device's context. A synchronous free resolves against the current context, not the buffer's, so bind this
         // cache's own first, as the host-read path does. After the gate, never before it: a retiring backend closes
         // the gate and only then destroys its context, so a bind placed earlier could throw against one already gone.
+        // Inside it the bind cannot fail that way, which is why the entry above may already be removed: a retiring
+        // backend waits for the callbacks in flight (CUDA's BeginRetire drains them) before it destroys anything.
         MakeCurrent();
         OnActivationEvicted(tensor, entry.Buffer);
         Pinned.Remove(tensor);
