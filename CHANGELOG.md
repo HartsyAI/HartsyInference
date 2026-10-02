@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.242
+
 - **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host
   Q/K rotation, `Nvfp4Linear`'s BF16 dequant, `VideoRgbFrames.ExtractAllFrames`, the CUDA backend's host W8A8 weight
   quantization and GPT-OSS's CPU-backend expert loop used raw `Parallel.For` / `Parallel.ForEach`, ignoring
@@ -204,6 +206,13 @@ stable release will require. Dates are UTC.
   cross-arm byte-identical output on both) — see the PR for both tables. The nondeterminism log line and
   its dedup key now carry a caller-supplied shape signature (op/Cin/Cout/kernel/stride/dtype for conv,
   op/batch/heads/seqlen/headdim/dtype for SDPA) instead of just the engine index.
+- **Fixed the `krea2` and `zimage` catalog entries' local target paths.** Both always reported "needs 1
+  file(s) not on disk" even though the real checkpoint was present, because `TargetSubdir`/`TargetName`
+  didn't match where the file actually landed: `krea2` was missing a `/Turbo` segment, and `zimage`
+  pointed at the HF repo's own filename under `Stable-Diffusion/ZImage/` instead of the locally-renamed
+  `Stable-Diffusion/z-image-turbo.safetensors`. `hartsy image -m krea2`/`-m zimage` only ever worked via
+  an explicit `--model-path` that bypassed the catalog check. `Repo`/`RepoPath`/`Sha256` were already
+  correct on both (confirmed against the real HF repos); only the local target path was wrong.
 
 ## alpha.241
 
