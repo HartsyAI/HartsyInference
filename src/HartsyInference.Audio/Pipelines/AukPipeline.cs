@@ -127,12 +127,19 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         int frames = ResolveFrames(seconds, _cfg.SampleRate, _cfg.Hop);
         cancel.ThrowIfCancellationRequested();
 
-        using Tensor text = EncodeConditioning(backend, instruction, audio16k, opts.SequentialResidency, cancel);
+        // opts.SequentialResidency=true is a REQUEST to keep peak VRAM low, not a mandate to re-upload every
+        // stage's weights on every call: freeing a stage only matters when the device doesn't have room for the
+        // next one too. Downgrading to "preload everything, free nothing" when there is clearly enough free VRAM
+        // turns a full host->device re-upload of every stage (tower, thinker, DiT, VAE) into a one-time cost for
+        // back-to-back calls on the same pipeline, which is the common case once a model is warm.
+        bool sequential = opts.SequentialResidency && !FitsResident(backend, hasAudio);
+
+        using Tensor text = EncodeConditioning(backend, instruction, audio16k, sequential, cancel);
         cancel.ThrowIfCancellationRequested();
-        using Tensor? refLatent = hasAudio ? EncodeReference(backend, refPcm, opts) : null;
+        using Tensor? refLatent = hasAudio ? EncodeReference(backend, refPcm, opts, sequential) : null;
         cancel.ThrowIfCancellationRequested();
-        using Tensor latent = Sample(backend, text, refLatent, frames, opts, cancel);
-        return Decode(backend, latent, opts.SequentialResidency);
+        using Tensor latent = Sample(backend, text, refLatent, frames, opts, sequential, cancel);
+        return Decode(backend, latent, sequential);
     }
 
     /// <summary>Latent frames for <paramref name="seconds"/> of output, rejecting more than <see cref="MaxSeconds"/>.</summary>
@@ -209,19 +216,48 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         return fusion.Complete(finalNormed);
     }
 
-    private Tensor EncodeReference(IBackend backend, float[] refPcm, AukOptions opts)
+    private Tensor EncodeReference(IBackend backend, float[] refPcm, AukOptions opts, bool sequential)
     {
         using Tensor pcm = new(new TensorShape(1, 1, refPcm.Length), DType.F32);
         refPcm.CopyTo(pcm.AsSpan<float>());
         AukVaeEncoder encoder = _vaeEncoder!;
-        return RunStage(backend, encoder.EnumerateWeights(), opts.SequentialResidency,
+        return RunStage(backend, encoder.EnumerateWeights(), sequential,
             () => encoder.Encode(backend, pcm, unchecked(opts.Seed + 1)));
     }
 
-    private Tensor Sample(IBackend backend, Tensor text, Tensor? refLatent, int frames, AukOptions opts, CancellationToken cancel)
+    /// <summary>True when the device has enough free VRAM to hold every stage this call will touch resident at
+    /// once, so the caller can skip freeing between stages. Generous on purpose (every stage's full weight size,
+    /// plus a third again for activations) — this only ever turns a requested sequential run into a resident one,
+    /// never the other way around, so overestimating costs a redundant free/reload rather than an OOM.</summary>
+    private bool FitsResident(IBackend backend, bool hasAudio)
+    {
+        (long freeBytes, long totalBytes) = backend.GetVramInfo();
+        long bytes = WeightBytes(_lm.EnumerateWeights()) + WeightBytes(_dit.EnumerateWeights()) + WeightBytes(_vae.EnumerateWeights());
+        if (hasAudio)
+        {
+            bytes += WeightBytes(_tower.EnumerateWeights()) + WeightBytes(_vaeEncoder!.EnumerateWeights());
+        }
+        return ResidentWithinBudget(freeBytes, totalBytes, bytes);
+    }
+
+    /// <summary>True when <paramref name="freeBytes"/> covers <paramref name="requiredBytes"/> plus a third again
+    /// for activations. <paramref name="totalBytes"/> not being positive means the backend can't report VRAM at
+    /// all (the CPU backend, mainly), which this treats as "assume the worst" rather than as boundless free memory.</summary>
+    public static bool ResidentWithinBudget(long freeBytes, long totalBytes, long requiredBytes) =>
+        totalBytes > 0 && freeBytes >= requiredBytes + requiredBytes / 3;
+
+    /// <summary>Total device bytes <paramref name="weights"/> would occupy, element count times dtype size.</summary>
+    public static long WeightBytes(IEnumerable<Tensor> weights)
+    {
+        long total = 0;
+        foreach (Tensor w in weights) total += Tensor.ComputeByteSize(w.Shape, w.DType);
+        return total;
+    }
+
+    private Tensor Sample(IBackend backend, Tensor text, Tensor? refLatent, int frames, AukOptions opts, bool sequential, CancellationToken cancel)
     {
         AukSchedule schedule = BuildSchedule(opts);
-        return RunStage(backend, _dit.EnumerateWeights(), opts.SequentialResidency, () =>
+        return RunStage(backend, _dit.EnumerateWeights(), sequential, () =>
         {
             using Tensor condText = _dit.ProjectText(backend, text);
             using Tensor? uncondText = schedule.UsesCfg ? _dit.ProjectText(backend, text, drop: true) : null;

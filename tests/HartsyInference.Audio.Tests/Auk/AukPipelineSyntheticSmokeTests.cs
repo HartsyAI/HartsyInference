@@ -168,6 +168,24 @@ public sealed class AukPipelineSyntheticSmokeTests : IDisposable
         Assert.Equal(pcm, resident);
     }
 
+    [Theory]
+    [InlineData(0, 0, 100, false)] // a backend that can't report VRAM never claims it fits
+    [InlineData(1_000, 0, 100, false)]
+    [InlineData(99, 1_000_000, 100, false)] // free is below required + a third margin
+    [InlineData(132, 1_000_000, 100, false)] // just under the margin (100 + 100/3 = 133, integer division)
+    [InlineData(133, 1_000_000, 100, true)] // exactly at it
+    [InlineData(1_000_000, 1_000_000, 100, true)]
+    public void ResidentWithinBudget_ComparesFreeAgainstRequiredPlusAThird(long free, long total, long required, bool expected)
+        => Assert.Equal(expected, AukPipeline.ResidentWithinBudget(free, total, required));
+
+    [Fact]
+    public void WeightBytes_SumsElementCountTimesDtypeSize()
+    {
+        Tensor a = Own(new Tensor(new TensorShape(2, 3), DType.F32)); // 6 * 4 bytes
+        Tensor b = Own(new Tensor(new TensorShape(4), DType.F32)); // 4 * 4 bytes
+        Assert.Equal(40, AukPipeline.WeightBytes([a, b]));
+    }
+
     [Fact]
     public void Generate_RejectsMissingDurationOverBudgetAndCancellation()
     {
