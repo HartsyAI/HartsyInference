@@ -45,7 +45,13 @@ stable release will require. Dates are UTC.
   persistently-throwing host callback doesn't flood the log with pointless resets of state a claimed device
   never reads. `WakeService.Claim` also now withdraws (and returns null for) a claim whose connection died in
   the gap between its own liveness check and installing the claim, so that race can no longer leave a host
-  holding a claim that will never call `OnDisconnected`.
+  holding a claim that will never call `OnDisconnected`. A reconnect ends the device's previous claim too (and
+  notifies it, same guarded `OnDisconnected` call), rather than letting it silently carry over to the new
+  connection's audio with no signal the old one is gone.
+- **`WakeWorker.Run` clears its shared `detections` list before deciding whether there is anything to score
+  this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
+  an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
+  the list held from an earlier iteration in place, and the dispatch loop below re-fired it a second time.
 
 ## alpha.241
 

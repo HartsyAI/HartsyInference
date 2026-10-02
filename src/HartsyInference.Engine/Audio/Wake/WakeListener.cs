@@ -141,6 +141,29 @@ public sealed class WakeListener : IDisposable
                             Logs.Warning($"[Audio][Wake] Device id '{deviceId}' reconnected from {remote} while another connection was live; dropping the older one. Give each satellite a unique device_id.");
                         }
                         session.OnReconnected(codec);
+                        // A claim belongs to the connection it was made against, not to the device id for all
+                        // time: OnReconnected just reset the ring buffer, the sequence counter and the pipeline
+                        // because this is a new, discontinuous turn, and WakeDeviceClaim.OnFrame's contract is
+                        // continuous audio for one turn. Without this, the stale-disconnect fix above makes the
+                        // claim silently outlive the connection it was made on -- the old connection's teardown
+                        // now correctly does nothing, but nothing else ever cleared the claim either, so it
+                        // would carry over to this new connection's audio with no OnDisconnected to tell the
+                        // host its turn's connection is gone. Ending it here, the same way an explicit disconnect
+                        // does, lets the host notice and decide whether to re-claim once detection resumes on
+                        // this connection. Unconditional, not CAS-matched: whatever is here was necessarily
+                        // installed before this connection existed, so it is unconditionally stale now.
+                        WakeDeviceClaim? staleClaim = Interlocked.Exchange(ref session.Claim, null);
+                        if (staleClaim is not null)
+                        {
+                            try
+                            {
+                                staleClaim.OnDisconnected?.Invoke();
+                            }
+                            catch (Exception ex)
+                            {
+                                Logs.Error($"[Audio][Wake] WakeDeviceClaim.OnDisconnected threw for '{deviceId}' on reconnect.", ex);
+                            }
+                        }
                         Logs.Info($"[Audio][Wake] Device '{deviceId}' connected from {remote} ({string.Join(", ", session.Pipeline.Words)}).");
                         await codec.WriteAsync("hello-ack", $"{{\"words\":[{string.Join(",", session.Pipeline.Words.Select(WakeFrameCodec.Escape))}]}}", connectionCancel.Token).ConfigureAwait(false);
                         pingLoop ??= Task.Run(() => PingLoopAsync(codec, connectionCancel), CancellationToken.None);

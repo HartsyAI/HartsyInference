@@ -133,16 +133,19 @@ public sealed class WakeTransportTests
 
     /// <summary>Reproduces the race a review caught before merge: a device's reconnect lands while its OLD
     /// connection is still unwinding (the "dropping the older one" path in <c>ServeStreamAsync</c>'s hello
-    /// case), and that old connection's disconnect teardown runs after. Needs no real wake model weights —
-    /// this never sends an audio-chunk frame, only hello and a raw socket close, so an unloaded
-    /// <see cref="WakeMelFrontend"/>/<see cref="SpeechEmbeddingModel"/> pair is enough to construct a session.
+    /// case), and that old connection's disconnect teardown runs after. Also covers the gap a second review
+    /// pass then found in the first fix: a claim must not silently carry over to the new connection just
+    /// because the stale old-connection teardown now correctly leaves it alone -- the reconnect itself has to
+    /// end it. Needs no real wake model weights — this never sends an audio-chunk frame, only hello and a raw
+    /// socket close, so an unloaded <see cref="WakeMelFrontend"/>/<see cref="SpeechEmbeddingModel"/> pair is
+    /// enough to construct a session.
     ///
     /// <para>Does not use <see cref="WakeListener.Start"/>: this drives its own <see cref="TcpListener"/> so the
     /// test can hold each connection's <c>ServeStreamAsync</c> <see cref="Task"/> directly instead of the
     /// fire-and-forget one <see cref="WakeListener"/>'s own accept loop would give it, which is what makes the
     /// ordering below deterministic rather than a sleep-and-hope.</para></summary>
     [Fact]
-    public async Task Disconnect_StaleAfterReconnect_LeavesNewConnectionsCodecAndClaimIntact()
+    public async Task Disconnect_StaleAfterReconnect_LeavesNewConnectionsCodecIntact_ButEndsTheOldClaim()
     {
         TcpListener rawListener = new(IPAddress.Loopback, 0);
         rawListener.Start();
@@ -166,37 +169,48 @@ public sealed class WakeTransportTests
             await WaitForAsync(() => session.Codec is not null, TimeSpan.FromSeconds(10));
             object codecA = session.Codec!;
 
+            // Simulates a host claiming the device after a Detected on connection A.
             int disconnected = 0;
             WakeDeviceClaim claim = new(_ => { }, () => Interlocked.Increment(ref disconnected));
             Assert.Null(Interlocked.CompareExchange(ref session.Claim, claim, null));
 
             // Connection B reconnects for the SAME device while A's socket is still open as far as anything
-            // has told it -- the overlap the bug depends on.
+            // has told it -- the overlap the first fix depends on.
             using TcpClient clientB = new();
             await clientB.ConnectAsync(IPAddress.Loopback, port);
             using TcpClient serverB = await rawListener.AcceptTcpClientAsync();
             Task serveB = listener.ServeStreamAsync(serverB.GetStream(), "B", CancellationToken.None);
 
             await WriteHeaderAsync(clientB.GetStream(), "{\"type\":\"hello\",\"data\":{\"device_id\":\"race-test\",\"rate\":16000,\"width\":2,\"channels\":1}}");
-            // OnReconnected runs synchronously inside ServeStreamAsync's hello case before anything is written
-            // back, so once session.Codec differs from connection A's, B's reconnect has already landed -- no
+            // OnReconnected, and the claim-ending code right after it, both run synchronously inside
+            // ServeStreamAsync's hello case before anything is written back, so once session.Codec differs
+            // from connection A's, B's reconnect -- and A's claim ending with it -- has already landed. No
             // need to round-trip B's hello-ack.
             await WaitForAsync(() => session.Codec is not null && !ReferenceEquals(session.Codec, codecA), TimeSpan.FromSeconds(10));
             object codecB = session.Codec!;
+
+            // The reconnect itself must end the OLD claim and notify it exactly once -- A's turn's connection
+            // is gone, even though the device id immediately reconnected. A host that wants continuity across
+            // a reconnect re-claims from its own OnDisconnected; the engine does not carry a claim across a
+            // connection boundary on its own.
+            Assert.Null(session.Claim);
+            Assert.Equal(1, disconnected);
 
             // NOW close A -- its ServeStreamAsync loop sees end-of-stream and runs its own finally next.
             clientA.Close();
             await serveA.WaitAsync(TimeSpan.FromSeconds(10));
 
-            // The discriminating assertions: at this exact point nothing but A's teardown has run. Pre-fix, A's
-            // unconditional clear wipes out B's codec and claim and fires a disconnect that belongs to a
-            // connection (B's) that is still live. Post-fix, A's teardown recognizes it is no longer the live
-            // connection for this device and does nothing.
+            // The discriminating assertions for the FIRST fix: at this exact point nothing but A's teardown
+            // has run since the reconnect. Pre-fix, A's unconditional clear would wipe out B's codec (and
+            // re-null an already-null claim, and fire a second, spurious disconnect) for a connection (B's)
+            // that is still live. Post-fix, A's teardown recognizes it is no longer the live connection for
+            // this device and does nothing at all.
             Assert.Same(codecB, session.Codec);
-            Assert.Same(claim, session.Claim);
-            Assert.Equal(0, disconnected);
+            Assert.Null(session.Claim);
+            Assert.Equal(1, disconnected);
 
-            // B's own, legitimate disconnect still works normally.
+            // B's own, legitimate disconnect still works normally. Nothing is claimed any more, so this is a
+            // null-to-null exchange and disconnected does not move again.
             clientB.Close();
             await serveB.WaitAsync(TimeSpan.FromSeconds(10));
             Assert.Null(session.Codec);
