@@ -56,8 +56,21 @@ internal static class DiaTtsModel
         },
     };
 
-    private sealed class Session(DiaPipeline pipeline)
+    /// <summary><c>internal</c> (not <c>private</c>) so <see cref="CapForTextLength"/> is unit-testable.</summary>
+    internal sealed class Session(DiaPipeline pipeline)
     {
+        /// <summary>1.5x the max observed genuine-EOS frames/char across 8 real prompts (see the PR body for
+        /// the table) -- the max was a non-ASCII prompt at 13.126 fpc, confirmed as real full-duration speech
+        /// via a second, language-correct Whisper pass. Only binds (produces less than the 1720 default) for
+        /// text under ~86 chars; above that, this factor's own estimate already exceeds 1720.</summary>
+        internal const int FramesPerChar = 20;
+
+        /// <summary>Floor so a one-word prompt still gets a few real seconds rather than being clipped mid-word.</summary>
+        internal const int MinFrames = 200;
+
+        /// <summary><see cref="TtsJob.MaxTokens"/>'s fallback when the caller doesn't set it.</summary>
+        internal const int DefaultMaxTokens = 1720;
+
         private static string BuildText(string text)
         {
             // Dia was trained on [S1]/[S2]-tagged dialogue; untagged text degenerates into repetition loops.
@@ -70,15 +83,32 @@ internal static class DiaTtsModel
             return tagged;
         }
 
+        /// <summary>Caps the DEFAULT token budget to what <paramref name="textLength"/> chars could plausibly
+        /// need, so a prompt too short for Dia to ever emit a confident EOS fails in seconds instead of running
+        /// the full budget. Never raises <paramref name="requested"/> — only ever tightens it; the factor is
+        /// <see cref="FramesPerChar"/> and the floor <see cref="MinFrames"/>.</summary>
+        internal static int CapForTextLength(int requested, int textLength)
+            => Math.Min(requested, Math.Max(MinFrames, textLength * FramesPerChar));
+
+        /// <summary>The token budget for one generation: the caller's own <see cref="TtsJob.MaxTokens"/> when they
+        /// set one (respected as-is, uncapped — an explicit request is a deliberate choice, not the runaway case
+        /// this cap exists for), else <see cref="DefaultMaxTokens"/> capped to <paramref name="text"/>'s length.</summary>
+        private static int ResolveMaxTokens(TtsJob job, string text)
+            => job.MaxTokens is > 0 ? job.MaxTokens.Value : CapForTextLength(DefaultMaxTokens, text.Length);
+
         public float[] Synthesize(IBackend backend, TtsJob job)
-            => pipeline.Generate(backend, AudioTextFrontend.DiaBytes(BuildText(job.Text)),
-                job.MaxTokens is > 0 ? job.MaxTokens.Value : 1720, job.Seed, null,
+        {
+            string text = BuildText(job.Text);
+            return pipeline.Generate(backend, AudioTextFrontend.DiaBytes(text),
+                ResolveMaxTokens(job, text), job.Seed, null,
                 job.CfgScale, job.TopK, job.Temperature, job.TopP);
+        }
 
         public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
         {
-            int[] textBytes = AudioTextFrontend.DiaBytes(BuildText(job.Text));
-            int maxTokens = job.MaxTokens is > 0 ? job.MaxTokens.Value : 1720;
+            string text = BuildText(job.Text);
+            int[] textBytes = AudioTextFrontend.DiaBytes(text);
+            int maxTokens = ResolveMaxTokens(job, text);
             using AudioStreamer streamer = new();
             long samplesEmitted = 0;
 

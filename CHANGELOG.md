@@ -116,6 +116,25 @@ stable release will require. Dates are UTC.
   `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
   produced) when timestamps were requested and the pipeline returned any; the plain-text path is
   unchanged byte-for-byte otherwise.
+- **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
+  `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
+  not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
+  transcribed the result as `[Music]`; energy stayed high for the full 20s rather than trailing into
+  quiet). `maxTokens` is now capped to the text's own length (20 frames/char, floored at 200), which only
+  applies when the caller left `TtsJob.MaxTokens` unset -- an explicit value is used as-is, uncapped,
+  since a deliberate request isn't the runaway case this exists for. The factor comes from measuring
+  natural (uncapped) EOS behavior on 8 real prompts spanning single-speaker sentences, `[S1]`/`[S2]`
+  dialogues, a `(laughs)`/pauses case and a non-ASCII case: 4 fired a genuine EOS, the other 4 hit the
+  1720 ceiling and were confirmed degenerate by what Whisper actually heard ("[Music]", "[ Silence ]", a
+  one-word fragment) versus the non-ASCII prompt's real EOS at 1142 frames (13.126 frames/char, the
+  max observed -- confirmed as genuine full-duration speech via a language-correct Whisper pass that
+  transcribed it back verbatim). 1.5x that margin sets the factor at 20; it only binds (produces less
+  than the 1720 default) for text under ~86 chars. **Confirmed model behaviour, not a port bug**: ran
+  upstream nari-labs Dia-1.6B-0626 itself (local weights, no download) on the identical sentence,
+  `[S1]`-tagged, same seed and the same 1720 cap. Upstream also never fires EOS -- its own
+  `finished_step_Bx` accounting shows the sequence forced to the cap at step ~1704 -- and Whisper
+  transcribes its output as `[Music]` too. Same inputs, same failure, in the reference implementation;
+  nothing in the C# port's conditioning, CFG, delay pattern, or EOS rule is implicated.
 
 ## alpha.241
 
