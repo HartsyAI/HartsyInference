@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
@@ -1525,7 +1526,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             sbyte* q = (sbyte*)dst;
             float* scales = (float*)(dst + scaleOff);
             byte* dstCopy = dst; // avoid capturing the fixed pointer in the lambda closure directly
-            Parallel.For(0, n, ni =>
+            CpuParallel.For(n, (long)n * k * 6, ni =>
             {
                 float amax = 0f;
                 for (int ki = 0; ki < k; ki++)

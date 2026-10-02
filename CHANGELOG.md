@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host
+  Q/K rotation, `Nvfp4Linear`'s BF16 dequant, `VideoRgbFrames.ExtractAllFrames`, the CUDA backend's host W8A8 weight
+  quantization and GPT-OSS's CPU-backend expert loop used raw `Parallel.For` / `Parallel.ForEach`, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`. They now go through `CpuParallel`, `FluxRope` in ranges of 1024
+  vectors through `CpuParallel.ForRanges`. The GPT-OSS loop runs a few lanes (at most half the cores, 8, and the cap),
+  each pulling experts from a shared counter and reusing one pair of dequant slices allocated on its first expert, so
+  slice memory stays bounded as before and the dequant and GEMM inside each expert nest on the same capped scheduler.
+  Outputs are byte-identical at any cap, and no raw `Parallel` loop remains outside `CpuParallel` itself.
 - **Fixed: host weight conversions, Mimi's RVQ encode and UnivNet's LVC gate no longer bypass the process CPU
   thread cap.** Large `Tensor.CastTo` and `DequantFp8E4M3ScaledToF16` casts, the fp8 quantizer's absmax, scale and
   stochastic-round passes, the NVFP4, MXFP4, FP8-block, affine, EXL3 and INT8-ConvRot host codecs,
@@ -18,8 +26,7 @@ stable release will require. Dates are UTC.
   every output is byte-identical at any cap. On a host that lowers the cap (the voice host's unit runs with
   `engine.cpuThreadCap: 14`) these now use at most that many threads, so checkpoint conversion and LoRA baking there,
   and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
-  cores than the cap. GPT-OSS's CPU-backend expert loop still wraps its per-expert dequant in a raw
-  `Parallel.ForEach`; a follow-up converts it.
+  cores than the cap.
 - **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
   pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
   compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
