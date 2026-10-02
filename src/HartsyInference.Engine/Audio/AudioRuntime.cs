@@ -1,13 +1,18 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>Device management for audio inference on ONE engine's backend: one generation at a time on that engine, other models evicted when a switch would not fit, and activations plus the memory pool trimmed after every run. One instance per <see cref="InferenceEngine"/> — the caches and the generation lock used to be process-wide statics, which serialized audio across every GPU and handed engine B a runner whose weights lived on engine A's device.</summary>
+/// <summary>Device management for audio inference on ONE engine's backend: one generation at a time on that engine, other models evicted when a switch would not fit, one retry after evicting them when a run still runs out of VRAM, and activations plus the memory pool trimmed after every run. One instance per <see cref="InferenceEngine"/> — the caches and the generation lock used to be process-wide statics, which serialized audio across every GPU and handed engine B a runner whose weights lived on engine A's device.</summary>
 internal sealed class AudioRuntime
 {
+    /// <summary>A switch asks for the incoming weights plus this fraction of them again (a fifth: 1.2×) for activations.</summary>
+    private const long ActivationShareDivisor = 5;
+
     /// <summary>Serializes inference across this engine's requests — one device per engine.</summary>
     private readonly SemaphoreSlim _genLock = new(1, 1);
 
@@ -15,6 +20,13 @@ internal sealed class AudioRuntime
 
     /// <summary>Model that ran most recently — switches trigger the memory-pressure eviction check.</summary>
     private string? _lastKey;
+
+    /// <summary>VRAM each model's latest load left in use, by <see cref="AudioJob.ModelKey"/>. Only touched under <see cref="_genLock"/>.</summary>
+    private readonly Dictionary<string, long> _learnedBytes = new(StringComparer.Ordinal);
+
+    /// <summary>Non-zero on-disk weight sizes already computed, by <see cref="AudioJob.ModelKey"/>, so a model's files are
+    /// sized once. A zero is not kept: the files may only not be downloaded yet. Only touched under <see cref="_genLock"/>.</summary>
+    private readonly Dictionary<string, long> _estimatedBytes = new(StringComparer.Ordinal);
 
     /// <summary>Open runner leases; <see cref="UnloadAll"/> revokes them before it drops their runners.</summary>
     private readonly List<AudioRunnerLease> _leases = [];
@@ -24,12 +36,13 @@ internal sealed class AudioRuntime
     /// holding a dropped runner or a disposed backend.</summary>
     private int _releaseEpoch;
 
-    /// <summary>Free-host-RAM floor (KiB) below which switching models evicts every OTHER resident audio pipeline first. Runners otherwise accumulate (each holds multi-GB weight copies) until the kernel OOM-kills the process — observed at 21.8 GB RSS on a 32 GB box, and again at 11.5 GB with a desktop session sharing the machine, so the floor is generous. Override via vram.audioEvictBelowGb. Host RAM is process-wide, so with several engines each judges the floor independently — acceptable: the floor is generous and the VRAM floor below is genuinely per-device.</summary>
+    /// <summary>Free-host-RAM floor (KiB) below which switching models evicts every OTHER resident audio pipeline first. Runners otherwise accumulate (each holds multi-GB weight copies) until the kernel OOM-kills the process — observed at 21.8 GB RSS on a 32 GB box, and again at 11.5 GB with a desktop session sharing the machine, so the floor is generous. Override via vram.audioEvictBelowGb. Host RAM is process-wide, so with several engines each judges the floor independently — acceptable: the floor is generous and the VRAM check below is genuinely per-device.</summary>
     private static long EvictBelowAvailableKb =>
         EngineKnobs.AudioEvictBelowGb.Value * 1024 * 1024;
 
-    /// <summary>Free-VRAM floor: a prior model's promoted weights can hold most of the card, so the next model would OOM at load even with plenty of host RAM free.</summary>
-    private const long EvictBelowFreeVramBytes = 3L * 1024 * 1024 * 1024;
+    /// <summary>Least free VRAM a switch accepts without evicting, whatever the incoming model is estimated to need.
+    /// Override via vram.audioEvictFreeVramFloorMb.</summary>
+    private static long FreeVramFloorBytes => EngineKnobs.AudioEvictFreeVramFloorMb.Value << 20;
 
     /// <summary>Resident speech pipelines, keyed by resolved repo.</summary>
     internal AudioRunnerCache<ITtsRunner> Tts { get; }
@@ -84,6 +97,194 @@ internal sealed class AudioRuntime
         }
     }
 
+    /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when the switch would not fit, retries once after evicting every other unpinned model when the work still runs out of VRAM, then frees leftover activations and trims the pool so a finished generation leaves nothing behind. <paramref name="job"/> names the cache and bare key the work is about to load through <c>GetOrLoadAsync</c>, so the eviction sweep can keep exactly that runner.</summary>
+    /// <remarks><paramref name="work"/> can therefore run twice, so it must release whatever it acquires itself.</remarks>
+    internal async Task<T> RunAsync<T>(IBackend backend, AudioJob job, Func<CancellationToken, Task<T>> work, CancellationToken cancel,
+        IReadOnlyList<IBackend>? stageBackends = null)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(work);
+        await _genLock.WaitAsync(cancel).ConfigureAwait(false);
+        // Device gate INSIDE the engine's audio lock (gate is always innermost, process-wide lock order).
+        // A layer-split job passes its stage backends so EVERY stage device is gated, not just the primary.
+        IDisposable gate = stageBackends is { Count: > 0 }
+            ? await DeviceGate.AcquireAllAsync([backend, .. stageBackends], cancel).ConfigureAwait(false)
+            : await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
+        LoadProbe probe = default;
+        bool succeeded = false;
+        try
+        {
+            EvictOthersUnderMemoryPressure(backend, job);
+            probe = LoadProbe.Begin(backend, job);
+            T result;
+            try
+            {
+                result = await work(cancel).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ShouldRetry(ex, cancel))
+            {
+                EvictForRetry(backend, job, ex);
+                probe = probe.Restart(backend);
+                result = await work(cancel).ConfigureAwait(false);
+            }
+            succeeded = true;
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            Logs.Debug($"[Audio] '{job.ModelKey}' was cancelled.");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[Audio] '{job.ModelKey}' failed: {ex.Message}", ex);
+            throw;
+        }
+        finally
+        {
+            FinishRun(backend, job, probe, succeeded);
+            gate.Dispose();
+            _genLock.Release();
+        }
+    }
+
+    /// <summary>Streaming counterpart to <see cref="RunAsync{T}"/>: holds this engine's generation lock and device gate for the ENTIRE consumption of the returned stream, not just until <paramref name="work"/> returns — the underlying generation loop keeps running on the device until every item has been yielded. Releases when the consumer finishes draining, breaks early, or cancels; the async-iterator's <c>finally</c> below runs exactly once either way. Retries after running out of VRAM only while nothing has been yielded: a caller already holding the opening of the stream would get it twice. (C# forbids <c>yield return</c> inside a <c>try</c> with a <c>catch</c> clause, so unlike <see cref="RunAsync{T}"/> this does not itself log-and-rethrow — exceptions still propagate to the caller, they just aren't logged at this layer.)</summary>
+    internal async IAsyncEnumerable<T> RunStreamAsync<T>(IBackend backend, AudioJob job,
+        Func<CancellationToken, IAsyncEnumerable<T>> work, [EnumeratorCancellation] CancellationToken cancel,
+        IReadOnlyList<IBackend>? stageBackends = null)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(work);
+        await _genLock.WaitAsync(cancel).ConfigureAwait(false);
+        IDisposable gate = stageBackends is { Count: > 0 }
+            ? await DeviceGate.AcquireAllAsync([backend, .. stageBackends], cancel).ConfigureAwait(false)
+            : await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
+        IAsyncEnumerator<T>? items = null;
+        LoadProbe probe = default;
+        bool completed = false;
+        try
+        {
+            EvictOthersUnderMemoryPressure(backend, job);
+            probe = LoadProbe.Begin(backend, job);
+            items = work(cancel).GetAsyncEnumerator(cancel);
+            bool yielded = false;
+            bool retried = false;
+            while (true)
+            {
+                bool more;
+                try
+                {
+                    more = await items.MoveNextAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex) when (!yielded && !retried && ShouldRetry(ex, cancel))
+                {
+                    retried = true;
+                    IAsyncEnumerator<T> failed = items;
+                    items = null;
+                    await DisposeFailedAttemptAsync(failed, job).ConfigureAwait(false);
+                    EvictForRetry(backend, job, ex);
+                    probe = probe.Restart(backend);
+                    items = work(cancel).GetAsyncEnumerator(cancel);
+                    continue;
+                }
+                if (!more)
+                {
+                    break;
+                }
+                yielded = true;
+                yield return items.Current;
+            }
+            completed = true;
+        }
+        finally
+        {
+            try
+            {
+                if (items is not null)
+                {
+                    await items.DisposeAsync().ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                FinishRun(backend, job, probe, completed);
+                gate.Dispose();
+                _genLock.Release();
+            }
+        }
+    }
+
+    /// <summary>Opens a lease on the runner for <paramref name="key"/>: loads or reuses it through <see cref="RunAsync{T}"/>, the same locked, gated and eviction-checked path a service call takes, then builds the lease, which pins the key, and registers it for revocation. Pinning inside the generation lock means no sweep can run between the load and the pin.</summary>
+    /// <param name="estimateWeightBytes">Sizes the runner's weights for the switch check; see <see cref="AudioJob.EstimateWeightBytes"/>.</param>
+    internal Task<TLease> OpenLeaseAsync<TRunner, TLease>(IBackend backend, AudioRunnerCache<TRunner> cache, string key,
+        Func<CancellationToken, Task<TRunner>> load, Func<TRunner, TLease> create, CancellationToken cancel,
+        IReadOnlyList<IBackend>? stageBackends = null, Func<long>? estimateWeightBytes = null)
+        where TRunner : class, IDisposable
+        where TLease : AudioRunnerLease
+    {
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentNullException.ThrowIfNull(load);
+        ArgumentNullException.ThrowIfNull(create);
+        int epoch = Volatile.Read(ref _releaseEpoch);
+        return RunAsync(backend, new AudioJob(cache, key, estimateWeightBytes), async ct =>
+        {
+            ct.ThrowIfCancellationRequested();
+            TRunner runner = await cache.GetOrLoadAsync(key, load, ct).ConfigureAwait(false);
+            TLease lease = create(runner);
+            Register(lease, epoch);
+            return lease;
+        }, cancel, stageBackends);
+    }
+
+    /// <summary>Forgets a disposed lease; a no-op for one a release already revoked.</summary>
+    internal void Unregister(AudioRunnerLease lease)
+    {
+        lock (_leaseLock)
+        {
+            _leases.Remove(lease);
+        }
+    }
+
+    /// <summary>The free VRAM a switch needs to skip eviction: the floor, or the incoming weights plus room beside them
+    /// — a fifth more, and never less than auto-promotion's headroom, because a weight that would leave less than that
+    /// free is not made resident at all and streams over PCIe on every use instead of failing.</summary>
+    internal static long SwitchThresholdBytes(long needBytes)
+    {
+        long floor = FreeVramFloorBytes;
+        if (needBytes <= 0)
+        {
+            return floor;
+        }
+        long beside = Math.Max(needBytes / ActivationShareDivisor, EngineKnobs.AutopromoteHeadroomMb.Value << 20);
+        return Math.Max(floor, needBytes + beside);
+    }
+
+    /// <summary>The out-of-VRAM failure behind <paramref name="error"/>, looking through the wrappers a worker thread or
+    /// an aggregate adds, or null.</summary>
+    internal static OutOfVramException? FindOutOfVram(Exception? error, int depth = 0)
+    {
+        if (error is null || depth > 8)
+        {
+            return null;
+        }
+        if (error is OutOfVramException outOfVram)
+        {
+            return outOfVram;
+        }
+        if (error is AggregateException aggregate)
+        {
+            foreach (Exception inner in aggregate.InnerExceptions)
+            {
+                if (FindOutOfVram(inner, depth + 1) is { } found)
+                {
+                    return found;
+                }
+            }
+            return null;
+        }
+        return FindOutOfVram(error.InnerException, depth + 1);
+    }
+
     private void UnloadAllCore()
     {
         foreach (IAudioRunnerCache cache in _caches)
@@ -113,118 +314,6 @@ internal sealed class AudioRuntime
         }
     }
 
-    /// <summary>Runs one audio job under this engine's generation lock: evicts other models first when memory is tight, then frees leftover activations and trims the pool afterwards so a finished generation leaves nothing behind. <paramref name="job"/> names the cache and bare key the work is about to load through <c>GetOrLoadAsync</c>, so the eviction sweep can keep exactly that runner.</summary>
-    internal async Task<T> RunAsync<T>(IBackend backend, AudioJob job, Func<CancellationToken, Task<T>> work, CancellationToken cancel,
-        IReadOnlyList<IBackend>? stageBackends = null)
-    {
-        ArgumentNullException.ThrowIfNull(backend);
-        ArgumentNullException.ThrowIfNull(work);
-        await _genLock.WaitAsync(cancel).ConfigureAwait(false);
-        // Device gate INSIDE the engine's audio lock (gate is always innermost, process-wide lock order).
-        // A layer-split job passes its stage backends so EVERY stage device is gated, not just the primary.
-        IDisposable gate = stageBackends is { Count: > 0 }
-            ? await DeviceGate.AcquireAllAsync([backend, .. stageBackends], cancel).ConfigureAwait(false)
-            : await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
-        try
-        {
-            EvictOthersUnderMemoryPressure(backend, job);
-            return await work(cancel).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            Logs.Debug($"[Audio] '{job.ModelKey}' was cancelled.");
-            throw;
-        }
-        catch (Exception ex)
-        {
-            Logs.Error($"[Audio] '{job.ModelKey}' failed: {ex.Message}", ex);
-            throw;
-        }
-        finally
-        {
-            // Post-generation device hygiene: drop leftover GPU activations and return pool-reserved-but-free blocks
-            // to the driver. Cached (promoted) weights stay resident, so warm latency is unaffected — without this,
-            // finished generations left multi-GB of dead activations + pool reservations on the card.
-            try
-            {
-                backend.FreeActivations();
-                backend.TrimMemoryPool();
-            }
-            catch (Exception ex)
-            {
-                Logs.Warning($"[Audio] Post-generation device cleanup failed: {ex.Message}");
-            }
-            gate.Dispose();
-            _genLock.Release();
-        }
-    }
-
-    /// <summary>Streaming counterpart to <see cref="RunAsync{T}"/>: holds this engine's generation lock and device gate for the ENTIRE consumption of the returned stream, not just until <paramref name="work"/> returns — the underlying generation loop keeps running on the device until every item has been yielded. Releases when the consumer finishes draining, breaks early, or cancels; the async-iterator's <c>finally</c> below runs exactly once either way. (C# forbids <c>yield return</c> inside a <c>try</c> with a <c>catch</c> clause, so unlike <see cref="RunAsync{T}"/> this does not itself log-and-rethrow — exceptions still propagate to the caller, they just aren't logged at this layer.)</summary>
-    internal async IAsyncEnumerable<T> RunStreamAsync<T>(IBackend backend, AudioJob job,
-        Func<CancellationToken, IAsyncEnumerable<T>> work, [EnumeratorCancellation] CancellationToken cancel,
-        IReadOnlyList<IBackend>? stageBackends = null)
-    {
-        ArgumentNullException.ThrowIfNull(backend);
-        ArgumentNullException.ThrowIfNull(work);
-        await _genLock.WaitAsync(cancel).ConfigureAwait(false);
-        IDisposable gate = stageBackends is { Count: > 0 }
-            ? await DeviceGate.AcquireAllAsync([backend, .. stageBackends], cancel).ConfigureAwait(false)
-            : await DeviceGate.AcquireAsync(backend, cancel).ConfigureAwait(false);
-        try
-        {
-            EvictOthersUnderMemoryPressure(backend, job);
-            await foreach (T item in work(cancel).WithCancellation(cancel).ConfigureAwait(false))
-            {
-                yield return item;
-            }
-        }
-        finally
-        {
-            // Same post-generation device hygiene as RunAsync — see its comment for why this matters.
-            try
-            {
-                backend.FreeActivations();
-                backend.TrimMemoryPool();
-            }
-            catch (Exception ex)
-            {
-                Logs.Warning($"[Audio] Post-generation device cleanup failed: {ex.Message}");
-            }
-            gate.Dispose();
-            _genLock.Release();
-        }
-    }
-
-    /// <summary>Opens a lease on the runner for <paramref name="key"/>: loads or reuses it through <see cref="RunAsync{T}"/>, the same locked, gated and eviction-checked path a service call takes, then builds the lease, which pins the key, and registers it for revocation. Pinning inside the generation lock means no sweep can run between the load and the pin.</summary>
-    internal Task<TLease> OpenLeaseAsync<TRunner, TLease>(IBackend backend, AudioRunnerCache<TRunner> cache, string key,
-        Func<CancellationToken, Task<TRunner>> load, Func<TRunner, TLease> create, CancellationToken cancel,
-        IReadOnlyList<IBackend>? stageBackends = null)
-        where TRunner : class, IDisposable
-        where TLease : AudioRunnerLease
-    {
-        ArgumentNullException.ThrowIfNull(cache);
-        ArgumentNullException.ThrowIfNull(load);
-        ArgumentNullException.ThrowIfNull(create);
-        int epoch = Volatile.Read(ref _releaseEpoch);
-        return RunAsync(backend, new AudioJob(cache, key), async ct =>
-        {
-            ct.ThrowIfCancellationRequested();
-            TRunner runner = await cache.GetOrLoadAsync(key, load, ct).ConfigureAwait(false);
-            TLease lease = create(runner);
-            Register(lease, epoch);
-            return lease;
-        }, cancel, stageBackends);
-    }
-
-    /// <summary>Forgets a disposed lease; a no-op for one a release already revoked.</summary>
-    internal void Unregister(AudioRunnerLease lease)
-    {
-        lock (_leaseLock)
-        {
-            _leases.Remove(lease);
-        }
-    }
-
     /// <summary>Tracks <paramref name="lease"/> for revocation, or disposes it and throws when a release ran after its open began.</summary>
     private void Register(AudioRunnerLease lease, int epoch)
     {
@@ -241,7 +330,7 @@ internal sealed class AudioRuntime
             $"The engine released its audio models while the lease on '{lease.ModelKey}' was opening.");
     }
 
-    /// <summary>When switching to a different model with low free host RAM or VRAM, drops every other resident pipeline (runner disposal also releases their auto-promoted GPU weights), keeping the incoming runner by asking ITS cache for the bare key and every pinned runner. Same-model repeat requests never evict, so warm generation stays warm. The keep decision has to go through <see cref="AudioJob.Cache"/>: the caches store bare keys, and handing them the prefixed <see cref="AudioJob.ModelKey"/> used to match nothing, so under pressure every switch evicted the model about to run and reloaded it.</summary>
+    /// <summary>When switching to a different model, drops every other resident pipeline if free host RAM is under its floor or free VRAM is under <see cref="SwitchThresholdBytes"/> for the incoming model's estimated need, keeping the incoming runner (asked for by ITS cache's bare key) and every pinned runner. Same-model repeat requests never evict, so warm generation stays warm. The keep decision has to go through <see cref="AudioJob.Cache"/>: the caches store bare keys, and handing them the prefixed <see cref="AudioJob.ModelKey"/> used to match nothing, so under pressure every switch evicted the model about to run and reloaded it.</summary>
     private void EvictOthersUnderMemoryPressure(IBackend backend, AudioJob job)
     {
         string modelKey = job.ModelKey;
@@ -254,32 +343,136 @@ internal sealed class AudioRuntime
         bool hostLow = availableKb > 0 && availableKb < EvictBelowAvailableKb;
         // Gated on the TOTAL, not on free being non-zero: a backend that reports honestly can say zero free, and
         // testing free itself skipped eviction in precisely the case it was written for.
-        bool vramLow = totalVramBytes > 0 && freeVramBytes < EvictBelowFreeVramBytes;
+        long needBytes = totalVramBytes > 0 ? EstimateNeedBytes(job) : 0;
+        bool vramLow = totalVramBytes > 0 && freeVramBytes < SwitchThresholdBytes(needBytes);
         if (hostLow || vramLow)
         {
-            Logs.Info($"[Audio] Memory pressure (host {availableKb / 1024 / 1024.0:0.0} GB free, VRAM "
-                + $"{freeVramBytes / 1024.0 / 1024 / 1024:0.0} GB free) — unloading other resident audio models before '{modelKey}'.");
-            foreach (IAudioRunnerCache cache in _caches)
-            {
-                cache.UnloadAllExcept(ReferenceEquals(cache, job.Cache) ? job.Key : null);
-            }
-            // Disposal only drops host references; the finalizer queue that frees the promoted GPU copies is drained
-            // lazily on the compute thread, so without forcing it here the card stays full across a model switch and
-            // the incoming model OOMs on load. This is the one place the collect is load-bearing.
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-            try
-            {
-                backend.FreeAllDeviceMemory();
-            }
-            catch (Exception ex)
-            {
-                Logs.Warning($"[Audio] Releasing device memory on eviction failed: {ex.Message}");
-            }
+            IReadOnlyList<string> evicted = UnloadOthers(backend, job);
+            string need = needBytes > 0 ? $"needs ~{ByteFormat.GbF1(needBytes)}, " : "";
+            Logs.Info($"[Audio] Switching to '{modelKey}' ({need}{ByteFormat.GbF1(freeVramBytes)} VRAM free, "
+                + $"{availableKb / 1024 / 1024.0:0.0} GB host RAM free) — unloaded {Describe(evicted)}.");
         }
         _lastKey = modelKey;
     }
+
+    /// <summary>Device bytes the incoming model will add: none when it is already loaded, else the larger of what its
+    /// latest load left in use and what its files on disk size to.</summary>
+    /// <remarks>The larger rather than the learned figure alone: a runner that uploads its weights for one run and frees
+    /// them at its end (Dia, F5, ZipVoice, YuE) leaves almost nothing in use, and a first run on a crowded card leaves
+    /// only what it managed to promote — both teach a figure far below what the next load needs.</remarks>
+    private long EstimateNeedBytes(AudioJob job)
+    {
+        if (job.Cache.IsResident(job.Key))
+        {
+            return 0;
+        }
+        _learnedBytes.TryGetValue(job.ModelKey, out long learned);
+        return Math.Max(learned, EstimatedBytes(job));
+    }
+
+    /// <summary>The job's on-disk weight size, remembered once it is non-zero.</summary>
+    private long EstimatedBytes(AudioJob job)
+    {
+        if (job.EstimateWeightBytes is null)
+        {
+            return 0;
+        }
+        if (_estimatedBytes.TryGetValue(job.ModelKey, out long known))
+        {
+            return known;
+        }
+        long bytes = Math.Max(0, job.EstimateWeightBytes());
+        if (bytes > 0)
+        {
+            _estimatedBytes[job.ModelKey] = bytes;
+        }
+        return bytes;
+    }
+
+    /// <summary>Drops every resident runner but the job's own and the pinned ones, then forces their device memory back:
+    /// disposal only drops host references, and the finalizers that free the promoted GPU copies otherwise drain lazily
+    /// on the compute thread, leaving the card full for the model about to load. Returns the prefixed keys dropped.</summary>
+    private List<string> UnloadOthers(IBackend backend, AudioJob job)
+    {
+        List<string> evicted = [];
+        foreach (IAudioRunnerCache cache in _caches)
+        {
+            foreach (string key in cache.UnloadAllExcept(ReferenceEquals(cache, job.Cache) ? job.Key : null))
+            {
+                evicted.Add($"{cache.Category}:{key}");
+            }
+        }
+        // The one place the collect is load-bearing: see the summary.
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+        try
+        {
+            backend.FreeAllDeviceMemory();
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Audio] Releasing device memory on eviction failed: {ex.Message}");
+        }
+        return evicted;
+    }
+
+    /// <summary>Whether a failed attempt earns the one retry: it ran out of VRAM and nobody cancelled it.</summary>
+    private static bool ShouldRetry(Exception error, CancellationToken cancel) =>
+        !cancel.IsCancellationRequested && FindOutOfVram(error) is not null;
+
+    /// <summary>Clears the device for the retry after <paramref name="error"/>: every other unpinned runner goes, whether
+    /// or not this run was a switch.</summary>
+    private void EvictForRetry(IBackend backend, AudioJob job, Exception error)
+    {
+        IReadOnlyList<string> evicted = UnloadOthers(backend, job);
+        (long freeBytes, _) = SafeVramInfo(backend);
+        Logs.Warning($"[Audio] '{job.ModelKey}' ran out of VRAM ({FindOutOfVram(error)?.Message}) — unloaded "
+            + $"{Describe(evicted)} and released device memory ({ByteFormat.GbF1(freeBytes)} free); retrying once.");
+    }
+
+    /// <summary>Disposes a stream attempt that failed, so its own cleanup runs before the retry starts the next one.</summary>
+    private static async ValueTask DisposeFailedAttemptAsync<T>(IAsyncEnumerator<T> failed, AudioJob job)
+    {
+        try
+        {
+            await failed.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Audio] Disposing the failed attempt of '{job.ModelKey}' threw: {ex.Message}");
+        }
+    }
+
+    /// <summary>Post-run device hygiene, then what the run taught. Drops leftover GPU activations and returns pool-reserved-but-free blocks to the driver; cached (promoted) weights stay resident, so warm latency is unaffected — without this, finished generations left multi-GB of dead activations and pool reservations on the card. What a successful load still holds after that is its runner's footprint.</summary>
+    private void FinishRun(IBackend backend, AudioJob job, LoadProbe probe, bool succeeded)
+    {
+        try
+        {
+            backend.FreeActivations();
+            backend.TrimMemoryPool();
+        }
+        catch (Exception ex)
+        {
+            Logs.Warning($"[Audio] Post-generation device cleanup failed: {ex.Message}");
+            return;
+        }
+        if (!succeeded || !probe.Loads || probe.TotalBytes <= 0 || !job.Cache.IsResident(job.Key))
+        {
+            return;
+        }
+        (long freeBytes, long totalBytes) = SafeVramInfo(backend);
+        if (totalBytes > 0)
+        {
+            long held = Math.Max(0, probe.FreeBytes - freeBytes);
+            _learnedBytes[job.ModelKey] = held;
+            Logs.Debug($"[Audio] Loading '{job.ModelKey}' left {ByteFormat.GbF1(held)} of VRAM in use.");
+        }
+    }
+
+    /// <summary>The keys a sweep dropped, for its log line.</summary>
+    private static string Describe(IReadOnlyList<string> evicted) =>
+        evicted.Count == 0 ? "nothing (no other unpinned model was resident)" : string.Join(", ", evicted);
 
     /// <summary>MemAvailable from <c>/proc/meminfo</c> in KiB, or 0 when unavailable (non-Linux → no host eviction).</summary>
     private static long ReadAvailableMemoryKb()
@@ -316,6 +509,35 @@ internal sealed class AudioRuntime
         {
             Logs.Debug($"[Audio] Backend VRAM query failed ({ex.Message}) — VRAM eviction disabled.");
             return (0, 0);
+        }
+    }
+
+    /// <summary>Device memory before a job that loads its runner, so the run can say what the load left in use.</summary>
+    /// <param name="Loads">The runner was not resident when the job started.</param>
+    /// <param name="FreeBytes">Free VRAM just before the work, after any eviction.</param>
+    /// <param name="TotalBytes">Total VRAM; zero when the backend does not report it.</param>
+    private readonly record struct LoadProbe(bool Loads, long FreeBytes, long TotalBytes)
+    {
+        /// <summary>A probe for <paramref name="job"/>, measuring only when its runner still has to load.</summary>
+        public static LoadProbe Begin(IBackend backend, AudioJob job)
+        {
+            if (job.Cache.IsResident(job.Key))
+            {
+                return default;
+            }
+            (long free, long total) = SafeVramInfo(backend);
+            return new LoadProbe(true, free, total);
+        }
+
+        /// <summary>The same probe measured again after a retry's sweep moved the baseline.</summary>
+        public LoadProbe Restart(IBackend backend)
+        {
+            if (!Loads)
+            {
+                return this;
+            }
+            (long free, long total) = SafeVramInfo(backend);
+            return new LoadProbe(true, free, total);
         }
     }
 }

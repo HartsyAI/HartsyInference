@@ -29,6 +29,8 @@ internal static class DiaTtsModel
         // The 0626 release, NOT the original Dia-1.6B: same architecture/keys/shapes, but the original checkpoint's
         // weights degenerate through the engine while 0626 produces the full multi-turn dialogue word-correct.
         ResolveRepo = _ => ModelRepo,
+        // Every Dia layer reads its weights through EnsureF32.
+        PromotesHalfToF32 = true,
         // The DAC codec lives in its own repo; the pickle weights come last as the install marker.
         ResolveFiles = (_, _) => Task.FromResult<IReadOnlyList<AudioModelFile>>(
         [

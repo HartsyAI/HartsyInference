@@ -8,6 +8,18 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Audio model switches now size the incoming model before deciding whether to evict.** `AudioRuntime` used to
+  unload the other resident audio models on a switch only when free VRAM was under a fixed 3 GiB, so a 6-7 GB model
+  arriving with 3-6 GB free evicted nothing: Dia then failed in `PreloadWeights` with `OutOfVramException`, and
+  Orpheus loaded with most of its weights left host-side and streamed them every step. A switch now evicts when free
+  VRAM is under the incoming model's need plus room beside it (a fifth more, and never less than
+  `vram.autopromoteHeadroomMb`, because a weight that would leave less than that free is streamed instead of made
+  resident), with the new `vram.audioEvictFreeVramFloorMb` (default 3072) as the floor. The need is the larger of
+  what the model's latest load in this process left in use and the size of its weight files on disk, with F16/BF16
+  tensors counted at F32 for a runner that widens them (Dia declares it). A model that is already loaded needs only
+  the floor; same-model repeats still never evict, and pinned runners are still never evicted. If a run still throws
+  `OutOfVramException`, the runtime unloads every other unpinned audio model, releases device memory, logs what it
+  dropped, and retries once; a stream retries only if it has not yielded anything yet.
 - **The prompt prefill now observes the request's cancellation token between transformer layers.**
   `TextGenerationPipeline` hands the token to the first prefill through a new
   `IGenerationModel.Prefill(chunk, state, cancel)` overload (a default interface method that checks only before the

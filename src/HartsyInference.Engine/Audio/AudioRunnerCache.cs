@@ -34,8 +34,8 @@ internal sealed class AudioRunnerCache<TRunner>(string category) : IAudioRunnerC
         }
     }
 
-    /// <summary>Whether a runner for <paramref name="key"/> is currently resident. Diagnostics and test seam; callers that need the runner use <see cref="GetOrLoadAsync"/>.</summary>
-    internal bool IsResident(string key) => _entries.ContainsKey(key);
+    /// <inheritdoc/>
+    public bool IsResident(string key) => _entries.ContainsKey(key);
 
     /// <summary>Keys of every resident runner, in no particular order. Diagnostics and test seam.</summary>
     internal IReadOnlyCollection<string> ResidentKeys => [.. _entries.Keys];
@@ -52,8 +52,9 @@ internal sealed class AudioRunnerCache<TRunner>(string category) : IAudioRunnerC
     public bool IsPinned(string key) => _pins.TryGetValue(key, out int holds) && holds > 0;
 
     /// <inheritdoc/>
-    public void UnloadAllExcept(string? keepKey, bool includePinned = false)
+    public IReadOnlyList<string> UnloadAllExcept(string? keepKey, bool includePinned = false)
     {
+        List<string>? dropped = null;
         foreach (string key in _entries.Keys)
         {
             if (string.Equals(key, keepKey, StringComparison.Ordinal))
@@ -69,6 +70,7 @@ internal sealed class AudioRunnerCache<TRunner>(string category) : IAudioRunnerC
             {
                 continue;
             }
+            (dropped ??= []).Add(key);
             try
             {
                 runner.Dispose();
@@ -78,6 +80,7 @@ internal sealed class AudioRunnerCache<TRunner>(string category) : IAudioRunnerC
                 Logs.Warning($"[Audio] Unloading resident model '{key}' failed: {ex.Message}");
             }
         }
+        return dropped ?? [];
     }
 
     /// <summary>Releases one hold on <paramref name="key"/>, removing the entry at zero so <see cref="IsPinned"/> stays a plain lookup.</summary>
