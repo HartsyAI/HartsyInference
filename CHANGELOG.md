@@ -6,6 +6,73 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.241
+
+- **Audio: fixed the vocab-sized delegate-sort allocation anti-pattern in the TTS samplers** — the same
+  pattern PR #215 fixed in the LLM package's `TopPStep`, independently present in several places in
+  `src/HartsyInference.Audio`:
+  - `NucleusSampler.Draw`'s unbounded fallback (hit whenever `topK<=0`, or `topK` exceeds the bounded fast
+    path's 1024 cap): Chatterbox, Zonos, Dia (its own `Draw` call), Bark's coarse/fine/generic stages, and
+    FishSpeech's codebook pass all pass `topK=0` today. A fresh `float[count]` + `int[count]` plus a full
+    `Array.Sort` with a `Comparison<int>` delegate, every token.
+  - `LogitSampling.SampleTopK` (Kyutai's text-token sampling and its depformer, up to 32 calls per audio
+    frame): the same shape, run unconditionally regardless of how small `k` was against the vocabulary.
+  - Two bespoke duplicate sorters outside `NucleusSampler` entirely: `DiaPipeline.SampleDiaChannel`'s
+    CFG-window selection and `BarkCausalStage.SampleTopPWithProb`'s semantic-stage top-p cut (up to 768
+    calls per generation).
+  - `Yue2LogitProcessor.ApplyNucleus`: the allocation half of the same anti-pattern (fresh `List<int>`/
+    `List<float>` plus collection-expression array copies every call) without the delegate-sort half — its
+    sort was already the primitive two-array `Array.Sort` overload.
+
+  Fix, mirrored from #215 rather than imported across the package boundary (Audio's `Draw` walks a SORTED
+  sequence for its multinomial draw — tie order and float-summation order are part of the observable output
+  — unlike LLM's `SamplerChain`, which always draws in natural index order): new
+  `src/HartsyInference.Audio/Sampling/SortHelpers.cs` holds a primitive `Array.Sort(float[], int[])`
+  (negate / sort ascending / negate back) in place of the delegate comparer, and every fixed call site keeps
+  a `[ThreadStatic]` scratch buffer pair, sized once and grown (never shrunk) on demand — no allocation after
+  the first call on a given thread. Every full-sort site keeps its EXACT pre-existing algorithm; only the
+  allocation and the sort mechanism changed. `NucleusSampler`'s existing bounded top-k fast path (every
+  other caller: CSM, SparkTTS, Qwen3-TTS, CosyVoice, GptSoVits, NeuTTS, MusicGen, MiniMax, the original YuE)
+  was already allocation-free and delegate-free and is untouched.
+
+  **Verified byte-identical**, not assumed: `SortHelpersTests` proves the new primitive sort reproduces the
+  OLD delegate sort's exact permutation — including exact ties at every rank — across random, all-equal,
+  low-cardinality, sorted, organ-pipe and median-of-three-killer inputs from 1 to 102,048 elements (the one
+  documented divergence is NaN placement, pinned by its own test rather than left unchecked: real model
+  logits are never NaN without sampling already being broken upstream). Five more test files keep each fixed
+  call site's pre-fix algorithm verbatim as a reference oracle and compare it against the real (fixed) code
+  across random inputs, exact ties at several boundary shapes, tiny/huge top-p, temperature=0, minP-only,
+  and masked tokens — 87 tests total, all passing. `BarkCausalStage.SampleTopPWithProb` and
+  `Yue2LogitProcessor.ApplyNucleus` move from `private` to `internal` so the test project can reach them
+  directly (the same `InternalsVisibleTo` pattern already used elsewhere in this package).
+
+  **Measured on the 3060** (`hartsy speak`, same text, seed 0 — the TTS default — base vs. this branch,
+  interleaved): sampler-alone cost (steady-state ms/call, CPU) and end-to-end wall clock, output digest
+  identical unless noted:
+
+  | Model | sampler ms/call before→after | end-to-end wall before→after | output |
+  |---|---:|---:|---|
+  | Kyutai TTS | 0.226→0.089 (depformer) / 0.93→0.42 (text) | 25.39s → 9.41s (−62.9%) | digest identical |
+  | FishSpeech | 12.02→7.39 (slow/text pass) / 0.056→0.025 (fast/codebook pass) | 11.20s → 7.10s (−36.6%) | digest identical |
+  | Bark | 0.058→0.027 (coarse/fine); bespoke semantic sort fixed, same technique | 13.63s → 12.80s (−6.1%) | digest identical |
+  | Zonos | 0.056→0.024 (×9 DAC channels/frame) | 29.10s → 26.15s (−10.1%) | digest identical |
+  | Chatterbox | 0.78→0.52 (×1/token) | 5.62s → 5.64s (noise) | **not comparable** — Chatterbox's S3Gen/HiFTNet stage is not bit-reproducible even on the SAME unmodified build run twice (confirmed); the CPU reference-oracle tests are the byte-identical proof for this model |
+  | Orpheus | not independently re-measured | n/a | the existing `OrpheusPipeline` perf-pass comment already measured "sampler restriction... flat" — its decode is GPU-compute-bound on the F32 backbone, not the sampler; this fix still removes the allocation but is not expected to move Orpheus's wall clock |
+  | Dia | 0.057→0.024 (×9 DAC channels/frame; CPU-isolated) | not cleanly measured end-to-end | see below |
+  | CSM, SparkTTS, Qwen3-TTS, CosyVoice, GptSoVits, NeuTTS, MusicGen, MiniMax, YuE (v1) | unaffected — already on `NucleusSampler`'s bounded fast path (`topK` small and `<1024`) | unaffected | regression-guarded by `BoundedFastPath_Unaffected_MatchesReference` |
+
+  **Dia**: a clean before/after end-to-end run was not obtained in this PR. A short (one-sentence) prompt
+  reproduces Dia's own documented "prompt is very short... tends to produce silence" pathology and never
+  reaches EOS; a proper multi-turn `[S1]/[S2]` dialogue prompt still did not complete in 180s on either
+  build. `nvidia-smi dmon` sampled during a run showed 0% SM utilization for the bulk of the sampled window
+  — a host-side stall, not GPU compute, consistent with this repo's own "GPU idle during a gen = host/
+  dispatch-bound" pattern (`docs/Checklists/TROUBLESHOOTING.md`) — and a concurrent agent's GPU test suite
+  was independently confirmed running on the same card during testing, so the attempted timings are not
+  trustworthy either way. The sampler's own contribution is proven negligible here (CPU-isolated, and
+  byte-identical via `DiaSampleChannelIdentityTests`); the real cost is elsewhere and needs a dedicated,
+  isolated re-run to profile. zipvoice (named in the original slow-model list) has no token-sampling path at
+  all — a flow-matching model, out of scope for this fix entirely.
+
 ## alpha.238
 
 - **Voice host exe (`src/HartsyInference.VoiceHost`, not packaged).** The phone-call voice agent's model process: a
