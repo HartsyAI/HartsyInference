@@ -21,7 +21,7 @@ public sealed class TranscribeService : ITranscribeService
         (SttModelDescriptor descriptor, string repo) = ResolveTarget(spec);
         IBackend backend = _engine.Backend;
 
-        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Stt, repo), async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, Job(repo), async ct =>
         {
             // Decode straight to the rate the pipeline wants (it would resample otherwise).
             float[] audio = AudioClipCodec.DecodeMono(request.Audio, descriptor.InputSampleRate);
@@ -83,7 +83,7 @@ public sealed class TranscribeService : ITranscribeService
         (SttModelDescriptor descriptor, string repo) = ResolveTarget(spec);
         IBackend backend = _engine.Backend;
 
-        return _engine.AudioRuntime.RunAsync(backend, new AudioJob(_engine.AudioRuntime.Stt, repo), async ct =>
+        return _engine.AudioRuntime.RunAsync(backend, Job(repo), async ct =>
         {
             float[] audio = AudioClipCodec.DecodeMono(request.Audio, descriptor.InputSampleRate);
             if (audio.Length == 0)
@@ -111,9 +111,15 @@ public sealed class TranscribeService : ITranscribeService
         IBackend backend = _engine.Backend;
         AudioRuntime runtime = _engine.AudioRuntime;
         return await runtime.OpenLeaseAsync(backend, runtime.Stt, repo, token => descriptor.LoadAsync(repo, token),
-            runner => new TranscriberLease(runtime, repo, runner, backend, descriptor.InputSampleRate), cancel)
-            .ConfigureAwait(false);
+            runner => new TranscriberLease(runtime, repo, runner, backend, descriptor.InputSampleRate), cancel,
+            estimateWeightBytes: EstimateWeightBytes(repo)).ConfigureAwait(false);
     }
+
+    /// <summary>The runtime job for <paramref name="repo"/>'s runner.</summary>
+    private AudioJob Job(string repo) => new(_engine.AudioRuntime.Stt, repo, EstimateWeightBytes(repo));
+
+    /// <summary>Sizes <paramref name="repo"/>'s downloaded weights for the switch check.</summary>
+    private static Func<long> EstimateWeightBytes(string repo) => () => AudioWeightFootprint.Estimate(repo, "stt");
 
     /// <summary>The descriptor and resolved repo (the cache key) a spec names; the one resolution the service calls and
     /// the lease share.</summary>

@@ -1,5 +1,6 @@
 using System.Numerics;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Lora.Mappers;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -294,8 +295,9 @@ public static class LoraBaker
         using Tensor a = ToF32("down", down);
         Tensor result = new(new TensorShape(rows, columns), DType.F32);
         float* bp = (float*)b.DataPointer, ap = (float*)a.DataPointer, cp = (float*)result.DataPointer;
-        Parallel.For(0, rows, row =>
+        CpuParallel.For(checked((int)rows), rows * columns * rank * 2, rowIndex =>
         {
+            long row = rowIndex;
             float* c = cp + row * columns;
             new Span<float>(c, (int)columns).Clear();
             for (int k = 0; k < rank; k++)

@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Security.Cryptography;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.CheckpointConverters;
@@ -134,7 +135,7 @@ internal static unsafe class MiniMaxH3ControlNetPrunedConverter
         float* biasPointer = (float*)bias.DataPointer;
         try
         {
-            Parallel.For(0, output, row =>
+            CpuParallel.For(output, (long)output * dense * (curve + 2) * 2, row =>
             {
                 double dc = MiniMaxH3TensorReader.Read(denseBias, row);
                 Span<double> projected = stackalloc double[curve];

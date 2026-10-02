@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
@@ -137,7 +138,7 @@ public static unsafe class Nvfp4Codec
         int bytesPerGroup = GroupSize / 2;
         long inDim = inHalf * 2;
 
-        Parallel.For(0, (int)outDim, r =>
+        CpuParallel.For((int)outDim, outDim * inDim * 2, r =>
         {
             byte* wr = w + (long)r * inHalf;
             float* dr = dst + (long)r * inDim;
@@ -165,9 +166,10 @@ public static unsafe class Nvfp4Codec
         int bytesPerGroup = GroupSize / 2;
         int tiles = (int)((outDim + RowTile - 1) / RowTile);
 
-        Parallel.For(0, tiles,
-            () => new float[RowTile * groups],
-            (tile, _, scaleScratch) =>
+        CpuParallel.For(tiles, outDim * inHalf * 4, tile =>
+        {
+            float[] scaleScratch = ArrayPool<float>.Shared.Rent((int)(RowTile * groups));
+            try
             {
                 long r0 = (long)tile * RowTile;
                 int tileRows = (int)(Math.Min(r0 + RowTile, outDim) - r0);
@@ -191,9 +193,12 @@ public static unsafe class Nvfp4Codec
                         d1[tr] = E2M1Lut[packed & 0x0F] * s;         // low nibble = odd element
                     }
                 }
-                return scaleScratch;
-            },
-            _ => { });
+            }
+            finally
+            {
+                ArrayPool<float>.Shared.Return(scaleScratch);
+            }
+        });
     }
 
     private static void ValidateBank(Tensor weight, Tensor blockScale, Tensor globalScale)

@@ -1,10 +1,10 @@
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.Vocoders;
 using HartsyInference.Audio.Preprocessing;
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using Xunit;
+using static HartsyInference.Tests.Common.CpuSchedules;
 
 namespace HartsyInference.Audio.Tests;
 
@@ -160,33 +160,6 @@ public sealed unsafe class NsfVocoderDspTests
         AssertBitIdentical(expected, parallel);
         AssertBitIdentical(expected, capped);
         AssertBitIdentical(expected, inline);
-    }
-
-    /// <summary>Runs <paramref name="run"/> under the default fan-out, a <c>numerics.cpuThreads</c> cap of 1, and
-    /// inside <see cref="CpuParallel.EnterInline"/>, restoring whatever cap was set before.</summary>
-    private static (T Parallel, T Capped, T Inline) UnderEverySchedule<T>(Func<T> run)
-    {
-        bool hadOverride = KnobStore.HasOverride(EngineKnobs.CpuThreads);
-        int previous = EngineKnobs.CpuThreads.Value;
-        try
-        {
-            KnobStore.Clear(EngineKnobs.CpuThreads);
-            T parallel = run();
-            KnobStore.Set(EngineKnobs.CpuThreads, 1);
-            T capped = run();
-            KnobStore.Clear(EngineKnobs.CpuThreads);
-            T inline;
-            using (CpuParallel.EnterInline())
-            {
-                inline = run();
-            }
-            return (parallel, capped, inline);
-        }
-        finally
-        {
-            if (hadOverride) KnobStore.Set(EngineKnobs.CpuThreads, previous);
-            else KnobStore.Clear(EngineKnobs.CpuThreads);
-        }
     }
 
     /// <summary>The harmonic source as it was before the fan-out, verbatim: one walk over every sample.</summary>

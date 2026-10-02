@@ -8,6 +8,33 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: host weight conversions, Mimi's RVQ encode and UnivNet's LVC gate no longer bypass the process CPU
+  thread cap.** Large `Tensor.CastTo` and `DequantFp8E4M3ScaledToF16` casts, the fp8 quantizer's absmax, scale and
+  stochastic-round passes, the NVFP4, MXFP4, FP8-block, affine, EXL3 and INT8-ConvRot host codecs,
+  `LoraBaker.MatMulFma`, the MiniMax-H3 rebasers, Mimi's split-RVQ encode and Resemble-Enhance's UnivNet each fanned
+  out with a raw `Parallel.For` on the shared thread pool, ignoring `numerics.cpuThreads` and
+  `CpuParallel.InlineScope`. Row and tile loops now go through `CpuParallel.For`, with per-row scratch rented from
+  `ArrayPool`, and the range passes through a new `CpuParallel.ForRanges`, whose ranges depend only on the length, so
+  every output is byte-identical at any cap. On a host that lowers the cap (the voice host's unit runs with
+  `engine.cpuThreadCap: 14`) these now use at most that many threads, so checkpoint conversion and LoRA baking there,
+  and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
+  cores than the cap. GPT-OSS's CPU-backend expert loop still wraps its per-expert dequant in a raw
+  `Parallel.ForEach`; a follow-up converts it.
+- **Audio model switches now size the incoming model before deciding whether to evict.** `AudioRuntime` used to
+  unload the other resident audio models on a switch only when free VRAM was under a fixed 3 GiB, so a 6-7 GB model
+  arriving with 3-6 GB free evicted nothing: Dia then failed in `PreloadWeights` with `OutOfVramException`, and
+  Orpheus loaded with most of its weights left host-side and streamed them every step. A switch now evicts when free
+  VRAM is under the incoming model's need plus room beside it (a fifth more, and never less than
+  `vram.autopromoteHeadroomMb`, because a weight that would leave less than that free is streamed instead of made
+  resident), with the new `vram.audioEvictFreeVramFloorMb` (default 3072) as the floor. The need is the larger of
+  what the model's latest load in this process left in use and the size of its weight files on disk, with F16/BF16
+  tensors counted at F32 for a runner that widens them (Dia declares it). A model that is already loaded needs only
+  the floor; same-model repeats still never evict, and pinned runners are still never evicted. If a run still throws
+  `OutOfVramException`, the runtime unloads every other unpinned audio model, releases device memory, logs what it
+  dropped, and retries once; a stream retries only if it has not yielded anything yet. Replaying the sweep on an RTX
+  4090 so that Dia arrives with 3.9 GiB free: before this change Dia failed with the same driver refusal and Orpheus
+  took 292 s to generate 6.2 s of audio against 7.5 s on a free card; with it the switch to Dia unloads the five
+  earlier models, Dia succeeds and Orpheus takes 7.6 s, and every model's audio is byte-identical.
 - **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
   pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
   compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
@@ -126,6 +153,25 @@ stable release will require. Dates are UTC.
   change**; `publish-nuget.yml`'s EXPECTED package list no longer includes it. SIPSorcery is no longer a
   dependency of this repo. No version bump for this change alone — see whichever numbered section above
   is first to ship after it for the actual release this landed in.
+- **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
+  `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
+  not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
+  transcribed the result as `[Music]`; energy stayed high for the full 20s rather than trailing into
+  quiet). `maxTokens` is now capped to the text's own length (20 frames/char, floored at 200), which only
+  applies when the caller left `TtsJob.MaxTokens` unset -- an explicit value is used as-is, uncapped,
+  since a deliberate request isn't the runaway case this exists for. The factor comes from measuring
+  natural (uncapped) EOS behavior on 8 real prompts spanning single-speaker sentences, `[S1]`/`[S2]`
+  dialogues, a `(laughs)`/pauses case and a non-ASCII case: 4 fired a genuine EOS, the other 4 hit the
+  1720 ceiling and were confirmed degenerate by what Whisper actually heard ("[Music]", "[ Silence ]", a
+  one-word fragment) versus the non-ASCII prompt's real EOS at 1142 frames (13.126 frames/char, the
+  max observed -- confirmed as genuine full-duration speech via a language-correct Whisper pass that
+  transcribed it back verbatim). 1.5x that margin sets the factor at 20; it only binds (produces less
+  than the 1720 default) for text under ~86 chars. **Confirmed model behaviour, not a port bug**: ran
+  upstream nari-labs Dia-1.6B-0626 itself (local weights, no download) on the identical sentence,
+  `[S1]`-tagged, same seed and the same 1720 cap. Upstream also never fires EOS -- its own
+  `finished_step_Bx` accounting shows the sequence forced to the cap at step ~1704 -- and Whisper
+  transcribes its output as `[Music]` too. Same inputs, same failure, in the reference implementation;
+  nothing in the C# port's conditioning, CFG, delay pattern, or EOS rule is implicated.
 
 ## alpha.241
 

@@ -1,5 +1,6 @@
 using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Models.Codecs.Mimi;
@@ -151,7 +152,7 @@ internal sealed unsafe class MimiSplitRvq
             for (int b = 0; b < batch; b++)
             {
                 int bb = b;
-                System.Threading.Tasks.Parallel.For(0, tt, ti =>
+                CpuParallel.For(tt, (long)tt * vocab * dim * 3, ti =>
                 {
                     float* rp = (float*)rpAddr;
                     float* emb = (float*)embAddr;

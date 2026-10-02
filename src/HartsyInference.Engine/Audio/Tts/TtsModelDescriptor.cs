@@ -14,6 +14,10 @@ internal sealed class TtsModelDescriptor
     /// <summary>True when the requested VOICE selects which weights to load (Piper ships one .onnx per voice), so the voice must take part in the cache key and be passed as the load variant. False for models whose single checkpoint carries every voice.</summary>
     internal bool VoiceSelectsWeights { get; init; }
 
+    /// <summary>True when the runner widens F16/BF16 weights to F32 as it loads them, so a half-precision checkpoint
+    /// takes twice its file size on the device. Read only to size the model for the engine's switch check.</summary>
+    internal bool PromotesHalfToF32 { get; init; }
+
     /// <summary>The files this model pulls, or null for a family whose weight list is still implicit in its
     /// load path. Set it and the model becomes pre-downloadable; leave it and prefetch reports the family as
     /// unsupported rather than pretending to install it. Async because a sharded family has to read its shard
