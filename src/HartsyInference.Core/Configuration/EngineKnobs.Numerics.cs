@@ -45,6 +45,21 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> CsmGraph =
         Bool("numerics.csmGraph", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for CUDA-graph replay of CSM's steady-state one-row backbone decode step; 0 keeps it eager.");
 
+    /// <summary>When a cuDNN backend-graph engine heuristic candidate carries <c>CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC</c>
+    /// (atomic-accumulation reductions whose float order varies run to run -- see issue #20, the Chatterbox/CosyVoice2
+    /// HiFT vocoder drift traced to exactly this on one ConvTranspose1d shape), skip it and try the next heuristic
+    /// candidate instead of accepting the first one that merely fits the workspace budget. Falls through to the
+    /// existing direct-kernel fallback if every candidate (both heuristic modes) is nondeterministic. Shared by every
+    /// caller of <see cref="HartsyInference.Cuda.CudnnPlanSearch.BuildExecutionPlan"/> (conv forward/backward-data,
+    /// SDPA) -- not Chatterbox-specific.
+    ///
+    /// <para>Defaults ON: measured no cost on Chatterbox, CosyVoice2, Piper or Kokoro on the 3060 (see the PR for
+    /// both tables), and it turns a real reproducibility bug into reproducible output. Default pending the same
+    /// off/on comparison on the 4090 image flagships (Krea2-Turbo, Z-Image-Turbo) before merge.</para></summary>
+    public static readonly Knob<bool> CudnnDeterministic =
+        Bool("numerics.cudnnDeterministic", true, KnobScope.Runtime, KnobDomain.Numerics,
+            "Skips cuDNN backend-graph engines marked CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC during heuristic search, falling through to the next candidate or the direct-kernel fallback.");
+
     /// <summary>Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.</summary>
     public static readonly Knob<bool> DitF16 =
         Bool("numerics.ditF16", true, KnobScope.Runtime, KnobDomain.Numerics, "Activation dtype for opted-in DiT block/attention hot paths; 0 forces F32 instead of the default F16.");

@@ -133,11 +133,13 @@ public sealed class ChatterboxPipeline : IDisposable
         Tensor mel = _flow.Inference(backend, speechTokens.ToArray(), promptSpeechTokens, promptMel, flowSpk, seed);
         if (ownsFlowSpk) flowSpk.Dispose();
         promptMel?.Dispose();
-        progress?.Invoke(new GenerationProgress(2, 3, sw.Elapsed.TotalMilliseconds));
+        double flowDoneMs = sw.Elapsed.TotalMilliseconds;
+        progress?.Invoke(new GenerationProgress(2, 3, flowDoneMs));
 
         // Stage 3: HiFTNet vocoder — mel → 24 kHz waveform.
         float[] audio = _vocoder.Forward(backend, mel);
         mel.Dispose();
+        Logs.Info($"Chatterbox: HiFT vocoder in {sw.Elapsed.TotalMilliseconds - flowDoneMs:F1}ms.");
 
         sw.Stop();
         progress?.Invoke(new GenerationProgress(3, 3, sw.Elapsed.TotalMilliseconds));

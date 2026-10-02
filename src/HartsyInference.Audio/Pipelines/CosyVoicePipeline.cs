@@ -167,9 +167,11 @@ public sealed class CosyVoicePipeline : IDisposable
         Tensor mel = _flow.Inference(backend, speechTokens.ToArray(), promptSpeechTokens, promptMel, spk, seed, chunkCausalSize);
         if (ownsSpk) spk.Dispose();
         promptMel?.Dispose();
+        double flowDoneMs = sw.Elapsed.TotalMilliseconds;
 
         float[] audio = _vocoder.Forward(backend, mel);
         mel.Dispose();
+        Logs.Info($"CosyVoice: HiFT vocoder in {sw.Elapsed.TotalMilliseconds - flowDoneMs:F1}ms.");
 
         sw.Stop();
         Logs.Info($"CosyVoice synthesis complete: {audio.Length} samples ({audio.Length / (double)_cfg.SampleRate:F2}s) in {sw.ElapsedMilliseconds}ms.");

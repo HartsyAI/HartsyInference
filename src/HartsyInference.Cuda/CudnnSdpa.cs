@@ -166,7 +166,8 @@ internal sealed class CudnnSdpa : IDisposable
             SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_OPS, CUDNN_TYPE_BACKEND_DESCRIPTOR, opCount, ops);
             Check(cudnnBackendFinalize(graph), "graph finalize");
 
-            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, long.MaxValue, "SDPA");
+            string shape = $"SDPA batch={b} heads={h} seqQ={sq} seqKV={sk} headdim={d} dtype=f16";
+            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, long.MaxValue, "SDPA", shape);
 
             Plan plan = new()
             {

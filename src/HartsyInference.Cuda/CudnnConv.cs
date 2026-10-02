@@ -253,6 +253,28 @@ internal sealed class CudnnConv : IDisposable
     /// <summary>Element strides of a contiguous rank-4 NCHW buffer.</summary>
     private static long[] Packed(long[] dims) => [dims[1] * dims[2] * dims[3], dims[2] * dims[3], dims[3], 1];
 
+    /// <summary>Formats a conv's op/Cin/Cout/kernel/stride/dtype for <see cref="CudnnPlanSearch.BuildExecutionPlan"/>'s
+    /// nondeterminism log line -- see issue #20. Takes the channel counts explicitly rather than reading them off a
+    /// weight-dims array, because callers disagree on that array's layout: <see cref="ComputeChoice"/> flips it to
+    /// <c>[Cin,Cout,...]</c> for backward-data (matching convolution-backward-data's X=DX/Y=DY convention), while
+    /// <see cref="BuildPlanNd"/>'s callers always pass <c>[Cout,Cin,...]</c> (the weight tensor's own layout is the
+    /// same for forward and backward-data; only X/Y's roles swap) -- reading position-0/1 generically here would
+    /// silently swap Cin/Cout for whichever caller's convention didn't match. <paramref name="kernel"/> and
+    /// <paramref name="stride"/> are the FULL spatial dims (one per axis: just the 1 axis for the audio 1D convs,
+    /// H×W for a 2D image conv) so a 3x3 doesn't get truncated down to "3" the way a scalar last-dim read would.</summary>
+    private static string ShapeSignature(bool backwardData, long cIn, long cOut, ReadOnlySpan<long> kernel,
+        ReadOnlySpan<long> stride, int dataType)
+    {
+        string dtype = dataType switch
+        {
+            CUDNN_DATA_HALF => "f16",
+            CUDNN_DATA_FLOAT => "f32",
+            _ => $"dtype{dataType}",
+        };
+        string op = backwardData ? "ConvTranspose1d" : "Conv1d";
+        return $"{op} Cin={cIn} Cout={cOut} kernel={string.Join('x', kernel.ToArray())} stride={string.Join('x', stride.ToArray())} dtype={dtype}";
+    }
+
     /// <summary>Whether a conv is 1D in the time axis (H = 1 throughout), the only case length buckets apply to.</summary>
     private static bool Is1d(long h, long r, long outH, long strideH, long padH, long dilationH) =>
         h == 1 && r == 1 && outH == 1 && strideH == 1 && padH == 0 && dilationH == 1;
@@ -330,7 +352,8 @@ internal sealed class CudnnConv : IDisposable
                 [1, g.Stride], [0, g.PadPre], [0, g.PadPost], [1, g.Dilation], g.DataType);
             long graphTicks = Stopwatch.GetTimestamp() - start;
             PlanBuildProbe probe = new() { CaptureKnobs = true };
-            (nint exec, long _) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, MaxWorkspaceBytes, "conv", probe);
+            string shape = ShapeSignature(g.BackwardData, g.InChannels, g.OutChannels, [g.Kernel], [g.Stride], g.DataType);
+            (nint exec, long _) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, MaxWorkspaceBytes, "conv", shape, probe);
             cudnnBackendDestroyDescriptor(exec);
             RecordReference(bucket.Family, Stopwatch.GetTimestamp() - start, graphTicks, probe);
             return EngineChoice.From(probe);
@@ -380,7 +403,13 @@ internal sealed class CudnnConv : IDisposable
                 Interlocked.Increment(ref _bucketFallbacks);
             }
             PlanBuildProbe probe = new();
-            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, MaxWorkspaceBytes, "conv", probe);
+            // wDim is always [Cout, Cin, kernel...] here (ExecuteChannelsLast and ExecuteBackwardData's own
+            // [k,c,r,s] both put the forward conv's output channels first) -- unlike ComputeChoice's own wDim,
+            // which flips that order for backward-data. See ShapeSignature's doc for why this isn't shared logic.
+            // `strides` is already the pure spatial-strides array (no leading N/C entries); wDim[2..] drops wDim's
+            // [Cout,Cin] prefix to get the matching spatial kernel dims.
+            string shape = ShapeSignature(backwardData, cIn: wDim[1], cOut: wDim[0], kernel: wDim.AsSpan(2), stride: strides, dataType);
+            (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, MaxWorkspaceBytes, "conv", shape, probe);
             RecordBuild(family, Stopwatch.GetTimestamp() - buildStart, graphTicks, probe);
             return new Plan
             {

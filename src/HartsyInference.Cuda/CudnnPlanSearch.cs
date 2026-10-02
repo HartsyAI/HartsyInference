@@ -1,4 +1,7 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
+using HartsyInference.Core.Configuration;
+using HartsyInference.Core.Logging;
 using static HartsyInference.Cuda.CudnnApi;
 
 namespace HartsyInference.Cuda;
@@ -43,10 +46,71 @@ internal sealed record EngineChoice(long GlobalIndex, (int Type, long Value)[] K
 /// <summary>The cuDNN backend-graph engine-config search shared by <see cref="CudnnConv"/> and <see cref="CudnnSdpa"/>.</summary>
 internal static class CudnnPlanSearch
 {
-    /// <summary>Asks heuristics (mode A = recommended runtime-compiled fused engines first, FALLBACK second) for engine configs and finalizes the first that yields a valid plan whose workspace fits <paramref name="maxWorkspaceBytes"/>. A non-null <paramref name="probe"/> records the time per phase and the chosen engine.</summary>
-    internal static unsafe (nint exec, long wsBytes) BuildExecutionPlan(nint handle, nint graph, List<nint> owned, long maxWorkspaceBytes,
-        string what, PlanBuildProbe? probe = null)
+    /// <summary>(<paramref name="what"/>, engine global index, shape signature) triples already logged, so a hot
+    /// path that replans the same shape repeatedly (every length-bucket miss, every call before the plan cache is
+    /// warm) logs once per DISTINCT shape, not per call -- but every distinct shape that lands on a nondeterministic
+    /// engine still gets its own line, so the fleet's exposure is answerable from logs alone without a digest
+    /// bisection (see issue #20).</summary>
+    private static readonly ConcurrentDictionary<(string What, long EngineIndex, string Shape), byte> _loggedDeterminism = new();
+
+    /// <summary>True when the engine behind <paramref name="cfg"/> carries <c>CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC</c>
+    /// (an atomic-accumulation reduction whose float summation order varies run to run -- see issue #20). False on
+    /// any read failure, so a cuDNN version without this attribute, or a transient read error, behaves like today:
+    /// engines are never filtered out for a reason this build cannot see.</summary>
+    private static unsafe bool IsNondeterministic(nint cfg, out long engineGlobalIndex)
     {
+        engineGlobalIndex = -1;
+        if (cudnnBackendCreateDescriptor(CUDNN_BACKEND_ENGINE_DESCRIPTOR, out nint engine) != CUDNN_STATUS_SUCCESS)
+            return false;
+        try
+        {
+            nint target = engine;
+            if (cudnnBackendGetAttribute(cfg, CUDNN_ATTR_ENGINECFG_ENGINE, CUDNN_TYPE_BACKEND_DESCRIPTOR, 1,
+                    out long engines, &target) != CUDNN_STATUS_SUCCESS || engines < 1)
+                return false;
+            long index = -1;
+            if (cudnnBackendGetAttribute(engine, CUDNN_ATTR_ENGINE_GLOBAL_INDEX, CUDNN_TYPE_INT64, 1, out _, &index)
+                == CUDNN_STATUS_SUCCESS)
+                engineGlobalIndex = index;
+            const int maxNotes = 8;
+            int* notes = stackalloc int[maxNotes];
+            if (cudnnBackendGetAttribute(engine, CUDNN_ATTR_ENGINE_NUMERICAL_NOTE, CUDNN_TYPE_NUMERICAL_NOTE, maxNotes,
+                    out long noteCount, notes) != CUDNN_STATUS_SUCCESS)
+                return false;
+            for (int i = 0; i < noteCount && i < maxNotes; i++)
+                if (notes[i] == CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC)
+                    return true;
+            return false;
+        }
+        finally
+        {
+            cudnnBackendDestroyDescriptor(engine);
+        }
+    }
+
+    /// <summary>Logs once per (<paramref name="what"/>, engine, shape) the first time this process sees a
+    /// nondeterministic engine land for it, whether it was picked (knob off, or no deterministic alternative) or
+    /// skipped (knob on, a deterministic candidate took over) -- so the fleet's exposure to issue #20's class of
+    /// drift is visible in the log regardless of which way the knob is set, and answerable per-shape without a
+    /// digest bisection. <paramref name="shape"/> is caller-supplied (op/Cin/Cout/kernel/stride/dtype or
+    /// op/batch/heads/seqlen/headdim/dtype) rather than read back off the opaque graph/engine descriptors, since
+    /// the caller already has it in scope when it builds the graph.</summary>
+    private static void LogNondeterministicOnce(string what, long engineGlobalIndex, string shape, bool skipped)
+    {
+        if (_loggedDeterminism.TryAdd((what, engineGlobalIndex, shape), 0))
+        {
+            Logs.Info(skipped
+                ? $"[CudnnPlanSearch] {what} [{shape}]: engine {engineGlobalIndex} is CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC -- skipped (numerics.cudnnDeterministic on), trying the next candidate."
+                : $"[CudnnPlanSearch] {what} [{shape}]: engine {engineGlobalIndex} is CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC and was used (numerics.cudnnDeterministic off) -- this shape's output is not reproducible run to run.");
+        }
+    }
+
+    /// <summary>Asks heuristics (mode A = recommended runtime-compiled fused engines first, FALLBACK second) for engine configs and finalizes the first that yields a valid plan whose workspace fits <paramref name="maxWorkspaceBytes"/>. When <see cref="EngineKnobs.CudnnDeterministic"/> is on, an engine carrying <c>CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC</c> is skipped in favor of the next candidate (across both heuristic modes); if every candidate is nondeterministic, this throws and the caller's existing direct-kernel fallback takes over, same as any other "no engine config" failure. <paramref name="shape"/> identifies the op/shape/dtype for the nondeterminism log line only (see <see cref="LogNondeterministicOnce"/>); null logs as "unknown-shape" rather than failing. A non-null <paramref name="probe"/> records the time per phase and the chosen engine.</summary>
+    internal static unsafe (nint exec, long wsBytes) BuildExecutionPlan(nint handle, nint graph, List<nint> owned, long maxWorkspaceBytes,
+        string what, string? shape = null, PlanBuildProbe? probe = null)
+    {
+        string shapeOrUnknown = shape ?? "unknown-shape";
+        bool deterministic = EngineKnobs.CudnnDeterministic.Value;
         foreach (int mode in new[] { CUDNN_HEUR_MODE_A, CUDNN_HEUR_MODE_FALLBACK })
         {
             long heuristicStart = Stopwatch.GetTimestamp();
@@ -101,6 +165,19 @@ internal static class CudnnPlanSearch
                         {
                             cudnnBackendDestroyDescriptor(exec);
                             ok = false;
+                        }
+                        if (ok && IsNondeterministic(cfgs[i], out long engineIdx))
+                        {
+                            if (deterministic)
+                            {
+                                cudnnBackendDestroyDescriptor(exec);
+                                ok = false;
+                                LogNondeterministicOnce(what, engineIdx, shapeOrUnknown, skipped: true);
+                            }
+                            else
+                            {
+                                LogNondeterministicOnce(what, engineIdx, shapeOrUnknown, skipped: false);
+                            }
                         }
                         if (ok)
                         {
