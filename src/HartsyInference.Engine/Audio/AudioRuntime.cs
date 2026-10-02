@@ -348,6 +348,7 @@ internal sealed class AudioRuntime
             Logs.Info($"[Audio] Switching to '{modelKey}' ({need}{ByteFormat.GbF1(freeVramBytes)} VRAM free, "
                 + $"{availableKb / 1024 / 1024.0:0.0} GB host RAM free) — unloaded {Describe(evicted)}.");
         }
+        // Set before the work runs, so a repeat after a failed load skips this check; the OOM retry makes room.
         _lastKey = modelKey;
     }
 
