@@ -8,6 +8,15 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.245
+
+- **AuK: skip per-call weight eviction when VRAM has room.** `AukOptions.SequentialResidency` defaults to `true`,
+  and every stage (audio tower, thinker, DiT, VAE) freed its device weights at the end of every single call
+  regardless of free VRAM, so back-to-back generations each paid a full host->device re-upload of every stage.
+  Measured on a live 4090, this was ~3s of fixed overhead per generation. `Generate` now only evicts a stage when
+  the device doesn't clearly have room to hold every stage the call touches resident at once; a backend that can't
+  report VRAM (CPU) is unaffected. Output is unchanged either way.
+
 ## alpha.244
 
 - **AuK and AuK-Flash (Tencent) speech model, structural port.** `auk:flash` (4 fixed steps, no guidance) and
