@@ -77,20 +77,26 @@ stable release will require. Dates are UTC.
   | Bark | 0.058→0.027 (coarse/fine); bespoke semantic sort fixed, same technique | 13.63s → 12.80s (−6.1%) | digest identical |
   | Zonos | 0.056→0.024 (×9 DAC channels/frame) | 29.10s → 26.15s (−10.1%) | digest identical |
   | Chatterbox | 0.78→0.52 (×1/token) | 5.62s → 5.64s (noise) | **not comparable** — Chatterbox's S3Gen/HiFTNet stage is not bit-reproducible even on the SAME unmodified build run twice (confirmed); the CPU reference-oracle tests are the byte-identical proof for this model |
-  | Orpheus | not independently re-measured | n/a | the existing `OrpheusPipeline` perf-pass comment already measured "sampler restriction... flat" — its decode is GPU-compute-bound on the F32 backbone, not the sampler; this fix still removes the allocation but is not expected to move Orpheus's wall clock |
+  | Orpheus | 2.79→1.80 (sampleCount=28,683, its real post-`CodeStart` slice) | ~0.4% of total (estimate: 639 tokens × 0.99ms saved ÷ 156.5s at the documented ~245ms/token) | not independently re-measured end to end — the existing `OrpheusPipeline` perf-pass comment already measured "sampler restriction... flat": its decode is GPU-compute-bound on the F32 backbone, not the sampler |
   | Dia | 0.057→0.024 (×9 DAC channels/frame; CPU-isolated) | not cleanly measured end-to-end | see below |
   | CSM, SparkTTS, Qwen3-TTS, CosyVoice, GptSoVits, NeuTTS, MusicGen, MiniMax, YuE (v1) | unaffected — already on `NucleusSampler`'s bounded fast path (`topK` small and `<1024`) | unaffected | regression-guarded by `BoundedFastPath_Unaffected_MatchesReference` |
 
-  **Dia**: a clean before/after end-to-end run was not obtained in this PR. A short (one-sentence) prompt
-  reproduces Dia's own documented "prompt is very short... tends to produce silence" pathology and never
-  reaches EOS; a proper multi-turn `[S1]/[S2]` dialogue prompt still did not complete in 180s on either
-  build. `nvidia-smi dmon` sampled during a run showed 0% SM utilization for the bulk of the sampled window
-  — a host-side stall, not GPU compute, consistent with this repo's own "GPU idle during a gen = host/
-  dispatch-bound" pattern (`docs/Checklists/TROUBLESHOOTING.md`) — and a concurrent agent's GPU test suite
-  was independently confirmed running on the same card during testing, so the attempted timings are not
-  trustworthy either way. The sampler's own contribution is proven negligible here (CPU-isolated, and
-  byte-identical via `DiaSampleChannelIdentityTests`); the real cost is elsewhere and needs a dedicated,
-  isolated re-run to profile. zipvoice (named in the original slow-model list) has no token-sampling path at
+  **Dia**: a clean before/after end-to-end run was not obtained in this PR. The CLI confirmed it loaded the
+  correct `nari-labs/Dia-1.6B-0626` checkpoint (not the broken base release this repo already root-caused a
+  different symptom to), so that is not the explanation. A short (one-sentence) prompt reproduces Dia's own
+  documented "prompt is very short... tends to produce silence" pathology and never reaches EOS; a proper
+  multi-turn `[S1]/[S2]` dialogue prompt still did not complete in 180s on either build. `nvidia-smi dmon`
+  sampled ~8-28s into one such run showed 0% SM utilization for most of that window with a utilization spike
+  right at the end — most likely still the 1.6B F32 checkpoint's load/deserialize/H2D-upload phase finishing,
+  not a stall mid-generation (an earlier, separate probe took 38s before an unrelated OOM, consistent with a
+  long load); this sample did not reach far enough into actual decoding to say where DECODE time goes. A
+  concurrent agent's GPU test suite was also independently confirmed running on the same card during testing,
+  so even the timing that was captured isn't fully trustworthy. What IS established: the sampler's own
+  contribution is negligible (CPU-isolated, ~0.03ms/channel saved × 9 channels/frame) and output-identical
+  (`DiaSampleChannelIdentityTests`, including exact ties at the CFG-window boundary) — Dia's real cost,
+  whatever it is, is elsewhere, and needs a dedicated, contention-free re-run (with load and decode timed
+  separately) to profile. Not fixed in this PR. zipvoice (named in the original slow-model list) has no
+  token-sampling path at
   all — a flow-matching model, out of scope for this fix entirely.
 
 ## alpha.238
