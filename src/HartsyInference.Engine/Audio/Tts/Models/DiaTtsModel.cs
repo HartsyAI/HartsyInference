@@ -69,7 +69,7 @@ internal static class DiaTtsModel
         internal const int MinFrames = 200;
 
         /// <summary><see cref="TtsJob.MaxTokens"/>'s fallback when the caller doesn't set it.</summary>
-        private const int DefaultMaxTokens = 1720;
+        internal const int DefaultMaxTokens = 1720;
 
         private static string BuildText(string text)
         {
@@ -85,9 +85,8 @@ internal static class DiaTtsModel
 
         /// <summary>Caps the DEFAULT token budget to what <paramref name="textLength"/> chars could plausibly
         /// need, so a prompt too short for Dia to ever emit a confident EOS fails in seconds instead of running
-        /// the full budget. Never raises <paramref name="requested"/> — only ever tightens it. See the PR that
-        /// added this for the empirical evidence (why 12 frames/char, why a 200-frame floor, why this doesn't
-        /// bind for ordinary multi-sentence prompts).</summary>
+        /// the full budget. Never raises <paramref name="requested"/> — only ever tightens it; the factor is
+        /// <see cref="FramesPerChar"/> and the floor <see cref="MinFrames"/>.</summary>
         internal static int CapForTextLength(int requested, int textLength)
             => Math.Min(requested, Math.Max(MinFrames, textLength * FramesPerChar));
 

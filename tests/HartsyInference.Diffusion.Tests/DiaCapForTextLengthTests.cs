@@ -23,7 +23,7 @@ public sealed class DiaCapForTextLengthTests
     /// floor (<see cref="LargestFloorLength"/> < this, for any floor/factor/ceiling combination where the
     /// floor is reachable by the factor at all) and not the ceiling (<see cref="NeverRaisesRequested"/>
     /// covers that edge separately).</summary>
-    private const int LargestMidRangeLength = 1720 / FramesPerChar;
+    private const int LargestMidRangeLength = DiaTtsModel.Session.DefaultMaxTokens / FramesPerChar;
 
     [Theory]
     [InlineData(1)]
@@ -31,7 +31,7 @@ public sealed class DiaCapForTextLengthTests
     [MemberData(nameof(FloorBoundaryLength))]
     public void ShortTextHitsTheFloor_NotTheFactor(int textLength)
     {
-        int result = DiaTtsModel.Session.CapForTextLength(requested: 1720, textLength);
+        int result = DiaTtsModel.Session.CapForTextLength(requested: DiaTtsModel.Session.DefaultMaxTokens, textLength);
 
         Assert.Equal(MinFrames, result);
     }
@@ -48,11 +48,11 @@ public sealed class DiaCapForTextLengthTests
     {
         int expected = textLength * FramesPerChar;
 
-        int result = DiaTtsModel.Session.CapForTextLength(requested: 1720, textLength);
+        int result = DiaTtsModel.Session.CapForTextLength(requested: DiaTtsModel.Session.DefaultMaxTokens, textLength);
 
         Assert.Equal(expected, result);
         Assert.True(expected > MinFrames, "test is only meaningful above the floor.");
-        Assert.True(expected < 1720, "test is only meaningful below the default requested ceiling.");
+        Assert.True(expected < DiaTtsModel.Session.DefaultMaxTokens, "test is only meaningful below the default requested ceiling.");
     }
 
     public static IEnumerable<object[]> JustOverFloorLength()
@@ -80,7 +80,7 @@ public sealed class DiaCapForTextLengthTests
     }
 
     [Fact]
-    public void FloorWinsOverAnEvenSmallerRequestedValue()
+    public void RequestedBelowFloorStillWins()
     {
         // requested below the floor: Math.Min still applies, so requested (not the floor) wins -- this is the
         // same "never raises requested" guarantee, restated for the floor branch specifically.
