@@ -120,8 +120,34 @@ internal static unsafe class GpuTransferHelper
         /// <summary>Q8_1 activation sidecars emitted by quantize-at-producer kernels (xq int8 + per-32-block scale xd + int-sum xs device buffers, K = the producing row width). Keyed by the F32 output tensor; consumed by the dp4a Linear path in place of its own quantize launch. Invalidated (buffers freed) whenever the tensor is re-bound, synced to host, or disposed — see <see cref="CacheActivation"/>.</summary>
         public readonly Dictionary<Tensor, (ulong xq, ulong xd, ulong xs, int k)> SidecarCache = new(ReferenceEqualityComparer.Instance);
 
-        /// <summary>Stream handle for deferred GPU memory frees and sync-before-D2H.</summary>
+        /// <summary>Stream handle for deferred GPU memory frees and sync-before-D2H. Zeroed by <see cref="CompleteRetire"/>
+        /// on backend disposal — a plain mutable field, not re-read from a resolved ambient, so a caller that resolved
+        /// this <see cref="State"/> earlier in one op and reads this field later in the SAME op can observe the zero if
+        /// disposal races it from another thread.</summary>
         public nint StreamHandle;
+
+        /// <summary>The live stream handle for an async native call that cannot be skipped when zero (an upload or a
+        /// stream-ordered free — unlike a sync/trim, where zero correctly means "nothing to wait for").</summary>
+        /// <remarks>Guards the exact gap <see cref="CompleteRetire"/> opens: disposal is supposed to be impossible
+        /// while a caller still holds this backend through <c>slot.Lock</c>-style exclusivity, but nothing here
+        /// enforces that for an ordinary op the way <see cref="TryEnterCallback"/> does for finalizer callbacks. A
+        /// zero handle passed to <c>cuMemcpyHtoDAsync</c>/<c>cuMemFreeAsync</c> silently targets the legacy default
+        /// stream instead of this backend's compute stream — valid as a driver call, wrong for a destination the
+        /// stream-ordered pool allocated elsewhere, and the source of an intermittent
+        /// <c>CUDA_ERROR_INVALID_VALUE</c> that looked like upload/free corruption rather than a torn-down backend.
+        /// Throwing a typed, actionable exception here instead is strictly safer than letting the driver call run.</remarks>
+        internal nint RequireLiveStream(string opName)
+        {
+            nint stream = StreamHandle;
+            if (stream == 0)
+            {
+                throw new ObjectDisposedException(nameof(CudaBackend),
+                    $"This backend's CUDA stream was retired (the backend was disposed) while {opName} was still "
+                    + "in flight against it. The caller must quiesce every in-flight request on a backend before "
+                    + "disposing it — another thread's reference to this State is no longer safe to use.");
+            }
+            return stream;
+        }
 
         /// <summary>Streaming cache reference, used to drain its upload stream + trim the device's stream-ordered allocator pool when an OOM retry needs to reclaim memory locked up in pool reservations. Null when the backend's streaming cache hasn't been wired (test setups, CPU/Vulkan).</summary>
         public IStreamingWeightCache? StreamingCache;
@@ -258,7 +284,7 @@ internal static unsafe class GpuTransferHelper
                 CudaMemory.Free(buffer);
                 return;
             }
-            CudaMemory.FreeAsync(buffer, StreamHandle, this);
+            CudaMemory.FreeAsync(buffer, RequireLiveStream("a stream-ordered free"), this);
         }
 
         protected override void Upload(ulong destination, Tensor source, long bytes) =>
@@ -747,6 +773,9 @@ internal static unsafe class GpuTransferHelper
     /// the stream-ordered free. No CPU read happens here, so only stream order matters, and it holds.</remarks>
     internal static unsafe void UploadTo(State s, ulong destination, Tensor source, nuint byteSize)
     {
+        // Resolved once, before anything else in this call touches the host source (DataPointer can itself
+        // trigger a D2H sync/GPU-binding callback) — see RequireLiveStream for why zero cannot be passed through.
+        nint stream = s.RequireLiveStream("a weight/activation upload");
         using Profiling.NvtxRange _upload = Profiling.NvtxRange.Push(byteSize > (1u << 20)
             ? (Profiling.NvtxRange.ProfileShapes
                 ? $"H2D_BIG {string.Join("x", Enumerable.Range(0, source.Shape.Rank).Select(i => source.Shape[i]))} {source.DType}"
@@ -758,7 +787,7 @@ internal static unsafe class GpuTransferHelper
             Logs.Debug($"[Cuda][H2D] {(long)byteSize >> 20} MB {source.DType} "
                 + $"[{string.Join("x", Enumerable.Range(0, source.Shape.Rank).Select(i => source.Shape[i]))}]");
         }
-        CudaMemory.CopyHostToDeviceAsync(destination, source.DataPointer, byteSize, s.StreamHandle);
+        CudaMemory.CopyHostToDeviceAsync(destination, source.DataPointer, byteSize, stream);
     }
 
     /// <summary>True when the pointer lies inside ANY live graph-capture arena (never individually freed).</summary>
