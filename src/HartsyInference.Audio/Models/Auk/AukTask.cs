@@ -1,0 +1,36 @@
+namespace HartsyInference.Audio.Models.Auk;
+
+/// <summary>Instruction tasks documented in the AuK cookbook; each maps to a template in <see cref="AukTemplates"/>.</summary>
+public enum AukTask
+{
+    ZeroShotTts,
+    InstructTts,
+    InstructTtsCookbookForm,
+    ReplaceText,
+    InsertBefore,
+    InsertAfter,
+    RemoveText,
+    RemoveTextBefore,
+    RemoveTextAfter,
+    LyricChange,
+    PitchRaise,
+    PitchLower,
+    Speed,
+    VolumeIncrease,
+    VolumeDecrease,
+    Emotion,
+    Timbre,
+    DeAccent,
+    NonverbalRemove,
+    NonverbalAdd,
+    WhisperConvert,
+    WhisperToNormal,
+    Denoise,
+    Dereverb,
+    EnhanceSpeech,
+    QualityRestoration,
+    SpeechSeparation,
+    MusicSeparationSinging,
+    MusicSeparationAllVoices,
+    TargetSpeakerExtraction,
+}
