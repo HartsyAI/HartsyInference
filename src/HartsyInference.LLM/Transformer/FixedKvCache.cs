@@ -16,7 +16,10 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     private readonly int[] _capacity;
     private readonly DType _dtype;
     private int _currentLength;
-    /// <summary>Per-layer device residency: each layer's K/V allocate on the backend that first APPENDS to that layer, which puts every layer's KV on its stage's device under multi-device layer-split placement with no placement API at all, and stops shared-KV-slot layers (Gemma-4) from ever going device-resident since nothing appends to them. Null until then.</summary>
+    /// <summary>Per-layer device residency: each layer's K/V allocate on the backend that first APPENDS to that layer,
+    /// which puts every layer's KV on its stage's device under multi-device layer-split placement with no placement API
+    /// at all, and stops shared-KV-slot layers (Gemma-4) from ever going device-resident since nothing appends to them.
+    /// Null until then; <see cref="CopyWithCapacity"/> copies each layer on the backend recorded here.</summary>
     private readonly IBackend?[] _layerBackend;
     private int _disposed;
 
@@ -141,7 +144,7 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     {
         ThrowIfDisposed();
         if (capacity < _currentLength)
-            throw new ArgumentOutOfRangeException(nameof(capacity), capacity, $"Capacity must hold the {_currentLength} committed tokens.");
+            throw new ArgumentOutOfRangeException(nameof(capacity), capacity, $"Must hold {_currentLength} tokens.");
         FixedKvCache copy = new(NumLayers, BatchSize, NumKvHeads, _headDimPerLayer, capacity, _dtype);
         try
         {

@@ -57,7 +57,8 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         return new FixedKvCache(cfg.NumLayers, 1, cfg.NumKvHeads, cfg.HeadDimsPerLayer(), options.MaxSequenceTokens, kvDtype);
     }
 
-    /// <summary>Copies a <see cref="FixedKvCache"/> layer by layer on each layer's own device; null for any other state.</summary>
+    /// <summary>Copies a <see cref="FixedKvCache"/> layer by layer on each layer's own device; null for any other
+    /// state.</summary>
     public ISequenceState? ResizeSequenceState(ISequenceState state, int capacity) =>
         state is FixedKvCache cache ? cache.CopyWithCapacity(capacity) : null;
 

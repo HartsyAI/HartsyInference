@@ -16,15 +16,6 @@ public sealed partial class VoiceAgentSession
 {
     private const double SamplesPerMs = VoiceAudioFrontend.SampleRate / 1000.0;
 
-    /// <summary>Chat-template overhead (role markers, tool-schema rendering) a token-counted history budget does
-    /// not account for; added so the FIRST retained KV allocation covers every turn's templated prompt and is
-    /// never resized mid-call.</summary>
-    private const int PrefixCacheCapacityMargin = 512;
-
-    /// <summary>Sizes this call's retained KV sequence once, from the history and reply budgets it will actually
-    /// hit across every turn, instead of from whichever turn happens to allocate it first.</summary>
-    private int PrefixCacheCapacityHint => _options.MaxHistoryTokens + _options.MaxReplyTokens + PrefixCacheCapacityMargin;
-
     /// <summary>Pre-fills the system+tools prefix under <see cref="_prefixCacheKey"/> right after the call starts
     /// (e.g. while the greeting plays), so turn 1's real request — which shares that same prefix — finds it
     /// already warm instead of paying its prefill cost on the caller's first utterance. Fire-and-forget: it
@@ -45,7 +36,6 @@ public sealed partial class VoiceAgentSession
                 Tools = _tools.Count > 0 ? _tools.Definitions : null,
                 AlwaysFreeMemory = false,
                 PrefixCacheKey = _prefixCacheKey,
-                PrefixCacheCapacityHint = PrefixCacheCapacityHint,
                 CacheWeightCasts = _options.CacheWeightCasts,
                 PreloadRedundantWeightSplits = _options.PreloadRedundantWeightSplits,
             };
@@ -179,7 +169,6 @@ public sealed partial class VoiceAgentSession
         Tools = _tools.Count > 0 ? _tools.Definitions : null,
         AlwaysFreeMemory = false,
         PrefixCacheKey = _prefixCacheKey,
-        PrefixCacheCapacityHint = _prefixCacheKey is null ? null : PrefixCacheCapacityHint,
         CacheWeightCasts = _options.CacheWeightCasts,
         PreloadRedundantWeightSplits = _options.PreloadRedundantWeightSplits,
     };

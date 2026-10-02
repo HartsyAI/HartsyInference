@@ -27,21 +27,21 @@ internal static class SeqHeadMajorScatterContract
         ArgumentNullException.ThrowIfNull(input);
         if (output.DType != input.DType)
             throw new ArgumentException(
-                $"ScatterSeqHeadMajor needs matching dtypes; got output {output.DType}, input {input.DType}.", nameof(input));
+                $"ScatterSeqHeadMajor needs matching dtypes; got {output.DType} and {input.DType}.", nameof(input));
         if (input.DType.IsQuantized || input.DType.SizeInBytes <= 0)
-            throw new NotSupportedException($"ScatterSeqHeadMajor copies byte-addressable dtypes only; got {input.DType}.");
+            throw new NotSupportedException($"ScatterSeqHeadMajor copies byte-addressable dtypes; got {input.DType}.");
         if (output.Shape.Rank != 4 || input.Shape.Rank != 4 || output.Shape[0] != 1 || input.Shape[0] != 1)
             throw new ArgumentException(
-                $"ScatterSeqHeadMajor expects [1, heads, seq, headDim] tensors; got output {output.Shape}, input {input.Shape}.");
+                $"ScatterSeqHeadMajor expects [1, heads, seq, headDim]; got {output.Shape} and {input.Shape}.");
         if (output.Shape[1] != input.Shape[1] || output.Shape[3] != input.Shape[3])
             throw new ArgumentException(
-                $"ScatterSeqHeadMajor needs matching heads and head dim; got output {output.Shape}, input {input.Shape}.");
+                $"ScatterSeqHeadMajor needs matching heads and head dim; got {output.Shape} and {input.Shape}.");
         long inputSeq = input.Shape[2], outputSeq = output.Shape[2];
         if (rows < 0 || rows > inputSeq)
             throw new ArgumentOutOfRangeException(nameof(rows), rows, $"rows must be in [0, {inputSeq}].");
         if (seqOffset < 0 || (long)seqOffset + rows > outputSeq)
             throw new ArgumentOutOfRangeException(
-                nameof(seqOffset), seqOffset, $"rows [{seqOffset}, {(long)seqOffset + rows}) exceed the output's {outputSeq}.");
+                nameof(seqOffset), seqOffset, $"Rows [{seqOffset}, {(long)seqOffset + rows}) exceed {outputSeq}.");
         long rowBytes = output.Shape[3] * input.DType.SizeInBytes;
         return new SeqHeadMajorScatter((int)output.Shape[1], inputSeq * rowBytes, outputSeq * rowBytes,
             seqOffset * rowBytes, rows * rowBytes);

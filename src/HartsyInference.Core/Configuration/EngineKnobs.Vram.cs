@@ -24,9 +24,12 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> LowvramQuant =
         Bool("vram.lowvramQuant", false, KnobScope.Construction, KnobDomain.Vram, "Makes LLMs keep GGUF weights compressed and use QuantizedMatMul instead of caching an F16 dequant.");
 
-    /// <summary>Spare KV capacity, in tokens, a retained prefix-cache sequence keeps past the tokens it holds; a larger allocation is copied down to its length plus this when its request ends, and grown again by copy when a later request needs more.</summary>
+    /// <summary>Spare KV capacity, in tokens, a retained prefix-cache sequence keeps past the tokens it holds; a
+    /// larger allocation is copied down to its length plus this when its request ends, and grown again by copy when a
+    /// later request needs more.</summary>
     public static readonly Knob<int> PrefixCacheHeadroomTokens =
-        Int("vram.prefixCacheHeadroomTokens", 256, KnobScope.Runtime, KnobDomain.Vram, "Spare KV tokens a retained prefix-cache sequence keeps past its length; larger allocations are shrunk to this when the request ends.",
+        Int("vram.prefixCacheHeadroomTokens", 256, KnobScope.Runtime, KnobDomain.Vram,
+            "Spare KV tokens a retained prefix-cache sequence keeps past its length; larger allocations shrink to this.",
             v => Math.Max(0, v));
 
     /// <summary>Most retained sequences (<c>TextRequest.PrefixCacheKey</c>) one device slot's prefix-KV store keeps at once; least-recently-used entries are evicted first past this.</summary>
@@ -37,7 +40,8 @@ public static partial class EngineKnobs
     /// shrinking, and the most one sequence may keep — a longer one is freed when its request ends instead of
     /// retained. Least-recently-used entries are evicted first past it.</summary>
     public static readonly Knob<long> PrefixCacheMaxBytes =
-        Long("vram.prefixCacheMaxBytes", 1536L << 20, KnobScope.Runtime, KnobDomain.Vram, "Byte budget for one device slot's retained prefix-KV sequences, and the most one may keep (LRU past this).",
+        Long("vram.prefixCacheMaxBytes", 1536L << 20, KnobScope.Runtime, KnobDomain.Vram,
+            "Byte budget for one device slot's retained prefix-KV sequences, and the most one may keep (LRU past this).",
             v => Math.Max(1L, v));
 
     /// <summary>Pins the LTX-2.5 diffusion decoder's temporal-chunk workspace in MB instead of sizing the plan off free VRAM.</summary>

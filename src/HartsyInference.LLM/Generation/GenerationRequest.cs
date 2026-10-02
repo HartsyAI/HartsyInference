@@ -45,12 +45,19 @@ public sealed record GenerationRequest
     /// <summary>Overrides whether prompt-lookup speculative decoding is attempted (null defers to <c>numerics.specDecode</c>); requires greedy non-JSON <see cref="Sampling"/>, is skipped when <see cref="GraphDecode"/> is eligible, and uses no draft model — drafts come from n-gram matches against the prompt/generated-so-far, so it speeds up repetitive content but costs nothing extra on prose (an unmatched draft degenerates to one plain decode step).</summary>
     public bool? SpeculativeDecode { get; init; }
 
-    /// <summary>Sizes a FRESH retained sequence's KV capacity (tokens) when <see cref="TextGenerationPipeline.Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/> is given a prefix-cache entry with nothing cached yet; null sizes it to just this call's own prompt + <see cref="MaxTokens"/>. Only that first allocation: a retained sequence too small for a later call grows by copying its reusable prefix, and is shrunk back toward its length when each call ends (<see cref="PrefixCacheHeadroomTokens"/>).</summary>
+    /// <summary>Sizes a FRESH retained sequence's KV capacity (tokens) when
+    /// <see cref="TextGenerationPipeline.Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/> is
+    /// given a prefix-cache entry with nothing cached yet; null sizes it to just this call's own prompt +
+    /// <see cref="MaxTokens"/>. Only that first allocation: a retained sequence too small for a later call grows by
+    /// copying its reusable prefix, and is shrunk back toward its length when each call ends
+    /// (<see cref="PrefixCacheHeadroomTokens"/>).</summary>
     public int? PrefixCacheCapacityHint { get; init; }
 
-    /// <summary>Spare KV capacity (tokens) a retained sequence keeps past its length when the call ends; a larger allocation is copied down to its length plus this. Null defers to <c>vram.prefixCacheHeadroomTokens</c>.</summary>
+    /// <summary>Spare KV capacity (tokens) a retained sequence keeps past its length when the call ends; a larger
+    /// allocation is copied down to its length plus this. Null defers to <c>vram.prefixCacheHeadroomTokens</c>.</summary>
     public int? PrefixCacheHeadroomTokens { get; init; }
 
-    /// <summary>Most KV bytes a retained sequence may keep once the call ends; one that would need more is freed instead of retained. Null defers to <c>vram.prefixCacheMaxBytes</c>.</summary>
+    /// <summary>Most KV bytes a retained sequence may keep once the call ends; one that would need more is freed
+    /// instead of retained. Null defers to <c>vram.prefixCacheMaxBytes</c>.</summary>
     public long? PrefixCacheMaxBytes { get; init; }
 }

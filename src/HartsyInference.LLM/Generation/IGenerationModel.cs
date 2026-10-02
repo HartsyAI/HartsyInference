@@ -20,7 +20,7 @@ public interface IGenerationModel : IDisposable
 
     /// <summary>A new sequence with room for <paramref name="capacity"/> tokens holding a device copy of
     /// <paramref name="state"/>'s committed tokens, or null when this model's state cannot be copied that way.
-    /// <paramref name="state"/> is left unchanged and still owned by the caller; the caller disposes the copy.</summary>
+    /// <paramref name="state"/> is left unchanged and still owned by the caller, who also disposes the copy.</summary>
     ISequenceState? ResizeSequenceState(ISequenceState state, int capacity) => null;
 
     /// <summary>Runs <paramref name="chunk"/> against <paramref name="state"/>, commits its tokens, and returns hidden <c>[1, rows, hidden]</c> (rows = 1 when <see cref="PrefillChunk.LastRowOnly"/>).</summary>

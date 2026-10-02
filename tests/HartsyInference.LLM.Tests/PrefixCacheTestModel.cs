@@ -28,7 +28,11 @@ internal sealed class PrefixCacheTestModel(uint seed)
     public Dictionary<string, Tensor> Weights(TransformerConfig c)
     {
         int h = c.HiddenSize, qDim = c.QDim, kvDim = c.KvDim;
-        Dictionary<string, Tensor> w = new() { ["model.embed_tokens.weight"] = F2(c.VocabSize, h), ["model.norm.weight"] = Ones(h) };
+        Dictionary<string, Tensor> w = new()
+        {
+            ["model.embed_tokens.weight"] = F2(c.VocabSize, h),
+            ["model.norm.weight"] = Ones(h),
+        };
         for (int i = 0; i < c.NumLayers; i++)
         {
             string p = $"model.layers.{i}";

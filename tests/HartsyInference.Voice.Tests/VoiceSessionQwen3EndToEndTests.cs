@@ -23,9 +23,9 @@ namespace HartsyInference.Voice.Tests;
 /// sampling the gate specifies) and asserts <c>voice.llm.ttft_ms</c> ≤ 150, <c>voice.llm.first_sentence_ms</c> ≤ 200
 /// (tool-call turns exempted, matching the gate's own wording) and <c>voice.turn.total_ms</c> ≤ 1300 for EVERY turn —
 /// this is the gate-verification run for perf/llm-voice-prefix-reuse's prefix-KV reuse, not just a measurement
-/// report. Also logs the LLM's resident VRAM (<see cref="VramProbe"/>) before the first turn and after the last, to
-/// show the footprint is bounded and does not grow with the conversation. Two independent timelines remain for
-/// root-causing any remaining gap between <c>llm.ttft_ms</c> and <c>llm.first_sentence_ms</c>:
+/// report. Also asserts the LLM card's VRAM (<see cref="VramProbe"/>) ends at or under 6 GiB and grows across the
+/// turns by no more than the retained prefix KV does (which tracks the conversation's length). Two independent
+/// timelines remain for root-causing any remaining gap between <c>llm.ttft_ms</c> and <c>llm.first_sentence_ms</c>:
 /// <see cref="RecordingDiagnostics"/> (raw per-token events from inside the engine, via
 /// <see cref="EngineOptions.Diagnostics"/>) and <see cref="TimestampingTextService"/> (the chunks the session
 /// actually sees, after the tool-call stream filter). Turn 1 keeps the original correctness checks (no literal
@@ -145,8 +145,10 @@ public sealed class VoiceSessionQwen3EndToEndTests
         // VRAM, purely so this log line attributes its cost correctly (production never waits on it).
         await Task.Delay(500).ConfigureAwait(false);
         long? vramAfterPriming = VramProbe.UsedBytes(engine.Text, "cuda:0");
+        long? retainedAfterPriming = VramProbe.RetainedPrefixBytes(engine.Text, "cuda:0");
         _output.WriteLine($"VRAM (cuda:0) after the session's priming request: {VramProbe.Describe(vramAfterPriming)}"
-            + $" (+{Delta(vramAfterWarm, vramAfterPriming)} over warm-up: the retained sequence's own KV capacity, a real resident allocation, not pool slack)");
+            + $" (+{Delta(vramAfterWarm, vramAfterPriming)} over warm-up;"
+            + $" retained prefix KV {VramProbe.Describe(retainedAfterPriming)})");
 
         List<VoiceTurnMetrics> metrics = [];
         int repliedSamplesSoFar = 0;
@@ -161,7 +163,10 @@ public sealed class VoiceSessionQwen3EndToEndTests
             metrics.Add(turn);
             _output.WriteLine(turn.ToLogLine());
             _output.WriteLine($"  plan stats after turn {turnId}: {CudaPlanStats.Describe(engine.Text, "cuda:0") ?? "(unavailable)"}");
-            _output.WriteLine($"  VRAM (cuda:0) after turn {turnId}: {VramProbe.Describe(VramProbe.UsedBytes(engine.Text, "cuda:0"))}");
+            long? vramNow = VramProbe.UsedBytes(engine.Text, "cuda:0");
+            long? retainedNow = VramProbe.RetainedPrefixBytes(engine.Text, "cuda:0");
+            _output.WriteLine($"  VRAM (cuda:0) after turn {turnId}: {VramProbe.Describe(vramNow)},"
+                + $" retained prefix KV {VramProbe.Describe(retainedNow)}");
 
             // The gate itself: every turn, not just a report. Tool-call turns are exempt from first_sentence,
             // matching the gate's own "on non-tool turns" wording (a tool round adds a full extra model
@@ -211,32 +216,28 @@ public sealed class VoiceSessionQwen3EndToEndTests
         Assert.All(metrics, m => Assert.NotNull(m.TotalMs));
 
         long? vramAfterLast = VramProbe.UsedBytes(engine.Text, "cuda:0");
+        long? retainedAfterLast = VramProbe.RetainedPrefixBytes(engine.Text, "cuda:0");
         _output.WriteLine($"VRAM (cuda:0) after turn {Turns}: {VramProbe.Describe(vramAfterLast)}"
-            + $" (warm-up {VramProbe.Describe(vramAfterWarm)} -> priming {VramProbe.Describe(vramAfterPriming)} -> turn {Turns} {VramProbe.Describe(vramAfterLast)})");
-        if (vramAfterPriming is { } primedBytes && vramAfterLast is { } lastBytes)
+            + $" (warm-up {VramProbe.Describe(vramAfterWarm)} -> priming {VramProbe.Describe(vramAfterPriming)}"
+            + $" -> turn {Turns} {VramProbe.Describe(vramAfterLast)}); retained prefix KV"
+            + $" {VramProbe.Describe(retainedAfterPriming)} -> {VramProbe.Describe(retainedAfterLast)}");
+        if (vramAfterPriming is { } primedBytes && vramAfterLast is { } lastBytes
+            && retainedAfterPriming is { } primedRetained && retainedAfterLast is { } lastRetained)
         {
-            // The gate this asserts: once the call is warm (model loaded, prefix primed), 10 real turns must not
-            // creep the footprint up further -- the growth from warm-up to THIS point is the retained sequence's
-            // own KV capacity (a deliberate, one-time, reported-below allocation, not something turns add to).
-            // A couple hundred MB of activation/workspace slack sized for the longest prompt a turn's decode loop
-            // happens to hit is expected; anything beyond that is the regression this assertion exists to catch.
+            // The retained KV is shrunk to the conversation's own length when each turn ends, so it grows with the
+            // history (up to MaxHistoryTokens) by design. Anything the card grew by beyond that growth — past a
+            // couple hundred MB of activation/workspace slack sized for the longest prompt — is a leak.
             const long growthToleranceBytes = 256L << 20;
-            Assert.True(lastBytes <= primedBytes + growthToleranceBytes,
-                $"VRAM grew by {(lastBytes - primedBytes) / (1024.0 * 1024):F0} MB over {Turns} turns after priming ({VramProbe.Describe(primedBytes)} -> {VramProbe.Describe(lastBytes)}).");
-            if (lastBytes > VramTargetBytes)
-            {
-                _output.WriteLine($"NOTE: VRAM steady-state ({VramProbe.Describe(lastBytes)}) is above the {VramTargetBytes / (1024.0 * 1024):F0} MB target by "
-                    + $"{(lastBytes - VramTargetBytes) / (1024.0 * 1024):F0} MB (down from ~13.8 GB before CacheWeightCasts=false, ~7.27 GB before"
-                    + " PreloadRedundantWeightSplits=false). Two known, unused levers to close the rest: (1) a smaller VoiceAgentSession.PrefixCacheCapacityHint"
-                    + " trades some mid-call reallocation risk for less resident KV; (2) vram.kvF16 halves the retained cache's bytes but is a numerics change"
-                    + " this PR does not make unilaterally. Not asserted here -- reported for a decision.");
-            }
-            else
-            {
-                _output.WriteLine($"VRAM steady-state ({VramProbe.Describe(lastBytes)}) meets the {VramTargetBytes / (1024.0 * 1024):F0} MB target "
-                    + $"(margin {(VramTargetBytes - lastBytes) / (1024.0 * 1024):F0} MB) -- down from ~13.8 GB before CacheWeightCasts=false and ~7.27 GB"
-                    + " before PreloadRedundantWeightSplits=false; see both defaults' doc comments on VoiceAgentOptions.");
-            }
+            long retainedGrowth = lastRetained - primedRetained;
+            Assert.True(lastBytes - primedBytes <= retainedGrowth + growthToleranceBytes,
+                $"VRAM grew by {Mb(lastBytes - primedBytes)} MB over {Turns} turns after priming, of which the retained"
+                + $" prefix KV accounts for {Mb(retainedGrowth)} MB ({VramProbe.Describe(primedBytes)} ->"
+                + $" {VramProbe.Describe(lastBytes)}).");
+            Assert.True(lastRetained > 0, "the call's conversation should still be retained after its last turn.");
+            Assert.True(lastBytes <= VramTargetBytes,
+                $"VRAM steady-state {VramProbe.Describe(lastBytes)} is above the {Mb(VramTargetBytes)} MB target.");
+            _output.WriteLine($"VRAM steady-state ({VramProbe.Describe(lastBytes)}) meets the {Mb(VramTargetBytes)} MB"
+                + $" target (margin {Mb(VramTargetBytes - lastBytes)} MB).");
         }
 
         IReadOnlyList<IReadOnlyList<RecordingDiagnostics.Entry>> byRequest = diagnostics.ByRequest();
@@ -262,6 +263,8 @@ public sealed class VoiceSessionQwen3EndToEndTests
         Assert.True(actualMs is { } value && value <= budgetMs,
             $"turn {turnId}: {metric} = {Fmt(actualMs)} ms, budget {budgetMs:F0} ms.");
     }
+
+    private static string Mb(long bytes) => (bytes / (1024.0 * 1024)).ToString("F0");
 
     private static string Delta(long? before, long? after) =>
         before is { } b && after is { } a ? $"{(a - b) / (1024.0 * 1024):F0} MB" : "?";

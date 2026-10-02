@@ -287,9 +287,9 @@ public sealed class TextGenerationPipeline
     /// failed allocation never leaves <paramref name="reuse"/> pointing at an already-disposed buffer. The returned
     /// length is always LESS than <paramref name="promptIds"/>.Length, even on an exact repeat, so the caller always
     /// prefills a real final token and gets a fresh logits row to sample from; it is also never more than
-    /// <c>old.Length</c> (defensive — <see cref="Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/>'s
-    /// own bookkeeping keeps <c>reuse.TokenIds</c> within that bound already, but <see cref="FixedKvCache.Truncate"/>
-    /// throws instead of clamping, so a future bug here should degrade to less reuse, not a crash).</summary>
+    /// <c>old.Length</c> (defensive — Generate's own bookkeeping keeps <c>reuse.TokenIds</c> within that bound already,
+    /// but <see cref="FixedKvCache.Truncate"/> throws instead of clamping, so a future bug here should degrade to less
+    /// reuse, not a crash).</summary>
     private (ISequenceState Cache, int ReusedLen) AcquireCache(RetainedSequence? reuse, int[] promptIds, int maxSeq, int? capacityHint)
     {
         if (reuse?.Cache is { } old)
