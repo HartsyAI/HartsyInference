@@ -19,8 +19,9 @@ public sealed class RetainedSequence : IDisposable
     /// in order. Empty when <see cref="Cache"/> is null.</summary>
     public int[] TokenIds { get; private set; } = [];
 
-    /// <summary>Device bytes <see cref="Cache"/> occupies (its capacity, not just what is committed) — what
-    /// <see cref="RetainedSequenceStore"/> charges this entry against its byte budget.</summary>
+    /// <summary>Device bytes <see cref="Cache"/> occupies (its capacity, not just what is committed, though the
+    /// pipeline shrinks it toward that) — what <see cref="RetainedSequenceStore"/> charges this entry against its
+    /// byte budget.</summary>
     public long Bytes { get; private set; }
 
     /// <summary>Replaces this entry's contents in place, so a reference a caller already holds stays valid across a

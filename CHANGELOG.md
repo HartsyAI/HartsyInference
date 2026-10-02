@@ -16,6 +16,20 @@ stable release will require. Dates are UTC.
   each pulling experts from a shared counter and reusing one pair of dequant slices allocated on its first expert, so
   slice memory stays bounded as before and the dequant and GEMM inside each expert nest on the same capped scheduler.
   Outputs are byte-identical at any cap, and no raw `Parallel` loop remains outside `CpuParallel` itself.
+- **Bounded the opt-in prefix-KV reuse (`TextRequest.PrefixCacheKey`) for GPUs shared with other models.** A
+  retained KV cache too small for the next request now grows by copying its reusable prefix on device instead of
+  being dropped and prefilled again, which also stops a tool round with a large result from re-prefilling the rest
+  of its turn. What a request retains is copied down to its length plus `vram.prefixCacheHeadroomTokens` (new,
+  default 256) instead of keeping the whole allocation, and a sequence whose kept size would exceed
+  `vram.prefixCacheMaxBytes` is freed after its request rather than retained; the store refuses one too, so the
+  cap is hard. `vram.prefixCacheMaxBytes` now defaults to 1.5 GiB (was 512 MiB, which the newest entry could
+  exceed): now that it also bounds each entry, it has to hold one voice call at its history ceiling on Qwen3-4B —
+  the measured 609-token system-and-tools prefix, the 3,000-token history budget and a 201-token reply allocation,
+  about 3,750 tokens at 288 KiB of F32 KV per token (~1.03 GiB); 512 MiB would drop that call's cache mid-call
+  past ~1,800 tokens. `IBackend.ScatterSeqHeadMajor` gains a row-count overload and copies any byte-addressable
+  dtype on CPU, CUDA and Vulkan; `FixedKvCache.CopyWithCapacity` and `IGenerationModel.ResizeSequenceState` expose
+  the resize. `PrefixCacheCapacityHint` now only sizes a sequence's first allocation, so the voice session no longer
+  passes one.
 - **Fixed: host weight conversions, Mimi's RVQ encode and UnivNet's LVC gate no longer bypass the process CPU
   thread cap.** Large `Tensor.CastTo` and `DequantFp8E4M3ScaledToF16` casts, the fp8 quantizer's absmax, scale and
   stochastic-round passes, the NVFP4, MXFP4, FP8-block, affine, EXL3 and INT8-ConvRot host codecs,
@@ -27,6 +41,21 @@ stable release will require. Dates are UTC.
   `engine.cpuThreadCap: 14`) these now use at most that many threads, so checkpoint conversion and LoRA baking there,
   and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
   cores than the cap.
+- **Audio model switches now size the incoming model before deciding whether to evict.** `AudioRuntime` used to
+  unload the other resident audio models on a switch only when free VRAM was under a fixed 3 GiB, so a 6-7 GB model
+  arriving with 3-6 GB free evicted nothing: Dia then failed in `PreloadWeights` with `OutOfVramException`, and
+  Orpheus loaded with most of its weights left host-side and streamed them every step. A switch now evicts when free
+  VRAM is under the incoming model's need plus room beside it (a fifth more, and never less than
+  `vram.autopromoteHeadroomMb`, because a weight that would leave less than that free is streamed instead of made
+  resident), with the new `vram.audioEvictFreeVramFloorMb` (default 3072) as the floor. The need is the larger of
+  what the model's latest load in this process left in use and the size of its weight files on disk, with F16/BF16
+  tensors counted at F32 for a runner that widens them (Dia declares it). A model that is already loaded needs only
+  the floor; same-model repeats still never evict, and pinned runners are still never evicted. If a run still throws
+  `OutOfVramException`, the runtime unloads every other unpinned audio model, releases device memory, logs what it
+  dropped, and retries once; a stream retries only if it has not yielded anything yet. Replaying the sweep on an RTX
+  4090 so that Dia arrives with 3.9 GiB free: before this change Dia failed with the same driver refusal and Orpheus
+  took 292 s to generate 6.2 s of audio against 7.5 s on a free card; with it the switch to Dia unloads the five
+  earlier models, Dia succeeds and Orpheus takes 7.6 s, and every model's audio is byte-identical.
 - **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
   pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
   compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU

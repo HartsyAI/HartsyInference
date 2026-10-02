@@ -143,6 +143,14 @@ public static partial class EngineKnobs
             "Host-RAM floor in GB below which the audio cache evicts a prior model before loading the next.",
             v => v > 0 ? v : 14L);
 
+    /// <summary>Free-VRAM floor in MB below which switching audio models evicts the other resident ones first.</summary>
+    /// <remarks>The minimum of the switch check: an incoming model whose weights are estimated larger raises the bar to
+    /// fit them, so this alone decides only for a model already resident or one with nothing to estimate from.</remarks>
+    public static readonly Knob<long> AudioEvictFreeVramFloorMb =
+        Long("vram.audioEvictFreeVramFloorMb", 3072L, KnobScope.Runtime, KnobDomain.Vram,
+            "Free-VRAM floor in MB below which switching audio models evicts the other resident ones first.",
+            v => v > 0 ? v : 3072L);
+
     /// <summary>VRAM headroom in MB kept free when deciding whether to auto-promote a tensor to resident.</summary>
     public static readonly Knob<long> AutopromoteHeadroomMb =
         Long("vram.autopromoteHeadroomMb", 1536L, KnobScope.Runtime, KnobDomain.Vram,
