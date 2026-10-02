@@ -352,6 +352,11 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
         {
             return;
         }
+        // This runs on whichever thread disposed the tensor, and a thread-pool thread can arrive holding ANOTHER
+        // device's context. A synchronous free resolves against the current context, not the buffer's, so bind this
+        // cache's own first, as the host-read path does. After the gate, never before it: a retiring backend closes
+        // the gate and only then destroys its context, so a bind placed earlier could throw against one already gone.
+        MakeCurrent();
         OnActivationEvicted(tensor, entry.Buffer);
         Pinned.Remove(tensor);
         CachedBuffers.Remove(entry.Buffer);
@@ -452,6 +457,9 @@ public abstract class GpuResidencyCache<TBuffer> : IGpuResidency
             {
                 return;
             }
+            // Same reason as in ReleaseActivationCore, and sharper here: CUDA frees a promoted weight with the
+            // synchronous free, which lands in whatever context this thread happens to hold.
+            MakeCurrent();
             // No D2H. The host buffer is the authority here — that is what makes this a demotion and not an
             // eviction — and copying the device bytes back would overwrite the write that triggered this.
             OnWeightDemoted(tensor, buffer);
