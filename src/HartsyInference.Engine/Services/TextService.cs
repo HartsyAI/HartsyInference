@@ -321,7 +321,11 @@ public sealed class TextService : ITextService, IDisposable
             return;
         }
         if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null) && slot.LoadedPath == path)
+        {
+            LogLoadTimeSettingMismatch(deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
+            LogLoadTimeSettingMismatch(deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
             return;
+        }
         string[] shardDevices = ResolveShardDevices(deviceKey);
         ValidateShardDevices(shardDevices);
         UnloadSlot(slot);
@@ -366,7 +370,7 @@ public sealed class TextService : ITextService, IDisposable
             buildSelector = fallbackDevice;
         }
         IBackend backend = slot.Backend ??= CreateBackendFor(buildSelector);
-        ApplyCacheWeightCastsOverride(request, [backend]);
+        ApplyCacheWeightCastsOverride(slot, request, [backend]);
         // A backend that cannot read quantized weights needs them dequantized on the way in. Asking the backend
         // what it supports rather than what class it is means Vulkan gets the right answer the moment it publishes
         // SupportsQuantized, instead of silently paying an F32 expansion forever because it is not CUDA.
@@ -376,6 +380,8 @@ public sealed class TextService : ITextService, IDisposable
         {
             slot.SsmModel = SsmLanguageModel.Load(path, architecture);
             slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
+            // SSM has its own loader with no EnumerateWeights/redundant-split concept at all.
+            slot.PreloadRedundantWeightSplitsApplied = null;
             slot.LoadedPath = path;
             LoadVisionInto(slot, path);   // qwen35 ships a Qwen3.5-VL mmproj sidecar; other SSM archs have none.
             Logs.Info($"[TextService] Loaded GGUF SSM model '{Path.GetFileName(path)}' ({architecture}) on {deviceKey}."
@@ -392,7 +398,9 @@ public sealed class TextService : ITextService, IDisposable
         // includeRedundantSplits defaults true here (unlike LoadSharded below and PreloadDecodeWeights, which
         // always pass false) to preserve this path's long-standing behavior for every existing caller; a request
         // can opt out via PreloadRedundantWeightSplits — see its doc comment on TextRequest for the measured cost.
-        backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights(request.PreloadRedundantWeightSplits ?? true));
+        bool preloadRedundantSplits = request.PreloadRedundantWeightSplits ?? true;
+        backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights(preloadRedundantSplits));
+        slot.PreloadRedundantWeightSplitsApplied = preloadRedundantSplits;
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
         slot.LoadedPath = path;
         LoadVisionInto(slot, path);
@@ -507,7 +515,10 @@ public sealed class TextService : ITextService, IDisposable
         slot.Placement = placement;
         slot.Backend = placement.LastBackend;
         slot.ExtraStageBackends = [.. stages.Select(s => s.Backend).Where(b => !ReferenceEquals(b, placement.LastBackend))];
-        ApplyCacheWeightCastsOverride(request, stages.Select(s => s.Backend));
+        ApplyCacheWeightCastsOverride(slot, request, stages.Select(s => s.Backend));
+        // LoadSharded's own preload above (line ~490) always passes includeRedundantSplits: false, unconditionally
+        // — TextRequest.PreloadRedundantWeightSplits is only read by the single-device path.
+        slot.PreloadRedundantWeightSplitsApplied = false;
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer,
             placement.LastBackend, slot.Model.Template, placement);
         slot.LoadedPath = path;
@@ -540,7 +551,10 @@ public sealed class TextService : ITextService, IDisposable
         bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
         GgufLanguageModel.TpCheckpoint checkpoint = GgufLanguageModel.LoadForTensorParallel(path, lowVram);
         List<IBackend> backends = [.. rankDevices.Select(CreateBackendFor)];
-        ApplyCacheWeightCastsOverride(request, backends);
+        ApplyCacheWeightCastsOverride(slot, request, backends);
+        // Tensor-parallel weights come from TensorParallelTransformer.EnumerateRankWeights, a wholly different
+        // method with no redundant-split concept — TextRequest.PreloadRedundantWeightSplits doesn't apply here.
+        slot.PreloadRedundantWeightSplitsApplied = null;
         ICollectiveComm comm = CollectiveComm.Create(backends);
         TensorParallelTransformer tp = new(checkpoint.Config, new TpPlacement(backends, comm));
         tp.LoadWeights(checkpoint.Weights, "model");
@@ -655,18 +669,36 @@ public sealed class TextService : ITextService, IDisposable
     private static RetainedSequenceStore NewPrefixCacheStore() =>
         new(EngineKnobs.PrefixCacheMaxEntries.Value, EngineKnobs.PrefixCacheMaxBytes.Value);
 
-    /// <summary>Applies <see cref="TextRequest.CacheWeightCasts"/> to every backend just created for a slot; a no-op
-    /// when the request leaves it null (the backend's own default stands).</summary>
-    private static void ApplyCacheWeightCastsOverride(TextRequest request, IEnumerable<IBackend> backends)
+    /// <summary>Logs once (debug level) when a request explicitly asks for a load-time-only setting
+    /// (<see cref="TextRequest.CacheWeightCasts"/>, <see cref="TextRequest.PreloadRedundantWeightSplits"/>) that
+    /// differs from what is actually in force on an ALREADY-loaded slot — e.g. a non-voice caller loaded this
+    /// device's slot first with the default, so a later voice request's VRAM-saving override is silently a no-op
+    /// without a reload. <paramref name="requested"/> null means the caller didn't ask, so there is nothing to
+    /// compare (no mismatch is possible by leaving it to the slot's existing setting).</summary>
+    private static void LogLoadTimeSettingMismatch(string deviceKey, string settingName, bool? requested, bool? applied)
     {
-        if (request.CacheWeightCasts is not { } value)
+        if (requested is { } value && applied is { } inForce && value != inForce)
         {
-            return;
+            Logs.Debug($"[TextService] '{settingName}' requested {value} for the already-loaded slot on "
+                + $"{deviceKey}, but {inForce} has been in force since that slot's backend was created — "
+                + "takes effect only on the next load; reload the slot (or restart on this device) to apply it.");
         }
-        foreach (IBackend backend in backends)
+    }
+
+    /// <summary>Applies <see cref="TextRequest.CacheWeightCasts"/> to every backend just created for a slot (a
+    /// no-op when the request leaves it null — the backend's own default stands), and records the resulting
+    /// effective value on <paramref name="slot"/> for <see cref="LoadInto"/>'s later-request mismatch check.</summary>
+    private static void ApplyCacheWeightCastsOverride(TextDeviceSlot slot, TextRequest request, IEnumerable<IBackend> backends)
+    {
+        List<IBackend> list = [.. backends];
+        if (request.CacheWeightCasts is { } value)
         {
-            backend.CacheWeightCasts = value;
+            foreach (IBackend backend in list)
+            {
+                backend.CacheWeightCasts = value;
+            }
         }
+        slot.CacheWeightCastsApplied = list.Count > 0 ? list[0].CacheWeightCasts : null;
     }
 
     /// <inheritdoc/>
@@ -751,6 +783,8 @@ public sealed class TextService : ITextService, IDisposable
         slot.SsmPipeline = null;
         slot.SsmModel?.Dispose();
         slot.SsmModel = null;
+        slot.CacheWeightCastsApplied = null;
+        slot.PreloadRedundantWeightSplitsApplied = null;
         bool hadModel = slot.LoadedPath is not null;
         slot.LoadedPath = null;
         // A GGUF load leaves multi-GB dequantized host buffers (and the closed mmap's pages) reachable only via

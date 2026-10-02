@@ -235,7 +235,7 @@ public sealed class VoiceSessionQwen3EndToEndTests
             {
                 _output.WriteLine($"VRAM steady-state ({VramProbe.Describe(lastBytes)}) meets the {VramTargetBytes / (1024.0 * 1024):F0} MB target "
                     + $"(margin {(VramTargetBytes - lastBytes) / (1024.0 * 1024):F0} MB) -- down from ~13.8 GB before CacheWeightCasts=false and ~7.27 GB"
-                    + " before PreloadRedundantWeightSplits=false; see both default's doc comments on VoiceAgentOptions.");
+                    + " before PreloadRedundantWeightSplits=false; see both defaults' doc comments on VoiceAgentOptions.");
             }
         }
 
