@@ -100,7 +100,8 @@ public sealed unsafe class DiaAttention
     /// <paramref name="cosGpu"/>/<paramref name="sinGpu"/> are <c>[1, t, headDim]</c>, shaped per that convention
     /// — interleaved (Zonos): first headDim/2 lanes populated, matching <see cref="IBackend.ApplyRopeInterleaved"/>;
     /// split-half (Dia): the half-width table duplicated into both halves, matching
-    /// <see cref="IBackend.ApplyRope"/>'s <c>cos[i] == cos[i+half]</c> contract — both for absolute positions
+    /// <see cref="IBackend.ApplyRopeSingle"/>'s <c>cos[i] == cos[i+half]</c> contract (applied to q and k
+    /// separately — Dia's self-attention is GQA, q and k don't share a head count) — both for absolute positions
     /// [posStart, posStart+t). The caller advances the cache length once after all layers.</summary>
     public Tensor SelfForwardFlash(IBackend backend, Tensor x, int t, int posStart, IKvCache cache, int layerIndex,
         Tensor cosGpu, Tensor sinGpu)
@@ -123,7 +124,15 @@ public sealed unsafe class DiaAttention
             }
             else
             {
-                backend.ApplyRope(q, k, cosGpu, sinGpu);
+                // Per-tensor, not the combined backend.ApplyRope(q, k, ...): Dia's self-attention is GQA
+                // (_qHeads=16, _kvHeads=4), and the combined overload derived K's kernel-launch shape from Q,
+                // silently rotating only 1/4 of K's real buffer and leaving the rest as whatever device memory
+                // happened to be there (deterministic garbage, not a crash — this is how the resident path was
+                // caught producing "[Music]" instead of speech while matching baseline's digest-per-rep
+                // determinism). ApplyRopeSingle derives numHeads/totalVecs from whichever tensor it's given, so
+                // q and k each get their own correct shape.
+                backend.ApplyRopeSingle(q, cosGpu, sinGpu);
+                backend.ApplyRopeSingle(k, cosGpu, sinGpu);
             }
         }
 
