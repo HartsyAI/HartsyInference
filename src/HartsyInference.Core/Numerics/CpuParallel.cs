@@ -41,9 +41,10 @@ public static class CpuParallel
     // oversubscribe the machine — which is the exact situation this exists to prevent, since the CPU device gate
     // is a no-op and those two really do overlap. A shared scheduler caps their combined concurrency.
     //
-    // Rebuilt when the knob changes, because the limit is fixed at construction. Nesting note: no kernel here
-    // calls into another one's parallel region (Conv2D reaches MatMul through a serial batch loop), and
-    // Parallel.For can inline work on the calling thread, so a capped scheduler does not deadlock this code.
+    // Rebuilt when the knob changes, because the limit is fixed at construction. Nesting: no kernel calls into another
+    // kernel's parallel region (Conv2D reaches MatMul through a serial batch loop), but a NativeBuffer of 8 MB or more
+    // allocated inside a body fans its zero-fill out through here. A loop started on one of this scheduler's own threads
+    // may run its queued work inline there, so nesting does not wedge it; NativeBufferZeroFillTests holds that.
     private static readonly object _schedulerLock = new();
     private static ConcurrentExclusiveSchedulerPair? _schedulerPair;
     private static int _schedulerLimit;

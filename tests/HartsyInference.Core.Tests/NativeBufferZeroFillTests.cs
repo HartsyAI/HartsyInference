@@ -101,6 +101,86 @@ public sealed unsafe class NativeBufferZeroFillTests
         }
     }
 
+    /// <summary>A large allocation's fill nests a <see cref="CpuParallel.For"/> inside whatever parallel body allocates,
+    /// on the same capped scheduler; at no cap may that wedge the outer loop.</summary>
+    [Theory]
+    [InlineData(1)]
+    [InlineData(2)]
+    [InlineData(0)]
+    public void AllocationsInsideAParallelLoop_Complete_AtEveryCap(int cap)
+    {
+        int threads = cap == 0 ? Environment.ProcessorCount : cap;
+        WithCpuThreads(threads, () => RunBounded(() => AllocateInsideAParallelLoop()));
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(0)]
+    public void AllocationsInsideParallelLoops_OnTwoForeignThreadsAtOnce_Complete(int cap)
+    {
+        int threads = cap == 0 ? Environment.ProcessorCount : cap;
+        WithCpuThreads(threads, () => RunBounded(AllocateInsideAParallelLoop, AllocateInsideAParallelLoop));
+    }
+
+    [Fact]
+    public void AllocationsInsideAParallelLoop_UnderAnInlineScope_Complete()
+    {
+        RunBounded(() =>
+        {
+            using CpuParallel.InlineScope scope = CpuParallel.EnterInline();
+            AllocateInsideAParallelLoop();
+        });
+    }
+
+    /// <summary>An outer loop that fans out, each of whose iterations allocates a buffer big enough to fan out its
+    /// own fill; repeated so a race that only sometimes wedges gets several chances.</summary>
+    private static void AllocateInsideAParallelLoop()
+    {
+        const int Iterations = 8;
+        for (int round = 0; round < 3; round++)
+        {
+            int[] zeroed = new int[Iterations];
+            CpuParallel.For(Iterations, CpuParallel.MinWorkForParallel * Iterations, zeroed, static (i, done) =>
+            {
+                using NativeBuffer buffer = new((nuint)(64UL << 20));
+                done[i] = buffer.AsReadOnlySpan<byte>().IndexOfAnyExcept((byte)0) == -1 ? 1 : 0;
+            });
+            Assert.All(zeroed, z => Assert.Equal(1, z));
+        }
+    }
+
+    /// <summary>Runs each action on its own background thread and fails, instead of hanging, if any is still running
+    /// after the bound; rethrows the first failure.</summary>
+    private static void RunBounded(params Action[] actions)
+    {
+        Exception?[] failures = new Exception?[actions.Length];
+        Thread[] threads = new Thread[actions.Length];
+        for (int i = 0; i < actions.Length; i++)
+        {
+            int index = i;
+            threads[i] = new Thread(() =>
+            {
+                try
+                {
+                    actions[index]();
+                }
+                catch (Exception ex)
+                {
+                    failures[index] = ex;
+                }
+            }) { IsBackground = true };
+            threads[i].Start();
+        }
+        foreach (Thread thread in threads)
+        {
+            Assert.True(thread.Join(TimeSpan.FromSeconds(60)), "an allocation inside a parallel loop deadlocked");
+        }
+        foreach (Exception? failure in failures)
+        {
+            if (failure is not null) throw new InvalidOperationException("an allocating loop failed", failure);
+        }
+    }
+
     private static void AssertZeroed(nuint bytes)
     {
         using NativeBuffer buffer = new(bytes);
