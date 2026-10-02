@@ -8,6 +8,20 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Bounded the opt-in prefix-KV reuse (`TextRequest.PrefixCacheKey`) for GPUs shared with other models.** A
+  retained KV cache too small for the next request now grows by copying its reusable prefix on device instead of
+  being dropped and prefilled again, which also stops a tool round with a large result from re-prefilling the rest
+  of its turn. What a request retains is copied down to its length plus `vram.prefixCacheHeadroomTokens` (new,
+  default 256) instead of keeping the whole allocation, and a sequence whose kept size would exceed
+  `vram.prefixCacheMaxBytes` is freed after its request rather than retained; the store refuses one too, so the
+  cap is hard. `vram.prefixCacheMaxBytes` now defaults to 1.5 GiB (was 512 MiB, which the newest entry could
+  exceed): now that it also bounds each entry, it has to hold one voice call at its history ceiling on Qwen3-4B —
+  the measured 609-token system-and-tools prefix, the 3,000-token history budget and a 201-token reply allocation,
+  about 3,750 tokens at 288 KiB of F32 KV per token (~1.03 GiB); 512 MiB would drop that call's cache mid-call
+  past ~1,800 tokens. `IBackend.ScatterSeqHeadMajor` gains a row-count overload and copies any byte-addressable
+  dtype on CPU, CUDA and Vulkan; `FixedKvCache.CopyWithCapacity` and `IGenerationModel.ResizeSequenceState` expose
+  the resize. `PrefixCacheCapacityHint` now only sizes a sequence's first allocation, so the voice session no longer
+  passes one.
 - **Fixed: host weight conversions, Mimi's RVQ encode and UnivNet's LVC gate no longer bypass the process CPU
   thread cap.** Large `Tensor.CastTo` and `DequantFp8E4M3ScaledToF16` casts, the fp8 quantizer's absmax, scale and
   stochastic-round passes, the NVFP4, MXFP4, FP8-block, affine, EXL3 and INT8-ConvRot host codecs,

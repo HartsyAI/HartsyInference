@@ -6811,14 +6811,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
-    public void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset)
+    public void ScatterSeqHeadMajor(Tensor output, Tensor input, int seqOffset, int rows)
     {
-        if (output.DType != DType.F32 || input.DType != DType.F32)
-            throw new NotSupportedException("CUDA ScatterSeqHeadMajor supports F32 only.");
+        SeqHeadMajorScatter geometry = SeqHeadMajorScatterContract.Validate(output, input, seqOffset, rows);
+        if (geometry.IsEmpty) return;
         using OpScope _op = EnterOp();
-        int heads = (int)output.Shape[1], seq = (int)output.Shape[2], hd = (int)output.Shape[3];
-        int c = (int)input.Shape[2];
-        int elemSize = DType.F32.SizeInBytes;
         ulong pIn = 0;
         try
         {
@@ -6831,14 +6828,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 GpuTransferHelper.CacheActivation(output, GpuTransferHelper.AllocateDevice(outBytes), outBytes);
             }
             ulong pOut = GpuTransferHelper.CopyToDevice(output);
-            // One stream-ordered DtoD per head: a head's chunk rows are contiguous, heads are not (dst stride is the
-            // full seq, src stride the chunk) — the same per-slice shape Concat's dim>0 path issues, same launch count.
-            nuint sliceBytes = (nuint)((long)c * hd * elemSize);
-            for (int h = 0; h < heads; h++)
+            // One stream-ordered DtoD per head: a head's rows are contiguous, heads are not (each side strides by its
+            // own sequence extent) — the same per-slice shape Concat's dim>0 path issues, same launch count.
+            for (int h = 0; h < geometry.Heads; h++)
             {
-                ulong dst = pOut + (ulong)((((long)h * seq + seqOffset) * hd) * elemSize);
-                ulong src = pIn + (ulong)(((long)h * c * hd) * elemSize);
-                CudaMemory.CopyDeviceToDeviceAsync(dst, src, sliceBytes, _stream.Handle);
+                CudaMemory.CopyDeviceToDeviceAsync(pOut + (ulong)geometry.DestinationOffset(h),
+                    pIn + (ulong)geometry.SourceOffset(h), (nuint)geometry.SliceBytes, _stream.Handle);
             }
         }
         finally
