@@ -119,6 +119,10 @@ internal static class AukModel
     {
         bool hasReference = job.ReferenceMono24k is { Length: > 0 };
         string instruction = BuildInstruction(job.Text, job.Instruction, hasReference);
+        if (pipeline.IsFlash && (job.NfeStep.HasValue || job.CfgScale.HasValue))
+        {
+            Logs.Info("[Audio][AuK] Flash uses a fixed 4-step schedule with no guidance; the requested steps/CFG are ignored.");
+        }
         AukOptions options = new AukOptions
         {
             Seed = job.Seed,
