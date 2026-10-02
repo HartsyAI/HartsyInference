@@ -171,7 +171,7 @@ public sealed class CosyVoicePipeline : IDisposable
 
         float[] audio = _vocoder.Forward(backend, mel);
         mel.Dispose();
-        Logs.Info($"CosyVoice: HiFT vocoder in {sw.Elapsed.TotalMilliseconds - flowDoneMs:F1}ms.");
+        Logs.Debug($"CosyVoice: HiFT vocoder in {sw.Elapsed.TotalMilliseconds - flowDoneMs:F1}ms.");
 
         sw.Stop();
         Logs.Info($"CosyVoice synthesis complete: {audio.Length} samples ({audio.Length / (double)_cfg.SampleRate:F2}s) in {sw.ElapsedMilliseconds}ms.");

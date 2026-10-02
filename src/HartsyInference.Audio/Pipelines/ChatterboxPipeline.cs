@@ -139,7 +139,7 @@ public sealed class ChatterboxPipeline : IDisposable
         // Stage 3: HiFTNet vocoder — mel → 24 kHz waveform.
         float[] audio = _vocoder.Forward(backend, mel);
         mel.Dispose();
-        Logs.Info($"Chatterbox: HiFT vocoder in {sw.Elapsed.TotalMilliseconds - flowDoneMs:F1}ms.");
+        Logs.Debug($"Chatterbox: HiFT vocoder in {sw.Elapsed.TotalMilliseconds - flowDoneMs:F1}ms.");
 
         sw.Stop();
         progress?.Invoke(new GenerationProgress(3, 3, sw.Elapsed.TotalMilliseconds));
