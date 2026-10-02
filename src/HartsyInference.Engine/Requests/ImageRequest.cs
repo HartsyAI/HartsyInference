@@ -90,6 +90,9 @@ public sealed record ImageRequest
     /// <summary>Inpaint mask; null for none.</summary>
     public Inpaint? Inpaint { get; init; }
 
+    /// <summary>Recomposite masked results through the soft mask instead of SwarmUI's default hard threshold.</summary>
+    public bool MaskCompositeUnthresholded { get; init; }
+
     /// <summary>Regional / segment prompting; null for none.</summary>
     public Regional? Regional { get; init; }
 

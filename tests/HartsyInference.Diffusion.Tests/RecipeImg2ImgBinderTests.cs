@@ -81,6 +81,20 @@ public sealed class RecipeImg2ImgBinderTests
         Assert.True(result.RecompositeAtEnd);
     }
 
+    /// <summary>With a mask the engine owns the final paste (hard-threshold policy), so the pipeline's own soft one is off.</summary>
+    [Fact]
+    public void Apply_WithAMask_TurnsOffThePipelinesOwnRecomposite()
+    {
+        ImageRequest request = RequestWithInit(48, 32) with { Inpaint = new Inpaint { Mask = SolidImage(8, 8, 255) } };
+        using Img2ImgResolver.Img2ImgSpec spec = RecipeImg2ImgBinder.Resolve(request, 48, 32)!;
+
+        ImageToImageRequest result = Assert.IsType<ImageToImageRequest>(
+            RecipeImg2ImgBinder.Apply(new TextToImageRequest { Prompt = "a fox", Width = 48, Height = 32 }, spec));
+
+        Assert.NotNull(result.Mask);
+        Assert.False(result.RecompositeAtEnd);
+    }
+
     [Fact]
     public void Resolve_WithoutInitImage_ReturnsNull()
     {

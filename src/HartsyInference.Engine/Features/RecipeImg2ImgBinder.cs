@@ -31,6 +31,8 @@ public static class RecipeImg2ImgBinder
         {
             Strength = spec.Strength,
             Mask = spec.MaskTensor,
+            // ImagesService owns the masked paste (MaskRecomposite); a direct recipe call with a mask gets none.
+            RecompositeAtEnd = spec.MaskTensor is null,
         };
     }
 }
