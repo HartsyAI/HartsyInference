@@ -322,8 +322,8 @@ public sealed class TextService : ITextService, IDisposable
         }
         if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null) && slot.LoadedPath == path)
         {
-            LogLoadTimeSettingMismatch(deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
-            LogLoadTimeSettingMismatch(deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
+            LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
+            LogLoadTimeSettingMismatch(slot, deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
             return;
         }
         string[] shardDevices = ResolveShardDevices(deviceKey);
@@ -669,15 +669,17 @@ public sealed class TextService : ITextService, IDisposable
     private static RetainedSequenceStore NewPrefixCacheStore() =>
         new(EngineKnobs.PrefixCacheMaxEntries.Value, EngineKnobs.PrefixCacheMaxBytes.Value);
 
-    /// <summary>Logs once (debug level) when a request explicitly asks for a load-time-only setting
+    /// <summary>Logs once per slot (debug level) when a request explicitly asks for a load-time-only setting
     /// (<see cref="TextRequest.CacheWeightCasts"/>, <see cref="TextRequest.PreloadRedundantWeightSplits"/>) that
     /// differs from what is actually in force on an ALREADY-loaded slot — e.g. a non-voice caller loaded this
     /// device's slot first with the default, so a later voice request's VRAM-saving override is silently a no-op
     /// without a reload. <paramref name="requested"/> null means the caller didn't ask, so there is nothing to
-    /// compare (no mismatch is possible by leaving it to the slot's existing setting).</summary>
-    private static void LogLoadTimeSettingMismatch(string deviceKey, string settingName, bool? requested, bool? applied)
+    /// compare (no mismatch is possible by leaving it to the slot's existing setting). "Once" via
+    /// <see cref="TextDeviceSlot.LoggedSettingMismatches"/> — otherwise every turn of a long voice call would
+    /// repeat the identical line.</summary>
+    private static void LogLoadTimeSettingMismatch(TextDeviceSlot slot, string deviceKey, string settingName, bool? requested, bool? applied)
     {
-        if (requested is { } value && applied is { } inForce && value != inForce)
+        if (requested is { } value && applied is { } inForce && value != inForce && slot.LoggedSettingMismatches.Add(settingName))
         {
             Logs.Debug($"[TextService] '{settingName}' requested {value} for the already-loaded slot on "
                 + $"{deviceKey}, but {inForce} has been in force since that slot's backend was created — "
@@ -785,6 +787,7 @@ public sealed class TextService : ITextService, IDisposable
         slot.SsmModel = null;
         slot.CacheWeightCastsApplied = null;
         slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoggedSettingMismatches.Clear();
         bool hadModel = slot.LoadedPath is not null;
         slot.LoadedPath = null;
         // A GGUF load leaves multi-GB dequantized host buffers (and the closed mmap's pages) reachable only via

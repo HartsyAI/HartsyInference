@@ -72,4 +72,10 @@ internal sealed class TextDeviceSlot
     /// decision, or <c>false</c> unconditionally for the sharded/tensor-parallel paths, which never read that
     /// field). Same read-only-after-creation caveat as <see cref="CacheWeightCastsApplied"/>.</summary>
     public bool? PreloadRedundantWeightSplitsApplied { get; set; }
+
+    /// <summary>Which load-time settings <see cref="TextService.LoadInto"/> has already logged a mismatch for on
+    /// this slot (by setting name) — a request's own value keeps being ignored every subsequent call on an
+    /// already-loaded slot, so without this a long voice call would repeat the same debug line every turn. Reset
+    /// by <c>UnloadSlot</c>, so a reload gets a fresh warning if it mismatches again.</summary>
+    public HashSet<string> LoggedSettingMismatches { get; } = [];
 }
