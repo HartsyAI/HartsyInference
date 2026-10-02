@@ -6,17 +6,6 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.245 (provisional -- renumbered at merge)
-
-- **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
-  `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
-  not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
-  transcribed the result as `[Music]`; energy stayed high for the full 20s rather than trailing into
-  quiet). `maxTokens` is now capped to the text's own length (12 frames/char, floored at 200), which only
-  binds for prompts already shown to run away -- a well-formed multi-sentence prompt's own length
-  estimate comfortably exceeds what its natural EOS needs. This does not make Dia produce intelligible
-  speech from one short sentence; it bounds how long a doomed generation wastes before giving up.
-
 ## Unreleased
 
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
@@ -31,6 +20,14 @@ stable release will require. Dates are UTC.
   the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
+- **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
+  `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
+  not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
+  transcribed the result as `[Music]`; energy stayed high for the full 20s rather than trailing into
+  quiet). `maxTokens` is now capped to the text's own length (12 frames/char, floored at 200), which only
+  binds for prompts already shown to run away -- a well-formed multi-sentence prompt's own length
+  estimate comfortably exceeds what its natural EOS needs. This does not make Dia produce intelligible
+  speech from one short sentence; it bounds how long a doomed generation wastes before giving up.
 
 ## alpha.239
 
