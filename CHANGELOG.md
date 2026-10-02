@@ -54,7 +54,12 @@ stable release will require. Dates are UTC.
   OLD delegate sort's exact permutation — including exact ties at every rank — across random, all-equal,
   low-cardinality, sorted, organ-pipe and median-of-three-killer inputs from 1 to 102,048 elements (the one
   documented divergence is NaN placement, pinned by its own test rather than left unchecked: real model
-  logits are never NaN without sampling already being broken upstream). Five more test files keep each fixed
+  logits are never NaN without sampling already being broken upstream). The failure mode shifts, though: the
+  old delegate sort put a NaN logit at the back (low-ranked, rarely drawn); the new primitive sort's
+  floating-point pre-pass puts it at the front, so `probs[0]`/`vals[0]`/`wSort[0]` — read as the running max —
+  can itself be NaN, poisoning the whole softmax rather than one token's probability. Acceptable (both are
+  "undefined behavior on already-corrupt input," never relied on either way), but worth knowing if a NaN
+  logit ever appears in production. Five more test files keep each fixed
   call site's pre-fix algorithm verbatim as a reference oracle and compare it against the real (fixed) code
   across random inputs, exact ties at several boundary shapes, tiny/huge top-p, temperature=0, minP-only,
   and masked tokens — 87 tests total, all passing. `BarkCausalStage.SampleTopPWithProb` and
