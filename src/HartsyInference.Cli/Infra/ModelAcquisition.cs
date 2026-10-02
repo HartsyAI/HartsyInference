@@ -26,6 +26,12 @@ public static class ModelAcquisition
         AudioWeightsCatalog.AceStepId, AudioWeightsCatalog.YueId,
     };
 
+    /// <summary>Catalog ids whose audio-cache assets were already confirmed present (or downloaded) this process —
+    /// a REPL session calls <see cref="EnsurePresent"/> once per generation, not once per model load, so without
+    /// this a correctly-resolving model still re-stats every asset on every single prompt; a mis-resolving one
+    /// (see the Orpheus/SNAC fix, <c>ModelCatalog.cs</c>) re-prompted "Download these now?" every single call.</summary>
+    private static readonly HashSet<string> _audioAssetsConfirmed = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Downloads <paramref name="spec"/>'s catalog assets if missing (with confirmation). No-op for models with no preset assets.</summary>
     /// <returns>The spec pointed at the now-present primary file.</returns>
     public static ModelSpec EnsurePresent(ModelSpec spec)
@@ -35,7 +41,8 @@ public static class ModelAcquisition
 
         if (UsesAudioCache(cat, spec.Modality))
         {
-            EnsureAudioAssetsPresent(cat, spec.Modality);
+            if (!_audioAssetsConfirmed.Contains(cat.Id) && EnsureAudioAssetsPresent(cat, spec.Modality))
+                _audioAssetsConfirmed.Add(cat.Id);
             return spec;
         }
 
