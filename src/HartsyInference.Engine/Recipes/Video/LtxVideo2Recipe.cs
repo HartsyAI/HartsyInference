@@ -364,7 +364,7 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         }
     }
 
-    /// <summary>The distilled sampling contract over a DETECTED architecture config. The 8-step base schedule is shared by every 2.x distilled template, but two-stage stays 2.5-only: distilled builds exist for older generations too (2.0's templates ship a 0.909375-head refine; a 2.3 distilled LoRA is documented), and the x2 upsampler is a 2.5 model — running it on 2.3 latents is unverified numerics.</summary>
+    /// <summary>The distilled sampling contract over a DETECTED architecture config. The 8-step base schedule is shared by every 2.x distilled template. Two-stage is left off: it is opt-in through <c>numerics.ltx2TwoStage</c>, and even then stays 2.5-only (<see cref="TwoStageRefusal"/>), because distilled builds exist for older generations too (2.0's templates ship a 0.909375-head refine; a 2.3 distilled LoRA is documented) and the x2 upsampler is a 2.5 model — running it on 2.3 latents is unverified numerics.</summary>
     internal static LtxVideo2Config ApplyDistilledContract(LtxVideo2Config detected) => detected with
     {
         FixedSigmas = LtxVideo2Config.Ltx25DistilledSigmas,
@@ -372,6 +372,30 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         GuidanceScale = LtxVideo2Config.V25Distilled.GuidanceScale,
         TwoStage = false,
     };
+
+    /// <summary>Why the two-stage refine cannot run on this checkpoint even when asked for, or null when it can. It is
+    /// documented only for the distilled family, and the x2 latent upsampler is an LTX-2.5 model, so an earlier
+    /// generation's distilled build stays single-pass.</summary>
+    /// <remarks>This used to be decided in <see cref="ApplyDistilledContract"/>, which turned two-stage on for 2.5 only.
+    /// Making two-stage opt-in moved the decision to the knob, which applied to any distilled checkpoint, so the 2.5
+    /// check is made here instead.</remarks>
+    internal static string? TwoStageRefusal(LtxVideo2Config config, bool distilled)
+    {
+        if (!distilled)
+        {
+            return "this is not the distilled family — the two-stage sigma schedule and upsample point are only "
+                + "documented for ltx-2.5-distilled";
+        }
+        // The keyframe absolute-position embedding is what LTX-2.5 added to the DiT, and the flag the detected
+        // config carries for it is this recipe's one 2.5 signal (the side-model choice above keys off it too). A later
+        // generation that keeps the embedding would pass here; give it its own check when one ships.
+        if (!config.UseKeyframesAbsPosEmbedding)
+        {
+            return "this is an earlier LTX generation than 2.5 — the x2 latent upsampler is a 2.5 model and is "
+                + "unverified on these latents";
+        }
+        return null;
+    }
 
     /// <summary>Loads the LTX-2.5 learned x2 latent upsampler for the two-stage flow, or returns null when the flow is
     /// off. Two-stage is opt-in because the upsampler is a separate Swarm model, not a required part of the LTX-2.5
@@ -388,10 +412,10 @@ public sealed class LtxVideo2Recipe : IVideoRecipe
         {
             return null;
         }
-        if (!_distilled)
+        string? refusal = TwoStageRefusal(config, _distilled);
+        if (refusal is not null)
         {
-            Logs.Warning("[LtxVideo2Recipe] numerics.ltx2TwoStage is set but this is not the distilled family — "
-                + "the two-stage sigma schedule and upsample point are only documented for ltx-2.5-distilled. Running single-pass.");
+            Logs.Warning($"[LtxVideo2Recipe] numerics.ltx2TwoStage is set but {refusal}. Running single-pass.");
             return null;
         }
         string? named = EngineKnobs.Ltx2Upsampler.Value is { Length: > 0 } n ? n : null;

@@ -52,7 +52,9 @@ hartsy settings set paths.modelsRoot /mnt/models        # persists
 hartsy settings path                                    # which file
 ```
 
-For one run only, without touching the file: `--set id=value` and `--profile <name>`.
+For one run only, without touching the file: `--set id=value` and `--profile <name>`. `--settings-file <path>` points
+one run at a different settings file (read, and written by `settings set`), so a harness's settings stay out of the
+one every HartsyInference process on the machine shares.
 
 **API**:
 

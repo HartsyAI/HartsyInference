@@ -17,7 +17,7 @@ public sealed class Qwen3ModelStoreResolutionTests : IDisposable
 {
     private readonly ITestOutputHelper _output;
 
-    // Reading the knob first lets the settings file load, which would otherwise overwrite the override on first resolve.
+    // The root to put back afterwards. (A Set now loads the settings file itself, so no read is needed before it.)
     private readonly string? _previousRoot = EngineKnobs.ModelsRoot.Value;
 
     public Qwen3ModelStoreResolutionTests(ITestOutputHelper output) => _output = output;

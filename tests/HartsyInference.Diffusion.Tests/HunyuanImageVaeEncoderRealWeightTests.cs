@@ -13,6 +13,8 @@ namespace HartsyInference.Diffusion.Tests;
 /// that mirror is wrong (skip structure, [r1, r2, c] channel order, conv-vs-shuffle ordering), the roundtrip
 /// reconstruction collapses to noise, so a high pixel correlation is a strong architectural check even though a
 /// 32× VAE is far from lossless.</summary>
+[Trait("Category", "Integration")]
+[Trait("Category", "GpuIntegration")]
 public sealed class HunyuanImageVaeEncoderRealWeightTests
 {
     private const string VaePath = "/home/hartsy/Desktop/HartsyInference/Models/VAE/hunyuan_image_2.1_vae_fp16.safetensors";

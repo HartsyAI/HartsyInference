@@ -13,6 +13,7 @@ namespace HartsyInference.Diffusion.Tests;
 /// frame, so these scan T on the REAL token grid (hw = 40x24 = 960, the live 384x640 case) and pin the CUDA splice
 /// to the CPU one at every T. A GPU primitive that is benign at 7 frames and wrong at 21 shows up here and nowhere
 /// in the fixed-T tests.</summary>
+[Trait("Category", "GpuIntegration")]
 public unsafe class WanAnimate2LongSequenceParityTests
 {
     // The live failing geometry: 384x640 → latent 48x80 → token grid 40x24, hw = 960.

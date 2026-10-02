@@ -16,6 +16,7 @@ namespace HartsyInference.LLM.Tests;
 /// bias) is correct — the still-open 2026-07-22 numeric-retrieval bug against the real checkpoint (see
 /// MODEL_STATUS_LLM.md) is therefore isolated to the quantized (Q4_K / <c>--low-vram-quant</c>) compute path,
 /// the only way to run the real 9B checkpoint on a 12 GB card.</summary>
+[Trait("Category", "Integration")]
 public sealed class Glm4SyntheticParityTests
 {
     private readonly ITestOutputHelper _output;
@@ -69,13 +70,21 @@ public sealed class Glm4SyntheticParityTests
     [Fact]
     public void SyntheticGlm4_MatchesHfTransformers_FinalLogits()
     {
-        if (!Directory.Exists(RefDir))
+        // The manifest and meta are committed; the tensors they list are gitignored *.bin dumps, so the folder being
+        // there says nothing about whether the dump was ever run on this machine.
+        if (!Directory.Exists(RefDir) || !File.Exists(Path.Combine(RefDir, "manifest.tsv")))
         {
             _output.WriteLine($"SKIPPED: reference dir not found: {RefDir}. Run dump_glm4_synthetic_ref.py first.");
             return;
         }
-
         Dictionary<string, (long[] Shape, string File)> manifest = LoadManifest(RefDir);
+        string[] missing = [.. manifest.Values.Select(entry => entry.File).Where(file => !File.Exists(Path.Combine(RefDir, file)))];
+        if (missing.Length > 0)
+        {
+            _output.WriteLine($"SKIPPED: {missing.Length} of the {manifest.Count} reference tensors are missing (first: {missing[0]}). "
+                + "Run dump_glm4_synthetic_ref.py first.");
+            return;
+        }
         Dictionary<string, int> meta = LoadMeta(RefDir);
 
         TransformerConfig cfg = new()

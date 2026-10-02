@@ -59,6 +59,7 @@ public sealed unsafe class WanVaeReflectPadKernelTests
     /// <summary>The CUDA kernel must agree with the managed reference on a shape where H != W and T > 1, so a
     /// transposed axis or a mis-strided frame cannot pass. Reflect padding is exact (a gather), so this is
     /// bit-equality, not a tolerance.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ReflectPad_CudaMatchesManagedReference()
     {

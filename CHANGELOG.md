@@ -8,6 +8,32 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: a host's setting can no longer lose to the settings file.** The file is loaded on the first knob read, and
+  that load let other threads through as soon as it started. So a `KnobStore.Set` made on another thread mid-load was
+  overwritten by the rest of the file, and a `Set` made before any read was overwritten by the load that the first
+  read triggered. Hosts worked around it by reading a knob before setting one. Now a read waits for a load in progress
+  to finish. `KnobStore.Set`, `KnobStore.Clear`, `KnobFile.Apply` and `KnobFile.Save` load the file first, so a
+  host's value lands on top in any order. `Save` also stores the value it was given, coerced, instead of reading the
+  knob back. A first-in-process `Save` could otherwise write the file's old value again. A missing explicit
+  settings file or a malformed one now surfaces from the first `Set` as well as from the first read. This was the
+  order-dependent `ModelFolderCaseTests` failure: a temp models root was replaced by the settings file's
+  `paths.modelsRoot`.
+- **Fixed: LTX two-stage refinement is refused on distilled checkpoints older than 2.5, even when
+  `numerics.ltx2TwoStage` asks for it.** The x2 latent upsampler is an LTX-2.5 model. Making two-stage opt-in had
+  moved the decision to the knob, and the knob applied to any distilled checkpoint, so the 2.5-only check that the
+  distilled contract used to make was lost. `LtxVideo2Recipe.TwoStageRefusal` makes it again.
+- **The CPU test lane passes on a machine with no GPU.**
+  - Tagged `GpuIntegration`: the ten test files that construct a CUDA backend with no device check. Seven are in
+    Cuda.Tests (51 cases); the other three are `WanAnimate2*` and `HunyuanImageVaeEncoderRealWeightTests`, which is
+    also tagged `Integration`.
+  - `TestTierLintTests` no longer accepts the `PtxDir()` helper's `Directory.Exists` as a GPU guard, so it now catches
+    tests like these.
+  - `Glm4SyntheticParityTests` is tagged `Integration` and skips unless its gitignored tensors are present.
+  - The YuE Stage-1 prompt tests now expect the `split_lyrics` format that the tokenizer was moved to.
+  - `KnobFileTests` no longer depends on what ran before it.
+  - Two flaky tests were stabilized. `LatencyHistogram`'s allocation check takes the least of three passes. The
+    `TextStreamPump` timing tests run warmed up, on their own.
+
 ## alpha.242
 
 - **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host

@@ -23,7 +23,7 @@ public sealed class ModelFolderCaseTests : IDisposable
     private readonly ITestOutputHelper _output;
     private readonly string _root = Directory.CreateTempSubdirectory("casefix-models-").FullName;
 
-    // Reading the knob first lets the settings file load, which would otherwise overwrite the override on first resolve.
+    // The root to put back afterwards. (A Set now loads the settings file itself, so no read is needed before it.)
     private readonly string? _previousRoot = EngineKnobs.ModelsRoot.Value;
 
     public ModelFolderCaseTests(ITestOutputHelper output)
