@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host
+  Q/K rotation, `Nvfp4Linear`'s BF16 dequant, `VideoRgbFrames.ExtractAllFrames`, the CUDA backend's host W8A8 weight
+  quantization and GPT-OSS's CPU-backend expert loop used raw `Parallel.For` / `Parallel.ForEach`, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`. They now go through `CpuParallel`, `FluxRope` in ranges of 1024
+  vectors through `CpuParallel.ForRanges`. The GPT-OSS loop runs a few lanes (at most half the cores, 8, and the cap),
+  each pulling experts from a shared counter and reusing one pair of dequant slices allocated on its first expert, so
+  slice memory stays bounded as before and the dequant and GEMM inside each expert nest on the same capped scheduler.
+  Outputs are byte-identical at any cap, and no raw `Parallel` loop remains outside `CpuParallel` itself.
 - **Bounded the opt-in prefix-KV reuse (`TextRequest.PrefixCacheKey`) for GPUs shared with other models.** A
   retained KV cache too small for the next request now grows by copying its reusable prefix on device instead of
   being dropped and prefilled again, which also stops a tool round with a large result from re-prefilling the rest
@@ -32,8 +40,7 @@ stable release will require. Dates are UTC.
   every output is byte-identical at any cap. On a host that lowers the cap (the voice host's unit runs with
   `engine.cpuThreadCap: 14`) these now use at most that many threads, so checkpoint conversion and LoRA baking there,
   and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
-  cores than the cap. GPT-OSS's CPU-backend expert loop still wraps its per-expert dequant in a raw
-  `Parallel.ForEach`; a follow-up converts it.
+  cores than the cap.
 - **Audio model switches now size the incoming model before deciding whether to evict.** `AudioRuntime` used to
   unload the other resident audio models on a switch only when free VRAM was under a fixed 3 GiB, so a 6-7 GB model
   arriving with 3-6 GB free evicted nothing: Dia then failed in `PreloadWeights` with `OutOfVramException`, and
@@ -157,6 +164,16 @@ stable release will require. Dates are UTC.
   `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
   produced) when timestamps were requested and the pipeline returned any; the plain-text path is
   unchanged byte-for-byte otherwise.
+- **The phone gateway and voice host moved out of this repo**, to a separate app:
+  [HartsyAI/HartsyPhone](https://github.com/HartsyAI/HartsyPhone). `HartsyInference.PhoneGateway`,
+  `HartsyInference.VoiceHost` and `HartsyInference.PhoneLink` (source, tests, the systemd units and install
+  scripts under `deploy/`, and their research docs) are removed from this repo; the code and its git history
+  continue in the new one, copied as of this engine's `main` at `40c84b69` (alpha.238). `HartsyInference.Voice`
+  and `HartsyInference.Tools` are unaffected and stay here (AudioLab and other consumers still use `Voice`
+  directly, with no phone dependency). **`HartsyInference.PhoneLink` stops publishing to NuGet as of this
+  change**; `publish-nuget.yml`'s EXPECTED package list no longer includes it. SIPSorcery is no longer a
+  dependency of this repo. No version bump for this change alone — see whichever numbered section above
+  is first to ship after it for the actual release this landed in.
 - **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
   `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
   not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
@@ -176,6 +193,17 @@ stable release will require. Dates are UTC.
   `finished_step_Bx` accounting shows the sequence forced to the cap at step ~1704 -- and Whisper
   transcribes its output as `[Music]` too. Same inputs, same failure, in the reference implementation;
   nothing in the C# port's conditioning, CFG, delay pattern, or EOS rule is implicated.
+- **cuDNN backend-graph engines marked `CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC` are now skipped by
+  default (`numerics.cudnnDeterministic`, default ON).** Root cause of issue #20 (Chatterbox/CosyVoice2/
+  Piper producing different HiFT-vocoder output on identical repeated calls): cuDNN's heuristic search
+  picks engine 25 on this box for the last `ConvTranspose1d` upsample stage, an atomic-accumulation
+  reduction whose float summation order varies run to run. `CudnnPlanSearch.BuildExecutionPlan` now reads
+  each candidate's numerical note and skips a nondeterministic one for the next, falling through to the
+  existing direct-kernel fallback if every candidate is nondeterministic. Measured zero cost and full
+  reproducibility on Chatterbox/CosyVoice2/Piper/Kokoro (3060) and on Krea2-Turbo/Z-Image-Turbo (4090,
+  cross-arm byte-identical output on both) — see the PR for both tables. The nondeterminism log line and
+  its dedup key now carry a caller-supplied shape signature (op/Cin/Cout/kernel/stride/dtype for conv,
+  op/batch/heads/seqlen/headdim/dtype for SDPA) instead of just the engine index.
 - **Fixed the `krea2` and `zimage` catalog entries' local target paths.** Both always reported "needs 1
   file(s) not on disk" even though the real checkpoint was present, because `TargetSubdir`/`TargetName`
   didn't match where the file actually landed: `krea2` was missing a `/Turbo` segment, and `zimage`

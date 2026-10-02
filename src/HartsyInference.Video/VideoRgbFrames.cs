@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Video;
@@ -16,7 +17,8 @@ public static unsafe class VideoRgbFrames
     {
         _ = rgb.DataPointer;
         byte[][] frames = new byte[(int)rgb.Shape[2]][];
-        System.Threading.Tasks.Parallel.For(0, frames.Length, i => frames[i] = ExtractFrame(rgb, i));
+        long work = (long)frames.Length * rgb.Shape[3] * rgb.Shape[4] * 3 * 4;
+        CpuParallel.For(frames.Length, work, i => frames[i] = ExtractFrame(rgb, i));
         return frames;
     }
 
