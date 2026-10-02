@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: a large `NativeBuffer`'s zero-fill no longer bypasses the process CPU thread cap.** Buffers of 8 MB and
+  up were zeroed with a raw `Parallel.For` sized by `Environment.ProcessorCount` on the shared thread pool, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`, so one big allocation on any thread could take every core
+  from the voice front end's real-time audio thread. The fill now goes through `CpuParallel.For` in fixed 2 MB
+  chunks whose count depends only on the size: inside an `InlineScope` it runs on the calling thread, and the cap
+  bounds how many threads clear at once. Smaller buffers still clear inline, and the memory is zeroed exactly as
+  before.
 - **Kokoro stops a cancelled synthesis at its next stage instead of finishing the sentence.**
   `KokoroPipeline.Synthesize`/`SynthesizeFromStyle` and `KokoroIStftNetDecoder.Forward` take a `CancellationToken`
   and check it at twelve stage boundaries — before any device work, after PLBERT, the text encoder, the duration
