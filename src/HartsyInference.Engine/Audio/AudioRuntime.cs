@@ -24,10 +24,6 @@ internal sealed class AudioRuntime
     /// <summary>VRAM each model's latest load left in use, by <see cref="AudioJob.ModelKey"/>. Only touched under <see cref="_genLock"/>.</summary>
     private readonly Dictionary<string, long> _learnedBytes = new(StringComparer.Ordinal);
 
-    /// <summary>Non-zero on-disk weight sizes already computed, by <see cref="AudioJob.ModelKey"/>, so a model's files are
-    /// sized once. A zero is not kept: the files may only not be downloaded yet. Only touched under <see cref="_genLock"/>.</summary>
-    private readonly Dictionary<string, long> _estimatedBytes = new(StringComparer.Ordinal);
-
     /// <summary>Open runner leases; <see cref="UnloadAll"/> revokes them before it drops their runners.</summary>
     private readonly List<AudioRunnerLease> _leases = [];
     private readonly object _leaseLock = new();
@@ -367,26 +363,9 @@ internal sealed class AudioRuntime
             return 0;
         }
         _learnedBytes.TryGetValue(job.ModelKey, out long learned);
-        return Math.Max(learned, EstimatedBytes(job));
-    }
-
-    /// <summary>The job's on-disk weight size, remembered once it is non-zero.</summary>
-    private long EstimatedBytes(AudioJob job)
-    {
-        if (job.EstimateWeightBytes is null)
-        {
-            return 0;
-        }
-        if (_estimatedBytes.TryGetValue(job.ModelKey, out long known))
-        {
-            return known;
-        }
-        long bytes = Math.Max(0, job.EstimateWeightBytes());
-        if (bytes > 0)
-        {
-            _estimatedBytes[job.ModelKey] = bytes;
-        }
-        return bytes;
+        // Sized afresh each time: it runs only for a model that is not loaded, and a file replaced since is then seen.
+        long onDisk = job.EstimateWeightBytes is null ? 0 : Math.Max(0, job.EstimateWeightBytes());
+        return Math.Max(learned, onDisk);
     }
 
     /// <summary>Drops every resident runner but the job's own and the pinned ones, then forces their device memory back:
@@ -464,6 +443,8 @@ internal sealed class AudioRuntime
         (long freeBytes, long totalBytes) = SafeVramInfo(backend);
         if (totalBytes > 0)
         {
+            // Free VRAM is device-wide, so another process allocating or freeing meanwhile moves this figure too; it
+            // never lowers the on-disk estimate (EstimateNeedBytes), and this model's next load measures it again.
             long held = Math.Max(0, probe.FreeBytes - freeBytes);
             _learnedBytes[job.ModelKey] = held;
             Logs.Debug($"[Audio] Loading '{job.ModelKey}' left {ByteFormat.GbF1(held)} of VRAM in use.");
