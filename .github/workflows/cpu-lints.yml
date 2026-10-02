@@ -9,7 +9,8 @@ name: CPU lints
 
 on:
   pull_request:
-    paths: ['src/**', 'tests/**', '.github/workflows/cpu-lints.yml']
+    # The root build inputs too: a change to them can break the Core.Tests build without touching src or tests.
+    paths: ['src/**', 'tests/**', 'Directory.*', '*.sln', '.github/workflows/cpu-lints.yml']
   workflow_dispatch:
 
 permissions:
