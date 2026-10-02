@@ -117,6 +117,8 @@ public sealed class HostFanOutScheduleTests
     [Fact]
     public void GptOssPackedExperts_GiveTheSameBits_UnderEverySchedule_AndAgreeWithTheDenseExperts()
     {
+        // 48 routed slots × hidden 128 × 2·intermediate 128 × 3 ≈ 2.4 M operations, far over CpuParallel's 64 k
+        // threshold, so the default schedule really runs the lanes in parallel.
         const int hidden = 128, intermediate = 64, experts = 16, topK = 2, tokens = 24;
         Random rng = new(19);
         Dictionary<string, Tensor> packedWeights = new()

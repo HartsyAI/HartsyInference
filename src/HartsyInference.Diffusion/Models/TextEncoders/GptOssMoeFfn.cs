@@ -294,7 +294,8 @@ public sealed unsafe class GptOssMoeFfn
                 // counter. The lane count bounds slice memory as before and the numerics.cpuThreads cap bounds it
                 // too; the lanes and the dequant and GEMM fan-outs nested in them all run on CpuParallel's one
                 // capped scheduler. Which lane runs an expert cannot change the output, because each (token,
-                // slot) contribution row belongs to exactly one expert.
+                // slot) contribution row belongs to exactly one expert. Not every lane is guaranteed a worker of
+                // its own: one that starts after the counter is drained finds nothing and exits.
                 int lanes = Math.Min(activeExperts.Count,
                     Math.Min(Math.Clamp(Environment.ProcessorCount / 2, 1, 8), CpuParallel.MaxThreads));
                 int next = -1;
