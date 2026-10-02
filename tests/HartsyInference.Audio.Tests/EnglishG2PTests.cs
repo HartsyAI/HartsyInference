@@ -12,10 +12,15 @@ public sealed class EnglishG2PTests
     [Fact]
     public void ArpabetToIpa_MapsPhonesAndStress()
     {
-        Assert.Equal("həlˈoʊ", ArpabetToIpa.ConvertWord(["HH", "AH0", "L", "OW1"]));
+        // OW1 → "O": Kokoro/StyleTTS2 (StyleTts2Symbols.Symbols) were trained on misaki's single-character
+        // diphthong tokens (A/I/W/O/Y for eɪ/aɪ/aʊ/oʊ/ɔɪ; see docs/Research/G2P_PHONEMIZATION.md and misaki's
+        // EN_PHONES.md), not the decomposed IPA "oʊ" — ArpabetToIpa.Vowels maps OW there deliberately.
+        Assert.Equal("həlˈO", ArpabetToIpa.ConvertWord(["HH", "AH0", "L", "OW1"]));
         Assert.Equal("kˈæt", ArpabetToIpa.ConvertWord(["K", "AE1", "T"]));
         Assert.Equal("ə", ArpabetToIpa.ConvertWord(["AH0"]));   // reduced schwa
-        Assert.Equal("ˈɝ", ArpabetToIpa.ConvertWord(["ER1"]));  // stressed r-colored vowel
+        // ER1 → "ɜɹ": misaki writes r-colored vowels as vowel+ɹ, not the single ɝ/ɚ glyphs (ArpabetToIpa.MapBase's
+        // own citation) — both "ɜ" and "ɹ" are themselves valid StyleTts2Symbols entries, but not in this combination.
+        Assert.Equal("ˈɜɹ", ArpabetToIpa.ConvertWord(["ER1"])); // stressed r-colored vowel, misaki decomposition
         Assert.Equal("ˌɛ", ArpabetToIpa.ConvertWord(["EH2"]));  // secondary stress
     }
 
@@ -25,8 +30,11 @@ public sealed class EnglishG2PTests
     [Fact]
     public void ToIpa_KnownWords_FromDict_WithPunctuation()
     {
+        // Sentence punctuation is deliberately ATTACHED to the preceding word with no space (EnglishG2P.ToIpa's
+        // own citation: misaki writes "dˈɔɡ.", and dropping it ran adjacent sentences together). "," and "!"
+        // are themselves valid StyleTts2Symbols entries, so Kokoro (ToIpa's only production caller) consumes them.
         EnglishG2P g2p = Dict(";;; header\nhello HH AH0 L OW1\nworld W ER1 L D\n");
-        Assert.Equal("həlˈoʊ wˈɝld", g2p.ToIpa("Hello, world!"));
+        Assert.Equal("həlˈO, wˈɜɹld!", g2p.ToIpa("Hello, world!"));
         Assert.Equal(2, g2p.WordCount);
     }
 

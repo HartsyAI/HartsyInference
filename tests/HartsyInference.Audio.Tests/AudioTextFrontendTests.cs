@@ -40,12 +40,36 @@ public sealed class AudioTextFrontendTests
         return HfTokenizerJson.LoadByteLevelBpe(json);
     }
 
+    // <|begin_of_text|> / <|end_of_text|> (meta-llama/Llama-3.1 tokenizer_config.json) — mirrors the private
+    // constants in AudioTextFrontend so these expectations can state the wrap explicitly.
+    private const int Llama3Bos = 128000;
+    private const int Llama3Eos = 128001;
+
+    private static int[] Prepend(int token, int[] ids)
+    {
+        int[] outp = new int[ids.Length + 1];
+        outp[0] = token;
+        Array.Copy(ids, 0, outp, 1, ids.Length);
+        return outp;
+    }
+
+    private static int[] BosEosWrap(int[] ids)
+    {
+        int[] outp = new int[ids.Length + 2];
+        outp[0] = Llama3Bos;
+        Array.Copy(ids, 0, outp, 1, ids.Length);
+        outp[^1] = Llama3Eos;
+        return outp;
+    }
+
     [Fact]
     public void OrpheusText_PrependsVoicePrefix_MatchesLlamaBpe()
     {
         GgufTokenizer? llama = TryLlama();
         if (llama is null) return;
-        int[] expected = llama.EncodeOrdinary("tara: hello world");
+        // Reference orpheus_tts._format_prompt tokenizes "{voice}: {text}" with add_special_tokens=True — a
+        // leading BOS (AudioTextFrontend.OrpheusText's own citation: omitting it left the model unconditioned).
+        int[] expected = Prepend(Llama3Bos, llama.EncodeOrdinary("tara: hello world"));
 
         int[] ids = AudioTextFrontend.OrpheusText("hello world", "tara");
 
@@ -58,7 +82,9 @@ public sealed class AudioTextFrontendTests
     {
         GgufTokenizer? llama = TryLlama();
         if (llama is null) return;
-        int[] bare = llama.EncodeOrdinary("hello world");
+        // An empty voice drops the "{voice}: " prefix, but BOS is unconditional — "bare" means no voice prefix,
+        // not no BOS.
+        int[] bare = Prepend(Llama3Bos, llama.EncodeOrdinary("hello world"));
 
         int[] withVoice = AudioTextFrontend.OrpheusText("hello world", "tara");
         int[] noVoice = AudioTextFrontend.OrpheusText("hello world", "");
@@ -68,15 +94,28 @@ public sealed class AudioTextFrontendTests
     }
 
     [Fact]
-    public void CsmText_IsPlainLlamaBpe()
+    public void CsmText_WrapsSpeakerTaggedTextWithBosEos()
     {
         GgufTokenizer? llama = TryLlama();
         if (llama is null) return;
-        int[] expected = llama.EncodeOrdinary("the quick brown fox");
+        // SesameAILabs/csm generator.py _tokenize_text_segment: f"[{speaker}]{text}", Llama-3 BPE, then the
+        // reference tokenizer's own BOS/EOS TemplateProcessing wrap (AudioTextFrontend.CsmText's own citation).
+        int[] expected = BosEosWrap(llama.EncodeOrdinary("[0]the quick brown fox"));
 
         int[] ids = AudioTextFrontend.CsmText("the quick brown fox");
 
         Assert.NotEmpty(ids);
         Assert.Equal(expected, ids);
+    }
+
+    [Fact]
+    public void CsmText_SpeakerIdChangesTheIdStream()
+    {
+        GgufTokenizer? llama = TryLlama();
+        if (llama is null) return;
+        int[] speaker0 = AudioTextFrontend.CsmText("hello", speaker: 0);
+        int[] speaker1 = AudioTextFrontend.CsmText("hello", speaker: 1);
+
+        Assert.NotEqual(speaker0, speaker1); // "[0]" vs "[1]" changes the BPE'd prefix, not just a label
     }
 }
