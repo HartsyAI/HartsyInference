@@ -78,6 +78,12 @@ stable release will require. Dates are UTC.
   this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
   an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
   the list held from an earlier iteration in place, and the dispatch loop below re-fired it a second time.
+- **`hartsy transcribe --timestamps` now prints the actual timestamps.** The flag only ever changed a
+  "segments N" count in the footer; the transcript text itself was identical with or without it, since
+  `TranscribeAsync` never read anything from `TranscriptResult.Words` but its `Count`. It now renders one
+  `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
+  produced) when timestamps were requested and the pipeline returned any; the plain-text path is
+  unchanged byte-for-byte otherwise.
 
 ## alpha.241
 

@@ -347,7 +347,9 @@ public static class GenerationDispatch
         GeneratedArtifact artifact = new GeneratedArtifact
         {
             Kind = ArtifactKind.Text,
-            Text = result.Text.Trim(),
+            // Words is populated only when the request asked for word timestamps or diarization: one
+            // "[start --> end]" line per word or segment then, the plain transcript otherwise.
+            Text = result.Words is { Count: > 0 } timedWords ? FormatTimestamps(timedWords) : result.Text.Trim(),
             Extension = "txt",
         };
         artifact.Meta["audio"] = path;
@@ -357,6 +359,23 @@ public static class GenerationDispatch
             artifact.Meta["segments"] = words.Count.ToString(CultureInfo.InvariantCulture);
         }
         return artifact;
+    }
+
+    /// <summary>One <c>[start --> end]  text</c> line per word/segment, seconds to 3 decimals.</summary>
+    internal static string FormatTimestamps(IReadOnlyList<WordSegment> words)
+    {
+        StringBuilder sb = new();
+        foreach (WordSegment w in words)
+        {
+            string word = w.Word.Trim();
+            if (word.Length == 0)
+            {
+                continue;
+            }
+            sb.Append('[').Append(w.Start.ToString("F3", CultureInfo.InvariantCulture)).Append("s --> ")
+              .Append(w.End.ToString("F3", CultureInfo.InvariantCulture)).Append("s]  ").Append(word).Append('\n');
+        }
+        return sb.ToString().TrimEnd('\n');
     }
 
     /// <summary>Embed / detect / segment through <see cref="IVisionService"/>; the CLI's "prompt" is the image path.</summary>
