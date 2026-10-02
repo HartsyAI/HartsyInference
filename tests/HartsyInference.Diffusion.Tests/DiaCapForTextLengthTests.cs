@@ -5,32 +5,66 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Unit coverage for <c>DiaTtsModel.Session.CapForTextLength</c> — the floor, the factor, and the one
 /// property the short-prompt fix depends on: it never raises <c>requested</c>, only ever tightens it. See PR
-/// #230 for the empirical evidence behind the 12 frames/char factor and the 200-frame floor.</summary>
+/// #230 for the empirical evidence behind <see cref="DiaTtsModel.Session.FramesPerChar"/> and the 200-frame
+/// floor. The floor/factor boundary cases below derive their <c>textLength</c> from the live constants (not a
+/// hardcoded literal), so retuning <c>FramesPerChar</c> can't silently break them the way the first version of
+/// this file did.</summary>
 public sealed class DiaCapForTextLengthTests
 {
+    private const int MinFrames = DiaTtsModel.Session.MinFrames;
+    private const int FramesPerChar = DiaTtsModel.Session.FramesPerChar;
+
+    /// <summary>The largest textLength whose factor estimate (<c>textLength * FramesPerChar</c>) still falls
+    /// at or under <see cref="MinFrames"/> -- i.e. the floor/factor boundary, from below.</summary>
+    private const int LargestFloorLength = MinFrames / FramesPerChar;
+
+    /// <summary>The largest textLength whose factor estimate still falls at or under the 1720 default --
+    /// i.e. the factor/default-ceiling boundary, from below. A textLength here uses the factor, not the
+    /// floor (<see cref="LargestFloorLength"/> < this, for any floor/factor/ceiling combination where the
+    /// floor is reachable by the factor at all) and not the ceiling (<see cref="NeverRaisesRequested"/>
+    /// covers that edge separately).</summary>
+    private const int LargestMidRangeLength = 1720 / FramesPerChar;
+
     [Theory]
     [InlineData(1)]
     [InlineData(5)]
-    [InlineData(16)] // 16 * 12 = 192, still under the 200 floor.
+    [MemberData(nameof(FloorBoundaryLength))]
     public void ShortTextHitsTheFloor_NotTheFactor(int textLength)
     {
         int result = DiaTtsModel.Session.CapForTextLength(requested: 1720, textLength);
 
-        Assert.Equal(DiaTtsModel.Session.MinFrames, result);
+        Assert.Equal(MinFrames, result);
+    }
+
+    public static IEnumerable<object[]> FloorBoundaryLength()
+    {
+        yield return new object[] { LargestFloorLength };
     }
 
     [Theory]
-    [InlineData(17)] // 17 * 12 = 204, just over the floor.
-    [InlineData(100)]
-    [InlineData(143)] // 143 * 12 = 1716, just under the 1720 default.
+    [MemberData(nameof(JustOverFloorLength))]
+    [MemberData(nameof(MidRangeLength))]
     public void MidLengthTextUsesTheFramesPerCharFactor(int textLength)
     {
-        int expected = textLength * DiaTtsModel.Session.FramesPerChar;
+        int expected = textLength * FramesPerChar;
 
         int result = DiaTtsModel.Session.CapForTextLength(requested: 1720, textLength);
 
         Assert.Equal(expected, result);
-        Assert.True(expected > DiaTtsModel.Session.MinFrames, "test is only meaningful above the floor.");
+        Assert.True(expected > MinFrames, "test is only meaningful above the floor.");
+        Assert.True(expected < 1720, "test is only meaningful below the default requested ceiling.");
+    }
+
+    public static IEnumerable<object[]> JustOverFloorLength()
+    {
+        yield return new object[] { LargestFloorLength + 1 };
+    }
+
+    public static IEnumerable<object[]> MidRangeLength()
+    {
+        // The midpoint between the two boundaries, so it stays comfortably mid-range for any
+        // floor/factor combination rather than sitting right against either edge.
+        yield return new object[] { (LargestFloorLength + LargestMidRangeLength) / 2 };
     }
 
     [Theory]

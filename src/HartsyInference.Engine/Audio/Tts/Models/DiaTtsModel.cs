@@ -59,10 +59,11 @@ internal static class DiaTtsModel
     /// <summary><c>internal</c> (not <c>private</c>) so <see cref="CapForTextLength"/> is unit-testable.</summary>
     internal sealed class Session(DiaPipeline pipeline)
     {
-        /// <summary>Dia's own generation frame rate is ~86 Hz (DAC 44.1 kHz, hop 512); conversational speech runs
-        /// roughly 12-15 chars/second, so ~1 frame/char already covers it and this is 12x that -- generous
-        /// headroom, not a tight fit.</summary>
-        internal const int FramesPerChar = 12;
+        /// <summary>1.5x the max observed genuine-EOS frames/char across 8 real prompts (see the PR body for
+        /// the table) -- the max was a non-ASCII prompt at 13.126 fpc, confirmed as real full-duration speech
+        /// via a second, language-correct Whisper pass. Only binds (produces less than the 1720 default) for
+        /// text under ~86 chars; above that, this factor's own estimate already exceeds 1720.</summary>
+        internal const int FramesPerChar = 20;
 
         /// <summary>Floor so a one-word prompt still gets a few real seconds rather than being clipped mid-word.</summary>
         internal const int MinFrames = 200;
