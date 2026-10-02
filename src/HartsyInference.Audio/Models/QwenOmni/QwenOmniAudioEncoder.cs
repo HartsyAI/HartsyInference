@@ -6,7 +6,7 @@ namespace HartsyInference.Audio.Models.QwenOmni;
 
 /// <summary>Qwen2.5-Omni thinker audio tower: per-chunk conv stem, block-diagonal Whisper layers, 2x pool, ln_post and the LLM projection.</summary>
 /// <remarks>Mel frames split into <c>2 * NWindow</c>-frame chunks that are convolved and attended independently (a short tail chunk at its own length) with positions restarting at 0; the outputs are concatenated, pooled by 2 over the whole sequence, normed and projected.</remarks>
-public sealed unsafe class QwenOmniAudioEncoder
+public sealed unsafe class QwenOmniAudioEncoder : IDisposable
 {
     private readonly QwenOmniConfig _cfg;
     private readonly WhisperConfig _layerCfg;
@@ -23,6 +23,7 @@ public sealed unsafe class QwenOmniAudioEncoder
     private Tensor? _projBias;
     private bool _loaded;
     private int _streamWarned;
+    private int _disposed;
 
     /// <summary>Creates the tower with generated sinusoidal positions and no weights; call <see cref="LoadWeights"/>.</summary>
     public QwenOmniAudioEncoder(QwenOmniConfig cfg)
@@ -259,5 +260,14 @@ public sealed unsafe class QwenOmniAudioEncoder
         }
         Tensor flat = hidden.Reshape(new TensorShape((long)count * convLength, d));
         return flat;
+    }
+
+    /// <summary>Releases the sinusoidal position table allocated by the constructor. Weight tensors (cast or pass-through) are owned by <see cref="LoadWeights"/>'s caller.</summary>
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            _positions.Dispose();
+        }
     }
 }

@@ -293,5 +293,6 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         _vaeEncoder?.Dispose();
         _stats?.Dispose();
         _lm.Dispose();
+        _tower.Dispose();
     }
 }

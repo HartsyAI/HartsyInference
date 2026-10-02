@@ -45,26 +45,40 @@ internal static class AukModel
             string repo = ResolveRepo(variant);
             (IReadOnlyDictionary<string, Tensor> omni, IDisposable[] omniLoaders) =
                 await AudioCheckpoints.LoadAsync(OmniRepo, "tts", cancel, OmniKeyPrefixes).ConfigureAwait(false);
-            IReadOnlyDictionary<string, string> fetched = await AudioModelCache.FetchAllAsync(repo,
-                [new AudioModelFile(TokenizerFile, Sha256: TokenizerSha256, Repo: OmniRepo), new AudioModelFile(VaeFile, Repo: AukRepo), new AudioModelFile(CheckpointFile(variant))],
-                "tts", ct: cancel).ConfigureAwait(false);
-
-            SafeTensorsLoader aukLoader = new SafeTensorsLoader();
-            aukLoader.Load(fetched[CheckpointFile(variant)]);
-            SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
-            vaeLoader.Load(fetched[VaeFile]);
-            GgufTokenizer tokenizer;
-            using (FileStream stream = File.OpenRead(fetched[TokenizerFile]))
+            List<IDisposable> owned = [.. omniLoaders];
+            try
             {
-                tokenizer = HfTokenizerJson.LoadByteLevelBpe(stream);
+                IReadOnlyDictionary<string, string> fetched = await AudioModelCache.FetchAllAsync(repo,
+                    [new AudioModelFile(TokenizerFile, Sha256: TokenizerSha256, Repo: OmniRepo), new AudioModelFile(VaeFile, Repo: AukRepo), new AudioModelFile(CheckpointFile(variant))],
+                    "tts", ct: cancel).ConfigureAwait(false);
+
+                SafeTensorsLoader aukLoader = new SafeTensorsLoader();
+                owned.Add(aukLoader);
+                aukLoader.Load(fetched[CheckpointFile(variant)]);
+                SafeTensorsLoader vaeLoader = new SafeTensorsLoader();
+                owned.Add(vaeLoader);
+                vaeLoader.Load(fetched[VaeFile]);
+                GgufTokenizer tokenizer;
+                using (FileStream stream = File.OpenRead(fetched[TokenizerFile]))
+                {
+                    tokenizer = HfTokenizerJson.LoadByteLevelBpe(stream);
+                }
+
+                AukPipeline pipeline = new AukPipeline(repo, flash, tokenizer.EncodeOrdinary);
+                owned.Add(pipeline);
+                pipeline.LoadWeights(aukLoader.GetAllTensors(), vaeLoader.GetAllTensors(), omni);
+                Logs.Info($"[Audio][AuK] Loaded {repo} ({(flash ? "Flash: 4 steps, no guidance" : "base: 32 steps, guided")}; Qwen2.5-Omni-3B encoder, 24 kHz).");
+
+                return new TtsRunner(pipeline.SampleRate, (backend, job) => Synthesize(pipeline, backend, job), [.. owned]);
             }
-
-            AukPipeline pipeline = new AukPipeline(repo, flash, tokenizer.EncodeOrdinary);
-            pipeline.LoadWeights(aukLoader.GetAllTensors(), vaeLoader.GetAllTensors(), omni);
-            Logs.Info($"[Audio][AuK] Loaded {repo} ({(flash ? "Flash: 4 steps, no guidance" : "base: 32 steps, guided")}; Qwen2.5-Omni-3B encoder, 24 kHz).");
-
-            IDisposable?[] keep = [pipeline, aukLoader, vaeLoader, .. omniLoaders];
-            return new TtsRunner(pipeline.SampleRate, (backend, job) => Synthesize(pipeline, backend, job), keep);
+            catch
+            {
+                foreach (IDisposable loaded in owned)
+                {
+                    loaded.Dispose();
+                }
+                throw;
+            }
         },
     };
 
