@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Numerics;
 
 namespace HartsyInference.Core.Tensors;
 
@@ -80,28 +81,35 @@ public static unsafe class Int8ConvRotCodec
         bool perTensor = rowScale.ElementCount == 1;
         ushort* destination = (ushort*)result.DataPointer;
 
-        Parallel.For(0, (int)outFeatures, () => new float[inFeatures], (row, _, scratch) =>
+        CpuParallel.For((int)outFeatures, outFeatures * inFeatures * 4, row =>
         {
-            sbyte* sourceRow = source + row * inFeatures;
-            float scale = perTensor ? scales[0] : scales[row];
-            for (long column = 0; column < inFeatures; column++)
+            float[] scratch = ArrayPool<float>.Shared.Rent((int)inFeatures);
+            try
             {
-                scratch[column] = sourceRow[column] * scale;
-            }
-            if (convRotGroupSize > 0)
-            {
-                fixed (float* p = scratch)
+                sbyte* sourceRow = source + row * inFeatures;
+                float scale = perTensor ? scales[0] : scales[row];
+                for (long column = 0; column < inFeatures; column++)
                 {
-                    ApplyRotation(p, (int)inFeatures, convRotGroupSize);
+                    scratch[column] = sourceRow[column] * scale;
+                }
+                if (convRotGroupSize > 0)
+                {
+                    fixed (float* p = scratch)
+                    {
+                        ApplyRotation(p, (int)inFeatures, convRotGroupSize);
+                    }
+                }
+                ushort* destinationRow = destination + row * inFeatures;
+                for (long column = 0; column < inFeatures; column++)
+                {
+                    destinationRow[column] = TensorCasts.F32ToBf16Bits(scratch[column]);
                 }
             }
-            ushort* destinationRow = destination + row * inFeatures;
-            for (long column = 0; column < inFeatures; column++)
+            finally
             {
-                destinationRow[column] = TensorCasts.F32ToBf16Bits(scratch[column]);
+                ArrayPool<float>.Shared.Return(scratch);
             }
-            return scratch;
-        }, static _ => { });
+        });
         return result;
     }
 
@@ -135,7 +143,7 @@ public static unsafe class Int8ConvRotCodec
             float* source = (float*)values.DataPointer;
             sbyte* destination = (sbyte*)quantized.DataPointer;
             float* scales = (float*)rowScale.DataPointer;
-            Parallel.For(0, (int)rows, row =>
+            CpuParallel.For((int)rows, rows * columns * 4, row =>
             {
                 Span<float> rowSpan = new Span<float>(source + row * columns, (int)columns);
                 if (convRotGroupSize > 0)

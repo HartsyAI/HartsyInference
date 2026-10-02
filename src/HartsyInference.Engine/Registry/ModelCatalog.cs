@@ -1134,7 +1134,7 @@ public static class ModelCatalog
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "unsloth/orpheus-3b-0.1-ft", RepoPath = "model.safetensors", TargetSubdir = "Audio/Orpheus", Role = "transformer" },
-                    new() { Repo = "hubertsiuzdak/snac_24khz", RepoPath = "model.safetensors", TargetSubdir = "Audio/Orpheus", Role = "codec" },
+                    new() { Repo = "hubertsiuzdak/snac_24khz", RepoPath = "pytorch_model.bin", TargetSubdir = "Audio/Orpheus", Role = "codec" },
                 },
             },
             new CatalogEntry

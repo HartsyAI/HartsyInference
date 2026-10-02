@@ -88,7 +88,7 @@ public sealed class VoiceHostWarmUpTests
 
         public string Transcribe(float[] audio) => "";
 
-        public float[] Synthesize(string text) => new float[160];
+        public float[] Synthesize(string text, CancellationToken cancel) => new float[160];
 
         public void Reopen()
         {

@@ -62,7 +62,11 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
     public ISequenceState? ResizeSequenceState(ISequenceState state, int capacity) =>
         state is FixedKvCache cache ? cache.CopyWithCapacity(capacity) : null;
 
-    public Tensor Prefill(in PrefillChunk chunk, ISequenceState state)
+    public Tensor Prefill(in PrefillChunk chunk, ISequenceState state) => Prefill(chunk, state, CancellationToken.None);
+
+    /// <summary>Stops between transformer layers (across every stage of a layer-split placement) once
+    /// <paramref name="cancel"/> is signalled; see <see cref="IGenerationModel.Prefill(in PrefillChunk, ISequenceState, CancellationToken)"/>.</summary>
+    public Tensor Prefill(in PrefillChunk chunk, ISequenceState state, CancellationToken cancel)
     {
         IKvCache cache = AsKvCache(state);
         ReadOnlySpan<int> tokenIds = chunk.TokenIds.Span;
@@ -71,14 +75,14 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         if (chunk.Embeds is not null)
         {
             hidden = Staged
-                ? _transformer.ForwardEmbedsStaged(_placement!, chunk.Embeds, t, chunk.PosStart, cache, tokenIds)
-                : _transformer.ForwardEmbeds(_backend, chunk.Embeds, t, chunk.PosStart, cache, tokenIds: tokenIds);
+                ? _transformer.ForwardEmbedsStaged(_placement!, chunk.Embeds, t, chunk.PosStart, cache, tokenIds, cancel: cancel)
+                : _transformer.ForwardEmbeds(_backend, chunk.Embeds, t, chunk.PosStart, cache, tokenIds: tokenIds, cancel: cancel);
         }
         else
         {
             hidden = Staged
-                ? _transformer.ForwardStaged(_placement!, tokenIds, chunk.PosStart, cache)
-                : _transformer.Forward(_backend, tokenIds, chunk.PosStart, cache);
+                ? _transformer.ForwardStaged(_placement!, tokenIds, chunk.PosStart, cache, cancel)
+                : _transformer.Forward(_backend, tokenIds, chunk.PosStart, cache, cancel);
         }
         if (!chunk.LastRowOnly || t <= 1) return hidden;
 

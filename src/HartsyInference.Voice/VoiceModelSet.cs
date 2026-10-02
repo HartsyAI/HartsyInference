@@ -80,8 +80,9 @@ public sealed class VoiceModelSet : IAsyncDisposable
     /// <summary>Recognizes one utterance; GPU thread only.</summary>
     internal string Transcribe(float[] audio) => _speech.Transcribe(audio);
 
-    /// <summary>Synthesizes one sentence; GPU thread only.</summary>
-    internal float[] Synthesize(string text) => _speech.Synthesize(text);
+    /// <summary>Synthesizes one sentence, stopping at the synthesizer's next stage once <paramref name="cancel"/> is
+    /// signalled; GPU thread only.</summary>
+    internal float[] Synthesize(string text, CancellationToken cancel) => _speech.Synthesize(text, cancel);
 
     /// <summary>A VAD instance for one session; it carries that session's recurrent state.</summary>
     internal IVadModel CreateVadModel() => _createVad();
@@ -280,7 +281,7 @@ public sealed class VoiceModelSet : IAsyncDisposable
             synthesized[i] = await Gpu.RunAsync(VoiceGpuJobKind.Warm, () =>
             {
                 long started = Stopwatch.GetTimestamp();
-                float[] audio = _speech.Synthesize(sentence);
+                float[] audio = _speech.Synthesize(sentence, cancel);
                 return (Stopwatch.GetElapsedTime(started).TotalMilliseconds, audio.Length / (double)_speech.SynthesisSampleRate);
             }, cancel).ConfigureAwait(false);
         }

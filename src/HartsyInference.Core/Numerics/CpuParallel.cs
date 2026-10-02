@@ -41,9 +41,11 @@ public static class CpuParallel
     // oversubscribe the machine — which is the exact situation this exists to prevent, since the CPU device gate
     // is a no-op and those two really do overlap. A shared scheduler caps their combined concurrency.
     //
-    // Rebuilt when the knob changes, because the limit is fixed at construction. Nesting note: no kernel here
-    // calls into another one's parallel region (Conv2D reaches MatMul through a serial batch loop), and
-    // Parallel.For can inline work on the calling thread, so a capped scheduler does not deadlock this code.
+    // Rebuilt when the knob changes, because the limit is fixed at construction. Nesting: no kernel calls into another
+    // kernel's parallel region (Conv2D reaches MatMul through a serial batch loop), but a body that allocates a
+    // NativeBuffer of 8 MB or more, or casts a tensor of 2^20 elements or more, fans that zero-fill or cast out through
+    // here. A loop started on one of this scheduler's own threads may run its queued work inline there, so nesting does
+    // not wedge it; NativeBufferZeroFillTests and TensorCastScheduleTests hold that.
     private static readonly object _schedulerLock = new();
     private static ConcurrentExclusiveSchedulerPair? _schedulerPair;
     private static int _schedulerLimit;
@@ -134,6 +136,32 @@ public static class CpuParallel
         ForParallel(count, threads, state, body);
     }
 
+    /// <summary>Runs <paramref name="body"/>(start, length, state) over <c>[0, <paramref name="count"/>)</c> cut into
+    /// ranges of <paramref name="rangeLength"/> elements, the last one shorter, through <see cref="For{TState}"/>.</summary>
+    /// <remarks>The ranges depend on <paramref name="count"/> and <paramref name="rangeLength"/> alone, never on the core
+    /// count or the cap, so a body that writes only its own range gives the same result however the ranges are
+    /// scheduled. That is what keeps an elementwise cast or a max reduction byte-identical at any cap.</remarks>
+    /// <param name="workPerElement">Scalar operations per element, weighed against <see cref="MinWorkForParallel"/>.</param>
+    /// <exception cref="OverflowException">The count needs more than <see cref="int.MaxValue"/> ranges.</exception>
+    public static void ForRanges<TState>(long count, long rangeLength, long workPerElement, TState state,
+        Action<long, long, TState> body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(rangeLength);
+        int ranges = count == 0 ? 0 : checked((int)((count - 1) / rangeLength + 1));
+        long perElement = Math.Max(1L, workPerElement);
+        long totalWork = count > long.MaxValue / perElement ? long.MaxValue : count * perElement;
+        For(ranges, totalWork, new RangePlan<TState>(count, rangeLength, state, body), static (range, plan) => plan.Run(range));
+    }
+
+    /// <summary>As <see cref="ForRanges{TState}"/> for a body that captures what it needs.</summary>
+    public static void ForRanges(long count, long rangeLength, long workPerElement, Action<long, long> body)
+    {
+        ArgumentNullException.ThrowIfNull(body);
+        ForRanges(count, rangeLength, workPerElement, body, static (start, length, run) => run(start, length));
+    }
+
     /// <summary>Splits <paramref name="length"/> into roughly <paramref name="targetChunks"/> contiguous chunks,
     /// returning the chunk size.</summary>
     /// <remarks>Used by kernels whose natural outer dimension is too small to fill the machine — a final vocoder
@@ -175,6 +203,16 @@ public static class CpuParallel
         catch (AggregateException ex) when (ex.InnerException is not null)
         {
             ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+        }
+    }
+
+    /// <summary>One <see cref="ForRanges{TState}"/> call's partition: range <c>i</c> starts at <c>i * RangeLength</c>.</summary>
+    private readonly record struct RangePlan<TState>(long Count, long RangeLength, TState State, Action<long, long, TState> Body)
+    {
+        public void Run(int range)
+        {
+            long start = range * RangeLength;
+            Body(start, Math.Min(RangeLength, Count - start), State);
         }
     }
 

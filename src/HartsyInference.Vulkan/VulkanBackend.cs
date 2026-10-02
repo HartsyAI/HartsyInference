@@ -248,6 +248,17 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         DrainStream();
     }
 
+    /// <inheritdoc/>
+    /// <remarks>Submits the batch recorded so far and returns the timeline tick it signals, so there is nothing to
+    /// release. 0 while a step graph is being captured, which must not submit.</remarks>
+    public nint RecordFence() => _capturingStepGraph ? 0 : (nint)DrainAndFlush();
+
+    /// <inheritdoc/>
+    public void WaitFence(nint fence)
+    {
+        if (fence != 0) _stream.WaitTimeline((ulong)fence);
+    }
+
     /// <summary>Submits whatever is recorded, waits for it, and tells the batching count that it happened.</summary>
     /// <remarks>Every drain outside teardown goes through here. <c>WaitIdleHost</c> always submits first, so a
     /// drain that did not reset the count left it holding dispatches that had already gone to the queue, and the
@@ -604,7 +615,8 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
-    private void DrainAndFlush()
+    /// <summary>Submits the dispatches recorded so far and returns the timeline tick that submission signals.</summary>
+    private ulong DrainAndFlush()
     {
         // Tag transient buffers at the upcoming tick (DrainTransients calls _stream.DeferredFree,
         // which uses _value + 1 — see VulkanCommandStream.DeferredFree).
@@ -615,8 +627,9 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         // callback, and explicit Sync() callers still get a synchronous WaitIdleHost. This
         // eliminates ~2800 host waits per Flux Schnell 4-step generation and lets the driver
         // overlap submission of op N+1 with execution of op N.
-        _stream.SubmitAndAdvance();
+        ulong tick = _stream.SubmitAndAdvance();
         _dispatchesSinceSubmit = 0;
+        return tick;
     }
 
     /// <summary>Promotes a freshly-allocated GPU buffer to the activation cache, keyed by Tensor reference equality.</summary>

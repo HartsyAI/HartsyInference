@@ -3553,6 +3553,20 @@ public partial interface IBackend : IDisposable
     /// <summary>Waits for all pending GPU work (no-op on CPU) — call at phase boundaries so deferred frees land before large allocations.</summary>
     void Sync() { }
 
+    /// <summary>Marks the end of the work issued so far and returns a handle <see cref="WaitFence"/> can block on; 0 on a
+    /// backend whose ops have finished by the time they return (the default), where there is nothing to wait for.</summary>
+    /// <remarks>Lets a caller bound how far the host runs ahead of the device without draining it: waiting on a fence
+    /// recorded a few steps back keeps the steps since then queued. Every non-zero fence goes back through
+    /// <see cref="ReleaseFence"/> exactly once, waited on or not.</remarks>
+    nint RecordFence() => 0;
+
+    /// <summary>Blocks the calling thread until the work issued before <paramref name="fence"/> was recorded has
+    /// finished; returns at once for 0.</summary>
+    void WaitFence(nint fence) { }
+
+    /// <summary>Gives back a fence from <see cref="RecordFence"/>; 0 is ignored.</summary>
+    void ReleaseFence(nint fence) { }
+
     /// <summary>Frees specific weight tensors (no-op on CPU) — call between phases to reclaim VRAM (e.g. UNet weights before VAE decode).</summary>
     void FreeWeights(IEnumerable<Tensor> weights) { }
 

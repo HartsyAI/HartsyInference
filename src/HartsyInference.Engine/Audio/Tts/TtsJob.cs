@@ -67,4 +67,8 @@ internal sealed record TtsJob
 
     /// <summary>Sampling seed; 0 leaves it unset.</summary>
     internal int Seed { get; init; }
+
+    /// <summary>Stops the job; a model that checks it between its stages (Kokoro) throws at the next one, the rest
+    /// finish the call they started.</summary>
+    internal CancellationToken Cancel { get; init; }
 }

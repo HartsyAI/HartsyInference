@@ -305,11 +305,10 @@ public sealed class PrefixCacheReuseTests
     }
 
     /// <summary>Delegates every <see cref="IGenerationModel"/> member to a real <see cref="GenericTransformerModel"/>,
-    /// counting <see cref="ResizeSequenceState"/> and <see cref="Prefill"/> calls, and throws
-    /// <see cref="OperationCanceledException"/> from the <see cref="ThrowOnPrefillCall"/>-th <see cref="Prefill"/>
-    /// instead of running it — simulating a backend whose <c>Prefill</c> itself observes a cancellation
-    /// mid-operation, which no current backend does (nothing plumbs a token into this call), but which
-    /// <c>TextGenerationPipeline.Generate</c>'s <c>firstPrefillDone</c> guard is defensive against regardless.</summary>
+    /// counting resize and prefill calls, and throws <see cref="OperationCanceledException"/> from the
+    /// <see cref="ThrowOnPrefillCall"/>-th prefill instead of running it — a prefill that observes a cancellation
+    /// mid-operation, on a call index the test picks. The real path, <see cref="GenericTransformerModel"/> stopping
+    /// between layers on the request's token, is driven by <c>PrefillCancellationTests</c>.</summary>
     private sealed class InstrumentedModel(GenericTransformerModel inner) : IGenerationModel
     {
         public int PrefillCalls { get; private set; }
@@ -332,26 +331,27 @@ public sealed class PrefixCacheReuseTests
             return inner.ResizeSequenceState(state, capacity);
         }
 
-        public Tensor Prefill(in PrefillChunk chunk, ISequenceState state)
+        public Tensor Prefill(in PrefillChunk chunk, ISequenceState state) => Prefill(chunk, state, CancellationToken.None);
+
+        public Tensor Prefill(in PrefillChunk chunk, ISequenceState state, CancellationToken cancel)
         {
             if (PrefillCalls++ == ThrowOnPrefillCall)
             {
                 throw new OperationCanceledException("injected: backend observed cancellation mid-prefill");
             }
-            return inner.Prefill(chunk, state);
+            return inner.Prefill(chunk, state, cancel);
         }
     }
 
     [Fact]
     public void OnCancellationDuringTheFirstPrefill_DiscardsCleanly_NoCorruptedReuse()
     {
-        // Regression (hardening): if a future backend's Prefill itself threw OperationCanceledException during
-        // the very FIRST prefill (cache.Length still short of promptIds.Length — nothing has been committed yet),
-        // treating that as "committed" would store the full prompt in RetainedSequence.TokenIds while the cache
-        // itself only holds part of it: the same class of mismatch as the eager-loop bug above, but for the
-        // call index BEFORE firstPrefillDone is set. Unlike that bug, this one isn't reachable through any public
-        // hook today (no current Prefill call is cancellation-aware), so it's exercised here via a fault-injecting
-        // IGenerationModel instead of a real cancellation path.
+        // Regression: if Prefill throws OperationCanceledException during the very FIRST prefill (cache.Length
+        // still short of promptIds.Length — nothing has been committed yet), treating that as "committed" would
+        // store the full prompt in RetainedSequence.TokenIds while the cache itself only holds part of it: the same
+        // class of mismatch as the eager-loop bug above, but for the call index BEFORE firstPrefillDone is set. The
+        // request's token now reaches that prefill (PrefillCancellationTests drives the real path); the
+        // fault-injecting model pins the pipeline's side of the guarantee for any model that throws there.
         PrefixCacheTestModel rig = new(0xB0BACAFEu);
         TransformerConfig cfg = PrefixCacheTestModel.Config();
         Dictionary<string, Tensor> w = rig.Weights(cfg);

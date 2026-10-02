@@ -50,7 +50,7 @@ public sealed class TextGenerationPipeline
         _stopIds = [.. tokenizer.StopIds];
     }
 
-    /// <summary>Generates text for <paramref name="request"/>, invoking <paramref name="onToken"/> per produced token; cancelling via <paramref name="ct"/> stops between tokens and throws, discarding already-produced tokens (rely on <paramref name="onToken"/> for partial output, which still fires for every token generated before cancellation is observed).</summary>
+    /// <summary>Generates text for <paramref name="request"/>, invoking <paramref name="onToken"/> per produced token; cancelling via <paramref name="ct"/> stops between layers during the prompt prefill and between tokens during decode, and throws, discarding already-produced tokens (rely on <paramref name="onToken"/> for partial output, which still fires for every token generated before cancellation is observed).</summary>
     public GenerationResult Generate(GenerationRequest request, Action<int>? onToken = null, CancellationToken ct = default)
         => Generate(request, reuse: null, onToken, ct);
 
@@ -61,12 +61,13 @@ public sealed class TextGenerationPipeline
     /// whole prompt from an empty cache — opt-in, bounded-VRAM prefix-KV reuse across calls that share a
     /// conversation. A retained cache too small for this call grows by copying its reusable prefix on device.
     /// <paramref name="reuse"/> is updated in place with this call's full sequence (prompt + generated tokens)
-    /// whether the call completes normally or is cancelled — a stream filter's intentional stop and caller
-    /// cancellation both leave the cache in a valid, consistently-committed state, so either is safe to keep; only
-    /// an exception from the backend itself (an unknown, possibly-inconsistent state) drops it instead. What is kept
-    /// is copied down to its length plus <see cref="GenerationRequest.PrefixCacheHeadroomTokens"/>, and freed
-    /// instead when even that exceeds <see cref="GenerationRequest.PrefixCacheMaxBytes"/>. Storage across keys,
-    /// eviction policy and the busy-key rule are the caller's responsibility (see
+    /// whether the call completes normally or is cancelled during decode — a stream filter's intentional stop and
+    /// caller cancellation both leave the cache in a valid, consistently-committed state, so either is safe to keep.
+    /// A cancellation during the prompt prefill, which commits nothing, and an exception from the backend itself (an
+    /// unknown, possibly-inconsistent state) drop it instead. What is kept is copied down to its length plus
+    /// <see cref="GenerationRequest.PrefixCacheHeadroomTokens"/>, and freed instead when even that exceeds
+    /// <see cref="GenerationRequest.PrefixCacheMaxBytes"/>. Storage across keys, eviction policy and the busy-key rule
+    /// are the caller's responsibility (see
     /// <see cref="RetainedSequenceStore"/>) — this method only reads and mutates the one instance it is given.
     /// Ignored for the tensor-parallel path (<see cref="GenerateTp"/>): per-rank <see cref="KvCache"/>s have no
     /// <see cref="ISequenceState"/> to retain, so <paramref name="reuse"/> is left untouched when <c>_tp</c> is set.</summary>
@@ -94,18 +95,18 @@ public sealed class TextGenerationPipeline
         (ISequenceState cache, int reusedLen) = AcquireCache(reuse, promptIds, maxSeq, request.PrefixCacheCapacityHint);
         bool committed = false;
         // True only once cache.Length is guaranteed >= promptIds.Length (the first prefill below has returned).
-        // The catch block below commits on cancellation ONLY once this is true: today nothing plumbs `ct` into
-        // the first Prefill call, so it cannot itself observe a cancellation, but gating on this explicitly (
-        // rather than relying on that absence) keeps the finally block's cache.Length-vs-promptIds.Length
-        // assumption true by construction instead of by what no current backend happens to do.
+        // The catch block below commits on cancellation ONLY once this is true: the first Prefill observes `ct`
+        // between layers and a stopped one commits nothing, so the finally block's cache.Length-vs-promptIds.Length
+        // reconciliation would otherwise run against a prompt that never went in.
         bool firstPrefillDone = false;
         try
         {
             bool stopped;
             int next;
             // Logits for the LAST prompt position only: sampling reads a single row (see GenericTransformerModel.Prefill).
-            // reusedLen is always < promptIds.Length (AcquireCache clamps it), so this chunk is never empty.
-            using (Tensor hidden = _model!.Prefill(new PrefillChunk(promptIds.AsMemory(reusedLen), reusedLen, LastRowOnly: true), cache))
+            // reusedLen is always < promptIds.Length (AcquireCache clamps it), so this chunk is never empty. Only this
+            // forward takes `ct`: decode steps are one token each and already stop between tokens.
+            using (Tensor hidden = _model!.Prefill(new PrefillChunk(promptIds.AsMemory(reusedLen), reusedLen, LastRowOnly: true), cache, ct))
             using (Tensor logits = _model.ProjectLogits(hidden, 1))
             {
                 Span<float> lastRow = LastRow(logits, 1, vocab);
