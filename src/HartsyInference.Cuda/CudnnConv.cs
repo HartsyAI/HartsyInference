@@ -265,13 +265,10 @@ internal sealed class CudnnConv : IDisposable
     private static string ShapeSignature(bool backwardData, long cIn, long cOut, ReadOnlySpan<long> kernel,
         ReadOnlySpan<long> stride, int dataType)
     {
-        string dtype = dataType switch
-        {
-            CUDNN_DATA_HALF => "f16",
-            CUDNN_DATA_FLOAT => "f32",
-            _ => $"dtype{dataType}",
-        };
-        string op = backwardData ? "ConvTranspose1d" : "Conv1d";
+        string dtype = CudnnPlanSearch.DtypeName(dataType);
+        // Spatial rank from kernel.Length, not a hardcoded "1d": BuildPlanNd also serves the 2-D image convs
+        // (ExecuteChannelsLast/BuildPlan), so a Krea2/Z-Image-style 3x3 conv must read "Conv2d", not "Conv1d".
+        string op = (backwardData ? "ConvTranspose" : "Conv") + kernel.Length + "d";
         return $"{op} Cin={cIn} Cout={cOut} kernel={string.Join('x', kernel.ToArray())} stride={string.Join('x', stride.ToArray())} dtype={dtype}";
     }
 

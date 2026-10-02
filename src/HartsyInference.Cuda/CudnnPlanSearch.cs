@@ -53,6 +53,17 @@ internal static class CudnnPlanSearch
     /// bisection (see issue #20).</summary>
     private static readonly ConcurrentDictionary<(string What, long EngineIndex, string Shape), byte> _loggedDeterminism = new();
 
+    /// <summary>Formats a cuDNN data-type constant for a nondeterminism-log shape signature (see
+    /// <see cref="CudnnConv"/>/<see cref="CudnnSdpa"/>'s own <c>ShapeSignature</c>). Shared so both callers read
+    /// off the same literal <c>CUDNN_DATA_*</c> constant they built their tensors with, instead of each
+    /// hand-maintaining their own copy that could silently drift from what the graph actually used.</summary>
+    internal static string DtypeName(int dataType) => dataType switch
+    {
+        CUDNN_DATA_HALF => "f16",
+        CUDNN_DATA_FLOAT => "f32",
+        _ => $"dtype{dataType}",
+    };
+
     /// <summary>True when the engine behind <paramref name="cfg"/> carries <c>CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC</c>
     /// (an atomic-accumulation reduction whose float summation order varies run to run -- see issue #20). False on
     /// any read failure, so a cuDNN version without this attribute, or a transient read error, behaves like today:

@@ -166,7 +166,10 @@ internal sealed class CudnnSdpa : IDisposable
             SetAttr(graph, CUDNN_ATTR_OPERATIONGRAPH_OPS, CUDNN_TYPE_BACKEND_DESCRIPTOR, opCount, ops);
             Check(cudnnBackendFinalize(graph), "graph finalize");
 
-            string shape = $"SDPA batch={b} heads={h} seqQ={sq} seqKV={sk} headdim={d} dtype=f16";
+            // Q/K/V/O are built as CUDNN_DATA_HALF above (see tQ/tKt/tV/tO) -- read that same constant through
+            // DtypeName rather than a disconnected "f16" literal, so this can't silently go stale if this
+            // graph ever gains a non-F16 path.
+            string shape = $"SDPA batch={b} heads={h} seqQ={sq} seqKV={sk} headdim={d} dtype={CudnnPlanSearch.DtypeName(CUDNN_DATA_HALF)}";
             (nint exec, long wsBytes) = CudnnPlanSearch.BuildExecutionPlan(_handle, graph, owned, long.MaxValue, "SDPA", shape);
 
             Plan plan = new()

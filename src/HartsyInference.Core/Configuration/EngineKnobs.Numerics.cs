@@ -53,9 +53,14 @@ public static partial class EngineKnobs
     /// caller of <see cref="HartsyInference.Cuda.CudnnPlanSearch.BuildExecutionPlan"/> (conv forward/backward-data,
     /// SDPA) -- not Chatterbox-specific.
     ///
-    /// <para>Defaults ON: measured no cost on Chatterbox, CosyVoice2, Piper or Kokoro on the 3060 (see the PR for
-    /// both tables), and it turns a real reproducibility bug into reproducible output. Default pending the same
-    /// off/on comparison on the 4090 image flagships (Krea2-Turbo, Z-Image-Turbo) before merge.</para></summary>
+    /// <para>Defaults ON: measured no cost on Chatterbox, CosyVoice2, Piper and Kokoro on the 3060, and no cost
+    /// with cross-arm byte-identical output on the 4090 image flagships (Krea2-Turbo, Z-Image-Turbo) -- see the
+    /// PR for both tables -- and it turns a real reproducibility bug into reproducible output.</para>
+    ///
+    /// <para>Toggling this at runtime (<see cref="KnobStore.Set{T}"/>) does not retroactively re-evaluate a plan
+    /// <see cref="HartsyInference.Cuda.CudnnConv"/>'s own cache already built under the old value -- a cached
+    /// plan keeps whichever engine its heuristic search picked at build time. Only plans built after the
+    /// change see the new value.</para></summary>
     public static readonly Knob<bool> CudnnDeterministic =
         Bool("numerics.cudnnDeterministic", true, KnobScope.Runtime, KnobDomain.Numerics,
             "Skips cuDNN backend-graph engines marked CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC during heuristic search, falling through to the next candidate or the direct-kernel fallback.");
