@@ -110,6 +110,12 @@ stable release will require. Dates are UTC.
   false-missing path and its interactive `Download these now?` prompt. Fixed the `RepoPath`, and added a
   per-process confirmed-present cache so the audio-asset check only runs until it first succeeds for a
   given catalog id.
+- **`hartsy transcribe --timestamps` now prints the actual timestamps.** The flag only ever changed a
+  "segments N" count in the footer; the transcript text itself was identical with or without it, since
+  `TranscribeAsync` never read anything from `TranscriptResult.Words` but its `Count`. It now renders one
+  `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
+  produced) when timestamps were requested and the pipeline returned any; the plain-text path is
+  unchanged byte-for-byte otherwise.
 
 ## alpha.241
 
