@@ -3679,37 +3679,31 @@ public sealed partial class VulkanBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>In-place rotary on q/k, tolerating GQA (q and k may have different head counts — only batch,
+    /// seqLen and headDim must agree). Was one dispatch sized from Q's <c>numHeads</c> covering both q's AND
+    /// k's buffer: harmless for MHA callers (same shape either way), but whenever K had fewer heads than Q this
+    /// dispatched over only a fraction of K's real element count — an out-of-bounds device read/write, not just
+    /// a wrong answer (same bug CUDA's combined overload had; caught via Dia's GQA decoder, 16 Q heads : 4 KV
+    /// heads). Delegates to <see cref="ApplyRopeSingle"/> per tensor instead, which already derives its shape
+    /// from whichever tensor it's given.</summary>
     public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
     {
         using OpScope _op = EnterOp();
-        int batch = (int)q.Shape[0], seqLen = (int)q.Shape[1], numHeads = (int)q.Shape[2], headDim = (int)q.Shape[3];
-        VulkanBuffer qBuf = GetBuffer(q);
-        VulkanBuffer kBuf = GetBuffer(k);
-        VulkanBuffer cosBuf = GetBuffer(cos);
-        VulkanBuffer sinBuf = GetBuffer(sin);
-        try
+        if (q.Shape.Rank != 4 || k.Shape.Rank != 4)
+            throw new NotSupportedException($"Vulkan ApplyRope expects token-major [B, L, heads, headDim] for q and k; got ranks {q.Shape.Rank}/{k.Shape.Rank}.");
+        if (q.Shape[0] != k.Shape[0] || q.Shape[1] != k.Shape[1] || q.Shape[3] != k.Shape[3])
         {
-            string shader = "apply_rope" + DtypeSuffix(q.DType);
-            VulkanKernel kernel = GetKernel(shader, 4, _default1DSpec);
-            Span<byte> pc = stackalloc byte[4 * 4];
-            BinaryWriteUInt(pc, 0, (uint)batch);
-            BinaryWriteUInt(pc, 4, (uint)seqLen);
-            BinaryWriteUInt(pc, 8, (uint)numHeads);
-            BinaryWriteUInt(pc, 12, (uint)headDim);
-            long total = (long)batch * seqLen * numHeads * (headDim / 2);
-            Span<ulong> bufs = stackalloc ulong[] { qBuf.Handle, kBuf.Handle, cosBuf.Handle, sinBuf.Handle };
-            Dispatch(kernel, bufs, pc, GroupCount(total, LocalX1D));
-            // In-place on q/k's EXISTING buffers — re-cache so a later reader doesn't see the pre-rope
-            // values via a stale activation-cache entry (or force a redundant re-upload if q/k weren't
-            // cached at all yet).
-            CacheOutput(q, qBuf);
-            CacheOutput(k, kBuf);
+            throw new NotSupportedException(
+                $"Vulkan ApplyRope requires q and k to share batch, seqLen and headDim (head COUNT may differ — GQA); got q={q.Shape}, k={k.Shape}.");
         }
-        catch (Exception ex)
+        int headDim = (int)q.Shape[3];
+        if (cos.Shape[cos.Shape.Rank - 1] != headDim || sin.Shape[sin.Shape.Rank - 1] != headDim)
         {
-            Logs.Error("Vulkan ApplyRope dispatch failed", ex);
-            throw;
+            throw new NotSupportedException(
+                $"Vulkan ApplyRope expects cos/sin's last dim to equal headDim ({headDim}); got cos={cos.Shape}, sin={sin.Shape}.");
         }
+        ApplyRopeSingle(q, cos, sin);
+        ApplyRopeSingle(k, cos, sin);
     }
 
     // Real GPU dispatch, NOT the IBackend CPU-loop default: x here is GPU-resident (FluxRope/Krea2's

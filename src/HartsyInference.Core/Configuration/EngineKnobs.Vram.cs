@@ -24,6 +24,14 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> LowvramQuant =
         Bool("vram.lowvramQuant", false, KnobScope.Construction, KnobDomain.Vram, "Makes LLMs keep GGUF weights compressed and use QuantizedMatMul instead of caching an F16 dequant.");
 
+    /// <summary>Most retained sequences (<c>TextRequest.PrefixCacheKey</c>) one device slot's prefix-KV store keeps at once; least-recently-used entries are evicted first past this.</summary>
+    public static readonly Knob<int> PrefixCacheMaxEntries =
+        Int("vram.prefixCacheMaxEntries", 4, KnobScope.Runtime, KnobDomain.Vram, "Most retained prefix-KV sequences one device slot's store keeps at once (LRU past this).");
+
+    /// <summary>Byte budget for one device slot's prefix-KV store (sum of every retained sequence's KV capacity); least-recently-used entries are evicted first past this.</summary>
+    public static readonly Knob<long> PrefixCacheMaxBytes =
+        Long("vram.prefixCacheMaxBytes", 512L << 20, KnobScope.Runtime, KnobDomain.Vram, "Byte budget for one device slot's prefix-KV store (LRU past this).");
+
     /// <summary>Pins the LTX-2.5 diffusion decoder's temporal-chunk workspace in MB instead of sizing the plan off free VRAM.</summary>
     public static readonly Knob<long> Ltx25VaeChunkMb =
         Long("vram.ltx25VaeChunkMb", 0L, KnobScope.Construction, KnobDomain.Vram, "Pins the LTX-2.5 diffusion decoder's temporal-chunk workspace in MB instead of sizing the plan off free VRAM.");

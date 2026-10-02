@@ -8,6 +8,22 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed an intermittent `CUDA_ERROR_INVALID_VALUE` crash on the first `RmsNorm` call of a prefill.**
+  `GpuTransferHelper.UploadTo` and `State.FreeDevice`'s async-free branch read `State.StreamHandle` directly, with
+  nothing checking that the backend hadn't been retired (zeroing the handle) since the caller resolved that
+  `State` — passing stream `0` into `cuMemcpyHtoDAsync`/`cuMemFreeAsync` is legal CUDA usage but wrong for a
+  destination the stream-ordered pool allocated on the real compute stream. `UploadTo` now resolves the handle once
+  through `State.RequireLiveStream` and throws a clear `ObjectDisposedException` instead of passing zero through;
+  `FreeDevice`, which runs from cleanup paths, logs and skips the stream-ordered free instead of throwing.
+- **Fixed ~144 redundant PCIe re-uploads per LLM forward call (prefill and decode alike), cutting 3060 cache
+  misses from 146/step to the 3 that are actually unavoidable.** `GenericTransformer` builds the RoPE cos/sin
+  table (and, for layer 0, reads the embedding lookup) once per forward call and reuses those host tensors
+  across every layer, but the residency cache only persists a tensor that became some op's OUTPUT — a plain
+  input that misses the cache is uploaded, read, and freed in that call's own cleanup, every single read. Each
+  of the three tensors (cos, sin, embedding) now uploads once via a cheap `Scale(_, _, 1f)` identity op before
+  the layer loop, so all 36-layer rereads hit instead of re-uploading. Under accurate (non-overlapped) timing
+  this is a real, modest TTFT reduction (~4-5%); prefill GEMM time dominates the 3060's TTFT and is unaffected
+  by this fix (a separate efficiency project is being scoped for that).
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
   pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
   `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
@@ -20,6 +36,91 @@ stable release will require. Dates are UTC.
   the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
+- **Fixed: HeartMuLa's quantized GGUF cache ignored `modelsRoot`/`ModelCacheRoot` entirely.** Every other
+  audio model resolves its cache location under `AudioModelCache.CacheRoot` (`modelsRoot/audio` when
+  `EngineKnobs.ModelsRoot` is configured, honoring the `EngineKnobs.ModelCacheRoot` override too).
+  `HeartMulaMusicModel`'s Q8/Q4 on-disk GGUF cache was the one exception, always writing under
+  `~/.cache/hartsyinference/heartmula/` regardless of either knob — so moving model storage (e.g. onto a
+  RAID array, via `ModelsRoot`) silently left HeartMuLa's quantized weights on the OS disk instead.
+
+  `HeartMulaMusicModel.ResolveQuantCachePath` now resolves under the shared audio root
+  (`modelsRoot/audio/music/heartmula/`), falling back to the legacy `~/.cache/hartsyinference/heartmula/`
+  location only when a file already exists there, so an existing install is not silently orphaned.
+- **`IBackend.ApplyRope`'s combined q+k overload no longer corrupts K under GQA.** CUDA, Vulkan and the CPU
+  default sized K's rotation from Q's head count: harmless while every caller was MHA, an out-of-bounds device
+  read/write for a GQA caller (found through Dia's resident decode, #224: 16 query heads, 4 KV heads). All three now
+  check that q and k share batch, seqLen and headDim (head counts may differ) and that cos/sin match headDim, throw
+  otherwise, and run the per-tensor `ApplyRopeSingle` once per tensor. Same split-half formula: the Ernie A/B on CUDA
+  is digest-identical; on Vulkan, dtypes other than F32/F16 now take `ApplyRopeSingle`'s reference fallback. Tests:
+  three in `DitGlueKernelTests` and `ApplyRope_QK_Matches_The_Cpu_For_Mha_And_Gqa` on every GPU backend.
+- **Opt-in prefix-KV reuse for `TextGenerationPipeline`.** A new `Generate` overload takes a `RetainedSequence`
+  (`HartsyInference.LLM.Generation`): it reuses the longest common token-id prefix between the retained cache and
+  the current prompt, `Truncate`s the divergent tail and prefills only the diverging suffix (always leaving the
+  final prompt token to be prefilled fresh, so sampling always has a real logits row), instead of prefilling the
+  whole prompt from an empty cache every call. `RetainedSequence`/`RetainedSequenceStore` are generic (count- and
+  byte-bounded, LRU, checkout/checkin so a second concurrent request on a busy key runs uncached) and live
+  entirely in the engine, independent of any caller. `TextRequest.PrefixCacheKey` (null by default) opts a caller
+  in; `TextRequest.PrefixCacheCapacityHint` sizes a fresh retained sequence once instead of letting it be
+  reallocated turn over turn. `TextService` keeps one store per device slot (`vram.prefixCacheMaxEntries`/
+  `vram.prefixCacheMaxBytes`), disposed before `FreeAllDeviceMemory` on every unload/reload path. Capacity
+  growth past a retained sequence's own cache reallocates transparently; the tensor-parallel path is
+  unaffected (no `ISequenceState` to retain). `GenerationResult.ReusedPromptTokens` reports how much of a
+  call's prompt came from the cache. The tensor-parallel path and `DynamicBatchScheduler`/`PagedKvPool` are
+  untouched — this is the single-sequence `TextGenerationPipeline` path only.
+- **Voice turns reuse their call's own prefix.** `VoiceAgentSession` gives each call a key (carried through
+  `BuildRequest` and so through every `ToolLoop` round too, since each round's request is `request with {...}`) and
+  `EnablePrefixCache` (default true) controls it. `StartAsync` fires a one-token priming request for the
+  system+tools prefix so turn 1 is warm as well, racing the greeting instead of delaying it.
+- **Voice LLM VRAM.** `TextRequest.CacheWeightCasts` (null = backend default) overrides the device backend's
+  `CacheWeightCasts` when its slot's backend is first created; `VoiceAgentOptions.CacheWeightCasts` defaults to
+  `false`. Measured on Qwen3-4B-Q4_K_M/4090: the backend's own default (cache a dequantized F16/BF16 copy of
+  every quantized weight) costs ~7.3 GB resident once warm on top of the ~5.5 GB the weights themselves take —
+  the dominant share of the model's footprint; off, weights stay compressed with a transient per-GEMM dequant,
+  for a fixed ~50 ms tax per prefill call (prompt-length independent; decode's quantized GEMV path and tokens/sec
+  are unaffected either way). `ITextService.TrimMemoryPool` (default no-op, so an existing implementation keeps
+  compiling) is `TextService`'s per-slot, best-effort, non-blocking equivalent of `Unload` that returns pool slack
+  to the driver without unloading weights; the voice turn loop awaits it at the same idle point
+  `VoiceGpuWorker.RequestTrim` already uses for the audio backend, and `VoiceModelSet.WarmAsync` and the session's
+  priming request each trim their own transient usage once done with it.
+- **Voice LLM VRAM: no redundant weight-split preload.** `TextService.LoadInto`'s single-device weight
+  upload called `GenericTransformer.EnumerateWeights()` with its default (`includeRedundantSplits: true`),
+  unlike `LoadSharded` and `GenericTransformerModel.PreloadDecodeWeights`, which already pass `false`. On
+  Qwen3-4B-Q4_K_M the load-time-fused Q/K/V and gate/up projections leave their pre-fusion split originals
+  resident too (tensor-level measurement: 1.21 GiB of the 3.53 GiB a default single-device load uploads, vs.
+  2.32 GiB deduplicated — matching the 2.33 GiB file almost exactly); nothing on `TextGenerationPipeline`'s
+  single-sequence decode/prefill path reads them (only the batch scheduler's mixed-dtype split-projection
+  path does, via its own lazy auto-promotion, unaffected by this change). Checked and ruled out as explanations
+  for the same gap: `AutoPromoteWeights` (a residency-pinning decision only — it uploads a weight already
+  twice-missed in its native dtype, never a dequantized copy) and the tied embedding/`lm_head` (kept quantized
+  at ~304 MiB via the existing `_lmHeadQuant` fused-GEMV path, not dequantized to F16/F32 as its size alone
+  would suggest). `TextRequest.PreloadRedundantWeightSplits` (null = unchanged default) opts a request out;
+  `VoiceAgentOptions.PreloadRedundantWeightSplits` defaults to `false` and is wired through warm-up, the
+  call's priming request and every turn, identically to `CacheWeightCasts`.
+- **Voice gate, measured on real weights (Qwen3-4B-Q4_K_M/4090, Whisper small.en + Kokoro/3060, the host's real
+  7-tool set, 10-turn growing history):** `voice.llm.ttft_ms` 85.7-105.4 ms and flat regardless of history length
+  (gate ≤ 150 ms; was 200-302 ms and growing), `voice.llm.first_sentence_ms` 139.1-158.1 ms (gate ≤ 200 ms),
+  `voice.turn.total_ms` 1095.8-1225.1 ms (gate ≤ 1300 ms), decode 89-102 tok/s. VRAM primed and flat for all ten
+  turns at **5.81 GB, under the ≤ 6 GB target** (was ~13.8 GB). A smaller `PrefixCacheCapacityHint` and
+  `vram.kvF16` stay unused.
+
+## alpha.240
+
+- **Fixed: an unparameterized Piper request 404'd fetching `piper.onnx`.** `AudioModelSelector.Parse` falls
+  back to the bare catalog token (e.g. `"piper"`) for `Variant` whenever the request token has no `':'` —
+  correct for a descriptor that treats a bare id as its own repo/model identifier, but Piper's weights ARE
+  the voice (one `.onnx` per voice), so that bare token is not a voice at all. `SpeechService.ResolveTarget`
+  used to pass it straight through as the load variant for any `VoiceSelectsWeights` descriptor whenever no
+  separate named voice was given, with no way to tell "the catalog id leaked through" from "the caller
+  genuinely asked for a voice named `piper`" — so a request with no voice and no `:variant` 404'd fetching
+  `rhasspy/piper-voices/piper.onnx` (no such file exists; every real Piper voice lives at
+  `<lang>/<lang_REGION>/<name>/<quality>/<id>.onnx`) instead of falling back to Piper's own default voice.
+
+  Fixed in `SpeechService.ResolveVariant` (extracted from `ResolveTarget`): detects the bare-token-fallback
+  shape by comparing `AudioModelSelector.Variant` against `AudioModelSelector.Id`, not by hardcoding
+  Piper's name, so the fix covers any other `VoiceSelectsWeights` model with this same shape, not just
+  Piper. `AudioModelSelector.Parse` itself and `PiperModel.LoadAsync`'s own `"default"`/empty sentinel check
+  are both unchanged — the first is shared, load-bearing logic for every modality's selector, the second
+  already did the right thing once actually given one of those values.
 
 ## alpha.240
 
