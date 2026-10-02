@@ -8,6 +8,22 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed an intermittent `CUDA_ERROR_INVALID_VALUE` crash on the first `RmsNorm` call of a prefill.**
+  `GpuTransferHelper.UploadTo` and `State.FreeDevice`'s async-free branch read `State.StreamHandle` directly, with
+  nothing checking that the backend hadn't been retired (zeroing the handle) since the caller resolved that
+  `State` — passing stream `0` into `cuMemcpyHtoDAsync`/`cuMemFreeAsync` is legal CUDA usage but wrong for a
+  destination the stream-ordered pool allocated on the real compute stream. `UploadTo` now resolves the handle once
+  through `State.RequireLiveStream` and throws a clear `ObjectDisposedException` instead of passing zero through;
+  `FreeDevice`, which runs from cleanup paths, logs and skips the stream-ordered free instead of throwing.
+- **Fixed ~144 redundant PCIe re-uploads per LLM forward call (prefill and decode alike), cutting 3060 cache
+  misses from 146/step to the 3 that are actually unavoidable.** `GenericTransformer` builds the RoPE cos/sin
+  table (and, for layer 0, reads the embedding lookup) once per forward call and reuses those host tensors
+  across every layer, but the residency cache only persists a tensor that became some op's OUTPUT — a plain
+  input that misses the cache is uploaded, read, and freed in that call's own cleanup, every single read. Each
+  of the three tensors (cos, sin, embedding) now uploads once via a cheap `Scale(_, _, 1f)` identity op before
+  the layer loop, so all 36-layer rereads hit instead of re-uploading. Under accurate (non-overlapped) timing
+  this is a real, modest TTFT reduction (~4-5%); prefill GEMM time dominates the 3060's TTFT and is unaffected
+  by this fix (a separate efficiency project is being scoped for that).
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
   pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
   `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
