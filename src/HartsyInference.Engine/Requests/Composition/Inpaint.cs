@@ -20,4 +20,7 @@ public sealed record Inpaint
 
     /// <summary>True when the request asks for an "inpaint only masked" crop.</summary>
     public bool CropsToMask => CropToMask || ShrinkGrow != 0;
+
+    /// <summary>Init Image Recomposite Mask: paste the result over the original through the mask (full-canvas path only).</summary>
+    public bool RecompositeMask { get; init; } = true;
 }

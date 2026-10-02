@@ -11,15 +11,12 @@ public static class InpaintOnlyMasked
     /// <summary>Mask values below this are treated as unselected when finding the bounding box, matching the 0.01 threshold SwarmUI applies before <c>SwarmMaskBounds</c>.</summary>
     private const byte BoundsThreshold = 3;
 
-    /// <summary>Applied to the cropped mask before compositing so a blurred edge cannot bleed the patch into pixels the user never selected (SwarmUI's <c>ThresholdMask</c> at 0.001).</summary>
-    private const byte CompositeThreshold = 1;
-
     /// <summary>Generated dimensions are rounded to this so every family's own snapping is a no-op — the widest VAE downscale × patch factor in the engine is 16.</summary>
     private const int SizeAlignment = 16;
 
     /// <summary>The resolved crop: where it came from, what to generate, and what to composite back into.</summary>
     public sealed record Plan(int X, int Y, int CropWidth, int CropHeight, int GenerateWidth, int GenerateHeight,
-        ImageData OriginalInit, ImageData CroppedInit, byte[] CroppedMask);
+        ImageData OriginalInit, ImageData CroppedInit, byte[] CroppedMask, bool CompositeUnthresholded = false);
 
     /// <summary>Resolves the crop for <paramref name="request"/>, or null when this run is not an "inpaint only masked" one — no init image, no mask, <see cref="Inpaint.CropsToMask"/> false, or a mask that selects nothing. <paramref name="request"/> must already have its defaults applied, since the crop is scaled to the resolution the model will actually run at.</summary>
     public static Plan? Prepare(ImageRequest request)
@@ -64,7 +61,17 @@ public static class InpaintOnlyMasked
 
         Logs.Info($"[Features][InpaintOnlyMasked] Crop {cropWidth}x{cropHeight} at ({x},{y}) of {init.Width}x{init.Height}, "
             + $"generating at {generateWidth}x{generateHeight} (grow={request.Inpaint.ShrinkGrow}px).");
-        return new Plan(x, y, cropWidth, cropHeight, generateWidth, generateHeight, init, croppedInit, croppedMask);
+        return new Plan(
+            x, y, cropWidth, cropHeight, generateWidth, generateHeight, init, croppedInit, croppedMask, request.MaskCompositeUnthresholded);
+    }
+
+    /// <summary>The request to run as a plain full-canvas inpaint when <see cref="Prepare"/> declined to crop.</summary>
+    public static ImageRequest WithoutCrop(ImageRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        return request.Inpaint is { CropsToMask: true } inpaint
+            ? request with { Inpaint = inpaint with { ShrinkGrow = 0, CropToMask = false } }
+            : request;
     }
 
     /// <summary>Rewrites the request to generate the crop: the init image and mask become the cropped pair resized to the generation size, and the crop request (<see cref="Inpaint.ShrinkGrow"/>, <see cref="Inpaint.CropToMask"/>) is cleared so the downstream mask resolver treats this as an ordinary inpaint.</summary>
@@ -104,7 +111,7 @@ public static class InpaintOnlyMasked
             Height = plan.CropHeight,
         };
         byte[] compositeMask = (byte[])plan.CroppedMask.Clone();
-        FeatureImaging.ThresholdInPlace(compositeMask, CompositeThreshold);
+        FeatureImaging.ApplyCompositePolicy(compositeMask, plan.CompositeUnthresholded);
         ImageData composited = FeatureImaging.CompositeRgb24(plan.OriginalInit, scaledBack, compositeMask, plan.X, plan.Y);
 
         Dictionary<string, string> meta = new Dictionary<string, string>(generated.Meta, StringComparer.OrdinalIgnoreCase)
