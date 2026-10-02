@@ -143,12 +143,28 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         // back-to-back calls on the same pipeline, which is the common case once a model is warm.
         bool sequential = opts.SequentialResidency && !FitsResident(backend, hasAudio);
 
-        using Tensor text = EncodeConditioning(backend, instruction, audio16k, sequential, cancel);
-        cancel.ThrowIfCancellationRequested();
-        using Tensor? refLatent = hasAudio ? EncodeReference(backend, refPcm, opts, sequential) : null;
-        cancel.ThrowIfCancellationRequested();
-        using Tensor latent = Sample(backend, text, refLatent, frames, opts, sequential, cancel);
-        return Decode(backend, latent, sequential);
+        try
+        {
+            using Tensor text = EncodeConditioning(backend, instruction, audio16k, sequential, cancel);
+            cancel.ThrowIfCancellationRequested();
+            using Tensor? refLatent = hasAudio ? EncodeReference(backend, refPcm, opts, sequential) : null;
+            cancel.ThrowIfCancellationRequested();
+            using Tensor latent = Sample(backend, text, refLatent, frames, opts, sequential, cancel);
+            return Decode(backend, latent, sequential);
+        }
+        catch
+        {
+            // FitsResident already counted these bytes as resident, optimistically, before any stage actually
+            // ran. A failure here (an OOM from PreloadWeights, most importantly) leaves what is really on the
+            // device unknown: maybe nothing from this call landed, maybe some stages did before a later one
+            // threw, and a caller's OOM recovery (AudioRuntime.EvictForRetry) may already be wiping the whole
+            // backend's device memory on its way to retrying -- out from under this count either way. Zeroing
+            // it is the safe side of that uncertainty: the next call re-measures live VRAM from scratch and,
+            // worst case, redoes a preload that was in fact still resident -- never an OOM from believing we
+            // hold bytes we don't.
+            _residentBytes = 0;
+            throw;
+        }
     }
 
     /// <summary>Latent frames for <paramref name="seconds"/> of output, rejecting more than <see cref="MaxSeconds"/>.</summary>
