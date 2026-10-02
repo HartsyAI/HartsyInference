@@ -69,4 +69,39 @@ public sealed record TextRequest
 
     /// <summary>Per-request engine settings (profile + individual overrides); null keeps the machine's configuration.</summary>
     public RequestSettings? Settings { get; init; }
+
+    /// <summary>Opt-in prefix-KV reuse key: calls sharing the same non-null key on the same device/model slot reuse
+    /// the longest common token-id prefix of their rendered prompts instead of each prefilling from scratch — e.g.
+    /// one phone call's conversation across turns. Null (the default) is the original per-call behavior: every
+    /// request prefills its whole prompt and the KV cache is discarded when the call returns. A second concurrent
+    /// request on a busy key (already mid-generation) runs uncached rather than waiting or corrupting it. See
+    /// <see cref="HartsyInference.LLM.Generation.RetainedSequenceStore"/>.</summary>
+    public string? PrefixCacheKey { get; init; }
+
+    /// <summary>Sizes a brand-new retained sequence's KV capacity (tokens) the first time <see cref="PrefixCacheKey"/>
+    /// is used; null sizes it to just this request's own prompt + <see cref="MaxTokens"/>. Pass the caller's own
+    /// growth ceiling (e.g. a conversation's history token budget + its reply budget) so the cache is allocated
+    /// once instead of being reallocated as the prompt grows across calls under the same key.</summary>
+    public int? PrefixCacheCapacityHint { get; init; }
+
+    /// <summary>Overrides the device backend's <c>CacheWeightCasts</c> (cache a dequantized copy of quantized
+    /// weights vs. a transient per-GEMM dequant); null leaves the backend's own default (on). Takes effect when
+    /// the slot's backend is first created for this device, like <see cref="LowVramQuant"/> — a later request on
+    /// an already-loaded slot does not change it without a reload. Measured on Qwen3-4B-Q4_K_M/4090: on costs
+    /// ~7.3 GB resident once warm; off costs a ~50 ms fixed dequant tax per prefill call (prompt-length
+    /// independent — decode's quantized GEMV path is unaffected either way) but nothing else resident.</summary>
+    public bool? CacheWeightCasts { get; init; }
+
+    /// <summary>Overrides whether a single-device load's initial weight upload includes the load-time-fused
+    /// Q/K/V and gate/up projections' ORIGINAL split tensors, on top of their fused replacements — see
+    /// <see cref="HartsyInference.LLM.Transformer.GenericTransformer.EnumerateWeights"/>'s <c>includeRedundantSplits</c>.
+    /// Null preserves the existing default (included, matching every other caller of this request type historically).
+    /// False excludes them: the fused tensors alone serve every <c>TextGenerationPipeline</c> single-sequence decode
+    /// and prefill path, so for that path the split originals are pure duplicate upload — only the batch scheduler's
+    /// mixed-dtype split-projection path reads them (via its own lazy auto-promotion on first use, unaffected by
+    /// this flag). Takes effect when the slot's backend is first created for this device, like
+    /// <see cref="CacheWeightCasts"/> — a later request on an already-loaded slot does not change it without a
+    /// reload. Measured on Qwen3-4B-Q4_K_M: the split originals are ~1.21 GiB of the ~3.53 GiB default single-device
+    /// upload (file is 2.33 GiB); only the sharded and tensor-parallel load paths already exclude them by default.</summary>
+    public bool? PreloadRedundantWeightSplits { get; init; }
 }

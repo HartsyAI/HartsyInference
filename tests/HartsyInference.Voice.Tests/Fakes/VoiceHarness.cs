@@ -54,8 +54,13 @@ internal sealed class VoiceHarness : IAsyncDisposable
     /// <summary>Defaults for the harness: synthesis and playback at the same rate, so played samples are the markers.
     /// Denoise off: every fake-model constructor here passes <c>createDenoiser: null</c>, and
     /// <see cref="VoiceAgentOptions.Denoise"/> now defaults on, which the real <see cref="VoiceModelSet"/> constructor
-    /// would otherwise refuse.</summary>
-    public static VoiceAgentOptions DefaultOptions() => new() { OutboundSampleRate = 24_000, LlmDevice = "cpu", AudioDevice = "cpu", Denoise = false };
+    /// would otherwise refuse. Prefix-cache priming off: it is a real, separate <c>ITextService</c> call a started
+    /// session fires in the background (see <see cref="VoiceAgentSession.StartAsync"/>), and most of this file's
+    /// tests assert exact request counts/shapes against <see cref="ScriptedTextService.Requests"/> for one
+    /// deliberate turn — on by default here would race an extra recorded request into every one of them.
+    /// <see cref="VoicePrefixCacheTests"/> opts back in explicitly to cover that request's own shape.</summary>
+    public static VoiceAgentOptions DefaultOptions() =>
+        new() { OutboundSampleRate = 24_000, LlmDevice = "cpu", AudioDevice = "cpu", Denoise = false, EnablePrefixCache = false };
 
     /// <summary>A session on fake models. <paramref name="device"/> wraps the CPU audio device, for a test that records
     /// what the GPU thread asks of it.</summary>

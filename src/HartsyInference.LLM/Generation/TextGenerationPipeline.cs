@@ -50,6 +50,22 @@ public sealed class TextGenerationPipeline
 
     /// <summary>Generates text for <paramref name="request"/>, invoking <paramref name="onToken"/> per produced token; cancelling via <paramref name="ct"/> stops between tokens and throws, discarding already-produced tokens (rely on <paramref name="onToken"/> for partial output, which still fires for every token generated before cancellation is observed).</summary>
     public GenerationResult Generate(GenerationRequest request, Action<int>? onToken = null, CancellationToken ct = default)
+        => Generate(request, reuse: null, onToken, ct);
+
+    /// <summary>Same as <see cref="Generate(GenerationRequest,Action{int},CancellationToken)"/>, but when
+    /// <paramref name="reuse"/> is supplied, prefills only the SUFFIX of this call's prompt that diverges from
+    /// <paramref name="reuse"/>'s retained token ids (the longest common prefix, always leaving at least the final
+    /// prompt token to be prefilled fresh so sampling has a real logits row), instead of always prefilling the
+    /// whole prompt from an empty cache — opt-in, bounded-VRAM prefix-KV reuse across calls that share a
+    /// conversation. <paramref name="reuse"/> is updated in place with this call's full sequence (prompt +
+    /// generated tokens) whether the call completes normally or is cancelled — a stream filter's intentional stop
+    /// and caller cancellation both leave the cache in a valid, consistently-committed state, so either is safe to
+    /// keep; only an exception from the backend itself (an unknown, possibly-inconsistent state) drops it instead.
+    /// Bounded storage, eviction policy and the busy-key rule are the caller's responsibility (see
+    /// <see cref="RetainedSequenceStore"/>) — this method only reads and mutates the one instance it is given.
+    /// Ignored for the tensor-parallel path (<see cref="GenerateTp"/>): per-rank <see cref="KvCache"/>s have no
+    /// <see cref="ISequenceState"/> to retain, so <paramref name="reuse"/> is left untouched when <c>_tp</c> is set.</summary>
+    public GenerationResult Generate(GenerationRequest request, RetainedSequence? reuse, Action<int>? onToken = null, CancellationToken ct = default)
     {
         ct.ThrowIfCancellationRequested();
         int[] promptIds = BuildPromptIds(request);
@@ -66,78 +82,180 @@ public sealed class TextGenerationPipeline
             return GenerateTp(request, promptIds, sampler, stops, onToken, ct);
         }
 
-        // Fixed-capacity KV (O(n) appends, bounded VRAM) sized for the prompt + the requested generation.
+        // Fixed-capacity KV (O(n) appends, bounded VRAM) sized for the prompt + the requested generation, unless
+        // `reuse` already holds one large enough (AcquireCache), in which case its common prefix with `promptIds`
+        // is kept and only the diverging tail below is prefilled.
         int maxSeq = promptIds.Length + request.MaxTokens + 1;
-        using ISequenceState cache = _model!.CreateSequenceState(new SequenceStateOptions(maxSeq));
-
-        bool stopped = false;
-        int next;
-        // Logits for the LAST prompt position only: sampling reads a single row (see GenericTransformerModel.Prefill).
-        using (Tensor hidden = _model.Prefill(new PrefillChunk(promptIds, 0, LastRowOnly: true), cache))
-        using (Tensor logits = _model.ProjectLogits(hidden, 1))
+        (ISequenceState cache, int reusedLen) = AcquireCache(reuse, promptIds, maxSeq, request.PrefixCacheCapacityHint);
+        bool committed = false;
+        // True only once cache.Length is guaranteed >= promptIds.Length (the first prefill below has returned).
+        // The catch block below commits on cancellation ONLY once this is true: today nothing plumbs `ct` into
+        // the first Prefill call, so it cannot itself observe a cancellation, but gating on this explicitly (
+        // rather than relying on that absence) keeps the finally block's cache.Length-vs-promptIds.Length
+        // assumption true by construction instead of by what no current backend happens to do.
+        bool firstPrefillDone = false;
+        try
         {
-            Span<float> lastRow = LastRow(logits, 1, vocab);
-            next = sampler.Next(lastRow, generated);
-        }
-
-        request.OnPrefillCompleted?.Invoke(promptIds.Length);
-
-        // CUDA-graph decode: collapses the ~600-700 kernel launches/token the plain loop below issues into one
-        // cuGraphLaunch/step, removing the CPU launch-issuance bottleneck the perf grind identified as the
-        // biggest remaining gap to llama.cpp (docs/Checklists/LLM_DECODE_PERF_GRIND.md Phase 6). Opt-in
-        // (env-gated) and scoped to what's actually graph-safe: greedy only (the on-device argmax has no
-        // sampler chain yet) and the plain dense GQA/RoPE decoder shape (SupportsGraphDecode) — MoE/MLA/
-        // cross-attention/sliding-window models fall through to the verified default loop unchanged.
-        bool graphDecodeRequested = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
-        // !HasJsonConstraint: graph decode's on-device argmax bypasses the CPU sampler chain entirely —
-        // including any JSON grammar step — so combining the two would silently produce unconstrained output.
-        // (Previously missing here even though DynamicBatchScheduler's equivalent admission check already
-        // excluded it — now consistent.)
-        // Staged v1 keeps decode eager (the adapter reports no graph support): the step graph is a single-backend
-        // capture, so per-stage graphs are a measured follow-up, not a default.
-        IGraphDecodable? graphModel = _model as IGraphDecodable;
-        bool useGraphDecode = request.Sampling.Greedy && !request.Sampling.HasJsonConstraint && graphDecodeRequested
-            && graphModel is not null && graphModel.SupportsGraphDecode(_backend);
-
-        // Prompt-lookup speculative decoding: batches a verify pass across several drafted tokens instead of
-        // one plain decode step apiece. Mutually exclusive with graph decode (graph decode wins when both are
-        // eligible — it's the more mature, unconditionally-faster path). See GenerateSpeculative's doc for why
-        // this is restricted to greedy, non-JSON-mode requests.
-        bool specDecodeRequested = request.SpeculativeDecode ?? EngineKnobs.SpecDecode.Value;
-        bool useSpecDecode = !useGraphDecode && request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
-            && _model.Capabilities.SupportsSpeculation && specDecodeRequested;
-
-        if (useGraphDecode)
-        {
-            stopped = GenerateGraphDecode(request, graphModel!, cache, promptIds.Length, next, generated, stops, onToken, ct);
-        }
-        else if (useSpecDecode)
-        {
-            stopped = GenerateSpeculative(request, cache, promptIds, sampler, next, generated, stops, onToken, ct);
-        }
-        else
-        {
-            for (int step = 0; step < request.MaxTokens; step++)
+            bool stopped;
+            int next;
+            // Logits for the LAST prompt position only: sampling reads a single row (see GenericTransformerModel.Prefill).
+            // reusedLen is always < promptIds.Length (AcquireCache clamps it), so this chunk is never empty.
+            using (Tensor hidden = _model!.Prefill(new PrefillChunk(promptIds.AsMemory(reusedLen), reusedLen, LastRowOnly: true), cache))
+            using (Tensor logits = _model.ProjectLogits(hidden, 1))
             {
-                ct.ThrowIfCancellationRequested();
-                if (stops.Contains(next)) { stopped = true; break; }
-                generated.Add(next);
-                onToken?.Invoke(next);
+                Span<float> lastRow = LastRow(logits, 1, vocab);
+                next = sampler.Next(lastRow, generated);
+            }
+            firstPrefillDone = true;
 
-                using Tensor hidden = _model.Prefill(new PrefillChunk(new[] { next }, cache.Length), cache);
-                using Tensor logits = _model.ProjectLogits(hidden, 1);
-                Span<float> row = LastRow(logits, 1, vocab);
-                next = sampler.Next(row, generated);
+            request.OnPrefillCompleted?.Invoke(promptIds.Length);
+
+            // CUDA-graph decode: collapses the ~600-700 kernel launches/token the plain loop below issues into one
+            // cuGraphLaunch/step, removing the CPU launch-issuance bottleneck the perf grind identified as the
+            // biggest remaining gap to llama.cpp (docs/Checklists/LLM_DECODE_PERF_GRIND.md Phase 6). Opt-in
+            // (env-gated) and scoped to what's actually graph-safe: greedy only (the on-device argmax has no
+            // sampler chain yet) and the plain dense GQA/RoPE decoder shape (SupportsGraphDecode) — MoE/MLA/
+            // cross-attention/sliding-window models fall through to the verified default loop unchanged.
+            bool graphDecodeRequested = request.GraphDecode ?? EngineKnobs.GraphDecode.Value;
+            // !HasJsonConstraint: graph decode's on-device argmax bypasses the CPU sampler chain entirely —
+            // including any JSON grammar step — so combining the two would silently produce unconstrained output.
+            // (Previously missing here even though DynamicBatchScheduler's equivalent admission check already
+            // excluded it — now consistent.)
+            // Staged v1 keeps decode eager (the adapter reports no graph support): the step graph is a single-backend
+            // capture, so per-stage graphs are a measured follow-up, not a default.
+            IGraphDecodable? graphModel = _model as IGraphDecodable;
+            bool useGraphDecode = request.Sampling.Greedy && !request.Sampling.HasJsonConstraint && graphDecodeRequested
+                && graphModel is not null && graphModel.SupportsGraphDecode(_backend);
+
+            // Prompt-lookup speculative decoding: batches a verify pass across several drafted tokens instead of
+            // one plain decode step apiece. Mutually exclusive with graph decode (graph decode wins when both are
+            // eligible — it's the more mature, unconditionally-faster path). See GenerateSpeculative's doc for why
+            // this is restricted to greedy, non-JSON-mode requests.
+            bool specDecodeRequested = request.SpeculativeDecode ?? EngineKnobs.SpecDecode.Value;
+            bool useSpecDecode = !useGraphDecode && request.Sampling.Greedy && !request.Sampling.HasJsonConstraint
+                && _model.Capabilities.SupportsSpeculation && specDecodeRequested;
+
+            if (useGraphDecode)
+            {
+                stopped = GenerateGraphDecode(request, graphModel!, cache, promptIds.Length, next, generated, stops, onToken, ct);
+            }
+            else if (useSpecDecode)
+            {
+                stopped = GenerateSpeculative(request, cache, promptIds, sampler, next, generated, stops, onToken, ct);
+            }
+            else
+            {
+                stopped = false;
+                for (int step = 0; step < request.MaxTokens; step++)
+                {
+                    ct.ThrowIfCancellationRequested();
+                    if (stops.Contains(next)) { stopped = true; break; }
+                    generated.Add(next);
+                    onToken?.Invoke(next);
+
+                    using Tensor hidden = _model.Prefill(new PrefillChunk(new[] { next }, cache.Length), cache);
+                    using Tensor logits = _model.ProjectLogits(hidden, 1);
+                    Span<float> row = LastRow(logits, 1, vocab);
+                    next = sampler.Next(row, generated);
+                }
+            }
+
+            committed = true;
+            return new GenerationResult
+            {
+                TokenIds = generated,
+                Text = _tokenizer.Decode(generated),
+                PromptTokens = promptIds.Length,
+                StoppedOnStopToken = stopped,
+                ReusedPromptTokens = reusedLen,
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            // NOT always strictly between committed steps: onToken runs (and, via TextService's filter-stop
+            // wrapper, can throw) right after generated.Add(next) but BEFORE the Prefill call that actually
+            // commits `next` to the cache (eager loop; graph decode's onToken sits at the same spot). So
+            // generated.Count can be exactly one ahead of what cache.Length reflects when this fires — the
+            // `finally` below reconciles against cache.Length, the one count that is always ground truth,
+            // rather than trusting generated.Count here. Committing is conditioned on firstPrefillDone: a
+            // cancellation before the prompt itself finished prefilling has no committed state at all (cache.Length
+            // is still short of promptIds.Length), and the finally block's reconciliation formula assumes the full
+            // prompt is already in — falling through to the genuine-fault branch below discards cleanly instead.
+            committed = firstPrefillDone;
+            throw;
+        }
+        finally
+        {
+            if (reuse is null)
+            {
+                cache.Dispose();
+            }
+            else if (committed)
+            {
+                // Clamped to cache.Length, not generated.Count: a cancellation from inside onToken (a filter or
+                // tool-call stop) can leave one token recorded in `generated` whose Prefill never ran. Storing
+                // more ids than the cache actually holds would make a later AcquireCache compute a reused-prefix
+                // length beyond old.Length, and FixedKvCache.Truncate throws on that.
+                int committedGenerated = Math.Clamp(cache.Length - promptIds.Length, 0, generated.Count);
+                int[] fullIds = new int[promptIds.Length + committedGenerated];
+                promptIds.CopyTo(fullIds, 0);
+                generated.CopyTo(0, fullIds, promptIds.Length, committedGenerated);
+                reuse.Update(cache, fullIds, _model!.EstimateSequenceBytes(cache.Capacity));
+            }
+            else
+            {
+                // A genuine fault (backend exception, not cancellation): don't trust this cache's state. `cache`
+                // is either `reuse.Cache` itself (the common reused-and-truncated case) or a freshly-allocated
+                // replacement AcquireCache already detached `reuse` from — dispose each exactly once either way.
+                bool same = ReferenceEquals(cache, reuse.Cache);
+                reuse.Dispose();
+                if (!same)
+                {
+                    cache.Dispose();
+                }
             }
         }
+    }
 
-        return new GenerationResult
+    /// <summary>Resolves the cache <see cref="Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/>
+    /// prefills into: <paramref name="reuse"/>'s cache truncated to its common prefix with <paramref name="promptIds"/>
+    /// when it is large enough for <paramref name="maxSeq"/>, else a fresh one (disposing an outgrown
+    /// <paramref name="reuse"/> cache first — never the other way around, so a failed allocation never leaves
+    /// <paramref name="reuse"/> pointing at an already-disposed buffer). The returned length is always LESS than
+    /// <paramref name="promptIds"/>.Length, even on an exact repeat, so the caller always prefills a real final
+    /// token and gets a fresh logits row to sample from; it is also never more than <c>old.Length</c> (defensive —
+    /// <see cref="Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/>'s own bookkeeping
+    /// keeps <c>reuse.TokenIds</c> within that bound already, but <see cref="FixedKvCache.Truncate"/> throws
+    /// instead of clamping, so a future bug here should degrade to less reuse, not a crash).</summary>
+    private (ISequenceState Cache, int ReusedLen) AcquireCache(RetainedSequence? reuse, int[] promptIds, int maxSeq, int? capacityHint)
+    {
+        if (reuse?.Cache is { } old)
         {
-            TokenIds = generated,
-            Text = _tokenizer.Decode(generated),
-            PromptTokens = promptIds.Length,
-            StoppedOnStopToken = stopped,
-        };
+            if (old.Capacity >= maxSeq)
+            {
+                int commonLen = Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), old.Length);
+                int reusedLen = Math.Max(0, Math.Min(commonLen, promptIds.Length - 1));
+                old.Truncate(reusedLen);
+                return (old, reusedLen);
+            }
+            // Outgrown: this entry can't serve the request as-is. Drop it now (disposing the old buffer) so the
+            // slot comes back empty if the fresh allocation below throws, rather than referencing a stale cache.
+            reuse.Dispose();
+        }
+        int capacity = Math.Max(maxSeq, capacityHint ?? 0);
+        return (_model!.CreateSequenceState(new SequenceStateOptions(capacity)), 0);
+    }
+
+    /// <summary>Length of the shared prefix of <paramref name="a"/> and <paramref name="b"/>.</summary>
+    private static int CommonPrefixLength(int[] a, int[] b)
+    {
+        int n = Math.Min(a.Length, b.Length);
+        int i = 0;
+        while (i < n && a[i] == b[i])
+        {
+            i++;
+        }
+        return i;
     }
 
     /// <summary>Tensor-parallel generation: prefill + eager decode over per-rank KV caches; no graph/speculative decode (structurally unreachable — <c>ForwardTp</c> is the only forward) and no last-row gather optimization yet (prefill projects all rows, correctness-first).</summary>
@@ -203,6 +321,13 @@ public sealed class TextGenerationPipeline
                 next = session.Replay();
                 session.Pos++;
                 session.WriteNextPos();   // prep for the NEXT replay
+                // Mirrors DynamicBatchScheduler.ReplayGraphRound: the graph advances the DEVICE-side position
+                // itself, but cache.Length (host-side, what AcquireCache/the retained-sequence bookkeeping in
+                // Generate reads) only moves via this explicit commit. Before prefix-cache reuse, nothing ever
+                // read cache.Length again after a graph-decode run (the cache was always disposed), so this had
+                // no observable effect either way; it matters now that a retained cache's Length needs to be
+                // accurate after a graph-decode turn too.
+                graphModel.CommitReplayedStep(cache);
             }
             return false;
         }
