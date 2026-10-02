@@ -164,6 +164,16 @@ stable release will require. Dates are UTC.
   `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
   produced) when timestamps were requested and the pipeline returned any; the plain-text path is
   unchanged byte-for-byte otherwise.
+- **The phone gateway and voice host moved out of this repo**, to a separate app:
+  [HartsyAI/HartsyPhone](https://github.com/HartsyAI/HartsyPhone). `HartsyInference.PhoneGateway`,
+  `HartsyInference.VoiceHost` and `HartsyInference.PhoneLink` (source, tests, the systemd units and install
+  scripts under `deploy/`, and their research docs) are removed from this repo; the code and its git history
+  continue in the new one, copied as of this engine's `main` at `40c84b69` (alpha.238). `HartsyInference.Voice`
+  and `HartsyInference.Tools` are unaffected and stay here (AudioLab and other consumers still use `Voice`
+  directly, with no phone dependency). **`HartsyInference.PhoneLink` stops publishing to NuGet as of this
+  change**; `publish-nuget.yml`'s EXPECTED package list no longer includes it. SIPSorcery is no longer a
+  dependency of this repo. No version bump for this change alone — see whichever numbered section above
+  is first to ship after it for the actual release this landed in.
 - **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
   `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
   not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper

@@ -32,12 +32,6 @@
     <PackageVersion Include="OpenTelemetry.Exporter.Prometheus.AspNetCore" Version="1.16.0-beta.1" />
   </ItemGroup>
 
-  <!-- Phone gateway (SIP/RTP). Pure managed. License: BSD-3-Clause plus an appended usage-restriction clause in
-       the package's LICENSE.md (read it before redistributing the gateway binary); the gateway is an unpackaged
-       exe, so no HartsyInference NuGet package carries it. Restores with zero NuGet-audit warnings on net10. -->
-  <ItemGroup>
-    <PackageVersion Include="SIPSorcery" Version="10.0.16" />
-  </ItemGroup>
 
   <!-- Testing -->
   <ItemGroup>
