@@ -30,7 +30,7 @@ public static class KnobFile
     /// the file a second time inside the first.</summary>
     private static bool _applying;
 
-    /// <summary>Set by a host that keeps its settings elsewhere; overrides <see cref="Path"/>. Must be set before the first knob is read.</summary>
+    /// <summary>Set by a host that keeps its settings elsewhere; overrides <see cref="Path"/>. Must be set before the first knob is read or set, since either loads the file.</summary>
     public static string? ExplicitPath { get; set; }
 
     /// <summary>The settings file this process reads and writes, whether or not it exists yet.</summary>
