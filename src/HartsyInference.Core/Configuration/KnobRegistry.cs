@@ -48,6 +48,23 @@ public static class KnobRegistry
         _ => null,
     };
 
+    /// <summary><paramref name="value"/>, already parsed to the knob's type, after the knob's own range rule. The value a
+    /// setting would take if it were the one in force, without asking what is in force now.</summary>
+    internal static object? Coerced(object knob, object? value) => (knob, value) switch
+    {
+        (Knob<bool> b, bool v) => Apply(b, v),
+        (Knob<bool?> b, _) => Apply(b, (bool?)value),
+        (Knob<int> i, int v) => Apply(i, v),
+        (Knob<int?> i, _) => Apply(i, (int?)value),
+        (Knob<long> l, long v) => Apply(l, v),
+        (Knob<float> f, float v) => Apply(f, v),
+        (Knob<float?> f, _) => Apply(f, (float?)value),
+        (Knob<string?> s, _) => Apply(s, (string?)value),
+        _ => value,
+    };
+
+    private static T Apply<T>(Knob<T> knob, T value) => knob.Coerce is null ? value : knob.Coerce(value);
+
     /// <summary>Describes a knob for <c>settings list</c> output.</summary>
     public static (string Id, string Type, object? Default, KnobScope Scope, KnobDomain Domain, string Summary) Describe(object knob)
     {

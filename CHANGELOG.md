@@ -12,9 +12,11 @@ stable release will require. Dates are UTC.
   that load let other threads through as soon as it started. So a `KnobStore.Set` made on another thread mid-load was
   overwritten by the rest of the file, and a `Set` made before any read was overwritten by the load that the first
   read triggered. Hosts worked around it by reading a knob before setting one. Now a read waits for a load in progress
-  to finish. `KnobStore.Set`, `KnobStore.Clear` and `KnobFile.Apply` load the file first, so a host's value lands on
-  top in any order. This was the order-dependent `ModelFolderCaseTests` failure: a temp models root was replaced by the
-  settings file's `paths.modelsRoot`.
+  to finish. `KnobStore.Set`, `KnobStore.Clear`, `KnobFile.Apply` and `KnobFile.Save` load the file first, so a
+  host's value lands on top in any order. `Save` also stores the value it was given, coerced, instead of reading the
+  knob back. A first-in-process `Save` could otherwise write the file's old value again. This was the
+  order-dependent `ModelFolderCaseTests` failure: a temp models root was replaced by the settings file's
+  `paths.modelsRoot`.
 - **Fixed: LTX two-stage refinement is refused on distilled checkpoints older than 2.5, even when
   `numerics.ltx2TwoStage` asks for it.** The x2 latent upsampler is an LTX-2.5 model. Making two-stage opt-in had
   moved the decision to the knob, and the knob applied to any distilled checkpoint, so the 2.5-only check that the

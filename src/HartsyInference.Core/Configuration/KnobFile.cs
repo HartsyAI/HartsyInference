@@ -116,19 +116,26 @@ public static class KnobFile
     public static object? Save(string id, string rawValue)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        // A process's first load applies the whole file, so it must not run after this point: it would put the
+        // setting's old value back over the one being saved.
+        EnsureLoaded();
         object knob = KnobRegistry.Find(id)
             ?? throw new InvalidOperationException($"Unknown setting '{id}'. Run 'hartsy settings list' to see them all.");
 
         // Round-trip through the loader's own parse so "true"/"1"/"256" are read exactly as the file would read them.
         string probe = "{\"settings\":{" + JsonSerializer.Serialize(id) + ":"
             + JsonSerializer.Serialize(rawValue) + "}}";
-        using (JsonDocument parsed = JsonDocument.Parse(probe))
+        object? parsed;
+        using (JsonDocument document = JsonDocument.Parse(probe))
         {
-            ApplyOne(parsed.RootElement.GetProperty("settings").EnumerateObject().First(), "(set)");
+            parsed = ParseOne(document.RootElement.GetProperty("settings").EnumerateObject().First(), "(set)");
         }
-        // The effective value, not the raw one: two knobs CLAMP rather than reject, and a file holding
-        // a number the engine would quietly narrow is exactly the kind of lie this rewrite is removing.
-        object? stored = KnobRegistry.ValueOf(knob);
+        // The coerced value, not the raw one: two knobs CLAMP rather than reject, and a file holding a number the
+        // engine would quietly narrow is exactly the kind of lie this rewrite is removing. Coerced from what was
+        // given rather than read back through the knob, so a value a host or a request profile holds for the same
+        // knob is never what gets written. Saving replaces a value set earlier in this process, a host's included:
+        // it is the newer request.
+        object? stored = KnobRegistry.Coerced(knob, parsed);
         KnobStore.SetByIdRaw(id, stored, "settings file");
 
         Dictionary<string, JsonElement> settings = new(StringComparer.Ordinal);
@@ -248,6 +255,10 @@ public static class KnobFile
     }
 
     private static void ApplyOne(JsonProperty entry, string origin)
+        => KnobStore.SetByIdRaw(entry.Name, ParseOne(entry, origin), "settings file");
+
+    /// <summary>One setting's value parsed to its knob's type, or an exception naming what is wrong with it.</summary>
+    private static object? ParseOne(JsonProperty entry, string origin)
     {
         object? knob = KnobRegistry.Find(entry.Name)
             ?? throw new InvalidOperationException(
@@ -267,7 +278,7 @@ public static class KnobFile
             _ => throw new InvalidOperationException(
                 $"Engine settings file '{origin}': setting '{entry.Name}' expects {t.Name}, got {entry.Value.ValueKind}."),
         };
-        KnobStore.SetByIdRaw(entry.Name, value, "settings file");
+        return value;
     }
 
     private static object ParseString(string raw, Type t, string id, string origin)
