@@ -117,15 +117,33 @@ public sealed class RetainedSequenceStoreTests
     }
 
     [Fact]
-    public void CheckIn_ASingleEntryHeavierThanTheBudget_IsStillKept()
+    public void CheckIn_ASequenceHeavierThanTheBudget_IsDisposed_AndTheOthersStay()
     {
         using RetainedSequenceStore store = new(maxEntries: 10, maxBytes: 100);
-        (RetainedSequence huge, _) = Seq(1, 8, 10_000);
+        (RetainedSequence small, _) = Seq(1, 8, 60);
+        (RetainedSequence huge, FakeSequenceState fakeHuge) = Seq(1, 8, 101);
+        store.CheckIn("small", small);
 
-        store.CheckIn("huge", huge);   // nothing else to evict; kept anyway rather than refused
+        store.CheckIn("huge", huge);   // over the hard cap: freed, and it must not evict "small" on its way out
+
+        Assert.True(fakeHuge.Disposed);
+        Assert.Equal(1, store.Count);
+        Assert.Equal(60, store.BytesUsed);
+        Assert.Null(store.Checkout("huge"));
+        Assert.NotNull(store.Checkout("small"));
+    }
+
+    [Fact]
+    public void CheckIn_AnEmptySequence_IsNotStored()
+    {
+        using RetainedSequenceStore store = new(maxEntries: 1, maxBytes: 100);
+        (RetainedSequence kept, _) = Seq(1, 8, 10);
+        store.CheckIn("kept", kept);
+
+        store.CheckIn("empty", new RetainedSequence());   // e.g. a request whose sequence was dropped
 
         Assert.Equal(1, store.Count);
-        Assert.NotNull(store.Checkout("huge"));
+        Assert.NotNull(store.Checkout("kept"));
     }
 
     [Fact]

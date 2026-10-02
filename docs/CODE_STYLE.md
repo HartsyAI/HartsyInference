@@ -84,9 +84,10 @@ Traits classify tests; they do not automatically filter dotnet test. Run the CPU
 
     dotnet test --filter "Category!=SyntheticSmoke&Category!=Integration&Category!=GpuIntegration&Category!=Slow&Network!=Real"
 
-There is no dedicated CPU/GPU CI workflow; publish-nuget.yml is the current workflow. TestTierLintTests
-checks unguarded GPU/backend and gitignored fixture access when executed; it is not a build-time guarantee.
-Use a recognized resource guard or a justified tier-lint: guarded annotation.
+CI runs only part of this: cpu-lints.yml runs TestTierLintTests, KnobRegistryTests and EnvReadAllowlistTests on every
+pull request that touches src or tests; the rest of the CPU lane, and every GPU lane, is run by hand. TestTierLintTests
+checks unguarded GPU/backend and gitignored fixture access. Use a recognized resource guard or a justified
+tier-lint: guarded annotation.
 
 Parity tests live in tests/<Project>/Parity/ and end in *ParityTests, selected with
 FullyQualifiedName~Parity. Resource-dependent tests remain resource-dependent after numerical verification;

@@ -9,6 +9,7 @@ namespace HartsyInference.Cuda.Tests;
 /// (<c>convrot_rotate</c> then <c>w8a8_quant_rowwise</c>) — not against a second copy of the fused logic — so a
 /// wrong rotation stage, a wrong reduction, or a changed rounding rule fails here instead of as slightly-off
 /// video. Non-square shapes throughout, so a transposed axis cannot pass.</summary>
+[Trait("Category", "GpuIntegration")]
 [Collection("CudaSerial")]
 public sealed unsafe class ConvRotFusedQuantTests
 {

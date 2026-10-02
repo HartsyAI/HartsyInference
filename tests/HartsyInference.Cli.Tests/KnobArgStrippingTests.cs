@@ -2,7 +2,7 @@ using Xunit;
 
 namespace HartsyInference.Cli.Tests;
 
-/// <summary>The <c>--profile</c> / <c>--set</c> pairs must not reach the command parser.
+/// <summary>The <c>--profile</c> / <c>--set</c> / <c>--settings-file</c> pairs must not reach the command parser.
 ///
 /// <para>Both are read by <c>Program.Main</c> before any command exists, so no command declares them. With
 /// <c>StrictParsing</c> on — see <see cref="StrictOptionParsingTests"/> for why it is — anything the parser does not
@@ -14,7 +14,7 @@ public sealed class KnobArgStrippingTests
     public void StripsEachFlagAndItsValue_LeavingTheCommandLineIntact()
     {
         string[] args = ["--set", "numerics.fp8Native=false", "--profile", "reference", "--set",
-            "diagnostics.logLevel=Info", "video", "-m", "minimax-h3", "--steps", "4"];
+            "diagnostics.logLevel=Info", "--settings-file", "/tmp/ab.json", "video", "-m", "minimax-h3", "--steps", "4"];
 
         string[] kept = Program.WithoutKnobArgs(args);
 
@@ -34,6 +34,7 @@ public sealed class KnobArgStrippingTests
     [Theory]
     [InlineData("--set")]
     [InlineData("--profile")]
+    [InlineData("--settings-file")]
     public void KeepsATrailingFlagThatHasNoValue_SoTheParserStillRejectsIt(string flag)
     {
         // ArgValues cannot have read a flag with nothing after it, so the setting the operator asked for was never
@@ -47,9 +48,9 @@ public sealed class KnobArgStrippingTests
     [Fact]
     public void DoesNotConsumeATokenThatMerelyContainsTheFlagName()
     {
-        // Matching is exact, not substring: an option like --settings-file must keep its own value.
-        string[] args = ["video", "--settings-file", "/etc/hartsy.json", "--set", "vram.stepCache=true"];
+        // Matching is exact, not substring: an option like --setting must keep its own value.
+        string[] args = ["video", "--setting", "/etc/hartsy.json", "--set", "vram.stepCache=true"];
 
-        Assert.Equal(["video", "--settings-file", "/etc/hartsy.json"], Program.WithoutKnobArgs(args));
+        Assert.Equal(["video", "--setting", "/etc/hartsy.json"], Program.WithoutKnobArgs(args));
     }
 }

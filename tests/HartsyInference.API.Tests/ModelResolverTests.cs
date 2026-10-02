@@ -8,7 +8,7 @@ namespace HartsyInference.API.Tests;
 
 /// <summary>Direct tests for <see cref="ModelResolver"/>'s catalog-id resolution — specifically the fix for a real
 /// bug found via a live end-to-end run: several image/video catalog entries record their actual on-disk location
-/// via <c>Assets[].TargetSubdir</c> (e.g. "Stable-Diffusion/Krea2"), which does not match the coarse
+/// via <c>Assets[].TargetSubdir</c> (e.g. "Stable-Diffusion/Krea2/Turbo"), which does not match the coarse
 /// per-modality subdir guess ("Image"/"Video") <see cref="ModelResolver"/> falls back to — so a bare catalog id
 /// alone used to 400 with "no checkpoint found" even when the file was genuinely present. Points
 /// <c>RepoPaths.ModelsRoot()</c> at a hermetic fixture through the <c>paths.modelsRoot</c> setting — no real
@@ -37,9 +37,10 @@ public sealed class ModelResolverTests : IDisposable
     [Fact]
     public void Resolve_PrefersAuthoritativeAssetPath_OverNaiveSubdirGuess()
     {
-        // krea2's transformer asset: TargetSubdir "Stable-Diffusion/Krea2", file "krea2_turbo_fp8_scaled.safetensors"
-        // — NOT under the naive per-modality guess "Image/krea2" this bug used to fall back to.
-        string authoritativeDir = Path.Combine(_tempModelsRoot, "Stable-Diffusion", "Krea2");
+        // krea2's transformer asset: TargetSubdir "Stable-Diffusion/Krea2/Turbo", file
+        // "krea2_turbo_fp8_scaled.safetensors" — NOT under the naive per-modality guess "Image/krea2" this
+        // bug used to fall back to.
+        string authoritativeDir = Path.Combine(_tempModelsRoot, "Stable-Diffusion", "Krea2", "Turbo");
         Directory.CreateDirectory(authoritativeDir);
         string authoritativeFile = Path.Combine(authoritativeDir, "krea2_turbo_fp8_scaled.safetensors");
         File.WriteAllBytes(authoritativeFile, [0x01]);

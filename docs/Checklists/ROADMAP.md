@@ -99,12 +99,12 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
   `TextGenerationPipeline`/`TextService` (`TextRequest.PrefixCacheKey`, `RetainedSequence`/`RetainedSequenceStore`),
   wired into the voice session per call plus a call-start priming request. 4090 VRAM also addressed
   (`TextRequest.CacheWeightCasts`, `TextRequest.PreloadRedundantWeightSplits`, `ITextService.TrimMemoryPool`) —
-  the ≤ 6 GB target is now met (5.81 GB measured, flat across turns) — see PR #217 for the breakdown.
-- [x] Phone voice host and deployment (`HartsyInference.VoiceHost`, alpha.230): PhoneLink server, one session per
-  call, turn-tagged reply audio with `Flush(turnId)` on barge-in, telephony tools over the link, systemd units for the
-  host and the gateway. Install and call checks: [runbook](VOICE_AGENT_VERIFICATION.md).
-- [ ] Voice host follow-ups: per-call instructions for outbound calls (why the agent is calling); a host-side metrics
-  endpoint (per-call summaries are log lines today).
+  the ≤ 6 GB target is met. Since #234 the retained KV is bounded for shared GPUs: shrunk to the conversation's
+  length plus `vram.prefixCacheHeadroomTokens`, grown by device copy, hard-capped by `vram.prefixCacheMaxBytes`.
+  Measurements in PRs #217 and #234.
+- [x] Phone voice host and gateway (formerly `HartsyInference.VoiceHost`/`.PhoneGateway`/`.PhoneLink`, built
+  from this engine through alpha.238): moved to a separate app,
+  [HartsyPhone](https://github.com/HartsyAI/HartsyPhone); its own roadmap and follow-ups live there now.
 
 ## 6. Diffusion / acceleration
 

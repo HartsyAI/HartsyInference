@@ -1,0 +1,32 @@
+name: CPU lints
+
+# Runs the source-scanning lints that keep the engine's test tiers and configuration surface honest, so a change that
+# breaks one fails on its own PR instead of reaching main (#238's environment read did, because no workflow ran them):
+#   TestTierLintTests      an untagged test that opens a GPU backend, or reads gitignored reference data, unguarded
+#   KnobRegistryTests      engine code that reads configuration from the environment; knob ids and paired defaults
+#   EnvReadAllowlistTests  a new file in src/ that reads the environment
+# They read the repository's sources and need no GPU, model weights or network, so a hosted runner is enough.
+
+on:
+  pull_request:
+    # The root build inputs too: a change to them can break the Core.Tests build without touching src or tests.
+    paths: ['src/**', 'tests/**', 'Directory.*', '*.sln', '.github/workflows/cpu-lints.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  cpu-lints:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: >-
+          dotnet test tests/HartsyInference.Core.Tests -c Release
+          --filter "FullyQualifiedName~TestTierLintTests|FullyQualifiedName~KnobRegistryTests|FullyQualifiedName~EnvReadAllowlistTests"

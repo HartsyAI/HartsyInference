@@ -55,15 +55,15 @@ public sealed class RetainedSequenceStore : IDisposable
 
     /// <summary>Stores <paramref name="sequence"/> under <paramref name="key"/>, evicting least-recently-used
     /// entries first until the store fits the configured count/byte bounds. Disposes every entry it evicts. A
-    /// single entry heavier than the whole byte budget is still stored (after evicting everything else) rather
-    /// than refused — the store always keeps at least the most recently used entry.</summary>
+    /// sequence heavier than the whole byte budget, or one holding nothing, is disposed instead of stored, and
+    /// leaves the other entries alone.</summary>
     public void CheckIn(string key, RetainedSequence sequence)
     {
         ArgumentException.ThrowIfNullOrEmpty(key);
         ArgumentNullException.ThrowIfNull(sequence);
         lock (_gate)
         {
-            if (_disposed)
+            if (_disposed || sequence.Cache is null || sequence.Bytes > _maxBytes)
             {
                 sequence.Dispose();
                 return;

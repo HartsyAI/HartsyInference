@@ -19,6 +19,16 @@ public static class Program
     /// <summary>Parses <paramref name="args"/> and dispatches to a command; with no args, shows the banner and usage.</summary>
     public static int Main(string[] args)
     {
+        // Isolates a test/harness run's settings from the shared ~/.config/hartsyinference/settings.json --
+        // that file is also read by any other HartsyInference process on this machine (including a live
+        // SwarmUI engine), so a one-off knob override for a timed A/B must never land there. Must run before
+        // ResolveLogLevel() below, which is the first knob read (KnobFile.EnsureLoaded() happens on first read).
+        // A flag rather than an environment variable: the engine takes no configuration from the environment
+        // (KnobRegistryTests and EnvReadAllowlistTests hold that).
+        string? settingsFile = ArgValue(args, "--settings-file");
+        if (!string.IsNullOrWhiteSpace(settingsFile))
+            KnobFile.ExplicitPath = settingsFile;
+
         // Warning by default keeps the REPL/one-shot output clean; diagnostics.logLevel exposes the engine's
         // per-phase / per-step diagnostics (D2H sync counts, phase timings) without a rebuild. Re-read after the
         // --set profile is pushed below, since that is where a caller raising it for one run supplies it.
@@ -150,12 +160,12 @@ public static class Program
         });
 
         // Without this the run always fails: StrictParsing above refuses any option no command declares, and no
-        // command declares --profile/--set because they are read here, before the parser exists. They have to be
+        // command declares --profile/--set/--settings-file because they are read here, before the parser exists. They have to be
         // taken out of what the parser sees or every invocation that uses one dies on "Unexpected option 'set'".
         return app.Run(WithoutKnobArgs(args));
     }
 
-    /// <summary>Drops each <c>--profile</c>/<c>--set</c> flag and the value that follows it, leaving the command line the parser should see.</summary>
+    /// <summary>Drops each <c>--profile</c>/<c>--set</c>/<c>--settings-file</c> flag and the value that follows it, leaving the command line the parser should see.</summary>
     /// <remarks>A trailing flag with no value is left in place on purpose: <see cref="ArgValues"/> cannot have read
     /// it, so silently swallowing it here would run the generation while ignoring what the operator asked for —
     /// the same failure mode <c>StrictParsing</c> exists to prevent. The parser rejects it by name instead.
@@ -168,7 +178,8 @@ public static class Program
         for (int i = 0; i < args.Length; i++)
         {
             bool isKnobFlag = string.Equals(args[i], "--profile", StringComparison.Ordinal)
-                || string.Equals(args[i], "--set", StringComparison.Ordinal);
+                || string.Equals(args[i], "--set", StringComparison.Ordinal)
+                || string.Equals(args[i], "--settings-file", StringComparison.Ordinal);
             if (isKnobFlag && i + 1 < args.Length)
             {
                 i++;

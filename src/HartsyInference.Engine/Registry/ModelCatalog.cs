@@ -838,8 +838,9 @@ public static class ModelCatalog
                 CliDrivable = true, // `hartsy image -m zimage` verified end-to-end 2026-07-21
                 Assets = new ModelAsset[]
                 {
+                    // TargetSubdir/TargetName point at where this actually landed locally (flat, renamed) rather than the HF repo's own Stable-Diffusion/ZImage/<repo filename> -- see #239 for the HF-side verification.
                     new() { Repo = "mcmonkey/swarm-models", RepoPath = "SwarmUI_Z-Image-Turbo-FP8Mix.safetensors",
-                        TargetSubdir = "Stable-Diffusion/ZImage", Role = "transformer",
+                        TargetSubdir = "Stable-Diffusion", TargetName = "z-image-turbo.safetensors", Role = "transformer",
                         Sha256 = "ba92d3705131c8d9b05ca9c6fefe39444d4eb02db16c30aafa9fcf5f85230e06" },
                     SideModels.Qwen3_4B,
                     SideModels.FluxAe,
@@ -925,7 +926,10 @@ public static class ModelCatalog
                 // transformer is spelled out here: it is the checkpoint itself and has no SideModels entry.
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "Comfy-Org/Krea-2", RepoPath = "diffusion_models/krea2_turbo_fp8_scaled.safetensors", TargetSubdir = "Stable-Diffusion/Krea2", Role = "transformer",
+                    // TargetSubdir has a /Turbo segment: this repo also ships krea2_raw_* (a separate Base
+                    // checkpoint under a sibling catalog id some day), so the turbo/raw split keeps them from
+                    // landing in the same folder under the same ambiguous "which variant is this" name.
+                    new() { Repo = "Comfy-Org/Krea-2", RepoPath = "diffusion_models/krea2_turbo_fp8_scaled.safetensors", TargetSubdir = "Stable-Diffusion/Krea2/Turbo", Role = "transformer",
                         Sha256 = "eb4dd8c612cfd10f64f25b057e6e6bbcb5737c94a7372177e456dbf7579502f1" },
                     SideModels.Qwen3VL_4B,
                     SideModels.QwenImageVae,

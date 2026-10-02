@@ -123,6 +123,7 @@ public unsafe class WanAnimate2DrivingSensitivityTests
 
     /// <summary>The CUDA twin of the CPU gate. The CPU splice carries real signal, so if this one does not, the
     /// driving stream is being lost in a GPU kernel — which is exactly what real generations show.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DifferentDrivingVideos_ProduceDifferentDenoiserOutput_Cuda()
     {

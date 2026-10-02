@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// The failure modes here are all silent — an offload that copies stale bytes, a reload that returns different bytes
 /// than were paged out, and above all an offloaded tensor that weight auto-promotion quietly makes device-resident
 /// again, which turns the whole lever into a no-op that still pays the D2H.</summary>
+[Trait("Category", "GpuIntegration")]
 [Collection("CudaSerial")]
 public sealed unsafe class ActivationOffloadTests
 {

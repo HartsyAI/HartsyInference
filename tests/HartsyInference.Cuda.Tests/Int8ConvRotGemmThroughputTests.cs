@@ -9,6 +9,7 @@ namespace HartsyInference.Cuda.Tests;
 /// so a perf pass can tell "the GEMM is at the hardware wall" apart from "the GEMM is leaving throughput on the
 /// table". Reports TOPS against the RTX 4090's ~330 TOPS dense INT8 tensor-core peak. Diagnostic, not a gate —
 /// it asserts only that the path ran, and prints the numbers for a human to read.</summary>
+[Trait("Category", "GpuIntegration")]
 [Collection("CudaSerial")]
 public sealed unsafe class Int8ConvRotGemmThroughputTests
 {

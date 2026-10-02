@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Nvfp4;
 
@@ -254,15 +255,15 @@ public sealed unsafe class GptOssMoeFfn
     /// GEMM → scatter into per-slot contribution rows, folded serially afterwards). Memory-bounded:
     /// peak transient is the live expert slices (~100 MB each for GPT-OSS-20B) + the contributions
     /// buffer, regardless of bank size.
-    /// <para><b>Concurrency contract:</b> on the CPU backend experts run in parallel with per-worker
-    /// reusable slices (the CPU ops are stateless; each (token, slot) contribution row is owned by
-    /// exactly one expert). On GPU backends experts run STRICTLY SEQUENTIALLY with a FRESH slice tensor
-    /// per expert: the CUDA backend's stream, reference-keyed weight/activation caches, lazy D2H sync
-    /// callbacks, and upload auto-promotion are none of them safe against concurrent calls or against
-    /// reusing a Tensor object whose bytes changed — the parallel+reuse shape corrupted the GPU cache
-    /// bookkeeping and the native heap in production (<c>malloc(): unsorted double linked list
-    /// corrupted</c>). Each expert ends with <c>Sync</c> + <c>FreeWeights</c> before its slices are
-    /// disposed so no async op or cache entry outlives the host memory.</para></summary>
+    /// <para><b>Concurrency contract:</b> on the CPU backend experts run in parallel lanes through
+    /// <see cref="CpuParallel"/>, each lane reusing its own slices (the CPU ops are stateless; each (token,
+    /// slot) contribution row is owned by exactly one expert). On GPU backends experts run STRICTLY
+    /// SEQUENTIALLY with a FRESH slice tensor per expert: the CUDA backend's stream, reference-keyed
+    /// weight/activation caches, lazy D2H sync callbacks, and upload auto-promotion are none of them safe
+    /// against concurrent calls or against reusing a Tensor object whose bytes changed — the parallel+reuse
+    /// shape corrupted the GPU cache bookkeeping and the native heap in production (<c>malloc(): unsorted
+    /// double linked list corrupted</c>). Each expert ends with <c>Sync</c> + <c>FreeWeights</c> before its
+    /// slices are disposed so no async op or cache entry outlives the host memory.</para></summary>
     private void ForwardPacked(IBackend backend, Tensor input, Tensor output, int tokens,
         int[] slotExpert, float[] slotScore)
     {
@@ -289,26 +290,37 @@ public sealed unsafe class GptOssMoeFfn
 
             if (backend.Device.IsCpu)
             {
-                // Parallelism bounded by slice memory (each worker holds ~100 MB of dequant slices) and
-                // by the CPU GEMM being single-threaded per call.
-                ParallelOptions po = new ParallelOptions
+                // A few lanes, each owning one reusable pair of slices (~100 MB each), pull experts from a shared
+                // counter. The lane count bounds slice memory as before and the numerics.cpuThreads cap bounds it
+                // too; the lanes and the dequant and GEMM fan-outs nested in them all run on CpuParallel's one
+                // capped scheduler. Which lane runs an expert cannot change the output, because each (token,
+                // slot) contribution row belongs to exactly one expert. Not every lane is guaranteed a worker of
+                // its own: one that starts after the counter is drained finds nothing and exits.
+                int lanes = Math.Min(activeExperts.Count,
+                    Math.Min(Math.Clamp(Environment.ProcessorCount / 2, 1, 8), CpuParallel.MaxThreads));
+                int next = -1;
+                CpuParallel.For(lanes, (long)totalSlots * _hidden * twoI * 3, _ =>
                 {
-                    MaxDegreeOfParallelism = Math.Clamp(Environment.ProcessorCount / 2, 1, 8),
-                };
-                Parallel.ForEach(activeExperts, po,
-                    () => (GateUp: new Tensor(new TensorShape(twoI, _hidden), DType.F32),
-                           Down: new Tensor(new TensorShape(_hidden, _intermediate), DType.F32)),
-                    (e, _, slices) =>
+                    Tensor? gateUpSlice = null, downSlice = null;
+                    try
                     {
-                        RunPackedExpert(backend, e, starts, slotsByExpert, slotScore,
-                            inPtr, contribPtr, slices.GateUp, slices.Down);
-                        return slices;
-                    },
-                    slices =>
+                        int i;
+                        while ((i = Interlocked.Increment(ref next)) < activeExperts.Count)
+                        {
+                            // Allocated on the first expert this lane gets: when the lanes run one after another
+                            // (a cap of 1, an InlineScope) the first one drains the counter and the rest get none.
+                            gateUpSlice ??= new Tensor(new TensorShape(twoI, _hidden), DType.F32);
+                            downSlice ??= new Tensor(new TensorShape(_hidden, _intermediate), DType.F32);
+                            RunPackedExpert(backend, activeExperts[i], starts, slotsByExpert, slotScore,
+                                inPtr, contribPtr, gateUpSlice, downSlice);
+                        }
+                    }
+                    finally
                     {
-                        slices.GateUp.Dispose();
-                        slices.Down.Dispose();
-                    });
+                        gateUpSlice?.Dispose();
+                        downSlice?.Dispose();
+                    }
+                });
             }
             else
             {

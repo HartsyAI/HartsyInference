@@ -2,6 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Text;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Nvfp4;
@@ -1064,16 +1065,9 @@ public static unsafe class CheckpointConvertUtils
             StochasticPreRoundRange(p, n, seed, 0);
             return;
         }
-        long chunks = Math.Min(Environment.ProcessorCount, Math.Max(1L, n / ParallelPassChunkElements));
-        long perChunk = (n + chunks - 1) / chunks;
         nint basePtr = (nint)p;
-        Parallel.For(0, (int)chunks, c =>
-        {
-            long start = c * perChunk;
-            long length = Math.Min(perChunk, n - start);
-            if (length > 0)
-                StochasticPreRoundRange((float*)(basePtr + (nint)(start * sizeof(float))), length, seed, start);
-        });
+        CpuParallel.ForRanges(n, ParallelPassChunkElements, 16, (start, length) =>
+            StochasticPreRoundRange((float*)(basePtr + (nint)(start * sizeof(float))), length, seed, start));
     }
 
     /// <summary>Values are drawn from the global element index, so chunking cannot perturb the result.</summary>
@@ -1126,10 +1120,10 @@ public static unsafe class CheckpointConvertUtils
         return crc ^ 0xFFFFFFFFu;
     }
 
-    /// <summary>Element count at or above which the fp8 absmax/scale passes fan out across cores. Once vectorized these passes are memory-bound, so a <see cref="Parallel.For"/> dispatch (measured at 22µs for 16 chunks on this box) only pays for itself on a fairly large buffer: the measured crossover is 2^19 elements (vector-serial 91µs vs parallel 84µs; at 2^18 serial still wins 43µs vs 66µs). Everything reaching <see cref="QuantizeToFp8Scaled"/> is already ≥ <c>minElements</c> (2^20), so this is a guard for any future caller with smaller tensors.</summary>
+    /// <summary>Element count at or above which the fp8 absmax/scale passes fan out across cores. Once vectorized these passes are memory-bound, so a fan-out dispatch (measured at 22µs for 16 chunks on this box) only pays for itself on a fairly large buffer: the measured crossover is 2^19 elements (vector-serial 91µs vs parallel 84µs; at 2^18 serial still wins 43µs vs 66µs). Everything reaching <see cref="QuantizeToFp8Scaled"/> is already ≥ <c>minElements</c> (2^20), so this is a guard for any future caller with smaller tensors.</summary>
     private const long ParallelPassMinElements = 1L << 19;
 
-    /// <summary>Minimum elements per chunk, so a barely-over-threshold pass fans out to a few fat slices instead of <see cref="Environment.ProcessorCount"/> slivers that cost more to dispatch than to run.</summary>
+    /// <summary>Elements per range of a split pass, so a barely-over-threshold pass fans out to a few fat ranges instead of slivers that cost more to dispatch than to run. The ranges depend on the length alone, so every pass gives the same bits at any cap.</summary>
     private const long ParallelPassChunkElements = 1L << 17;
 
     /// <summary>Largest <c>|x|</c> over <paramref name="n"/> floats, ignoring NaN.</summary>
@@ -1139,16 +1133,10 @@ public static unsafe class CheckpointConvertUtils
         if (n < ParallelPassMinElements)
             return AbsMaxRange(p, n);
 
-        long chunks = Math.Min(Environment.ProcessorCount, Math.Max(1L, n / ParallelPassChunkElements));
-        long perChunk = (n + chunks - 1) / chunks;
-        float[] partials = new float[chunks];
+        float[] partials = new float[(n + ParallelPassChunkElements - 1) / ParallelPassChunkElements];
         nint basePtr = (nint)p;
-        Parallel.For(0, (int)chunks, c =>
-        {
-            long start = c * perChunk;
-            long length = Math.Min(perChunk, n - start);
-            partials[c] = length > 0 ? AbsMaxRange((float*)(basePtr + (nint)(start * sizeof(float))), length) : 0f;
-        });
+        CpuParallel.ForRanges(n, ParallelPassChunkElements, 2, (start, length) =>
+            partials[start / ParallelPassChunkElements] = AbsMaxRange((float*)(basePtr + (nint)(start * sizeof(float))), length));
         float absmax = 0f;
         foreach (float partial in partials)
         {
@@ -1189,16 +1177,9 @@ public static unsafe class CheckpointConvertUtils
             ScaleRange(p, n, inv);
             return;
         }
-        long chunks = Math.Min(Environment.ProcessorCount, Math.Max(1L, n / ParallelPassChunkElements));
-        long perChunk = (n + chunks - 1) / chunks;
         nint basePtr = (nint)p;
-        Parallel.For(0, (int)chunks, c =>
-        {
-            long start = c * perChunk;
-            long length = Math.Min(perChunk, n - start);
-            if (length > 0)
-                ScaleRange((float*)(basePtr + (nint)(start * sizeof(float))), length, inv);
-        });
+        CpuParallel.ForRanges(n, ParallelPassChunkElements, 1, (start, length) =>
+            ScaleRange((float*)(basePtr + (nint)(start * sizeof(float))), length, inv));
     }
 
     private static unsafe void ScaleRange(float* p, long n, float inv)
@@ -1263,7 +1244,7 @@ public static unsafe class CheckpointConvertUtils
             Half* dst = (Half*)result.DataPointer;
             float[] e2m1 = E2M1Magnitudes;
             float[] e4m3 = E4M3Table;
-            Parallel.For(0, (int)rows, r =>
+            CpuParallel.For((int)rows, rows * cols * 4, r =>
             {
                 byte* rowSrc = src + (long)r * packedCols;
                 Half* rowDst = dst + (long)r * cols;
@@ -1309,7 +1290,7 @@ public static unsafe class CheckpointConvertUtils
             float* dst = (float*)f32.DataPointer;
             float[] e2m1 = E2M1Magnitudes;
             float[] e4m3 = E4M3Table;
-            Parallel.For(0, (int)rows, r =>
+            CpuParallel.For((int)rows, rows * cols * 4, r =>
             {
                 byte* rowSrc = src + (long)r * packedCols;
                 float* rowDst = dst + (long)r * cols;

@@ -1,5 +1,7 @@
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.Sampling;
@@ -57,12 +59,15 @@ public sealed class TextGenerationPipeline
     /// <paramref name="reuse"/>'s retained token ids (the longest common prefix, always leaving at least the final
     /// prompt token to be prefilled fresh so sampling has a real logits row), instead of always prefilling the
     /// whole prompt from an empty cache — opt-in, bounded-VRAM prefix-KV reuse across calls that share a
-    /// conversation. <paramref name="reuse"/> is updated in place with this call's full sequence (prompt +
-    /// generated tokens) whether the call completes normally or is cancelled during decode — a stream filter's
-    /// intentional stop and caller cancellation both leave the cache in a valid, consistently-committed state, so
-    /// either is safe to keep. A cancellation during the prompt prefill, which commits nothing, and an exception from
-    /// the backend itself (an unknown, possibly-inconsistent state) drop it instead.
-    /// Bounded storage, eviction policy and the busy-key rule are the caller's responsibility (see
+    /// conversation. A retained cache too small for this call grows by copying its reusable prefix on device.
+    /// <paramref name="reuse"/> is updated in place with this call's full sequence (prompt + generated tokens)
+    /// whether the call completes normally or is cancelled during decode — a stream filter's intentional stop and
+    /// caller cancellation both leave the cache in a valid, consistently-committed state, so either is safe to keep.
+    /// A cancellation during the prompt prefill, which commits nothing, and an exception from the backend itself (an
+    /// unknown, possibly-inconsistent state) drop it instead. What is kept is copied down to its length plus
+    /// <see cref="GenerationRequest.PrefixCacheHeadroomTokens"/>, and freed instead when even that exceeds
+    /// <see cref="GenerationRequest.PrefixCacheMaxBytes"/>. Storage across keys, eviction policy and the busy-key rule
+    /// are the caller's responsibility (see
     /// <see cref="RetainedSequenceStore"/>) — this method only reads and mutates the one instance it is given.
     /// Ignored for the tensor-parallel path (<see cref="GenerateTp"/>): per-rank <see cref="KvCache"/>s have no
     /// <see cref="ISequenceState"/> to retain, so <paramref name="reuse"/> is left untouched when <c>_tp</c> is set.</summary>
@@ -84,8 +89,8 @@ public sealed class TextGenerationPipeline
         }
 
         // Fixed-capacity KV (O(n) appends, bounded VRAM) sized for the prompt + the requested generation, unless
-        // `reuse` already holds one large enough (AcquireCache), in which case its common prefix with `promptIds`
-        // is kept and only the diverging tail below is prefilled.
+        // `reuse` already holds one (AcquireCache), in which case its common prefix with `promptIds` is kept —
+        // grown by copy when the retained buffer is too small — and only the diverging tail below is prefilled.
         int maxSeq = promptIds.Length + request.MaxTokens + 1;
         (ISequenceState cache, int reusedLen) = AcquireCache(reuse, promptIds, maxSeq, request.PrefixCacheCapacityHint);
         bool committed = false;
@@ -201,50 +206,136 @@ public sealed class TextGenerationPipeline
                 int[] fullIds = new int[promptIds.Length + committedGenerated];
                 promptIds.CopyTo(fullIds, 0);
                 generated.CopyTo(0, fullIds, promptIds.Length, committedGenerated);
-                reuse.Update(cache, fullIds, _model!.EstimateSequenceBytes(cache.Capacity));
+                Retain(reuse, cache, fullIds, request);
             }
             else
             {
-                // A genuine fault (backend exception, not cancellation): don't trust this cache's state. `cache`
-                // is either `reuse.Cache` itself (the common reused-and-truncated case) or a freshly-allocated
-                // replacement AcquireCache already detached `reuse` from — dispose each exactly once either way.
-                bool same = ReferenceEquals(cache, reuse.Cache);
-                reuse.Dispose();
-                if (!same)
-                {
-                    cache.Dispose();
-                }
+                // A genuine fault (backend exception, not cancellation): don't trust this cache's state.
+                Discard(reuse, cache);
             }
+        }
+    }
+
+    /// <summary>Stores <paramref name="cache"/> in <paramref name="reuse"/> as holding <paramref name="tokenIds"/>,
+    /// first copying it down to its length plus the request's headroom when it holds more spare capacity than that,
+    /// or frees it instead when the kept size would exceed the request's byte cap.</summary>
+    private void Retain(RetainedSequence reuse, ISequenceState cache, int[] tokenIds, GenerationRequest request)
+    {
+        int headroom = Math.Max(0, request.PrefixCacheHeadroomTokens ?? EngineKnobs.PrefixCacheHeadroomTokens.Value);
+        long maxBytes = request.PrefixCacheMaxBytes ?? EngineKnobs.PrefixCacheMaxBytes.Value;
+        int target = (int)Math.Min((long)cache.Length + headroom, cache.Capacity);
+        // Checked before shrinking, through the same estimator as the check after it: a sequence over the cap is
+        // freed outright, never first copied into a buffer that would only be thrown away.
+        if (_model!.EstimateSequenceBytes(target) > maxBytes)
+        {
+            Discard(reuse, cache);
+            return;
+        }
+        ISequenceState kept = cache;
+        try
+        {
+            if (cache.Capacity > target)
+            {
+                kept = TryResize(cache, target) ?? cache;
+            }
+        }
+        catch
+        {
+            // A device fault mid-copy surfaces even though every token was already streamed; nothing is retained.
+            Discard(reuse, cache);
+            throw;
+        }
+        long keptBytes = _model.EstimateSequenceBytes(kept.Capacity);
+        if (keptBytes > maxBytes)
+        {
+            if (!ReferenceEquals(kept, cache))
+            {
+                kept.Dispose();
+            }
+            Discard(reuse, cache);
+            return;
+        }
+        if (!ReferenceEquals(kept, cache))
+        {
+            // Update only disposes the cache `reuse` itself references; a fresh or grown one is not it.
+            if (ReferenceEquals(reuse.Cache, cache))
+            {
+                reuse.Clear();
+            }
+            cache.Dispose();
+        }
+        reuse.Update(kept, tokenIds, keptBytes);
+    }
+
+    /// <summary>Frees <paramref name="cache"/> and empties <paramref name="reuse"/>. <paramref name="cache"/> is either
+    /// <c>reuse.Cache</c> itself (reused in place) or one <see cref="AcquireCache"/> already detached
+    /// <paramref name="reuse"/> from — each is disposed exactly once either way.</summary>
+    private static void Discard(RetainedSequence reuse, ISequenceState cache)
+    {
+        bool same = ReferenceEquals(cache, reuse.Cache);
+        reuse.Dispose();
+        if (!same)
+        {
+            cache.Dispose();
         }
     }
 
     /// <summary>Resolves the cache <see cref="Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/>
     /// prefills into: <paramref name="reuse"/>'s cache truncated to its common prefix with <paramref name="promptIds"/>
-    /// when it is large enough for <paramref name="maxSeq"/>, else a fresh one (disposing an outgrown
-    /// <paramref name="reuse"/> cache first — never the other way around, so a failed allocation never leaves
-    /// <paramref name="reuse"/> pointing at an already-disposed buffer). The returned length is always LESS than
-    /// <paramref name="promptIds"/>.Length, even on an exact repeat, so the caller always prefills a real final
-    /// token and gets a fresh logits row to sample from; it is also never more than <c>old.Length</c> (defensive —
-    /// <see cref="Generate(GenerationRequest,RetainedSequence,Action{int},CancellationToken)"/>'s own bookkeeping
-    /// keeps <c>reuse.TokenIds</c> within that bound already, but <see cref="FixedKvCache.Truncate"/> throws
-    /// instead of clamping, so a future bug here should degrade to less reuse, not a crash).</summary>
+    /// when it is large enough for <paramref name="maxSeq"/>; when it is not, a copy of that prefix in a cache of
+    /// exactly <paramref name="maxSeq"/>; else a fresh one sized by <paramref name="capacityHint"/>. An outgrown
+    /// <paramref name="reuse"/> cache is disposed before any fresh allocation — never the other way around, so a
+    /// failed allocation never leaves <paramref name="reuse"/> pointing at an already-disposed buffer. The returned
+    /// length is always LESS than <paramref name="promptIds"/>.Length, even on an exact repeat, so the caller always
+    /// prefills a real final token and gets a fresh logits row to sample from; it is also never more than
+    /// <c>old.Length</c> (defensive — Generate's own bookkeeping keeps <c>reuse.TokenIds</c> within that bound already,
+    /// but <see cref="FixedKvCache.Truncate"/> throws instead of clamping, so a future bug here should degrade to less
+    /// reuse, not a crash).</summary>
     private (ISequenceState Cache, int ReusedLen) AcquireCache(RetainedSequence? reuse, int[] promptIds, int maxSeq, int? capacityHint)
     {
         if (reuse?.Cache is { } old)
         {
+            int commonLen = Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), old.Length);
+            int reusedLen = Math.Max(0, Math.Min(commonLen, promptIds.Length - 1));
+            // Before the grow below, too: a resize copies the committed length, so only the reused prefix moves.
+            old.Truncate(reusedLen);
             if (old.Capacity >= maxSeq)
             {
-                int commonLen = Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), old.Length);
-                int reusedLen = Math.Max(0, Math.Min(commonLen, promptIds.Length - 1));
-                old.Truncate(reusedLen);
                 return (old, reusedLen);
             }
-            // Outgrown: this entry can't serve the request as-is. Drop it now (disposing the old buffer) so the
-            // slot comes back empty if the fresh allocation below throws, rather than referencing a stale cache.
-            reuse.Dispose();
+            // Outgrown: copy only the reusable prefix into a cache with room for this call. Exactly maxSeq, not the
+            // hint: what is retained is shrunk back when the call ends anyway.
+            ISequenceState? grown = null;
+            try
+            {
+                grown = reusedLen > 0 ? TryResize(old, maxSeq) : null;
+            }
+            finally
+            {
+                reuse.Dispose();
+            }
+            if (grown is not null)
+            {
+                return (grown, reusedLen);
+            }
         }
         int capacity = Math.Max(maxSeq, capacityHint ?? 0);
         return (_model!.CreateSequenceState(new SequenceStateOptions(capacity)), 0);
+    }
+
+    /// <summary><see cref="IGenerationModel.ResizeSequenceState"/>, or null when the model cannot copy its state or
+    /// the device cannot fit the copy; the caller then keeps or rebuilds the original instead.</summary>
+    private ISequenceState? TryResize(ISequenceState state, int capacity)
+    {
+        try
+        {
+            return _model!.ResizeSequenceState(state, capacity);
+        }
+        catch (OutOfVramException ex)
+        {
+            Logs.Debug($"[TextGenerationPipeline] Retained KV not resized to {capacity} tokens: {ex.Message}");
+            return null;
+        }
     }
 
     /// <summary>Length of the shared prefix of <paramref name="a"/> and <paramref name="b"/>.</summary>

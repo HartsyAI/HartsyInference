@@ -1,4 +1,5 @@
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 
@@ -43,7 +44,7 @@ public static unsafe class AffineIntCodec
         fixed (float* dst = dest)
         {
             nint srcAddr = (nint)src, dstAddr = (nint)dst, scaleAddr = (nint)scaleBase, biasAddr = (nint)biasBase;
-            Parallel.For(0, (int)rowCount, r =>
+            CpuParallel.For((int)rowCount, rowCount * cols * 4, r =>
             {
                 long row = rowOffset + r;
                 byte* rowSrc = (byte*)srcAddr + row * rowBytes;
