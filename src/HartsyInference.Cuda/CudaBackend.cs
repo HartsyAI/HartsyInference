@@ -4453,6 +4453,13 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         }
     }
 
+    /// <summary>In-place rotary on q/k, tolerating GQA (q and k may have different head counts — only batch,
+    /// seqLen and headDim must agree). Was one fused kernel pair launched with Q's <c>numHeads</c>/<c>totalVecs</c>
+    /// reused for K: harmless for MHA callers (same shape either way) but silently launched K's kernel over only
+    /// a fraction of K's real element count whenever K had fewer heads than Q — an out-of-bounds device
+    /// read/write, not just a wrong answer (caught via Dia's GQA decoder, 16 Q heads : 4 KV heads). Delegates to
+    /// <see cref="ApplyRopeSingle"/> per tensor instead, which already derives its shape from whichever tensor
+    /// it's given.</summary>
     public void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
     {
         using NvtxRange _nvtxProf = NvtxRange.Push("ApplyRope");
@@ -4460,43 +4467,21 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
         bool f16 = q.DType == DType.F16;
         if ((!f16 && q.DType != DType.F32) || k.DType != q.DType || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("CUDA ApplyRope supports F32, or F16 q/k with F32 cos/sin.");
-        using OpScope _op = EnterOp();
-        EnsureKernels();
-        int numHeads = (int)q.Shape[2];
+        if (q.Shape.Rank != 4 || k.Shape.Rank != 4)
+            throw new NotSupportedException($"CUDA ApplyRope expects token-major [B, L, heads, headDim] for q and k; got ranks {q.Shape.Rank}/{k.Shape.Rank}.");
+        if (q.Shape[0] != k.Shape[0] || q.Shape[1] != k.Shape[1] || q.Shape[3] != k.Shape[3])
+        {
+            throw new NotSupportedException(
+                $"CUDA ApplyRope requires q and k to share batch, seqLen and headDim (head COUNT may differ — GQA); got q={q.Shape}, k={k.Shape}.");
+        }
         int headDim = (int)q.Shape[3];
-        long totalVecs = q.ElementCount / headDim;
-
-        ulong pQ = 0, pK = 0, pCos = 0, pSin = 0;
-        try
+        if (cos.Shape[cos.Shape.Rank - 1] != headDim || sin.Shape[sin.Shape.Rank - 1] != headDim)
         {
-            pQ = GpuTransferHelper.CopyToDevice(q);
-            pK = GpuTransferHelper.CopyToDevice(k);
-            pCos = GpuTransferHelper.CopyToDevice(cos);
-            pSin = GpuTransferHelper.CopyToDevice(sin);
-            if (f16)
-            {
-                _kernels!.LaunchRopeF16(pQ, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
-                _kernels!.LaunchRopeF16(pK, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
-            }
-            else
-            {
-                _kernels!.LaunchRope(pQ, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
-                _kernels!.LaunchRope(pK, pCos, pSin, numHeads, headDim, totalVecs, _stream.Handle);
-            }
-
-            // In-place on q and k: clear stale callbacks before re-caching (pitfall #17).
-            q._gpuSyncCallback = null;
-            q._gpuDisposeCallback = null;
-            k._gpuSyncCallback = null;
-            k._gpuDisposeCallback = null;
-            GpuTransferHelper.CacheActivation(q, pQ, GpuTransferHelper.ByteSize(q));
-            GpuTransferHelper.CacheActivation(k, pK, GpuTransferHelper.ByteSize(k));
+            throw new NotSupportedException(
+                $"CUDA ApplyRope expects cos/sin's last dim to equal headDim ({headDim}); got cos={cos.Shape}, sin={sin.Shape}.");
         }
-        finally
-        {
-            GpuTransferHelper.FreeDevice(pCos);
-            GpuTransferHelper.FreeDevice(pSin);
-        }
+        ApplyRopeSingle(q, cos, sin);
+        ApplyRopeSingle(k, cos, sin);
     }
 
     /// <summary>LTX-2.5 channels-last 3D pixel shuffle — see <see cref="IBackend.Ltx25PixelShuffle"/>. The output spans every chunk, so it is allocated once and written in place rather than recached per call.</summary>

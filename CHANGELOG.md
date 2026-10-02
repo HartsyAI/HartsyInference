@@ -46,6 +46,13 @@ stable release will require. Dates are UTC.
   `HeartMulaMusicModel.ResolveQuantCachePath` now resolves under the shared audio root
   (`modelsRoot/audio/music/heartmula/`), falling back to the legacy `~/.cache/hartsyinference/heartmula/`
   location only when a file already exists there, so an existing install is not silently orphaned.
+- **`IBackend.ApplyRope`'s combined q+k overload no longer corrupts K under GQA.** CUDA, Vulkan and the CPU
+  default sized K's rotation from Q's head count: harmless while every caller was MHA, an out-of-bounds device
+  read/write for a GQA caller (found through Dia's resident decode, #224: 16 query heads, 4 KV heads). All three now
+  check that q and k share batch, seqLen and headDim (head counts may differ) and that cos/sin match headDim, throw
+  otherwise, and run the per-tensor `ApplyRopeSingle` once per tensor. Same split-half formula: the Ernie A/B on CUDA
+  is digest-identical; on Vulkan, dtypes other than F32/F16 now take `ApplyRopeSingle`'s reference fallback. Tests:
+  three in `DitGlueKernelTests` and `ApplyRope_QK_Matches_The_Cpu_For_Mha_And_Gqa` on every GPU backend.
 
 ## alpha.240
 
