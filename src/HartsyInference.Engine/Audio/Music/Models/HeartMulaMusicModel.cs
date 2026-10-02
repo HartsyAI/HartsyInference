@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Frontends;
 using HartsyInference.Audio.Models.Csm;
 using HartsyInference.Audio.Models.HeartMula;
@@ -61,6 +62,28 @@ internal static class HeartMulaMusicModel
         return lower.EndsWith("-q4", StringComparison.Ordinal) || lower.EndsWith("-q4_k", StringComparison.Ordinal) ? "q4_k" : null;
     }
 
+    /// <summary>Resolves <paramref name="repo"/>'s quantized GGUF cache path under
+    /// <see cref="AudioModelCache.CacheRoot"/>, falling back to the legacy
+    /// <c>~/.cache/hartsyinference/heartmula/</c> location only when a file already exists there.</summary>
+    internal static string ResolveQuantCachePath(string repo, string quant) => ResolveQuantCachePath(
+        repo, quant,
+        legacyCacheRoot: Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "hartsyinference"),
+        sharedAudioRoot: AudioModelCache.CacheRoot,
+        fileExists: File.Exists);
+
+    /// <summary>Pure core of <see cref="ResolveQuantCachePath(string, string)"/>, parameterized over both
+    /// candidate roots and the existence check for unit testing.</summary>
+    internal static string ResolveQuantCachePath(string repo, string quant, string legacyCacheRoot, string sharedAudioRoot, Func<string, bool> fileExists)
+    {
+        string fileName = $"{repo.Replace('/', '_')}-{quant.ToLowerInvariant()}.gguf";
+        string legacyPath = Path.Combine(legacyCacheRoot, "heartmula", fileName);
+        if (fileExists(legacyPath))
+        {
+            return legacyPath;
+        }
+        return Path.Combine(sharedAudioRoot, "music", "heartmula", fileName);
+    }
+
     private static async Task<IMusicRunner> LoadAsync(string repo, string? quant, CancellationToken cancel)
     {
         (IReadOnlyDictionary<string, Tensor> lmWeights, IDisposable[] lmLoaders) = await AudioCheckpoints.LoadAsync(repo, "music", cancel).ConfigureAwait(false);
@@ -74,8 +97,7 @@ internal static class HeartMulaMusicModel
         HeartMulaPipeline pipeline = new HeartMulaPipeline(config);
         if (useQuant)
         {
-            string quantCache = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".cache", "hartsyinference", "heartmula", $"{repo.Replace('/', '_')}-{quant!.ToLowerInvariant()}.gguf");
+            string quantCache = ResolveQuantCachePath(repo, quant!);
             pipeline.LoadWeights(lmWeights, quant, quantCache);   // raw → remap → quantize (post-remap), disk-cached
             // The GGUF cache owns the weights now — drop the source safetensors mmaps.
             foreach (IDisposable loader in lmLoaders)

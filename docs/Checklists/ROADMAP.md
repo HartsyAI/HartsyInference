@@ -95,7 +95,7 @@ References: [Vulkan scoreboard](../../benchmarks/scoreboards/VULKAN.md),
 - [ ] Voice session (`HartsyInference.Voice`) follow-ups: partial transcripts need a streaming recognizer
   (`PartialTranscripts` is rejected until then); after a barge-in the history keeps the generated text rather than
   what the caller heard. Design in [voice session](../Research/VOICE_AGENT_SESSION.md).
-- [x] KV reuse across turns (`perf/llm-voice-prefix-reuse`, alpha.240-241): opt-in prefix-KV reuse in
+- [x] KV reuse across turns (`perf/llm-voice-prefix-reuse`, #217): opt-in prefix-KV reuse in
   `TextGenerationPipeline`/`TextService` (`TextRequest.PrefixCacheKey`, `RetainedSequence`/`RetainedSequenceStore`),
   wired into the voice session per call plus a call-start priming request. 4090 VRAM also addressed
   (`TextRequest.CacheWeightCasts`, `TextRequest.PreloadRedundantWeightSplits`, `ITextService.TrimMemoryPool`) —

@@ -20,34 +20,16 @@ stable release will require. Dates are UTC.
   the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
+- **Fixed: HeartMuLa's quantized GGUF cache ignored `modelsRoot`/`ModelCacheRoot` entirely.** Every other
+  audio model resolves its cache location under `AudioModelCache.CacheRoot` (`modelsRoot/audio` when
+  `EngineKnobs.ModelsRoot` is configured, honoring the `EngineKnobs.ModelCacheRoot` override too).
+  `HeartMulaMusicModel`'s Q8/Q4 on-disk GGUF cache was the one exception, always writing under
+  `~/.cache/hartsyinference/heartmula/` regardless of either knob — so moving model storage (e.g. onto a
+  RAID array, via `ModelsRoot`) silently left HeartMuLa's quantized weights on the OS disk instead.
 
-## alpha.241
-
-- **Voice LLM VRAM, round 2: redundant weight-split preload.** `TextService.LoadInto`'s single-device weight
-  upload called `GenericTransformer.EnumerateWeights()` with its default (`includeRedundantSplits: true`),
-  unlike `LoadSharded` and `GenericTransformerModel.PreloadDecodeWeights`, which already pass `false`. On
-  Qwen3-4B-Q4_K_M the load-time-fused Q/K/V and gate/up projections leave their pre-fusion split originals
-  resident too (tensor-level measurement: 1.21 GiB of the 3.53 GiB a default single-device load uploads, vs.
-  2.32 GiB deduplicated — matching the 2.33 GiB file almost exactly); nothing on `TextGenerationPipeline`'s
-  single-sequence decode/prefill path reads them (only the batch scheduler's mixed-dtype split-projection
-  path does, via its own lazy auto-promotion, unaffected by this change). Checked and ruled out as explanations
-  for the same gap: `AutoPromoteWeights` (a residency-pinning decision only — it uploads a weight already
-  twice-missed in its native dtype, never a dequantized copy) and the tied embedding/`lm_head` (kept quantized
-  at ~304 MiB via the existing `_lmHeadQuant` fused-GEMV path, not dequantized to F16/F32 as its size alone
-  would suggest). `TextRequest.PreloadRedundantWeightSplits` (null = unchanged default) opts a request out;
-  `VoiceAgentOptions.PreloadRedundantWeightSplits` defaults to `false` and is wired through warm-up, the
-  call's priming request and every turn, identically to `CacheWeightCasts`.
-- **Voice gate, re-measured on real weights (Qwen3-4B-Q4_K_M/4090, same 10-turn real-tool-set call as
-  alpha.240):** every latency budget still holds — `voice.llm.ttft_ms` 85.7-105.4 ms (gate ≤ 150 ms),
-  `voice.llm.first_sentence_ms` 139.1-158.1 ms (gate ≤ 200 ms), `voice.turn.total_ms` 1095.8-1225.1 ms
-  (gate ≤ 1300 ms), decode 89-102 tok/s (unchanged within noise — decode always reads the fused tensors
-  regardless of whether the split originals are also resident). VRAM: primed and flat for all ten turns at
-  **5.81 GB, now under the ≤ 6 GB target** (down from ~7.27 GB before this change, ~13.8 GB before
-  `CacheWeightCasts=false`). Both VRAM levers from alpha.240 (a smaller `PrefixCacheCapacityHint`;
-  `vram.kvF16`) remain unused.
-
-## alpha.240
-
+  `HeartMulaMusicModel.ResolveQuantCachePath` now resolves under the shared audio root
+  (`modelsRoot/audio/music/heartmula/`), falling back to the legacy `~/.cache/hartsyinference/heartmula/`
+  location only when a file already exists there, so an existing install is not silently orphaned.
 - **Opt-in prefix-KV reuse for `TextGenerationPipeline`.** A new `Generate` overload takes a `RetainedSequence`
   (`HartsyInference.LLM.Generation`): it reuses the longest common token-id prefix between the retained cache and
   the current prompt, `Truncate`s the divergent tail and prefills only the diverging suffix (always leaving the
@@ -77,15 +59,45 @@ stable release will require. Dates are UTC.
   to the driver without unloading weights; the voice turn loop awaits it at the same idle point
   `VoiceGpuWorker.RequestTrim` already uses for the audio backend, and `VoiceModelSet.WarmAsync` and the session's
   priming request each trim their own transient usage once done with it.
+- **Voice LLM VRAM: no redundant weight-split preload.** `TextService.LoadInto`'s single-device weight
+  upload called `GenericTransformer.EnumerateWeights()` with its default (`includeRedundantSplits: true`),
+  unlike `LoadSharded` and `GenericTransformerModel.PreloadDecodeWeights`, which already pass `false`. On
+  Qwen3-4B-Q4_K_M the load-time-fused Q/K/V and gate/up projections leave their pre-fusion split originals
+  resident too (tensor-level measurement: 1.21 GiB of the 3.53 GiB a default single-device load uploads, vs.
+  2.32 GiB deduplicated — matching the 2.33 GiB file almost exactly); nothing on `TextGenerationPipeline`'s
+  single-sequence decode/prefill path reads them (only the batch scheduler's mixed-dtype split-projection
+  path does, via its own lazy auto-promotion, unaffected by this change). Checked and ruled out as explanations
+  for the same gap: `AutoPromoteWeights` (a residency-pinning decision only — it uploads a weight already
+  twice-missed in its native dtype, never a dequantized copy) and the tied embedding/`lm_head` (kept quantized
+  at ~304 MiB via the existing `_lmHeadQuant` fused-GEMV path, not dequantized to F16/F32 as its size alone
+  would suggest). `TextRequest.PreloadRedundantWeightSplits` (null = unchanged default) opts a request out;
+  `VoiceAgentOptions.PreloadRedundantWeightSplits` defaults to `false` and is wired through warm-up, the
+  call's priming request and every turn, identically to `CacheWeightCasts`.
 - **Voice gate, measured on real weights (Qwen3-4B-Q4_K_M/4090, Whisper small.en + Kokoro/3060, the host's real
-  7-tool set, 10-turn growing history):** `voice.llm.ttft_ms` flat at ~87-98 ms across every turn regardless of
-  history length (gate ≤ 150 ms; was 200-302 ms and growing before this), `voice.llm.first_sentence_ms`
-  ~133-166 ms (gate ≤ 200 ms), `voice.turn.total_ms` ~1092-1250 ms (gate ≤ 1300 ms) — every turn meets every
-  budget. VRAM: ~7.27 GB resident once the call is warm and primed, flat for all ten turns (down from ~13.8 GB
-  before `CacheWeightCasts=false`, and does not grow with the conversation) but still above the ≤ 6 GB target —
-  the retained prefix sequence's own KV capacity (sized for the full `MaxHistoryTokens` + `MaxReplyTokens`
-  ceiling) accounts for most of the remainder. See PR #217 for the breakdown and the two unused levers to close
-  the rest (a smaller capacity hint; `vram.kvF16`, a numerics change not made unilaterally here).
+  7-tool set, 10-turn growing history):** `voice.llm.ttft_ms` 85.7-105.4 ms and flat regardless of history length
+  (gate ≤ 150 ms; was 200-302 ms and growing), `voice.llm.first_sentence_ms` 139.1-158.1 ms (gate ≤ 200 ms),
+  `voice.turn.total_ms` 1095.8-1225.1 ms (gate ≤ 1300 ms), decode 89-102 tok/s. VRAM primed and flat for all ten
+  turns at **5.81 GB, under the ≤ 6 GB target** (was ~13.8 GB). A smaller `PrefixCacheCapacityHint` and
+  `vram.kvF16` stay unused.
+
+## alpha.240
+
+- **Fixed: an unparameterized Piper request 404'd fetching `piper.onnx`.** `AudioModelSelector.Parse` falls
+  back to the bare catalog token (e.g. `"piper"`) for `Variant` whenever the request token has no `':'` —
+  correct for a descriptor that treats a bare id as its own repo/model identifier, but Piper's weights ARE
+  the voice (one `.onnx` per voice), so that bare token is not a voice at all. `SpeechService.ResolveTarget`
+  used to pass it straight through as the load variant for any `VoiceSelectsWeights` descriptor whenever no
+  separate named voice was given, with no way to tell "the catalog id leaked through" from "the caller
+  genuinely asked for a voice named `piper`" — so a request with no voice and no `:variant` 404'd fetching
+  `rhasspy/piper-voices/piper.onnx` (no such file exists; every real Piper voice lives at
+  `<lang>/<lang_REGION>/<name>/<quality>/<id>.onnx`) instead of falling back to Piper's own default voice.
+
+  Fixed in `SpeechService.ResolveVariant` (extracted from `ResolveTarget`): detects the bare-token-fallback
+  shape by comparing `AudioModelSelector.Variant` against `AudioModelSelector.Id`, not by hardcoding
+  Piper's name, so the fix covers any other `VoiceSelectsWeights` model with this same shape, not just
+  Piper. `AudioModelSelector.Parse` itself and `PiperModel.LoadAsync`'s own `"default"`/empty sentinel check
+  are both unchanged — the first is shared, load-bearing logic for every modality's selector, the second
+  already did the right thing once actually given one of those values.
 
 ## alpha.239
 
