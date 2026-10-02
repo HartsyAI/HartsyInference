@@ -44,6 +44,16 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
     private bool _loaded;
     private int _disposed;
 
+    /// <summary>Cached fits-resident decision, indexed by <c>hasAudio ? 1 : 0</c> (the audio tower and VAE encoder
+    /// only count toward the required bytes when a reference clip is given). Measured once per configuration and
+    /// reused rather than re-querying <see cref="IBackend.GetVramInfo"/> on every call: once this pipeline's own
+    /// stages are resident, the free bytes that query reports no longer reflect what's actually available to OTHER
+    /// work, so a live re-check would see "only free_before - mine" and flip back to evicting, undoing the whole
+    /// point. If something else later needs the VRAM this pipeline is sitting on, the engine's cross-model eviction
+    /// (<c>AudioRuntime</c>) reclaims it by evicting the pipeline wholesale, same as it already does for any other
+    /// resident model, not by second-guessing this per-call.</summary>
+    private readonly bool?[] _residentFits = new bool?[2];
+
     /// <inheritdoc/>
     public string ModelName { get; }
 
@@ -132,7 +142,7 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         // next one too. Downgrading to "preload everything, free nothing" when there is clearly enough free VRAM
         // turns a full host->device re-upload of every stage (tower, thinker, DiT, VAE) into a one-time cost for
         // back-to-back calls on the same pipeline, which is the common case once a model is warm.
-        bool sequential = opts.SequentialResidency && !FitsResident(backend, hasAudio);
+        bool sequential = opts.SequentialResidency && !FitsResidentCached(backend, hasAudio);
 
         using Tensor text = EncodeConditioning(backend, instruction, audio16k, sequential, cancel);
         cancel.ThrowIfCancellationRequested();
@@ -225,19 +235,28 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
             () => encoder.Encode(backend, pcm, unchecked(opts.Seed + 1)));
     }
 
-    /// <summary>True when the device has enough free VRAM to hold every stage this call will touch resident at
-    /// once, so the caller can skip freeing between stages. Generous on purpose (every stage's full weight size,
-    /// plus a third again for activations) — this only ever turns a requested sequential run into a resident one,
-    /// never the other way around, so overestimating costs a redundant free/reload rather than an OOM.</summary>
-    private bool FitsResident(IBackend backend, bool hasAudio)
+    /// <summary>True when the device had enough free VRAM, the FIRST time this pipeline asked for this
+    /// <paramref name="hasAudio"/> configuration, to hold every stage that configuration touches resident at once.
+    /// Cached in <see cref="_residentFits"/> after that: once this pipeline's own stages are preloaded, free VRAM
+    /// drops by however much THEY now hold, and re-measuring would read that as "no longer fits" purely because of
+    /// this pipeline's own resident weights, flipping it back to evicting every other call. See the field's own
+    /// remarks for why a live re-check is the wrong fix.</summary>
+    private bool FitsResidentCached(IBackend backend, bool hasAudio)
     {
+        int index = hasAudio ? 1 : 0;
+        if (_residentFits[index] is bool cached)
+        {
+            return cached;
+        }
         (long freeBytes, long totalBytes) = backend.GetVramInfo();
         long bytes = WeightBytes(_lm.EnumerateWeights()) + WeightBytes(_dit.EnumerateWeights()) + WeightBytes(_vae.EnumerateWeights());
         if (hasAudio)
         {
             bytes += WeightBytes(_tower.EnumerateWeights()) + WeightBytes(_vaeEncoder!.EnumerateWeights());
         }
-        return ResidentWithinBudget(freeBytes, totalBytes, bytes);
+        bool fits = ResidentWithinBudget(freeBytes, totalBytes, bytes);
+        _residentFits[index] = fits;
+        return fits;
     }
 
     /// <summary>True when <paramref name="freeBytes"/> covers <paramref name="requiredBytes"/> plus a third again
