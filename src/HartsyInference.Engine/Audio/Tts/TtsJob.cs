@@ -65,6 +65,12 @@ internal sealed record TtsJob
     /// <summary>Zonos pitch standard deviation; null is the model default.</summary>
     internal double? PitchStd { get; init; }
 
+    /// <summary>AuK instruction (see <c>SpeechRequest.Instruction</c>); null/empty means zero-shot cloning of <see cref="Text"/>.</summary>
+    internal string? Instruction { get; init; }
+
+    /// <summary>Output length in seconds for models that cannot infer it; null lets the model decide.</summary>
+    internal double? DurationSeconds { get; init; }
+
     /// <summary>Sampling seed; 0 leaves it unset.</summary>
     internal int Seed { get; init; }
 

@@ -123,6 +123,8 @@ public sealed class ParamState
                 _values["exaggeration"] = "";
                 _values["nfe-step"] = "";
                 _values["cfg-scale"] = "";
+                _values["instruction"] = "";
+                _values["duration"] = "";
                 break;
             case Modality.Music:
                 _values["duration"] = "10";

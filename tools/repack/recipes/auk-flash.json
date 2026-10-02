@@ -1,0 +1,8 @@
+{
+  // Tencent AuK-Flash from the official fp32 checkpoint, cast to bf16. The learned layer mixing (layer_weights, layer_scale),
+  // norms, biases and the rotary inv_freq buffer (already bf16-rounded upstream, loaded by the engine) stay fp32.
+  "name": "auk-flash", "model": "auk", "variant": "flash", "source_repo": "tencent/AuK-Flash", "dtype": "bf16",
+  "stands_in_for": [ "tts/tencent--AuK-Flash/auk_flash.safetensors" ],
+  "components": [ { "source_file": "tencent--AuK-Flash/auk_flash.safetensors" } ],
+  "keep_dtype": [ "layer_weights", "layer_scale", "*norm*", "*.bias", "*inv_freq*" ]
+}

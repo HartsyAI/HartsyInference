@@ -250,6 +250,8 @@ public sealed class SpeechService : ISpeechService
         Emotion = request.Emotion,
         SpeakingRate = request.SpeakingRate,
         PitchStd = request.PitchStd,
+        Instruction = request.Instruction,
+        DurationSeconds = request.DurationSeconds,
         Seed = request.Seed,
         Cancel = cancel,
     };

@@ -85,13 +85,15 @@ public sealed class Qwen2Model : IDisposable
         return _transformer.Forward(backend, tokenIds, posStart, cache);
     }
 
-    /// <summary>Embedding-in path with optional layer range and final-norm toggle (VibeVoice streaming splits the stack); pass a <see cref="FixedKvCache"/> for O(1)-append incremental decode, or a <see cref="StreamingKvCache"/> for the host-copy prefix path.</summary>
+    /// <summary>Embedding-in path with optional layer range and final-norm toggle (VibeVoice streaming splits the stack); pass a <see cref="FixedKvCache"/> for O(1)-append incremental decode, or a <see cref="StreamingKvCache"/> for the host-copy prefix path; <paramref name="layerTap"/> receives each layer's raw output (see <see cref="GenericTransformer.ForwardEmbeds"/>).</summary>
     public Tensor ForwardEmbeds(IBackend backend, Tensor inputsEmbeds, int batch, int t, int posStart,
-        IKvCache cache, int startLayer = 0, int? endLayer = null, bool applyFinalNorm = true)
+        IKvCache cache, int startLayer = 0, int? endLayer = null, bool applyFinalNorm = true,
+        Action<int, Tensor>? layerTap = null)
     {
         ThrowIfDisposed();
         RequireBatchOne(batch);
-        return _transformer.ForwardEmbeds(backend, inputsEmbeds, t, posStart, cache, applyFinalNorm, startLayer, endLayer);
+        return _transformer.ForwardEmbeds(backend, inputsEmbeds, t, posStart, cache, applyFinalNorm, startLayer, endLayer,
+            layerTap: layerTap);
     }
 
     /// <summary>Allocates the efficient incremental decode cache for this model (<see cref="KvCaches.ForDecode"/>) — a <see cref="FixedKvCache"/> (O(1) appends); prefer this over hand-rolling a cache.</summary>
