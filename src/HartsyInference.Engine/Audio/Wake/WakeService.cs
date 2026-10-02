@@ -295,7 +295,14 @@ public sealed class WakeService : IDisposable
     /// <paramref name="onFrame"/> instead of this service's own wake scoring, end-of-speech capture and
     /// transcription, which are suspended for it — see <see cref="WakeDeviceClaim"/>'s own remarks for exactly
     /// what does and does not change. Typically called from a <see cref="Detected"/> handler, once the host has
-    /// decided to run this device's next turn itself.</summary>
+    /// decided to run this device's next turn itself.
+    ///
+    /// <para>Claiming mid-detection does not retroactively cancel a transcription already in flight for an
+    /// earlier wake word on this device: <see cref="WakeSession.Enqueue"/> keeps writing the raw capture
+    /// buffer a pending <see cref="TranscribeUtteranceAsync"/> call reads from regardless of claim state, so
+    /// that detection still gets the audio that actually followed it. The same raw samples also reach this
+    /// claim's <paramref name="onFrame"/> for the turn going forward — the two are independent consumers of
+    /// the same microphone feed for however briefly they overlap, not a hand-off.</para></summary>
     /// <param name="deviceId">The satellite to claim.</param>
     /// <param name="onFrame">See <see cref="WakeDeviceClaim.OnFrame"/>.</param>
     /// <param name="onDisconnected">See <see cref="WakeDeviceClaim.OnDisconnected"/>.</param>

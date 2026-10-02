@@ -151,20 +151,31 @@ public sealed class WakeListener : IDisposable
                         // same way an explicit disconnect does, lets the host notice and decide whether to
                         // re-claim once detection resumes on this connection.
                         //
-                        // Taken before OnReconnected publishes the new codec, not after: a claim installed by
-                        // another thread's WakeService.Claim call is only valid once it has seen session.Codec
-                        // non-null, so clearing first means any claim this Exchange can observe necessarily
-                        // predates this connection and is safe to end unconditionally. Clearing after (the
-                        // first version of this fix) left a window, a few instructions wide, where a claim
-                        // installed against the brand-new codec right after OnReconnected published it could
-                        // be this Exchange's victim instead -- a spurious disconnect for a connection that was
-                        // never replaced. A narrower residual remains: a claim racing in the gap between this
-                        // line and OnReconnected still attaches to the dying old connection and is not re-ended
-                        // here, so it silently carries over to this new connection exactly once more. Closing
-                        // that would need the codec swap itself gated behind this Exchange, which is a bigger
-                        // change for a window this narrow; accepted for now.
+                        // Taken, and notified, before OnReconnected publishes the new codec, not after -- for
+                        // two separate reasons, not one:
+                        //
+                        // Correctness: a claim installed by another thread's WakeService.Claim call is only
+                        // valid once it has seen session.Codec non-null, so clearing first means any claim this
+                        // Exchange can observe necessarily predates this connection and is safe to end
+                        // unconditionally. Clearing after (the first version of this fix) left a window, a few
+                        // instructions wide, where a claim installed against the brand-new codec right after
+                        // OnReconnected published it could be this Exchange's victim instead -- a spurious
+                        // disconnect for a connection that was never replaced. A narrower residual remains: a
+                        // claim racing in the gap between this block and OnReconnected still attaches to the
+                        // dying old connection and is not re-ended here, so it silently carries over to this
+                        // new connection exactly once more. Closing that would need the codec swap itself gated
+                        // behind this Exchange, which is a bigger change for a window this narrow; accepted.
+                        //
+                        // Visibility: Codec is volatile and this Exchange is a full fence, but a release fence
+                        // only carries writes that happen BEFORE it (in this thread's program order) to a
+                        // thread that acquire-reads the released value -- it says nothing about writes AFTER
+                        // it. A reader polling Codec until it changes, then immediately checking whether
+                        // OnDisconnected ran, needs that invocation to be one of the writes Codec's release
+                        // carries, which only holds if it runs before OnReconnected, not after. A regression
+                        // test polling exactly that way caught this: moving only the Exchange earlier (and
+                        // leaving the invoke after OnReconnected) left it still flaky under full-suite load,
+                        // just less often.
                         WakeDeviceClaim? staleClaim = Interlocked.Exchange(ref session.Claim, null);
-                        session.OnReconnected(codec);
                         if (staleClaim is not null)
                         {
                             try
@@ -176,6 +187,7 @@ public sealed class WakeListener : IDisposable
                                 Logs.Error($"[Audio][Wake] WakeDeviceClaim.OnDisconnected threw for '{deviceId}' on reconnect.", ex);
                             }
                         }
+                        session.OnReconnected(codec);
                         Logs.Info($"[Audio][Wake] Device '{deviceId}' connected from {remote} ({string.Join(", ", session.Pipeline.Words)}).");
                         await codec.WriteAsync("hello-ack", $"{{\"words\":[{string.Join(",", session.Pipeline.Words.Select(WakeFrameCodec.Escape))}]}}", connectionCancel.Token).ConfigureAwait(false);
                         pingLoop ??= Task.Run(() => PingLoopAsync(codec, connectionCancel), CancellationToken.None);

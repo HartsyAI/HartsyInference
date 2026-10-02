@@ -116,10 +116,10 @@ public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline,
     /// <para><c>volatile</c> because that CAS is not the only cross-thread dependency on this field any more:
     /// <see cref="WakeListener"/>'s hello case now writes <see cref="Claim"/> (via <see cref="Interlocked"/>,
     /// a full fence on the writing thread) strictly before this field's own write in <c>OnReconnected</c>, so
-    /// that any claim a reader can observe here is one that predates the codec change — but only if the reader
-    /// also sees this field's write with proper acquire semantics, which a plain field does not guarantee
-    /// without a lock on both sides. A test that polled this field with a plain read and asserted <see
-    /// cref="Claim"/> immediately after, with nothing else between the two reads to force a fence, caught
+    /// that any claim a reader can observe here is one that predates the codec change — but only if that read
+    /// of this field also carries acquire semantics, which a plain field read does not on its own. A test that
+    /// polled this field with a plain read and asserted <see cref="Claim"/> immediately after, with nothing
+    /// else between the two reads to force a fence, caught
     /// this: it flaked under full-suite parallel load, never in isolation.</para></summary>
     public volatile WakeFrameCodec? Codec;
 

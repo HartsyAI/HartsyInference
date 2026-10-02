@@ -45,17 +45,21 @@ stable release will require. Dates are UTC.
   persistently-throwing host callback doesn't flood the log with pointless resets of state a claimed device
   never reads. `WakeService.Claim` also now withdraws (and returns null for) a claim whose connection died in
   the gap between its own liveness check and installing the claim, so that race can no longer leave a host
-  holding a claim that will never call `OnDisconnected`. A reconnect ends the device's previous claim too (and
-  notifies it, same guarded `OnDisconnected` call), rather than letting it silently carry over to the new
-  connection's audio with no signal the old one is gone — taken before, not after, `OnReconnected` publishes
-  the new codec, so a claim installed by a host thread that has just seen that new codec can't be this
-  reconnect's victim instead.
-- **`WakeSession.Codec` is `volatile`.** The CAS in the disconnect path and the ordering the point above
-  depends on both need any thread that observes a codec change to also observe everything written before it
-  on the connection-handling thread — a plain field does not guarantee that without a lock on both sides. Found
-  by a new regression test flaking under full test-suite parallel load (never in isolation): it polled this
-  field with a plain read and asserted `Claim` immediately after, with nothing else forcing a fence in
-  between.
+  holding a claim that will never call `OnDisconnected`. A reconnect ends the device's previous claim too —
+  cleared AND notified before `OnReconnected` publishes the new codec, not after, so neither step can land on
+  a claim a host thread installed against that new codec, and so that notification is one of the writes the
+  new codec's own publish carries to anyone who observes it (see the next entry): letting it silently carry
+  over to the new connection's audio with no signal the old one is gone was the bug; running the notification
+  after the publish, rather than before, turned out to be a second, narrower version of the same bug.
+- **`WakeSession.Codec` is `volatile`.** `WakeListener`'s disconnect CAS and reconnect handling, and
+  `WakeService`'s outbound audio path, all read or write it across threads without a lock. A release (the
+  volatile write in `OnReconnected`, or the CAS in the disconnect path) only carries a thread's earlier writes
+  forward to whoever observes it — never later ones — so anything a reconnect needs a reader to see has to
+  happen before the codec publish, not after. A new regression test polling this field with a plain read, then
+  immediately checking a side effect of the reconnect, caught both the missing `volatile` and, after adding
+  it, that the notification above was still ordered on the wrong side of the publish: flaky under full
+  test-suite parallel load either way, just far less often with only the field fixed. 16 consecutive clean
+  full-suite runs once both were corrected, after failures inside the first 3-8 runs at each earlier stage.
 - **`WakeWorker.Run` clears its shared `detections` list before deciding whether there is anything to score
   this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
   an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
