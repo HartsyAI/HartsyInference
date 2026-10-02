@@ -380,7 +380,7 @@ public sealed partial class VoiceAgentSession
         private float[] Synthesize(string sentence, CancellationToken cancel)
         {
             string speakable = SpokenTextNormalizer.ToSpeakable(sentence);
-            return HasWords(speakable) ? session._models.Synthesize(speakable) : [];
+            return HasWords(speakable) ? session._models.Synthesize(speakable, cancel) : [];
         }
 
         /// <summary>The sentence synthesizer's scheduler seam: every sentence becomes one job on the GPU thread.</summary>

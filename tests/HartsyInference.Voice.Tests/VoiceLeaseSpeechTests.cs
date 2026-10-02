@@ -36,7 +36,7 @@ public sealed class VoiceLeaseSpeechTests
 
         synthesizers[0].Revoked = true;
         transcribers[0].Revoked = true;
-        float[] audio = await worker.RunAsync(VoiceGpuJobKind.Synthesize, () => speech.Synthesize("Hello there."), CancellationToken.None)
+        float[] audio = await worker.RunAsync(VoiceGpuJobKind.Synthesize, () => speech.Synthesize("Hello there.", CancellationToken.None), CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(10));
         string heard = await worker.RunAsync(VoiceGpuJobKind.Transcribe, () => speech.Transcribe(new float[16_000]), CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(10));
@@ -71,7 +71,7 @@ public sealed class VoiceLeaseSpeechTests
 
         first.Revoked = true;
         await Assert.ThrowsAsync<ObjectDisposedException>(() =>
-            worker.RunAsync(VoiceGpuJobKind.Synthesize, () => speech.Synthesize("Hello."), CancellationToken.None));
+            worker.RunAsync(VoiceGpuJobKind.Synthesize, () => speech.Synthesize("Hello.", CancellationToken.None), CancellationToken.None));
 
         Assert.Equal(7, await worker.RunAsync(VoiceGpuJobKind.Warm, () => 7, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(10)));
         Assert.Equal(2, opens);
