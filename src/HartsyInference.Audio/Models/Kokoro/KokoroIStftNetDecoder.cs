@@ -133,7 +133,8 @@ public sealed class KokoroIStftNetDecoder
     /// predictor. <paramref name="styleDecoder"/> is the 128-dim decoder style row <c>[1, 128]</c>.
     /// Returns a 1-D float waveform at <see cref="KokoroConfig.SampleRate"/> (24 kHz).
     /// <paramref name="cancel"/> is checked after the encode block, after the decode blocks and, on the iSTFTNet
-    /// generator, after the harmonic source, after each upsample stage and before the iSTFT head.</summary>
+    /// generator, after the harmonic source, after each upsample stage and before the iSTFT head. The HiFi-GAN generator
+    /// (StyleTTS 2 LibriTTS) has no boundaries of its own: once it starts, it runs to the end.</summary>
     public float[] Forward(IBackend backend, Tensor asr, Tensor f0, Tensor n, Tensor styleDecoder,
         CancellationToken cancel = default)
     {
