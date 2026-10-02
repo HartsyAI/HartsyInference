@@ -58,6 +58,14 @@ internal static class DiaTtsModel
 
     private sealed class Session(DiaPipeline pipeline)
     {
+        /// <summary>Dia's own generation frame rate is ~86 Hz (DAC 44.1 kHz, hop 512); conversational speech runs
+        /// roughly 12-15 chars/second, so ~1 frame/char already covers it and this is 12x that -- generous
+        /// headroom, not a tight fit.</summary>
+        private const int FramesPerChar = 12;
+
+        /// <summary>Floor so a one-word prompt still gets a few real seconds rather than being clipped mid-word.</summary>
+        private const int MinFrames = 200;
+
         private static string BuildText(string text)
         {
             // Dia was trained on [S1]/[S2]-tagged dialogue; untagged text degenerates into repetition loops.
@@ -70,15 +78,38 @@ internal static class DiaTtsModel
             return tagged;
         }
 
+        /// <summary>Caps generation to what the text could plausibly need, so a prompt too short for Dia to ever
+        /// emit a confident EOS fails in seconds instead of running the full budget.
+        ///
+        /// <para><c>requested</c> (<see cref="TtsJob.MaxTokens"/> or the 1720 default) is a safety CEILING, not a
+        /// promise of that many frames -- but every decode step costs the same whether or not the model is going
+        /// anywhere, and a short/plain prompt reliably fails to terminate on its own: confirmed empirically (both
+        /// an untagged and a <c>[S1]</c>-tagged one-sentence prompt ran to the full 1720-frame cap and produced
+        /// non-speech throughout — Whisper transcribed the result as <c>[Music]</c>, not silence, so this is not
+        /// the EOS-margin rescue in <c>DiaPipeline.SampleDiaChannel</c> almost working; the model has nothing
+        /// confident to say about ending a sentence this short). <paramref name="textLength"/> chars at
+        /// <see cref="FramesPerChar"/> gives a generous frame budget for whatever the text actually asks for; a
+        /// well-formed multi-sentence prompt's own length estimate comfortably exceeds the frames its natural EOS
+        /// needs (confirmed: a two-sentence, 103-char prompt estimates ~1236 frames here but finishes via EOS at
+        /// ~728), so this never binds for ordinary prompts -- only for ones already shown to run away.</para></summary>
+        private static int CapForTextLength(int requested, int textLength)
+            => Math.Min(requested, Math.Max(MinFrames, textLength * FramesPerChar));
+
         public float[] Synthesize(IBackend backend, TtsJob job)
-            => pipeline.Generate(backend, AudioTextFrontend.DiaBytes(BuildText(job.Text)),
-                job.MaxTokens is > 0 ? job.MaxTokens.Value : 1720, job.Seed, null,
+        {
+            string text = BuildText(job.Text);
+            int requested = job.MaxTokens is > 0 ? job.MaxTokens.Value : 1720;
+            return pipeline.Generate(backend, AudioTextFrontend.DiaBytes(text),
+                CapForTextLength(requested, text.Length), job.Seed, null,
                 job.CfgScale, job.TopK, job.Temperature, job.TopP);
+        }
 
         public async IAsyncEnumerable<AudioChunk> SynthesizeStream(IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
         {
-            int[] textBytes = AudioTextFrontend.DiaBytes(BuildText(job.Text));
-            int maxTokens = job.MaxTokens is > 0 ? job.MaxTokens.Value : 1720;
+            string text = BuildText(job.Text);
+            int[] textBytes = AudioTextFrontend.DiaBytes(text);
+            int requested = job.MaxTokens is > 0 ? job.MaxTokens.Value : 1720;
+            int maxTokens = CapForTextLength(requested, text.Length);
             using AudioStreamer streamer = new();
             long samplesEmitted = 0;
 
