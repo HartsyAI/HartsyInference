@@ -21,6 +21,25 @@ stable release will require. Dates are UTC.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
 
+## alpha.240
+
+- **Fixed: an unparameterized Piper request 404'd fetching `piper.onnx`.** `AudioModelSelector.Parse` falls
+  back to the bare catalog token (e.g. `"piper"`) for `Variant` whenever the request token has no `':'` —
+  correct for a descriptor that treats a bare id as its own repo/model identifier, but Piper's weights ARE
+  the voice (one `.onnx` per voice), so that bare token is not a voice at all. `SpeechService.ResolveTarget`
+  used to pass it straight through as the load variant for any `VoiceSelectsWeights` descriptor whenever no
+  separate named voice was given, with no way to tell "the catalog id leaked through" from "the caller
+  genuinely asked for a voice named `piper`" — so a request with no voice and no `:variant` 404'd fetching
+  `rhasspy/piper-voices/piper.onnx` (no such file exists; every real Piper voice lives at
+  `<lang>/<lang_REGION>/<name>/<quality>/<id>.onnx`) instead of falling back to Piper's own default voice.
+
+  Fixed in `SpeechService.ResolveVariant` (extracted from `ResolveTarget`): detects the bare-token-fallback
+  shape by comparing `AudioModelSelector.Variant` against `AudioModelSelector.Id`, not by hardcoding
+  Piper's name, so the fix covers any other `VoiceSelectsWeights` model with this same shape, not just
+  Piper. `AudioModelSelector.Parse` itself and `PiperModel.LoadAsync`'s own `"default"`/empty sentinel check
+  are both unchanged — the first is shared, load-bearing logic for every modality's selector, the second
+  already did the right thing once actually given one of those values.
+
 ## alpha.239
 
 - **Audio: fixed the vocab-sized delegate-sort allocation anti-pattern in the TTS samplers** — the same
