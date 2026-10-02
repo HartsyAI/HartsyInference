@@ -16,8 +16,11 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     private readonly int[] _capacity;
     private readonly DType _dtype;
     private int _currentLength;
-    /// <summary>Per-layer device residency: each layer's K/V allocate on the backend that first APPENDS to that layer, which puts every layer's KV on its stage's device under multi-device layer-split placement with no placement API at all, and stops shared-KV-slot layers (Gemma-4) from ever going device-resident since nothing appends to them.</summary>
-    private readonly bool[] _residentLayer;
+    /// <summary>Per-layer device residency: each layer's K/V allocate on the backend that first APPENDS to that layer,
+    /// which puts every layer's KV on its stage's device under multi-device layer-split placement with no placement API
+    /// at all, and stops shared-KV-slot layers (Gemma-4) from ever going device-resident since nothing appends to them.
+    /// Null until then; <see cref="CopyWithCapacity"/> copies each layer on the backend recorded here.</summary>
+    private readonly IBackend?[] _layerBackend;
     private int _disposed;
 
     public int NumLayers => _k.Length;
@@ -66,7 +69,7 @@ public sealed class FixedKvCache : IKvCache, IDisposable
         _capacity = new int[numLayers];
         _k = new Tensor?[numLayers];
         _v = new Tensor?[numLayers];
-        _residentLayer = new bool[numLayers];
+        _layerBackend = new IBackend?[numLayers];
         for (int i = 0; i < numLayers; i++)
         {
             int hd = headDimPerLayer[i];
@@ -96,9 +99,9 @@ public sealed class FixedKvCache : IKvCache, IDisposable
         // placement lands each layer's KV on its own stage's device, and never-appended layers (shared KV slots)
         // never go resident. Backends without a device treat this as a no-op and fall back to lazy upload. The
         // tail beyond the valid length is never read, so the buffers are left uninitialized.
-        if (!_residentLayer[layer])
+        if (_layerBackend[layer] is null)
         {
-            _residentLayer[layer] = true;
+            _layerBackend[layer] = backend;
             backend.ResidentAllocateKv(_k[layer]!);
             backend.ResidentAllocateKv(_v[layer]!);
         }
@@ -131,6 +134,39 @@ public sealed class FixedKvCache : IKvCache, IDisposable
     }
 
     public void Reset() { ThrowIfDisposed(); _currentLength = 0; }
+
+    /// <summary>A new cache with room for <paramref name="capacity"/> tokens holding a device copy of this cache's
+    /// committed tokens, each layer copied on the backend it lives on; this cache is left unchanged and still owned
+    /// by the caller.</summary>
+    /// <remarks>Only the committed rows move — a cache sized for a long reply but holding a short one copies the
+    /// short one. Layers nothing has appended to (shared-KV slots) stay unallocated, as in the source.</remarks>
+    public FixedKvCache CopyWithCapacity(int capacity)
+    {
+        ThrowIfDisposed();
+        if (capacity < _currentLength)
+            throw new ArgumentOutOfRangeException(nameof(capacity), capacity, $"Must hold {_currentLength} tokens.");
+        FixedKvCache copy = new(NumLayers, BatchSize, NumKvHeads, _headDimPerLayer, capacity, _dtype);
+        try
+        {
+            for (int layer = 0; layer < NumLayers; layer++)
+            {
+                if (_currentLength == 0 || _layerBackend[layer] is not { } backend)
+                {
+                    continue;
+                }
+                copy._layerBackend[layer] = backend;
+                backend.ScatterSeqHeadMajor(copy._k[layer]!, _k[layer]!, 0, _currentLength);
+                backend.ScatterSeqHeadMajor(copy._v[layer]!, _v[layer]!, 0, _currentLength);
+            }
+            copy._currentLength = _currentLength;
+            return copy;
+        }
+        catch
+        {
+            copy.Dispose();
+            throw;
+        }
+    }
 
     private void ThrowIfDisposed()
     {
