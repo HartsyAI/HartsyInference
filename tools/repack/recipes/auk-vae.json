@@ -1,0 +1,10 @@
+{
+  // Tencent AuK BigVGAN-flow VAE from tencent/AuK (byte-identical in tencent/AuK-Flash), kept fp32: the vocoder's snake
+  // alpha/beta, anti-alias filters and weight-norm g/v pairs are precision-sensitive, so nothing is cast. Only the
+  // training-only flow.* stack (the VITS residual coupling prior, never used by encode or decode) is dropped.
+  "name": "auk-vae", "model": "auk", "component": "vae", "source_repo": "tencent/AuK", "dtype": "fp32",
+  "stands_in_for": [ "tts/tencent--AuK/vae.safetensors" ],
+  "components": [ { "source_file": "tencent--AuK/vae.safetensors" } ],
+  "drop": [ "flow.*" ],
+  "keep_dtype": [ "global_*", "*alpha", "*beta", "*filter", "*.bias" ]
+}

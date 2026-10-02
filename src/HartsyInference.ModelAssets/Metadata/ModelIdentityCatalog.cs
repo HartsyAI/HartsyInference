@@ -163,6 +163,7 @@ public static class ModelIdentityCatalog
             },
             Audio("zipvoice", "zipvoice_tts", "ZipVoice", "k2-fsa", "apache-2.0", "tts"),
             Audio("f5", "f5_tts", "F5-TTS", "SWivid", "cc-by-nc-4.0", "tts"),
+            Audio("auk", "auk_tts", "AuK", "Tencent", "mit", "tts"),
             Audio("sparktts", "sparktts_tts", "Spark-TTS", "SparkAudio", "cc-by-nc-sa-4.0", "tts"),
             Audio("fishspeech", "fishspeech_tts", "Fish-Speech 1.5", "Fish Audio", "cc-by-nc-sa-4.0", "tts", "fishaudio/fish-speech-1.5"),
             Audio("neutts", "neutts_tts", "NeuTTS Air", "Neuphonic", "apache-2.0", "tts", "neuphonic/neutts-air"),

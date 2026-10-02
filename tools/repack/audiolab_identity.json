@@ -89,6 +89,13 @@
       "architecture": "f5_tts", "author": "SWivid", "license": "cc-by-nc-4.0",
       "primary": "model.safetensors", "upload_allowed": false
     },
+    "tts/auk": {
+      "provider_id": "auk_tts", "engine_id": "auk", "prefix": "AuK",
+      "architecture": "auk_tts", "author": "Tencent", "license": "mit",
+      "primary": "auk_*.safetensors",
+      "components": { "vae.safetensors": "vae" },
+      "variant_id": { "base": "base", "flash": "flash" }
+    },
     "tts/zipvoice": {
       "provider_id": "zipvoice_tts", "engine_id": "zipvoice", "prefix": "ZipVoice",
       "architecture": "zipvoice_tts", "author": "k2-fsa", "license": "apache-2.0",
