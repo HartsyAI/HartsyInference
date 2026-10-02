@@ -20,7 +20,8 @@ public static class MaskResolver
         return mask;
     }
 
-    /// <summary>The mask as a fresh L8 buffer (255 = inpaint) at the target size, or null; shared with the end recomposite. Callers may modify it in place.</summary>
+    /// <summary>The mask as a fresh L8 buffer (255 = inpaint) at the target size, or null; shared with the end
+    /// recomposite. Callers may modify it in place.</summary>
     public static byte[]? ResolveBytes(Inpaint? inpaint, int targetWidth, int targetHeight)
     {
         if (inpaint?.Mask is null)

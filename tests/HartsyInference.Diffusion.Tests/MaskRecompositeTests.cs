@@ -73,7 +73,8 @@ public sealed class MaskRecompositeTests
         Assert.Equal(Original, At(result, 28, 10));
     }
 
-    /// <summary>A mask paired with a reference-mode init is still pasted, as in SwarmUI; pinned so a family that starts consuming the mask itself is a deliberate change.</summary>
+    /// <summary>A mask with a reference-mode init is still pasted, as in SwarmUI; pinned so a family that starts
+    /// consuming the mask itself is a deliberate change.</summary>
     [Fact]
     public void Apply_WithAReferenceModeInit_StillPastesThroughTheMask()
     {
