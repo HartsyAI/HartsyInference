@@ -58,7 +58,7 @@ public sealed class PinnedRunnersSurviveEvictionTests
                 TranscriptResult other = await engine.Transcribe.RunAsync(tiny, new AudioRequest { Audio = jfkClip });
                 Assert.Contains("country", other.Text, StringComparison.OrdinalIgnoreCase);
                 (string heard, double ms) = await TranscribeTimedAsync(models, jfk);
-                float[] spoken = await models.Gpu.RunAsync(VoiceGpuJobKind.Synthesize, () => models.Synthesize(Sentence), CancellationToken.None);
+                float[] spoken = await models.Gpu.RunAsync(VoiceGpuJobKind.Synthesize, () => models.Synthesize(Sentence, CancellationToken.None), CancellationToken.None);
                 _output.WriteLine($"switch {round}: pinned Whisper {ms:F0} ms (warm {warmMs:F0} ms), Kokoro {spoken.Length} samples: \"{heard}\"");
                 Assert.True(VoiceAssets.Recall(heard, VoiceAssets.JfkWords) >= 0.8, $"the pinned recognizer misheard after switch {round}: \"{heard}\"");
                 Assert.NotEmpty(spoken);

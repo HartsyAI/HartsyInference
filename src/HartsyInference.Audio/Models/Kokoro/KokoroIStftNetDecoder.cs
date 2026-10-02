@@ -123,12 +123,20 @@ public sealed class KokoroIStftNetDecoder
         _convPostB = WhisperOps.EnsureF32(w["decoder.generator.conv_post.bias"]);
     }
 
+    /// <summary>Called with each stage's name as <see cref="Forward"/> passes the boundary after it, ahead of that
+    /// boundary's cancellation check; <see cref="KokoroPipeline"/> sets it with its own.</summary>
+    internal Action<string>? TestStageObserver { get; set; }
+
     /// <summary>Forward pass — runs the full decoder + generator over the predicted prosody.
     /// <paramref name="asr"/> is <c>[1, 512, T]</c> (length-regulated text-encoder output).
     /// <paramref name="f0"/> and <paramref name="n"/> are <c>[1, 1, 2*T]</c> from the prosody
     /// predictor. <paramref name="styleDecoder"/> is the 128-dim decoder style row <c>[1, 128]</c>.
-    /// Returns a 1-D float waveform at <see cref="KokoroConfig.SampleRate"/> (24 kHz).</summary>
-    public float[] Forward(IBackend backend, Tensor asr, Tensor f0, Tensor n, Tensor styleDecoder)
+    /// Returns a 1-D float waveform at <see cref="KokoroConfig.SampleRate"/> (24 kHz).
+    /// <paramref name="cancel"/> is checked after the encode block, after the decode blocks and, on the iSTFTNet
+    /// generator, after the harmonic source, after each upsample stage and before the iSTFT head. The HiFi-GAN generator
+    /// (StyleTTS 2 LibriTTS) has no boundaries of its own: once it starts, it runs to the end.</summary>
+    public float[] Forward(IBackend backend, Tensor asr, Tensor f0, Tensor n, Tensor styleDecoder,
+        CancellationToken cancel = default)
     {
         int batch = (int)asr.Shape[0];
         int t = (int)asr.Shape[2];
@@ -149,6 +157,7 @@ public sealed class KokoroIStftNetDecoder
         Tensor encIn = KokoroOps.ConcatChannels(backend, [asr, f0Down, nDown]);
         Tensor x = _encode.Forward(backend, encIn, styleDecoder);
         encIn.Dispose();
+        KokoroOps.StageBoundary(TestStageObserver, "encode", cancel, x, asrRes, nDown, f0Down);
 
         // decode: each block runs on cat([x, asr_res, F0, N], s). Last block upsamples 2×.
         for (int i = 0; i < 4; i++)
@@ -161,18 +170,24 @@ public sealed class KokoroIStftNetDecoder
         asrRes.Dispose();
         nDown.Dispose();
         f0Down.Dispose();
+        KokoroOps.StageBoundary(TestStageObserver, "decode", cancel, x);
 
         // generator consumes the ORIGINAL 2T F0 curve (not the downsampled one).
-        float[] audio = _useHifiGan ? _hifiGan!.Forward(backend, x, styleDecoder, f0)
-            : RunGenerator(backend, x, styleDecoder, f0);
-        x.Dispose();
-        return audio;
+        try
+        {
+            return _useHifiGan ? _hifiGan!.Forward(backend, x, styleDecoder, f0)
+                : RunGenerator(backend, x, styleDecoder, f0, cancel);
+        }
+        finally
+        {
+            x.Dispose();
+        }
     }
 
     /// <summary>iSTFTNet generator: harmonic-plus-noise source → forward STFT → two ConvTranspose1d
     /// upsamples (10×, 6×) with per-level noise injection + 3-kernel MRF AdaIN/Snake resblocks →
     /// conv_post → magnitude/phase iSTFT. Mirrors <c>kokoro/istftnet.py</c> <c>Generator.forward</c>.</summary>
-    private float[] RunGenerator(IBackend backend, Tensor x0, Tensor s, Tensor f0)
+    private float[] RunGenerator(IBackend backend, Tensor x0, Tensor s, Tensor f0, CancellationToken cancel)
     {
         KokoroConfig.IStftNetConfig g = _cfg.IStftNet;
         int hop = g.GenIstftHopSize;       // 5
@@ -187,6 +202,7 @@ public sealed class KokoroIStftNetDecoder
         timer?.Mark("harmonic");
         Tensor har = NsfVocoderDsp.ForwardStftMagPhase(harSource, nFft, hop);
         timer?.Mark("stft");
+        KokoroOps.StageBoundary(TestStageObserver, "source", cancel, har);
 
         // x0 is borrowed: the first activation writes into a fresh tensor instead of copying it.
         Tensor x = x0;
@@ -233,6 +249,7 @@ public sealed class KokoroIStftNetDecoder
             backend.Scale(acc, acc, 1f / 3f);
             x = acc;
             timer?.Mark(i == 0 ? "stage0" : "stage1");
+            KokoroOps.StageBoundary(TestStageObserver, i == 0 ? "stage0" : "stage1", cancel, x, har);
         }
         har.Dispose();
 
@@ -246,6 +263,7 @@ public sealed class KokoroIStftNetDecoder
         backend.Conv1d(post, x, _convPostW!, _convPostB, stride: 1, padLeft: 3, padRight: 3, dilation: 1, groups: 1);
         x.Dispose();
         timer?.Mark("post");
+        KokoroOps.StageBoundary(TestStageObserver, "post", cancel, post);
 
         float[] audio = NsfVocoderDsp.IstftHead(post, nFft, hop);
         post.Dispose();

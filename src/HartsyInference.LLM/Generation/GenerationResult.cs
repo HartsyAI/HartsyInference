@@ -14,4 +14,8 @@ public sealed record GenerationResult
 
     /// <summary>True when generation stopped on an end-of-turn/end-of-text/stop token rather than the <c>MaxTokens</c> limit.</summary>
     public required bool StoppedOnStopToken { get; init; }
+
+    /// <summary>Prompt tokens served from a reused KV prefix instead of freshly prefilled (0 when no prefix-cache
+    /// entry was supplied, or none of its tokens matched this call's prompt).</summary>
+    public int ReusedPromptTokens { get; init; }
 }

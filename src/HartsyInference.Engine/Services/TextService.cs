@@ -3,6 +3,7 @@ using System.IO;
 using System.Text;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
@@ -216,17 +217,31 @@ public sealed class TextService : ITextService, IDisposable
             onToken = _ => _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
         }
 
+        // Opt-in (null key = today's behavior, unchanged): checked OUT of the slot's store so a second concurrent
+        // request on the same busy key finds nothing and falls back to this same uncached path, and checked back
+        // IN from `finally` below whatever the outcome — success, a filter stop, or a genuine exception all leave
+        // `reuse` in a state TextGenerationPipeline.Generate already decided is safe to store (see its doc).
+        RetainedSequence? reuse = request.PrefixCacheKey is { Length: > 0 } cacheKey && slot.SsmPipeline is null
+            ? (slot.PrefixCache ??= NewPrefixCacheStore()).Checkout(cacheKey) ?? new RetainedSequence()
+            : null;
         GenerationResult result;
         try
         {
             result = slot.SsmPipeline is not null ? slot.SsmPipeline.Generate(genRequest, onToken, generation)
-                : slot.Pipeline!.Generate(genRequest, onToken, generation);
+                : slot.Pipeline!.Generate(genRequest, reuse, onToken, generation);
         }
         catch (OperationCanceledException) when (filterSink is { Stopped: true } && !cancel.IsCancellationRequested)
         {
             // ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.
             StopReason filterStop = filterSink.ToolCall is null ? StopReason.Stop : StopReason.ToolCall;
             return new GenOutcome(filterSink.Text, filterStop, promptTokens, count, filterSink.ToolCall);
+        }
+        finally
+        {
+            if (reuse is not null)
+            {
+                slot.PrefixCache!.CheckIn(request.PrefixCacheKey!, reuse);
+            }
         }
         if (parser is not null) parser.Finish(emit!);
 
@@ -306,7 +321,11 @@ public sealed class TextService : ITextService, IDisposable
             return;
         }
         if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null) && slot.LoadedPath == path)
+        {
+            LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
+            LogLoadTimeSettingMismatch(slot, deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
             return;
+        }
         string[] shardDevices = ResolveShardDevices(deviceKey);
         ValidateShardDevices(shardDevices);
         UnloadSlot(slot);
@@ -351,6 +370,7 @@ public sealed class TextService : ITextService, IDisposable
             buildSelector = fallbackDevice;
         }
         IBackend backend = slot.Backend ??= CreateBackendFor(buildSelector);
+        ApplyCacheWeightCastsOverride(slot, request, [backend]);
         // A backend that cannot read quantized weights needs them dequantized on the way in. Asking the backend
         // what it supports rather than what class it is means Vulkan gets the right answer the moment it publishes
         // SupportsQuantized, instead of silently paying an F32 expansion forever because it is not CUDA.
@@ -360,6 +380,8 @@ public sealed class TextService : ITextService, IDisposable
         {
             slot.SsmModel = SsmLanguageModel.Load(path, architecture);
             slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
+            // SSM has its own loader with no EnumerateWeights/redundant-split concept at all.
+            slot.PreloadRedundantWeightSplitsApplied = null;
             slot.LoadedPath = path;
             LoadVisionInto(slot, path);   // qwen35 ships a Qwen3.5-VL mmproj sidecar; other SSM archs have none.
             Logs.Info($"[TextService] Loaded GGUF SSM model '{Path.GetFileName(path)}' ({architecture}) on {deviceKey}."
@@ -373,7 +395,12 @@ public sealed class TextService : ITextService, IDisposable
         // Unconditional: PreloadWeights is a no-op on a backend with no device memory, and a backend that HAS
         // device memory wants its weights resident — gating on the class meant Vulkan re-uploaded every weight
         // over PCIe on every op.
-        backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights());
+        // includeRedundantSplits defaults true here (unlike LoadSharded below and PreloadDecodeWeights, which
+        // always pass false) to preserve this path's long-standing behavior for every existing caller; a request
+        // can opt out via PreloadRedundantWeightSplits — see its doc comment on TextRequest for the measured cost.
+        bool preloadRedundantSplits = request.PreloadRedundantWeightSplits ?? true;
+        backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights(preloadRedundantSplits));
+        slot.PreloadRedundantWeightSplitsApplied = preloadRedundantSplits;
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
         slot.LoadedPath = path;
         LoadVisionInto(slot, path);
@@ -488,6 +515,10 @@ public sealed class TextService : ITextService, IDisposable
         slot.Placement = placement;
         slot.Backend = placement.LastBackend;
         slot.ExtraStageBackends = [.. stages.Select(s => s.Backend).Where(b => !ReferenceEquals(b, placement.LastBackend))];
+        ApplyCacheWeightCastsOverride(slot, request, stages.Select(s => s.Backend));
+        // LoadSharded's own preload above (line ~490) always passes includeRedundantSplits: false, unconditionally
+        // — TextRequest.PreloadRedundantWeightSplits is only read by the single-device path.
+        slot.PreloadRedundantWeightSplitsApplied = false;
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer,
             placement.LastBackend, slot.Model.Template, placement);
         slot.LoadedPath = path;
@@ -520,6 +551,10 @@ public sealed class TextService : ITextService, IDisposable
         bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
         GgufLanguageModel.TpCheckpoint checkpoint = GgufLanguageModel.LoadForTensorParallel(path, lowVram);
         List<IBackend> backends = [.. rankDevices.Select(CreateBackendFor)];
+        ApplyCacheWeightCastsOverride(slot, request, backends);
+        // Tensor-parallel weights come from TensorParallelTransformer.EnumerateRankWeights, a wholly different
+        // method with no redundant-split concept — TextRequest.PreloadRedundantWeightSplits doesn't apply here.
+        slot.PreloadRedundantWeightSplitsApplied = null;
         ICollectiveComm comm = CollectiveComm.Create(backends);
         TensorParallelTransformer tp = new(checkpoint.Config, new TpPlacement(backends, comm));
         tp.LoadWeights(checkpoint.Weights, "model");
@@ -630,9 +665,92 @@ public sealed class TextService : ITextService, IDisposable
         _slots.Clear();
     }
 
+    /// <summary>A fresh prefix-cache store sized from the <c>vram.prefixCache*</c> knobs, for a slot's first request that opts in.</summary>
+    private static RetainedSequenceStore NewPrefixCacheStore() =>
+        new(EngineKnobs.PrefixCacheMaxEntries.Value, EngineKnobs.PrefixCacheMaxBytes.Value);
+
+    /// <summary>Logs once per slot (debug level) when a request explicitly asks for a load-time-only setting
+    /// (<see cref="TextRequest.CacheWeightCasts"/>, <see cref="TextRequest.PreloadRedundantWeightSplits"/>) that
+    /// differs from what is actually in force on an ALREADY-loaded slot — e.g. a non-voice caller loaded this
+    /// device's slot first with the default, so a later voice request's VRAM-saving override is silently a no-op
+    /// without a reload. <paramref name="requested"/> null means the caller didn't ask, so there is nothing to
+    /// compare (no mismatch is possible by leaving it to the slot's existing setting). "Once" via
+    /// <see cref="TextDeviceSlot.LoggedSettingMismatches"/> — otherwise every turn of a long voice call would
+    /// repeat the identical line.</summary>
+    private static void LogLoadTimeSettingMismatch(TextDeviceSlot slot, string deviceKey, string settingName, bool? requested, bool? applied)
+    {
+        if (requested is { } value && applied is { } inForce && value != inForce && slot.LoggedSettingMismatches.Add(settingName))
+        {
+            Logs.Debug($"[TextService] '{settingName}' requested {value} for the already-loaded slot on "
+                + $"{deviceKey}, but {inForce} has been in force since that slot's backend was created — "
+                + "takes effect only on the next load; reload the slot (or restart on this device) to apply it.");
+        }
+    }
+
+    /// <summary>Applies <see cref="TextRequest.CacheWeightCasts"/> to every backend just created for a slot (a
+    /// no-op when the request leaves it null — the backend's own default stands), and records the resulting
+    /// effective value on <paramref name="slot"/> for <see cref="LoadInto"/>'s later-request mismatch check.</summary>
+    private static void ApplyCacheWeightCastsOverride(TextDeviceSlot slot, TextRequest request, IEnumerable<IBackend> backends)
+    {
+        List<IBackend> list = [.. backends];
+        if (request.CacheWeightCasts is { } value)
+        {
+            foreach (IBackend backend in list)
+            {
+                backend.CacheWeightCasts = value;
+            }
+        }
+        slot.CacheWeightCastsApplied = list.Count > 0 ? list[0].CacheWeightCasts : null;
+    }
+
+    /// <inheritdoc/>
+    public async Task TrimMemoryPool(string? device = null)
+    {
+        IEnumerable<TextDeviceSlot> targets = string.IsNullOrWhiteSpace(device)
+            ? _slots.Values
+            : _slots.TryGetValue(NormalizeDeviceKey(device), out TextDeviceSlot? found) ? [found] : [];
+        foreach (TextDeviceSlot slot in targets)
+        {
+            // Best-effort and non-blocking: a slot mid-generation is skipped rather than waited on, since this is
+            // background hygiene (pool slack an idle point returns to the driver), never something a live request
+            // should queue behind.
+            if (!await slot.Lock.WaitAsync(0).ConfigureAwait(false))
+            {
+                continue;
+            }
+            try
+            {
+                slot.Backend?.TrimMemoryPool();
+                if (slot.ExtraStageBackends is not null)
+                {
+                    foreach (IBackend stage in slot.ExtraStageBackends)
+                    {
+                        stage.TrimMemoryPool();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Logs.Debug($"[TextService] TrimMemoryPool failed on a slot: {ex.Message}");
+            }
+            finally
+            {
+                slot.Lock.Release();
+            }
+        }
+    }
+
     /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
     private static bool UnloadSlot(TextDeviceSlot slot)
     {
+        // Disposed BEFORE FreeAllDeviceMemory below: a retained entry's KV Tensors reference this backend's
+        // device allocations directly, and FreeAllDeviceMemory resets the backend's allocator wholesale — a
+        // Tensor.Dispose() call after that would free an already-invalidated pointer.
+        if (slot.PrefixCache is not null)
+        {
+            slot.PrefixCache.Dispose();
+            slot.PrefixCache = null;
+        }
         slot.SpliceVision?.Dispose();
         slot.SpliceVision = null;
         slot.MllamaVision?.Dispose();
@@ -667,6 +785,9 @@ public sealed class TextService : ITextService, IDisposable
         slot.SsmPipeline = null;
         slot.SsmModel?.Dispose();
         slot.SsmModel = null;
+        slot.CacheWeightCastsApplied = null;
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoggedSettingMismatches.Clear();
         bool hadModel = slot.LoadedPath is not null;
         slot.LoadedPath = null;
         // A GGUF load leaves multi-GB dequantized host buffers (and the closed mmap's pages) reachable only via
@@ -864,6 +985,7 @@ public sealed class TextService : ITextService, IDisposable
             GraphDecode = request.GraphDecode,
             SpeculativeDecode = request.SpeculativeDecode,
             EnableThinking = request.EnableThinking,
+            PrefixCacheCapacityHint = request.PrefixCacheCapacityHint,
         };
         if (rawCompletion)
         {

@@ -8,6 +8,243 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
+  pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
+  compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
+  backend has nothing to wait for. While the request's token can be cancelled, `GenericTransformer.ForwardEmbeds`
+  waits, before issuing layer *k*, on the fence recorded after layer *k − 2* (`DeviceRunAhead`). The device always
+  has the next layer queued behind the running one, and a stop leaves at most two layers to drain instead of
+  everything the host had queued. Math, kernels and stream order are unchanged; a forward with a token that cannot be
+  cancelled takes no fences at all.
+- **Fixed: a large `NativeBuffer`'s zero-fill no longer bypasses the process CPU thread cap.** Buffers of 8 MB and
+  up were zeroed with a raw `Parallel.For` sized by `Environment.ProcessorCount` on the shared thread pool, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`, so one big allocation on any thread could take every core
+  from the voice front end's real-time audio thread. The fill now goes through `CpuParallel.For` in fixed 2 MB
+  chunks whose count depends only on the size: inside an `InlineScope` it runs on the calling thread, and the cap
+  bounds how many threads clear at once. Smaller buffers still clear inline, and the memory is zeroed exactly as
+  before.
+- **Kokoro stops a cancelled synthesis at its next stage instead of finishing the sentence.**
+  `KokoroPipeline.Synthesize`/`SynthesizeFromStyle` and `KokoroIStftNetDecoder.Forward` take a `CancellationToken`
+  and check it at twelve stage boundaries — before any device work, after PLBERT, the text encoder, the duration
+  predictor, the length regulator and F0/N, after the decoder's encode and decode blocks, after the harmonic source,
+  after each upsample stage and before the iSTFT head — disposing the tensors that stage still holds before throwing.
+  The token reaches Kokoro on every path: sentence streaming, `SpeechService.SynthesizeAsync` (through `TtsJob`), and a
+  new `ISynthesizerLease.Synthesize(text, options, cancel)` overload, which the voice session's GPU thread now calls
+  with the turn's token, so a barge-in stops issuing the sentence's work at the next boundary (on CUDA, kernels already
+  queued still finish). The overload is a default interface method that checks only before the call, so other
+  implementers keep compiling. Output is byte-identical when not cancelled.
+- **The prompt prefill now observes the request's cancellation token between transformer layers.**
+  `TextGenerationPipeline` hands the token to the first prefill through a new
+  `IGenerationModel.Prefill(chunk, state, cancel)` overload (a default interface method that checks only before the
+  call); `GenericTransformerModel` implements it by checking between layers in `GenericTransformer.Forward`,
+  `ForwardEmbeds` and the layer-split `ForwardEmbedsStaged`, which all take an optional token. The math and the
+  kernel shapes are those of an uncancelled call, so output is identical when nothing is cancelled. A stopped prefill
+  commits nothing: the cache length is not advanced, and the rows the finished layers wrote past it are never read
+  and are overwritten next time. As before, a request with prefix-cache reuse that is cancelled during the prompt
+  prefill drops its retained sequence instead of keeping one the cache never received. On the CPU backend the stop
+  lands at the next layer. On CUDA the host queues layers far ahead of the GPU, so the check stops issuing work only
+  when the cancel lands early, and the layers already queued still run. Measured on an RTX 3060 (Qwen3-4B Q4_K_M,
+  695-token prompt, 1.02 s prefill): a cancel 10 % in throws after 7 ms instead of 913 ms, but the card stays busy
+  for 788 ms instead of 913 ms; from 30 % in, every layer is already queued and nothing changes. Freeing the card
+  early needs a bound on how far the host runs ahead, which is open work.
+- **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
+  instead of guessing the tool-call format from its name: true only when the template references the
+  caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,
+  Llama-3 `<|python_tag|>`, Mistral `[TOOL_CALLS]`, Gemma `<|tool_call>`). Verified against the real template
+  of eight local GGUFs — three detect correctly (Qwen3-4B/Qwen2.5-1.5B → Hermes, gemma-4-E2B-it → Gemma) and
+  five correctly detect as unsupported for family-specific reasons, see
+  `tests/HartsyInference.Tools.Tests/Fixtures/ChatTemplates/README.md`.
+- **Fixed:** `ToolCallFormats.Detect`'s name-hint heuristic no longer maps `"glm"`/`"deepseek"` to Hermes —
+  neither family's real wire format matches it (GLM uses XML arguments, DeepSeek never renders `tools` for
+  new calls). Both still reach the documented unknown-family Hermes fallback, so `Detect`'s observable
+  behavior for a bare name hint is unchanged.
+- **`WakeService.Claim`/`Release`**: an opt-in, per-device host handoff for the wake listener. A host can claim
+  one connected satellite's turns (typically from a `Detected` handler) and receive its decoded inbound audio
+  (16 kHz mono float, post-denoise when noise suppression is on, normalized from the wake path's internal
+  int16 scale) through `WakeDeviceClaim.OnFrame` instead of the service's own wake scoring, end-of-speech
+  capture and transcription, which are suspended for that device only. The connection, ping/pong keepalive and
+  outbound audio path (`BeginAudio`/`SendAudioAsync`) are unaffected. `Release` returns the device to normal
+  listening; a disconnect while claimed auto-releases and calls `WakeDeviceClaim.OnDisconnected` once. Zero
+  change for a device nothing has claimed — `WakeSession.Claim` defaults to null and the existing
+  scoring/VAD branch is reached exactly as before; proven against the full existing wake suite
+  (`WakeTransportTests` and the rest) with real backbone/head/denoiser weights, not just by inspection. This is
+  the engine-side requirement for `SwarmUI-AudioLab`'s satellite voice-agent Session mode, which could not
+  otherwise get continuous raw audio for a device past its own wake detection.
+- **Fixed two races in `WakeService.Claim`/`Release`'s disconnect path, found by review before this shipped.**
+  A device's reconnect (`WakeSession.OnReconnected`, from its new connection) could land while its old
+  connection was still unwinding; the old connection's `finally` then unconditionally cleared the new
+  connection's `Codec`, reset `State` to `Handshake` (silently pausing the worker for that device, since
+  `WakeWorker.Run` skips a session in `Handshake`), cleared the new connection's claim, and fired a spurious
+  `OnDisconnected` for a device that was, in fact, still connected. `WakeSession.Codec` is now a field (like
+  `Claim` already was) so the disconnect path can clear it with a CAS keyed to the specific codec that
+  connection installed; a superseded connection's teardown now does nothing instead. A throwing
+  `OnDisconnected` is also now caught and logged (`Logs.Error`) rather than propagating out of the `finally`,
+  where it could otherwise mask whatever exception actually ended the connection. Same treatment for a
+  throwing `OnFrame` in `WakeWorker`, caught separately from the pipeline/denoiser/VAD reset path so a
+  persistently-throwing host callback doesn't flood the log with pointless resets of state a claimed device
+  never reads. `WakeService.Claim` also now withdraws (and returns null for) a claim whose connection died in
+  the gap between its own liveness check and installing the claim, so that race can no longer leave a host
+  holding a claim that will never call `OnDisconnected`. A reconnect ends the device's previous claim too —
+  cleared AND notified before `OnReconnected` publishes the new codec, not after, so neither step can land on
+  a claim a host thread installed against that new codec, and so that notification is one of the writes the
+  new codec's own publish carries to anyone who observes it (see the next entry): letting it silently carry
+  over to the new connection's audio with no signal the old one is gone was the bug; running the notification
+  after the publish, rather than before, turned out to be a second, narrower version of the same bug.
+- **`WakeSession.Codec` is `volatile`.** `WakeListener`'s disconnect CAS and reconnect handling, and
+  `WakeService`'s outbound audio path, all read or write it across threads without a lock. A release (the
+  volatile write in `OnReconnected`, or the CAS in the disconnect path) only carries a thread's earlier writes
+  forward to whoever observes it — never later ones — so anything a reconnect needs a reader to see has to
+  happen before the codec publish, not after. A new regression test polling this field with a plain read, then
+  immediately checking a side effect of the reconnect, caught both the missing `volatile` and, after adding
+  it, that the notification above was still ordered on the wrong side of the publish: flaky under full
+  test-suite parallel load either way, just far less often with only the field fixed. 16 consecutive clean
+  full-suite runs once both were corrected, after failures inside the first 3-8 runs at each earlier stage.
+- **`WakeWorker.Run` clears its shared `detections` list before deciding whether there is anything to score
+  this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
+  an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
+  the list held from an earlier iteration in place, and the dispatch loop below re-fired it a second time.
+- **Orpheus TTS no longer re-prompts to download its SNAC codec on every generation.** `ModelCatalog`'s
+  SNAC asset (`hubertsiuzdak/snac_24khz`) listed `RepoPath = "model.safetensors"`; the real downloaded
+  file is `pytorch_model.bin`, so `ModelAcquisition`'s presence check always reported it missing. The CLI
+  REPL calls `EnsurePresent` once per generation (not once per load), so every Orpheus prompt hit the
+  false-missing path and its interactive `Download these now?` prompt. Fixed the `RepoPath`, and added a
+  per-process confirmed-present cache so the audio-asset check only runs until it first succeeds for a
+  given catalog id.
+- **`hartsy transcribe --timestamps` now prints the actual timestamps.** The flag only ever changed a
+  "segments N" count in the footer; the transcript text itself was identical with or without it, since
+  `TranscribeAsync` never read anything from `TranscriptResult.Words` but its `Count`. It now renders one
+  `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
+  produced) when timestamps were requested and the pipeline returned any; the plain-text path is
+  unchanged byte-for-byte otherwise.
+- **The phone gateway and voice host moved out of this repo**, to a separate app:
+  [HartsyAI/HartsyPhone](https://github.com/HartsyAI/HartsyPhone). `HartsyInference.PhoneGateway`,
+  `HartsyInference.VoiceHost` and `HartsyInference.PhoneLink` (source, tests, the systemd units and install
+  scripts under `deploy/`, and their research docs) are removed from this repo; the code and its git history
+  continue in the new one, copied as of this engine's `main` at `40c84b69` (alpha.238). `HartsyInference.Voice`
+  and `HartsyInference.Tools` are unaffected and stay here (AudioLab and other consumers still use `Voice`
+  directly, with no phone dependency). **`HartsyInference.PhoneLink` stops publishing to NuGet as of this
+  change**; `publish-nuget.yml`'s EXPECTED package list no longer includes it. SIPSorcery is no longer a
+  dependency of this repo. No version bump for this change alone — see whichever numbered section above
+  is first to ship after it for the actual release this landed in.
+
+## alpha.241
+
+- **Fixed an intermittent `CUDA_ERROR_INVALID_VALUE` crash on the first `RmsNorm` call of a prefill.**
+  `GpuTransferHelper.UploadTo` and `State.FreeDevice`'s async-free branch read `State.StreamHandle` directly, with
+  nothing checking that the backend hadn't been retired (zeroing the handle) since the caller resolved that
+  `State` — passing stream `0` into `cuMemcpyHtoDAsync`/`cuMemFreeAsync` is legal CUDA usage but wrong for a
+  destination the stream-ordered pool allocated on the real compute stream. `UploadTo` now resolves the handle once
+  through `State.RequireLiveStream` and throws a clear `ObjectDisposedException` instead of passing zero through;
+  `FreeDevice`, which runs from cleanup paths, logs and skips the stream-ordered free instead of throwing.
+- **Fixed ~144 redundant PCIe re-uploads per LLM forward call (prefill and decode alike), cutting 3060 cache
+  misses from 146/step to the 3 that are actually unavoidable.** `GenericTransformer` builds the RoPE cos/sin
+  table (and, for layer 0, reads the embedding lookup) once per forward call and reuses those host tensors
+  across every layer, but the residency cache only persists a tensor that became some op's OUTPUT — a plain
+  input that misses the cache is uploaded, read, and freed in that call's own cleanup, every single read. Each
+  of the three tensors (cos, sin, embedding) now uploads once via a cheap `Scale(_, _, 1f)` identity op before
+  the layer loop, so all 36-layer rereads hit instead of re-uploading. Under accurate (non-overlapped) timing
+  this is a real, modest TTFT reduction (~4-5%); prefill GEMM time dominates the 3060's TTFT and is unaffected
+  by this fix (a separate efficiency project is being scoped for that).
+- **Fixed: HeartMuLa's quantized GGUF cache ignored `modelsRoot`/`ModelCacheRoot` entirely.** Every other
+  audio model resolves its cache location under `AudioModelCache.CacheRoot` (`modelsRoot/audio` when
+  `EngineKnobs.ModelsRoot` is configured, honoring the `EngineKnobs.ModelCacheRoot` override too).
+  `HeartMulaMusicModel`'s Q8/Q4 on-disk GGUF cache was the one exception, always writing under
+  `~/.cache/hartsyinference/heartmula/` regardless of either knob — so moving model storage (e.g. onto a
+  RAID array, via `ModelsRoot`) silently left HeartMuLa's quantized weights on the OS disk instead.
+
+  `HeartMulaMusicModel.ResolveQuantCachePath` now resolves under the shared audio root
+  (`modelsRoot/audio/music/heartmula/`), falling back to the legacy `~/.cache/hartsyinference/heartmula/`
+  location only when a file already exists there, so an existing install is not silently orphaned.
+- **`IBackend.ApplyRope`'s combined q+k overload no longer corrupts K under GQA.** CUDA, Vulkan and the CPU
+  default sized K's rotation from Q's head count: harmless while every caller was MHA, an out-of-bounds device
+  read/write for a GQA caller (found through Dia's resident decode, #224: 16 query heads, 4 KV heads). All three now
+  check that q and k share batch, seqLen and headDim (head counts may differ) and that cos/sin match headDim, throw
+  otherwise, and run the per-tensor `ApplyRopeSingle` once per tensor. Same split-half formula: the Ernie A/B on CUDA
+  is digest-identical; on Vulkan, dtypes other than F32/F16 now take `ApplyRopeSingle`'s reference fallback. Tests:
+  three in `DitGlueKernelTests` and `ApplyRope_QK_Matches_The_Cpu_For_Mha_And_Gqa` on every GPU backend.
+- **Opt-in prefix-KV reuse for `TextGenerationPipeline`.** A new `Generate` overload takes a `RetainedSequence`
+  (`HartsyInference.LLM.Generation`): it reuses the longest common token-id prefix between the retained cache and
+  the current prompt, `Truncate`s the divergent tail and prefills only the diverging suffix (always leaving the
+  final prompt token to be prefilled fresh, so sampling always has a real logits row), instead of prefilling the
+  whole prompt from an empty cache every call. `RetainedSequence`/`RetainedSequenceStore` are generic (count- and
+  byte-bounded, LRU, checkout/checkin so a second concurrent request on a busy key runs uncached) and live
+  entirely in the engine, independent of any caller. `TextRequest.PrefixCacheKey` (null by default) opts a caller
+  in; `TextRequest.PrefixCacheCapacityHint` sizes a fresh retained sequence once instead of letting it be
+  reallocated turn over turn. `TextService` keeps one store per device slot (`vram.prefixCacheMaxEntries`/
+  `vram.prefixCacheMaxBytes`), disposed before `FreeAllDeviceMemory` on every unload/reload path. Capacity
+  growth past a retained sequence's own cache reallocates transparently; the tensor-parallel path is
+  unaffected (no `ISequenceState` to retain). `GenerationResult.ReusedPromptTokens` reports how much of a
+  call's prompt came from the cache. The tensor-parallel path and `DynamicBatchScheduler`/`PagedKvPool` are
+  untouched — this is the single-sequence `TextGenerationPipeline` path only.
+- **Voice turns reuse their call's own prefix.** `VoiceAgentSession` gives each call a key (carried through
+  `BuildRequest` and so through every `ToolLoop` round too, since each round's request is `request with {...}`) and
+  `EnablePrefixCache` (default true) controls it. `StartAsync` fires a one-token priming request for the
+  system+tools prefix so turn 1 is warm as well, racing the greeting instead of delaying it.
+- **Voice LLM VRAM.** `TextRequest.CacheWeightCasts` (null = backend default) overrides the device backend's
+  `CacheWeightCasts` when its slot's backend is first created; `VoiceAgentOptions.CacheWeightCasts` defaults to
+  `false`. Measured on Qwen3-4B-Q4_K_M/4090: the backend's own default (cache a dequantized F16/BF16 copy of
+  every quantized weight) costs ~7.3 GB resident once warm on top of the ~5.5 GB the weights themselves take —
+  the dominant share of the model's footprint; off, weights stay compressed with a transient per-GEMM dequant,
+  for a fixed ~50 ms tax per prefill call (prompt-length independent; decode's quantized GEMV path and tokens/sec
+  are unaffected either way). `ITextService.TrimMemoryPool` (default no-op, so an existing implementation keeps
+  compiling) is `TextService`'s per-slot, best-effort, non-blocking equivalent of `Unload` that returns pool slack
+  to the driver without unloading weights; the voice turn loop awaits it at the same idle point
+  `VoiceGpuWorker.RequestTrim` already uses for the audio backend, and `VoiceModelSet.WarmAsync` and the session's
+  priming request each trim their own transient usage once done with it.
+- **Voice LLM VRAM: no redundant weight-split preload.** `TextService.LoadInto`'s single-device weight
+  upload called `GenericTransformer.EnumerateWeights()` with its default (`includeRedundantSplits: true`),
+  unlike `LoadSharded` and `GenericTransformerModel.PreloadDecodeWeights`, which already pass `false`. On
+  Qwen3-4B-Q4_K_M the load-time-fused Q/K/V and gate/up projections leave their pre-fusion split originals
+  resident too (tensor-level measurement: 1.21 GiB of the 3.53 GiB a default single-device load uploads, vs.
+  2.32 GiB deduplicated — matching the 2.33 GiB file almost exactly); nothing on `TextGenerationPipeline`'s
+  single-sequence decode/prefill path reads them (only the batch scheduler's mixed-dtype split-projection
+  path does, via its own lazy auto-promotion, unaffected by this change). Checked and ruled out as explanations
+  for the same gap: `AutoPromoteWeights` (a residency-pinning decision only — it uploads a weight already
+  twice-missed in its native dtype, never a dequantized copy) and the tied embedding/`lm_head` (kept quantized
+  at ~304 MiB via the existing `_lmHeadQuant` fused-GEMV path, not dequantized to F16/F32 as its size alone
+  would suggest). `TextRequest.PreloadRedundantWeightSplits` (null = unchanged default) opts a request out;
+  `VoiceAgentOptions.PreloadRedundantWeightSplits` defaults to `false` and is wired through warm-up, the
+  call's priming request and every turn, identically to `CacheWeightCasts`.
+- **Voice gate, measured on real weights (Qwen3-4B-Q4_K_M/4090, Whisper small.en + Kokoro/3060, the host's real
+  7-tool set, 10-turn growing history):** `voice.llm.ttft_ms` 85.7-105.4 ms and flat regardless of history length
+  (gate ≤ 150 ms; was 200-302 ms and growing), `voice.llm.first_sentence_ms` 139.1-158.1 ms (gate ≤ 200 ms),
+  `voice.turn.total_ms` 1095.8-1225.1 ms (gate ≤ 1300 ms), decode 89-102 tok/s. VRAM primed and flat for all ten
+  turns at **5.81 GB, under the ≤ 6 GB target** (was ~13.8 GB). A smaller `PrefixCacheCapacityHint` and
+  `vram.kvF16` stay unused.
+- **Dia TTS decode self-attention is GPU-resident; warm generation is ~3.6x faster with bit-identical
+  output.** `DiaAttention.SelfForwardFlash` (gated on `IBackend.FlashDecodeSupported`) replaces the
+  per-step host reshape/RoPE/GQA-repeat/memcpy attention path Dia shared with pre-fix Zonos, mirroring
+  Zonos's own resident decode (`ForwardResident`, `FixedKvCache`). Split-half (NeoX) RoPE is applied via
+  two per-tensor `IBackend.ApplyRopeSingle` calls (q and k separately -- Dia's self-attention is GQA, 16
+  query heads / 4 KV heads, so the combined q+k call corrupted K before #228 fixed it).
+  Verified same seed, same prompt, baseline vs fixed: identical sha256 and duration across 6 reps each;
+  warm median 91.92s -> 25.39s, RTF ~10.9 -> ~3.0. CPU/Vulkan paths are untouched.
+- **Audio regression triage, alpha.183 -> alpha.238: no regression found.** Orpheus, CSM, Qwen3-TTS,
+  Chatterbox and Moonshine (STT) A/B'd on the RTX 4090, same text/voice/seed: all flat to noise, Qwen3-TTS
+  ~24% faster (not chased further). The 176 shared-backend files (Cuda/Core/Gpu) that changed in that
+  window did not slow any of the five models down.
+
+## alpha.240
+
+- **Fixed: an unparameterized Piper request 404'd fetching `piper.onnx`.** `AudioModelSelector.Parse` falls
+  back to the bare catalog token (e.g. `"piper"`) for `Variant` whenever the request token has no `':'` —
+  correct for a descriptor that treats a bare id as its own repo/model identifier, but Piper's weights ARE
+  the voice (one `.onnx` per voice), so that bare token is not a voice at all. `SpeechService.ResolveTarget`
+  used to pass it straight through as the load variant for any `VoiceSelectsWeights` descriptor whenever no
+  separate named voice was given, with no way to tell "the catalog id leaked through" from "the caller
+  genuinely asked for a voice named `piper`" — so a request with no voice and no `:variant` 404'd fetching
+  `rhasspy/piper-voices/piper.onnx` (no such file exists; every real Piper voice lives at
+  `<lang>/<lang_REGION>/<name>/<quality>/<id>.onnx`) instead of falling back to Piper's own default voice.
+
+  Fixed in `SpeechService.ResolveVariant` (extracted from `ResolveTarget`): detects the bare-token-fallback
+  shape by comparing `AudioModelSelector.Variant` against `AudioModelSelector.Id`, not by hardcoding
+  Piper's name, so the fix covers any other `VoiceSelectsWeights` model with this same shape, not just
+  Piper. `AudioModelSelector.Parse` itself and `PiperModel.LoadAsync`'s own `"default"`/empty sentinel check
+  are both unchanged — the first is shared, load-bearing logic for every modality's selector, the second
+  already did the right thing once actually given one of those values.
+
+## alpha.239
+
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
   pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
   `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
@@ -20,27 +257,6 @@ stable release will require. Dates are UTC.
   the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
-
-## alpha.240 (provisional — see note below)
-
-- **The phone gateway and voice host moved out of this repo**, to a separate app:
-  [HartsyAI/HartsyPhone](https://github.com/HartsyAI/HartsyPhone). `HartsyInference.PhoneGateway`,
-  `HartsyInference.VoiceHost` and `HartsyInference.PhoneLink` (source, tests, the systemd units and install
-  scripts under `deploy/`, and their research docs) are removed from this repo; the code and its git history
-  continue in the new one, copied as of this engine's `main` at `40c84b69` (alpha.238). `HartsyInference.Voice`
-  and `HartsyInference.Tools` are unaffected and stay here (AudioLab and other consumers still use `Voice`
-  directly, with no phone dependency). **`HartsyInference.PhoneLink` stops publishing to NuGet with this
-  version**; its last published version is whatever `main` carried immediately before this merged (at
-  least `2.0.0-alpha.239` as of this branch's base — `publish-nuget.yml` packs the whole solution on every
-  push to `main` that touches `src/`, so it kept publishing right up to the commit this removal branched
-  from). SIPSorcery is no longer a dependency of this repo.
-
-  *(Note: this PR is waiting on engine PRs #217 and #218 before it can merge; both will take a version
-  number first, so `alpha.240` and the exact "last published" number above are provisional and will be
-  re-taken after rebasing past both — see the PR description.)*
-
-## alpha.239
-
 - **Audio: fixed the vocab-sized delegate-sort allocation anti-pattern in the TTS samplers** — the same
   pattern PR #215 fixed in the LLM package's `TopPStep`, independently present in several places in
   `src/HartsyInference.Audio`:

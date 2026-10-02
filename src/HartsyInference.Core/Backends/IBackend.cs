@@ -928,44 +928,32 @@ public partial interface IBackend : IDisposable
         }
     }
 
-    /// <summary>In-place rotary on q/k <c>[B,L,numHeads,headDim]</c>: <c>out = x*cos + rotate_half(x)*sin</c> (Ideogram 4's ApplyRotary).</summary>
+    /// <summary>In-place rotary on q/k <c>[B,L,numHeads,headDim]</c>: <c>out = x*cos + rotate_half(x)*sin</c> (Ideogram 4's ApplyRotary).
+    /// Tolerates GQA: q and k may have different head counts — only batch, seqLen and headDim must agree. Was one
+    /// loop nest sized from Q's <c>numHeads</c> indexing into K's buffer too: harmless for MHA callers (same shape
+    /// either way), but whenever K had fewer heads than Q this read/wrote past K's actual element count — an
+    /// out-of-bounds access, not just a wrong answer (same bug CUDA's and Vulkan's combined overloads had; caught
+    /// via Dia's GQA decoder, 16 Q heads : 4 KV heads). Delegates to <see cref="ApplyRopeSingleReference"/> per
+    /// tensor instead, which already derives its shape from whichever tensor it's given.</summary>
     unsafe void ApplyRope(Tensor q, Tensor k, Tensor cos, Tensor sin)
     {
         if (q.DType != DType.F32 || k.DType != DType.F32 || cos.DType != DType.F32 || sin.DType != DType.F32)
             throw new NotSupportedException("ApplyRope default fallback only supports F32.");
-        int batch = (int)q.Shape[0];
-        int seqLen = (int)q.Shape[1];
-        int numHeads = (int)q.Shape[2];
+        if (q.Shape.Rank != 4 || k.Shape.Rank != 4)
+            throw new NotSupportedException($"ApplyRope expects token-major [B, L, heads, headDim] for q and k; got ranks {q.Shape.Rank}/{k.Shape.Rank}.");
+        if (q.Shape[0] != k.Shape[0] || q.Shape[1] != k.Shape[1] || q.Shape[3] != k.Shape[3])
+        {
+            throw new NotSupportedException(
+                $"ApplyRope requires q and k to share batch, seqLen and headDim (head COUNT may differ — GQA); got q={q.Shape}, k={k.Shape}.");
+        }
         int headDim = (int)q.Shape[3];
-        int half = headDim / 2;
-        float* qPtr = (float*)q.DataPointer;
-        float* kPtr = (float*)k.DataPointer;
-        float* cosPtr = (float*)cos.DataPointer;
-        float* sinPtr = (float*)sin.DataPointer;
-        for (int b = 0; b < batch; b++)
+        if (cos.Shape[cos.Shape.Rank - 1] != headDim || sin.Shape[sin.Shape.Rank - 1] != headDim)
         {
-            for (int s = 0; s < seqLen; s++)
-            {
-                long freqBase = ((long)b * seqLen + s) * headDim;
-                for (int h = 0; h < numHeads; h++)
-                {
-                    long vecOff = (((long)b * seqLen + s) * numHeads + h) * headDim;
-                    RotateHalfInPlace(qPtr + vecOff, cosPtr + freqBase, sinPtr + freqBase, half);
-                    RotateHalfInPlace(kPtr + vecOff, cosPtr + freqBase, sinPtr + freqBase, half);
-                }
-            }
+            throw new NotSupportedException(
+                $"ApplyRope expects cos/sin's last dim to equal headDim ({headDim}); got cos={cos.Shape}, sin={sin.Shape}.");
         }
-
-        static void RotateHalfInPlace(float* vec, float* cos, float* sin, int half)
-        {
-            for (int i = 0; i < half; i++)
-            {
-                float lower = vec[i];
-                float upper = vec[i + half];
-                vec[i] = lower * cos[i] - upper * sin[i];
-                vec[i + half] = upper * cos[i + half] + lower * sin[i + half];
-            }
-        }
+        ApplyRopeSingleReference(q, cos, sin);
+        ApplyRopeSingleReference(k, cos, sin);
     }
 
     /// <summary>In-place <b>interleaved (GPT-J)</b> rotary on <c>x [B,L,numHeads,headDim]</c>; NOT same as <see cref="ApplyRopeSingle"/>.</summary>
@@ -3560,6 +3548,20 @@ public partial interface IBackend : IDisposable
 
     /// <summary>Waits for all pending GPU work (no-op on CPU) — call at phase boundaries so deferred frees land before large allocations.</summary>
     void Sync() { }
+
+    /// <summary>Marks the end of the work issued so far and returns a handle <see cref="WaitFence"/> can block on; 0 on a
+    /// backend whose ops have finished by the time they return (the default), where there is nothing to wait for.</summary>
+    /// <remarks>Lets a caller bound how far the host runs ahead of the device without draining it: waiting on a fence
+    /// recorded a few steps back keeps the steps since then queued. Every non-zero fence goes back through
+    /// <see cref="ReleaseFence"/> exactly once, waited on or not.</remarks>
+    nint RecordFence() => 0;
+
+    /// <summary>Blocks the calling thread until the work issued before <paramref name="fence"/> was recorded has
+    /// finished; returns at once for 0.</summary>
+    void WaitFence(nint fence) { }
+
+    /// <summary>Gives back a fence from <see cref="RecordFence"/>; 0 is ignored.</summary>
+    void ReleaseFence(nint fence) { }
 
     /// <summary>Frees specific weight tensors (no-op on CPU) — call between phases to reclaim VRAM (e.g. UNet weights before VAE decode).</summary>
     void FreeWeights(IEnumerable<Tensor> weights) { }

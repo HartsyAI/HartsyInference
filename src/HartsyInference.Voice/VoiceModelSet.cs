@@ -80,8 +80,9 @@ public sealed class VoiceModelSet : IAsyncDisposable
     /// <summary>Recognizes one utterance; GPU thread only.</summary>
     internal string Transcribe(float[] audio) => _speech.Transcribe(audio);
 
-    /// <summary>Synthesizes one sentence; GPU thread only.</summary>
-    internal float[] Synthesize(string text) => _speech.Synthesize(text);
+    /// <summary>Synthesizes one sentence, stopping at the synthesizer's next stage once <paramref name="cancel"/> is
+    /// signalled; GPU thread only.</summary>
+    internal float[] Synthesize(string text, CancellationToken cancel) => _speech.Synthesize(text, cancel);
 
     /// <summary>A VAD instance for one session; it carries that session's recurrent state.</summary>
     internal IVadModel CreateVadModel() => _createVad();
@@ -242,6 +243,9 @@ public sealed class VoiceModelSet : IAsyncDisposable
             MaxTokens = warmToolPath ? WarmToolMaxTokens : 1,
             Tools = warmToolPath ? tools : null,
             AlwaysFreeMemory = false,
+            // Takes effect here: this is the FIRST request on the slot, which is where its backend is created.
+            CacheWeightCasts = Options.CacheWeightCasts,
+            PreloadRedundantWeightSplits = Options.PreloadRedundantWeightSplits,
         };
         // Different devices, so the language model warms while the GPU thread does. A throwaway request with its own
         // Messages, never touching a session's conversation or the sentence splitter, so it cannot change what a real
@@ -249,6 +253,11 @@ public sealed class VoiceModelSet : IAsyncDisposable
         Task llm = warmToolPath ? WarmLlmStreamAsync(text, request, cancel) : text.GenerateAsync(ResolveLlm(Options), request, cancel);
         Task speech = WarmSpeechAsync(silence, cancel);
         await Task.WhenAll(llm, speech).ConfigureAwait(false);
+        // This generate call's own activation/workspace pool usage (its decode loop is the first to run more
+        // than one step, the shape every real turn's decode loop will reuse from the pool from then on) is pure
+        // overhead once warm-up itself is done -- reclaim it now rather than letting it sit resident until a
+        // real turn's own idle point gets around to it.
+        await text.TrimMemoryPool(Options.LlmDevice).ConfigureAwait(false);
     }
 
     /// <summary>Drains the warm-up's streamed generation so the filter/parser/channel path a real tool-enabled turn
@@ -272,7 +281,7 @@ public sealed class VoiceModelSet : IAsyncDisposable
             synthesized[i] = await Gpu.RunAsync(VoiceGpuJobKind.Warm, () =>
             {
                 long started = Stopwatch.GetTimestamp();
-                float[] audio = _speech.Synthesize(sentence);
+                float[] audio = _speech.Synthesize(sentence, cancel);
                 return (Stopwatch.GetElapsedTime(started).TotalMilliseconds, audio.Length / (double)_speech.SynthesisSampleRate);
             }, cancel).ConfigureAwait(false);
         }

@@ -21,6 +21,17 @@ public interface IGenerationModel : IDisposable
     /// <summary>Runs <paramref name="chunk"/> against <paramref name="state"/>, commits its tokens, and returns hidden <c>[1, rows, hidden]</c> (rows = 1 when <see cref="PrefillChunk.LastRowOnly"/>).</summary>
     Tensor Prefill(in PrefillChunk chunk, ISequenceState state);
 
+    /// <summary>As <see cref="Prefill(in PrefillChunk, ISequenceState)"/>, stopping with <see cref="OperationCanceledException"/>
+    /// once <paramref name="cancel"/> is signalled. A stopped prefill commits nothing: <paramref name="state"/>'s length is
+    /// unchanged. The default implementation checks only before the call. An implementation that checks during it must
+    /// leave an uncancelled call's result untouched (<see cref="GenericTransformerModel"/> checks between layers), and a
+    /// decorator must forward this overload itself, or the model it wraps is only checked before the call.</summary>
+    Tensor Prefill(in PrefillChunk chunk, ISequenceState state, CancellationToken cancel)
+    {
+        cancel.ThrowIfCancellationRequested();
+        return Prefill(chunk, state);
+    }
+
     /// <summary>One decode step for each sequence in <paramref name="states"/> (token i belongs to state i), committing one token per state; returns hidden <c>[1, N, hidden]</c>.</summary>
     Tensor DecodeBatch(ReadOnlySpan<int> tokenIds, ISequenceState[] states);
 

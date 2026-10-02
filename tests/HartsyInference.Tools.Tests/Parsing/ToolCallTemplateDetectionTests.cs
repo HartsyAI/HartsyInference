@@ -1,0 +1,206 @@
+using System.Text;
+using HartsyInference.ModelAssets.Gguf;
+using HartsyInference.Tests.Common;
+using HartsyInference.Tools.Parsing;
+using Xunit;
+using Xunit.Abstractions;
+
+namespace HartsyInference.Tools.Tests.Parsing;
+
+/// <summary>Tests <see cref="ToolCallFormats.TryDetectFromTemplate"/> against the real <c>tokenizer.chat_template</c>
+/// of eight local GGUFs (see <c>Fixtures/ChatTemplates/README.md</c> for exactly what each one proves) plus
+/// synthetic templates for the two markers no local checkpoint carries (Llama-3's <c>&lt;|python_tag|&gt;</c>,
+/// Mistral's <c>[TOOL_CALLS]</c>) and the failure modes the review that prompted this API named by name.</summary>
+public sealed class ToolCallTemplateDetectionTests
+{
+    private readonly ITestOutputHelper _output;
+    public ToolCallTemplateDetectionTests(ITestOutputHelper output) => _output = output;
+
+    [Fact]
+    public void NullTemplate_IsFalse()
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate(null, out _));
+
+    [Fact]
+    public void EmptyTemplate_IsFalse()
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate("", out _));
+
+    [Fact]
+    public void ToolsReferencedButNoSupportedMarker_IsFalse()
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate(
+            "{%- if tools %}You have tools available.{%- endif %}", out _));
+
+    [Fact]
+    public void HermesMarkerWithoutToolsReference_IsFalse()
+        // The envelope alone isn't enough — nothing here ever loops over the caller-supplied list, so there's
+        // nothing for the model to have actually been instructed about.
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate(
+            "<tool_call>\n{\"name\": \"x\", \"arguments\": {}}\n</tool_call>", out _));
+
+    // ── Real fixtures: Hermes (true) ────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Qwen3_4B_RealTemplate_DetectsHermes()
+    {
+        bool detected = ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Qwen3_4B, out ToolCallFormat format);
+        Assert.True(detected);
+        Assert.Equal(ToolCallFormat.Hermes, format);
+    }
+
+    [Fact]
+    public void Qwen25_1_5B_RealTemplate_DetectsHermes()
+    {
+        bool detected = ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Qwen25_1_5B, out ToolCallFormat format);
+        Assert.True(detected);
+        Assert.Equal(ToolCallFormat.Hermes, format);
+    }
+
+    // ── Real fixtures: Gemma (true) ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Gemma4E2BIt_RealTemplate_DetectsGemma()
+    {
+        bool detected = ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Gemma4_E2B_It, out ToolCallFormat format);
+        Assert.True(detected);
+        Assert.Equal(ToolCallFormat.Gemma, format);
+    }
+
+    // ── Real fixtures: false, for family-specific reasons ───────────────────────────────────────────────────
+
+    [Fact]
+    public void Qwen35_0_8B_RealTemplate_XmlFunctionArgsDoNotMatchHermes()
+        // Qwen3.5 / Qwen3-Coder style: opens with the identical "<tool_call>" tag as the Hermes pair above, but
+        // instructs "<function=name><parameter=...>" — neither "name" nor "arguments" appears anywhere in it.
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Qwen35_0_8B, out _));
+
+    [Fact]
+    public void DeepSeekR1Distill_RealTemplate_NeverRendersToolsIsFalse()
+        // Renders a *previous* assistant tool_calls turn with its own "<｜tool▁calls▁begin｜>" markers, but never
+        // loops over the caller-supplied "tools" list — there's no instruction to detect in the first place.
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.DeepSeekR1DistillQwen1_5B, out _));
+
+    [Fact]
+    public void Glm4_9B_RealTemplate_ListsToolsButInstructsNoEnvelopeIsFalse()
+        // Loops over "tools" and dumps each function's JSON schema, but only tells the model in prose to "use
+        // JSON format for the arguments" — none of the four literal envelope markers ever appears.
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Glm4_9B_0414, out _));
+
+    [Fact]
+    public void Llama32_1B_RealTemplate_BareJsonConventionIsFalse()
+        // A real Llama-3.2 template that references "tools" (and "tools_in_user_message") but never renders
+        // "<|python_tag|>" for custom tools — it instructs a bare {"name":..,"parameters":..} object instead,
+        // which isn't one of the four supported envelopes. Proves the detector doesn't assume family == format.
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Llama32_1B_Instruct, out _));
+
+    [Fact]
+    public void Mistral7BV03_RealTemplate_NoToolsSupportAtAllIsFalse()
+        // This build's template is the plain "[INST] ... [/INST]" conversational format — "tools" never appears.
+        => Assert.False(ToolCallFormats.TryDetectFromTemplate(ChatTemplateFixtures.Mistral7B_Instruct_v0_3, out _));
+
+    // ── Synthetic: the two markers no local GGUF happens to carry ──────────────────────────────────────────
+
+    [Fact]
+    public void SyntheticLlama3Template_PythonTagWithTools_DetectsLlama3()
+    {
+        // The trailing {"name": x} is filler, not a Hermes decoy: Hermes needs a literal "<tool_call>" marker,
+        // which this template never has, so only the "<|python_tag|>" branch can match it.
+        const string template = "{%- if tools %}Environment: ipython{%- endif %}<|python_tag|>{\"name\": x}";
+        bool detected = ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format);
+        Assert.True(detected);
+        Assert.Equal(ToolCallFormat.Llama3, format);
+    }
+
+    [Fact]
+    public void SyntheticLlama3Template_PythonTagForBuiltinToolsPlusBareJsonForCustomTools_StillDetectsLlama3()
+    {
+        // Real Llama-3.1/3.2 templates render <|python_tag|> only for the model's own built-in tools (code
+        // interpreter, search, …) — custom user tools get a bare {"name":..,"parameters":..} object instead
+        // (exactly the llama-3.2-1b-instruct real fixture above, which has no <|python_tag|> at all because it
+        // never offers built-in tools). TryDetectFromTemplate doesn't need to know why the marker is there;
+        // its presence anywhere in a tools-aware template is enough.
+        const string template = "{%- if tools %}"
+            + "{%- if builtin_tools %}Environment: ipython<|python_tag|>{%- endif %}"
+            + "Respond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}."
+            + "{%- endif %}";
+        bool detected = ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format);
+        Assert.True(detected);
+        Assert.Equal(ToolCallFormat.Llama3, format);
+    }
+
+    [Fact]
+    public void SyntheticMistralTemplate_ToolCallsWithTools_DetectsMistral()
+    {
+        const string template = "{%- if tools %}[AVAILABLE_TOOLS]{{ tools }}[/AVAILABLE_TOOLS]{%- endif %}[TOOL_CALLS][{\"name\": x}]";
+        bool detected = ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format);
+        Assert.True(detected);
+        Assert.Equal(ToolCallFormat.Mistral, format);
+    }
+
+    // ── Synthetic: the exact failure modes the review named ───────────────────────────────────────────────
+
+    [Fact]
+    public void SyntheticGlm45StyleXmlArgKey_IsFalse()
+    {
+        // GLM-4.5's actual convention per the review: "<tool_call>name\n<arg_key>...". Same opening tag as
+        // Hermes, XML arguments instead of JSON — must not be confused with the Hermes envelope.
+        const string template = "{% if tools %}Tools: {{ tools | tojson }}{% endif %}"
+            + "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Paris</arg_value>\n</tool_call>";
+        Assert.False(ToolCallFormats.TryDetectFromTemplate(template, out _));
+    }
+
+    [Fact]
+    public void SyntheticDeepSeekMarkersEvenWithTools_IsFalse()
+    {
+        // DeepSeek's own fullwidth markers, deliberately paired with a real "tools" loop this time (the real
+        // fixture above is false for the simpler reason that it never reaches this far) — proves the markers
+        // themselves never accidentally satisfy one of the four ASCII-marker checks.
+        const string template = "{% if tools %}{% for t in tools %}{{ t | tojson }}{% endfor %}{% endif %}"
+            + "<｜tool▁calls▁begin｜><｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n"
+            + "```json\n{\"city\": \"Paris\"}\n```<｜tool▁call▁end｜><｜tool▁calls▁end｜>";
+        Assert.False(ToolCallFormats.TryDetectFromTemplate(template, out _));
+    }
+
+    [Fact]
+    public void EscapedQuotesInJinjaStringLiteral_StillDetectHermes()
+    {
+        // Exactly the Qwen shape: the JSON example is embedded inside a Jinja string literal, so the raw GGUF
+        // metadata string carries \" rather than ". TryDetectFromTemplate must normalize before matching.
+        const string template = "{%- if tools %}"
+            + "{{- \"Call with <tool_call>\\n{\\\"name\\\": <fn>, \\\"arguments\\\": <args>}\\n</tool_call>\" }}"
+            + "{%- endif %}";
+        bool detected = ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format);
+        Assert.True(detected);
+        Assert.Equal(ToolCallFormat.Hermes, format);
+    }
+
+    // ── Live re-extraction: the committed fixtures must still match the real GGUFs ────────────────────────
+
+    public static TheoryData<string> FixtureFiles()
+    {
+        TheoryData<string> data = new();
+        foreach (string name in ChatTemplateFixtures.SourceGgufPaths.Keys) data.Add(name);
+        return data;
+    }
+
+    /// <summary>Re-reads <c>tokenizer.chat_template</c> straight from each source GGUF (metadata only — the
+    /// loader mmaps the file but tensor bytes are never touched) and asserts it still matches the committed
+    /// fixture byte-for-byte, so the two can't silently drift apart. Guarded: skips cleanly (or, under
+    /// <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c>, fails loudly) when a path isn't mounted on this machine.</summary>
+    [Trait("Category", "Integration")]
+    [Theory]
+    [MemberData(nameof(FixtureFiles))]
+    public void CommittedFixture_MatchesLiveGgufMetadata(string fixtureName)
+    {
+        string path = ChatTemplateFixtures.SourceGgufPaths[fixtureName];
+        if (!RealWeightGate.Require(_output.WriteLine, path)) return;
+
+        using GgufLoader loader = new();
+        loader.Load(path);
+        string? liveTemplate = loader.Metadata.GetString("tokenizer.chat_template");
+
+        Assert.NotNull(liveTemplate);
+        // Bytes, not File.ReadAllText: ReadAllText detects and strips a BOM, which would silently pass even if
+        // a future re-extraction introduced one — the fixtures and the README's claim are byte-exact.
+        byte[] committed = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "ChatTemplates", fixtureName));
+        Assert.Equal(committed, Encoding.UTF8.GetBytes(liveTemplate));
+    }
+}
