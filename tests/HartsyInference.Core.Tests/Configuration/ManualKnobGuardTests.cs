@@ -39,6 +39,16 @@ public sealed class ManualKnobGuardTests
     public void AudioEvictBelowGb_RejectsNonPositive(long? value, long expected)
         => With(EngineKnobs.AudioEvictBelowGb, value, () => Assert.Equal(expected, EngineKnobs.AudioEvictBelowGb.Value));
 
+    /// <summary>Rejecting knob: non-positive falls back to the declared 3072 MB.</summary>
+    [Theory]
+    [InlineData(-1L, 3072L)]
+    [InlineData(0L, 3072L)]
+    [InlineData(8192L, 8192L)]
+    [InlineData(null, 3072L)]
+    public void AudioEvictFreeVramFloorMb_RejectsNonPositive(long? value, long expected)
+        => With(EngineKnobs.AudioEvictFreeVramFloorMb, value,
+            () => Assert.Equal(expected, EngineKnobs.AudioEvictFreeVramFloorMb.Value));
+
     /// <summary>Rejecting knob: non-positive falls back to the measured 8192 knee.</summary>
     [Theory]
     [InlineData(0, 8192)]
