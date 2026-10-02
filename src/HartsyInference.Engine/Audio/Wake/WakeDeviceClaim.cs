@@ -26,10 +26,15 @@ public sealed class WakeDeviceClaim
     /// runs on the same thread that drains every other connected device, claimed or not.</summary>
     public WakeInboundFrameHandler OnFrame { get; }
 
-    /// <summary>Called at most once, if the device disconnects while this claim is still in effect — after the
-    /// claim has already been cleared, so the host does not need to poll to find out its turn ended out from
-    /// under it. Not called by an ordinary <see cref="WakeService.Release"/>, and not called at all if the
-    /// claim was already released before the disconnect.</summary>
+    /// <summary>Called at most once, if the device's connection ends while this claim is still in effect —
+    /// after the claim has already been cleared, so the host does not need to poll to find out its turn ended
+    /// out from under it. "Ends" includes an explicit disconnect AND a <c>hello</c> on a new or the same TCP
+    /// connection (a genuine reconnect, or a device that sends a second <c>hello</c> without reconnecting):
+    /// either way the ring buffer, sequence counter and pipeline are reset for a fresh turn, so this claim's
+    /// turn is over even though the device id immediately has a live connection again. Re-claim from inside
+    /// this callback to pick the new turn up rather than assuming continuity. Not called by an ordinary
+    /// <see cref="WakeService.Release"/>, and not called at all if the claim was already released before
+    /// whatever ended it.</summary>
     public Action? OnDisconnected { get; }
 
     public WakeDeviceClaim(WakeInboundFrameHandler onFrame, Action? onDisconnected = null)

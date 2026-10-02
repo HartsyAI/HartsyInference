@@ -111,8 +111,17 @@ public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline,
     /// cref="WakeListener"/>'s disconnect path clears it with a CAS keyed to the specific codec that connection
     /// installed, not an unconditional write, so a connection superseded by a reconnect while it was still
     /// unwinding cannot clear the new connection's codec (or, gated on that same CAS, its state and claim) out
-    /// from under it.</para></summary>
-    public WakeFrameCodec? Codec;
+    /// from under it.</para>
+    ///
+    /// <para><c>volatile</c> because that CAS is not the only cross-thread dependency on this field any more:
+    /// <see cref="WakeListener"/>'s hello case now writes <see cref="Claim"/> (via <see cref="Interlocked"/>,
+    /// a full fence on the writing thread) strictly before this field's own write in <c>OnReconnected</c>, so
+    /// that any claim a reader can observe here is one that predates the codec change — but only if the reader
+    /// also sees this field's write with proper acquire semantics, which a plain field does not guarantee
+    /// without a lock on both sides. A test that polled this field with a plain read and asserted <see
+    /// cref="Claim"/> immediately after, with nothing else between the two reads to force a fence, caught
+    /// this: it flaked under full-suite parallel load, never in isolation.</para></summary>
+    public volatile WakeFrameCodec? Codec;
 
     /// <summary>The host claim currently in effect, or null when the service's own scoring, capture and
     /// transcription own this device — the default, and the only state before any claim exists.

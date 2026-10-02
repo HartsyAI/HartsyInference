@@ -140,19 +140,31 @@ public sealed class WakeListener : IDisposable
                             // one is dropped rather than letting them interleave into corrupt audio.
                             Logs.Warning($"[Audio][Wake] Device id '{deviceId}' reconnected from {remote} while another connection was live; dropping the older one. Give each satellite a unique device_id.");
                         }
-                        session.OnReconnected(codec);
                         // A claim belongs to the connection it was made against, not to the device id for all
-                        // time: OnReconnected just reset the ring buffer, the sequence counter and the pipeline
-                        // because this is a new, discontinuous turn, and WakeDeviceClaim.OnFrame's contract is
-                        // continuous audio for one turn. Without this, the stale-disconnect fix above makes the
-                        // claim silently outlive the connection it was made on -- the old connection's teardown
-                        // now correctly does nothing, but nothing else ever cleared the claim either, so it
-                        // would carry over to this new connection's audio with no OnDisconnected to tell the
-                        // host its turn's connection is gone. Ending it here, the same way an explicit disconnect
-                        // does, lets the host notice and decide whether to re-claim once detection resumes on
-                        // this connection. Unconditional, not CAS-matched: whatever is here was necessarily
-                        // installed before this connection existed, so it is unconditionally stale now.
+                        // time: OnReconnected (right below) resets the ring buffer, the sequence counter and
+                        // the pipeline because this is a new, discontinuous turn, and WakeDeviceClaim.OnFrame's
+                        // contract is continuous audio for one turn. Without this, the stale-disconnect fix
+                        // above makes the claim silently outlive the connection it was made on -- the old
+                        // connection's teardown now correctly does nothing, but nothing else would ever clear
+                        // the claim either, so it would carry over to this new connection's audio with no
+                        // OnDisconnected to tell the host its turn's connection is gone. Ending it here, the
+                        // same way an explicit disconnect does, lets the host notice and decide whether to
+                        // re-claim once detection resumes on this connection.
+                        //
+                        // Taken before OnReconnected publishes the new codec, not after: a claim installed by
+                        // another thread's WakeService.Claim call is only valid once it has seen session.Codec
+                        // non-null, so clearing first means any claim this Exchange can observe necessarily
+                        // predates this connection and is safe to end unconditionally. Clearing after (the
+                        // first version of this fix) left a window, a few instructions wide, where a claim
+                        // installed against the brand-new codec right after OnReconnected published it could
+                        // be this Exchange's victim instead -- a spurious disconnect for a connection that was
+                        // never replaced. A narrower residual remains: a claim racing in the gap between this
+                        // line and OnReconnected still attaches to the dying old connection and is not re-ended
+                        // here, so it silently carries over to this new connection exactly once more. Closing
+                        // that would need the codec swap itself gated behind this Exchange, which is a bigger
+                        // change for a window this narrow; accepted for now.
                         WakeDeviceClaim? staleClaim = Interlocked.Exchange(ref session.Claim, null);
+                        session.OnReconnected(codec);
                         if (staleClaim is not null)
                         {
                             try

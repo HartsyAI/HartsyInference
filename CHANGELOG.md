@@ -47,7 +47,15 @@ stable release will require. Dates are UTC.
   the gap between its own liveness check and installing the claim, so that race can no longer leave a host
   holding a claim that will never call `OnDisconnected`. A reconnect ends the device's previous claim too (and
   notifies it, same guarded `OnDisconnected` call), rather than letting it silently carry over to the new
-  connection's audio with no signal the old one is gone.
+  connection's audio with no signal the old one is gone — taken before, not after, `OnReconnected` publishes
+  the new codec, so a claim installed by a host thread that has just seen that new codec can't be this
+  reconnect's victim instead.
+- **`WakeSession.Codec` is `volatile`.** The CAS in the disconnect path and the ordering the point above
+  depends on both need any thread that observes a codec change to also observe everything written before it
+  on the connection-handling thread — a plain field does not guarantee that without a lock on both sides. Found
+  by a new regression test flaking under full test-suite parallel load (never in isolation): it polled this
+  field with a plain read and asserted `Claim` immediately after, with nothing else forcing a fence in
+  between.
 - **`WakeWorker.Run` clears its shared `detections` list before deciding whether there is anything to score
   this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
   an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
