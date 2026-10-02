@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host
+  Q/K rotation, `Nvfp4Linear`'s BF16 dequant, `VideoRgbFrames.ExtractAllFrames`, the CUDA backend's host W8A8 weight
+  quantization and GPT-OSS's CPU-backend expert loop used raw `Parallel.For` / `Parallel.ForEach`, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`. They now go through `CpuParallel`, `FluxRope` in ranges of 1024
+  vectors through `CpuParallel.ForRanges`. The GPT-OSS loop runs a few lanes (at most half the cores, 8, and the cap),
+  each pulling experts from a shared counter and reusing one pair of dequant slices allocated on its first expert, so
+  slice memory stays bounded as before and the dequant and GEMM inside each expert nest on the same capped scheduler.
+  Outputs are byte-identical at any cap, and no raw `Parallel` loop remains outside `CpuParallel` itself.
 - **Bounded the opt-in prefix-KV reuse (`TextRequest.PrefixCacheKey`) for GPUs shared with other models.** A
   retained KV cache too small for the next request now grows by copying its reusable prefix on device instead of
   being dropped and prefilled again, which also stops a tool round with a large result from re-prefilling the rest
@@ -32,8 +40,7 @@ stable release will require. Dates are UTC.
   every output is byte-identical at any cap. On a host that lowers the cap (the voice host's unit runs with
   `engine.cpuThreadCap: 14`) these now use at most that many threads, so checkpoint conversion and LoRA baking there,
   and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
-  cores than the cap. GPT-OSS's CPU-backend expert loop still wraps its per-expert dequant in a raw
-  `Parallel.ForEach`; a follow-up converts it.
+  cores than the cap.
 - **Audio model switches now size the incoming model before deciding whether to evict.** `AudioRuntime` used to
   unload the other resident audio models on a switch only when free VRAM was under a fixed 3 GiB, so a 6-7 GB model
   arriving with 3-6 GB free evicted nothing: Dia then failed in `PreloadWeights` with `OutOfVramException`, and

@@ -1,6 +1,7 @@
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
@@ -8,6 +9,10 @@ namespace HartsyInference.Diffusion.Models.Denoisers.DiTBlocks;
 /// <summary>Axial Rotary Position Embedding for Flux. Computes RoPE rotation matrices across 3 axes [16, 56, 56] with theta=10000, then applies 2x2 rotation to each Q/K pair. Precomputes cos/sin tables per resolution for caching.</summary>
 public sealed unsafe class FluxRope
 {
+    /// <summary>Q/K vectors rotated per range of the host fan-out: a vector is only a few hundred operations, so a
+    /// range of them amortizes dispatch, and the ranges depend only on the vector count.</summary>
+    private const long RowsPerRange = 1024;
+
     private readonly int[] _axesDim;
     private readonly int _theta;
     private readonly int _headDim;
@@ -223,13 +228,16 @@ public sealed unsafe class FluxRope
         fixed (float* cosPtr = _cosCache, sinPtr = _sinCache)
         {
             nint cosBase = (nint)cosPtr, sinBase = (nint)sinPtr;
-            System.Threading.Tasks.Parallel.For(0, rows, row =>
+            CpuParallel.ForRanges(rows, RowsPerRange, 12L * halfDim, (start, length) =>
             {
-                long s = row % seqLen;
-                int vecOffset = (int)(row * _headDim);
-                int freqIdx = (int)(s * halfDim);
-                ApplyRotation((float*)qBase + vecOffset, (float*)cosBase + freqIdx, (float*)sinBase + freqIdx, halfDim);
-                ApplyRotation((float*)kBase + vecOffset, (float*)cosBase + freqIdx, (float*)sinBase + freqIdx, halfDim);
+                for (long row = start; row < start + length; row++)
+                {
+                    long s = row % seqLen;
+                    int vecOffset = (int)(row * _headDim);
+                    int freqIdx = (int)(s * halfDim);
+                    ApplyRotation((float*)qBase + vecOffset, (float*)cosBase + freqIdx, (float*)sinBase + freqIdx, halfDim);
+                    ApplyRotation((float*)kBase + vecOffset, (float*)cosBase + freqIdx, (float*)sinBase + freqIdx, halfDim);
+                }
             });
         }
     }
@@ -248,11 +256,14 @@ public sealed unsafe class FluxRope
         fixed (float* cosPtr = _cosCache, sinPtr = _sinCache)
         {
             nint cosBase = (nint)cosPtr, sinBase = (nint)sinPtr;
-            System.Threading.Tasks.Parallel.For(0, rows, row =>
+            CpuParallel.ForRanges(rows, RowsPerRange, 6L * halfDim, (start, length) =>
             {
-                long s = row % seqLen;
-                int vecOffset = (int)(row * _headDim);
-                ApplyRotation((float*)ptrBase + vecOffset, (float*)cosBase + (int)(s * halfDim), (float*)sinBase + (int)(s * halfDim), halfDim);
+                for (long row = start; row < start + length; row++)
+                {
+                    long s = row % seqLen;
+                    int vecOffset = (int)(row * _headDim);
+                    ApplyRotation((float*)ptrBase + vecOffset, (float*)cosBase + (int)(s * halfDim), (float*)sinBase + (int)(s * halfDim), halfDim);
+                }
             });
         }
     }

@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Nvfp4;
@@ -251,7 +252,7 @@ public sealed unsafe class Nvfp4Linear : IDisposable
         int bytesPerGroup = Nvfp4Codec.GroupSize / 2;
         long inDim = inHalf * 2;
 
-        Parallel.For(0, (int)outDim, r =>
+        CpuParallel.For((int)outDim, outDim * inDim * 2, r =>
         {
             byte* wr = w + (long)r * inHalf;
             ushort* dr = dst + (long)r * inDim;
