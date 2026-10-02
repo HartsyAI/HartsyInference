@@ -183,6 +183,17 @@ stable release will require. Dates are UTC.
   `finished_step_Bx` accounting shows the sequence forced to the cap at step ~1704 -- and Whisper
   transcribes its output as `[Music]` too. Same inputs, same failure, in the reference implementation;
   nothing in the C# port's conditioning, CFG, delay pattern, or EOS rule is implicated.
+- **cuDNN backend-graph engines marked `CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC` are now skipped by
+  default (`numerics.cudnnDeterministic`, default ON).** Root cause of issue #20 (Chatterbox/CosyVoice2/
+  Piper producing different HiFT-vocoder output on identical repeated calls): cuDNN's heuristic search
+  picks engine 25 on this box for the last `ConvTranspose1d` upsample stage, an atomic-accumulation
+  reduction whose float summation order varies run to run. `CudnnPlanSearch.BuildExecutionPlan` now reads
+  each candidate's numerical note and skips a nondeterministic one for the next, falling through to the
+  existing direct-kernel fallback if every candidate is nondeterministic. Measured zero cost and full
+  reproducibility on Chatterbox/CosyVoice2/Piper/Kokoro (3060) and on Krea2-Turbo/Z-Image-Turbo (4090,
+  cross-arm byte-identical output on both) — see the PR for both tables. The nondeterminism log line and
+  its dedup key now carry a caller-supplied shape signature (op/Cin/Cout/kernel/stride/dtype for conv,
+  op/batch/heads/seqlen/headdim/dtype for SDPA) instead of just the engine index.
 
 ## alpha.241
 
