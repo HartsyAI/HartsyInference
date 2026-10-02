@@ -32,6 +32,9 @@ stable release will require. Dates are UTC.
   - `KnobFileTests` no longer depends on what ran before it.
   - Two flaky tests were stabilized. `LatencyHistogram`'s allocation check takes the least of three passes. The
     `TextStreamPump` timing tests run warmed up, on their own.
+
+## alpha.242
+
 - **Fixed: the last raw thread-pool fan-outs on host paths now obey the CPU thread cap too.** `FluxRope`'s host
   Q/K rotation, `Nvfp4Linear`'s BF16 dequant, `VideoRgbFrames.ExtractAllFrames`, the CUDA backend's host W8A8 weight
   quantization and GPT-OSS's CPU-backend expert loop used raw `Parallel.For` / `Parallel.ForEach`, ignoring
@@ -188,6 +191,16 @@ stable release will require. Dates are UTC.
   `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
   produced) when timestamps were requested and the pipeline returned any; the plain-text path is
   unchanged byte-for-byte otherwise.
+- **The phone gateway and voice host moved out of this repo**, to a separate app:
+  [HartsyAI/HartsyPhone](https://github.com/HartsyAI/HartsyPhone). `HartsyInference.PhoneGateway`,
+  `HartsyInference.VoiceHost` and `HartsyInference.PhoneLink` (source, tests, the systemd units and install
+  scripts under `deploy/`, and their research docs) are removed from this repo; the code and its git history
+  continue in the new one, copied as of this engine's `main` at `40c84b69` (alpha.238). `HartsyInference.Voice`
+  and `HartsyInference.Tools` are unaffected and stay here (AudioLab and other consumers still use `Voice`
+  directly, with no phone dependency). **`HartsyInference.PhoneLink` stops publishing to NuGet as of this
+  change**; `publish-nuget.yml`'s EXPECTED package list no longer includes it. SIPSorcery is no longer a
+  dependency of this repo. No version bump for this change alone — see whichever numbered section above
+  is first to ship after it for the actual release this landed in.
 - **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
   `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
   not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
@@ -207,6 +220,24 @@ stable release will require. Dates are UTC.
   `finished_step_Bx` accounting shows the sequence forced to the cap at step ~1704 -- and Whisper
   transcribes its output as `[Music]` too. Same inputs, same failure, in the reference implementation;
   nothing in the C# port's conditioning, CFG, delay pattern, or EOS rule is implicated.
+- **cuDNN backend-graph engines marked `CUDNN_NUMERICAL_NOTE_NONDETERMINISTIC` are now skipped by
+  default (`numerics.cudnnDeterministic`, default ON).** Root cause of issue #20 (Chatterbox/CosyVoice2/
+  Piper producing different HiFT-vocoder output on identical repeated calls): cuDNN's heuristic search
+  picks engine 25 on this box for the last `ConvTranspose1d` upsample stage, an atomic-accumulation
+  reduction whose float summation order varies run to run. `CudnnPlanSearch.BuildExecutionPlan` now reads
+  each candidate's numerical note and skips a nondeterministic one for the next, falling through to the
+  existing direct-kernel fallback if every candidate is nondeterministic. Measured zero cost and full
+  reproducibility on Chatterbox/CosyVoice2/Piper/Kokoro (3060) and on Krea2-Turbo/Z-Image-Turbo (4090,
+  cross-arm byte-identical output on both) — see the PR for both tables. The nondeterminism log line and
+  its dedup key now carry a caller-supplied shape signature (op/Cin/Cout/kernel/stride/dtype for conv,
+  op/batch/heads/seqlen/headdim/dtype for SDPA) instead of just the engine index.
+- **Fixed the `krea2` and `zimage` catalog entries' local target paths.** Both always reported "needs 1
+  file(s) not on disk" even though the real checkpoint was present, because `TargetSubdir`/`TargetName`
+  didn't match where the file actually landed: `krea2` was missing a `/Turbo` segment, and `zimage`
+  pointed at the HF repo's own filename under `Stable-Diffusion/ZImage/` instead of the locally-renamed
+  `Stable-Diffusion/z-image-turbo.safetensors`. `hartsy image -m krea2`/`-m zimage` only ever worked via
+  an explicit `--model-path` that bypassed the catalog check. `Repo`/`RepoPath`/`Sha256` were already
+  correct on both (confirmed against the real HF repos); only the local target path was wrong.
 
 ## alpha.241
 

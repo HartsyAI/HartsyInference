@@ -17,9 +17,11 @@ namespace HartsyInference.Voice.Tests;
 /// <summary>The production split with a real language model: the audio engine on the RTX 3060 (engine <c>cuda:1</c> with
 /// every card visible) and Qwen3-4B Q4_K_M, asked for by its catalog id <c>qwen3</c>, on the RTX 4090 through
 /// <see cref="TextRequest.Device"/> = <c>cuda:0</c>, the host's real 7-tool set installed (<see cref="BuildRealToolSet"/>
-/// — the same names/descriptions/schemas <c>VoiceHostTools</c> offers; this project has no <c>InternalsVisibleTo</c>
-/// into <c>HartsyInference.VoiceHost</c>, and the handlers here are safe no-ops rather than VoiceHostTools' own
-/// warm-up-only throw-if-invoked ones, since a real multi-turn conversation can plausibly call any of them). Runs
+/// — the same names/descriptions/schemas <c>HartsyPhone.Host.Tools.VoiceHostTools</c> offers; that type now lives in
+/// the separate <see href="https://github.com/HartsyAI/HartsyPhone">HartsyPhone</see> repo, which this engine has no
+/// reference to at all, so the set is mirrored here by hand. The handlers here are safe no-ops rather than that
+/// registry's own warm-up-only throw-if-invoked ones, since a real multi-turn conversation can plausibly call any
+/// of them). Runs
 /// <see cref="Turns"/> turns of the same caller utterance back to back (conversation history grows each turn, so
 /// later turns template a longer prompt, exactly as <c>MaxHistoryTokens</c>/<c>MaxReplyTokens</c> and the default
 /// sampling the gate specifies) and asserts <c>voice.llm.ttft_ms</c> ≤ 150, <c>voice.llm.first_sentence_ms</c> ≤ 200
@@ -53,8 +55,9 @@ public sealed class VoiceSessionQwen3EndToEndTests
 
     public VoiceSessionQwen3EndToEndTests(ITestOutputHelper output) => _output = output;
 
-    /// <summary>The host's real 7 tools (<c>VoiceHostTools.Names</c>'s own set and schemas), with safe handlers that
-    /// return a canned confirmation instead of touching a gateway or ending the call — unlike
+    /// <summary>The real phone host's 7 tools (<c>HartsyPhone.Host.Tools.VoiceHostTools.Names</c>'s own set and
+    /// schemas, mirrored by hand since that type lives in the separate HartsyPhone repo now), with safe handlers
+    /// that return a canned confirmation instead of touching a gateway or ending the call — unlike
     /// <c>VoiceModelSet.WarmAsync</c>'s throw-if-invoked warm-up definitions, a real multi-turn conversation can
     /// plausibly have the model call any of these for real, and must not crash the run if it does.</summary>
     private static ToolRegistry BuildRealToolSet()

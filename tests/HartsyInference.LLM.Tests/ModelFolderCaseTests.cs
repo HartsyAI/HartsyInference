@@ -99,8 +99,9 @@ public sealed class ModelFolderCaseTests : IDisposable
     {
         if (!CaseSensitive())
             return;
-        // Before case matching, the catalog path (Stable-Diffusion/Krea2/...) missed and the guess (Image/krea2) won.
-        Place("stable-diffusion", "Krea2", Krea2File);
+        // Before case matching, the catalog path (Stable-Diffusion/Krea2/Turbo/...) missed and the guess
+        // (Image/krea2) won.
+        Place("stable-diffusion", "Krea2", "Turbo", Krea2File);
         string guess = Directory.CreateDirectory(Path.Combine(_root, "Image", "krea2")).FullName;
 
         Assert.Equal(guess, ModelResolver.Resolve("krea2", modelPathArg: null, Modality.Image).LocalPath);
@@ -111,7 +112,7 @@ public sealed class ModelFolderCaseTests : IDisposable
     {
         if (!CaseSensitive())
             return;
-        Directory.CreateDirectory(Path.Combine(_root, "stable-diffusion", "Krea2"));
+        Directory.CreateDirectory(Path.Combine(_root, "stable-diffusion", "Krea2", "Turbo"));
         string guess = Directory.CreateDirectory(Path.Combine(_root, "image", "krea2")).FullName;
 
         Assert.Equal(guess, ModelResolver.Resolve("krea2", modelPathArg: null, Modality.Image).LocalPath);

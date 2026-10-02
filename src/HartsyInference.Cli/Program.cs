@@ -19,6 +19,14 @@ public static class Program
     /// <summary>Parses <paramref name="args"/> and dispatches to a command; with no args, shows the banner and usage.</summary>
     public static int Main(string[] args)
     {
+        // Isolates a test/harness run's settings from the shared ~/.config/hartsyinference/settings.json --
+        // that file is also read by any other HartsyInference process on this machine (including a live
+        // SwarmUI engine), so a one-off knob override for a timed A/B must never land there. Must run before
+        // ResolveLogLevel() below, which is the first knob read (KnobFile.EnsureLoaded() happens on first read).
+        string? settingsPath = Environment.GetEnvironmentVariable("HARTSYINFERENCE_SETTINGS_PATH");
+        if (!string.IsNullOrWhiteSpace(settingsPath))
+            KnobFile.ExplicitPath = settingsPath;
+
         // Warning by default keeps the REPL/one-shot output clean; diagnostics.logLevel exposes the engine's
         // per-phase / per-step diagnostics (D2H sync counts, phase timings) without a rebuild. Re-read after the
         // --set profile is pushed below, since that is where a caller raising it for one run supplies it.
