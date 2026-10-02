@@ -223,8 +223,8 @@ public sealed class TextGenerationPipeline
         int headroom = Math.Max(0, request.PrefixCacheHeadroomTokens ?? EngineKnobs.PrefixCacheHeadroomTokens.Value);
         long maxBytes = request.PrefixCacheMaxBytes ?? EngineKnobs.PrefixCacheMaxBytes.Value;
         int target = (int)Math.Min((long)cache.Length + headroom, cache.Capacity);
-        // Checked before shrinking: a sequence over the cap is freed outright, never first copied into a buffer
-        // that would only be thrown away.
+        // Checked before shrinking, through the same estimator as the check after it: a sequence over the cap is
+        // freed outright, never first copied into a buffer that would only be thrown away.
         if (_model!.EstimateSequenceBytes(target) > maxBytes)
         {
             Discard(reuse, cache);
@@ -240,7 +240,7 @@ public sealed class TextGenerationPipeline
         }
         catch
         {
-            // A device fault mid-copy: nothing about this sequence is worth keeping.
+            // A device fault mid-copy surfaces even though every token was already streamed; nothing is retained.
             Discard(reuse, cache);
             throw;
         }
