@@ -16,7 +16,7 @@ namespace HartsyInference.LLM.Tests;
 /// copy at check-in, or freed for exceeding its byte cap. A tiny random-weight CPU model under the session's actual
 /// default sampling (temperature, top-p, fixed seed — see <see cref="SamplingOptions.Seed"/>'s "0 is a fixed
 /// reproducible constant", not random) is deterministic, so this covers the non-greedy path the voice session uses,
-/// not just greedy. <see cref="PrefixCacheReuseCudaTests"/> runs the same conversation on CUDA.</summary>
+/// not just greedy. <see cref="PrefixCacheReuseGpuTests"/> runs the same conversation on CUDA and Vulkan.</summary>
 public sealed class PrefixCacheReuseTests
 {
     private static GenericTransformer Load(TransformerConfig cfg, Dictionary<string, Tensor> weights)

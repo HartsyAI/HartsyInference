@@ -9,22 +9,27 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests;
 
-/// <summary><see cref="PrefixCacheReuseTests"/>' multi-turn conversation on CUDA, where the retained KV lives on the
-/// device and every grow and shrink is a device-to-device copy. Two comparisons per turn: cached-and-resized against
+/// <summary><see cref="PrefixCacheReuseTests"/>' multi-turn conversation on each GPU backend, where the retained KV
+/// lives on the device and every grow and shrink is a device-to-device copy. Two comparisons per turn: cached-and-resized against
 /// cached-in-place (identical prefill chunking, only the buffer capacities differ — the test of the copy itself,
 /// fatal on the turn it fails), and cached against a fresh prefill of the whole prompt (the end-to-end identity a
 /// caller relies on, collected over every turn and asserted at the end so one divergence still reports the rest).</summary>
 [Trait("Category", "GpuIntegration")]
-public sealed class PrefixCacheReuseCudaTests(ITestOutputHelper output)
+public sealed class PrefixCacheReuseGpuTests(ITestOutputHelper output)
 {
     private readonly ITestOutputHelper _out = output;
 
+    /// <summary>Every GPU backend, under greedy and under the voice session's sampling.</summary>
+    public static IEnumerable<object[]> KindsAndSampling =>
+        from object[] row in BackendGate.GpuKinds
+        from object[] mode in new[] { new object[] { true, 0f }, new object[] { false, 0.7f } }
+        select new object[] { row[0], mode[0], mode[1] };
+
     [Theory]
-    [InlineData(true, 0f)]
-    [InlineData(false, 0.7f)]
-    public void GrowingConversation_ResizedOnDevice_MatchesInPlaceReuseAndFreshPrefill(bool greedy, float temperature)
+    [MemberData(nameof(KindsAndSampling))]
+    public void GrowingConversation_ResizedOnDevice_MatchesInPlaceReuseAndFreshPrefill(string kind, bool greedy, float temperature)
     {
-        if (!BackendGate.TryOpen("cuda", _out.WriteLine, out IBackend? gpu))
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
         {
             return;
         }
@@ -65,7 +70,7 @@ public sealed class PrefixCacheReuseCudaTests(ITestOutputHelper output)
             string copies = string.Join(",", viaCopies.TokenIds);
             string kept = string.Join(",", viaInPlace.TokenIds);
             Assert.True(kept == copies,
-                $"turn {turn}: resizing the retained cache changed the output — [{copies}] vs in place [{kept}].");
+                $"{kind} turn {turn}: resizing the retained cache changed the output — [{copies}] vs in place [{kept}].");
             Assert.Equal(viaInPlace.ReusedPromptTokens, viaCopies.ReusedPromptTokens);
             ISequenceState resizedState = Assert.IsAssignableFrom<ISequenceState>(resized.Cache);
             Assert.InRange(resizedState.Capacity - resizedState.Length, 0, 3);
@@ -85,7 +90,7 @@ public sealed class PrefixCacheReuseCudaTests(ITestOutputHelper output)
         }
 
         Assert.True(freshMismatches.Count == 0,
-            $"cached output differs from a fresh prefill on CUDA: {string.Join("; ", freshMismatches)}");
+            $"cached output differs from a fresh prefill on {kind}: {string.Join("; ", freshMismatches)}");
         foreach (Tensor t in w.Values) t.Dispose();
     }
 }

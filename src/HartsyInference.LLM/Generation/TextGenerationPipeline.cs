@@ -296,6 +296,7 @@ public sealed class TextGenerationPipeline
         {
             int commonLen = Math.Min(CommonPrefixLength(reuse.TokenIds, promptIds), old.Length);
             int reusedLen = Math.Max(0, Math.Min(commonLen, promptIds.Length - 1));
+            // Before the grow below, too: a resize copies the committed length, so only the reused prefix moves.
             old.Truncate(reusedLen);
             if (old.Capacity >= maxSeq)
             {

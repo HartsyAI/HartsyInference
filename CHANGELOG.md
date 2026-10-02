@@ -15,7 +15,9 @@ stable release will require. Dates are UTC.
   default 256) instead of keeping the whole allocation, and a sequence whose kept size would exceed
   `vram.prefixCacheMaxBytes` is freed after its request rather than retained; the store refuses one too, so the
   cap is hard. `vram.prefixCacheMaxBytes` now defaults to 1.5 GiB (was 512 MiB, which the newest entry could
-  exceed). `IBackend.ScatterSeqHeadMajor` gains a row-count overload and copies any byte-addressable dtype on CPU,
+  exceed): now that it also bounds each entry, it has to hold one voice call at its history ceiling on Qwen3-4B,
+  about 4,000 tokens at 288 KiB of F32 KV per token (~1.1 GiB); 512 MiB would drop that call's cache mid-call
+  past ~1,800 tokens. `IBackend.ScatterSeqHeadMajor` gains a row-count overload and copies any byte-addressable dtype on CPU,
   CUDA and Vulkan; `FixedKvCache.CopyWithCapacity` and `IGenerationModel.ResizeSequenceState` expose the resize.
   `PrefixCacheCapacityHint` now only sizes a sequence's first allocation, so the voice session no longer passes one.
 - **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
