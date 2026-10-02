@@ -8,6 +8,21 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.244
+
+- **AuK and AuK-Flash (Tencent) speech model, structural port.** `auk:flash` (4 fixed steps, no guidance) and
+  `auk:base` (32 steps, CFG 2.0, sway) run zero-shot voice cloning and instruction-described voices through
+  `hartsy speak -m auk:flash` (`--reference`, `--instruction`, `--duration`) and the speech API. The pipeline is
+  task-agnostic: an instruction plus a source clip drives the same DiT for editing, enhancement and separation, but
+  only TTS is exposed by the engine in this release. Conditioning comes from the Qwen2.5-Omni-3B thinker (text LM
+  plus audio tower; only shards 1 and 2 are downloaded) fused over all 36 hidden states; audio is decoded by the
+  24 kHz BigVGAN-flow VAE. Not numerically verified against the reference yet (see `MODEL_STATUS_AUDIO.md`).
+  The Qwen2.5-Omni encoder is under the Qwen Research License; the AuK weights are MIT.
+- `GenericTransformer.ForwardEmbeds` and `Qwen2Model.ForwardEmbeds` take an optional per-layer tap; behavior is
+  unchanged when it is null.
+- `SpeechRequest` gains optional `Instruction` and `DurationSeconds`.
+- bf16 repack recipes `auk-base`, `auk-flash` and `auk-vae` for `CheckpointRepacker`; nothing is uploaded.
+
 ## alpha.243
 
 - **Fixed: a CUDA op runs in its own backend's context even when another copy of the engine left a different one
@@ -252,21 +267,6 @@ stable release will require. Dates are UTC.
   `Stable-Diffusion/z-image-turbo.safetensors`. `hartsy image -m krea2`/`-m zimage` only ever worked via
   an explicit `--model-path` that bypassed the catalog check. `Repo`/`RepoPath`/`Sha256` were already
   correct on both (confirmed against the real HF repos); only the local target path was wrong.
-
-## alpha.242
-
-- **AuK and AuK-Flash (Tencent) speech model, structural port.** `auk:flash` (4 fixed steps, no guidance) and
-  `auk:base` (32 steps, CFG 2.0, sway) run zero-shot voice cloning and instruction-described voices through
-  `hartsy speak -m auk:flash` (`--reference`, `--instruction`, `--duration`) and the speech API. The pipeline is
-  task-agnostic: an instruction plus a source clip drives the same DiT for editing, enhancement and separation, but
-  only TTS is exposed by the engine in this release. Conditioning comes from the Qwen2.5-Omni-3B thinker (text LM
-  plus audio tower; only shards 1 and 2 are downloaded) fused over all 36 hidden states; audio is decoded by the
-  24 kHz BigVGAN-flow VAE. Not numerically verified against the reference yet (see `MODEL_STATUS_AUDIO.md`).
-  The Qwen2.5-Omni encoder is under the Qwen Research License; the AuK weights are MIT.
-- `GenericTransformer.ForwardEmbeds` and `Qwen2Model.ForwardEmbeds` take an optional per-layer tap; behavior is
-  unchanged when it is null.
-- `SpeechRequest` gains optional `Instruction` and `DurationSeconds`.
-- bf16 repack recipes `auk-base`, `auk-flash` and `auk-vae` for `CheckpointRepacker`; nothing is uploaded.
 
 ## alpha.241
 
