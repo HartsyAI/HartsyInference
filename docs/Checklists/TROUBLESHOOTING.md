@@ -413,6 +413,11 @@ no bug, any more than one bad seed was proof there was one.
   work. Recurring root cause across GEGLU loops, LayerScale, SwiGLU gates, per-step CFG/Euler. Fix: port
   the glue op to device so activations stay resident. Health assert: ~0 mid-decode D2H syncs; any per-token
   sync is a residency bug (MoE routing readback is a current offender at 2193–3225 syncs/rep).
+- **A host-side cancellation check between async GPU ops stops issuing, not the device.** The host queues a
+  long forward far ahead of the GPU: a 1.02 s RTX 3060 prefill (Qwen3-4B Q4_K_M, 695 tokens) had about 88 % of
+  its 36 layers queued 110 ms in, so a per-layer `CancellationToken` check made `Generate` throw within 7 ms
+  while the card ran on for another ~790 ms. Time "card free" (a `Sync()` right after the throw), not the
+  throw; where early release matters, bound the run-ahead with the `IBackend` fences (`DeviceRunAhead`).
 - **A step preview must not touch the step-graph's fixed buffer, and must not host-read the loop's packed
   tokens.** `numerics.ditGraph` is default-off for most models, so that buffer usually does not exist — a
   `SnapshotGraphLatent` preview hook threw `NullReferenceException` on every Z-Image generation from alpha.42

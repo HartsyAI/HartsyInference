@@ -40,7 +40,7 @@ public sealed class SpeechService : ISpeechService
                 ITtsRunner runner = await _engine.AudioRuntime.Tts
                     .GetOrLoadAsync(target.Key, token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token), ct)
                     .ConfigureAwait(false);
-                TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath);
+                TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, ct);
                 long started = Environment.TickCount64;
                 float[] samples = runner.Synthesize(target.Backend, job);
                 if (samples is null || samples.Length == 0)
@@ -165,7 +165,7 @@ public sealed class SpeechService : ISpeechService
         (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
         try
         {
-            TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath);
+            TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, cancel);
             await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(target.Backend, Job(target),
                 ct => StreamWork(target, job, ct), cancel, target.StageBackends).ConfigureAwait(false))
             {
@@ -225,7 +225,8 @@ public sealed class SpeechService : ISpeechService
     }
 
     /// <summary>Builds the per-model job for <paramref name="text"/> from the request's knobs plus the already-materialized reference. Shared by the batch and streaming synthesis paths and the synthesizer lease so their knob-mapping never drifts apart.</summary>
-    internal static TtsJob BuildJob(string text, SpeechRequest request, float[]? referenceMono, string? referenceWavPath) => new TtsJob
+    internal static TtsJob BuildJob(string text, SpeechRequest request, float[]? referenceMono, string? referenceWavPath,
+        CancellationToken cancel) => new TtsJob
     {
         Text = text,
         RefText = request.RefText,
@@ -250,6 +251,7 @@ public sealed class SpeechService : ISpeechService
         SpeakingRate = request.SpeakingRate,
         PitchStd = request.PitchStd,
         Seed = request.Seed,
+        Cancel = cancel,
     };
 
     /// <summary>Builds the load-time context: single-device (byte-identical to pre-placement behavior) unless the engine placement has ≥2 <c>ShardDevices</c>, in which case CosyVoice's Qwen2 LM gets the resolved shard backends and layer-splits across them; every other TTS family ignores the shard stages. Mirrors <c>MusicService.BuildLoadContext</c>.</summary>

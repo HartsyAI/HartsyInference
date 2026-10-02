@@ -20,6 +20,31 @@ stable release will require. Dates are UTC.
   the floor; same-model repeats still never evict, and pinned runners are still never evicted. If a run still throws
   `OutOfVramException`, the runtime unloads every other unpinned audio model, releases device memory, logs what it
   dropped, and retries once; a stream retries only if it has not yielded anything yet.
+- **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
+  pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
+  compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
+  backend has nothing to wait for. While the request's token can be cancelled, `GenericTransformer.ForwardEmbeds`
+  waits, before issuing layer *k*, on the fence recorded after layer *k − 2* (`DeviceRunAhead`). The device always
+  has the next layer queued behind the running one, and a stop leaves at most two layers to drain instead of
+  everything the host had queued. Math, kernels and stream order are unchanged; a forward with a token that cannot be
+  cancelled takes no fences at all.
+- **Fixed: a large `NativeBuffer`'s zero-fill no longer bypasses the process CPU thread cap.** Buffers of 8 MB and
+  up were zeroed with a raw `Parallel.For` sized by `Environment.ProcessorCount` on the shared thread pool, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`, so one big allocation on any thread could take every core
+  from the voice front end's real-time audio thread. The fill now goes through `CpuParallel.For` in fixed 2 MB
+  chunks whose count depends only on the size: inside an `InlineScope` it runs on the calling thread, and the cap
+  bounds how many threads clear at once. Smaller buffers still clear inline, and the memory is zeroed exactly as
+  before.
+- **Kokoro stops a cancelled synthesis at its next stage instead of finishing the sentence.**
+  `KokoroPipeline.Synthesize`/`SynthesizeFromStyle` and `KokoroIStftNetDecoder.Forward` take a `CancellationToken`
+  and check it at twelve stage boundaries — before any device work, after PLBERT, the text encoder, the duration
+  predictor, the length regulator and F0/N, after the decoder's encode and decode blocks, after the harmonic source,
+  after each upsample stage and before the iSTFT head — disposing the tensors that stage still holds before throwing.
+  The token reaches Kokoro on every path: sentence streaming, `SpeechService.SynthesizeAsync` (through `TtsJob`), and a
+  new `ISynthesizerLease.Synthesize(text, options, cancel)` overload, which the voice session's GPU thread now calls
+  with the turn's token, so a barge-in stops issuing the sentence's work at the next boundary (on CUDA, kernels already
+  queued still finish). The overload is a default interface method that checks only before the call, so other
+  implementers keep compiling. Output is byte-identical when not cancelled.
 - **The prompt prefill now observes the request's cancellation token between transformer layers.**
   `TextGenerationPipeline` hands the token to the first prefill through a new
   `IGenerationModel.Prefill(chunk, state, cancel)` overload (a default interface method that checks only before the
@@ -90,6 +115,13 @@ stable release will require. Dates are UTC.
   this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
   an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
   the list held from an earlier iteration in place, and the dispatch loop below re-fired it a second time.
+- **Orpheus TTS no longer re-prompts to download its SNAC codec on every generation.** `ModelCatalog`'s
+  SNAC asset (`hubertsiuzdak/snac_24khz`) listed `RepoPath = "model.safetensors"`; the real downloaded
+  file is `pytorch_model.bin`, so `ModelAcquisition`'s presence check always reported it missing. The CLI
+  REPL calls `EnsurePresent` once per generation (not once per load), so every Orpheus prompt hit the
+  false-missing path and its interactive `Download these now?` prompt. Fixed the `RepoPath`, and added a
+  per-process confirmed-present cache so the audio-asset check only runs until it first succeeds for a
+  given catalog id.
 
 ## alpha.241
 

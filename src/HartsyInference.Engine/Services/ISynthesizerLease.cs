@@ -35,4 +35,14 @@ public interface ISynthesizerLease : IDisposable
     /// <see cref="ISpeechService.SynthesizeAsync"/> reads them; its <see cref="SpeechRequest.Text"/> is not read. For a
     /// model whose voice selects its weights (Piper), a voice other than the one the lease opened is refused.</summary>
     float[] Synthesize(string text, SpeechRequest options);
+
+    /// <summary>As <see cref="Synthesize(string, SpeechRequest)"/>, stopping with
+    /// <see cref="OperationCanceledException"/> once <paramref name="cancel"/> is signalled: a model that checks it
+    /// between its stages (Kokoro) stops at the next one, any other finishes the call it started. The default
+    /// implementation checks it only before the call.</summary>
+    float[] Synthesize(string text, SpeechRequest options, CancellationToken cancel)
+    {
+        cancel.ThrowIfCancellationRequested();
+        return Synthesize(text, options);
+    }
 }
