@@ -8,6 +8,18 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: host weight conversions, Mimi's RVQ encode and UnivNet's LVC gate no longer bypass the process CPU
+  thread cap.** Large `Tensor.CastTo` and `DequantFp8E4M3ScaledToF16` casts, the fp8 quantizer's absmax, scale and
+  stochastic-round passes, the NVFP4, MXFP4, FP8-block, affine, EXL3 and INT8-ConvRot host codecs,
+  `LoraBaker.MatMulFma`, the MiniMax-H3 rebasers, Mimi's split-RVQ encode and Resemble-Enhance's UnivNet each fanned
+  out with a raw `Parallel.For` on the shared thread pool, ignoring `numerics.cpuThreads` and
+  `CpuParallel.InlineScope`. Row and tile loops now go through `CpuParallel.For`, with per-row scratch rented from
+  `ArrayPool`, and the range passes through a new `CpuParallel.ForRanges`, whose ranges depend only on the length, so
+  every output is byte-identical at any cap. On a host that lowers the cap (the voice host's unit runs with
+  `engine.cpuThreadCap: 14`) these now use at most that many threads, so checkpoint conversion and LoRA baking there,
+  and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
+  cores than the cap. GPT-OSS's CPU-backend expert loop still wraps its per-expert dequant in a raw
+  `Parallel.ForEach`; a follow-up converts it.
 - **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
   pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
   compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU

@@ -17,8 +17,6 @@ public sealed unsafe class NativeBuffer : IDisposable
 
     private static readonly Action<nint, nuint> ClearRange = static (start, length) => NativeMemory.Clear((void*)start, length);
 
-    private static readonly Action<int, ClearPlan> ClearChunk = static (chunk, plan) => plan.Run(chunk);
-
     private nint _pointer;
 
     /// <summary>Allocates an aligned block of unmanaged memory, zeroed.</summary>
@@ -49,8 +47,8 @@ public sealed unsafe class NativeBuffer : IDisposable
             clearRange((nint)pointer, byteLength);
             return;
         }
-        ClearPlan plan = new((nint)pointer, byteLength, clearRange);
-        CpuParallel.For(plan.Chunks, (long)byteLength, plan, ClearChunk);
+        CpuParallel.ForRanges((long)byteLength, (long)ParallelClearChunkBytes, 1, (Base: (nint)pointer, Clear: clearRange),
+            static (start, length, fill) => fill.Clear(fill.Base + (nint)start, (nuint)length));
     }
 
     /// <summary>Total size in bytes of the allocated buffer.</summary>
@@ -111,19 +109,6 @@ public sealed unsafe class NativeBuffer : IDisposable
         {
             NativeMemory.AlignedFree((void*)ptr);
             GC.RemoveMemoryPressure((long)ByteLength);
-        }
-    }
-
-    /// <summary>A zero-fill cut into <see cref="ParallelClearChunkBytes"/> chunks, the last one shorter; chunk
-    /// <c>i</c> starts at <c>i * ParallelClearChunkBytes</c>.</summary>
-    private readonly record struct ClearPlan(nint Start, nuint Length, Action<nint, nuint> ClearRange)
-    {
-        public int Chunks => checked((int)((Length + ParallelClearChunkBytes - 1) / ParallelClearChunkBytes));
-
-        public void Run(int chunk)
-        {
-            nuint offset = (nuint)chunk * ParallelClearChunkBytes;
-            ClearRange(Start + (nint)offset, Math.Min(ParallelClearChunkBytes, Length - offset));
         }
     }
 }

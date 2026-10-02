@@ -1,10 +1,10 @@
 using System.Collections.Concurrent;
-using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Memory;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tests.MemoryManagement;
 using Xunit;
 using Xunit.Abstractions;
+using static HartsyInference.Tests.Common.CpuSchedules;
 
 namespace HartsyInference.Core.Tests;
 
@@ -149,58 +149,10 @@ public sealed unsafe class NativeBufferZeroFillTests
         }
     }
 
-    /// <summary>Runs each action on its own background thread and fails, instead of hanging, if any is still running
-    /// after the bound; rethrows the first failure.</summary>
-    private static void RunBounded(params Action[] actions)
-    {
-        Exception?[] failures = new Exception?[actions.Length];
-        Thread[] threads = new Thread[actions.Length];
-        for (int i = 0; i < actions.Length; i++)
-        {
-            int index = i;
-            threads[i] = new Thread(() =>
-            {
-                try
-                {
-                    actions[index]();
-                }
-                catch (Exception ex)
-                {
-                    failures[index] = ex;
-                }
-            }) { IsBackground = true };
-            threads[i].Start();
-        }
-        foreach (Thread thread in threads)
-        {
-            Assert.True(thread.Join(TimeSpan.FromSeconds(60)), "an allocation inside a parallel loop deadlocked");
-        }
-        foreach (Exception? failure in failures)
-        {
-            if (failure is not null) throw new InvalidOperationException("an allocating loop failed", failure);
-        }
-    }
-
     private static void AssertZeroed(nuint bytes)
     {
         using NativeBuffer buffer = new(bytes);
         Assert.Equal(-1, buffer.AsReadOnlySpan<byte>().IndexOfAnyExcept((byte)0));
-    }
-
-    private static void WithCpuThreads(int cap, Action run)
-    {
-        bool hadOverride = KnobStore.HasOverride(EngineKnobs.CpuThreads);
-        int previous = EngineKnobs.CpuThreads.Value;
-        try
-        {
-            KnobStore.Set(EngineKnobs.CpuThreads, cap);
-            run();
-        }
-        finally
-        {
-            if (hadOverride) KnobStore.Set(EngineKnobs.CpuThreads, previous);
-            else KnobStore.Clear(EngineKnobs.CpuThreads);
-        }
     }
 
     /// <summary>A buffer filled with a non-zero pattern, and a clear that records each range it is handed, the thread

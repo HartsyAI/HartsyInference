@@ -1,4 +1,5 @@
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.ModelAssets.Lora;
 
@@ -106,7 +107,7 @@ public static unsafe class MiniMaxH3PddPrunedRebaser
         float* biasPointer = (float*)biasDiff.DataPointer;
         try
         {
-            Parallel.For(0, output, outputRow =>
+            CpuParallel.For(output, (long)output * (curve + 1) * rank * 2, outputRow =>
             {
                 double bias = 0.0;
                 for (int r = 0; r < rank; r++)
