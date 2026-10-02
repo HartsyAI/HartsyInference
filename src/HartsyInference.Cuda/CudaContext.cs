@@ -147,7 +147,7 @@ public sealed class CudaContext : IDisposable
         _threadCurrentGeneration = _generation;
     }
 
-    /// <summary>Forces a re-bind of this context on the calling thread, bypassing the TLS cache. Use when external code may have changed the current context out from under us (e.g. another library that calls <c>cuCtxSetCurrent</c> on the same thread).</summary>
+    /// <summary>Binds this context on the calling thread unconditionally, with one <c>cuCtxSetCurrent</c> whatever the TLS cache or the driver says. <see cref="EnsureCurrent"/> already notices a binding that external code changed (another engine copy or library calling <c>cuCtxSetCurrent</c> on the same thread), so prefer it; this is for a caller that wants the write regardless.</summary>
     public void MakeCurrent()
     {
         if (_context == 0)
