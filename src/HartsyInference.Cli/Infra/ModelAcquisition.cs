@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using HartsyInference.Audio.Cache;
 using HartsyInference.Engine.Audio;
 using Spectre.Console;
@@ -26,6 +27,17 @@ public static class ModelAcquisition
         AudioWeightsCatalog.AceStepId, AudioWeightsCatalog.YueId,
     };
 
+    /// <summary>Catalog ids whose audio-cache assets were already confirmed present (or downloaded) this process —
+    /// a REPL session calls <see cref="EnsurePresent"/> once per generation, not once per model load, so without
+    /// this a correctly-resolving model still re-stats every asset on every single prompt; a mis-resolving one
+    /// (see the Orpheus/SNAC fix, <c>ModelCatalog.cs</c>) re-prompted "Download these now?" every single call.</summary>
+    /// <remarks>A <see cref="ConcurrentDictionary{TKey,TValue}"/> (value unused) rather than a plain
+    /// <c>HashSet</c>: the CLI can run generations concurrently against a shared process, and two threads racing
+    /// <see cref="EnsurePresent"/> for the same id would otherwise both read <c>false</c> and both enter
+    /// <see cref="EnsureAudioAssetsPresent"/>. That race is benign (idempotent re-check, no corruption) — this
+    /// just removes the data-race on the collection itself.</remarks>
+    private static readonly ConcurrentDictionary<string, byte> _audioAssetsConfirmed = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>Downloads <paramref name="spec"/>'s catalog assets if missing (with confirmation). No-op for models with no preset assets.</summary>
     /// <returns>The spec pointed at the now-present primary file.</returns>
     public static ModelSpec EnsurePresent(ModelSpec spec)
@@ -35,7 +47,8 @@ public static class ModelAcquisition
 
         if (UsesAudioCache(cat, spec.Modality))
         {
-            EnsureAudioAssetsPresent(cat, spec.Modality);
+            if (!_audioAssetsConfirmed.ContainsKey(cat.Id) && EnsureAudioAssetsPresent(cat, spec.Modality))
+                _audioAssetsConfirmed.TryAdd(cat.Id, 0);
             return spec;
         }
 

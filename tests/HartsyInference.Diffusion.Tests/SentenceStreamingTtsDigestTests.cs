@@ -17,8 +17,8 @@ namespace HartsyInference.Diffusion.Tests;
 /// produced. That loop was <see cref="SentenceSplitter.Split"/> followed by one <c>SynthesizeText(sentence, seed)</c>
 /// per sentence, which is exactly the runner's non-streaming <c>Synthesize</c> called per sentence, so that is the
 /// reference computed here. Kokoro: the whole-text <c>Synthesize</c> is unchanged and must match a direct pipeline
-/// call; the new sentence stream is Whisper-verified for intelligibility. Every test skips through
-/// <see cref="RealWeightGate"/> when its files are not on the box.</para></summary>
+/// call; the new sentence stream is Whisper-verified for intelligibility; a job whose token is cancelled stops in the
+/// pipeline. Every test skips through <see cref="RealWeightGate"/> when its files are not on the box.</para></summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class SentenceStreamingTtsDigestTests
@@ -102,6 +102,18 @@ public sealed class SentenceStreamingTtsDigestTests
 
         _output.WriteLine($"Kokoro whole-text: {viaRunner.Length} samples, digest {PcmDigest.Of(viaRunner)}");
         Assert.Equal(PcmDigest.Of(viaPipeline), PcmDigest.Of(viaRunner));
+    }
+
+    [Fact]
+    public async Task Kokoro_ACancelledJob_StopsInThePipeline()
+    {
+        if (!KokoroPresent(out _)) return;
+
+        using CpuBackend backend = new();
+        using ITtsRunner runner = await TtsCatalog.Kokoro.LoadAsync(new TtsLoadContext { Backend = backend }, "", CancellationToken.None);
+
+        Assert.Throws<OperationCanceledException>(() =>
+            runner.Synthesize(backend, new TtsJob { Text = TwoSentences, Cancel = new CancellationToken(canceled: true) }));
     }
 
     [Fact]

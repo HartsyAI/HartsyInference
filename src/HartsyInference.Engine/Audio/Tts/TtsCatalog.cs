@@ -149,8 +149,9 @@ internal static class TtsCatalog
             float[] Synth(IBackend backend, TtsJob job)
             {
                 string voice = KokoroVoice(job);
-                EnsureKokoroVoiceAsync(voice, CancellationToken.None).GetAwaiter().GetResult();
-                return pipeline.Synthesize(backend, g2p.ToIpa(job.Text), voiceName: voice, speed: KokoroSpeed(job));
+                EnsureKokoroVoiceAsync(voice, job.Cancel).GetAwaiter().GetResult();
+                return pipeline.Synthesize(backend, g2p.ToIpa(job.Text), voiceName: voice, speed: KokoroSpeed(job),
+                    cancel: job.Cancel);
             }
             // Through SpeechService.SynthesizeStreamAsync the runtime holds _genLock for this whole stream; the
             // old text-split loop released it between chunks.
@@ -160,7 +161,8 @@ internal static class TtsCatalog
                 float speed = KokoroSpeed(job);
                 await EnsureKokoroVoiceAsync(voice, cancel).ConfigureAwait(false);
                 await foreach (AudioChunk chunk in SentenceChunkedSynthesis.StreamBySentence(job.Text, 24_000,
-                    (sentence, _) => pipeline.Synthesize(backend, g2p.ToIpa(sentence), voiceName: voice, speed: speed),
+                    (sentence, token) => pipeline.Synthesize(backend, g2p.ToIpa(sentence), voiceName: voice, speed: speed,
+                        cancel: token),
                     static (work, token) => Task.Run(work, token),
                     SentenceSplitter.MinSentenceLength, KokoroMaxSentenceChars, cancel).ConfigureAwait(false))
                 {

@@ -16,6 +16,23 @@ stable release will require. Dates are UTC.
   has the next layer queued behind the running one, and a stop leaves at most two layers to drain instead of
   everything the host had queued. Math, kernels and stream order are unchanged; a forward with a token that cannot be
   cancelled takes no fences at all.
+- **Fixed: a large `NativeBuffer`'s zero-fill no longer bypasses the process CPU thread cap.** Buffers of 8 MB and
+  up were zeroed with a raw `Parallel.For` sized by `Environment.ProcessorCount` on the shared thread pool, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`, so one big allocation on any thread could take every core
+  from the voice front end's real-time audio thread. The fill now goes through `CpuParallel.For` in fixed 2 MB
+  chunks whose count depends only on the size: inside an `InlineScope` it runs on the calling thread, and the cap
+  bounds how many threads clear at once. Smaller buffers still clear inline, and the memory is zeroed exactly as
+  before.
+- **Kokoro stops a cancelled synthesis at its next stage instead of finishing the sentence.**
+  `KokoroPipeline.Synthesize`/`SynthesizeFromStyle` and `KokoroIStftNetDecoder.Forward` take a `CancellationToken`
+  and check it at twelve stage boundaries — before any device work, after PLBERT, the text encoder, the duration
+  predictor, the length regulator and F0/N, after the decoder's encode and decode blocks, after the harmonic source,
+  after each upsample stage and before the iSTFT head — disposing the tensors that stage still holds before throwing.
+  The token reaches Kokoro on every path: sentence streaming, `SpeechService.SynthesizeAsync` (through `TtsJob`), and a
+  new `ISynthesizerLease.Synthesize(text, options, cancel)` overload, which the voice session's GPU thread now calls
+  with the turn's token, so a barge-in stops issuing the sentence's work at the next boundary (on CUDA, kernels already
+  queued still finish). The overload is a default interface method that checks only before the call, so other
+  implementers keep compiling. Output is byte-identical when not cancelled.
 - **The prompt prefill now observes the request's cancellation token between transformer layers.**
   `TextGenerationPipeline` hands the token to the first prefill through a new
   `IGenerationModel.Prefill(chunk, state, cancel)` overload (a default interface method that checks only before the
@@ -41,6 +58,58 @@ stable release will require. Dates are UTC.
   neither family's real wire format matches it (GLM uses XML arguments, DeepSeek never renders `tools` for
   new calls). Both still reach the documented unknown-family Hermes fallback, so `Detect`'s observable
   behavior for a bare name hint is unchanged.
+- **`WakeService.Claim`/`Release`**: an opt-in, per-device host handoff for the wake listener. A host can claim
+  one connected satellite's turns (typically from a `Detected` handler) and receive its decoded inbound audio
+  (16 kHz mono float, post-denoise when noise suppression is on, normalized from the wake path's internal
+  int16 scale) through `WakeDeviceClaim.OnFrame` instead of the service's own wake scoring, end-of-speech
+  capture and transcription, which are suspended for that device only. The connection, ping/pong keepalive and
+  outbound audio path (`BeginAudio`/`SendAudioAsync`) are unaffected. `Release` returns the device to normal
+  listening; a disconnect while claimed auto-releases and calls `WakeDeviceClaim.OnDisconnected` once. Zero
+  change for a device nothing has claimed — `WakeSession.Claim` defaults to null and the existing
+  scoring/VAD branch is reached exactly as before; proven against the full existing wake suite
+  (`WakeTransportTests` and the rest) with real backbone/head/denoiser weights, not just by inspection. This is
+  the engine-side requirement for `SwarmUI-AudioLab`'s satellite voice-agent Session mode, which could not
+  otherwise get continuous raw audio for a device past its own wake detection.
+- **Fixed two races in `WakeService.Claim`/`Release`'s disconnect path, found by review before this shipped.**
+  A device's reconnect (`WakeSession.OnReconnected`, from its new connection) could land while its old
+  connection was still unwinding; the old connection's `finally` then unconditionally cleared the new
+  connection's `Codec`, reset `State` to `Handshake` (silently pausing the worker for that device, since
+  `WakeWorker.Run` skips a session in `Handshake`), cleared the new connection's claim, and fired a spurious
+  `OnDisconnected` for a device that was, in fact, still connected. `WakeSession.Codec` is now a field (like
+  `Claim` already was) so the disconnect path can clear it with a CAS keyed to the specific codec that
+  connection installed; a superseded connection's teardown now does nothing instead. A throwing
+  `OnDisconnected` is also now caught and logged (`Logs.Error`) rather than propagating out of the `finally`,
+  where it could otherwise mask whatever exception actually ended the connection. Same treatment for a
+  throwing `OnFrame` in `WakeWorker`, caught separately from the pipeline/denoiser/VAD reset path so a
+  persistently-throwing host callback doesn't flood the log with pointless resets of state a claimed device
+  never reads. `WakeService.Claim` also now withdraws (and returns null for) a claim whose connection died in
+  the gap between its own liveness check and installing the claim, so that race can no longer leave a host
+  holding a claim that will never call `OnDisconnected`. A reconnect ends the device's previous claim too —
+  cleared AND notified before `OnReconnected` publishes the new codec, not after, so neither step can land on
+  a claim a host thread installed against that new codec, and so that notification is one of the writes the
+  new codec's own publish carries to anyone who observes it (see the next entry): letting it silently carry
+  over to the new connection's audio with no signal the old one is gone was the bug; running the notification
+  after the publish, rather than before, turned out to be a second, narrower version of the same bug.
+- **`WakeSession.Codec` is `volatile`.** `WakeListener`'s disconnect CAS and reconnect handling, and
+  `WakeService`'s outbound audio path, all read or write it across threads without a lock. A release (the
+  volatile write in `OnReconnected`, or the CAS in the disconnect path) only carries a thread's earlier writes
+  forward to whoever observes it — never later ones — so anything a reconnect needs a reader to see has to
+  happen before the codec publish, not after. A new regression test polling this field with a plain read, then
+  immediately checking a side effect of the reconnect, caught both the missing `volatile` and, after adding
+  it, that the notification above was still ordered on the wrong side of the publish: flaky under full
+  test-suite parallel load either way, just far less often with only the field fixed. 16 consecutive clean
+  full-suite runs once both were corrected, after failures inside the first 3-8 runs at each earlier stage.
+- **`WakeWorker.Run` clears its shared `detections` list before deciding whether there is anything to score
+  this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
+  an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
+  the list held from an earlier iteration in place, and the dispatch loop below re-fired it a second time.
+- **Orpheus TTS no longer re-prompts to download its SNAC codec on every generation.** `ModelCatalog`'s
+  SNAC asset (`hubertsiuzdak/snac_24khz`) listed `RepoPath = "model.safetensors"`; the real downloaded
+  file is `pytorch_model.bin`, so `ModelAcquisition`'s presence check always reported it missing. The CLI
+  REPL calls `EnsurePresent` once per generation (not once per load), so every Orpheus prompt hit the
+  false-missing path and its interactive `Download these now?` prompt. Fixed the `RepoPath`, and added a
+  per-process confirmed-present cache so the audio-asset check only runs until it first succeeds for a
+  given catalog id.
 
 ## alpha.241
 

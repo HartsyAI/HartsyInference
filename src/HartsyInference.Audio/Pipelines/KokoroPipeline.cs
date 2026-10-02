@@ -78,9 +78,23 @@ public sealed class KokoroPipeline : IDisposable
     private readonly Dictionary<string, KokoroVoicePack> _voicePackCache = new(StringComparer.Ordinal);
     private readonly string _repoDir;
     private IBackend? _residentBackend;
+    private Action<string>? _testStageObserver;
     private int _disposed;
 
     public KokoroConfig Config => _cfg;
+
+    /// <summary>Called with each stage's name as a synthesis passes the boundary after it (<c>"start"</c> before the
+    /// first), ahead of that boundary's cancellation check, so a test can cancel a call at a known stage. Covers the
+    /// decoder's own boundaries too.</summary>
+    internal Action<string>? TestStageObserver
+    {
+        get => _testStageObserver;
+        set
+        {
+            _testStageObserver = value;
+            _decoder.TestStageObserver = value;
+        }
+    }
 
     /// <summary>The token count <see cref="Synthesize"/> sees for <paramref name="phonemes"/> (diagnostics: the text
     /// encoder and the voice-pack row depend on it).</summary>
@@ -199,8 +213,11 @@ public sealed class KokoroPipeline : IDisposable
     /// <summary>Synthesizes audio from an IPA phoneme string. <paramref name="voiceName"/>
     /// must match a file under <c>voices/{voiceName}.bin</c> in the Kokoro repo cache
     /// (e.g. <c>"af_heart"</c>). <paramref name="speed"/> scales the predicted durations
-    /// (1.0 = natural; 1.5 = faster, 0.7 = slower).</summary>
-    public float[] Synthesize(IBackend backend, string phonemes, string voiceName = "af_heart", float speed = 1f)
+    /// (1.0 = natural; 1.5 = faster, 0.7 = slower). <paramref name="cancel"/> is checked at every stage boundary,
+    /// from before PLBERT to just before the iSTFT head; a cancelled call throws
+    /// <see cref="OperationCanceledException"/> at the next one.</summary>
+    public float[] Synthesize(IBackend backend, string phonemes, string voiceName = "af_heart", float speed = 1f,
+        CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         KokoroVoicePack pack = GetOrLoadVoicePack(voiceName);
@@ -213,7 +230,7 @@ public sealed class KokoroPipeline : IDisposable
         (Tensor sDec, Tensor sPred) = KokoroVoicePack.SplitStyle(style);
         try
         {
-            return SynthesizeCore(backend, tokenIds, sDec, sPred, speed);
+            return SynthesizeCore(backend, tokenIds, sDec, sPred, speed, cancel);
         }
         finally
         {
@@ -226,8 +243,9 @@ public sealed class KokoroPipeline : IDisposable
     /// StyleTTS 2, whose decoder/predictor style halves come from a reference-audio <c>StyleEncoder</c>
     /// or the diffusion style sampler rather than a Kokoro voice pack. The vector is split
     /// <c>[:128] → decoder (acoustic)</c>, <c>[128:] → predictor (prosodic)</c>, matching the voice-pack
-    /// convention.</summary>
-    public float[] SynthesizeFromStyle(IBackend backend, string phonemes, Tensor refStyle256, float speed = 1f)
+    /// convention. <paramref name="cancel"/> is checked as <see cref="Synthesize"/> checks it.</summary>
+    public float[] SynthesizeFromStyle(IBackend backend, string phonemes, Tensor refStyle256, float speed = 1f,
+        CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         int[] tokenIds = _tokenizer.Encode(phonemes);
@@ -236,7 +254,7 @@ public sealed class KokoroPipeline : IDisposable
         (Tensor sDec, Tensor sPred) = KokoroVoicePack.SplitStyle(refStyle256);
         try
         {
-            return SynthesizeCore(backend, tokenIds, sDec, sPred, speed);
+            return SynthesizeCore(backend, tokenIds, sDec, sPred, speed, cancel);
         }
         finally
         {
@@ -247,8 +265,11 @@ public sealed class KokoroPipeline : IDisposable
 
     /// <summary>The shared PLBERT → TextEncoder → duration → length-regulate → F0/N → decoder path.
     /// Borrows <paramref name="sDec"/> / <paramref name="sPred"/> (the caller owns + disposes them).</summary>
-    private float[] SynthesizeCore(IBackend backend, int[] tokenIds, Tensor sDec, Tensor sPred, float speed)
+    private float[] SynthesizeCore(IBackend backend, int[] tokenIds, Tensor sDec, Tensor sPred, float speed,
+        CancellationToken cancel)
     {
+        // Ahead of any device work, so a call cancelled while it waited for the device costs nothing.
+        KokoroOps.StageBoundary(_testStageObserver, "start", cancel);
         EnsureWeightsResident(backend);
         StageTimer? timer = StageTimer.Start(backend, "Kokoro");
         // The two style halves feed every AdaIN in the graph; resident for the call, they cost one upload
@@ -260,14 +281,17 @@ public sealed class KokoroPipeline : IDisposable
             // PLBERT → d_bert [1, T, 512].
             using Tensor dBert = _plBert.Forward(backend, tokenIds);
             timer?.Mark("plbert");
+            KokoroOps.StageBoundary(_testStageObserver, "plbert", cancel);
             // TextEncoder → text_features [1, T, 512].
             using Tensor textFeatures = _textEncoder.Forward(backend, tokenIds);
             timer?.Mark("textenc");
+            KokoroOps.StageBoundary(_testStageObserver, "textenc", cancel);
 
             // Predict durations.
             (Tensor durFeatures, int[] durations) = _predictor.PredictDurations(backend, dBert, sPred, speed);
             durFeatures.Dispose();
             timer?.Mark("durations");
+            KokoroOps.StageBoundary(_testStageObserver, "durations", cancel);
 
             // Every predicted duration is clamped to ≥ 1 frame, so T_total ≥ T and the alignment is total.
             int tTotal = 0;
@@ -280,11 +304,13 @@ public sealed class KokoroPipeline : IDisposable
             timer?.Mark("regulate");
             try
             {
+                KokoroOps.StageBoundary(_testStageObserver, "regulate", cancel);
                 (Tensor f0, Tensor n) = _predictor.F0Ntrain(backend, dBertExpanded, sPred);
                 timer?.Mark("f0n");
                 try
                 {
-                    float[] audio = _decoder.Forward(backend, asr, f0, n, sDec);
+                    KokoroOps.StageBoundary(_testStageObserver, "f0n", cancel);
+                    float[] audio = _decoder.Forward(backend, asr, f0, n, sDec, cancel);
                     timer?.Mark("decoder");
                     timer?.Report($"synth T={tokenIds.Length} T_total={tTotal}");
                     return audio;
