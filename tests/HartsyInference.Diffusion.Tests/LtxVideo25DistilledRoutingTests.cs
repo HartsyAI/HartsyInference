@@ -78,14 +78,21 @@ public sealed class LtxVideo25DistilledRoutingTests : IDisposable
         // 2.0/2.3 distilled builds exist; the shared 8-step schedule applies but the x2 upsampler is a 2.5 model.
         Diffusion.Models.Denoisers.LtxVideo2Config detected23 =
             Diffusion.Models.Denoisers.LtxVideo2Config.V23;
-        Diffusion.Models.Denoisers.LtxVideo2Config gated = LtxVideo2Recipe.ApplyDistilledContract(detected23);
-        Assert.NotNull(gated.FixedSigmas);
-        Assert.Equal(1.0f, gated.GuidanceScale);
-        Assert.False(gated.TwoStage);
+        Diffusion.Models.Denoisers.LtxVideo2Config gated23 = LtxVideo2Recipe.ApplyDistilledContract(detected23);
+        Assert.NotNull(gated23.FixedSigmas);
+        Assert.Equal(1.0f, gated23.GuidanceScale);
+        Assert.False(gated23.TwoStage);
+        // Asked for through numerics.ltx2TwoStage, two-stage is still refused on 2.3.
+        Assert.NotNull(LtxVideo2Recipe.TwoStageRefusal(gated23, distilled: true));
 
-        Diffusion.Models.Denoisers.LtxVideo2Config detected25 =
-            Diffusion.Models.Denoisers.LtxVideo2Config.V25;
-        Assert.True(LtxVideo2Recipe.ApplyDistilledContract(detected25).TwoStage);
+        // Two-stage is opt-in, so the contract leaves it off on 2.5 too; asked for, it runs there.
+        Diffusion.Models.Denoisers.LtxVideo2Config gated25 =
+            LtxVideo2Recipe.ApplyDistilledContract(Diffusion.Models.Denoisers.LtxVideo2Config.V25);
+        Assert.False(gated25.TwoStage);
+        Assert.Null(LtxVideo2Recipe.TwoStageRefusal(gated25, distilled: true));
+
+        // A 2.5 checkpoint outside the distilled family has no documented two-stage schedule.
+        Assert.NotNull(LtxVideo2Recipe.TwoStageRefusal(Diffusion.Models.Denoisers.LtxVideo2Config.V25, distilled: false));
     }
 
     [Fact]
