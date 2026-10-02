@@ -96,9 +96,12 @@ public sealed class WakeListener : IDisposable
         // Bytes per sample this connection is sending, from its hello. Two until told otherwise, so a
         // satellite that predates the µ-law option is read exactly as it always was.
         int width = 2;
+        // Declared outside the try so the finally below can identify which codec THIS connection installed,
+        // and only clear session state that is still this connection's.
+        WakeFrameCodec? codec = null;
         try
         {
-            WakeFrameCodec codec = new(stream, _options.MaxPayloadBytes);
+            codec = new WakeFrameCodec(stream, _options.MaxPayloadBytes);
             using CancellationTokenSource connectionCancel = CancellationTokenSource.CreateLinkedTokenSource(cancel);
 
             float[] samples = new float[_options.MaxPayloadBytes / 2];
@@ -170,15 +173,43 @@ public sealed class WakeListener : IDisposable
         {
             // The session object stays registered so the device keeps its words and config across the gap;
             // only the transport is torn down. Detection stops because no audio arrives.
-            if (session is not null)
+            //
+            // session is shared across connections for one device id: a reconnect can install a new codec
+            // (WakeSession.OnReconnected, called from this device's NEW connection, on another thread) while
+            // THIS connection is still unwinding here — the "dropping the older one" log above describes
+            // exactly this overlap. Clearing unconditionally would then tear down the new connection's codec,
+            // state and claim out from under it and fire a spurious disconnect for a device that is, in fact,
+            // still connected. The CAS below only clears what THIS connection installed: if session.Codec is
+            // no longer this connection's own codec, a newer one has already taken over and this connection's
+            // teardown must do nothing.
+            if (session is not null && codec is not null && Interlocked.CompareExchange(ref session.Codec, null, codec) == codec)
             {
-                session.Codec = null;
+                // A residual, few-instruction race remains here: a reconnect's OnReconnected can land between
+                // the CompareExchange above and this write, setting State to Listening only for this line to
+                // put it back to Handshake moments later. WakeWorker.Run only reads State to skip a session
+                // that has never completed a handshake, so at worst that reconnect's audio is skipped for one
+                // ~10 ms idle poll before its own next frame corrects it — not the race this guards against.
                 session.State = WakeSessionState.Handshake;
-                // Unconditional, not CAS-matched against a specific claim: whatever is here is now stale
-                // regardless of which claim it is, because the connection it was reading just ended. A host
-                // that already released before the disconnect sees this as a harmless null-to-null exchange.
                 WakeDeviceClaim? claim = Interlocked.Exchange(ref session.Claim, null);
-                claim?.OnDisconnected?.Invoke();
+                if (claim is not null)
+                {
+                    try
+                    {
+                        claim.OnDisconnected?.Invoke();
+                    }
+                    catch (Exception ex)
+                    {
+                        // Last statement in the block, so nothing here is skipped by letting it propagate --
+                        // but an unguarded throw at this point would still replace whatever exception (if any)
+                        // unwound the try above, hiding the reason this connection actually ended. Log and
+                        // swallow the host's bug instead.
+                        Logs.Error($"[Audio][Wake] WakeDeviceClaim.OnDisconnected threw for '{session.DeviceId}'.", ex);
+                    }
+                }
+            }
+            else if (session is not null)
+            {
+                Logs.Verbose($"[Audio][Wake] Connection from {remote} ended after a newer connection took over '{session.DeviceId}'; leaving its state alone.");
             }
         }
     }

@@ -102,6 +102,33 @@ stable release will require. Dates are UTC.
   `voice.turn.total_ms` 1095.8-1225.1 ms (gate ≤ 1300 ms), decode 89-102 tok/s. VRAM primed and flat for all ten
   turns at **5.81 GB, under the ≤ 6 GB target** (was ~13.8 GB). A smaller `PrefixCacheCapacityHint` and
   `vram.kvF16` stay unused.
+- **`WakeService.Claim`/`Release`**: an opt-in, per-device host handoff for the wake listener. A host can claim
+  one connected satellite's turns (typically from a `Detected` handler) and receive its decoded inbound audio
+  (16 kHz mono float, post-denoise when noise suppression is on, normalized from the wake path's internal
+  int16 scale) through `WakeDeviceClaim.OnFrame` instead of the service's own wake scoring, end-of-speech
+  capture and transcription, which are suspended for that device only. The connection, ping/pong keepalive and
+  outbound audio path (`BeginAudio`/`SendAudioAsync`) are unaffected. `Release` returns the device to normal
+  listening; a disconnect while claimed auto-releases and calls `WakeDeviceClaim.OnDisconnected` once. Zero
+  change for a device nothing has claimed — `WakeSession.Claim` defaults to null and the existing
+  scoring/VAD branch is reached exactly as before; proven against the full existing wake suite
+  (`WakeTransportTests` and the rest) with real backbone/head/denoiser weights, not just by inspection. This is
+  the engine-side requirement for `SwarmUI-AudioLab`'s satellite voice-agent Session mode, which could not
+  otherwise get continuous raw audio for a device past its own wake detection.
+- **Fixed two races in `WakeService.Claim`/`Release`'s disconnect path, found by review before this shipped.**
+  A device's reconnect (`WakeSession.OnReconnected`, from its new connection) could land while its old
+  connection was still unwinding; the old connection's `finally` then unconditionally cleared the new
+  connection's `Codec`, reset `State` to `Handshake` (silently pausing the worker for that device, since
+  `WakeWorker.Run` skips a session in `Handshake`), cleared the new connection's claim, and fired a spurious
+  `OnDisconnected` for a device that was, in fact, still connected. `WakeSession.Codec` is now a field (like
+  `Claim` already was) so the disconnect path can clear it with a CAS keyed to the specific codec that
+  connection installed; a superseded connection's teardown now does nothing instead. A throwing
+  `OnDisconnected` is also now caught and logged (`Logs.Error`) rather than propagating out of the `finally`,
+  where it could otherwise mask whatever exception actually ended the connection. Same treatment for a
+  throwing `OnFrame` in `WakeWorker`, caught separately from the pipeline/denoiser/VAD reset path so a
+  persistently-throwing host callback doesn't flood the log with pointless resets of state a claimed device
+  never reads. `WakeService.Claim` also now withdraws (and returns null for) a claim whose connection died in
+  the gap between its own liveness check and installing the claim, so that race can no longer leave a host
+  holding a claim that will never call `OnDisconnected`.
 
 ## alpha.240
 
@@ -121,21 +148,6 @@ stable release will require. Dates are UTC.
   Piper. `AudioModelSelector.Parse` itself and `PiperModel.LoadAsync`'s own `"default"`/empty sentinel check
   are both unchanged — the first is shared, load-bearing logic for every modality's selector, the second
   already did the right thing once actually given one of those values.
-
-## alpha.240
-
-- **`WakeService.Claim`/`Release`**: an opt-in, per-device host handoff for the wake listener. A host can claim
-  one connected satellite's turns (typically from a `Detected` handler) and receive its decoded inbound audio
-  (16 kHz mono float, post-denoise when noise suppression is on, normalized from the wake path's internal
-  int16 scale) through `WakeDeviceClaim.OnFrame` instead of the service's own wake scoring, end-of-speech
-  capture and transcription, which are suspended for that device only. The connection, ping/pong keepalive and
-  outbound audio path (`BeginAudio`/`SendAudioAsync`) are unaffected. `Release` returns the device to normal
-  listening; a disconnect while claimed auto-releases and calls `WakeDeviceClaim.OnDisconnected` once. Zero
-  change for a device nothing has claimed — `WakeSession.Claim` defaults to null and the existing
-  scoring/VAD branch is reached exactly as before; proven against the full existing wake suite
-  (`WakeTransportTests` and the rest) with real backbone/head/denoiser weights, not just by inspection. This is
-  the engine-side requirement for `SwarmUI-AudioLab`'s satellite voice-agent Session mode, which could not
-  otherwise get continuous raw audio for a device past its own wake detection.
 
 ## alpha.239
 

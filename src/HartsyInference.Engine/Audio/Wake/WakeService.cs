@@ -314,6 +314,21 @@ public sealed class WakeService : IDisposable
         {
             throw new InvalidOperationException($"Device '{deviceId}' is already claimed.");
         }
+        if (session.Codec is null)
+        {
+            // The connection died between the check above and the CompareExchange that just installed this
+            // claim. Withdraw it with the same CAS WakeListener's disconnect path uses to clear a claim: if
+            // this withdrawal wins (session.Claim is still exactly this claim), that disconnect has not seen
+            // it -- possibly because it already ran before this claim existed -- so nobody will ever call
+            // onDisconnected for it, and the caller gets the same null a claim on a dead device always gets.
+            // If the withdrawal loses, the disconnect path's own CAS got there first and will invoke
+            // onDisconnected itself; this method must not call it too, which is why it withdraws rather than
+            // notifying directly.
+            if (Interlocked.CompareExchange(ref session.Claim, null, claim) == claim)
+            {
+                return null;
+            }
+        }
         return claim;
     }
 

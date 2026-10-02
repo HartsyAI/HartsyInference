@@ -1,5 +1,6 @@
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using HartsyInference.Audio.Models.Wake;
@@ -130,6 +131,117 @@ public sealed class WakeTransportTests
         Assert.True(session.RequestReset);
     }
 
+    /// <summary>Reproduces the race a review caught before merge: a device's reconnect lands while its OLD
+    /// connection is still unwinding (the "dropping the older one" path in <c>ServeStreamAsync</c>'s hello
+    /// case), and that old connection's disconnect teardown runs after. Needs no real wake model weights —
+    /// this never sends an audio-chunk frame, only hello and a raw socket close, so an unloaded
+    /// <see cref="WakeMelFrontend"/>/<see cref="SpeechEmbeddingModel"/> pair is enough to construct a session.
+    ///
+    /// <para>Does not use <see cref="WakeListener.Start"/>: this drives its own <see cref="TcpListener"/> so the
+    /// test can hold each connection's <c>ServeStreamAsync</c> <see cref="Task"/> directly instead of the
+    /// fire-and-forget one <see cref="WakeListener"/>'s own accept loop would give it, which is what makes the
+    /// ordering below deterministic rather than a sleep-and-hope.</para></summary>
+    [Fact]
+    public async Task Disconnect_StaleAfterReconnect_LeavesNewConnectionsCodecAndClaimIntact()
+    {
+        TcpListener rawListener = new(IPAddress.Loopback, 0);
+        rawListener.Start();
+        int port = ((IPEndPoint)rawListener.LocalEndpoint).Port;
+        try
+        {
+            ConcurrentDictionary<string, WakeSession> sessions = new();
+            WakeSession Factory(string deviceId) =>
+                new(deviceId, new WakeDetectionPipeline(new WakeMelFrontend(), new SpeechEmbeddingModel()));
+            WakeServiceOptions options = new() { Port = 0, PingInterval = TimeSpan.FromSeconds(30) };
+            using WakeListener listener = new(sessions, Factory, options);
+
+            using TcpClient clientA = new();
+            await clientA.ConnectAsync(IPAddress.Loopback, port);
+            using TcpClient serverA = await rawListener.AcceptTcpClientAsync();
+            Task serveA = listener.ServeStreamAsync(serverA.GetStream(), "A", CancellationToken.None);
+
+            await WriteHeaderAsync(clientA.GetStream(), "{\"type\":\"hello\",\"data\":{\"device_id\":\"race-test\",\"rate\":16000,\"width\":2,\"channels\":1}}");
+            await WaitForAsync(() => sessions.ContainsKey("race-test"), TimeSpan.FromSeconds(10));
+            WakeSession session = sessions["race-test"];
+            await WaitForAsync(() => session.Codec is not null, TimeSpan.FromSeconds(10));
+            object codecA = session.Codec!;
+
+            int disconnected = 0;
+            WakeDeviceClaim claim = new(_ => { }, () => Interlocked.Increment(ref disconnected));
+            Assert.Null(Interlocked.CompareExchange(ref session.Claim, claim, null));
+
+            // Connection B reconnects for the SAME device while A's socket is still open as far as anything
+            // has told it -- the overlap the bug depends on.
+            using TcpClient clientB = new();
+            await clientB.ConnectAsync(IPAddress.Loopback, port);
+            using TcpClient serverB = await rawListener.AcceptTcpClientAsync();
+            Task serveB = listener.ServeStreamAsync(serverB.GetStream(), "B", CancellationToken.None);
+
+            await WriteHeaderAsync(clientB.GetStream(), "{\"type\":\"hello\",\"data\":{\"device_id\":\"race-test\",\"rate\":16000,\"width\":2,\"channels\":1}}");
+            // OnReconnected runs synchronously inside ServeStreamAsync's hello case before anything is written
+            // back, so once session.Codec differs from connection A's, B's reconnect has already landed -- no
+            // need to round-trip B's hello-ack.
+            await WaitForAsync(() => session.Codec is not null && !ReferenceEquals(session.Codec, codecA), TimeSpan.FromSeconds(10));
+            object codecB = session.Codec!;
+
+            // NOW close A -- its ServeStreamAsync loop sees end-of-stream and runs its own finally next.
+            clientA.Close();
+            await serveA.WaitAsync(TimeSpan.FromSeconds(10));
+
+            // The discriminating assertions: at this exact point nothing but A's teardown has run. Pre-fix, A's
+            // unconditional clear wipes out B's codec and claim and fires a disconnect that belongs to a
+            // connection (B's) that is still live. Post-fix, A's teardown recognizes it is no longer the live
+            // connection for this device and does nothing.
+            Assert.Same(codecB, session.Codec);
+            Assert.Same(claim, session.Claim);
+            Assert.Equal(0, disconnected);
+
+            // B's own, legitimate disconnect still works normally.
+            clientB.Close();
+            await serveB.WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Null(session.Codec);
+            Assert.Null(session.Claim);
+            Assert.Equal(1, disconnected);
+        }
+        finally
+        {
+            rawListener.Stop();
+        }
+    }
+
+    /// <summary>The other half of the same review comment: a disconnect that legitimately owns the session
+    /// (no reconnect involved) must still complete its teardown when the claim's own <c>OnDisconnected</c>
+    /// callback throws -- the callback is the host's bug, not a reason to leave <see cref="WakeSession.Codec"/>,
+    /// <see cref="WakeSession.State"/> or <see cref="WakeSession.Claim"/> uncleared, and not a reason to fault
+    /// the connection loop. Drives <see cref="WakeListener.ServeStreamAsync"/> directly against a one-shot fake
+    /// stream (hello, then EOF) rather than a real socket: the only thing under test is whether the exception
+    /// escapes the <c>finally</c>, which a real socket cannot make deterministic either way.</summary>
+    [Fact]
+    public async Task Disconnect_WhenOnDisconnectedThrows_StillClearsStateWithoutFaulting()
+    {
+        ConcurrentDictionary<string, WakeSession> sessions = new();
+        WakeSession Factory(string deviceId) =>
+            new(deviceId, new WakeDetectionPipeline(new WakeMelFrontend(), new SpeechEmbeddingModel()));
+        WakeSession session = sessions.GetOrAdd("race-test-2", Factory);
+
+        WakeDeviceClaim claim = new(_ => { }, () => throw new InvalidOperationException("host callback bug"));
+        Assert.Null(Interlocked.CompareExchange(ref session.Claim, claim, null));
+
+        byte[] hello = Encoding.UTF8.GetBytes(
+            "{\"type\":\"hello\",\"data\":{\"device_id\":\"race-test-2\",\"rate\":16000,\"width\":2,\"channels\":1}}\n");
+        OneFrameStream stream = new(hello);
+
+        WakeServiceOptions options = new() { Port = 0, PingInterval = TimeSpan.FromSeconds(30) };
+        using WakeListener listener = new(sessions, Factory, options);
+
+        // Must complete, not fault: a throwing host callback must not escape this connection's own teardown.
+        await listener.ServeStreamAsync(stream, "test", CancellationToken.None);
+
+        Assert.Null(session.Codec);
+        Assert.Null(session.Claim);
+        Assert.Equal(WakeSessionState.Handshake, session.State);
+    }
+
     private static async Task WriteHeaderAsync(NetworkStream stream, string json)
     {
         byte[] bytes = Encoding.UTF8.GetBytes(json + "\n");
@@ -184,5 +296,40 @@ public sealed class WakeTransportTests
         WakeHead head = new(name);
         head.LoadWeights(loader.GetAllTensors());
         return head;
+    }
+
+    /// <summary>Exactly one frame's worth of readable bytes, then EOF; writes are accepted and discarded. Lets
+    /// <see cref="WakeListener.ServeStreamAsync"/> run its hello case once and then see end-of-stream on its
+    /// next read, without a real socket.</summary>
+    private sealed class OneFrameStream(byte[] data) : Stream
+    {
+        private int _position;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => true;
+        public override long Length => data.Length;
+        public override long Position { get => _position; set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            int available = Math.Min(buffer.Length, data.Length - _position);
+            if (available <= 0) return 0;
+            data.AsSpan(_position, available).CopyTo(buffer);
+            _position += available;
+            return available;
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            ValueTask.FromResult(Read(buffer.Span));
+
+        public override void Flush() { }
+        public override Task FlushAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) { }
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default) => ValueTask.CompletedTask;
     }
 }

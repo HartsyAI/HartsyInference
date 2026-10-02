@@ -105,8 +105,14 @@ public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline,
         }
     }
 
-    /// <summary>Frame codec for this connection, replaced when the device reconnects.</summary>
-    public WakeFrameCodec? Codec { get; set; }
+    /// <summary>Frame codec for this connection, replaced when the device reconnects.
+    ///
+    /// <para>A plain field, not a property, for the same reason <see cref="Claim"/> is one: <see
+    /// cref="WakeListener"/>'s disconnect path clears it with a CAS keyed to the specific codec that connection
+    /// installed, not an unconditional write, so a connection superseded by a reconnect while it was still
+    /// unwinding cannot clear the new connection's codec (or, gated on that same CAS, its state and claim) out
+    /// from under it.</para></summary>
+    public WakeFrameCodec? Codec;
 
     /// <summary>The host claim currently in effect, or null when the service's own scoring, capture and
     /// transcription own this device — the default, and the only state before any claim exists.

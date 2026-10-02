@@ -118,7 +118,19 @@ public sealed class WakeWorker : IDisposable
                                 // consumer in the codebase expects [-1, 1], so this boundary converts once
                                 // rather than leaking the internal scale to a claim's own caller.
                                 for (int i = 0; i < toProcess.Length; i++) normalized[i] = toProcess[i] / 32768f;
-                                claim.OnFrame(normalized.AsSpan(0, toProcess.Length));
+                                try
+                                {
+                                    claim.OnFrame(normalized.AsSpan(0, toProcess.Length));
+                                }
+                                catch (Exception ex)
+                                {
+                                    // Caught separately from the outer catch below: a throwing OnFrame is the
+                                    // host's bug, not this device's audio state, so resetting the pipeline,
+                                    // denoiser and VAD here would be pointless (a claimed device never reads
+                                    // them) and a host that throws persistently would otherwise log a reset
+                                    // error roughly every 80 ms.
+                                    Logs.Error($"[Audio][Wake] WakeDeviceClaim.OnFrame threw for '{session.DeviceId}'.", ex);
+                                }
                             }
                             else
                             {
