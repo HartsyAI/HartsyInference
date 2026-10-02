@@ -8,6 +8,18 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Fixed: host weight conversions, Mimi's RVQ encode and UnivNet's LVC gate no longer bypass the process CPU
+  thread cap.** Large `Tensor.CastTo` and `DequantFp8E4M3ScaledToF16` casts, the fp8 quantizer's absmax, scale and
+  stochastic-round passes, the NVFP4, MXFP4, FP8-block, affine, EXL3 and INT8-ConvRot host codecs,
+  `LoraBaker.MatMulFma`, the MiniMax-H3 rebasers, Mimi's split-RVQ encode and Resemble-Enhance's UnivNet each fanned
+  out with a raw `Parallel.For` on the shared thread pool, ignoring `numerics.cpuThreads` and
+  `CpuParallel.InlineScope`. Row and tile loops now go through `CpuParallel.For`, with per-row scratch rented from
+  `ArrayPool`, and the range passes through a new `CpuParallel.ForRanges`, whose ranges depend only on the length, so
+  every output is byte-identical at any cap. On a host that lowers the cap (the voice host's unit runs with
+  `engine.cpuThreadCap: 14`) these now use at most that many threads, so checkpoint conversion and LoRA baking there,
+  and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
+  cores than the cap. GPT-OSS's CPU-backend expert loop still wraps its per-expert dequant in a raw
+  `Parallel.ForEach`; a follow-up converts it.
 - **Audio model switches now size the incoming model before deciding whether to evict.** `AudioRuntime` used to
   unload the other resident audio models on a switch only when free VRAM was under a fixed 3 GiB, so a 6-7 GB model
   arriving with 3-6 GB free evicted nothing: Dia then failed in `PreloadWeights` with `OutOfVramException`, and
@@ -125,6 +137,31 @@ stable release will require. Dates are UTC.
   false-missing path and its interactive `Download these now?` prompt. Fixed the `RepoPath`, and added a
   per-process confirmed-present cache so the audio-asset check only runs until it first succeeds for a
   given catalog id.
+- **`hartsy transcribe --timestamps` now prints the actual timestamps.** The flag only ever changed a
+  "segments N" count in the footer; the transcript text itself was identical with or without it, since
+  `TranscribeAsync` never read anything from `TranscriptResult.Words` but its `Count`. It now renders one
+  `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
+  produced) when timestamps were requested and the pipeline returned any; the plain-text path is
+  unchanged byte-for-byte otherwise.
+- **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
+  `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
+  not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
+  transcribed the result as `[Music]`; energy stayed high for the full 20s rather than trailing into
+  quiet). `maxTokens` is now capped to the text's own length (20 frames/char, floored at 200), which only
+  applies when the caller left `TtsJob.MaxTokens` unset -- an explicit value is used as-is, uncapped,
+  since a deliberate request isn't the runaway case this exists for. The factor comes from measuring
+  natural (uncapped) EOS behavior on 8 real prompts spanning single-speaker sentences, `[S1]`/`[S2]`
+  dialogues, a `(laughs)`/pauses case and a non-ASCII case: 4 fired a genuine EOS, the other 4 hit the
+  1720 ceiling and were confirmed degenerate by what Whisper actually heard ("[Music]", "[ Silence ]", a
+  one-word fragment) versus the non-ASCII prompt's real EOS at 1142 frames (13.126 frames/char, the
+  max observed -- confirmed as genuine full-duration speech via a language-correct Whisper pass that
+  transcribed it back verbatim). 1.5x that margin sets the factor at 20; it only binds (produces less
+  than the 1720 default) for text under ~86 chars. **Confirmed model behaviour, not a port bug**: ran
+  upstream nari-labs Dia-1.6B-0626 itself (local weights, no download) on the identical sentence,
+  `[S1]`-tagged, same seed and the same 1720 cap. Upstream also never fires EOS -- its own
+  `finished_step_Bx` accounting shows the sequence forced to the cap at step ~1704 -- and Whisper
+  transcribes its output as `[Music]` too. Same inputs, same failure, in the reference implementation;
+  nothing in the C# port's conditioning, CFG, delay pattern, or EOS rule is implicated.
 
 ## alpha.241
 

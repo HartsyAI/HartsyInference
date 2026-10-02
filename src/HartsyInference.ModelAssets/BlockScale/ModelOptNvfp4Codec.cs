@@ -1,4 +1,5 @@
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.ModelAssets.CheckpointConverters.Utils;
@@ -45,7 +46,7 @@ public static unsafe class ModelOptNvfp4Codec
         fixed (float* dst = dest)
         {
             nint srcAddr = (nint)src, dstAddr = (nint)dst, scaleAddr = (nint)scaleBase;
-            Parallel.For(0, (int)rowCount, r =>
+            CpuParallel.For((int)rowCount, rowCount * cols * 2, r =>
             {
                 long row = rowOffset + r;
                 byte* rowSrc = (byte*)srcAddr + row * rowBytes;
