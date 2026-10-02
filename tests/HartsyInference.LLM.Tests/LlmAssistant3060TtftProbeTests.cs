@@ -60,13 +60,17 @@ public sealed class LlmAssistant3060TtftProbeTests
         using InferenceEngine engine = new("cuda", new EngineOptions { VramPolicy = null });
         ModelSpec spec = new() { Requested = "qwen3-4b", Modality = Modality.Text, LocalPath = checkpoint };
 
-        // Warm-up: forces a slot to load (on cuda:1) so CountTokens below reads the real tokenizer instead of the
-        // cold chars/4 heuristic, and so neither timed run below pays the one-time weight load.
+        // Warm BOTH devices before any timed measurement: each device gets its own TextService slot (its own cold
+        // GGUF load + PreloadWeights), and a timed run against a never-yet-loaded device would bake that one-time
+        // load into its "TTFT" — comparing a warm 3060 against a cold 4090 is not a TTFT comparison at all.
         await RunOnceAsync(engine, spec, "Hi.", 1, profile: false);
+        await RunOnceAsync(engine, spec, "Hi.", 0, profile: false);
 
         string prompt = BuildPrompt(engine, spec, out int promptTokens);
         _out.WriteLine($"prompt: {promptTokens} ordinary tokens (target >= {TargetPromptTokens})");
 
+        // Both slots stay resident (no Unload between devices) for the same reason — only the FIRST timed call on
+        // either device may legitimately pay a load, and both already have.
         foreach (int ordinal in new[] { 1, 0 })
         {
             KnobStore.Set(EngineKnobs.Profile, true);
@@ -90,10 +94,9 @@ public sealed class LlmAssistant3060TtftProbeTests
             }
             KnobStore.Set(EngineKnobs.Profile, false);
             NvtxRange.ResetProfile();
-            // Release this device's slot before moving to the other one, so the second device's run is not
-            // sharing the first device's resident weights/KV with anything and VRAM is returned.
-            engine.Text.Unload($"cuda:{ordinal}");
         }
+        // Both devices' slots are released together at the end, not between timed runs.
+        engine.Text.Unload();
     }
 
     private static string BuildPrompt(InferenceEngine engine, ModelSpec spec, out int promptTokens)

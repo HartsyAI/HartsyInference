@@ -773,8 +773,7 @@ internal static unsafe class GpuTransferHelper
     /// the stream-ordered free. No CPU read happens here, so only stream order matters, and it holds.</remarks>
     internal static unsafe void UploadTo(State s, ulong destination, Tensor source, nuint byteSize)
     {
-        // Resolved once, before anything else in this call touches the host source (DataPointer can itself
-        // trigger a D2H sync/GPU-binding callback) — see RequireLiveStream for why zero cannot be passed through.
+        // Resolved once, up front — see RequireLiveStream for why zero cannot reach the native call below.
         nint stream = s.RequireLiveStream("a weight/activation upload");
         using Profiling.NvtxRange _upload = Profiling.NvtxRange.Push(byteSize > (1u << 20)
             ? (Profiling.NvtxRange.ProfileShapes
