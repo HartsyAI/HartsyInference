@@ -95,6 +95,13 @@ stable release will require. Dates are UTC.
   this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
   an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
   the list held from an earlier iteration in place, and the dispatch loop below re-fired it a second time.
+- **Orpheus TTS no longer re-prompts to download its SNAC codec on every generation.** `ModelCatalog`'s
+  SNAC asset (`hubertsiuzdak/snac_24khz`) listed `RepoPath = "model.safetensors"`; the real downloaded
+  file is `pytorch_model.bin`, so `ModelAcquisition`'s presence check always reported it missing. The CLI
+  REPL calls `EnsurePresent` once per generation (not once per load), so every Orpheus prompt hit the
+  false-missing path and its interactive `Download these now?` prompt. Fixed the `RepoPath`, and added a
+  per-process confirmed-present cache so the audio-asset check only runs until it first succeeds for a
+  given catalog id.
 
 ## alpha.241
 
