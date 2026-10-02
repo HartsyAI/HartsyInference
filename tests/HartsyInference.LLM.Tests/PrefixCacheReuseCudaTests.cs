@@ -40,7 +40,9 @@ public sealed class PrefixCacheReuseCudaTests(ITestOutputHelper output)
 
         TextGenerationPipeline resizing = new(model, tokenizer, backend);
         TextGenerationPipeline inPlace = new(model, tokenizer, backend);
-        using RetainedSequence resized = new();     // 3 tokens of headroom: grown and shrunk by copy every turn
+        // 3 tokens of headroom: the 512-token first allocation is shrunk at turn 0, every later turn grows by copy, and
+        // a turn that stops before MaxTokens is shrunk again.
+        using RetainedSequence resized = new();
         using RetainedSequence unresized = new();   // sized once for the whole conversation, never copied
         List<int> history = [];
         List<string> freshMismatches = [];
@@ -49,10 +51,11 @@ public sealed class PrefixCacheReuseCudaTests(ITestOutputHelper output)
         for (int turn = 0; turn < 8; turn++)
         {
             for (int i = 0; i < 5; i++) history.Add(rig.NextToken(cfg.VocabSize));
-            GenerationRequest request = new() { RawTokenIds = [.. history], MaxTokens = 8, Sampling = sampling };
+            GenerationRequest request = new() { RawTokenIds = [.. history], MaxTokens = 12, Sampling = sampling };
 
             GenerationResult fresh = new TextGenerationPipeline(model, tokenizer, backend).Generate(request);
-            GenerationResult viaCopies = resizing.Generate(request with { PrefixCacheHeadroomTokens = 3 }, resized);
+            GenerationResult viaCopies = resizing.Generate(
+                request with { PrefixCacheCapacityHint = 512, PrefixCacheHeadroomTokens = 3 }, resized);
             GenerationResult viaInPlace = inPlace.Generate(
                 request with { PrefixCacheCapacityHint = 512, PrefixCacheHeadroomTokens = 512 }, unresized);
             _out.WriteLine($"turn {turn}: prompt {fresh.PromptTokens}, reused {viaCopies.ReusedPromptTokens}"
