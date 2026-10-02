@@ -21,7 +21,7 @@ stable release will require. Dates are UTC.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
 
-## alpha.241
+## alpha.239
 
 - **Audio: fixed the vocab-sized delegate-sort allocation anti-pattern in the TTS samplers** — the same
   pattern PR #215 fixed in the LLM package's `TopPStep`, independently present in several places in
