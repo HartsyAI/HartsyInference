@@ -1,0 +1,5 @@
+# Chat-template fixtures are byte-exact extractions from real GGUF tokenizer.chat_template metadata
+# (see tests/HartsyInference.Tools.Tests/Fixtures/ChatTemplates/README.md for provenance); the guarded
+# CommittedFixture_MatchesLiveGgufMetadata test compares them byte-for-byte against the live GGUF, so they
+# must never be line-ending-normalized on checkout.
+tests/HartsyInference.Tools.Tests/Fixtures/ChatTemplates/*.jinja -text

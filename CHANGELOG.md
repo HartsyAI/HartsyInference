@@ -8,6 +8,18 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
+  instead of guessing the tool-call format from its name: true only when the template references the
+  caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,
+  Llama-3 `<|python_tag|>`, Mistral `[TOOL_CALLS]`, Gemma `<|tool_call>`). Verified against the real template
+  of eight local GGUFs — three detect correctly (Qwen3-4B/Qwen2.5-1.5B → Hermes, gemma-4-E2B-it → Gemma) and
+  five correctly detect as unsupported for family-specific reasons, see
+  `tests/HartsyInference.Tools.Tests/Fixtures/ChatTemplates/README.md`.
+- **Fixed:** `ToolCallFormats.Detect`'s name-hint heuristic no longer maps `"glm"`/`"deepseek"` to Hermes —
+  neither family's real wire format matches it (GLM uses XML arguments, DeepSeek never renders `tools` for
+  new calls). Both still reach the documented unknown-family Hermes fallback, so `Detect`'s observable
+  behavior for a bare name hint is unchanged.
+
 ## alpha.241
 
 - **Fixed an intermittent `CUDA_ERROR_INVALID_VALUE` crash on the first `RmsNorm` call of a prefill.**
