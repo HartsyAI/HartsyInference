@@ -117,6 +117,21 @@ stable release will require. Dates are UTC.
   produced) when timestamps were requested and the pipeline returned any; the plain-text path is
   unchanged byte-for-byte otherwise.
 
+## alpha.242
+
+- **AuK and AuK-Flash (Tencent) speech model, structural port.** `auk:flash` (4 fixed steps, no guidance) and
+  `auk:base` (32 steps, CFG 2.0, sway) run zero-shot voice cloning and instruction-described voices through
+  `hartsy speak -m auk:flash` (`--reference`, `--instruction`, `--duration`) and the speech API. The pipeline is
+  task-agnostic: an instruction plus a source clip drives the same DiT for editing, enhancement and separation, but
+  only TTS is exposed by the engine in this release. Conditioning comes from the Qwen2.5-Omni-3B thinker (text LM
+  plus audio tower; only shards 1 and 2 are downloaded) fused over all 36 hidden states; audio is decoded by the
+  24 kHz BigVGAN-flow VAE. Not numerically verified against the reference yet (see `MODEL_STATUS_AUDIO.md`).
+  The Qwen2.5-Omni encoder is under the Qwen Research License; the AuK weights are MIT.
+- `GenericTransformer.ForwardEmbeds` and `Qwen2Model.ForwardEmbeds` take an optional per-layer tap; behavior is
+  unchanged when it is null.
+- `SpeechRequest` gains optional `Instruction` and `DurationSeconds`.
+- bf16 repack recipes `auk-base`, `auk-flash` and `auk-vae` for `CheckpointRepacker`; nothing is uploaded.
+
 ## alpha.241
 
 - **Fixed an intermittent `CUDA_ERROR_INVALID_VALUE` crash on the first `RmsNorm` call of a prefill.**

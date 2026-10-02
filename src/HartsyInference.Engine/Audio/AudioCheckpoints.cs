@@ -10,15 +10,16 @@ namespace HartsyInference.Engine.Audio;
 /// <summary>Loads a HuggingFace checkpoint into one merged tensor map plus the loaders whose mmapped buffers the tensors reference: single-file safetensors, then the sharded index, then a PyTorch pickle.</summary>
 internal static class AudioCheckpoints
 {
-    /// <summary>Resolves and loads <paramref name="repo"/>'s weights, downloading them on first use.</summary>
-    internal static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)> LoadAsync(string repo, string category, CancellationToken cancel)
+    /// <summary>Resolves and loads <paramref name="repo"/>'s weights, downloading them on first use. With <paramref name="keyPrefixes"/> only the tensors under those prefixes are kept and, for a sharded repo, only the shards that hold any are fetched.</summary>
+    internal static async Task<(IReadOnlyDictionary<string, Tensor> Dict, IDisposable[] Loaders)> LoadAsync(string repo, string category, CancellationToken cancel,
+        IReadOnlyList<string>? keyPrefixes = null)
     {
         try
         {
             string path = await AudioModelCache.GetAsync(repo, "model.safetensors", category, ct: cancel).ConfigureAwait(false);
             SafeTensorsLoader loader = new SafeTensorsLoader();
             loader.Load(path);
-            return (loader.GetAllTensors(), [loader]);
+            return (FilterByPrefix(loader.GetAllTensors(), keyPrefixes), [loader]);
         }
         catch (FileNotFoundException ex)
         {
@@ -28,7 +29,7 @@ internal static class AudioCheckpoints
         try
         {
             string indexPath = await AudioModelCache.GetAsync(repo, "model.safetensors.index.json", category, ct: cancel).ConfigureAwait(false);
-            HashSet<string> shards = ReadShardNames(indexPath);
+            HashSet<string> shards = ReadShardNames(indexPath, keyPrefixes);
             Dictionary<string, Tensor> merged = new Dictionary<string, Tensor>(StringComparer.Ordinal);
             List<IDisposable> loaders = [];
             foreach (string shard in shards)
@@ -37,7 +38,7 @@ internal static class AudioCheckpoints
                 SafeTensorsLoader shardLoader = new SafeTensorsLoader();
                 shardLoader.Load(shardPath);
                 loaders.Add(shardLoader);
-                foreach (KeyValuePair<string, Tensor> entry in shardLoader.GetAllTensors())
+                foreach (KeyValuePair<string, Tensor> entry in FilterByPrefix(shardLoader.GetAllTensors(), keyPrefixes))
                 {
                     merged[entry.Key] = entry.Value;
                 }
@@ -52,7 +53,7 @@ internal static class AudioCheckpoints
         string binPath = await AudioModelCache.GetAsync(repo, "pytorch_model.bin", category, ct: cancel).ConfigureAwait(false);
         AnyFormatCheckpointLoader pickle = new AnyFormatCheckpointLoader();
         pickle.Load(binPath);
-        return (pickle.GetAllTensors(), [pickle]);
+        return (FilterByPrefix(pickle.GetAllTensors(), keyPrefixes), [pickle]);
     }
 
     /// <summary>Names the files <see cref="LoadAsync"/> would read, without loading any tensors — for
@@ -62,7 +63,7 @@ internal static class AudioCheckpoints
     /// the pickle. A sharded repo cannot state its own file list without the index, so that one small file is
     /// downloaded here to read the shard names out of it.</para></summary>
     internal static async Task<IReadOnlyList<AudioModelFile>> ResolveCheckpointFilesAsync(string repo, string category,
-        CancellationToken cancel)
+        CancellationToken cancel, IReadOnlyList<string>? keyPrefixes = null)
     {
         // Probed, not downloaded: fetching the weights here to find out whether they exist would land the
         // primary artifact before its companions, which is the one ordering this whole path guarantees.
@@ -74,7 +75,7 @@ internal static class AudioCheckpoints
         {
             string indexPath = await AudioModelCache.GetAsync(repo, "model.safetensors.index.json", category, ct: cancel).ConfigureAwait(false);
             List<AudioModelFile> files = [new AudioModelFile("model.safetensors.index.json")];
-            foreach (string shard in ReadShardNames(indexPath))
+            foreach (string shard in ReadShardNames(indexPath, keyPrefixes))
             {
                 files.Add(new AudioModelFile(shard));
             }
@@ -150,7 +151,36 @@ internal static class AudioCheckpoints
         return (pickle.GetAllTensors(), pickle);
     }
 
-    private static HashSet<string> ReadShardNames(string indexPath)
+    private static IReadOnlyDictionary<string, Tensor> FilterByPrefix(IReadOnlyDictionary<string, Tensor> all, IReadOnlyList<string>? keyPrefixes)
+    {
+        if (keyPrefixes is null)
+        {
+            return all;
+        }
+        Dictionary<string, Tensor> kept = new Dictionary<string, Tensor>(StringComparer.Ordinal);
+        foreach (KeyValuePair<string, Tensor> entry in all)
+        {
+            if (HasPrefix(entry.Key, keyPrefixes))
+            {
+                kept[entry.Key] = entry.Value;
+            }
+        }
+        return kept;
+    }
+
+    private static bool HasPrefix(string key, IReadOnlyList<string> prefixes)
+    {
+        foreach (string prefix in prefixes)
+        {
+            if (key.StartsWith(prefix, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    internal static HashSet<string> ReadShardNames(string indexPath, IReadOnlyList<string>? keyPrefixes = null)
     {
         HashSet<string> shards = new HashSet<string>(StringComparer.Ordinal);
         using FileStream stream = File.OpenRead(indexPath);
@@ -161,7 +191,7 @@ internal static class AudioCheckpoints
         }
         foreach (JsonProperty entry in weightMap.EnumerateObject())
         {
-            if (entry.Value.GetString() is { Length: > 0 } shard)
+            if (entry.Value.GetString() is { Length: > 0 } shard && (keyPrefixes is null || HasPrefix(entry.Name, keyPrefixes)))
             {
                 shards.Add(shard);
             }

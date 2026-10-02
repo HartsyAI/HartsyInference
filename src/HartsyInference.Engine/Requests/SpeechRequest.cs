@@ -60,6 +60,12 @@ public sealed record SpeechRequest
     /// <summary>Zonos pitch standard deviation (0-400; 20-45 normal, 60-150 expressive).</summary>
     public double? PitchStd { get; init; }
 
+    /// <summary>AuK instruction. With a reference clip it is the verbatim edit/enhance/separation command; without one it is the voice description that frames <see cref="Text"/>; null/empty with a reference means zero-shot cloning of <see cref="Text"/>.</summary>
+    public string? Instruction { get; init; }
+
+    /// <summary>Output length in seconds, for models that cannot infer it (AuK without a reference clip); null lets the model decide.</summary>
+    public double? DurationSeconds { get; init; }
+
     /// <summary>Sampling seed for reproducibility; 0 leaves it unset.</summary>
     public int Seed { get; init; }
 

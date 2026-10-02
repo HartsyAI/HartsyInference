@@ -68,6 +68,7 @@ internal static class TtsCatalog
         ["zonos"] = ZonosModel.Descriptor,
         ["gptsovits"] = GptSoVitsModel.Descriptor,
         ["zipvoice"] = ZipVoiceModel.Descriptor,
+        ["auk"] = AukModel.Descriptor,
     };
 
     /// <summary>VibeVoice — long-form multi-speaker synthesis (default, 1.5B) or the single-speaker low-latency Realtime-0.5B variant (<c>vibevoice:realtime</c>). Both need a 24 kHz voice reference.</summary>

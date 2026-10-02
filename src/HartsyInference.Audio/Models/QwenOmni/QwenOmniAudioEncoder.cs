@@ -133,6 +133,9 @@ public sealed unsafe class QwenOmniAudioEncoder
         _loaded = true;
     }
 
+    /// <summary>The device-resident weights, for <see cref="IBackend.PreloadWeights"/>/<see cref="IBackend.FreeWeights"/> around a stage.</summary>
+    public IEnumerable<Tensor> EnumerateWeights() => _deviceWeights;
+
     /// <summary>Encodes the first <paramref name="frames"/> columns of <paramref name="mel"/> <c>[NumMelBins, T]</c> to <c>[AudioTokens(frames), OutputDim]</c>; the caller owns the result.</summary>
     public Tensor Forward(IBackend backend, Tensor mel, int frames)
     {
