@@ -101,15 +101,52 @@ public sealed class SpeechService : ISpeechService
     {
         AudioModelSelector selector = AudioModelSelector.Parse(spec);
         TtsModelDescriptor descriptor = TtsCatalog.Resolve(selector.Id);
-        // A descriptor whose weights ARE the voice (Piper ships one .onnx per voice) needs the voice in the
-        // variant, or every voice would share the first-loaded pipeline.
-        string variant = descriptor.VoiceSelectsWeights && IsNamedVoice(voice) ? voice : selector.Variant;
+        string variant = ResolveVariant(selector, descriptor, voice);
         string repo = descriptor.ResolveRepo(variant);
         IBackend backend = _engine.Backend;
         TtsLoadContext loadContext = BuildLoadContext(backend);
         string key = repo + (descriptor.VoiceSelectsWeights ? "|" + variant : "") + loadContext.CacheSuffix();
         IReadOnlyList<IBackend>? stageBackends = loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null;
         return new TtsTarget(descriptor, variant, backend, loadContext, key, stageBackends);
+    }
+
+    /// <summary>Resolves the load variant for a <see cref="TtsModelDescriptor"/>: the real sub-variant the
+    /// caller named -- either via <paramref name="voice"/>, or via <c>":variant"</c> in the request token,
+    /// already captured in <paramref name="selector"/> -- or, for a <see cref="TtsModelDescriptor.VoiceSelectsWeights"/>
+    /// descriptor with neither, the empty string signaling "no real voice; apply your own default."
+    ///
+    /// <para><see cref="AudioModelSelector.Parse"/> falls back to the bare catalog token (e.g. <c>"piper"</c>)
+    /// for <see cref="AudioModelSelector.Variant"/> whenever the request token has no <c>':'</c> -- correct
+    /// for a descriptor that treats a bare id as its own repo/model identifier (see that type's doc), but for
+    /// a <c>VoiceSelectsWeights</c> descriptor that fallback is NOT a voice: Piper's catalog id is
+    /// <c>"piper"</c>, and <c>"piper"</c> is not a file in <c>rhasspy/piper-voices</c>. An unparameterized
+    /// request used to resolve <paramref name="selector"/>'s bare-token <c>Variant</c> straight through as if
+    /// it named a real voice, and the Engine 404'd fetching <c>piper.onnx</c> instead of falling back to
+    /// Piper's own documented default voice.
+    ///
+    /// <para>Detected by comparing <see cref="AudioModelSelector.Variant"/> to <see cref="AudioModelSelector.Id"/>
+    /// rather than against the literal string <c>"piper"</c>, so the same fix covers any other
+    /// <c>VoiceSelectsWeights</c> model with this shape, not just Piper. The empty-string result (not null)
+    /// keeps every existing consumer of this variant -- the cache <c>key</c> above, each descriptor's own
+    /// <c>LoadAsync</c> (already treating empty/<c>"default"</c> as "use my default" where that applies, e.g.
+    /// Piper's), and <see cref="SynthesizerLease"/>'s voice-mismatch check -- working exactly as they did,
+    /// with a type that is never actually a voice instead of one that merely looks like it could be.</para>
+    ///
+    /// <para><c>internal</c> so this exact decision -- not the whole <see cref="ResolveTarget"/>, which needs
+    /// a live <see cref="InferenceEngine"/> for its backend/placement lookups -- has its own fast, pure unit
+    /// tests.</para></summary>
+    internal static string ResolveVariant(AudioModelSelector selector, TtsModelDescriptor descriptor, string? voice)
+    {
+        if (!descriptor.VoiceSelectsWeights)
+        {
+            return selector.Variant;
+        }
+        if (IsNamedVoice(voice))
+        {
+            return voice;
+        }
+        bool bareTokenFallback = string.Equals(selector.Variant, selector.Id, StringComparison.OrdinalIgnoreCase);
+        return bareTokenFallback ? "" : selector.Variant;
     }
 
     /// <summary>Whether <paramref name="voice"/> names a voice rather than the model default; "default" is a placeholder

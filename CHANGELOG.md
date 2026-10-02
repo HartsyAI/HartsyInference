@@ -6,23 +6,24 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
-## alpha.242 (provisional -- renumbered at merge)
-
-- **Dia TTS decode self-attention is GPU-resident; warm generation is ~3.6x faster with bit-identical
-  output.** `DiaAttention.SelfForwardFlash` (gated on `IBackend.FlashDecodeSupported`) replaces the
-  per-step host reshape/RoPE/GQA-repeat/memcpy attention path Dia shared with pre-fix Zonos, mirroring
-  Zonos's own resident decode (`ForwardResident`, `FixedKvCache`). Split-half (NeoX) RoPE is applied via
-  two per-tensor `IBackend.ApplyRopeSingle` calls (q and k separately -- Dia's self-attention is GQA, 16
-  query heads / 4 KV heads, so a shared-shape call corrupts one of them; see the alpha.243 entry below).
-  Verified same seed, same prompt, baseline vs fixed: identical sha256 and duration across 6 reps each;
-  warm median 91.92s -> 25.39s, RTF ~10.9 -> ~3.0. CPU/Vulkan paths are untouched.
-- **Audio regression triage, alpha.183 -> alpha.238: no regression found.** Orpheus, CSM, Qwen3-TTS,
-  Chatterbox and Moonshine (STT) A/B'd on the RTX 4090, same text/voice/seed: all flat to noise, Qwen3-TTS
-  ~24% faster (not chased further). The 176 shared-backend files (Cuda/Core/Gpu) that changed in that
-  window did not slow any of the five models down.
-
 ## Unreleased
 
+- **Fixed an intermittent `CUDA_ERROR_INVALID_VALUE` crash on the first `RmsNorm` call of a prefill.**
+  `GpuTransferHelper.UploadTo` and `State.FreeDevice`'s async-free branch read `State.StreamHandle` directly, with
+  nothing checking that the backend hadn't been retired (zeroing the handle) since the caller resolved that
+  `State` — passing stream `0` into `cuMemcpyHtoDAsync`/`cuMemFreeAsync` is legal CUDA usage but wrong for a
+  destination the stream-ordered pool allocated on the real compute stream. `UploadTo` now resolves the handle once
+  through `State.RequireLiveStream` and throws a clear `ObjectDisposedException` instead of passing zero through;
+  `FreeDevice`, which runs from cleanup paths, logs and skips the stream-ordered free instead of throwing.
+- **Fixed ~144 redundant PCIe re-uploads per LLM forward call (prefill and decode alike), cutting 3060 cache
+  misses from 146/step to the 3 that are actually unavoidable.** `GenericTransformer` builds the RoPE cos/sin
+  table (and, for layer 0, reads the embedding lookup) once per forward call and reuses those host tensors
+  across every layer, but the residency cache only persists a tensor that became some op's OUTPUT — a plain
+  input that misses the cache is uploaded, read, and freed in that call's own cleanup, every single read. Each
+  of the three tensors (cos, sin, embedding) now uploads once via a cheap `Scale(_, _, 1f)` identity op before
+  the layer loop, so all 36-layer rereads hit instead of re-uploading. Under accurate (non-overlapped) timing
+  this is a real, modest TTFT reduction (~4-5%); prefill GEMM time dominates the 3060's TTFT and is unaffected
+  by this fix (a separate efficiency project is being scoped for that).
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
   pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
   `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
@@ -35,6 +36,47 @@ stable release will require. Dates are UTC.
   the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
+- **Fixed: HeartMuLa's quantized GGUF cache ignored `modelsRoot`/`ModelCacheRoot` entirely.** Every other
+  audio model resolves its cache location under `AudioModelCache.CacheRoot` (`modelsRoot/audio` when
+  `EngineKnobs.ModelsRoot` is configured, honoring the `EngineKnobs.ModelCacheRoot` override too).
+  `HeartMulaMusicModel`'s Q8/Q4 on-disk GGUF cache was the one exception, always writing under
+  `~/.cache/hartsyinference/heartmula/` regardless of either knob — so moving model storage (e.g. onto a
+  RAID array, via `ModelsRoot`) silently left HeartMuLa's quantized weights on the OS disk instead.
+
+  `HeartMulaMusicModel.ResolveQuantCachePath` now resolves under the shared audio root
+  (`modelsRoot/audio/music/heartmula/`), falling back to the legacy `~/.cache/hartsyinference/heartmula/`
+  location only when a file already exists there, so an existing install is not silently orphaned.
+- **Dia TTS decode self-attention is GPU-resident; warm generation is ~3.6x faster with bit-identical
+  output.** `DiaAttention.SelfForwardFlash` (gated on `IBackend.FlashDecodeSupported`) replaces the
+  per-step host reshape/RoPE/GQA-repeat/memcpy attention path Dia shared with pre-fix Zonos, mirroring
+  Zonos's own resident decode (`ForwardResident`, `FixedKvCache`). Split-half (NeoX) RoPE is applied via
+  two per-tensor `IBackend.ApplyRopeSingle` calls (q and k separately -- Dia's self-attention is GQA, 16
+  query heads / 4 KV heads, so the combined q+k call corrupted K before #228 fixed it).
+  Verified same seed, same prompt, baseline vs fixed: identical sha256 and duration across 6 reps each;
+  warm median 91.92s -> 25.39s, RTF ~10.9 -> ~3.0. CPU/Vulkan paths are untouched.
+- **Audio regression triage, alpha.183 -> alpha.238: no regression found.** Orpheus, CSM, Qwen3-TTS,
+  Chatterbox and Moonshine (STT) A/B'd on the RTX 4090, same text/voice/seed: all flat to noise, Qwen3-TTS
+  ~24% faster (not chased further). The 176 shared-backend files (Cuda/Core/Gpu) that changed in that
+  window did not slow any of the five models down.
+
+## alpha.240
+
+- **Fixed: an unparameterized Piper request 404'd fetching `piper.onnx`.** `AudioModelSelector.Parse` falls
+  back to the bare catalog token (e.g. `"piper"`) for `Variant` whenever the request token has no `':'` —
+  correct for a descriptor that treats a bare id as its own repo/model identifier, but Piper's weights ARE
+  the voice (one `.onnx` per voice), so that bare token is not a voice at all. `SpeechService.ResolveTarget`
+  used to pass it straight through as the load variant for any `VoiceSelectsWeights` descriptor whenever no
+  separate named voice was given, with no way to tell "the catalog id leaked through" from "the caller
+  genuinely asked for a voice named `piper`" — so a request with no voice and no `:variant` 404'd fetching
+  `rhasspy/piper-voices/piper.onnx` (no such file exists; every real Piper voice lives at
+  `<lang>/<lang_REGION>/<name>/<quality>/<id>.onnx`) instead of falling back to Piper's own default voice.
+
+  Fixed in `SpeechService.ResolveVariant` (extracted from `ResolveTarget`): detects the bare-token-fallback
+  shape by comparing `AudioModelSelector.Variant` against `AudioModelSelector.Id`, not by hardcoding
+  Piper's name, so the fix covers any other `VoiceSelectsWeights` model with this same shape, not just
+  Piper. `AudioModelSelector.Parse` itself and `PiperModel.LoadAsync`'s own `"default"`/empty sentinel check
+  are both unchanged — the first is shared, load-bearing logic for every modality's selector, the second
+  already did the right thing once actually given one of those values.
 
 ## alpha.239
 
