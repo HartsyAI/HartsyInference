@@ -15,17 +15,17 @@ namespace HartsyInference.LLM.Tests;
 /// lands while layer k writes its K/V ends the stream with a Cancelled stop before layer k+1 touches the cache, on the
 /// plain and the layer-split path; nothing is committed or retained; and the next request on the same pipeline matches
 /// a fresh one. A live token that is never cancelled changes no bit of the prefill. CPU backend, synthetic weights.</summary>
-public sealed unsafe class PrefillCancellationTests
+public sealed class PrefillCancellationTests
 {
     private const int Layers = 4;
     private static readonly SamplingOptions Greedy = SamplingOptions.Default with { Greedy = true };
 
     private static uint _rng = 0x9E3779B9u;
     private static uint NextRaw() { _rng ^= _rng << 13; _rng ^= _rng >> 17; _rng ^= _rng << 5; return _rng; }
-    private static Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = ((NextRaw() & 0xFFFF) / 65535f - 0.5f) * 0.2f; return t; }
+    private static unsafe Tensor Fill(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = ((NextRaw() & 0xFFFF) / 65535f - 0.5f) * 0.2f; return t; }
     private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
     private static Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
-    private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); new Span<float>((float*)t.DataPointer, n).Fill(1f); return t; }
+    private static unsafe Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); new Span<float>((float*)t.DataPointer, n).Fill(1f); return t; }
 
     private static TransformerConfig Cfg() => new()
     {
@@ -169,7 +169,7 @@ public sealed unsafe class PrefillCancellationTests
             return [new TextChunk { Kind = TextChunkKind.Result, Text = result.Text }];
         }, token);
 
-    private static uint[] Bits(Tensor t) => new ReadOnlySpan<uint>(t.DataPointer, (int)t.ElementCount).ToArray();
+    private static unsafe uint[] Bits(Tensor t) => new ReadOnlySpan<uint>(t.DataPointer, (int)t.ElementCount).ToArray();
 
     /// <summary>A tiny random-weight model on the CPU backend, driven through <see cref="RecordingModel"/>.</summary>
     private sealed class Fixture : IDisposable
