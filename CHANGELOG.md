@@ -20,6 +20,16 @@ stable release will require. Dates are UTC.
   the CLI and HTTP API do not expose them yet.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
+- **Fixed: HeartMuLa's quantized GGUF cache ignored `modelsRoot`/`ModelCacheRoot` entirely.** Every other
+  audio model resolves its cache location under `AudioModelCache.CacheRoot` (`modelsRoot/audio` when
+  `EngineKnobs.ModelsRoot` is configured, honoring the `EngineKnobs.ModelCacheRoot` override too).
+  `HeartMulaMusicModel`'s Q8/Q4 on-disk GGUF cache was the one exception, always writing under
+  `~/.cache/hartsyinference/heartmula/` regardless of either knob — so moving model storage (e.g. onto a
+  RAID array, via `ModelsRoot`) silently left HeartMuLa's quantized weights on the OS disk instead.
+
+  `HeartMulaMusicModel.ResolveQuantCachePath` now resolves under the shared audio root
+  (`modelsRoot/audio/music/heartmula/`), falling back to the legacy `~/.cache/hartsyinference/heartmula/`
+  location only when a file already exists there, so an existing install is not silently orphaned.
 - **`IBackend.ApplyRope`'s combined q+k overload no longer corrupts K under GQA.** CUDA, Vulkan and the CPU
   default sized K's rotation from Q's head count: harmless while every caller was MHA, an out-of-bounds device
   read/write for a GQA caller (found through Dia's resident decode, #224: 16 query heads, 4 KV heads). All three now
