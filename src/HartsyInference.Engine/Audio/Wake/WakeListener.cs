@@ -96,9 +96,12 @@ public sealed class WakeListener : IDisposable
         // Bytes per sample this connection is sending, from its hello. Two until told otherwise, so a
         // satellite that predates the µ-law option is read exactly as it always was.
         int width = 2;
+        // Declared outside the try so the finally below can identify which codec THIS connection installed,
+        // and only clear session state that is still this connection's.
+        WakeFrameCodec? codec = null;
         try
         {
-            WakeFrameCodec codec = new(stream, _options.MaxPayloadBytes);
+            codec = new WakeFrameCodec(stream, _options.MaxPayloadBytes);
             using CancellationTokenSource connectionCancel = CancellationTokenSource.CreateLinkedTokenSource(cancel);
 
             float[] samples = new float[_options.MaxPayloadBytes / 2];
@@ -137,6 +140,53 @@ public sealed class WakeListener : IDisposable
                             // one is dropped rather than letting them interleave into corrupt audio.
                             Logs.Warning($"[Audio][Wake] Device id '{deviceId}' reconnected from {remote} while another connection was live; dropping the older one. Give each satellite a unique device_id.");
                         }
+                        // A claim belongs to the connection it was made against, not to the device id for all
+                        // time: OnReconnected (right below) resets the ring buffer, the sequence counter and
+                        // the pipeline because this is a new, discontinuous turn, and WakeDeviceClaim.OnFrame's
+                        // contract is continuous audio for one turn. Without this, the stale-disconnect fix
+                        // above makes the claim silently outlive the connection it was made on -- the old
+                        // connection's teardown now correctly does nothing, but nothing else would ever clear
+                        // the claim either, so it would carry over to this new connection's audio with no
+                        // OnDisconnected to tell the host its turn's connection is gone. Ending it here, the
+                        // same way an explicit disconnect does, lets the host notice and decide whether to
+                        // re-claim once detection resumes on this connection.
+                        //
+                        // Taken, and notified, before OnReconnected publishes the new codec, not after -- for
+                        // two separate reasons, not one:
+                        //
+                        // Correctness: a claim installed by another thread's WakeService.Claim call is only
+                        // valid once it has seen session.Codec non-null, so clearing first means any claim this
+                        // Exchange can observe necessarily predates this connection and is safe to end
+                        // unconditionally. Clearing after (the first version of this fix) left a window, a few
+                        // instructions wide, where a claim installed against the brand-new codec right after
+                        // OnReconnected published it could be this Exchange's victim instead -- a spurious
+                        // disconnect for a connection that was never replaced. A narrower residual remains: a
+                        // claim racing in the gap between this block and OnReconnected still attaches to the
+                        // dying old connection and is not re-ended here, so it silently carries over to this
+                        // new connection exactly once more. Closing that would need the codec swap itself gated
+                        // behind this Exchange, which is a bigger change for a window this narrow; accepted.
+                        //
+                        // Visibility: Codec is volatile and this Exchange is a full fence, but a release fence
+                        // only carries writes that happen BEFORE it (in this thread's program order) to a
+                        // thread that acquire-reads the released value -- it says nothing about writes AFTER
+                        // it. A reader polling Codec until it changes, then immediately checking whether
+                        // OnDisconnected ran, needs that invocation to be one of the writes Codec's release
+                        // carries, which only holds if it runs before OnReconnected, not after. A regression
+                        // test polling exactly that way caught this: moving only the Exchange earlier (and
+                        // leaving the invoke after OnReconnected) left it still flaky under full-suite load,
+                        // just less often.
+                        WakeDeviceClaim? staleClaim = Interlocked.Exchange(ref session.Claim, null);
+                        if (staleClaim is not null)
+                        {
+                            try
+                            {
+                                staleClaim.OnDisconnected?.Invoke();
+                            }
+                            catch (Exception ex)
+                            {
+                                Logs.Error($"[Audio][Wake] WakeDeviceClaim.OnDisconnected threw for '{deviceId}' on reconnect.", ex);
+                            }
+                        }
                         session.OnReconnected(codec);
                         Logs.Info($"[Audio][Wake] Device '{deviceId}' connected from {remote} ({string.Join(", ", session.Pipeline.Words)}).");
                         await codec.WriteAsync("hello-ack", $"{{\"words\":[{string.Join(",", session.Pipeline.Words.Select(WakeFrameCodec.Escape))}]}}", connectionCancel.Token).ConfigureAwait(false);
@@ -170,10 +220,43 @@ public sealed class WakeListener : IDisposable
         {
             // The session object stays registered so the device keeps its words and config across the gap;
             // only the transport is torn down. Detection stops because no audio arrives.
-            if (session is not null)
+            //
+            // session is shared across connections for one device id: a reconnect can install a new codec
+            // (WakeSession.OnReconnected, called from this device's NEW connection, on another thread) while
+            // THIS connection is still unwinding here — the "dropping the older one" log above describes
+            // exactly this overlap. Clearing unconditionally would then tear down the new connection's codec,
+            // state and claim out from under it and fire a spurious disconnect for a device that is, in fact,
+            // still connected. The CAS below only clears what THIS connection installed: if session.Codec is
+            // no longer this connection's own codec, a newer one has already taken over and this connection's
+            // teardown must do nothing.
+            if (session is not null && codec is not null && Interlocked.CompareExchange(ref session.Codec, null, codec) == codec)
             {
-                session.Codec = null;
+                // A residual, few-instruction race remains here: a reconnect's OnReconnected can land between
+                // the CompareExchange above and this write, setting State to Listening only for this line to
+                // put it back to Handshake moments later. WakeWorker.Run only reads State to skip a session
+                // that has never completed a handshake, so at worst that reconnect's audio is skipped for one
+                // ~10 ms idle poll before its own next frame corrects it — not the race this guards against.
                 session.State = WakeSessionState.Handshake;
+                WakeDeviceClaim? claim = Interlocked.Exchange(ref session.Claim, null);
+                if (claim is not null)
+                {
+                    try
+                    {
+                        claim.OnDisconnected?.Invoke();
+                    }
+                    catch (Exception ex)
+                    {
+                        // Last statement in the block, so nothing here is skipped by letting it propagate --
+                        // but an unguarded throw at this point would still replace whatever exception (if any)
+                        // unwound the try above, hiding the reason this connection actually ended. Log and
+                        // swallow the host's bug instead.
+                        Logs.Error($"[Audio][Wake] WakeDeviceClaim.OnDisconnected threw for '{session.DeviceId}'.", ex);
+                    }
+                }
+            }
+            else if (session is not null)
+            {
+                Logs.Verbose($"[Audio][Wake] Connection from {remote} ended after a newer connection took over '{session.DeviceId}'; leaving its state alone.");
             }
         }
     }

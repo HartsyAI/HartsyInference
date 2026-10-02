@@ -3,13 +3,16 @@ using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.Dia;
 
 /// <summary>Dia decoder: 9 per-codebook embedding tables (summed) + N pre-norm layers (causal GQA
 /// self-attention with RoPE + cross-attention to the encoder + SwiGLU MLP) + final RMSNorm + a fused
 /// <c>logits_dense</c> head producing all 9 codebooks' logits per step. Encoder K/V are precomputed once
-/// via <see cref="PrecomputeCrossKv"/>; self-attention uses a <see cref="StreamingKvCache"/>.</summary>
+/// via <see cref="PrecomputeCrossKv"/>; self-attention uses an <see cref="IKvCache"/> — a fixed-capacity
+/// device cache (<see cref="FixedKvCache"/>) on a <see cref="IBackend.FlashDecodeSupported"/> backend, else
+/// the host <see cref="StreamingKvCache"/>.</summary>
 public sealed unsafe class DiaDecoder : IDisposable
 {
     private readonly DiaConfig _cfg;
@@ -49,8 +52,12 @@ public sealed unsafe class DiaDecoder : IDisposable
         _sin ??= RotaryEmbedding.GetTables(_cfg.HeadDim, _cfg.RopeTheta, _cfg.MaxAudio).Sin;
     }
 
-    /// <summary>One decode step over the current 9 channel tokens → logits <c>[Channels, AudioVocab]</c>.</summary>
-    public Tensor StepLogits(IBackend backend, ReadOnlySpan<int> channelTokens, int posStart, StreamingKvCache cache)
+    /// <summary>One decode step over the current 9 channel tokens → logits <c>[Channels, AudioVocab]</c>.
+    /// Runs the GPU-resident attention path (<see cref="DiaDecoderLayer.ForwardResident"/>) when
+    /// <paramref name="backend"/> supports it — <paramref name="cache"/> must then be a <see cref="FixedKvCache"/>
+    /// — else the host path (<paramref name="cache"/> must be a <see cref="StreamingKvCache"/>); both are
+    /// numerically equivalent (see <see cref="DiaAttention.SelfForwardFlash"/>).</summary>
+    public Tensor StepLogits(IBackend backend, ReadOnlySpan<int> channelTokens, int posStart, IKvCache cache)
     {
         int dim = _cfg.DecoderDim;
         Tensor x = new(new TensorShape(1, 1, dim), DType.F32);
@@ -61,12 +68,21 @@ public sealed unsafe class DiaDecoder : IDisposable
             for (int i = 0; i < dim; i++) xp[i] += row[i];
         }
 
-        for (int i = 0; i < _layers.Length; i++)
+        bool resident = backend.FlashDecodeSupported;
+        Tensor? cosGpu = null, sinGpu = null;
+        if (resident) (cosGpu, sinGpu) = BuildResidentRopeStep(posStart);
+        try
         {
-            Tensor next = _layers[i].Forward(backend, x, posStart, cache, i, _cos!, _sin!);
-            x.Dispose();
-            x = next;
+            for (int i = 0; i < _layers.Length; i++)
+            {
+                Tensor next = resident
+                    ? _layers[i].ForwardResident(backend, x, posStart, cache, i, cosGpu!, sinGpu!)
+                    : _layers[i].Forward(backend, x, posStart, (StreamingKvCache)cache, i, _cos!, _sin!);
+                x.Dispose();
+                x = next;
+            }
         }
+        finally { cosGpu?.Dispose(); sinGpu?.Dispose(); }
         // Every layer appended its K/V at the shared CurrentLength; advance once per step so the next step's
         // self-attention sees this position (Append does not advance the counter itself).
         cache.AdvanceLength(1);
@@ -78,6 +94,26 @@ public sealed unsafe class DiaDecoder : IDisposable
             _cfg.Channels * _cfg.AudioVocab);
         normed.Dispose();
         return logits;
+    }
+
+    /// <summary>Builds the GPU-resident <c>[1,1,headDim]</c> cos/sin slice for one decode step's absolute
+    /// position, duplicated into both halves to match <see cref="IBackend.ApplyRope"/>'s split-half contract
+    /// (<c>cos[i] == cos[i+half]</c>) — reads the same half-width host table the host path uses via
+    /// <see cref="DiaWeights.RopeSplitHalfInPlace"/>, so both paths rotate by the identical angle.</summary>
+    private unsafe (Tensor cos, Tensor sin) BuildResidentRopeStep(int posStart)
+    {
+        int headDim = _cfg.HeadDim, half = headDim / 2;
+        Tensor cosT = new(new TensorShape(1, 1, headDim), DType.F32);
+        Tensor sinT = new(new TensorShape(1, 1, headDim), DType.F32);
+        float* pc = (float*)cosT.DataPointer;
+        float* ps = (float*)sinT.DataPointer;
+        int row = posStart * half;
+        for (int d = 0; d < half; d++)
+        {
+            pc[d] = pc[d + half] = _cos![row + d];
+            ps[d] = ps[d + half] = _sin![row + d];
+        }
+        return (cosT, sinT);
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -138,6 +174,39 @@ public sealed unsafe class DiaDecoderLayer
         Tensor preSa = new(shape, DType.F32);
         backend.RmsNorm(preSa, x, _preSa!, _cfg.NormEps);
         Tensor sa = _self.SelfForward(backend, preSa, 1, posStart, cache, layerIndex, null, cos, sin);
+        preSa.Dispose();
+        Tensor afterSa = new(shape, DType.F32);
+        backend.Add(afterSa, x, sa); sa.Dispose();
+
+        Tensor preCa = new(shape, DType.F32);
+        backend.RmsNorm(preCa, afterSa, _preCa!, _cfg.NormEps);
+        Tensor ca = _cross.CrossForward(backend, preCa, 1);
+        preCa.Dispose();
+        Tensor afterCa = new(shape, DType.F32);
+        backend.Add(afterCa, afterSa, ca); afterSa.Dispose(); ca.Dispose();
+
+        Tensor preMlp = new(shape, DType.F32);
+        backend.RmsNorm(preMlp, afterCa, _preMlp!, _cfg.NormEps);
+        Tensor mlp = _mlp.Forward(backend, preMlp, 1); preMlp.Dispose();
+        Tensor outT = new(shape, DType.F32);
+        backend.Add(outT, afterCa, mlp); afterCa.Dispose(); mlp.Dispose();
+        return outT;
+    }
+
+    /// <summary>GPU-resident twin of <see cref="Forward"/>: self-attention runs through
+    /// <see cref="DiaAttention.SelfForwardFlash"/> (GPU split-half RoPE, in-place device KV append, GQA-native
+    /// FlashAttention) instead of the host reshape/rope/repeat path. Cross-attention and the MLP are unchanged —
+    /// a small, non-cascading per-layer cost relative to self-attention (same tradeoff Zonos's own resident
+    /// block makes).</summary>
+    public Tensor ForwardResident(IBackend backend, Tensor x, int posStart, IKvCache cache, int layerIndex,
+        Tensor cosGpu, Tensor sinGpu)
+    {
+        int dim = _cfg.DecoderDim;
+        TensorShape shape = new(1, 1, dim);
+
+        Tensor preSa = new(shape, DType.F32);
+        backend.RmsNorm(preSa, x, _preSa!, _cfg.NormEps);
+        Tensor sa = _self.SelfForwardFlash(backend, preSa, 1, posStart, cache, layerIndex, cosGpu, sinGpu);
         preSa.Dispose();
         Tensor afterSa = new(shape, DType.F32);
         backend.Add(afterSa, x, sa); sa.Dispose();

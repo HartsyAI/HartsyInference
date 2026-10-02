@@ -154,6 +154,38 @@ public sealed class CrossBackendOpParityTests(ITestOutputHelper output)
         TensorAssert.Close(actual, expected, because: $"on {kind}");
     }
 
+    /// <summary>The combined q+k overload, with K carrying as many heads as Q (MHA) and fewer (GQA).</summary>
+    [Theory]
+    [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
+    public void ApplyRope_QK_Matches_The_Cpu_For_Mha_And_Gqa(string kind)
+    {
+        if (!BackendGate.TryOpen(kind, _out.WriteLine, out IBackend? gpu))
+        {
+            return;
+        }
+        using IBackend backend = gpu!;
+        using CpuBackend cpu = new();
+
+        const int batch = 2, seqLen = 5, headDim = 8;
+        foreach ((int qHeads, int kHeads) in new[] { (4, 4), (16, 4) })
+        {
+            using Tensor q = Random(new TensorShape(batch, seqLen, qHeads, headDim), seed: 51);
+            using Tensor k = Random(new TensorShape(batch, seqLen, kHeads, headDim), seed: 52);
+            using Tensor qExpected = new(q.Shape, DType.F32);
+            using Tensor kExpected = new(k.Shape, DType.F32);
+            q.AsReadOnlySpan<float>().CopyTo(qExpected.AsSpan<float>());
+            k.AsReadOnlySpan<float>().CopyTo(kExpected.AsSpan<float>());
+            using Tensor cos = Random(new TensorShape(batch, seqLen, headDim), seed: 53);
+            using Tensor sin = Random(new TensorShape(batch, seqLen, headDim), seed: 54);
+
+            backend.ApplyRope(q, k, cos, sin);
+            ((IBackend)cpu).ApplyRope(qExpected, kExpected, cos, sin);
+
+            TensorAssert.Close(q, qExpected, because: $"q on {kind}, {qHeads} q / {kHeads} k heads");
+            TensorAssert.Close(k, kExpected, because: $"k on {kind}, {qHeads} q / {kHeads} k heads");
+        }
+    }
+
     /// <summary>F32 to bfloat16, against the rounding rule the GPU kernels actually implement.</summary>
     /// <remarks>Deliberately NOT compared against <c>CpuBackend</c>. <c>Tensor.CastTo(BF16)</c> truncates — its own
     /// doc says so — while both GPU kernels round to nearest, ties to even, which is what hardware and every other

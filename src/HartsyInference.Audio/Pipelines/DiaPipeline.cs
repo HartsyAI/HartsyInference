@@ -10,6 +10,7 @@ using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
+using HartsyInference.LLM.Transformer;
 using DacModel = HartsyInference.Audio.Models.Codecs.Dac.Dac;
 
 namespace HartsyInference.Audio.Pipelines;
@@ -129,8 +130,8 @@ public sealed unsafe class DiaPipeline : IDisposable
         encCond.Dispose(); encUncond.Dispose();
 
         int cap = Math.Min(_cfg.MaxAudio, maxTokens + maxDelay + 2);
-        using StreamingKvCache cacheC = new(_decCond.NumLayers, 1, _decCond.KvHeads, cap, _decCond.HeadDim);
-        using StreamingKvCache cacheU = new(_decUncond.NumLayers, 1, _decUncond.KvHeads, cap, _decUncond.HeadDim);
+        using IKvCache cacheC = NewCache(backend, _decCond, cap);
+        using IKvCache cacheU = NewCache(backend, _decUncond, cap);
 
         uint rng = DeterministicRng.Seed(seed);
         // Delayed grid; row 0 is the all-BOS prefill.
@@ -262,9 +263,17 @@ public sealed unsafe class DiaPipeline : IDisposable
         return tail;
     }
 
+    /// <summary>Allocates the self-attention KV cache backing that matches the backend: a fixed-capacity
+    /// device cache (<see cref="FixedKvCache"/>, in-place GPU append) when flash-decode is supported, else the
+    /// host <see cref="StreamingKvCache"/> — mirrors <c>ZonosPipeline.NewCache</c>.</summary>
+    private static IKvCache NewCache(IBackend backend, DiaDecoder decoder, int maxSeq) =>
+        backend.FlashDecodeSupported
+            ? new FixedKvCache(decoder.NumLayers, 1, decoder.KvHeads, decoder.HeadDim, maxSeq)
+            : new StreamingKvCache(decoder.NumLayers, 1, decoder.KvHeads, maxSeq, decoder.HeadDim);
+
     /// <summary>Steps both CFG branches and returns per-channel (conditional, CFG-combined) logits.</summary>
     private (float[][] Cond, float[][] Guided) StepCfg(IBackend backend, ReadOnlySpan<int> frame, int posStart,
-        StreamingKvCache cacheC, StreamingKvCache cacheU)
+        IKvCache cacheC, IKvCache cacheU)
     {
         Tensor lc = _decCond.StepLogits(backend, frame, posStart, cacheC);
         Tensor lu = _decUncond.StepLogits(backend, frame, posStart, cacheU);

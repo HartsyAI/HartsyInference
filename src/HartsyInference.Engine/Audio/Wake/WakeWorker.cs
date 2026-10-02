@@ -53,6 +53,9 @@ public sealed class WakeWorker : IDisposable
     {
         float[] buffer = new float[DrainBufferSamples];
         float[] denoised = new float[DrainBufferSamples + DenoiseSlackSamples];
+        // Only filled, and only converted to [-1, 1] scale, for a claimed device's frames -- an unclaimed one
+        // never touches this, so it costs nothing beyond its own allocation for the common case.
+        float[] normalized = new float[DrainBufferSamples + DenoiseSlackSamples];
         List<WakeDetection> detections = [];
         // Private to this thread: the shared audio runtime serializes on one generation lock, and an 80 ms
         // cadence would hold it often enough to starve every other request on the engine.
@@ -80,32 +83,71 @@ public sealed class WakeWorker : IDisposable
                     if (read == 0) continue;
                     didWork = true;
 
+                    // Snapshotted once per device per iteration: a claim or release landing mid-iteration is
+                    // fine either way (this frame goes wherever the snapshot says, the next one sees whatever
+                    // is current then), and the worker must never block waiting for a host that is slow to
+                    // claim or release.
+                    WakeDeviceClaim? claim = session.Claim;
                     try
                     {
-                        // Denoise before scoring, and only for scoring: the session's capture buffer keeps the
-                        // raw audio, so transcription and speaker identification still see what the microphone
-                        // actually heard. The denoiser holds audio back while it fills, so `scored` is not
-                        // `read` and the pipeline must be given the returned count.
-                        ReadOnlySpan<float> toScore;
-                        if (session.Denoiser is null) toScore = buffer.AsSpan(0, read);
+                        // Denoise before scoring (or before handing off to a claim), and only for that: the
+                        // session's capture buffer keeps the raw audio, so transcription and speaker
+                        // identification still see what the microphone actually heard. The denoiser holds
+                        // audio back while it fills, so `processed` is not `read` and the pipeline (or the
+                        // claim) must be given the returned count.
+                        ReadOnlySpan<float> toProcess;
+                        if (session.Denoiser is null) toProcess = buffer.AsSpan(0, read);
                         else
                         {
-                            int scored = session.Denoiser.Process(backend, buffer.AsSpan(0, read), denoised);
-                            toScore = denoised.AsSpan(0, scored);
+                            int processed = session.Denoiser.Process(backend, buffer.AsSpan(0, read), denoised);
+                            toProcess = denoised.AsSpan(0, processed);
                         }
-                        if (!toScore.IsEmpty)
+                        // Pipeline.Push clears `detections` itself before adding its own results, but the
+                        // claimed branch below never calls it -- without an explicit clear here, a claimed
+                        // device's iteration would still see whatever an earlier, unclaimed device's Push left
+                        // in the shared list this loop reuses across every session, and dispatch a detection
+                        // that belongs to a different device entirely.
+                        detections.Clear();
+                        if (!toProcess.IsEmpty)
                         {
-                            session.Pipeline.Push(backend, toScore, detections);
-                            StepsProcessed += toScore.Length / WakeDetectionPipeline.ChunkSamples;
-                            // End-of-speech runs on the denoised audio for the same reason scoring does: it is
-                            // deciding whether a person is talking, and room noise is exactly what would keep
-                            // it from ever hearing the pause.
-                            session.PushVad(backend, toScore);
+                            if (claim is not null)
+                            {
+                                // A host session owns this device's turns now: hand it the audio instead of
+                                // scoring or end-of-speech-tracking it. The wake path carries int16-scaled
+                                // audio internally (see PushVad's own division below); every other audio
+                                // consumer in the codebase expects [-1, 1], so this boundary converts once
+                                // rather than leaking the internal scale to a claim's own caller.
+                                for (int i = 0; i < toProcess.Length; i++) normalized[i] = toProcess[i] / 32768f;
+                                try
+                                {
+                                    claim.OnFrame(normalized.AsSpan(0, toProcess.Length));
+                                }
+                                catch (Exception ex)
+                                {
+                                    // Caught separately from the outer catch below: a throwing OnFrame is the
+                                    // host's bug, not this device's audio state, so resetting the pipeline,
+                                    // denoiser and VAD here would be pointless (a claimed device never reads
+                                    // them) and a host that throws persistently would otherwise log a reset
+                                    // error roughly every 80 ms.
+                                    Logs.Error($"[Audio][Wake] WakeDeviceClaim.OnFrame threw for '{session.DeviceId}'.", ex);
+                                }
+                            }
+                            else
+                            {
+                                session.Pipeline.Push(backend, toProcess, detections);
+                                StepsProcessed += toProcess.Length / WakeDetectionPipeline.ChunkSamples;
+                                // End-of-speech runs on the denoised audio for the same reason scoring does: it
+                                // is deciding whether a person is talking, and room noise is exactly what would
+                                // keep it from ever hearing the pause.
+                                session.PushVad(backend, toProcess);
+                            }
                         }
                     }
                     catch (Exception ex)
                     {
-                        // One device's bad state must not take the loop down for every other device.
+                        // One device's bad state must not take the loop down for every other device. Resetting
+                        // the pipeline/denoiser/VAD here is harmless even for a claimed device that never uses
+                        // them while claimed: it only clears state nothing is currently reading.
                         Logs.Error($"[Audio][Wake] Detection failed for device '{session.DeviceId}'; resetting it.", ex);
                         session.Pipeline.Reset();
                         session.Denoiser?.Reset();
