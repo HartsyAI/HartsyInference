@@ -3,6 +3,7 @@ using System.Runtime.ExceptionServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Memory;
+using HartsyInference.Core.Numerics;
 
 namespace HartsyInference.Core.Tensors;
 
@@ -566,40 +567,14 @@ public sealed unsafe class Tensor : IDisposable
             "host-staged otherwise), or CopyTo for host<->device moves within one backend.");
     }
 
-    /// <summary>Element count at or above which elementwise dtype conversion is split across cores. Checkpoint load runs thousands of tiny casts (biases, norms, scalars) where the <see cref="Parallel.For"/> dispatch — measured at 22µs for 16 chunks on a 16-core box — costs more than the whole conversion. At 2^20 even the cheapest conversion here (BF16→F32) is ~500µs serial, so the dispatch is under 5% and the win is 4-6×; below the threshold the code path is byte-for-byte the pre-existing serial loop.</summary>
+    /// <summary>Element count at or above which elementwise dtype conversion is split across cores. Checkpoint load runs thousands of tiny casts (biases, norms, scalars) where the fan-out dispatch — measured at 22µs for 16 chunks on a 16-core box — costs more than the whole conversion. At 2^20 even the cheapest conversion here (BF16→F32) is ~500µs serial, so the dispatch is under 5% and the win is 4-6×; below the threshold the code path is byte-for-byte the pre-existing serial loop.</summary>
     private const long ParallelCastMinElements = 1L << 20;
 
-    /// <summary>Minimum elements per chunk, so a barely-over-threshold cast fans out to a few fat slices rather than <see cref="Environment.ProcessorCount"/> slivers that cost more to dispatch than to run.</summary>
+    /// <summary>Elements per range of a split cast, so a barely-over-threshold cast fans out to a few fat ranges rather than slivers that cost more to dispatch than to run.</summary>
+    /// <remarks>Every elementwise conversion below is a pure <c>dst[i] = f(src[i])</c> with no loop-carried state, so the
+    /// ranges <see cref="CpuParallel.ForRanges(long, long, long, Action{long, long})"/> cuts produce bit-identical output
+    /// to the serial loop, at any cap.</remarks>
     private const long ParallelCastChunkElements = 1L << 18;
-
-    /// <summary>Splits <paramref name="count"/> elements into per-core chunks and invokes <paramref name="body"/>(start, length) on each.</summary>
-    /// <remarks>Every elementwise conversion below is a pure <c>dst[i] = f(src[i])</c> with no loop-carried state, so
-    /// chunking produces bit-identical output to the serial loop. The <see cref="AggregateException"/> unwrap preserves the
-    /// serial contract that an unsupported dtype pair surfaces as <c>HartsyInferenceException</c>.</remarks>
-    private static void ParallelChunks(long count, Action<long, long> body)
-    {
-        int chunks = (int)Math.Min(Environment.ProcessorCount, Math.Max(1L, count / ParallelCastChunkElements));
-        if (chunks <= 1)
-        {
-            body(0, count);
-            return;
-        }
-        long perChunk = (count + chunks - 1) / chunks;
-        try
-        {
-            Parallel.For(0, chunks, c =>
-            {
-                long start = c * perChunk;
-                long length = Math.Min(perChunk, count - start);
-                if (length > 0)
-                    body(start, length);
-            });
-        }
-        catch (AggregateException ex) when (ex.InnerException is not null)
-        {
-            ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
-        }
-    }
 
     /// <summary>Creates a copy cast to the specified dtype. Quantized types require GgufDequantizer.</summary>
     public Tensor CastTo(DType targetDtype)
@@ -631,7 +606,7 @@ public sealed unsafe class Tensor : IDisposable
                 DType from = DType, to = targetDtype;
                 nint srcBase = (nint)ptr, dstBase = (nint)dst;
                 long srcStride = from.SizeInBytes, dstStride = to.SizeInBytes;
-                ParallelChunks(count, (start, length) => ConvertRange(from, to,
+                CpuParallel.ForRanges(count, ParallelCastChunkElements, 1, (start, length) => ConvertRange(from, to,
                     (void*)(srcBase + (nint)(start * srcStride)), (void*)(dstBase + (nint)(start * dstStride)), length, fp8Scale));
             }
             else
@@ -784,7 +759,7 @@ public sealed unsafe class Tensor : IDisposable
             nint srcBase = (nint)DataPointer, dstBase = (nint)result.DataPointer;
             if (count >= ParallelCastMinElements)
             {
-                ParallelChunks(count, (start, length) =>
+                CpuParallel.ForRanges(count, ParallelCastChunkElements, 1, (start, length) =>
                     DequantFp8E4M3ScaledToF16Range((byte*)(srcBase + (nint)start), (Half*)(dstBase + (nint)(start * 2)), length, scale));
             }
             else

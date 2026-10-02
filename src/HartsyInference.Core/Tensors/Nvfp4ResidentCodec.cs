@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using HartsyInference.Core.Numerics;
 
 namespace HartsyInference.Core.Tensors;
 
@@ -87,7 +88,7 @@ public static unsafe class Nvfp4ResidentCodec
         int bytesPerGroup = GroupSize / 2;
         long inDim = inHalf * 2;
 
-        Parallel.For(0, (int)outDim, r =>
+        CpuParallel.For((int)outDim, outDim * inDim * 4, r =>
         {
             byte* wr = w + (long)r * inHalf;
             ushort* dr = dst + (long)r * inDim;
