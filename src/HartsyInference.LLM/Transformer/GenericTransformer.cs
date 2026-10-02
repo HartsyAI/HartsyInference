@@ -9,6 +9,10 @@ namespace HartsyInference.LLM.Transformer;
 /// <remarks>Built for full GPU residency: every op is an <see cref="IBackend"/> call, no activation is read on the host mid-forward, weights are the raw loaded tensors (stable references) handed to <see cref="IBackend.PreloadWeights"/> so each uploads once and every projection hits the weight cache, and K/V grow on-device via <see cref="KvCache"/>. Validated against the per-family reference decoders. Scope: batch = 1, F32, pre-norm + SwiGLU + causal attention.</remarks>
 public sealed unsafe class GenericTransformer : IDisposable
 {
+    /// <summary>Layers a cancellable forward lets the device have in flight: two keeps the next layer queued behind the
+    /// running one, so the bound costs no device time, while a stop leaves at most that much to drain.</summary>
+    private const int RunAheadLayers = 2;
+
     private readonly TransformerConfig _cfg;
     private readonly Layer[] _layers;
     private Tensor? _embed;
@@ -385,7 +389,7 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Embedding-in path: runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack) and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/> is true.</summary>
     /// <remarks>The cache advances once per call (after the layers run) UNLESS <paramref name="advanceCache"/> is false: a staged (layer-split) driver calls this once per stage over ONE shared cache, and only the final stage may advance, or the write cursor moves stages× per token. <paramref name="tokenIds"/> is required when <see cref="TransformerConfig.PerLayerEmbeddingDim"/> is set (Gemma-4), whose per-layer embedding mixing needs the actual token ids, not just their embedding — every other architecture ignores it.
-    /// <para><paramref name="cancel"/> is checked before the call starts and before every layer, so a long prefill stops at the next layer boundary with <see cref="OperationCanceledException"/>. The math and kernel shapes are those of an uncancelled call. A stopped call commits nothing: the cache length is not advanced, and the K/V rows the finished layers wrote past it are never read (attention takes the valid length explicitly) and are overwritten by the next call.</para></remarks>
+    /// <para><paramref name="cancel"/> is checked before the call starts and before every layer, so a long prefill stops at the next layer boundary with <see cref="OperationCanceledException"/>. While the token can be cancelled, the host also stays at most <see cref="RunAheadLayers"/> layers ahead of the device (<see cref="DeviceRunAhead"/>): an asynchronous backend would otherwise have queued the whole forward before a late cancel lands, leaving it all to run. The math and kernel shapes are those of an uncancelled call. A stopped call commits nothing: the cache length is not advanced, and the K/V rows the finished layers wrote past it are never read (attention takes the valid length explicitly) and are overwritten by the next call.</para></remarks>
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
         bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null, Tensor? crossStates = null,
         int crossLen = 0, ReadOnlySpan<int> tokenIds = default, bool advanceCache = true, CancellationToken cancel = default)
@@ -468,12 +472,18 @@ public sealed unsafe class GenericTransformer : IDisposable
             perLayerInputs = ComputePerLayerInputs(backend, embeds, tokenIds, t);
         }
 
+        DeviceRunAhead runAhead = new(backend, stackalloc nint[RunAheadLayers], cancel.CanBeCanceled);
         try
         {
             Tensor hidden = work;
             bool ownsHidden = ownsWork;
             for (int i = startLayer; i < last; i++)
             {
+                if (cancel.IsCancellationRequested)
+                {
+                    StopBetweenLayers(cancel, hidden, ownsHidden, perLayerInputs, i);
+                }
+                runAhead.BeforeStep();
                 if (cancel.IsCancellationRequested)
                 {
                     StopBetweenLayers(cancel, hidden, ownsHidden, perLayerInputs, i);
@@ -495,6 +505,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                         ? _layers[i].MlaForward(backend, hidden, t, posStart, cache, i, cos, sin)
                         : _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls, perLayerInputs?[i]);
                 }
+                runAhead.AfterStep();
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
                 ownsHidden = true;
@@ -526,6 +537,7 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
         finally
         {
+            runAhead.Dispose();
             cos.Dispose();
             sin.Dispose();
             cosLocal?.Dispose();
