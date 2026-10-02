@@ -44,15 +44,14 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
     private bool _loaded;
     private int _disposed;
 
-    /// <summary>Cached fits-resident decision, indexed by <c>hasAudio ? 1 : 0</c> (the audio tower and VAE encoder
-    /// only count toward the required bytes when a reference clip is given). Measured once per configuration and
-    /// reused rather than re-querying <see cref="IBackend.GetVramInfo"/> on every call: once this pipeline's own
-    /// stages are resident, the free bytes that query reports no longer reflect what's actually available to OTHER
-    /// work, so a live re-check would see "only free_before - mine" and flip back to evicting, undoing the whole
-    /// point. If something else later needs the VRAM this pipeline is sitting on, the engine's cross-model eviction
-    /// (<c>AudioRuntime</c>) reclaims it by evicting the pipeline wholesale, same as it already does for any other
-    /// resident model, not by second-guessing this per-call.</summary>
-    private readonly bool?[] _residentFits = new bool?[2];
+    /// <summary>Bytes this pipeline itself currently holds resident on the device (0 when nothing is kept warm
+    /// between stages). Re-added to the live free-VRAM reading in <see cref="FitsResident"/> so the check reflects
+    /// what is actually available rather than being confounded by this pipeline's own prior allocation — a plain
+    /// re-read of <see cref="IBackend.GetVramInfo"/> after going resident would see "only free_before - mine" and
+    /// flip straight back to evicting. Tracking it instead of caching the decision outright keeps this responsive
+    /// to real external pressure (another engine's pipeline consuming VRAM in the meantime still lowers the live
+    /// reading and can correctly flip this back to sequential).</summary>
+    private long _residentBytes;
 
     /// <inheritdoc/>
     public string ModelName { get; }
@@ -142,7 +141,7 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         // next one too. Downgrading to "preload everything, free nothing" when there is clearly enough free VRAM
         // turns a full host->device re-upload of every stage (tower, thinker, DiT, VAE) into a one-time cost for
         // back-to-back calls on the same pipeline, which is the common case once a model is warm.
-        bool sequential = opts.SequentialResidency && !FitsResidentCached(backend, hasAudio);
+        bool sequential = opts.SequentialResidency && !FitsResident(backend, hasAudio);
 
         using Tensor text = EncodeConditioning(backend, instruction, audio16k, sequential, cancel);
         cancel.ThrowIfCancellationRequested();
@@ -235,27 +234,21 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
             () => encoder.Encode(backend, pcm, unchecked(opts.Seed + 1)));
     }
 
-    /// <summary>True when the device had enough free VRAM, the FIRST time this pipeline asked for this
-    /// <paramref name="hasAudio"/> configuration, to hold every stage that configuration touches resident at once.
-    /// Cached in <see cref="_residentFits"/> after that: once this pipeline's own stages are preloaded, free VRAM
-    /// drops by however much THEY now hold, and re-measuring would read that as "no longer fits" purely because of
-    /// this pipeline's own resident weights, flipping it back to evicting every other call. See the field's own
-    /// remarks for why a live re-check is the wrong fix.</summary>
-    private bool FitsResidentCached(IBackend backend, bool hasAudio)
+    /// <summary>True when the device has enough free VRAM, once this pipeline's own already-resident bytes are
+    /// added back in, to hold every stage this <paramref name="hasAudio"/> configuration touches resident at once.
+    /// Re-evaluated every call (see <see cref="_residentBytes"/> for why that stays correct instead of flip-flopping)
+    /// so a genuine drop in external free VRAM — another pipeline loading on the same device — still downgrades to
+    /// sequential instead of an indefinitely stale "yes".</summary>
+    private bool FitsResident(IBackend backend, bool hasAudio)
     {
-        int index = hasAudio ? 1 : 0;
-        if (_residentFits[index] is bool cached)
-        {
-            return cached;
-        }
         (long freeBytes, long totalBytes) = backend.GetVramInfo();
         long bytes = WeightBytes(_lm.EnumerateWeights()) + WeightBytes(_dit.EnumerateWeights()) + WeightBytes(_vae.EnumerateWeights());
         if (hasAudio)
         {
             bytes += WeightBytes(_tower.EnumerateWeights()) + WeightBytes(_vaeEncoder!.EnumerateWeights());
         }
-        bool fits = ResidentWithinBudget(freeBytes, totalBytes, bytes);
-        _residentFits[index] = fits;
+        bool fits = ResidentWithinBudget(freeBytes + _residentBytes, totalBytes, bytes);
+        _residentBytes = fits ? bytes : 0;
         return fits;
     }
 

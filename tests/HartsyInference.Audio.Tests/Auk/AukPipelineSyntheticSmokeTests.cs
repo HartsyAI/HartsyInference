@@ -178,6 +178,37 @@ public sealed class AukPipelineSyntheticSmokeTests : IDisposable
     public void ResidentWithinBudget_ComparesFreeAgainstRequiredPlusAThird(long free, long total, long required, bool expected)
         => Assert.Equal(expected, AukPipeline.ResidentWithinBudget(free, total, required));
 
+    /// <summary>Simulates AukPipeline.FitsResident's effectiveFree = freeBytes + residentBytes pattern across a
+    /// call sequence, standing in for the live device (no backend needed since the formula itself is pure). Two
+    /// properties a naive "re-read GetVramInfo every call" check gets wrong: going resident must not immediately
+    /// look like it no longer fits just because the preload it caused shows up as less free device memory (that
+    /// would evict every other call, exactly what going resident is meant to avoid), and a real drop in free VRAM
+    /// from something else entirely must still be able to flip it back.</summary>
+    [Fact]
+    public void FitsResidentFormula_StaysStableOnOwnFootprint_ButReactsToExternalPressure()
+    {
+        const long total = 10_000;
+        const long required = 900; // margin threshold: 900 + 900/3 = 1200
+        long deviceFree = 2_000;
+        long residentBytes = 0;
+
+        bool fits1 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.True(fits1);
+        residentBytes = required; // the pipeline preloads and keeps `required` bytes resident
+        deviceFree -= required; // which the device now reports as used
+
+        // Call 2: a plain re-read of deviceFree (1100) would be below the 1200 margin and flip to sequential.
+        // effectiveFree adds the pipeline's own footprint back, so it reads as unchanged from call 1.
+        bool fits2 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.True(fits2);
+        residentBytes = required;
+
+        // Something unrelated now consumes real device VRAM (another engine's pipeline, not this one).
+        deviceFree -= 1_000;
+        bool fits3 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.False(fits3); // must still catch genuine external pressure, not stay stuck on the old "true"
+    }
+
     [Fact]
     public void WeightBytes_SumsElementCountTimesDtypeSize()
     {
