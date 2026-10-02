@@ -25,6 +25,9 @@ internal sealed class FakeSpeech(int sampleRate = 24_000) : IVoiceSpeech
     /// <summary>Managed thread ids of every call.</summary>
     public ConcurrentQueue<int> Threads { get; } = new();
 
+    /// <summary>The token each synthesis was handed, in order.</summary>
+    public ConcurrentQueue<CancellationToken> SynthesisTokens { get; } = new();
+
     /// <summary>When set, synthesis waits for it, so a test controls how fast replies are produced.</summary>
     public ManualResetEventSlim? HoldSynthesis { get; init; }
 
@@ -50,7 +53,7 @@ internal sealed class FakeSpeech(int sampleRate = 24_000) : IVoiceSpeech
         return Transcripts.TryDequeue(out string? text) ? text : "";
     }
 
-    public float[] Synthesize(string text)
+    public float[] Synthesize(string text, CancellationToken cancel)
     {
         ThrowIfRevoked();
         if (!text.Any(char.IsLetterOrDigit))
@@ -59,6 +62,7 @@ internal sealed class FakeSpeech(int sampleRate = 24_000) : IVoiceSpeech
             throw new InvalidOperationException("The text-to-speech model produced no audio.");
         }
         Threads.Enqueue(Environment.CurrentManagedThreadId);
+        SynthesisTokens.Enqueue(cancel);
         HoldSynthesis?.Wait(TimeSpan.FromSeconds(30));
         Synthesized.Enqueue(text);
         float[] samples = new float[SamplesPerSentence];

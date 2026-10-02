@@ -28,9 +28,13 @@ internal sealed class SynthesizerLease : AudioRunnerLease, ISynthesizerLease
     public int SampleRate { get; }
 
     /// <inheritdoc/>
-    public float[] Synthesize(string text, SpeechRequest options)
+    public float[] Synthesize(string text, SpeechRequest options) => Synthesize(text, options, CancellationToken.None);
+
+    /// <inheritdoc/>
+    public float[] Synthesize(string text, SpeechRequest options, CancellationToken cancel)
     {
         ThrowIfClosed();
+        cancel.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(text))
         {
             throw new ArgumentException("No text supplied to synthesize.", nameof(text));
@@ -46,7 +50,7 @@ internal sealed class SynthesizerLease : AudioRunnerLease, ISynthesizerLease
         (float[]? referenceMono, string? referenceWavPath) = SpeechService.MaterializeReference(options.Reference);
         try
         {
-            TtsJob job = SpeechService.BuildJob(text, options, referenceMono, referenceWavPath);
+            TtsJob job = SpeechService.BuildJob(text, options, referenceMono, referenceWavPath, cancel);
             float[] samples;
             lock (CallLock)
             {

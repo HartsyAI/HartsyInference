@@ -64,7 +64,7 @@ internal sealed class VoiceLeaseSpeech : IVoiceSpeech
 
     public string Transcribe(float[] audio) => Transcriber.Transcribe(audio, VoiceAudioFrontend.SampleRate, _recognition);
 
-    public float[] Synthesize(string text) => Synthesizer.Synthesize(text, _speech);
+    public float[] Synthesize(string text, CancellationToken cancel) => Synthesizer.Synthesize(text, _speech, cancel);
 
     public void Reopen()
     {
