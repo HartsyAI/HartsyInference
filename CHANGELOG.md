@@ -21,7 +21,7 @@ stable release will require. Dates are UTC.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
 
-## PLACEHOLDER_VERSION_2
+## alpha.241
 
 - **Voice LLM VRAM, round 2: redundant weight-split preload.** `TextService.LoadInto`'s single-device weight
   upload called `GenericTransformer.EnumerateWeights()` with its default (`includeRedundantSplits: true`),
@@ -38,15 +38,15 @@ stable release will require. Dates are UTC.
   `VoiceAgentOptions.PreloadRedundantWeightSplits` defaults to `false` and is wired through warm-up, the
   call's priming request and every turn, identically to `CacheWeightCasts`.
 - **Voice gate, re-measured on real weights (Qwen3-4B-Q4_K_M/4090, same 10-turn real-tool-set call as
-  alpha.239):** every latency budget still holds — `voice.llm.ttft_ms` 85.7-105.4 ms (gate ≤ 150 ms),
+  alpha.240):** every latency budget still holds — `voice.llm.ttft_ms` 85.7-105.4 ms (gate ≤ 150 ms),
   `voice.llm.first_sentence_ms` 139.1-158.1 ms (gate ≤ 200 ms), `voice.turn.total_ms` 1095.8-1225.1 ms
   (gate ≤ 1300 ms), decode 89-102 tok/s (unchanged within noise — decode always reads the fused tensors
   regardless of whether the split originals are also resident). VRAM: primed and flat for all ten turns at
   **5.81 GB, now under the ≤ 6 GB target** (down from ~7.27 GB before this change, ~13.8 GB before
-  `CacheWeightCasts=false`). Both VRAM levers from alpha.239 (a smaller `PrefixCacheCapacityHint`;
+  `CacheWeightCasts=false`). Both VRAM levers from alpha.240 (a smaller `PrefixCacheCapacityHint`;
   `vram.kvF16`) remain unused.
 
-## PLACEHOLDER_VERSION_1
+## alpha.240
 
 - **Opt-in prefix-KV reuse for `TextGenerationPipeline`.** A new `Generate` overload takes a `RetainedSequence`
   (`HartsyInference.LLM.Generation`): it reuses the longest common token-id prefix between the retained cache and
