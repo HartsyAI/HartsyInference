@@ -133,9 +133,10 @@ internal static unsafe class GpuTransferHelper
         /// enforces that for an ordinary op the way <see cref="TryEnterCallback"/> does for finalizer callbacks. A
         /// zero handle passed to <c>cuMemcpyHtoDAsync</c>/<c>cuMemFreeAsync</c> silently targets the legacy default
         /// stream instead of this backend's compute stream — valid as a driver call, wrong for a destination the
-        /// stream-ordered pool allocated elsewhere, and the source of an intermittent
-        /// <c>CUDA_ERROR_INVALID_VALUE</c> that looked like upload/free corruption rather than a torn-down backend.
-        /// Throwing a typed, actionable exception here instead is strictly safer than letting the driver call run.</remarks>
+        /// stream-ordered pool allocated elsewhere, and a plausible (not confirmed — see PR #221's "known gap")
+        /// cause of an intermittent <c>CUDA_ERROR_INVALID_VALUE</c> that looked like upload/free corruption rather
+        /// than a torn-down backend. Throwing a typed, actionable exception here instead is strictly safer than
+        /// letting the driver call run either way.</remarks>
         internal nint RequireLiveStream(string opName)
         {
             nint stream = StreamHandle;
@@ -284,7 +285,21 @@ internal static unsafe class GpuTransferHelper
                 CudaMemory.Free(buffer);
                 return;
             }
-            CudaMemory.FreeAsync(buffer, RequireLiveStream("a stream-ordered free"), this);
+            // Unlike UploadTo (where a retired stream is caught before any side effect runs), this can run from
+            // a Dispose or finally path cleaning up after a DIFFERENT exception — throwing here would replace
+            // that exception and can abort the rest of that cleanup partway. A retired stream means the backend
+            // is already being torn down and this pool allocation is going away with it regardless, so skip the
+            // stream-ordered free and log rather than throw: a leaked pool block the teardown is about to
+            // reclaim anyway is strictly safer than masking whatever the caller was already handling.
+            nint stream = StreamHandle;
+            if (stream == 0)
+            {
+                Logs.Warning($"[Cuda] Skipped a stream-ordered free of {bytes} byte(s): this backend's stream was "
+                    + "already retired. The buffer is not freed here — the pool/context teardown that retired "
+                    + "the stream owns it now.");
+                return;
+            }
+            CudaMemory.FreeAsync(buffer, stream, this);
         }
 
         protected override void Upload(ulong destination, Tensor source, long bytes) =>

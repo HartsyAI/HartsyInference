@@ -425,9 +425,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         // tensor, twice, vs. 36 layers × ~4), but it is the exact RmsNorm → GpuTransferHelper.UploadTo frame
         // that read a retired StreamHandle. `ownsWork` becomes unconditionally true here: we now own this
         // buffer regardless of whether `work` was the caller's `embeds` or BLOOM's fresh LayerNorm output, and
-        // the caller's own `embeds` is never disposed.
-        Tensor residentWork = new(work.Shape, DType.F32);
-        backend.Scale(residentWork, work, 1f);
+        // the caller's own `embeds` is never disposed (MakeResident never touches `source`'s disposal).
+        Tensor residentWork = MakeResident(backend, work);
         if (ownsWork) work.Dispose();
         work = residentWork;
         ownsWork = true;
@@ -483,7 +482,11 @@ public sealed unsafe class GenericTransformer : IDisposable
             }
             if (!ownsHidden)
             {
-                // No layers ran (or range empty): return an owned copy so the caller never shares the input.
+                // Unreachable since the residency fix above: `ownsHidden` starts at `ownsWork`, which is now
+                // unconditionally true before this `try` even begins (see the MakeResident call above), and the
+                // loop only ever sets it to true too. Left as a defensive fallback rather than deleted — reviewed
+                // and confirmed dead for both the populated-range and empty-range (startLayer == last) cases, not
+                // relied on by either.
                 Tensor copy = new(embeds.Shape, DType.F32);
                 backend.CopyTo(copy, embeds);
                 return copy;
@@ -775,9 +778,9 @@ public sealed unsafe class GenericTransformer : IDisposable
         {
             // Same uncached-input bug as the RoPE tables: layer 0 would otherwise read the caller's `embeds`
             // twice (norm input, then residual add) before anything binds it as a cached activation. Make our
-            // OWN resident copy and run the loop on that — `embeds` is the caller's and is never disposed here.
-            Tensor hidden = new(embeds.Shape, DType.F32);
-            backend.Scale(hidden, embeds, 1f);
+            // OWN resident copy and run the loop on that — `embeds` is the caller's and is never disposed here
+            // (MakeResident never touches `source`'s disposal, so this is safe even though `embeds` is borrowed).
+            Tensor hidden = MakeResident(backend, embeds);
             bool ownsHidden = true;
             for (int i = 0; i < _layers.Length; i++)
             {
@@ -893,27 +896,55 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     /// <summary>Uploads a host-built RoPE table once and returns a GPU-resident replacement, so every layer's
-    /// <see cref="IBackend.ApplyRopeSingle"/>/<see cref="IBackend.ApplyRopeInterleaved"/> read of it hits the
-    /// activation cache instead of re-uploading over PCIe. Needed because <see cref="GpuResidencyCache{TBuffer}.CopyToDevice"/>
-    /// only persists a tensor that was bound as SOME op's output — a plain input that misses is uploaded, used,
-    /// and freed in that op's own <c>finally</c>, every single read. <paramref name="cos"/>/<paramref name="sin"/>
-    /// are the SAME two host objects read by every layer this forward call touches (built once above, loop-
-    /// invariant across the layer loop), so an uncached miss here is not one-off — it is ~4 reads/layer × every
-    /// layer, every forward call (prefill AND decode alike), which is exactly what made the 3060 TTFT fix
-    /// necessary (see PR #221 / the residency investigation: this one table pair was ~144 of ~146 PCIe uploads
-    /// recorded per decode step before this fix). <c>Scale(_, _, 1f)</c> is a cheap, backend-agnostic identity op
-    /// whose only purpose here is the ordinary CacheActivation side effect every op's output already gets — no
-    /// new backend API, and no change to the shared rope-apply kernels the diffusion stack also calls. The
-    /// caller disposes the returned tensors exactly as it would have disposed the originals (same <c>finally</c>).</summary>
+    /// rope-apply read of it hits the activation cache instead of re-uploading over PCIe every time (see
+    /// <see cref="MakeResident"/> for the mechanism and why). <paramref name="cos"/>/<paramref name="sin"/> are
+    /// always owned by the caller at this point (freshly built immediately above), so this disposes them
+    /// unconditionally — unlike <see cref="MakeResident"/>, which leaves a borrowable source's disposal to its
+    /// own caller.</summary>
     private static (Tensor Cos, Tensor Sin) MakeRopeTableResident(IBackend backend, Tensor cos, Tensor sin)
     {
         Tensor residentCos = new(cos.Shape, DType.F32);
         Tensor residentSin = new(sin.Shape, DType.F32);
-        backend.Scale(residentCos, cos, 1f);
-        backend.Scale(residentSin, sin, 1f);
-        cos.Dispose();
-        sin.Dispose();
+        try
+        {
+            backend.Scale(residentCos, cos, 1f);
+            backend.Scale(residentSin, sin, 1f);
+        }
+        catch
+        {
+            residentCos.Dispose();
+            residentSin.Dispose();
+            throw;
+        }
+        finally
+        {
+            cos.Dispose();
+            sin.Dispose();
+        }
         return (residentCos, residentSin);
+    }
+
+    /// <summary>Uploads <paramref name="source"/> once via a cheap, backend-agnostic <c>Scale(_, _, 1f)</c>
+    /// identity op and returns the resident replacement — its output gets the ordinary <c>CacheActivation</c>
+    /// binding every op's output already gets, which is the whole point: no new backend API, no change to any
+    /// shared op another caller (eg the diffusion stack's own rope-apply calls) also uses. Worth it for a
+    /// <paramref name="source"/> read on every iteration of a loop, not for one read once (see PR #221 for why
+    /// and the measurements). Disposes the half-built resident tensor and rethrows on failure so nothing leaks;
+    /// <paramref name="source"/>'s own disposal is the caller's — it may be borrowed, not owned, at the call
+    /// site, and this helper neither knows nor assumes.</summary>
+    private static Tensor MakeResident(IBackend backend, Tensor source)
+    {
+        Tensor resident = new(source.Shape, DType.F32);
+        try
+        {
+            backend.Scale(resident, source, 1f);
+        }
+        catch
+        {
+            resident.Dispose();
+            throw;
+        }
+        return resident;
     }
 
     private void ThrowIfDisposed()
