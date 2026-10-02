@@ -21,6 +21,24 @@ stable release will require. Dates are UTC.
 - A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
   before the full-canvas run; before, the mask resolver's guard threw.
 
+## alpha.240 (provisional — see note below)
+
+- **The phone gateway and voice host moved out of this repo**, to a separate app:
+  [HartsyAI/HartsyPhone](https://github.com/HartsyAI/HartsyPhone). `HartsyInference.PhoneGateway`,
+  `HartsyInference.VoiceHost` and `HartsyInference.PhoneLink` (source, tests, the systemd units and install
+  scripts under `deploy/`, and their research docs) are removed from this repo; the code and its git history
+  continue in the new one, copied as of this engine's `main` at `40c84b69` (alpha.238). `HartsyInference.Voice`
+  and `HartsyInference.Tools` are unaffected and stay here (AudioLab and other consumers still use `Voice`
+  directly, with no phone dependency). **`HartsyInference.PhoneLink` stops publishing to NuGet with this
+  version**; its last published version is whatever `main` carried immediately before this merged (at
+  least `2.0.0-alpha.239` as of this branch's base — `publish-nuget.yml` packs the whole solution on every
+  push to `main` that touches `src/`, so it kept publishing right up to the commit this removal branched
+  from). SIPSorcery is no longer a dependency of this repo.
+
+  *(Note: this PR is waiting on engine PRs #217 and #218 before it can merge; both will take a version
+  number first, so `alpha.240` and the exact "last published" number above are provisional and will be
+  re-taken after rebasing past both — see the PR description.)*
+
 ## alpha.239
 
 - **Audio: fixed the vocab-sized delegate-sort allocation anti-pattern in the TTS samplers** — the same
