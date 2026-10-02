@@ -55,7 +55,7 @@ public sealed class VoiceModelSet : IAsyncDisposable
         _frontEndModels = frontEndModels;
         if (options.CpuThreadCap > 0)
         {
-            // Reading the value first loads the settings file, so a file value cannot later overwrite this override.
+            // Read before HasOverride: the read loads the settings file, so a cap the file sets counts as an override.
             _cpuCapPrevious = EngineKnobs.CpuThreads.Value;
             _cpuCapHadOverride = KnobStore.HasOverride(EngineKnobs.CpuThreads);
             KnobStore.Set(EngineKnobs.CpuThreads, options.CpuThreadCap);

@@ -25,6 +25,11 @@ public static class KnobFile
     private static readonly object _gate = new();
     private static bool _loaded;
 
+    /// <summary>True while the thread holding <see cref="_gate"/> applies the file. Only that thread can see it set, and
+    /// the knob reads Apply makes on the way come back to <see cref="EnsureLoaded"/>, which must return rather than load
+    /// the file a second time inside the first.</summary>
+    private static bool _applying;
+
     /// <summary>Set by a host that keeps its settings elsewhere; overrides <see cref="Path"/>. Must be set before the first knob is read.</summary>
     public static string? ExplicitPath { get; set; }
 
@@ -44,6 +49,9 @@ public static class KnobFile
 
 
     /// <summary>Loads the settings file once. Safe to call repeatedly and from multiple threads.</summary>
+    /// <remarks>Another thread that reads a knob while the file is being applied waits for the load to finish. Letting
+    /// it through as soon as the load had started meant it could go on to <c>Set</c> a value that the rest of the file
+    /// then wrote over, so a host's override lost to the settings file whenever the two raced.</remarks>
     internal static void EnsureLoaded()
     {
         if (Volatile.Read(ref _loaded))
@@ -52,17 +60,25 @@ public static class KnobFile
         }
         lock (_gate)
         {
-            if (_loaded)
+            if (_loaded || _applying)
             {
                 return;
             }
-            // Set BEFORE applying, so the Apply path's own knob reads cannot recurse into a second load.
-            _loaded = true;
-            string? path = Discover();
-            if (path is not null)
+            _applying = true;
+            try
             {
-                Apply(File.ReadAllText(path), path);
-                LoadedFrom = path;
+                string? path = Discover();
+                if (path is not null)
+                {
+                    Apply(File.ReadAllText(path), path);
+                    LoadedFrom = path;
+                }
+            }
+            finally
+            {
+                _applying = false;
+                // Published only once the file is applied; a failed load is not retried, as before.
+                Volatile.Write(ref _loaded, true);
             }
         }
     }
@@ -181,8 +197,12 @@ public static class KnobFile
     }
 
     /// <summary>Parses and applies one settings document. Public so a host can supply settings it holds in memory.</summary>
+    /// <remarks>A host's document lands on top of the settings file: the file is loaded first if nothing has loaded it
+    /// yet, so a later first read cannot put the file's values back over the host's.</remarks>
     public static void Apply(string json, string origin = "(inline)")
     {
+        // A no-op when the file load itself is the caller, which holds the lock with _applying set.
+        EnsureLoaded();
         JsonDocument doc;
         try
         {

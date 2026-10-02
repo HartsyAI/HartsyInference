@@ -17,13 +17,18 @@ public sealed class KnobFileTests : IDisposable
     public KnobFileTests()
     {
         Directory.CreateDirectory(_dir);
+        // Loads whatever settings file this process uses BEFORE pointing at one that does not exist yet. A test that
+        // happened to make the process's first knob read would otherwise go looking for the empty temp path, which
+        // throws, so whether the class passed depended on what had run before it.
+        KnobFile.EnsureLoaded();
         KnobFile.ExplicitPath = Path.Combine(_dir, "settings.json");
     }
 
     public void Dispose()
     {
         KnobFile.ExplicitPath = _previous;
-        KnobStore.ResetOverrides();
+        // Put back the settings the rest of the process was running with, not just an empty override store.
+        KnobFile.Reload();
         try
         {
             Directory.Delete(_dir, recursive: true);
