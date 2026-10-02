@@ -1,3 +1,4 @@
+using System.Text;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.Tests.Common;
 using HartsyInference.Tools.Parsing;
@@ -100,6 +101,8 @@ public sealed class ToolCallTemplateDetectionTests
     [Fact]
     public void SyntheticLlama3Template_PythonTagWithTools_DetectsLlama3()
     {
+        // The trailing {"name": x} is filler, not a Hermes decoy: Hermes needs a literal "<tool_call>" marker,
+        // which this template never has, so only the "<|python_tag|>" branch can match it.
         const string template = "{%- if tools %}Environment: ipython{%- endif %}<|python_tag|>{\"name\": x}";
         bool detected = ToolCallFormats.TryDetectFromTemplate(template, out ToolCallFormat format);
         Assert.True(detected);
@@ -195,7 +198,9 @@ public sealed class ToolCallTemplateDetectionTests
         string? liveTemplate = loader.Metadata.GetString("tokenizer.chat_template");
 
         Assert.NotNull(liveTemplate);
-        string committed = File.ReadAllText(Path.Combine(AppContext.BaseDirectory, "Fixtures", "ChatTemplates", fixtureName));
-        Assert.Equal(committed, liveTemplate);
+        // Bytes, not File.ReadAllText: ReadAllText detects and strips a BOM, which would silently pass even if
+        // a future re-extraction introduced one — the fixtures and the README's claim are byte-exact.
+        byte[] committed = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "ChatTemplates", fixtureName));
+        Assert.Equal(committed, Encoding.UTF8.GetBytes(liveTemplate));
     }
 }

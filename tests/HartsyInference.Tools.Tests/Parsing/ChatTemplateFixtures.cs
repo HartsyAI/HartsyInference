@@ -20,8 +20,10 @@ internal static class ChatTemplateFixtures
     /// repo's single source of truth for these, each overridable via its own env var), for the guarded live
     /// re-extraction check. Not every dev machine or CI runner has the models directory mounted, so that check
     /// skips cleanly when a path is missing via <see cref="RealWeightGate"/> — the committed fixtures above are
-    /// what the Unit-lane tests actually run against.</summary>
-    public static readonly IReadOnlyDictionary<string, string> SourceGgufPaths = new Dictionary<string, string>(StringComparer.Ordinal)
+    /// what the Unit-lane tests actually run against. A computed property, not a static field: the plain fixture
+    /// properties above share this class's type initializer, and a Unit-lane test must never be able to fail
+    /// from a <see cref="TestPaths"/> resolution problem it has nothing to do with.</summary>
+    public static IReadOnlyDictionary<string, string> SourceGgufPaths => new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["qwen3-4b.jinja"] = TestPaths.Llm.Qwen3_4BQ4KM,
         ["qwen2.5-1.5b.jinja"] = TestPaths.Llm.Qwen25_15B("Q8_0"),
