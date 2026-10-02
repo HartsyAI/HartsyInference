@@ -1056,9 +1056,9 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private nuint _dp4aScratchBytes;
     private ulong _argmaxScratch;
     private ulong _ssmDeltaScratch;
+    private nuint _ssmDeltaScratchBytes;
     // Recorded fences come back here for reuse, so a fence per layer costs one record instead of an event create/destroy.
     private readonly Stack<nint> _fencePool = new();
-    private nuint _ssmDeltaScratchBytes;
 
     private bool StreamIsCapturing()
     {
