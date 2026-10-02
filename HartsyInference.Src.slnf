@@ -13,14 +13,11 @@
       "src\\HartsyInference.LLM\\HartsyInference.LLM.csproj",
       "src\\HartsyInference.Meta\\HartsyInference.Meta.csproj",
       "src\\HartsyInference.ModelAssets\\HartsyInference.ModelAssets.csproj",
-      "src\\HartsyInference.PhoneGateway\\HartsyInference.PhoneGateway.csproj",
-      "src\\HartsyInference.PhoneLink\\HartsyInference.PhoneLink.csproj",
       "src\\HartsyInference.ThreeD\\HartsyInference.ThreeD.csproj",
       "src\\HartsyInference.Tools\\HartsyInference.Tools.csproj",
       "src\\HartsyInference.Video\\HartsyInference.Video.csproj",
       "src\\HartsyInference.Vision\\HartsyInference.Vision.csproj",
       "src\\HartsyInference.Voice\\HartsyInference.Voice.csproj",
-      "src\\HartsyInference.VoiceHost\\HartsyInference.VoiceHost.csproj",
       "src\\HartsyInference.Vulkan\\HartsyInference.Vulkan.csproj",
       "src\\HartsyInference.World\\HartsyInference.World.csproj"
     ]
