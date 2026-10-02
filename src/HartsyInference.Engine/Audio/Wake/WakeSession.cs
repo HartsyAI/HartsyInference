@@ -105,8 +105,34 @@ public sealed class WakeSession(string deviceId, WakeDetectionPipeline pipeline,
         }
     }
 
-    /// <summary>Frame codec for this connection, replaced when the device reconnects.</summary>
-    public WakeFrameCodec? Codec { get; set; }
+    /// <summary>Frame codec for this connection, replaced when the device reconnects.
+    ///
+    /// <para>A plain field, not a property, for the same reason <see cref="Claim"/> is one: <see
+    /// cref="WakeListener"/>'s disconnect path clears it with a CAS keyed to the specific codec that connection
+    /// installed, not an unconditional write, so a connection superseded by a reconnect while it was still
+    /// unwinding cannot clear the new connection's codec (or, gated on that same CAS, its state and claim) out
+    /// from under it.</para>
+    ///
+    /// <para><c>volatile</c> because that CAS is not the only cross-thread dependency on this field any more:
+    /// <see cref="WakeListener"/>'s hello case now writes <see cref="Claim"/> (via <see cref="Interlocked"/>,
+    /// a full fence on the writing thread) strictly before this field's own write in <c>OnReconnected</c>, so
+    /// that any claim a reader can observe here is one that predates the codec change — but only if that read
+    /// of this field also carries acquire semantics, which a plain field read does not on its own. A test that
+    /// polled this field with a plain read and asserted <see cref="Claim"/> immediately after, with nothing
+    /// else between the two reads to force a fence, caught
+    /// this: it flaked under full-suite parallel load, never in isolation.</para></summary>
+    public volatile WakeFrameCodec? Codec;
+
+    /// <summary>The host claim currently in effect, or null when the service's own scoring, capture and
+    /// transcription own this device — the default, and the only state before any claim exists.
+    ///
+    /// <para>A plain field, not a property, so <see cref="WakeService.Claim"/>/<see cref="WakeService.Release"/>
+    /// and the disconnect path in <see cref="WakeListener"/> can swap it through <see cref="Interlocked"/>:
+    /// those run on whatever thread the host or the socket loop is on, while the wake worker reads it once per
+    /// drain on its own thread, so this needs the same lock-free cross-thread handoff
+    /// <see cref="LastSpeechTicks"/> already uses, not a lock the worker would have to take every iteration.
+    /// </para></summary>
+    public WakeDeviceClaim? Claim;
 
     public WakeSessionState State { get; set; } = WakeSessionState.Handshake;
 

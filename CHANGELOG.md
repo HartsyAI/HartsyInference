@@ -18,6 +18,20 @@ stable release will require. Dates are UTC.
   with the turn's token, so a barge-in stops issuing the sentence's work at the next boundary (on CUDA, kernels already
   queued still finish). The overload is a default interface method that checks only before the call, so other
   implementers keep compiling. Output is byte-identical when not cancelled.
+- **The prompt prefill now observes the request's cancellation token between transformer layers.**
+  `TextGenerationPipeline` hands the token to the first prefill through a new
+  `IGenerationModel.Prefill(chunk, state, cancel)` overload (a default interface method that checks only before the
+  call); `GenericTransformerModel` implements it by checking between layers in `GenericTransformer.Forward`,
+  `ForwardEmbeds` and the layer-split `ForwardEmbedsStaged`, which all take an optional token. The math and the
+  kernel shapes are those of an uncancelled call, so output is identical when nothing is cancelled. A stopped prefill
+  commits nothing: the cache length is not advanced, and the rows the finished layers wrote past it are never read
+  and are overwritten next time. As before, a request with prefix-cache reuse that is cancelled during the prompt
+  prefill drops its retained sequence instead of keeping one the cache never received. On the CPU backend the stop
+  lands at the next layer. On CUDA the host queues layers far ahead of the GPU, so the check stops issuing work only
+  when the cancel lands early, and the layers already queued still run. Measured on an RTX 3060 (Qwen3-4B Q4_K_M,
+  695-token prompt, 1.02 s prefill): a cancel 10 % in throws after 7 ms instead of 913 ms, but the card stays busy
+  for 788 ms instead of 913 ms; from 30 % in, every layer is already queued and nothing changes. Freeing the card
+  early needs a bound on how far the host runs ahead, which is open work.
 - **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
   instead of guessing the tool-call format from its name: true only when the template references the
   caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,
@@ -29,6 +43,51 @@ stable release will require. Dates are UTC.
   neither family's real wire format matches it (GLM uses XML arguments, DeepSeek never renders `tools` for
   new calls). Both still reach the documented unknown-family Hermes fallback, so `Detect`'s observable
   behavior for a bare name hint is unchanged.
+- **`WakeService.Claim`/`Release`**: an opt-in, per-device host handoff for the wake listener. A host can claim
+  one connected satellite's turns (typically from a `Detected` handler) and receive its decoded inbound audio
+  (16 kHz mono float, post-denoise when noise suppression is on, normalized from the wake path's internal
+  int16 scale) through `WakeDeviceClaim.OnFrame` instead of the service's own wake scoring, end-of-speech
+  capture and transcription, which are suspended for that device only. The connection, ping/pong keepalive and
+  outbound audio path (`BeginAudio`/`SendAudioAsync`) are unaffected. `Release` returns the device to normal
+  listening; a disconnect while claimed auto-releases and calls `WakeDeviceClaim.OnDisconnected` once. Zero
+  change for a device nothing has claimed — `WakeSession.Claim` defaults to null and the existing
+  scoring/VAD branch is reached exactly as before; proven against the full existing wake suite
+  (`WakeTransportTests` and the rest) with real backbone/head/denoiser weights, not just by inspection. This is
+  the engine-side requirement for `SwarmUI-AudioLab`'s satellite voice-agent Session mode, which could not
+  otherwise get continuous raw audio for a device past its own wake detection.
+- **Fixed two races in `WakeService.Claim`/`Release`'s disconnect path, found by review before this shipped.**
+  A device's reconnect (`WakeSession.OnReconnected`, from its new connection) could land while its old
+  connection was still unwinding; the old connection's `finally` then unconditionally cleared the new
+  connection's `Codec`, reset `State` to `Handshake` (silently pausing the worker for that device, since
+  `WakeWorker.Run` skips a session in `Handshake`), cleared the new connection's claim, and fired a spurious
+  `OnDisconnected` for a device that was, in fact, still connected. `WakeSession.Codec` is now a field (like
+  `Claim` already was) so the disconnect path can clear it with a CAS keyed to the specific codec that
+  connection installed; a superseded connection's teardown now does nothing instead. A throwing
+  `OnDisconnected` is also now caught and logged (`Logs.Error`) rather than propagating out of the `finally`,
+  where it could otherwise mask whatever exception actually ended the connection. Same treatment for a
+  throwing `OnFrame` in `WakeWorker`, caught separately from the pipeline/denoiser/VAD reset path so a
+  persistently-throwing host callback doesn't flood the log with pointless resets of state a claimed device
+  never reads. `WakeService.Claim` also now withdraws (and returns null for) a claim whose connection died in
+  the gap between its own liveness check and installing the claim, so that race can no longer leave a host
+  holding a claim that will never call `OnDisconnected`. A reconnect ends the device's previous claim too —
+  cleared AND notified before `OnReconnected` publishes the new codec, not after, so neither step can land on
+  a claim a host thread installed against that new codec, and so that notification is one of the writes the
+  new codec's own publish carries to anyone who observes it (see the next entry): letting it silently carry
+  over to the new connection's audio with no signal the old one is gone was the bug; running the notification
+  after the publish, rather than before, turned out to be a second, narrower version of the same bug.
+- **`WakeSession.Codec` is `volatile`.** `WakeListener`'s disconnect CAS and reconnect handling, and
+  `WakeService`'s outbound audio path, all read or write it across threads without a lock. A release (the
+  volatile write in `OnReconnected`, or the CAS in the disconnect path) only carries a thread's earlier writes
+  forward to whoever observes it — never later ones — so anything a reconnect needs a reader to see has to
+  happen before the codec publish, not after. A new regression test polling this field with a plain read, then
+  immediately checking a side effect of the reconnect, caught both the missing `volatile` and, after adding
+  it, that the notification above was still ordered on the wrong side of the publish: flaky under full
+  test-suite parallel load either way, just far less often with only the field fixed. 16 consecutive clean
+  full-suite runs once both were corrected, after failures inside the first 3-8 runs at each earlier stage.
+- **`WakeWorker.Run` clears its shared `detections` list before deciding whether there is anything to score
+  this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
+  an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
+  the list held from an earlier iteration in place, and the dispatch loop below re-fired it a second time.
 
 ## alpha.241
 
