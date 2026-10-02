@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Rope;
@@ -9,6 +10,10 @@ namespace HartsyInference.LLM.Transformer;
 /// <remarks>Built for full GPU residency: every op is an <see cref="IBackend"/> call, no activation is read on the host mid-forward, weights are the raw loaded tensors (stable references) handed to <see cref="IBackend.PreloadWeights"/> so each uploads once and every projection hits the weight cache, and K/V grow on-device via <see cref="KvCache"/>. Validated against the per-family reference decoders. Scope: batch = 1, F32, pre-norm + SwiGLU + causal attention.</remarks>
 public sealed unsafe class GenericTransformer : IDisposable
 {
+    /// <summary>Layers a cancellable forward lets the device have in flight: two keeps the next layer queued behind the
+    /// running one, so the bound costs no device time, while a stop leaves at most that much to drain.</summary>
+    private const int RunAheadLayers = 2;
+
     private readonly TransformerConfig _cfg;
     private readonly Layer[] _layers;
     private Tensor? _embed;
@@ -271,7 +276,7 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <summary>Runs the full stack across a layer-split placement: one <see cref="ForwardEmbeds"/> call per stage on that stage's backend, final norm and cache advance only on the last, and a HOST-staged hidden handoff between stages. Not supported for Gemma-4 PLE (per-layer inputs are computed against the full stack).</summary>
     /// <remarks>The host-staged handoff (the read fires the producing backend's lazy D2H; the next stage re-uploads — ~T×hidden F32 per boundary, 16-32 KB at decode) works on any hardware; a direct <c>CopyFromPeer</c> boundary is a measured follow-up. <paramref name="crossStates"/> (mllama gated cross-attention) is produced once by the caller — presumed resident/computed on stage 0's backend — and peer-copied fresh onto every OTHER stage that owns a cross-attention layer via <see cref="IBackend.CopyFromPeer"/> (mirrors <c>QwenImageTransformer.ForwardSharded</c>'s <c>temb</c> handoff, copied fresh from the master at each boundary since it never changes within one call). Paid on every call that reaches a cross-attention-owning stage — a persistent per-stage cache is a measured follow-up.</remarks>
     public Tensor ForwardEmbedsStaged(LlmPlacement placement, Tensor embeds, int t, int posStart, IKvCache cache,
-        ReadOnlySpan<int> tokenIds = default, Tensor? crossStates = null, int crossLen = 0)
+        ReadOnlySpan<int> tokenIds = default, Tensor? crossStates = null, int crossLen = 0, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         ArgumentNullException.ThrowIfNull(placement);
@@ -279,7 +284,7 @@ public sealed unsafe class GenericTransformer : IDisposable
             throw new ArgumentException($"Placement covers {placement.LayerCount} layers; model has {_layers.Length}.");
         if (placement.IsSingle)
             return ForwardEmbeds(placement.Stages[0].Backend, embeds, t, posStart, cache,
-                crossStates: crossStates, crossLen: crossLen, tokenIds: tokenIds);
+                crossStates: crossStates, crossLen: crossLen, tokenIds: tokenIds, cancel: cancel);
         if (_cfg.PerLayerEmbeddingDim > 0)
             throw new NotSupportedException("Layer-split placement does not support Gemma-4 per-layer embeddings yet.");
 
@@ -307,10 +312,23 @@ public sealed unsafe class GenericTransformer : IDisposable
                 }
             }
 
-            Tensor next = ForwardEmbeds(stage.Backend, hidden, t, posStart, cache,
-                applyFinalNorm: last, startLayer: stage.StartLayer, endLayer: stage.EndLayer,
-                crossStates: stageCross, crossLen: crossLen, tokenIds: tokenIds, advanceCache: last);
-            if (ownsStageCross) stageCross!.Dispose();
+            Tensor next;
+            try
+            {
+                next = ForwardEmbeds(stage.Backend, hidden, t, posStart, cache,
+                    applyFinalNorm: last, startLayer: stage.StartLayer, endLayer: stage.EndLayer,
+                    crossStates: stageCross, crossLen: crossLen, tokenIds: tokenIds, advanceCache: last, cancel: cancel);
+            }
+            catch
+            {
+                // A stage stopped by cancellation (or failing) never hands its input back; release the previous one.
+                if (owns) hidden.Dispose();
+                throw;
+            }
+            finally
+            {
+                if (ownsStageCross) stageCross!.Dispose();
+            }
             if (!last)
             {
                 // LOAD-BEARING host materialization: this read IS the stage boundary — it syncs the hidden state
@@ -335,39 +353,53 @@ public sealed unsafe class GenericTransformer : IDisposable
     }
 
     /// <summary>Token-IDs-in convenience over <see cref="ForwardEmbedsStaged"/>, mirroring <see cref="Forward"/>.</summary>
-    public Tensor ForwardStaged(LlmPlacement placement, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache)
+    public Tensor ForwardStaged(LlmPlacement placement, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache,
+        CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         int t = tokenIds.Length;
         Tensor embeds = new(new TensorShape(1, t, _cfg.HiddenSize), DType.F32);
-        EmbedLookup(embeds, tokenIds);
-        Tensor output = ForwardEmbedsStaged(placement, embeds, t, posStart, cache, tokenIds: tokenIds);
-        embeds.Dispose();
-        return output;
+        try
+        {
+            EmbedLookup(embeds, tokenIds);
+            return ForwardEmbedsStaged(placement, embeds, t, posStart, cache, tokenIds: tokenIds, cancel: cancel);
+        }
+        finally
+        {
+            embeds.Dispose();
+        }
     }
 
-    /// <summary>Token-IDs-in path: host embedding gather (one tiny H2D), then the resident transformer; returns the final <c>[1, T, hidden]</c> hidden state (post final RMSNorm).</summary>
-    public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache)
+    /// <summary>Token-IDs-in path: host embedding gather (one tiny H2D), then the resident transformer; returns the final <c>[1, T, hidden]</c> hidden state (post final RMSNorm). <paramref name="cancel"/> is checked between layers as <see cref="ForwardEmbeds"/> describes.</summary>
+    public Tensor Forward(IBackend backend, ReadOnlySpan<int> tokenIds, int posStart, IKvCache cache,
+        CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         int t = tokenIds.Length;
         Tensor embeds = new(new TensorShape(1, t, _cfg.HiddenSize), DType.F32);
-        EmbedLookup(embeds, tokenIds);
-        Tensor output = ForwardEmbeds(backend, embeds, t, posStart, cache, tokenIds: tokenIds);
-        embeds.Dispose();
-        return output;
+        try
+        {
+            EmbedLookup(embeds, tokenIds);
+            return ForwardEmbeds(backend, embeds, t, posStart, cache, tokenIds: tokenIds, cancel: cancel);
+        }
+        finally
+        {
+            embeds.Dispose();
+        }
     }
 
     /// <summary>Embedding-in path: runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack) and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/> is true.</summary>
-    /// <remarks>The cache advances once per call (after the layers run) UNLESS <paramref name="advanceCache"/> is false: a staged (layer-split) driver calls this once per stage over ONE shared cache, and only the final stage may advance, or the write cursor moves stages× per token. <paramref name="tokenIds"/> is required when <see cref="TransformerConfig.PerLayerEmbeddingDim"/> is set (Gemma-4), whose per-layer embedding mixing needs the actual token ids, not just their embedding — every other architecture ignores it.</remarks>
+    /// <remarks>The cache advances once per call (after the layers run) UNLESS <paramref name="advanceCache"/> is false: a staged (layer-split) driver calls this once per stage over ONE shared cache, and only the final stage may advance, or the write cursor moves stages× per token. <paramref name="tokenIds"/> is required when <see cref="TransformerConfig.PerLayerEmbeddingDim"/> is set (Gemma-4), whose per-layer embedding mixing needs the actual token ids, not just their embedding — every other architecture ignores it.
+    /// <para><paramref name="cancel"/> is checked before the call starts and before every layer, so a long prefill stops at the next layer boundary with <see cref="OperationCanceledException"/>. While the token can be cancelled, the host also stays at most <see cref="RunAheadLayers"/> layers ahead of the device (<see cref="DeviceRunAhead"/>): an asynchronous backend would otherwise have queued the whole forward before a late cancel lands, leaving it all to run. The math and kernel shapes are those of an uncancelled call. A stopped call commits nothing: the cache length is not advanced, and the K/V rows the finished layers wrote past it are never read (attention takes the valid length explicitly) and are overwritten by the next call.</para></remarks>
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
         bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null, Tensor? crossStates = null,
-        int crossLen = 0, ReadOnlySpan<int> tokenIds = default, bool advanceCache = true)
+        int crossLen = 0, ReadOnlySpan<int> tokenIds = default, bool advanceCache = true, CancellationToken cancel = default)
     {
         ThrowIfDisposed();
         int last = endLayer ?? _layers.Length;
         if (startLayer < 0 || last > _layers.Length || startLayer > last)
             throw new ArgumentException($"Invalid layer range [{startLayer}, {last}) for a stack of {_layers.Length}.");
+        cancel.ThrowIfCancellationRequested();
 
         // Absolute position embeddings (GPT-2/StarCoder): add posEmbed[posStart+s] to each token embedding,
         // host-side (the embeds buffer is host F32 on the token path). These models use no RoPE.
@@ -441,12 +473,22 @@ public sealed unsafe class GenericTransformer : IDisposable
             perLayerInputs = ComputePerLayerInputs(backend, embeds, tokenIds, t);
         }
 
+        DeviceRunAhead runAhead = new(backend, stackalloc nint[RunAheadLayers], cancel.CanBeCanceled);
         try
         {
             Tensor hidden = work;
             bool ownsHidden = ownsWork;
             for (int i = startLayer; i < last; i++)
             {
+                if (cancel.IsCancellationRequested)
+                {
+                    StopBetweenLayers(cancel, hidden, ownsHidden, perLayerInputs, i);
+                }
+                runAhead.BeforeStep();
+                if (cancel.IsCancellationRequested)
+                {
+                    StopBetweenLayers(cancel, hidden, ownsHidden, perLayerInputs, i);
+                }
                 bool global = _cfg.IsGlobalLayer(i);
                 Tensor lc = global ? cos : cosLocal ?? cos;
                 Tensor ls = global ? sin : sinLocal ?? sin;
@@ -464,6 +506,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                         ? _layers[i].MlaForward(backend, hidden, t, posStart, cache, i, cos, sin)
                         : _layers[i].Forward(backend, hidden, t, posStart, cache, i, lc, ls, perLayerInputs?[i]);
                 }
+                runAhead.AfterStep();
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
                 ownsHidden = true;
@@ -495,11 +538,27 @@ public sealed unsafe class GenericTransformer : IDisposable
         }
         finally
         {
+            runAhead.Dispose();
             cos.Dispose();
             sin.Dispose();
             cosLocal?.Dispose();
             sinLocal?.Dispose();
         }
+    }
+
+    /// <summary>Ends a forward stopped by <paramref name="cancel"/> before layer <paramref name="layer"/>: releases the
+    /// running hidden state when this call owns it and the per-layer inputs the remaining layers would have consumed,
+    /// then throws. Never returns.</summary>
+    [DoesNotReturn]
+    private static void StopBetweenLayers(CancellationToken cancel, Tensor hidden, bool ownsHidden, Tensor[]? perLayerInputs,
+        int layer)
+    {
+        if (ownsHidden) hidden.Dispose();
+        if (perLayerInputs is not null)
+        {
+            for (int i = layer; i < perLayerInputs.Length; i++) perLayerInputs[i].Dispose();
+        }
+        throw new OperationCanceledException(cancel);
     }
 
     /// <summary>Gemma-4 per-layer embeddings (PLE): for each layer, mixes a small extra embedding derived two ways — a direct per-token gather from <see cref="_perLayerTokEmbd"/>, and a projection of the main hidden state through <see cref="_perLayerModelProj"/> — averaged via a fixed 1/√2 scale after each is independently normalized/scaled. Returns one <c>[1, T, PerLayerEmbeddingDim]</c> tensor per layer, each consumed (disposed) by its layer's <see cref="Layer.Forward"/>. Ported from llama.cpp's <c>build_inp_per_layer</c>/<c>project_per_layer_inputs</c>.</summary>

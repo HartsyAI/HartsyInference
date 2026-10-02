@@ -8,6 +8,45 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
+  pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
+  compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
+  backend has nothing to wait for. While the request's token can be cancelled, `GenericTransformer.ForwardEmbeds`
+  waits, before issuing layer *k*, on the fence recorded after layer *k − 2* (`DeviceRunAhead`). The device always
+  has the next layer queued behind the running one, and a stop leaves at most two layers to drain instead of
+  everything the host had queued. Math, kernels and stream order are unchanged; a forward with a token that cannot be
+  cancelled takes no fences at all.
+- **Fixed: a large `NativeBuffer`'s zero-fill no longer bypasses the process CPU thread cap.** Buffers of 8 MB and
+  up were zeroed with a raw `Parallel.For` sized by `Environment.ProcessorCount` on the shared thread pool, ignoring
+  `numerics.cpuThreads` and `CpuParallel.InlineScope`, so one big allocation on any thread could take every core
+  from the voice front end's real-time audio thread. The fill now goes through `CpuParallel.For` in fixed 2 MB
+  chunks whose count depends only on the size: inside an `InlineScope` it runs on the calling thread, and the cap
+  bounds how many threads clear at once. Smaller buffers still clear inline, and the memory is zeroed exactly as
+  before.
+- **Kokoro stops a cancelled synthesis at its next stage instead of finishing the sentence.**
+  `KokoroPipeline.Synthesize`/`SynthesizeFromStyle` and `KokoroIStftNetDecoder.Forward` take a `CancellationToken`
+  and check it at twelve stage boundaries — before any device work, after PLBERT, the text encoder, the duration
+  predictor, the length regulator and F0/N, after the decoder's encode and decode blocks, after the harmonic source,
+  after each upsample stage and before the iSTFT head — disposing the tensors that stage still holds before throwing.
+  The token reaches Kokoro on every path: sentence streaming, `SpeechService.SynthesizeAsync` (through `TtsJob`), and a
+  new `ISynthesizerLease.Synthesize(text, options, cancel)` overload, which the voice session's GPU thread now calls
+  with the turn's token, so a barge-in stops issuing the sentence's work at the next boundary (on CUDA, kernels already
+  queued still finish). The overload is a default interface method that checks only before the call, so other
+  implementers keep compiling. Output is byte-identical when not cancelled.
+- **The prompt prefill now observes the request's cancellation token between transformer layers.**
+  `TextGenerationPipeline` hands the token to the first prefill through a new
+  `IGenerationModel.Prefill(chunk, state, cancel)` overload (a default interface method that checks only before the
+  call); `GenericTransformerModel` implements it by checking between layers in `GenericTransformer.Forward`,
+  `ForwardEmbeds` and the layer-split `ForwardEmbedsStaged`, which all take an optional token. The math and the
+  kernel shapes are those of an uncancelled call, so output is identical when nothing is cancelled. A stopped prefill
+  commits nothing: the cache length is not advanced, and the rows the finished layers wrote past it are never read
+  and are overwritten next time. As before, a request with prefix-cache reuse that is cancelled during the prompt
+  prefill drops its retained sequence instead of keeping one the cache never received. On the CPU backend the stop
+  lands at the next layer. On CUDA the host queues layers far ahead of the GPU, so the check stops issuing work only
+  when the cancel lands early, and the layers already queued still run. Measured on an RTX 3060 (Qwen3-4B Q4_K_M,
+  695-token prompt, 1.02 s prefill): a cancel 10 % in throws after 7 ms instead of 913 ms, but the card stays busy
+  for 788 ms instead of 913 ms; from 30 % in, every layer is already queued and nothing changes. Freeing the card
+  early needs a bound on how far the host runs ahead, which is open work.
 - **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
   instead of guessing the tool-call format from its name: true only when the template references the
   caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,
@@ -64,20 +103,38 @@ stable release will require. Dates are UTC.
   this iteration**, not only inside the unclaimed branch's own `Pipeline.Push`. Before, a denoiser that held
   an iteration's audio back entirely (so `toProcess` was empty) skipped scoring but left whatever detection
   the list held from an earlier iteration in place, and the dispatch loop below re-fired it a second time.
+- **Orpheus TTS no longer re-prompts to download its SNAC codec on every generation.** `ModelCatalog`'s
+  SNAC asset (`hubertsiuzdak/snac_24khz`) listed `RepoPath = "model.safetensors"`; the real downloaded
+  file is `pytorch_model.bin`, so `ModelAcquisition`'s presence check always reported it missing. The CLI
+  REPL calls `EnsurePresent` once per generation (not once per load), so every Orpheus prompt hit the
+  false-missing path and its interactive `Download these now?` prompt. Fixed the `RepoPath`, and added a
+  per-process confirmed-present cache so the audio-asset check only runs until it first succeeds for a
+  given catalog id.
+- **`hartsy transcribe --timestamps` now prints the actual timestamps.** The flag only ever changed a
+  "segments N" count in the footer; the transcript text itself was identical with or without it, since
+  `TranscribeAsync` never read anything from `TranscriptResult.Words` but its `Count`. It now renders one
+  `[start --> end]  text` line per word/segment (word- or segment-granularity, whichever the model
+  produced) when timestamps were requested and the pipeline returned any; the plain-text path is
+  unchanged byte-for-byte otherwise.
 - **Dia TTS: a doomed-to-fail short prompt now fails in seconds instead of tens of seconds.**
   `DiaTtsModel.Session` already auto-tags untagged text with `[S1]`, but a one-sentence prompt (tagged or
   not) still ran the full 1720-frame default budget producing non-speech throughout (confirmed: Whisper
   transcribed the result as `[Music]`; energy stayed high for the full 20s rather than trailing into
-  quiet). `maxTokens` is now capped to the text's own length (12 frames/char, floored at 200), which only
-  binds for prompts already shown to run away -- a well-formed multi-sentence prompt's own length
-  estimate comfortably exceeds what its natural EOS needs. This does not make Dia produce intelligible
-  speech from one short sentence; it bounds how long a doomed generation wastes before giving up.
-  **Confirmed model behaviour, not a port bug**: ran upstream nari-labs Dia-1.6B-0626 itself (local
-  weights, no download) on the identical sentence, `[S1]`-tagged, same seed and the same 1720 cap.
-  Upstream also never fires EOS — its own `finished_step_Bx` accounting shows the sequence forced to
-  the cap at step ≈1704 — and Whisper transcribes its output as `[Music]` too. Same inputs, same
-  failure, in the reference implementation; nothing in the C# port's conditioning, CFG, delay pattern,
-  or EOS rule is implicated. The cap only applies when the caller didn't request an explicit `MaxTokens`.
+  quiet). `maxTokens` is now capped to the text's own length (20 frames/char, floored at 200), which only
+  applies when the caller left `TtsJob.MaxTokens` unset -- an explicit value is used as-is, uncapped,
+  since a deliberate request isn't the runaway case this exists for. The factor comes from measuring
+  natural (uncapped) EOS behavior on 8 real prompts spanning single-speaker sentences, `[S1]`/`[S2]`
+  dialogues, a `(laughs)`/pauses case and a non-ASCII case: 4 fired a genuine EOS, the other 4 hit the
+  1720 ceiling and were confirmed degenerate by what Whisper actually heard ("[Music]", "[ Silence ]", a
+  one-word fragment) versus the non-ASCII prompt's real EOS at 1142 frames (13.126 frames/char, the
+  max observed -- confirmed as genuine full-duration speech via a language-correct Whisper pass that
+  transcribed it back verbatim). 1.5x that margin sets the factor at 20; it only binds (produces less
+  than the 1720 default) for text under ~86 chars. **Confirmed model behaviour, not a port bug**: ran
+  upstream nari-labs Dia-1.6B-0626 itself (local weights, no download) on the identical sentence,
+  `[S1]`-tagged, same seed and the same 1720 cap. Upstream also never fires EOS -- its own
+  `finished_step_Bx` accounting shows the sequence forced to the cap at step ~1704 -- and Whisper
+  transcribes its output as `[Music]` too. Same inputs, same failure, in the reference implementation;
+  nothing in the C# port's conditioning, CFG, delay pattern, or EOS rule is implicated.
 
 ## alpha.241
 

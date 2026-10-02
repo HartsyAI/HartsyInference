@@ -1057,6 +1057,8 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     private ulong _argmaxScratch;
     private ulong _ssmDeltaScratch;
     private nuint _ssmDeltaScratchBytes;
+    // Recorded fences come back here for reuse, so a fence per layer costs one record instead of an event create/destroy.
+    private readonly Stack<nint> _fencePool = new();
 
     private bool StreamIsCapturing()
     {
@@ -9682,6 +9684,61 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             Profiling.NvtxRange.DumpProfile(EngineKnobs.ProfileOut.Value ?? "/tmp/hartsy_profile.txt");
     }
 
+    /// <inheritdoc/>
+    /// <remarks>An event recorded on the compute stream. 0 while the stream is being captured, where an event wait has
+    /// no meaning.</remarks>
+    public nint RecordFence()
+    {
+        using OpScope _op = EnterOp();
+        if (StreamIsCapturing()) return 0;
+        nint fence;
+        lock (_fencePool)
+        {
+            _fencePool.TryPop(out fence);
+        }
+        if (fence == 0)
+        {
+            CudaDriverApi.cuEventCreate(out fence, CudaDriverApi.CU_EVENT_DISABLE_TIMING).ThrowOnError();
+        }
+        int recorded = CudaDriverApi.cuEventRecord(fence, _stream.Handle);
+        if (recorded != 0)
+        {
+            CudaDriverApi.cuEventDestroy(fence);
+            recorded.ThrowOnError();
+        }
+        return fence;
+    }
+
+    /// <inheritdoc/>
+    public void WaitFence(nint fence)
+    {
+        if (fence == 0) return;
+        using OpScope _op = EnterOp();
+        CudaDriverApi.cuEventSynchronize(fence).ThrowOnError();
+    }
+
+    /// <inheritdoc/>
+    public void ReleaseFence(nint fence)
+    {
+        if (fence == 0) return;
+        lock (_fencePool)
+        {
+            _fencePool.Push(fence);
+        }
+    }
+
+    /// <summary>Destroys the pooled fence events; the streams are drained before this runs.</summary>
+    private void DestroyFencePool()
+    {
+        lock (_fencePool)
+        {
+            while (_fencePool.TryPop(out nint fence))
+            {
+                CudaDriverApi.cuEventDestroy(fence).ThrowOnError();
+            }
+        }
+    }
+
     #endregion
 
     #region Transpose / Permute
@@ -11550,6 +11607,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // modules/executors/streams, independently attempting both streams even if one reports an error.
             if (_stream is not null) Attempt("post-free compute-stream drain", _stream.Synchronize);
             if (_uploadStream is not null) Attempt("post-free upload-stream drain", _uploadStream.Synchronize);
+            Attempt("fence events", DestroyFencePool);
 
             if (_kernels is not null)
                 Attempt("kernel modules", () => { lock (_cudnnSdpaLock) _kernels.Dispose(); });
