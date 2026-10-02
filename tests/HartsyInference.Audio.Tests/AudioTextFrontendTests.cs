@@ -113,9 +113,12 @@ public sealed class AudioTextFrontendTests
     {
         GgufTokenizer? llama = TryLlama();
         if (llama is null) return;
+        int[] speaker1Expected = BosEosWrap(llama.EncodeOrdinary("[1]hello"));
+
         int[] speaker0 = AudioTextFrontend.CsmText("hello", speaker: 0);
         int[] speaker1 = AudioTextFrontend.CsmText("hello", speaker: 1);
 
         Assert.NotEqual(speaker0, speaker1); // "[0]" vs "[1]" changes the BPE'd prefix, not just a label
+        Assert.Equal(speaker1Expected, speaker1); // and speaker 1 is exactly the [1]-tagged, BOS/EOS-wrapped encode
     }
 }

@@ -21,7 +21,14 @@ public sealed class EnglishG2PTests
         // ER1 → "ɜɹ": misaki writes r-colored vowels as vowel+ɹ, not the single ɝ/ɚ glyphs (ArpabetToIpa.MapBase's
         // own citation) — both "ɜ" and "ɹ" are themselves valid StyleTts2Symbols entries, but not in this combination.
         Assert.Equal("ˈɜɹ", ArpabetToIpa.ConvertWord(["ER1"])); // stressed r-colored vowel, misaki decomposition
+        Assert.Equal("əɹ", ArpabetToIpa.ConvertWord(["ER0"]));  // unstressed r-colored vowel (no stress mark either)
         Assert.Equal("ˌɛ", ArpabetToIpa.ConvertWord(["EH2"]));  // secondary stress
+        // The remaining misaki single-character diphthongs (AW/AY/EY/OY → W/I/A/Y), locking in the full set OW/ER
+        // above only sampled one of.
+        Assert.Equal("W", ArpabetToIpa.ConvertWord(["AW0"]));
+        Assert.Equal("ˈI", ArpabetToIpa.ConvertWord(["AY1"]));
+        Assert.Equal("ˈA", ArpabetToIpa.ConvertWord(["EY1"]));
+        Assert.Equal("ˈY", ArpabetToIpa.ConvertWord(["OY1"]));
     }
 
     private static EnglishG2P Dict(string entries)
