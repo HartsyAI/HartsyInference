@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
+  pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
+  compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
+  backend has nothing to wait for. While the request's token can be cancelled, `GenericTransformer.ForwardEmbeds`
+  waits, before issuing layer *k*, on the fence recorded after layer *k − 2* (`DeviceRunAhead`). The device always
+  has the next layer queued behind the running one, and a stop leaves at most two layers to drain instead of
+  everything the host had queued. Math, kernels and stream order are unchanged; a forward with a token that cannot be
+  cancelled takes no fences at all.
 - **Fixed: a large `NativeBuffer`'s zero-fill no longer bypasses the process CPU thread cap.** Buffers of 8 MB and
   up were zeroed with a raw `Parallel.For` sized by `Environment.ProcessorCount` on the shared thread pool, ignoring
   `numerics.cpuThreads` and `CpuParallel.InlineScope`, so one big allocation on any thread could take every core
