@@ -6,6 +6,21 @@ source of truth is `<VersionPrefix>`/`<VersionSuffix>` in `Directory.Build.props
 [`docs/Checklists/ROADMAP.md`](docs/Checklists/ROADMAP.md) for what a
 stable release will require. Dates are UTC.
 
+## alpha.242 (provisional -- renumbered at merge)
+
+- **Dia TTS decode self-attention is GPU-resident; warm generation is ~3.6x faster with bit-identical
+  output.** `DiaAttention.SelfForwardFlash` (gated on `IBackend.FlashDecodeSupported`) replaces the
+  per-step host reshape/RoPE/GQA-repeat/memcpy attention path Dia shared with pre-fix Zonos, mirroring
+  Zonos's own resident decode (`ForwardResident`, `FixedKvCache`). Split-half (NeoX) RoPE is applied via
+  two per-tensor `IBackend.ApplyRopeSingle` calls (q and k separately -- Dia's self-attention is GQA, 16
+  query heads / 4 KV heads, so a shared-shape call corrupts one of them; see the alpha.243 entry below).
+  Verified same seed, same prompt, baseline vs fixed: identical sha256 and duration across 6 reps each;
+  warm median 91.92s -> 25.39s, RTF ~10.9 -> ~3.0. CPU/Vulkan paths are untouched.
+- **Audio regression triage, alpha.183 -> alpha.238: no regression found.** Orpheus, CSM, Qwen3-TTS,
+  Chatterbox and Moonshine (STT) A/B'd on the RTX 4090, same text/voice/seed: all flat to noise, Qwen3-TTS
+  ~24% faster (not chased further). The 176 shared-backend files (Cuda/Core/Gpu) that changed in that
+  window did not slow any of the five models down.
+
 ## Unreleased
 
 - **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
