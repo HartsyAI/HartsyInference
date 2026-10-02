@@ -84,6 +84,31 @@ public sealed record VoiceAgentOptions
     /// recognizer, so <c>true</c> is rejected.</summary>
     public bool PartialTranscripts { get; init; }
 
+    /// <summary>Reuses the language model's KV cache across a call's turns (<c>TextRequest.PrefixCacheKey</c>):
+    /// each turn prefills only what diverges from the retained conversation instead of the whole growing history,
+    /// and the system+tools prefix is pre-filled once at <see cref="VoiceAgentSession.StartAsync"/> so turn 1 is
+    /// warm too. Default true; false restores the original per-turn-from-scratch behavior (e.g. to isolate whether
+    /// a regression is reuse-related).</summary>
+    public bool EnablePrefixCache { get; init; } = true;
+
+    /// <summary>Whether the language model's device backend caches a dequantized copy of its quantized weights.
+    /// Default false: measured on Qwen3-4B-Q4_K_M/4090, "on" costs ~7.3 GB resident once warm (the dominant
+    /// share of the model's VRAM footprint) for a prefill that is a fixed ~50 ms faster; "off" keeps weights
+    /// compressed with a transient per-GEMM dequant, trading that fixed ~50 ms of every prefill call (prompt
+    /// length does not change it — decode's quantized GEMV path is unaffected either way, and so is tokens/sec)
+    /// for staying off the model's own memory. True restores the backend's own default (on) — e.g. to isolate
+    /// whether a regression is residency-related.</summary>
+    public bool CacheWeightCasts { get; init; }
+
+    /// <summary>Whether the language model's initial weight upload includes the load-time-fused Q/K/V and
+    /// gate/up projections' original split tensors alongside their fused replacements (see
+    /// <c>TextRequest.PreloadRedundantWeightSplits</c>). Default false: measured on Qwen3-4B-Q4_K_M/4090, the
+    /// split originals are ~1.21 GiB of pure duplicate upload that nothing on this single-sequence decode/prefill
+    /// path ever reads (only the batch scheduler's mixed-dtype split-projection path does, via its own lazy
+    /// auto-promotion, unaffected by this flag). True restores the engine's long-standing default (included) —
+    /// e.g. to isolate whether a regression is residency-related.</summary>
+    public bool PreloadRedundantWeightSplits { get; init; }
+
     /// <summary>Throws when a field is out of range or asks for something this version cannot do.</summary>
     public void Validate()
     {
