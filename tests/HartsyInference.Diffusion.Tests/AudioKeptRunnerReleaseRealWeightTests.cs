@@ -49,8 +49,6 @@ public sealed class AudioKeptRunnerReleaseRealWeightTests
         SpeechRequest speech = new() { Text = "Hello there, this is a test of the resident audio cache.", Voice = "af_heart" };
         AudioRequest transcribe = new() { Audio = new AudioClip { Data = await File.ReadAllBytesAsync(jfk), Format = "wav" } };
 
-        // Read first: the settings file loads on the first knob read and would overwrite a value set before it.
-        _ = EngineKnobs.AudioEvictFreeVramFloorMb.Value;
         ConcurrentQueue<string> lines = new();
         Logs.SetLogger((level, message) =>
         {
