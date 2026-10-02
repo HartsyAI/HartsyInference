@@ -17,7 +17,13 @@
     <ProjectReference Include="..\..\src\HartsyInference.Tools\HartsyInference.Tools.csproj" />
     <!-- The real-weight Qwen3 end-to-end test drives InferenceEngine("cuda") and gates on CudaContext. -->
     <ProjectReference Include="..\..\src\HartsyInference.Cuda\HartsyInference.Cuda.csproj" />
+    <!-- ChatTemplateFixtures' guarded Integration test reads tokenizer.chat_template straight from local GGUFs. -->
+    <ProjectReference Include="..\..\src\HartsyInference.ModelAssets\HartsyInference.ModelAssets.csproj" />
     <ProjectReference Include="..\HartsyInference.Tests.Common\HartsyInference.Tests.Common.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="Fixtures\ChatTemplates\*.jinja" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

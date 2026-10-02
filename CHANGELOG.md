@@ -8,6 +8,47 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added `ToolCallFormats.TryDetectFromTemplate`**, which reads a model's own GGUF `tokenizer.chat_template`
+  instead of guessing the tool-call format from its name: true only when the template references the
+  caller-supplied `tools` variable AND literally instructs one of the four supported envelopes (Hermes JSON,
+  Llama-3 `<|python_tag|>`, Mistral `[TOOL_CALLS]`, Gemma `<|tool_call>`). Verified against the real template
+  of eight local GGUFs — three detect correctly (Qwen3-4B/Qwen2.5-1.5B → Hermes, gemma-4-E2B-it → Gemma) and
+  five correctly detect as unsupported for family-specific reasons, see
+  `tests/HartsyInference.Tools.Tests/Fixtures/ChatTemplates/README.md`.
+- **Fixed:** `ToolCallFormats.Detect`'s name-hint heuristic no longer maps `"glm"`/`"deepseek"` to Hermes —
+  neither family's real wire format matches it (GLM uses XML arguments, DeepSeek never renders `tools` for
+  new calls). Both still reach the documented unknown-family Hermes fallback, so `Detect`'s observable
+  behavior for a bare name hint is unchanged.
+- **`WakeService.Claim`/`Release`**: an opt-in, per-device host handoff for the wake listener. A host can claim
+  one connected satellite's turns (typically from a `Detected` handler) and receive its decoded inbound audio
+  (16 kHz mono float, post-denoise when noise suppression is on, normalized from the wake path's internal
+  int16 scale) through `WakeDeviceClaim.OnFrame` instead of the service's own wake scoring, end-of-speech
+  capture and transcription, which are suspended for that device only. The connection, ping/pong keepalive and
+  outbound audio path (`BeginAudio`/`SendAudioAsync`) are unaffected. `Release` returns the device to normal
+  listening; a disconnect while claimed auto-releases and calls `WakeDeviceClaim.OnDisconnected` once. Zero
+  change for a device nothing has claimed — `WakeSession.Claim` defaults to null and the existing
+  scoring/VAD branch is reached exactly as before; proven against the full existing wake suite
+  (`WakeTransportTests` and the rest) with real backbone/head/denoiser weights, not just by inspection. This is
+  the engine-side requirement for `SwarmUI-AudioLab`'s satellite voice-agent Session mode, which could not
+  otherwise get continuous raw audio for a device past its own wake detection.
+- **Fixed two races in `WakeService.Claim`/`Release`'s disconnect path, found by review before this shipped.**
+  A device's reconnect (`WakeSession.OnReconnected`, from its new connection) could land while its old
+  connection was still unwinding; the old connection's `finally` then unconditionally cleared the new
+  connection's `Codec`, reset `State` to `Handshake` (silently pausing the worker for that device, since
+  `WakeWorker.Run` skips a session in `Handshake`), cleared the new connection's claim, and fired a spurious
+  `OnDisconnected` for a device that was, in fact, still connected. `WakeSession.Codec` is now a field (like
+  `Claim` already was) so the disconnect path can clear it with a CAS keyed to the specific codec that
+  connection installed; a superseded connection's teardown now does nothing instead. A throwing
+  `OnDisconnected` is also now caught and logged (`Logs.Error`) rather than propagating out of the `finally`,
+  where it could otherwise mask whatever exception actually ended the connection. Same treatment for a
+  throwing `OnFrame` in `WakeWorker`, caught separately from the pipeline/denoiser/VAD reset path so a
+  persistently-throwing host callback doesn't flood the log with pointless resets of state a claimed device
+  never reads. `WakeService.Claim` also now withdraws (and returns null for) a claim whose connection died in
+  the gap between its own liveness check and installing the claim, so that race can no longer leave a host
+  holding a claim that will never call `OnDisconnected`.
+
+## alpha.241
+
 - **Fixed an intermittent `CUDA_ERROR_INVALID_VALUE` crash on the first `RmsNorm` call of a prefill.**
   `GpuTransferHelper.UploadTo` and `State.FreeDevice`'s async-free branch read `State.StreamHandle` directly, with
   nothing checking that the backend hadn't been retired (zeroing the handle) since the caller resolved that
@@ -24,18 +65,6 @@ stable release will require. Dates are UTC.
   the layer loop, so all 36-layer rereads hit instead of re-uploading. Under accurate (non-overlapped) timing
   this is a real, modest TTFT reduction (~4-5%); prefill GEMM time dominates the 3060's TTFT and is unaffected
   by this fix (a separate efficiency project is being scoped for that).
-- **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
-  pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
-  `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
-  Blur only softens the in-denoise blend (and, because the grown and blurred mask is thresholded, widens the pasted
-  region by about the blur radius), unless `ImageRequest.MaskCompositeUnthresholded` asks for the soft paste.
-  `Inpaint.RecompositeMask` turns the full-canvas paste off (Init Image Recomposite Mask); the crop and segment paths
-  always paste. `RecipeImg2ImgBinder` switches the pipelines' own paste off whenever a mask is present, so a caller
-  driving a recipe pipeline directly with a mask gets no paste and should go through `IImagesService`.
-  `MaskCompositeUnthresholded` and `RecompositeMask` are request fields for library callers (the SwarmUI extension);
-  the CLI and HTTP API do not expose them yet.
-- A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
-  before the full-canvas run; before, the mask resolver's guard threw.
 - **Fixed: HeartMuLa's quantized GGUF cache ignored `modelsRoot`/`ModelCacheRoot` entirely.** Every other
   audio model resolves its cache location under `AudioModelCache.CacheRoot` (`modelsRoot/audio` when
   `EngineKnobs.ModelsRoot` is configured, honoring the `EngineKnobs.ModelCacheRoot` override too).
@@ -102,33 +131,18 @@ stable release will require. Dates are UTC.
   `voice.turn.total_ms` 1095.8-1225.1 ms (gate ≤ 1300 ms), decode 89-102 tok/s. VRAM primed and flat for all ten
   turns at **5.81 GB, under the ≤ 6 GB target** (was ~13.8 GB). A smaller `PrefixCacheCapacityHint` and
   `vram.kvF16` stay unused.
-- **`WakeService.Claim`/`Release`**: an opt-in, per-device host handoff for the wake listener. A host can claim
-  one connected satellite's turns (typically from a `Detected` handler) and receive its decoded inbound audio
-  (16 kHz mono float, post-denoise when noise suppression is on, normalized from the wake path's internal
-  int16 scale) through `WakeDeviceClaim.OnFrame` instead of the service's own wake scoring, end-of-speech
-  capture and transcription, which are suspended for that device only. The connection, ping/pong keepalive and
-  outbound audio path (`BeginAudio`/`SendAudioAsync`) are unaffected. `Release` returns the device to normal
-  listening; a disconnect while claimed auto-releases and calls `WakeDeviceClaim.OnDisconnected` once. Zero
-  change for a device nothing has claimed — `WakeSession.Claim` defaults to null and the existing
-  scoring/VAD branch is reached exactly as before; proven against the full existing wake suite
-  (`WakeTransportTests` and the rest) with real backbone/head/denoiser weights, not just by inspection. This is
-  the engine-side requirement for `SwarmUI-AudioLab`'s satellite voice-agent Session mode, which could not
-  otherwise get continuous raw audio for a device past its own wake detection.
-- **Fixed two races in `WakeService.Claim`/`Release`'s disconnect path, found by review before this shipped.**
-  A device's reconnect (`WakeSession.OnReconnected`, from its new connection) could land while its old
-  connection was still unwinding; the old connection's `finally` then unconditionally cleared the new
-  connection's `Codec`, reset `State` to `Handshake` (silently pausing the worker for that device, since
-  `WakeWorker.Run` skips a session in `Handshake`), cleared the new connection's claim, and fired a spurious
-  `OnDisconnected` for a device that was, in fact, still connected. `WakeSession.Codec` is now a field (like
-  `Claim` already was) so the disconnect path can clear it with a CAS keyed to the specific codec that
-  connection installed; a superseded connection's teardown now does nothing instead. A throwing
-  `OnDisconnected` is also now caught and logged (`Logs.Error`) rather than propagating out of the `finally`,
-  where it could otherwise mask whatever exception actually ended the connection. Same treatment for a
-  throwing `OnFrame` in `WakeWorker`, caught separately from the pipeline/denoiser/VAD reset path so a
-  persistently-throwing host callback doesn't flood the log with pointless resets of state a claimed device
-  never reads. `WakeService.Claim` also now withdraws (and returns null for) a claim whose connection died in
-  the gap between its own liveness check and installing the claim, so that race can no longer leave a host
-  holding a claim that will never call `OnDisconnected`.
+- **Dia TTS decode self-attention is GPU-resident; warm generation is ~3.6x faster with bit-identical
+  output.** `DiaAttention.SelfForwardFlash` (gated on `IBackend.FlashDecodeSupported`) replaces the
+  per-step host reshape/RoPE/GQA-repeat/memcpy attention path Dia shared with pre-fix Zonos, mirroring
+  Zonos's own resident decode (`ForwardResident`, `FixedKvCache`). Split-half (NeoX) RoPE is applied via
+  two per-tensor `IBackend.ApplyRopeSingle` calls (q and k separately -- Dia's self-attention is GQA, 16
+  query heads / 4 KV heads, so the combined q+k call corrupted K before #228 fixed it).
+  Verified same seed, same prompt, baseline vs fixed: identical sha256 and duration across 6 reps each;
+  warm median 91.92s -> 25.39s, RTF ~10.9 -> ~3.0. CPU/Vulkan paths are untouched.
+- **Audio regression triage, alpha.183 -> alpha.238: no regression found.** Orpheus, CSM, Qwen3-TTS,
+  Chatterbox and Moonshine (STT) A/B'd on the RTX 4090, same text/voice/seed: all flat to noise, Qwen3-TTS
+  ~24% faster (not chased further). The 176 shared-backend files (Cuda/Core/Gpu) that changed in that
+  window did not slow any of the five models down.
 
 ## alpha.240
 
@@ -151,6 +165,18 @@ stable release will require. Dates are UTC.
 
 ## alpha.239
 
+- **Masked inpaint pastes its result back through one engine-level, hard-threshold step, as SwarmUI does.** The
+  pipelines each blended the decoded image over the source with the same soft mask they used inside the denoise.
+  `MaskRecomposite` now does the paste after generation: any mask value above 0.001 takes the new pixel, so Mask
+  Blur only softens the in-denoise blend (and, because the grown and blurred mask is thresholded, widens the pasted
+  region by about the blur radius), unless `ImageRequest.MaskCompositeUnthresholded` asks for the soft paste.
+  `Inpaint.RecompositeMask` turns the full-canvas paste off (Init Image Recomposite Mask); the crop and segment paths
+  always paste. `RecipeImg2ImgBinder` switches the pipelines' own paste off whenever a mask is present, so a caller
+  driving a recipe pipeline directly with a mask gets no paste and should go through `IImagesService`.
+  `MaskCompositeUnthresholded` and `RecompositeMask` are request fields for library callers (the SwarmUI extension);
+  the CLI and HTTP API do not expose them yet.
+- A declined "inpaint only masked" crop (empty mask, or a crop covering the whole canvas) now clears the crop request
+  before the full-canvas run; before, the mask resolver's guard threw.
 - **Audio: fixed the vocab-sized delegate-sort allocation anti-pattern in the TTS samplers** — the same
   pattern PR #215 fixed in the LLM package's `TopPStep`, independently present in several places in
   `src/HartsyInference.Audio`:
