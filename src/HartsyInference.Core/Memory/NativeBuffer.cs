@@ -118,7 +118,7 @@ public sealed unsafe class NativeBuffer : IDisposable
     /// <c>i</c> starts at <c>i * ParallelClearChunkBytes</c>.</summary>
     private readonly record struct ClearPlan(nint Start, nuint Length, Action<nint, nuint> ClearRange)
     {
-        public int Chunks => (int)((Length + ParallelClearChunkBytes - 1) / ParallelClearChunkBytes);
+        public int Chunks => checked((int)((Length + ParallelClearChunkBytes - 1) / ParallelClearChunkBytes));
 
         public void Run(int chunk)
         {

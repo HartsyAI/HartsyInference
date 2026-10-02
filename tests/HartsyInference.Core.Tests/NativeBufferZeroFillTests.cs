@@ -56,6 +56,12 @@ public sealed unsafe class NativeBufferZeroFillTests
         {
             Assert.All(recorder.Calls, call => Assert.Equal(caller, call.Thread));
         }
+        else if (Environment.ProcessorCount > 1)
+        {
+            // The capped scheduler never runs a fanned-out loop on a thread outside it, so a fill that stayed
+            // entirely on the caller would mean it had quietly stopped fanning out.
+            Assert.Contains(recorder.Calls, call => call.Thread != caller);
+        }
         recorder.AssertTiledAndZeroed();
     }
 
