@@ -17,9 +17,10 @@ namespace HartsyInference.Gpu;
 /// <para>Deliberately NOT here: anything a backend does differently. The base declares hooks for those and states
 /// what each is for, rather than absorbing one backend's answer and making the other bend to it.</para>
 ///
-/// <para>Only <c>VulkanBackend</c> derives from this today. <c>CudaBackend</c> is still a standalone
-/// <see cref="IBackend"/> with its own copies of the members below, so where a remark here says "both backends",
-/// it is describing what the two did separately before this existed — not a hook CUDA currently runs through.</para></summary>
+/// <para>Both <c>VulkanBackend</c> and <c>CudaBackend</c> derive from this. What a backend releases beyond the
+/// shared sweep — CUDA's Q8_1 sidecars, Vulkan's bulk free — belongs in its residency cache's <c>FreeAllCached</c>:
+/// <see cref="FreeAllDeviceMemory"/> reaches the cache only as an <see cref="IGpuResidency"/>, so cleanup kept
+/// anywhere else is cleanup it skips.</para></summary>
 public abstract class GpuBackendBase
 {
     private int _opDepth;

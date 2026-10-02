@@ -68,6 +68,42 @@ internal static unsafe class GpuTransferHelper
             }
         }
 
+        /// <summary>Releases everything this cache holds: the shared sweep, and the Q8_1 sidecars and queued persistent
+        /// frees that are CUDA's.</summary>
+        /// <remarks>An override, not a static wrapper, so that every route to the shared sweep runs it. The sweep never
+        /// calls <see cref="OnActivationEvicted"/>, so on its own it hands each activation back and leaves the sidecar
+        /// riding on it — three device buffers apiece — allocated and still tracked. <c>FreeAllDeviceMemory</c> holds
+        /// this cache only as <see cref="IGpuResidency"/>; while the cleanup lived in a static method it called the
+        /// sweep directly and went around it.
+        ///
+        /// <para>The stream is drained first and the sweep frees synchronously: this is a teardown-grade release, a
+        /// stream-ordered free is wrong against a stream that is about to be retired, and after the drain the ordering
+        /// it exists to provide is moot. Sidecars go before the sweep because they are keyed by the very activations
+        /// it is about to forget.</para></remarks>
+        public override void FreeAllCached()
+        {
+            Context?.EnsureCurrent();
+            if (StreamHandle != 0)
+            {
+                CudaDriverApi.cuStreamSynchronize(StreamHandle).ThrowOnError();
+            }
+            foreach (Tensor tensor in ActivationCache.Keys.ToArray())
+            {
+                RemoveSidecar(this, tensor);
+            }
+            SynchronousFrees = true;
+            try
+            {
+                base.FreeAllCached();
+            }
+            finally
+            {
+                SynchronousFrees = false;
+            }
+            SidecarCache.Clear();
+            PendingPersistentFrees.Clear();
+        }
+
         /// <summary>The shared cache's sweep, with the three guards CUDA's free paths need.</summary>
         /// <remarks>Reached from the shared op scope, which is the only reason this is an override rather than a
         /// wrapper: the base calls <c>Residency.SweepOrphans()</c>, so a guard that lives anywhere else is a guard
@@ -1149,20 +1185,11 @@ internal static unsafe class GpuTransferHelper
     public static void FreeAllCached() => FreeAllCached(Resolve());
 
 
-    /// <summary>Releases every cached allocation this state owns. The shared cache clears the bindings, frees the
-    /// buffers (weights, activations and casts) and empties the collections; the arena and sidecar bookkeeping
-    /// around it is CUDA's.</summary>
-    internal static void FreeAllCached(State s)
-    {
-        s.Context?.EnsureCurrent();
-        if (s.StreamHandle != 0) CudaDriverApi.cuStreamSynchronize(s.StreamHandle).ThrowOnError();
-        foreach (Tensor tensor in s.ActivationCache.Keys.ToArray()) RemoveSidecar(s, tensor);
-        s.SynchronousFrees = true;
-        try { s.FreeAllCached(); }
-        finally { s.SynchronousFrees = false; }
-        s.SidecarCache.Clear();
-        s.PendingPersistentFrees.Clear();
-    }
+    /// <summary>Releases every cached allocation this state owns, for a caller that has the state in hand.</summary>
+    /// <remarks>The cleanup itself — sidecars, the synchronous sweep, the persistent-free queue — is
+    /// <see cref="State.FreeAllCached"/>, so this and every path that reaches the cache through
+    /// <see cref="IGpuResidency"/> run the same one.</remarks>
+    internal static void FreeAllCached(State s) => s.FreeAllCached();
 
 
 
