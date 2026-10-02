@@ -62,27 +62,17 @@ internal static class HeartMulaMusicModel
         return lower.EndsWith("-q4", StringComparison.Ordinal) || lower.EndsWith("-q4_k", StringComparison.Ordinal) ? "q4_k" : null;
     }
 
-    /// <summary>Resolves the on-disk path for <paramref name="repo"/>'s quantized GGUF cache, under the same
-    /// audio root every other audio model uses (<see cref="AudioModelCache.CacheRoot"/> -- <c>modelsRoot/audio</c>
-    /// when configured via <c>EngineKnobs.ModelsRoot</c>, honoring the <c>EngineKnobs.ModelCacheRoot</c>
-    /// override too; see <see cref="AudioModelCache"/>'s own resolution order) rather than a path fixed to the
-    /// OS user profile. The previous version always wrote under
-    /// <c>~/.cache/hartsyinference/heartmula/</c>, ignoring both knobs entirely -- the one audio model that
-    /// did not follow the convention every other one already does.
-    ///
-    /// <para>Falls back to the legacy path ONLY when a file already exists there (an install that predates
-    /// this change), so nothing already on disk is silently orphaned; any fresh conversion always writes
-    /// under the shared root.</para></summary>
+    /// <summary>Resolves <paramref name="repo"/>'s quantized GGUF cache path under
+    /// <see cref="AudioModelCache.CacheRoot"/>, falling back to the legacy
+    /// <c>~/.cache/hartsyinference/heartmula/</c> location only when a file already exists there.</summary>
     internal static string ResolveQuantCachePath(string repo, string quant) => ResolveQuantCachePath(
         repo, quant,
         legacyCacheRoot: Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".cache", "hartsyinference"),
         sharedAudioRoot: AudioModelCache.CacheRoot,
         fileExists: File.Exists);
 
-    /// <summary>Pure resolution core of <see cref="ResolveQuantCachePath(string, string)"/>, taking both
-    /// candidate roots and the existence check as parameters so this exact decision -- legacy path if (and
-    /// only if) something is already there, the shared audio root otherwise -- has fast unit tests that
-    /// never touch the real home directory or the real <see cref="AudioModelCache.CacheRoot"/>.</summary>
+    /// <summary>Pure core of <see cref="ResolveQuantCachePath(string, string)"/>, parameterized over both
+    /// candidate roots and the existence check for unit testing.</summary>
     internal static string ResolveQuantCachePath(string repo, string quant, string legacyCacheRoot, string sharedAudioRoot, Func<string, bool> fileExists)
     {
         string fileName = $"{repo.Replace('/', '_')}-{quant.ToLowerInvariant()}.gguf";

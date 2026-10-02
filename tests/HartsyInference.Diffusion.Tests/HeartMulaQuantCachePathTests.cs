@@ -3,12 +3,9 @@ using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
 
-/// <summary>Unit tests for <see cref="HeartMulaMusicModel.ResolveQuantCachePath(string, string, string, string, Func{string, bool})"/>
-/// -- the fix for HeartMuLa's quantized GGUF cache ignoring <c>modelsRoot</c>/<c>ModelCacheRoot</c> entirely
-/// and always writing under <c>~/.cache/hartsyinference/heartmula/</c>, unlike every other audio model (which
-/// resolves under <see cref="HartsyInference.Audio.Cache.AudioModelCache.CacheRoot"/>). The pure core takes
-/// both candidate roots and the existence check as parameters so these tests never touch the real home
-/// directory or the real <c>AudioModelCache.CacheRoot</c>.</summary>
+/// <summary>Unit tests for <see cref="HeartMulaMusicModel.ResolveQuantCachePath(string, string, string, string, Func{string, bool})"/>:
+/// resolves under the shared audio root by default, the legacy path only when a file already exists
+/// there.</summary>
 public sealed class HeartMulaQuantCachePathTests
 {
     private const string LegacyRoot = "/fake/home/.cache/hartsyinference";
