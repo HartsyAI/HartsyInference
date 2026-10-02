@@ -24,7 +24,9 @@ namespace HartsyInference.Diffusion.Tests;
 ///
 /// <para>Opt-in (<c>HARTSY_AUDIO_SWEEP_PROBE=1</c>): roughly 30 GB of weights through one GPU, so it runs only under
 /// this repo's swarm-quiet-window and lock protocol. <c>HARTSY_AUDIO_SWEEP_OUT</c> names the folder the WAVs and the
-/// report land in. Never downloads: a missing checkpoint skips.</para></summary>
+/// report land in; <c>HARTSY_AUDIO_SWEEP_MODELS</c> (comma-separated ids) picks and orders a subset, because whether a
+/// switch lands in the window the old fixed floor missed depends on what the card holds by then. Never downloads: a
+/// missing checkpoint skips.</para></summary>
 [Trait("Category", "GpuIntegration")]
 [Trait("Category", "RealWeights")]
 [Trait("Category", "Slow")]
@@ -32,6 +34,7 @@ public sealed class AudioSweepEvictionProbeTests
 {
     private const string GateEnvVar = "HARTSY_AUDIO_SWEEP_PROBE";
     private const string OutEnvVar = "HARTSY_AUDIO_SWEEP_OUT";
+    private const string ModelsEnvVar = "HARTSY_AUDIO_SWEEP_MODELS";
     private const int Seed = 42;
     private const string Line = "Hello, this is a short test of the audio sweep, running through the engine on a shared card.";
     private const string JfkText = "And so my fellow Americans, ask not what your country can do for you, ask what you can do for your country.";
@@ -73,9 +76,13 @@ public sealed class AudioSweepEvictionProbeTests
             _out.WriteLine($"SKIPPED: {unavailable}");
             return;
         }
+        string? picked = Environment.GetEnvironmentVariable(ModelsEnvVar);
+        (string Id, string Weights, bool NeedsReference)[] steps = string.IsNullOrWhiteSpace(picked) ? Sweep
+            : [.. picked.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Select(id => Sweep.Single(step => step.Id == id))];
         string jfk = Path.Combine(RepoPaths.RepoRoot(), "tests", "python-reference", "silerovad_reference", "jfk.wav");
         string whisperWeights = Path.Combine(AudioModelCache.CacheRoot, "stt", "openai--whisper-medium.en", "model.safetensors");
-        string[] required = [jfk, whisperWeights, .. Sweep.Select(step => Path.Combine(AudioModelCache.CacheRoot, step.Weights))];
+        string[] required = [jfk, whisperWeights, .. steps.Select(step => Path.Combine(AudioModelCache.CacheRoot, step.Weights))];
         if (!RealWeightGate.Require(_out.WriteLine, required))
         {
             return;
@@ -98,7 +105,7 @@ public sealed class AudioSweepEvictionProbeTests
             using InferenceEngine engine = new("cuda");
             (long startFree, long total) = engine.Backend.GetVramInfo();
             _out.WriteLine($"device {total >> 20} MB, {startFree >> 20} MB free before the sweep");
-            foreach ((string id, _, bool needsReference) in Sweep)
+            foreach ((string id, _, bool needsReference) in steps)
             {
                 SpeechRequest request = Request(id, needsReference ? reference : null);
                 byte[]? wav = await RunStepAsync(engine, id, id, request, engineLines, rows, outDir);
