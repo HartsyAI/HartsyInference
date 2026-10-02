@@ -25,9 +25,17 @@ public sealed class TestTierLintTests
         RegexOptions.Compiled);
     private static readonly Regex HasFacts = new(@"\[Fact\]|\[Theory\]", RegexOptions.Compiled);
 
-    // A test is exempt from a lint if it demonstrably skips/guards when the resource is unavailable. Widen this set
+    // A test is exempt from a lint if it demonstrably skips/guards when the resource is unavailable. Widen these sets
     // (or drop the magic comment `// tier-lint: guarded` on the offending line) rather than suppressing a real find.
-    private static readonly Regex RecognizedGuard = new(
+    // The GPU set names only checks that ask whether a device is there. File and directory probes used to count
+    // too, so the PtxDir() helper's Directory.Exists — which only finds compiled kernels — passed an unguarded
+    // `new CudaBackend` file, and those tests failed on a machine without a GPU instead of being flagged here.
+    private static readonly Regex RecognizedGpuGuard = new(
+        @"CudaContext\.IsAvailable|BackendGate\.(TryOpen|UnavailableReason)|CudaAvailable|GpuAvailable|VulkanAvailable|"
+        + @"HasCuda|HasGpu|TryCreate|SkipIfNo|tier-lint:\s*guarded",
+        RegexOptions.Compiled);
+
+    private static readonly Regex RecognizedFixtureGuard = new(
         @"CudaAvailable|GpuAvailable|VulkanAvailable|HasCuda|HasGpu|TryCreate|SkipIfNo|IsAvailable|FixturesPresent|"
         + @"catch\s*\(|Directory\.Exists|File\.Exists|GetEnvironmentVariable|tier-lint:\s*guarded",
         RegexOptions.Compiled);
@@ -40,19 +48,19 @@ public sealed class TestTierLintTests
     public void UntaggedUnitTests_DoNotInstantiateGpuBackend_WithoutGuard()
     {
         List<string> violations = ScanUntaggedUnitFiles((path, body) =>
-            GpuInit.IsMatch(body) && !RecognizedGuard.IsMatch(body));
+            GpuInit.IsMatch(body) && !RecognizedGpuGuard.IsMatch(body));
 
         Assert.True(violations.Count == 0,
             "These untagged (Unit-tier) tests instantiate a real GPU backend with no skip-guard, so they will hard-fail "
-            + "on the GPU-less hosted CI runner. Add [Trait(\"Category\", \"GpuIntegration\")] (or a CudaAvailable()-style "
-            + "guard that returns early when no device is present):\n  " + string.Join("\n  ", violations));
+            + "on the GPU-less hosted CI runner. Add [Trait(\"Category\", \"GpuIntegration\")] (or a CudaContext.IsAvailable() / "
+            + "BackendGate.TryOpen guard that returns early when no device is present):\n  " + string.Join("\n  ", violations));
     }
 
     [Fact]
     public void UntaggedUnitTests_DoNotReadGitignoredReferenceData_WithoutGuard()
     {
         List<string> violations = ScanUntaggedUnitFiles((path, body) =>
-            RefDataPath.IsMatch(body) && FileReadApi.IsMatch(body) && !RecognizedGuard.IsMatch(body));
+            RefDataPath.IsMatch(body) && FileReadApi.IsMatch(body) && !RecognizedFixtureGuard.IsMatch(body));
 
         Assert.True(violations.Count == 0,
             "These untagged (Unit-tier) tests read from tests/python-reference/ (reference tensors are gitignored via the "

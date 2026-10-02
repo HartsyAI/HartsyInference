@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 /// logic. Non-square shapes so a transposed axis cannot pass. Also reports achieved TOPS against the same
 /// pair, since the whole point of the kernel is to beat that pair end-to-end: it must clear the PAIR's
 /// throughput, not the bare GEMM's, to be worth wiring in.</summary>
+[Trait("Category", "GpuIntegration")]
 [Collection("CudaSerial")]
 public sealed unsafe class Int8MmaGemmTests
 {

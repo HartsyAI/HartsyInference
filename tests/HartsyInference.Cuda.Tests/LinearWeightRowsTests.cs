@@ -15,6 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// gemm-dtype units, which is exactly the sort of thing that is silently wrong only on the dtype the real model uses:
 /// these cases run F32, BF16 (cast path) and fp8 (the MiniMax-H3 checkpoint's own weight dtype), preloaded and not,
 /// because preloading is what switches the cast on.</summary>
+[Trait("Category", "GpuIntegration")]
 [Collection("CudaSerial")]
 public sealed unsafe class LinearWeightRowsTests
 {

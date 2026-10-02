@@ -17,13 +17,18 @@ public sealed class KnobFileTests : IDisposable
     public KnobFileTests()
     {
         Directory.CreateDirectory(_dir);
+        // Loads whatever settings file this process uses BEFORE pointing at one that does not exist yet. A test that
+        // happened to make the process's first knob read would otherwise go looking for the empty temp path, which
+        // throws, so whether the class passed depended on what had run before it.
+        KnobFile.EnsureLoaded();
         KnobFile.ExplicitPath = Path.Combine(_dir, "settings.json");
     }
 
     public void Dispose()
     {
         KnobFile.ExplicitPath = _previous;
-        KnobStore.ResetOverrides();
+        // Put back the settings the rest of the process was running with, not just an empty override store.
+        KnobFile.Reload();
         try
         {
             Directory.Delete(_dir, recursive: true);
@@ -112,6 +117,22 @@ public sealed class KnobFileTests : IDisposable
 
         Assert.Equal("/from-host", EngineKnobs.ModelsRoot.Value);
         Assert.Equal("host", KnobStore.SourceOf("paths.modelsRoot"));
+    }
+
+    /// <summary>Saving while a host holds a value for the same setting stores what was saved, coerced, and not the
+    /// host's value; and the newer request is the one in force afterwards.</summary>
+    [Fact]
+    public void Save_UnderAHostOverride_StoresTheSavedValueNotTheHosts()
+    {
+        KnobStore.Set(EngineKnobs.GemvWpb, 8);
+
+        object? stored = KnobFile.Save("numerics.gemvWpb", "999");
+
+        Assert.Equal(16, stored);
+        string written = File.ReadAllText(KnobFile.ExplicitPath!);
+        Assert.Contains("\"numerics.gemvWpb\": 16", written, StringComparison.Ordinal);
+        Assert.Equal(16, EngineKnobs.GemvWpb.Value);
+        Assert.Equal("settings file", KnobStore.SourceOf("numerics.gemvWpb"));
     }
 
     /// <summary>An unset setting reports the declared default as its source, so "where did this come from" always has an answer.</summary>

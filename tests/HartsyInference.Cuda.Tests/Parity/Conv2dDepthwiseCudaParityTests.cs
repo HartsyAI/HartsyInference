@@ -11,6 +11,7 @@ namespace HartsyInference.Cuda.Tests;
 /// MaskRows/Transpose2D being called with a <c>.Reshape</c> view as the write target, which orphans
 /// the CUDA activation cache entry from the object the caller reads back (see
 /// NormalBaeModel.SqueezeExcite and UperNetSegModel for the fix). Kept as regression coverage.</summary>
+[Trait("Category", "GpuIntegration")]
 [Collection("CudaSerial")]
 public sealed unsafe class Conv2dDepthwiseCudaParityTests
 {

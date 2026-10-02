@@ -16,7 +16,13 @@ public static class KnobStore
     private static readonly ConcurrentDictionary<string, (object? Value, string Source)> _overrides = new(StringComparer.Ordinal);
 
     /// <summary>Sets an explicit value. Beats the settings file; beaten by a scoped profile.</summary>
-    public static void Set<T>(Knob<T> knob, T value) => _overrides[knob.Id] = (value, "host");
+    /// <remarks>Loads the settings file first if nothing has yet. Otherwise a Set made before the first read would be
+    /// overwritten by that read's load of the file, and a host had to remember to read a knob before setting one.</remarks>
+    public static void Set<T>(Knob<T> knob, T value)
+    {
+        KnobFile.EnsureLoaded();
+        _overrides[knob.Id] = (value, "host");
+    }
 
     /// <summary>Sets by dotted id with an already-parsed value. Used by <see cref="KnobFile"/>, which owns the parsing.</summary>
     internal static void SetByIdRaw(string id, object? value, string source) => _overrides[id] = (value, source);
@@ -38,7 +44,13 @@ public static class KnobStore
     internal static object? Raw(string id) => _overrides.TryGetValue(id, out (object? Value, string Source) entry) ? entry.Value : null;
 
     /// <summary>Clears an override so the knob falls back to its declared default.</summary>
-    public static void Clear<T>(Knob<T> knob) => _overrides.TryRemove(knob.Id, out _);
+    /// <remarks>Loads the settings file first, for the same reason as <see cref="Set{T}"/>: a later first load would
+    /// otherwise put the file's value back.</remarks>
+    public static void Clear<T>(Knob<T> knob)
+    {
+        KnobFile.EnsureLoaded();
+        _overrides.TryRemove(knob.Id, out _);
+    }
 
     /// <summary>Drops every override. For tests and <see cref="KnobFile.Reload"/>.</summary>
     public static void ResetOverrides() => _overrides.Clear();

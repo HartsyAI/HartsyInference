@@ -48,6 +48,10 @@ public class PlacementCliSettings : CommandSettings
     [CommandOption("--profile")]
     [Description("Apply a named settings profile before any --set. 'reference' disables every approximation and fast path for parity work; 'default' is a no-op.")]
     public string? Profile { get; init; }
+
+    [CommandOption("--settings-file")]
+    [Description("Read engine settings from this file for this run, instead of ~/.config/hartsyinference/settings.json, which every HartsyInference process on the machine shares. 'settings set' writes to it too.")]
+    public string? SettingsFile { get; init; }
 }
 
 /// <summary>Builds the engine placement from CLI options with the same eager validation the extension does, so a bad ordinal fails at startup rather than mid-generation.</summary>

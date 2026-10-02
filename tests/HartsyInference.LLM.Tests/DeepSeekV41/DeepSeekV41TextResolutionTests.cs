@@ -14,7 +14,7 @@ public sealed class DeepSeekV41TextResolutionTests : IDisposable
 {
     private readonly string _root = Directory.CreateTempSubdirectory("dsv41-resolver-").FullName;
 
-    // Reading the knob first lets the settings file load, which would otherwise overwrite the override on first resolve.
+    // The root to put back afterwards. (A Set now loads the settings file itself, so no read is needed before it.)
     private readonly string? _previousRoot = EngineKnobs.ModelsRoot.Value;
 
     public DeepSeekV41TextResolutionTests() => KnobStore.Set(EngineKnobs.ModelsRoot, _root);

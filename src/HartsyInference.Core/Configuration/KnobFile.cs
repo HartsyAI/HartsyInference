@@ -25,7 +25,12 @@ public static class KnobFile
     private static readonly object _gate = new();
     private static bool _loaded;
 
-    /// <summary>Set by a host that keeps its settings elsewhere; overrides <see cref="Path"/>. Must be set before the first knob is read.</summary>
+    /// <summary>True while the thread holding <see cref="_gate"/> applies the file. Only that thread can see it set, and
+    /// the knob reads Apply makes on the way come back to <see cref="EnsureLoaded"/>, which must return rather than load
+    /// the file a second time inside the first.</summary>
+    private static bool _applying;
+
+    /// <summary>Set by a host that keeps its settings elsewhere; overrides <see cref="Path"/>. Must be set before the first knob is read or set, since either loads the file.</summary>
     public static string? ExplicitPath { get; set; }
 
     /// <summary>The settings file this process reads and writes, whether or not it exists yet.</summary>
@@ -44,6 +49,9 @@ public static class KnobFile
 
 
     /// <summary>Loads the settings file once. Safe to call repeatedly and from multiple threads.</summary>
+    /// <remarks>Another thread that reads a knob while the file is being applied waits for the load to finish. Letting
+    /// it through as soon as the load had started meant it could go on to <c>Set</c> a value that the rest of the file
+    /// then wrote over, so a host's override lost to the settings file whenever the two raced.</remarks>
     internal static void EnsureLoaded()
     {
         if (Volatile.Read(ref _loaded))
@@ -52,17 +60,25 @@ public static class KnobFile
         }
         lock (_gate)
         {
-            if (_loaded)
+            if (_loaded || _applying)
             {
                 return;
             }
-            // Set BEFORE applying, so the Apply path's own knob reads cannot recurse into a second load.
-            _loaded = true;
-            string? path = Discover();
-            if (path is not null)
+            _applying = true;
+            try
             {
-                Apply(File.ReadAllText(path), path);
-                LoadedFrom = path;
+                string? path = Discover();
+                if (path is not null)
+                {
+                    Apply(File.ReadAllText(path), path);
+                    LoadedFrom = path;
+                }
+            }
+            finally
+            {
+                _applying = false;
+                // Published only once the file is applied; a failed load is not retried, as before.
+                Volatile.Write(ref _loaded, true);
             }
         }
     }
@@ -100,19 +116,26 @@ public static class KnobFile
     public static object? Save(string id, string rawValue)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(id);
+        // A process's first load applies the whole file, so it must not run after this point: it would put the
+        // setting's old value back over the one being saved.
+        EnsureLoaded();
         object knob = KnobRegistry.Find(id)
             ?? throw new InvalidOperationException($"Unknown setting '{id}'. Run 'hartsy settings list' to see them all.");
 
         // Round-trip through the loader's own parse so "true"/"1"/"256" are read exactly as the file would read them.
         string probe = "{\"settings\":{" + JsonSerializer.Serialize(id) + ":"
             + JsonSerializer.Serialize(rawValue) + "}}";
-        using (JsonDocument parsed = JsonDocument.Parse(probe))
+        object? parsed;
+        using (JsonDocument document = JsonDocument.Parse(probe))
         {
-            ApplyOne(parsed.RootElement.GetProperty("settings").EnumerateObject().First(), "(set)");
+            parsed = ParseOne(document.RootElement.GetProperty("settings").EnumerateObject().First(), "(set)");
         }
-        // The effective value, not the raw one: two knobs CLAMP rather than reject, and a file holding
-        // a number the engine would quietly narrow is exactly the kind of lie this rewrite is removing.
-        object? stored = KnobRegistry.ValueOf(knob);
+        // The coerced value, not the raw one: two knobs CLAMP rather than reject, and a file holding a number the
+        // engine would quietly narrow is exactly the kind of lie this rewrite is removing. Coerced from what was
+        // given rather than read back through the knob, so a value a host or a request profile holds for the same
+        // knob is never what gets written. Saving replaces a value set earlier in this process, a host's included:
+        // it is the newer request.
+        object? stored = KnobRegistry.Coerced(knob, parsed);
         KnobStore.SetByIdRaw(id, stored, "settings file");
 
         Dictionary<string, JsonElement> settings = new(StringComparer.Ordinal);
@@ -181,8 +204,12 @@ public static class KnobFile
     }
 
     /// <summary>Parses and applies one settings document. Public so a host can supply settings it holds in memory.</summary>
+    /// <remarks>A host's document lands on top of the settings file: the file is loaded first if nothing has loaded it
+    /// yet, so a later first read cannot put the file's values back over the host's.</remarks>
     public static void Apply(string json, string origin = "(inline)")
     {
+        // A no-op when the file load itself is the caller, which holds the lock with _applying set.
+        EnsureLoaded();
         JsonDocument doc;
         try
         {
@@ -228,6 +255,10 @@ public static class KnobFile
     }
 
     private static void ApplyOne(JsonProperty entry, string origin)
+        => KnobStore.SetByIdRaw(entry.Name, ParseOne(entry, origin), "settings file");
+
+    /// <summary>One setting's value parsed to its knob's type, or an exception naming what is wrong with it.</summary>
+    private static object? ParseOne(JsonProperty entry, string origin)
     {
         object? knob = KnobRegistry.Find(entry.Name)
             ?? throw new InvalidOperationException(
@@ -247,7 +278,7 @@ public static class KnobFile
             _ => throw new InvalidOperationException(
                 $"Engine settings file '{origin}': setting '{entry.Name}' expects {t.Name}, got {entry.Value.ValueKind}."),
         };
-        KnobStore.SetByIdRaw(entry.Name, value, "settings file");
+        return value;
     }
 
     private static object ParseString(string raw, Type t, string id, string origin)

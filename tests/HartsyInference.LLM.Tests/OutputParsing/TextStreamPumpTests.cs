@@ -6,6 +6,9 @@ using Xunit;
 namespace HartsyInference.LLM.Tests.OutputParsing;
 
 /// <summary>The generation worker must never outlive a consumer that walked away, and must never be stalled by one that reads slowly.</summary>
+/// <remarks>Two tests hold the pump to a 100 ms budget, so the class runs on its own rather than beside other classes
+/// that keep the thread pool busy.</remarks>
+[Collection(TimingSensitiveCollection.Name)]
 public sealed class TextStreamPumpTests
 {
     private static readonly TimeSpan Budget = TimeSpan.FromMilliseconds(100);
@@ -114,9 +117,18 @@ public sealed class TextStreamPumpTests
             ct.ThrowIfCancellationRequested();
             return Task.FromResult<IReadOnlyList<TextChunk>>([]);
         }
+        async Task<List<TextChunk>> Drain()
+        {
+            List<TextChunk> chunks = [];
+            await foreach (TextChunk c in TextStreamPump.Run(Produce, cts.Token)) chunks.Add(c);
+            return chunks;
+        }
+        // The first stream in the process pays for compiling the pump, the channel and the cancellation logging; the
+        // budget is for the stream, so that is spent before the clock starts.
+        Assert.Equal(StopReason.Cancelled, Assert.Single(await Drain()).Stop);
+
         Stopwatch watch = Stopwatch.StartNew();
-        List<TextChunk> got = [];
-        await foreach (TextChunk c in TextStreamPump.Run(Produce, cts.Token)) got.Add(c);
+        List<TextChunk> got = await Drain();
         Assert.True(watch.Elapsed < Budget, $"stream took {watch.ElapsedMilliseconds} ms to complete");
         Assert.Equal(StopReason.Cancelled, Assert.Single(got).Stop);
     }
