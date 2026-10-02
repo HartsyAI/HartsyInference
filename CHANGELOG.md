@@ -8,6 +8,8 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.243
+
 - **Fixed: a CUDA op runs in its own backend's context even when another copy of the engine left a different one
   bound to the thread.** SwarmUI loads a private copy of the engine per extension (AudioLab, LLMAssistant, the image
   backend), all on one thread pool. `CudaContext.EnsureCurrent` remembered each thread's binding in a `[ThreadStatic]`
