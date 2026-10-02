@@ -20,8 +20,9 @@ Telephony tools (hang up, DTMF, transfer) are registered by the host; the sessio
   registered gets) the request is unchanged from before: one token, no grammar. The warm-up's own `Messages` never
   touch a session's conversation or the sentence splitter, so it changes nothing about what the first real turn
   generates. This is what the Qwen3-4B [measurement](#qwen3-4b-on-the-rtx-4090-audio-on-the-3060-both-cards-visible)
-  below is re-measured against. `VoiceHost` boots with its own tool definitions (the six telephony tools plus
-  `get_time`), so production warm-up takes this tool-aware path too — see [the host section](#voice-host-hartsyinferencevoicehost).
+  below is re-measured against. `VoiceHost` (now in [HartsyPhone](https://github.com/HartsyAI/HartsyPhone)) boots with
+  its own tool definitions (the six telephony tools plus `get_time`), so production warm-up takes this tool-aware
+  path too.
 - It synthesizes five texts, each as its own GPU job: "Okay.", a 3-word, a 6-word, a 13-word and a 30-word sentence.
 - On the RTX 3060 these gave 58, 70, 81, 195 and 407 of Kokoro's 25 ms alignment frames. That is the power-of-two
   buckets 64, 128, 128, 256 and 512, every bucket a sentence reaches:
