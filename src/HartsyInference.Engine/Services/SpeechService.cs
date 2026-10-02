@@ -31,7 +31,7 @@ public sealed class SpeechService : ISpeechService
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
         TtsTarget target = ResolveTarget(spec, request.Voice);
-        return _engine.AudioRuntime.RunAsync(target.Backend, new AudioJob(_engine.AudioRuntime.Tts, target.Key), async ct =>
+        return _engine.AudioRuntime.RunAsync(target.Backend, Job(target), async ct =>
         {
             (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
             try
@@ -77,9 +77,7 @@ public sealed class SpeechService : ISpeechService
         {
             throw new ArgumentException("No text supplied to synthesize.", nameof(request));
         }
-        TtsTarget target = ResolveTarget(spec, request.Voice);
-        return StreamCore(target.Backend, target.Key, target.Descriptor, target.LoadContext, target.Variant, request,
-            target.StageBackends, cancel);
+        return StreamCore(ResolveTarget(spec, request.Voice), request, cancel);
     }
 
     /// <inheritdoc/>
@@ -91,7 +89,7 @@ public sealed class SpeechService : ISpeechService
         return await runtime.OpenLeaseAsync(target.Backend, runtime.Tts, target.Key,
             token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token),
             runner => new SynthesizerLease(runtime, target.Key, runner, target.Backend, weightsVoice),
-            cancel, target.StageBackends).ConfigureAwait(false);
+            cancel, target.StageBackends, target.EstimateWeightBytes).ConfigureAwait(false);
     }
 
     /// <summary>Resolves the runner a request names: descriptor, load variant, backend, load context and cache key. The
@@ -107,8 +105,14 @@ public sealed class SpeechService : ISpeechService
         TtsLoadContext loadContext = BuildLoadContext(backend);
         string key = repo + (descriptor.VoiceSelectsWeights ? "|" + variant : "") + loadContext.CacheSuffix();
         IReadOnlyList<IBackend>? stageBackends = loadContext.ShardStages is { Count: >= 2 } stages ? [.. stages.Select(s => s.Backend)] : null;
-        return new TtsTarget(descriptor, variant, backend, loadContext, key, stageBackends);
+        // A layer-split load spreads its weights over several devices, so the whole checkpoint is no single device's need.
+        Func<long>? estimate = loadContext.IsSharded ? null
+            : () => AudioWeightFootprint.Estimate(repo, "tts", descriptor.PromotesHalfToF32);
+        return new TtsTarget(descriptor, variant, backend, loadContext, key, stageBackends, estimate);
     }
+
+    /// <summary>The runtime job for <paramref name="target"/>'s runner.</summary>
+    private AudioJob Job(TtsTarget target) => new(_engine.AudioRuntime.Tts, target.Key, target.EstimateWeightBytes);
 
     /// <summary>Resolves the load variant for a <see cref="TtsModelDescriptor"/>: the real sub-variant the
     /// caller named -- either via <paramref name="voice"/>, or via <c>":variant"</c> in the request token,
@@ -155,16 +159,15 @@ public sealed class SpeechService : ISpeechService
         !string.IsNullOrWhiteSpace(voice) && !voice.Equals("default", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Owns reference-file materialization/cleanup around the streamed run, exactly mirroring <see cref="SynthesizeAsync"/>'s non-streaming <c>finally</c>.</summary>
-    private async IAsyncEnumerable<AudioChunk> StreamCore(IBackend backend, string key, TtsModelDescriptor descriptor,
-        TtsLoadContext loadContext, string variant, SpeechRequest request, IReadOnlyList<IBackend>? stageBackends,
+    private async IAsyncEnumerable<AudioChunk> StreamCore(TtsTarget target, SpeechRequest request,
         [EnumeratorCancellation] CancellationToken cancel)
     {
         (float[]? referenceMono, string? referenceWavPath) = MaterializeReference(request.Reference);
         try
         {
             TtsJob job = BuildJob(request.Text, request, referenceMono, referenceWavPath, cancel);
-            await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(backend, new AudioJob(_engine.AudioRuntime.Tts, key),
-                ct => StreamWork(backend, key, descriptor, loadContext, variant, job, ct), cancel, stageBackends).ConfigureAwait(false))
+            await foreach (AudioChunk chunk in _engine.AudioRuntime.RunStreamAsync(target.Backend, Job(target),
+                ct => StreamWork(target, job, ct), cancel, target.StageBackends).ConfigureAwait(false))
             {
                 yield return chunk;
             }
@@ -176,11 +179,13 @@ public sealed class SpeechService : ISpeechService
     }
 
     /// <summary>Loads the runner and streams from it if it implements <see cref="IStreamingTtsRunner"/>; every other model falls back to one chunk containing the complete synthesized buffer, so <see cref="StreamCore"/> and its caller have a single code path regardless of which model is selected.</summary>
-    private async IAsyncEnumerable<AudioChunk> StreamWork(IBackend backend, string key, TtsModelDescriptor descriptor,
-        TtsLoadContext loadContext, string variant, TtsJob job, [EnumeratorCancellation] CancellationToken ct)
+    private async IAsyncEnumerable<AudioChunk> StreamWork(TtsTarget target, TtsJob job, [EnumeratorCancellation] CancellationToken ct)
     {
+        IBackend backend = target.Backend;
+        string key = target.Key;
         ITtsRunner runner = await _engine.AudioRuntime.Tts
-            .GetOrLoadAsync(key, token => descriptor.LoadAsync(loadContext, variant, token), ct).ConfigureAwait(false);
+            .GetOrLoadAsync(key, token => target.Descriptor.LoadAsync(target.LoadContext, target.Variant, token), ct)
+            .ConfigureAwait(false);
         long started = Environment.TickCount64;
         if (runner is IStreamingTtsRunner streaming)
         {
@@ -292,7 +297,7 @@ public sealed class SpeechService : ISpeechService
     }
 
     /// <summary>What <see cref="ResolveTarget"/> resolved: the runner's descriptor, load variant, backend, load context,
-    /// cache key and, for a layer-split load, the stage backends to gate.</summary>
+    /// cache key, for a layer-split load the stage backends to gate, and the weight sizing for the switch check.</summary>
     private readonly record struct TtsTarget(TtsModelDescriptor Descriptor, string Variant, IBackend Backend,
-        TtsLoadContext LoadContext, string Key, IReadOnlyList<IBackend>? StageBackends);
+        TtsLoadContext LoadContext, string Key, IReadOnlyList<IBackend>? StageBackends, Func<long>? EstimateWeightBytes);
 }

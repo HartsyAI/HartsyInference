@@ -1021,9 +1021,16 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
 - **Audio models reloading on every STT↔TTS switch** (fixed alpha.218): the memory-pressure sweep compared the
   prefixed job key (`tts:…`) against the caches' bare keys, so once free host RAM dropped under
   `vram.audioEvictBelowGb` (default 14 GB) it evicted the model it was about to run. Symptom: an
-  `[Audio] Memory pressure … unloading other resident audio models` line before every request, each followed by a
-  full load. Jobs now carry an `AudioJob` (cache + bare key); `AudioRunnerCache.Pin` keeps a runner through
-  pressure, and only engine release/backend switch still unloads pinned runners.
+  `[Audio] Switching to '…' (…) — unloaded …` line before every request, each followed by a full load. Jobs now
+  carry an `AudioJob` (cache + bare key); `AudioRunnerCache.Pin` keeps a runner through pressure, and only engine
+  release/backend switch still unloads pinned runners.
+- **An audio model fails to load, or runs many times slower, only after other audio models ran on the card.** A
+  runner that calls `PreloadWeights` throws `OutOfVramException`; a runner that relies on auto-promotion throws
+  nothing and streams every weight whose promotion would leave less than `vram.autopromoteHeadroomMb` free, so its
+  only symptom is the time. The switch to a model that is not loaded yet sizes it and logs
+  `[Audio] Switching to '…' (needs ~N GB, …) — unloaded …` when it evicts; an out-of-VRAM run logs
+  `… ran out of VRAM … retrying once`. A slow run with neither line before it means the check judged it fit: compare
+  free VRAM before the run with the model's resident size, and look at `vram.audioEvictFreeVramFloorMb`.
 - **A runner lease throws `ObjectDisposedException` after `FreeMemory`:** by design. Synthesizer and transcriber
   leases hold such a pin, and every engine release (`Dispose`, `FreeMemory`, `SetBackend`, `SetPlacement`) revokes
   them after waiting for the call in flight. A host that frees memory reopens its leases. An open that never

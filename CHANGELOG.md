@@ -20,6 +20,21 @@ stable release will require. Dates are UTC.
   and Mimi's RVQ encode (Kyutai STT, CSM) and the UnivNet vocoder at inference, can take longer on a machine with more
   cores than the cap. GPT-OSS's CPU-backend expert loop still wraps its per-expert dequant in a raw
   `Parallel.ForEach`; a follow-up converts it.
+- **Audio model switches now size the incoming model before deciding whether to evict.** `AudioRuntime` used to
+  unload the other resident audio models on a switch only when free VRAM was under a fixed 3 GiB, so a 6-7 GB model
+  arriving with 3-6 GB free evicted nothing: Dia then failed in `PreloadWeights` with `OutOfVramException`, and
+  Orpheus loaded with most of its weights left host-side and streamed them every step. A switch now evicts when free
+  VRAM is under the incoming model's need plus room beside it (a fifth more, and never less than
+  `vram.autopromoteHeadroomMb`, because a weight that would leave less than that free is streamed instead of made
+  resident), with the new `vram.audioEvictFreeVramFloorMb` (default 3072) as the floor. The need is the larger of
+  what the model's latest load in this process left in use and the size of its weight files on disk, with F16/BF16
+  tensors counted at F32 for a runner that widens them (Dia declares it). A model that is already loaded needs only
+  the floor; same-model repeats still never evict, and pinned runners are still never evicted. If a run still throws
+  `OutOfVramException`, the runtime unloads every other unpinned audio model, releases device memory, logs what it
+  dropped, and retries once; a stream retries only if it has not yielded anything yet. Replaying the sweep on an RTX
+  4090 so that Dia arrives with 3.9 GiB free: before this change Dia failed with the same driver refusal and Orpheus
+  took 292 s to generate 6.2 s of audio against 7.5 s on a free card; with it the switch to Dia unloads the five
+  earlier models, Dia succeeds and Orpheus takes 7.6 s, and every model's audio is byte-identical.
 - **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
   pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
   compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
