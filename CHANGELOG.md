@@ -19,7 +19,10 @@ stable release will require. Dates are UTC.
   tensors counted at F32 for a runner that widens them (Dia declares it). A model that is already loaded needs only
   the floor; same-model repeats still never evict, and pinned runners are still never evicted. If a run still throws
   `OutOfVramException`, the runtime unloads every other unpinned audio model, releases device memory, logs what it
-  dropped, and retries once; a stream retries only if it has not yielded anything yet.
+  dropped, and retries once; a stream retries only if it has not yielded anything yet. Replaying the sweep on an RTX
+  4090 so that Dia arrives with 3.9 GiB free: before this change Dia failed with the same driver refusal and Orpheus
+  took 292 s to generate 6.2 s of audio against 7.5 s on a free card; with it the switch to Dia unloads the five
+  earlier models, Dia succeeds and Orpheus takes 7.6 s, and every model's audio is byte-identical.
 - **A cancelled prompt prefill now frees the GPU within about two transformer layers.** `IBackend` gains a fence
   pair — `RecordFence` / `WaitFence`, plus `ReleaseFence` — with no-op defaults: CUDA records a pooled event on the
   compute stream, Vulkan submits the batch recorded so far and hands back the timeline tick it signals, and the CPU
