@@ -78,18 +78,6 @@ public sealed class AudioWeightFootprintTests : IDisposable
         Assert.Equal(0, AudioWeightFootprint.Estimate(Path.Combine(_root, "not-downloaded"), "tts"));
     }
 
-    public void Dispose()
-    {
-        try
-        {
-            Directory.Delete(_root, recursive: true);
-        }
-        catch (IOException)
-        {
-            // A leftover temp folder is harmless; failing the test over it would not be.
-        }
-    }
-
     private string WriteBytes(string relative, int length)
     {
         string path = Path.Combine(_root, relative);
@@ -97,4 +85,6 @@ public sealed class AudioWeightFootprintTests : IDisposable
         File.WriteAllBytes(path, new byte[length]);
         return path;
     }
+
+    public void Dispose() => Directory.Delete(_root, recursive: true);
 }

@@ -293,7 +293,7 @@ public sealed class AudioRuntimeNeedEvictionTests
         List<int> items = await CollectAsync(runtime.RunStreamAsync(backend, new AudioJob(runtime.Tts, "dia"),
             ct => Items(++attempts == 1 ? 0 : 3, failAfter: attempts == 1 ? 0 : -1, ct), CancellationToken.None));
 
-        Assert.Equal([0, 1, 2], items);
+        Assert.Equal(new[] { 0, 1, 2 }, items);
         Assert.Equal(2, attempts);
         Assert.True(bark.Disposed);
         Assert.Equal(1, device.FreeAllCalls);
@@ -318,7 +318,7 @@ public sealed class AudioRuntimeNeedEvictionTests
         });
 
         Assert.Equal(1, attempts);
-        Assert.Equal([0], received);
+        Assert.Equal(new[] { 0 }, received);
         Assert.Equal(0, device.FreeAllCalls);
         Assert.Equal(7, await runtime.RunAsync(backend, new AudioJob(runtime.Tts, "dia"), _ => Task.FromResult(7), CancellationToken.None)
             .WaitAsync(TimeSpan.FromSeconds(10)));
