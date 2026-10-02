@@ -154,7 +154,12 @@ public sealed class ToolCallTemplateDetectionTests
 
     // ── Live re-extraction: the committed fixtures must still match the real GGUFs ────────────────────────
 
-    public static IEnumerable<object[]> FixtureFiles() => ChatTemplateFixtures.SourceGgufPaths.Keys.Select(name => new object[] { name });
+    public static TheoryData<string> FixtureFiles()
+    {
+        TheoryData<string> data = new();
+        foreach (string name in ChatTemplateFixtures.SourceGgufPaths.Keys) data.Add(name);
+        return data;
+    }
 
     /// <summary>Re-reads <c>tokenizer.chat_template</c> straight from each source GGUF (metadata only — the
     /// loader mmaps the file but tensor bytes are never touched) and asserts it still matches the committed
