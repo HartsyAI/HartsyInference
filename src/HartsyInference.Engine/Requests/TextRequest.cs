@@ -78,10 +78,11 @@ public sealed record TextRequest
     /// <see cref="HartsyInference.LLM.Generation.RetainedSequenceStore"/>.</summary>
     public string? PrefixCacheKey { get; init; }
 
-    /// <summary>Sizes a brand-new retained sequence's KV capacity (tokens) the first time <see cref="PrefixCacheKey"/>
-    /// is used; null sizes it to just this request's own prompt + <see cref="MaxTokens"/>. Pass the caller's own
-    /// growth ceiling (e.g. a conversation's history token budget + its reply budget) so the cache is allocated
-    /// once instead of being reallocated as the prompt grows across calls under the same key.</summary>
+    /// <summary>Sizes a brand-new retained sequence's first KV allocation (tokens) the first time
+    /// <see cref="PrefixCacheKey"/> is used; null sizes it to this request's own prompt + <see cref="MaxTokens"/>.
+    /// Rarely worth setting: what a request retains is shrunk to its length plus <c>vram.prefixCacheHeadroomTokens</c>
+    /// when it ends, and a later request that needs more room grows it by copying the reusable prefix on device, so
+    /// the hint no longer has to cover the conversation's growth.</summary>
     public int? PrefixCacheCapacityHint { get; init; }
 
     /// <summary>Overrides the device backend's <c>CacheWeightCasts</c> (cache a dequantized copy of quantized

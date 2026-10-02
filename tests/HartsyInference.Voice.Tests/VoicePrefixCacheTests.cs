@@ -27,7 +27,9 @@ public sealed class VoicePrefixCacheTests
         Assert.False(priming.EnableThinking);
         Assert.NotNull(priming.PrefixCacheKey);
         Assert.StartsWith("voice:", priming.PrefixCacheKey);
-        Assert.True(priming.PrefixCacheCapacityHint > 0);
+        // No capacity hint: the engine grows the retained KV by copy as the conversation needs it, so sizing the
+        // priming request for the whole history would only allocate a buffer to shrink right after.
+        Assert.Null(priming.PrefixCacheCapacityHint);
 
         harness.Session.PushDtmf('1');
         await harness.TurnCompletedAsync(1);
@@ -36,7 +38,7 @@ public sealed class VoicePrefixCacheTests
         TextRequest[] requests = [.. text.Requests];
         TextRequest turn = requests[1];
         Assert.Equal(priming.PrefixCacheKey, turn.PrefixCacheKey);          // same call, same key
-        Assert.Equal(priming.PrefixCacheCapacityHint, turn.PrefixCacheCapacityHint);
+        Assert.Null(turn.PrefixCacheCapacityHint);
         Assert.True(turn.Messages.Count > 1, "a real turn's request carries more than just the system message.");
     }
 

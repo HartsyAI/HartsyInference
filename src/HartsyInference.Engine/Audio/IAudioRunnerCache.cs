@@ -6,8 +6,11 @@ internal interface IAudioRunnerCache
     /// <summary>Category prefix that names this cache in job keys and log lines, e.g. <c>tts</c> or <c>fx:demucs</c>.</summary>
     string Category { get; }
 
-    /// <summary>Drops every resident runner except the one keyed <paramref name="keepKey"/> (the incoming model) and, unless <paramref name="includePinned"/> is set, any runner a caller holds a <see cref="Pin"/> on.</summary>
-    void UnloadAllExcept(string? keepKey, bool includePinned = false);
+    /// <summary>Whether a runner for <paramref name="key"/> is loaded, so a job knows whether it is about to load one.</summary>
+    bool IsResident(string key);
+
+    /// <summary>Drops every resident runner except the one keyed <paramref name="keepKey"/> (the incoming model) and, unless <paramref name="includePinned"/> is set, any runner a caller holds a <see cref="Pin"/> on. Returns the keys it dropped.</summary>
+    IReadOnlyList<string> UnloadAllExcept(string? keepKey, bool includePinned = false);
 
     /// <summary>Holds <paramref name="key"/> resident through memory-pressure eviction until the returned handle is disposed. Pins nest, so each handle releases one hold, and they are name-level: pinning a key before it loads protects it once it has. An engine release or backend switch still unloads pinned runners — a pin survives memory pressure, not the device.</summary>
     IDisposable Pin(string key);

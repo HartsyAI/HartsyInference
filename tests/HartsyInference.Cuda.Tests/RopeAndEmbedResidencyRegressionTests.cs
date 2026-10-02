@@ -24,6 +24,7 @@ namespace HartsyInference.Cuda.Tests;
 [Trait("Category", "GpuIntegration")]
 public sealed unsafe class RopeAndEmbedResidencyRegressionTests
 {
+    /// <summary>The 3060 with every card visible; a runner pinning one card (CUDA_VISIBLE_DEVICES) leaves only 0.</summary>
     private const int Ordinal = 1;
 
     // Comfortably above the true per-call floor (3 on the real Qwen3-4B path: cos, sin, embedding) but far
@@ -102,7 +103,7 @@ public sealed unsafe class RopeAndEmbedResidencyRegressionTests
         Dictionary<string, Tensor> weights = TinyWeights(cfg);
         try
         {
-            using CudaBackend backend = new(Ordinal, ptxDir);
+            using CudaBackend backend = new(Math.Min(Ordinal, CudaContext.GetDeviceCount() - 1), ptxDir);
             using GenericTransformer model = new(cfg);
             model.LoadWeights(weights, "model");
             backend.PreloadWeights(model.EnumerateWeights());
