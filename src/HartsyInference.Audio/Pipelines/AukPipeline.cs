@@ -4,6 +4,7 @@ using HartsyInference.Audio.Models.Auk;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.QwenOmni;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Pipelines;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Transformer;
@@ -43,6 +44,15 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
     private AukVaeStats? _stats;
     private bool _loaded;
     private int _disposed;
+
+    /// <summary>Bytes this pipeline currently holds resident, added back into the live VRAM reading in <see cref="FitsResident"/> so its own allocation isn't mistaken for external pressure.</summary>
+    private long _residentBytes;
+
+    /// <summary>The backend <see cref="_residentBytes"/> was last measured against.</summary>
+    private IBackend? _residentBackend;
+
+    /// <summary>Set once resident mode genuinely runs out of VRAM, permanently forcing <see cref="FitsResident"/> to return false for this instance.</summary>
+    private bool _residentDisabledByOom;
 
     /// <inheritdoc/>
     public string ModelName { get; }
@@ -86,6 +96,12 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         ArgumentNullException.ThrowIfNull(auk);
         ArgumentNullException.ThrowIfNull(vae);
         ArgumentNullException.ThrowIfNull(omni);
+        // Every stage's LoadWeights below replaces its Tensor fields, orphaning any device-resident cache keyed by the old ones.
+        if (_residentBackend is not null && _residentBytes > 0)
+        {
+            FreeAllStageWeights(_residentBackend);
+            _residentBytes = 0;
+        }
         _dit.LoadWeights(auk);
         _vae.LoadWeights(vae);
         _vaeEncoder?.Dispose();
@@ -132,15 +148,58 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         // next one too. Downgrading to "preload everything, free nothing" when there is clearly enough free VRAM
         // turns a full host->device re-upload of every stage (tower, thinker, DiT, VAE) into a one-time cost for
         // back-to-back calls on the same pipeline, which is the common case once a model is warm.
-        bool sequential = opts.SequentialResidency && !FitsResident(backend, hasAudio);
+        //
+        // An explicit SequentialResidency=false still records _residentBytes, since RunStage never frees on that path.
+        bool sequential;
+        if (opts.SequentialResidency)
+        {
+            sequential = !FitsResident(backend, hasAudio);
+        }
+        else
+        {
+            ReconcileResidentBackend(backend);
+            _residentBytes = ComputeResidentBytes(hasAudio);
+            sequential = false;
+        }
 
-        using Tensor text = EncodeConditioning(backend, instruction, audio16k, sequential, cancel);
-        cancel.ThrowIfCancellationRequested();
-        using Tensor? refLatent = hasAudio ? EncodeReference(backend, refPcm, opts, sequential) : null;
-        cancel.ThrowIfCancellationRequested();
-        using Tensor latent = Sample(backend, text, refLatent, frames, opts, sequential, cancel);
-        return Decode(backend, latent, sequential);
+        try
+        {
+            using Tensor text = EncodeConditioning(backend, instruction, audio16k, sequential, cancel);
+            cancel.ThrowIfCancellationRequested();
+            using Tensor? refLatent = hasAudio ? EncodeReference(backend, refPcm, opts, sequential) : null;
+            cancel.ThrowIfCancellationRequested();
+            using Tensor latent = Sample(backend, text, refLatent, frames, opts, sequential, cancel);
+            return Decode(backend, latent, sequential);
+        }
+        catch (Exception ex)
+        {
+            // Device state after a failure is unknown, so free everything and zero the count instead of guessing.
+            _residentBytes = 0;
+            FreeAllStageWeights(backend);
+            // Only a failed resident attempt indicts the margin; a sequential call OOMing says nothing about it.
+            if (ShouldDisableResidentAfterFailure(sequential, ex)) _residentDisabledByOom = true;
+            throw;
+        }
     }
+
+    /// <summary>True if <paramref name="error"/> or anything in its exception tree, including every <see cref="AggregateException"/> branch, is an <see cref="OutOfVramException"/>.</summary>
+    public static bool IsOutOfVram(Exception? error, int depth = 0)
+    {
+        if (error is null || depth > 8) return false;
+        if (error is OutOfVramException) return true;
+        if (error is AggregateException aggregate)
+        {
+            foreach (Exception inner in aggregate.InnerExceptions)
+            {
+                if (IsOutOfVram(inner, depth + 1)) return true;
+            }
+            return false;
+        }
+        return IsOutOfVram(error.InnerException, depth + 1);
+    }
+
+    /// <summary>True only when a resident attempt (<paramref name="sequential"/> false) failed with an out-of-VRAM error.</summary>
+    public static bool ShouldDisableResidentAfterFailure(bool sequential, Exception error) => !sequential && IsOutOfVram(error);
 
     /// <summary>Latent frames for <paramref name="seconds"/> of output, rejecting more than <see cref="MaxSeconds"/>.</summary>
     public static int ResolveFrames(double seconds, int sampleRate, int hop)
@@ -225,19 +284,58 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
             () => encoder.Encode(backend, pcm, unchecked(opts.Seed + 1)));
     }
 
-    /// <summary>True when the device has enough free VRAM to hold every stage this call will touch resident at
-    /// once, so the caller can skip freeing between stages. Generous on purpose (every stage's full weight size,
-    /// plus a third again for activations) — this only ever turns a requested sequential run into a resident one,
-    /// never the other way around, so overestimating costs a redundant free/reload rather than an OOM.</summary>
+    /// <summary>True when free VRAM, plus this pipeline's own resident bytes, covers every stage this <paramref name="hasAudio"/> call touches.</summary>
     private bool FitsResident(IBackend backend, bool hasAudio)
     {
+        if (_residentDisabledByOom) return false;
+        ReconcileResidentBackend(backend);
         (long freeBytes, long totalBytes) = backend.GetVramInfo();
+        if (WasSweptExternally(totalBytes - freeBytes, _residentBytes))
+        {
+            _residentBytes = 0;
+        }
+        long bytes = ComputeResidentBytes(hasAudio);
+        bool fits = ResidentWithinBudget(freeBytes + _residentBytes, totalBytes, bytes);
+        if (!fits && _residentBytes > 0)
+        {
+            // Frees every stage so one this call doesn't itself touch (e.g. the tower after a no-audio call) can't stay stranded resident.
+            FreeAllStageWeights(backend);
+        }
+        _residentBytes = fits ? bytes : 0;
+        return fits;
+    }
+
+    /// <summary>Bytes every stage this <paramref name="hasAudio"/> call touches would occupy resident.</summary>
+    private long ComputeResidentBytes(bool hasAudio)
+    {
         long bytes = WeightBytes(_lm.EnumerateWeights()) + WeightBytes(_dit.EnumerateWeights()) + WeightBytes(_vae.EnumerateWeights());
         if (hasAudio)
         {
             bytes += WeightBytes(_tower.EnumerateWeights()) + WeightBytes(_vaeEncoder!.EnumerateWeights());
         }
-        return ResidentWithinBudget(freeBytes, totalBytes, bytes);
+        return bytes;
+    }
+
+    /// <summary>Frees every stage's weights on <paramref name="backend"/>; a no-op for a stage never loaded there.</summary>
+    private void FreeAllStageWeights(IBackend backend)
+    {
+        backend.FreeWeights(_lm.EnumerateWeights());
+        backend.FreeWeights(_dit.EnumerateWeights());
+        backend.FreeWeights(_vae.EnumerateWeights());
+        backend.FreeWeights(_tower.EnumerateWeights());
+        backend.FreeWeights(_vaeEncoder!.EnumerateWeights());
+    }
+
+    /// <summary>Resets residency tracking to a cold start, freeing the prior backend's weights, when <paramref name="backend"/> differs from last time.</summary>
+    private void ReconcileResidentBackend(IBackend backend)
+    {
+        if (ReferenceEquals(backend, _residentBackend)) return;
+        if (_residentBackend is not null && _residentBytes > 0)
+        {
+            FreeAllStageWeights(_residentBackend);
+        }
+        _residentBytes = 0;
+        _residentBackend = backend;
     }
 
     /// <summary>True when <paramref name="freeBytes"/> covers <paramref name="requiredBytes"/> plus a third again
@@ -245,6 +343,9 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
     /// all (the CPU backend, mainly), which this treats as "assume the worst" rather than as boundless free memory.</summary>
     public static bool ResidentWithinBudget(long freeBytes, long totalBytes, long requiredBytes) =>
         totalBytes > 0 && freeBytes >= requiredBytes + requiredBytes / 3;
+
+    /// <summary>True when device usage is below what this pipeline alone believes it holds resident, meaning an external sweep freed at least that much.</summary>
+    public static bool WasSweptExternally(long usedBytes, long residentBytes) => usedBytes < residentBytes;
 
     /// <summary>Total device bytes <paramref name="weights"/> would occupy, element count times dtype size.</summary>
     public static long WeightBytes(IEnumerable<Tensor> weights)
@@ -324,6 +425,8 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
+        // The backend's GPU-resident cache isn't tied to these CPU tensors' lifetime, so free it explicitly first.
+        if (_residentBackend is not null && _residentBytes > 0) FreeAllStageWeights(_residentBackend);
         _dit.Dispose();
         _vae.Dispose();
         _vaeEncoder?.Dispose();

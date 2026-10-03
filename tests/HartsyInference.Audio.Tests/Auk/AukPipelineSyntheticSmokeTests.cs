@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.Auk;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.QwenOmni;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using Xunit;
@@ -178,12 +179,111 @@ public sealed class AukPipelineSyntheticSmokeTests : IDisposable
     public void ResidentWithinBudget_ComparesFreeAgainstRequiredPlusAThird(long free, long total, long required, bool expected)
         => Assert.Equal(expected, AukPipeline.ResidentWithinBudget(free, total, required));
 
+    /// <summary>Simulates AukPipeline.FitsResident's effectiveFree = freeBytes + residentBytes pattern across a
+    /// call sequence, standing in for the live device (no backend needed since the formula itself is pure). Two
+    /// properties a naive "re-read GetVramInfo every call" check gets wrong: going resident must not immediately
+    /// look like it no longer fits just because the preload it caused shows up as less free device memory (that
+    /// would evict every other call, exactly what going resident is meant to avoid), and a real drop in free VRAM
+    /// from something else entirely must still be able to flip it back.</summary>
+    [Fact]
+    public void FitsResidentFormula_StaysStableOnOwnFootprint_ButReactsToExternalPressure()
+    {
+        const long total = 10_000;
+        const long required = 900; // margin threshold: 900 + 900/3 = 1200
+        long deviceFree = 2_000;
+        long residentBytes = 0;
+
+        bool fits1 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.True(fits1);
+        residentBytes = required; // the pipeline preloads and keeps `required` bytes resident
+        deviceFree -= required; // which the device now reports as used
+
+        // Call 2: a plain re-read of deviceFree (1100) would be below the 1200 margin and flip to sequential.
+        // effectiveFree adds the pipeline's own footprint back, so it reads as unchanged from call 1.
+        bool fits2 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.True(fits2);
+        residentBytes = required;
+
+        // Something unrelated now consumes real device VRAM (another engine's pipeline, not this one).
+        deviceFree -= 1_000;
+        bool fits3 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.False(fits3); // must still catch genuine external pressure, not stay stuck on the old "true"
+    }
+
+    [Theory]
+    [InlineData(500, 900, true)] // device shows less in use than we think we alone hold: at least ours was freed
+    [InlineData(900, 900, false)] // exactly what we think we hold -- nothing missing
+    [InlineData(1_500, 900, false)] // more in use than just ours -- plausible without anything of ours freed
+    public void WasSweptExternally_DetectsDeviceUsageBelowOwnFootprint(long usedBytes, long residentBytes, bool expected)
+        => Assert.Equal(expected, AukPipeline.WasSweptExternally(usedBytes, residentBytes));
+
+    [Fact]
+    public void FitsResidentFormula_RecoversAfterAnExternalSweepFreesOwnFootprint()
+    {
+        const long total = 10_000;
+        const long required = 900;
+        long deviceFree = 2_000;
+        long residentBytes = 0;
+
+        bool fits1 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.True(fits1);
+        residentBytes = required;
+        deviceFree -= required; // deviceFree=1100, usedBytes=8900
+
+        // AudioRuntime.UnloadOthers evicts a sibling model and sweeps the WHOLE device clean -- including this
+        // pipeline's own resident weights -- without ever throwing through this pipeline's own call.
+        deviceFree = total; // the device now reports fully free; usedBytes drops to 0
+        Assert.True(AukPipeline.WasSweptExternally(total - deviceFree, residentBytes)); // 0 < 900: detected
+        residentBytes = 0; // what FitsResident does on detecting it
+
+        bool fits2 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.True(fits2); // re-measured from a clean baseline, not inflated by the no-longer-real old footprint
+    }
+
     [Fact]
     public void WeightBytes_SumsElementCountTimesDtypeSize()
     {
         Tensor a = Own(new Tensor(new TensorShape(2, 3), DType.F32)); // 6 * 4 bytes
         Tensor b = Own(new Tensor(new TensorShape(4), DType.F32)); // 4 * 4 bytes
         Assert.Equal(40, AukPipeline.WeightBytes([a, b]));
+    }
+
+    [Fact]
+    public void IsOutOfVram_TrueForTheExceptionItselfOrAnywhereInItsInnerChain()
+    {
+        Assert.True(AukPipeline.IsOutOfVram(new OutOfVramException(100, 10)));
+        Assert.True(AukPipeline.IsOutOfVram(new InvalidOperationException("wrapped", new OutOfVramException(100, 10))));
+        Assert.True(AukPipeline.IsOutOfVram(new InvalidOperationException("double-wrapped",
+            new InvalidOperationException("inner", new OutOfVramException(100, 10)))));
+    }
+
+    [Fact]
+    public void IsOutOfVram_FalseWhenNoOutOfVramExceptionAppearsInTheChain()
+    {
+        Assert.False(AukPipeline.IsOutOfVram(new InvalidOperationException("unrelated")));
+        Assert.False(AukPipeline.IsOutOfVram(new InvalidOperationException("wrapped", new ArgumentException("inner"))));
+        Assert.False(AukPipeline.IsOutOfVram(new OperationCanceledException()));
+    }
+
+    [Fact]
+    public void IsOutOfVram_TraversesEveryAggregateExceptionBranch()
+    {
+        Assert.True(AukPipeline.IsOutOfVram(new AggregateException(new InvalidOperationException("a"), new OutOfVramException(100, 10))));
+        Assert.True(AukPipeline.IsOutOfVram(new AggregateException(new OutOfVramException(100, 10), new InvalidOperationException("a"))));
+        Assert.False(AukPipeline.IsOutOfVram(new AggregateException(new InvalidOperationException("a"), new ArgumentException("b"))));
+    }
+
+    [Fact]
+    public void ShouldDisableResidentAfterFailure_OnlyTrueForAnOomWhileActuallyResident()
+    {
+        // Resident mode was attempted (sequential=false) and really did OOM -- the margin was wrong.
+        Assert.True(AukPipeline.ShouldDisableResidentAfterFailure(sequential: false, new OutOfVramException(100, 10)));
+        // Already sequential (never went resident) OOMing under temporary external pressure says nothing
+        // about the resident margin -- must not cost every later call the optimization.
+        Assert.False(AukPipeline.ShouldDisableResidentAfterFailure(sequential: true, new OutOfVramException(100, 10)));
+        // Resident but a non-OOM failure (e.g. cancellation) -- not a margin problem.
+        Assert.False(AukPipeline.ShouldDisableResidentAfterFailure(sequential: false, new OperationCanceledException()));
+        Assert.False(AukPipeline.ShouldDisableResidentAfterFailure(sequential: true, new OperationCanceledException()));
     }
 
     [Fact]
