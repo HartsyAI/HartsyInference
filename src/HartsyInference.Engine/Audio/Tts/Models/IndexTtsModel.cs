@@ -16,7 +16,6 @@ internal static class IndexTtsModel
     internal const string ConfigFile = "config.yaml";
     internal const string TokenizerFile = "bpe.model";
     internal const string GptFile = "gpt.pth";
-    internal const string DvaeFile = "dvae.pth";
     internal const string BigVganFile = "bigvgan_generator.pth";
 
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
@@ -27,22 +26,22 @@ internal static class IndexTtsModel
             new AudioModelFile(ConfigFile),
             new AudioModelFile(TokenizerFile),
             new AudioModelFile(GptFile),
-            new AudioModelFile(DvaeFile),
             new AudioModelFile(BigVganFile),
         ]),
         LoadAsync = async (_, _, cancel) =>
         {
+            // dvae.pth (243 MB) is confirmed unused at inference (see IndexTtsPipeline's remarks) and
+            // deliberately not fetched -- no point costing every first-time install that download.
             IReadOnlyDictionary<string, string> fetched = await AudioModelCache.FetchAllAsync(Repo,
                 [
                     new AudioModelFile(ConfigFile),
                     new AudioModelFile(TokenizerFile),
-                    new AudioModelFile(DvaeFile),
                     new AudioModelFile(BigVganFile),
                     new AudioModelFile(GptFile),
                 ], "tts", ct: cancel).ConfigureAwait(false);
 
             IndexTtsPipeline pipeline = await IndexTtsPipeline.LoadAsync(
-                fetched[TokenizerFile], fetched[GptFile], fetched[BigVganFile], fetched[DvaeFile], cfg: null, cancel).ConfigureAwait(false);
+                fetched[TokenizerFile], fetched[GptFile], fetched[BigVganFile], cfg: null, cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][IndexTTS] Loaded {Repo} (IndexTTS-1.5, zero-shot cloning, 24 kHz).");
 
             return new TtsRunner(24_000, (backend, job) => Synthesize(pipeline, backend, job), pipeline);

@@ -1,6 +1,7 @@
 using System.Text.RegularExpressions;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.IndexTts;
+using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Audio.Preprocessing;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
@@ -32,12 +33,14 @@ public sealed class IndexTtsPipeline : IDisposable
     private readonly MelSpectrogramExtractor _melExtractor;
     private readonly PytorchPickleLoader _gptLoader;
     private readonly PytorchPickleLoader _bigVganLoader;
+    private readonly List<Tensor> _convertedWeights;
     private int _disposed;
 
     public string ModelName => "indextts-1.5";
 
     private IndexTtsPipeline(IndexTtsConfig cfg, IndexTtsTokenizer tokenizer, IndexTtsSpeakerEncoder speakerEncoder,
-        IndexTtsT2sDecoder t2s, IndexTtsBigVganGenerator bigVgan, PytorchPickleLoader gptLoader, PytorchPickleLoader bigVganLoader)
+        IndexTtsT2sDecoder t2s, IndexTtsBigVganGenerator bigVgan, PytorchPickleLoader gptLoader, PytorchPickleLoader bigVganLoader,
+        List<Tensor> convertedWeights)
     {
         _cfg = cfg;
         _tokenizer = tokenizer;
@@ -46,6 +49,7 @@ public sealed class IndexTtsPipeline : IDisposable
         _bigVgan = bigVgan;
         _gptLoader = gptLoader;
         _bigVganLoader = bigVganLoader;
+        _convertedWeights = convertedWeights;
         // IndexTTS's own MelSpectrogramFeatures matches F5VocosConfig's torchaudio MelSpectrogram parameterization
         // exactly (24kHz, n_fft 1024, hop 256, 100 mels, HTK scale, magnitude spectrum, center padding, natural
         // log) EXCEPT the log floor: the reference calls safe_log(mel, clip_val=1e-7), not F5/Vocos's 1e-5 —
@@ -53,13 +57,12 @@ public sealed class IndexTtsPipeline : IDisposable
         _melExtractor = new MelSpectrogramExtractor(MelSpectrogramExtractor.F5VocosConfig() with { LogFloor = 1e-7f });
     }
 
-    /// <summary>Loads IndexTTS-1.5 from already-downloaded checkpoint files. <paramref name="dvaePath"/> is
-    /// accepted for completeness (the Engine layer downloads it alongside the rest of the HF repo) but is never
-    /// read — confirmed unused in the real inference path.</summary>
+    /// <summary>Loads IndexTTS-1.5 from already-downloaded checkpoint files. <c>dvae.pth</c> is deliberately not
+    /// a parameter here — confirmed unused in the real inference path, and the Engine layer no longer downloads
+    /// it at all.</summary>
     public static Task<IndexTtsPipeline> LoadAsync(string tokenizerPath, string gptPath, string bigVganPath,
-        string? dvaePath, IndexTtsConfig? cfg, CancellationToken ct = default)
+        IndexTtsConfig? cfg, CancellationToken ct = default)
     {
-        _ = dvaePath;
         ct.ThrowIfCancellationRequested();
         IndexTtsConfig resolved = cfg ?? IndexTtsConfig.V1_5;
 
@@ -69,20 +72,25 @@ public sealed class IndexTtsPipeline : IDisposable
         IndexTtsT2sDecoder? t2s = null;
         PytorchPickleLoader? bigVganLoader = null;
         IndexTtsBigVganGenerator? bigVgan = null;
+        List<Tensor> converted = [];
         try
         {
             tokenizer = new IndexTtsTokenizer(tokenizerPath);
 
-            // The loaders must outlive this method: WhisperOps.EnsureF32 passes an already-F32 tensor through
-            // unchanged (the caller does not own the result, per its own doc), so every weight the model classes
-            // below retain is the SAME Tensor the loader owns. Disposing the loader here would free those tensors
-            // out from under a pipeline that hasn't synthesized anything yet. Both loaders are kept as fields and
-            // disposed only in IndexTtsPipeline.Dispose() on the success path — or right here, alongside every
-            // other component already constructed, if a later step throws (a corrupt/incompatible checkpoint
-            // must not leak the gigabytes already loaded).
+            // The loaders must outlive this method: whatever's still natively F32 passes through WhisperOps.
+            // EnsureF32 unchanged, so the loader is that tensor's only owner. But the real gpt.pth/bigvgan_*.pth
+            // are entirely BF16 (verified directly), so EVERY EnsureF32 call below actually allocates a new F32
+            // tensor the loader does NOT own -- converting the whole dictionary to F32 here, once, and tracking
+            // every genuinely-new conversion in `converted` means every downstream EnsureF32 call (scattered
+            // across GptBlock, the Conformer/Perceiver encoder, ECAPA-TDNN, BigVGAN's resblocks, ...) becomes a
+            // guaranteed no-op passthrough again, restoring the single-owner assumption all of that code was
+            // written against instead of requiring each of those classes to track its own conversions. Both
+            // loaders are still kept as fields for the (now BF16-only) originals, disposed only in
+            // IndexTtsPipeline.Dispose() on the success path -- or right here, alongside every other component
+            // already constructed, if a later step throws.
             gptLoader = new PytorchPickleLoader();
             gptLoader.Load(gptPath, recursiveFlatten: true);
-            IReadOnlyDictionary<string, Tensor> gptWeights = gptLoader.GetAllTensors();
+            Dictionary<string, Tensor> gptWeights = ToF32(gptLoader.GetAllTensors(), converted);
 
             speakerEncoder = new IndexTtsSpeakerEncoder(resolved.ConditioningEncoder, resolved.Gpt.Hidden);
             speakerEncoder.LoadWeights(gptWeights, "model.conditioning_encoder", "model.perceiver_encoder");
@@ -92,14 +100,15 @@ public sealed class IndexTtsPipeline : IDisposable
 
             bigVganLoader = new PytorchPickleLoader();
             bigVganLoader.Load(bigVganPath, recursiveFlatten: true);
-            IReadOnlyDictionary<string, Tensor> bigVganWeights = bigVganLoader.GetAllTensors();
+            Dictionary<string, Tensor> bigVganWeights = ToF32(bigVganLoader.GetAllTensors(), converted);
             bigVgan = new IndexTtsBigVganGenerator(resolved.BigVgan);
             bigVgan.LoadWeights(bigVganWeights, "generator", "generator.speaker_encoder");
 
-            return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan, gptLoader, bigVganLoader));
+            return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan, gptLoader, bigVganLoader, converted));
         }
         catch
         {
+            foreach (Tensor t in converted) t.Dispose();
             bigVgan?.Dispose();
             t2s?.Dispose();
             speakerEncoder?.Dispose();
@@ -108,6 +117,22 @@ public sealed class IndexTtsPipeline : IDisposable
             tokenizer?.Dispose();
             throw;
         }
+    }
+
+    /// <summary>Converts every tensor in <paramref name="raw"/> to F32, appending any tensor that was genuinely
+    /// newly-allocated (i.e. not already F32) to <paramref name="converted"/> so the caller can dispose it later —
+    /// <see cref="WhisperOps.EnsureF32"/>'s passthrough-when-already-F32 contract means a reference check is
+    /// enough to tell the two cases apart.</summary>
+    private static Dictionary<string, Tensor> ToF32(IReadOnlyDictionary<string, Tensor> raw, List<Tensor> converted)
+    {
+        Dictionary<string, Tensor> result = new(raw.Count);
+        foreach ((string key, Tensor tensor) in raw)
+        {
+            Tensor f32 = WhisperOps.EnsureF32(tensor);
+            if (!ReferenceEquals(f32, tensor)) converted.Add(f32);
+            result[key] = f32;
+        }
+        return result;
     }
 
     /// <summary>Default per-segment text budget, matching the reference CLI's own <c>infer()</c> default
@@ -178,18 +203,31 @@ public sealed class IndexTtsPipeline : IDisposable
     {
         Random rng = new(unchecked((int)seed));
         Tensor latent = _t2s.Generate(backend, prefix, textIds, opts, rng);
-        Tensor wave = _bigVgan.Forward(backend, latent, (int)latent.Shape[1], refMel, refMelLen);
-        latent.Dispose();
-
-        int n = (int)wave.ElementCount;
-        float[] pcm = new float[n];
-        unsafe
+        Tensor wave;
+        try
         {
-            float* wp = (float*)wave.DataPointer;
-            for (int i = 0; i < n; i++) pcm[i] = wp[i];
+            wave = _bigVgan.Forward(backend, latent, (int)latent.Shape[1], refMel, refMelLen);
         }
-        wave.Dispose();
-        return pcm;
+        finally
+        {
+            latent.Dispose();
+        }
+
+        try
+        {
+            int n = (int)wave.ElementCount;
+            float[] pcm = new float[n];
+            unsafe
+            {
+                float* wp = (float*)wave.DataPointer;
+                for (int i = 0; i < n; i++) pcm[i] = wp[i];
+            }
+            return pcm;
+        }
+        finally
+        {
+            wave.Dispose();
+        }
     }
 
     /// <summary>Splits <paramref name="text"/> into token-id segments, each tokenizing to at most
@@ -297,10 +335,12 @@ public sealed class IndexTtsPipeline : IDisposable
         _speakerEncoder.Dispose();
         _t2s.Dispose();
         _bigVgan.Dispose();
-        // The loaders own the actual weight-tensor memory every component above holds references into (see
-        // LoadAsync's remarks); dispose them last so nothing above touches freed tensors mid-teardown.
+        // The loaders own the original BF16 weight-tensor memory; _convertedWeights owns every genuinely-new F32
+        // conversion ToF32 produced from them (see LoadAsync's remarks) -- dispose both last so nothing above
+        // touches freed tensors mid-teardown.
         _gptLoader.Dispose();
         _bigVganLoader.Dispose();
+        foreach (Tensor t in _convertedWeights) t.Dispose();
         GC.SuppressFinalize(this);
     }
 }
