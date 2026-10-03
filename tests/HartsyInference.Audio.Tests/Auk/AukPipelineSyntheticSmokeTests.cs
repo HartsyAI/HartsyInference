@@ -266,6 +266,14 @@ public sealed class AukPipelineSyntheticSmokeTests : IDisposable
     }
 
     [Fact]
+    public void IsOutOfVram_TraversesEveryAggregateExceptionBranch()
+    {
+        Assert.True(AukPipeline.IsOutOfVram(new AggregateException(new InvalidOperationException("a"), new OutOfVramException(100, 10))));
+        Assert.True(AukPipeline.IsOutOfVram(new AggregateException(new OutOfVramException(100, 10), new InvalidOperationException("a"))));
+        Assert.False(AukPipeline.IsOutOfVram(new AggregateException(new InvalidOperationException("a"), new ArgumentException("b"))));
+    }
+
+    [Fact]
     public void ShouldDisableResidentAfterFailure_OnlyTrueForAnOomWhileActuallyResident()
     {
         // Resident mode was attempted (sequential=false) and really did OOM -- the margin was wrong.
