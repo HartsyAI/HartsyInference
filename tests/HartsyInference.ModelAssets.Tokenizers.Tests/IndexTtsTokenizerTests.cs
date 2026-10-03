@@ -9,13 +9,17 @@ namespace HartsyInference.ModelAssets.Tokenizers.Tests;
 public sealed class IndexTtsTokenizerTests
 {
     [Theory]
-    [InlineData("hello world", "hello world")]
-    [InlineData("你好世界", "你好世界")]
-    [InlineData("hello你好world", "hello 你好 world")]
-    [InlineData("I said 你好 to him", "I said 你好 to him")]
-    [InlineData("中文,English混合", "中文 ,English 混合")]
-    public void InjectCjkBoundaries_SpacesAtCjkNonCjkTransitions(string input, string expected)
+    [InlineData("hello world", "HELLO WORLD")]
+    [InlineData("你好世界", "你 好 世 界")]
+    [InlineData("hello你好world", "HELLO 你 好 WORLD")]
+    [InlineData("I said 你好 to him", "I SAID 你 好 TO HIM")]
+    [InlineData("中文,English混合", "中 文 ,ENGLISH 混 合")]
+    public void InjectCjkBoundaries_SplitsEveryCjkCharAndUppercasesNonCjkRuns(string input, string expected)
     {
+        // Matches the reference tokenize_by_CJK_char(line, do_upper_case=True) exactly: every CJK code point
+        // becomes its own token, and every non-CJK run is uppercased -- the real bpe.model's vocabulary has no
+        // lowercase English pieces at all (verified against the real checkpoint), so skipping the uppercase step
+        // sends almost every English word to <unk>.
         string actual = IndexTtsTextNormalizer.InjectCjkBoundaries(input);
         Assert.Equal(expected, actual);
     }

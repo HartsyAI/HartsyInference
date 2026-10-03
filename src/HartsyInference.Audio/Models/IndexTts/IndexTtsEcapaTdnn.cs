@@ -340,7 +340,7 @@ internal sealed unsafe class IndexTtsEcapaTdnn : IDisposable
 
         public static AttentiveStatsPooling Load(IReadOnlyDictionary<string, Tensor> w, string prefix, int channels, int attnChannels) => new(
             TdnnBlock.Load(w, $"{prefix}.tdnn", channels * 3, attnChannels, 1, 1),
-            WhisperOps.EnsureF32(w[$"{prefix}.conv.weight"]), WhisperOps.EnsureF32(w[$"{prefix}.conv.bias"]),
+            WhisperOps.EnsureF32(w[$"{prefix}.conv.conv.weight"]), WhisperOps.EnsureF32(w[$"{prefix}.conv.conv.bias"]),
             channels, attnChannels);
 
         public Tensor Forward(IBackend backend, Tensor x, int t)
