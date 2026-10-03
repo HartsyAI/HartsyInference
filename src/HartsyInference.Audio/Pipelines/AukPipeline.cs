@@ -96,6 +96,12 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         ArgumentNullException.ThrowIfNull(auk);
         ArgumentNullException.ThrowIfNull(vae);
         ArgumentNullException.ThrowIfNull(omni);
+        // Every stage's LoadWeights below replaces its Tensor fields, orphaning any device-resident cache keyed by the old ones.
+        if (_residentBackend is not null && _residentBytes > 0)
+        {
+            FreeAllStageWeights(_residentBackend);
+            _residentBytes = 0;
+        }
         _dit.LoadWeights(auk);
         _vae.LoadWeights(vae);
         _vaeEncoder?.Dispose();
