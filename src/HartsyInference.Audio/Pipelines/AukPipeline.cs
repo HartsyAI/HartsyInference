@@ -268,6 +268,19 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
             bytes += WeightBytes(_tower.EnumerateWeights()) + WeightBytes(_vaeEncoder!.EnumerateWeights());
         }
         bool fits = ResidentWithinBudget(freeBytes + _residentBytes, totalBytes, bytes);
+        if (!fits && _residentBytes > 0)
+        {
+            // Downgrading after a previous call went resident. RunStage only frees a stage it actually runs, and
+            // this call might not touch all of them -- a no-audio call after an audio call went resident never
+            // visits the tower or VAE encoder at all, so without this they would stay resident, unaccounted and
+            // unfreed, for as long as the process runs. Freeing everything up front costs nothing extra: whichever
+            // stages this call's own RunStage calls free again moments later are no-ops the second time.
+            backend.FreeWeights(_lm.EnumerateWeights());
+            backend.FreeWeights(_dit.EnumerateWeights());
+            backend.FreeWeights(_vae.EnumerateWeights());
+            backend.FreeWeights(_tower.EnumerateWeights());
+            backend.FreeWeights(_vaeEncoder!.EnumerateWeights());
+        }
         _residentBytes = fits ? bytes : 0;
         return fits;
     }
