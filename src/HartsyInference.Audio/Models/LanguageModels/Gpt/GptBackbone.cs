@@ -122,6 +122,12 @@ public sealed unsafe class GptBackbone : IDisposable
     /// <summary>Adds the learned position embedding for <c>[posStart, posStart+t)</c>; runs host-side since the input is a freshly host-built embedding lookup that hasn't touched the device yet.</summary>
     private Tensor AddPositions(Tensor inputEmbeds, int t, int h, int posStart)
     {
+        if (_posEmbed is null)
+        {
+            throw new InvalidOperationException(
+                $"{nameof(GptBackbone)} has no position table (loaded with a null posKey) and was called with positionsApplied: false. " +
+                "Either load with a real posKey, or pass positionsApplied: true and add the position embedding(s) yourself before calling Forward/ForwardStep.");
+        }
         Tensor hidden = new(inputEmbeds.Shape, DType.F32);
         float* ip = (float*)inputEmbeds.DataPointer;
         float* op = (float*)hidden.DataPointer;

@@ -6,7 +6,7 @@ using HartsyInference.LLM.Transformer;
 namespace HartsyInference.Audio.Models.LanguageModels.Gpt;
 
 /// <summary>One GPT-2 pre-norm block: <c>x + Attn(LN1(x))</c> then <c>x + MLP(LN2(x))</c>, fused QKV projection; checkpoint key scheme follows HF Bark (<c>layernorm_1</c>, <c>attn.att_proj</c>, <c>attn.out_proj</c>, <c>layernorm_2</c>, <c>mlp.in_proj</c>, <c>mlp.out_proj</c>).</summary>
-/// <remarks>Every linear's bias loads via <see cref="LoadBiasOrZero"/> — a zero tensor for Bark's bias-free checkpoint, the real bias for a standard biased HF GPT-2 (e.g. IndexTTS) — so one code path serves both without a config flag.</remarks>
+/// <remarks>LayerNorm biases always load bias-or-zero. The attention/MLP linears' biases are gated by <see cref="GptConfig.Bias"/> (see <see cref="LoadProjectionBias"/>): zero-filled without a checkpoint lookup for Bark's bias-free convention, loaded for real for a standard biased HF GPT-2 (e.g. IndexTTS).</remarks>
 public sealed unsafe class GptBlock : IDisposable
 {
     private readonly GptConfig _cfg;
@@ -23,15 +23,30 @@ public sealed unsafe class GptBlock : IDisposable
         _ln1G = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_1.weight"]);
         _ln1B = LoadBiasOrZero(w, $"{prefix}.layernorm_1.bias", _ln1G);
         _attW = WhisperOps.EnsureF32(w[$"{prefix}.attn.att_proj.weight"]);
-        _attB = LoadBiasOrZero(w, $"{prefix}.attn.att_proj.bias", 3 * _cfg.Hidden);
+        _attB = LoadProjectionBias(w, $"{prefix}.attn.att_proj.bias", 3 * _cfg.Hidden);
         _outW = WhisperOps.EnsureF32(w[$"{prefix}.attn.out_proj.weight"]);
-        _outB = LoadBiasOrZero(w, $"{prefix}.attn.out_proj.bias", _cfg.Hidden);
+        _outB = LoadProjectionBias(w, $"{prefix}.attn.out_proj.bias", _cfg.Hidden);
         _ln2G = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_2.weight"]);
         _ln2B = LoadBiasOrZero(w, $"{prefix}.layernorm_2.bias", _ln2G);
         _mlpInW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.in_proj.weight"]);
-        _mlpInB = LoadBiasOrZero(w, $"{prefix}.mlp.in_proj.bias", _cfg.MlpDim);
+        _mlpInB = LoadProjectionBias(w, $"{prefix}.mlp.in_proj.bias", _cfg.MlpDim);
         _mlpOutW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.out_proj.weight"]);
-        _mlpOutB = LoadBiasOrZero(w, $"{prefix}.mlp.out_proj.bias", _cfg.Hidden);
+        _mlpOutB = LoadProjectionBias(w, $"{prefix}.mlp.out_proj.bias", _cfg.Hidden);
+    }
+
+    /// <summary>Loads an attention/MLP projection's bias only when <see cref="GptConfig.Bias"/> is set (a real HF
+    /// GPT-2 checkpoint, e.g. IndexTTS); returns a zero vector without touching <paramref name="w"/> otherwise
+    /// (Bark/GPT-2-small's bias-free convention), so the config flag actually gates behavior instead of sitting
+    /// unused.</summary>
+    private Tensor LoadProjectionBias(IReadOnlyDictionary<string, Tensor> w, string key, int outDim) =>
+        _cfg.Bias ? LoadBiasOrZero(w, key, outDim) : ZeroVector(outDim);
+
+    private static Tensor ZeroVector(int size)
+    {
+        Tensor zero = new(new TensorShape(size), DType.F32);
+        float* p = (float*)zero.DataPointer;
+        for (long i = 0; i < zero.ElementCount; i++) p[i] = 0f;
+        return zero;
     }
 
     /// <summary>Full-sequence forward with NO KV cache — used for the bidirectional Bark-Fine stage (<paramref name="causalMask"/> null) and parity-debug teacher forcing (causal mask); the incremental AR path goes through <see cref="ForwardCached"/> instead.</summary>

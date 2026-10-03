@@ -27,6 +27,8 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     public const int StopMelToken = 8193;
     public const int NumMelCodes = 8194;
     public const int NumTextTokens = 12001;
+    public const int StartTextToken = 0;
+    public const int StopTextToken = 1;
 
     private readonly GptConfig _cfg;
     private readonly GptBackbone _gpt;
@@ -59,8 +61,10 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     }
 
     /// <summary>Autoregressively generates mel-code latents conditioned on <paramref name="speechConditioning"/>
-    /// (the Perceiver's 32-vector prefix, no position embedding) and <paramref name="textTokenIds"/> (embedded +
-    /// text-positioned here). Returns <c>[1, melLen, hidden]</c> final_norm'd hidden states — IndexTTS's "latent",
+    /// (the Perceiver's 32-vector prefix, no position embedding) and <paramref name="textTokenIds"/> (wrapped with
+    /// <see cref="StartTextToken"/>/<see cref="StopTextToken"/>, embedded, and text-positioned here — the real
+    /// <c>prepare_gpt_inputs</c> pads every text sequence with these sentinels before embedding, confirmed against
+    /// the reference source). Returns <c>[1, melLen, hidden]</c> final_norm'd hidden states — IndexTTS's "latent",
     /// fed directly to BigVGAN (the sampled mel codes themselves are discarded once generation stops; see
     /// <see cref="Models.Codecs"/> and <c>docs/Research/INDEX_TTS_ARCHITECTURE.md</c> for why no codec decode is
     /// in this pipeline's inference path at all).</summary>
@@ -69,9 +73,14 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         if (_textEmbed is null) throw new InvalidOperationException("IndexTtsT2sDecoder weights not loaded.");
         int h = _cfg.Hidden;
         int condLen = (int)speechConditioning.Shape[1];
-        int textLen = textTokenIds.Length;
 
-        Tensor textEmb = EmbedWithPosition(textTokenIds, _textEmbed!, _textPos!, h);
+        int[] wrappedTextIds = new int[textTokenIds.Length + 2];
+        wrappedTextIds[0] = StartTextToken;
+        Array.Copy(textTokenIds, 0, wrappedTextIds, 1, textTokenIds.Length);
+        wrappedTextIds[^1] = StopTextToken;
+        int textLen = wrappedTextIds.Length;
+
+        Tensor textEmb = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h);
         Tensor prefix = Concat(speechConditioning, textEmb, condLen, textLen, h);
         textEmb.Dispose();
 
@@ -89,26 +98,28 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
             int prevToken = StartMelToken;
             for (int step = 0; step < cap; step++)
             {
-                Tensor stepInput = EmbedOneWithPosition(prevToken, _melEmbed!, _melPos!, step, h);
-                Tensor hiddenStep = _gpt.ForwardStep(backend, stepInput, cache, positionsApplied: true);
-                stepInput.Dispose();
+                using Tensor stepInput = EmbedOneWithPosition(prevToken, _melEmbed!, _melPos!, step, h);
+                using Tensor hiddenStep = _gpt.ForwardStep(backend, stepInput, cache, positionsApplied: true);
 
                 Tensor normedStep = new(hiddenStep.Shape, DType.F32);
-                backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
-                hiddenStep.Dispose();
-
-                Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
-                int nextToken = SampleNextToken(logits, generated, options, rng);
-                logits.Dispose();
-
-                if (nextToken == StopMelToken)
+                bool normedStepOwnedByLatents = false;
+                try
                 {
-                    normedStep.Dispose();
-                    break;
+                    backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
+
+                    using Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
+                    int nextToken = SampleNextToken(logits, generated, options, rng);
+
+                    if (nextToken == StopMelToken) break;
+                    latents.Add(normedStep);
+                    normedStepOwnedByLatents = true;
+                    generated.Add(nextToken);
+                    prevToken = nextToken;
                 }
-                latents.Add(normedStep);
-                generated.Add(nextToken);
-                prevToken = nextToken;
+                finally
+                {
+                    if (!normedStepOwnedByLatents) normedStep.Dispose();
+                }
             }
 
             if (latents.Count == 0)
