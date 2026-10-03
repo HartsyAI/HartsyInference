@@ -258,6 +258,10 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
     private bool FitsResident(IBackend backend, bool hasAudio)
     {
         (long freeBytes, long totalBytes) = backend.GetVramInfo();
+        if (WasSweptExternally(totalBytes - freeBytes, _residentBytes))
+        {
+            _residentBytes = 0;
+        }
         long bytes = WeightBytes(_lm.EnumerateWeights()) + WeightBytes(_dit.EnumerateWeights()) + WeightBytes(_vae.EnumerateWeights());
         if (hasAudio)
         {
@@ -273,6 +277,14 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
     /// all (the CPU backend, mainly), which this treats as "assume the worst" rather than as boundless free memory.</summary>
     public static bool ResidentWithinBudget(long freeBytes, long totalBytes, long requiredBytes) =>
         totalBytes > 0 && freeBytes >= requiredBytes + requiredBytes / 3;
+
+    /// <summary>True when the device shows less in-use memory than this pipeline believes it alone holds
+    /// resident -- the tell that a backend-wide sweep this pipeline has no visibility into (such as
+    /// <c>AudioRuntime.UnloadOthers</c> evicting a sibling model, which frees the whole device including this
+    /// pipeline's own already-resident weights) ran since the bytes were counted. In-use memory can't be less
+    /// than what we alone hold without at least ours having been freed too, so this needs no dedicated
+    /// invalidation hook from the backend -- just the same <see cref="IBackend.GetVramInfo"/> call already made.</summary>
+    public static bool WasSweptExternally(long usedBytes, long residentBytes) => usedBytes < residentBytes;
 
     /// <summary>Total device bytes <paramref name="weights"/> would occupy, element count times dtype size.</summary>
     public static long WeightBytes(IEnumerable<Tensor> weights)

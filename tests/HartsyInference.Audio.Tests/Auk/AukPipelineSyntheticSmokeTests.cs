@@ -209,6 +209,36 @@ public sealed class AukPipelineSyntheticSmokeTests : IDisposable
         Assert.False(fits3); // must still catch genuine external pressure, not stay stuck on the old "true"
     }
 
+    [Theory]
+    [InlineData(500, 900, true)] // device shows less in use than we think we alone hold: at least ours was freed
+    [InlineData(900, 900, false)] // exactly what we think we hold -- nothing missing
+    [InlineData(1_500, 900, false)] // more in use than just ours -- plausible without anything of ours freed
+    public void WasSweptExternally_DetectsDeviceUsageBelowOwnFootprint(long usedBytes, long residentBytes, bool expected)
+        => Assert.Equal(expected, AukPipeline.WasSweptExternally(usedBytes, residentBytes));
+
+    [Fact]
+    public void FitsResidentFormula_RecoversAfterAnExternalSweepFreesOwnFootprint()
+    {
+        const long total = 10_000;
+        const long required = 900;
+        long deviceFree = 2_000;
+        long residentBytes = 0;
+
+        bool fits1 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.True(fits1);
+        residentBytes = required;
+        deviceFree -= required; // deviceFree=1100, usedBytes=8900
+
+        // AudioRuntime.UnloadOthers evicts a sibling model and sweeps the WHOLE device clean -- including this
+        // pipeline's own resident weights -- without ever throwing through this pipeline's own call.
+        deviceFree = total; // the device now reports fully free; usedBytes drops to 0
+        Assert.True(AukPipeline.WasSweptExternally(total - deviceFree, residentBytes)); // 0 < 900: detected
+        residentBytes = 0; // what FitsResident does on detecting it
+
+        bool fits2 = AukPipeline.ResidentWithinBudget(deviceFree + residentBytes, total, required);
+        Assert.True(fits2); // re-measured from a clean baseline, not inflated by the no-longer-real old footprint
+    }
+
     [Fact]
     public void WeightBytes_SumsElementCountTimesDtypeSize()
     {
