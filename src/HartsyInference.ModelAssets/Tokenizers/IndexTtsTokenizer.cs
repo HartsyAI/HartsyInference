@@ -35,7 +35,8 @@ public sealed class IndexTtsTokenizer : IDisposable
     public string Decode(ReadOnlySpan<int> tokenIds)
     {
         ThrowIfDisposed();
-        return _tokenizer.Decode(tokenIds) ?? string.Empty;
+        // Tokenizer.Decode takes IEnumerable<int>; a span can't implement that, so materialize it first.
+        return _tokenizer.Decode(tokenIds.ToArray()) ?? string.Empty;
     }
 
     private void ThrowIfDisposed()
