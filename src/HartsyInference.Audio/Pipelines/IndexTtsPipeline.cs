@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.IndexTts;
 using HartsyInference.Audio.Preprocessing;
@@ -109,35 +110,76 @@ public sealed class IndexTtsPipeline : IDisposable
         }
     }
 
+    /// <summary>Default per-segment text budget, matching the reference CLI's own <c>infer()</c> default
+    /// (<c>max_text_tokens_per_segment=120</c>) — chosen upstream for pacing/quality, well under
+    /// <see cref="IndexTtsConfig.MaxTextTokens"/> (600, the GPT's actual trained text-position-table size).</summary>
+    private const int DefaultMaxTextTokensPerSegment = 120;
+
     /// <summary>Clones the voice in <paramref name="referenceAudioMono"/> speaking <paramref name="text"/>.
     /// Returns 24 kHz mono PCM float samples in [-1, 1].</summary>
+    /// <remarks>Text longer than <see cref="DefaultMaxTextTokensPerSegment"/> tokens is split into sentence-bounded
+    /// segments and synthesized one at a time against the same reference voice, then concatenated — matching the
+    /// reference <c>infer()</c>'s own chunk-and-concatenate strategy. Without this, text that fits under
+    /// <see cref="IndexTtsConfig.MaxTextTokens"/> but is long enough that <c>condLen + textLen</c> leaves little of
+    /// the GPT's 1,402-token block size for mel generation would silently stop speaking mid-utterance once the
+    /// per-call generation cap is hit, with no error. This is a simplified port (sentence-then-comma-then-hard-token
+    /// splitting) of the reference's more intricate recursive <c>split_segments_by_token</c>, not a byte-exact
+    /// match — the goal is avoiding silent truncation, not reproducing its exact segment boundaries.</remarks>
     public float[] Synthesize(IBackend backend, string text, float[] referenceAudioMono, int referenceSampleRate, IndexTtsOptions? options = null)
     {
         ThrowIfDisposed();
         IndexTtsOptions opts = options ?? new IndexTtsOptions();
 
-        // Validate text (cheap, no allocation) before computing the reference mel, so a rejected prompt never
-        // leaves an undisposed Tensor behind.
-        string normalized = IndexTtsTextNormalizer.InjectCjkBoundaries(text);
-        int[] textIds = _tokenizer.Encode(normalized);
-        if (textIds.Length == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
-        if (textIds.Length > _cfg.MaxTextTokens)
-            throw new ArgumentException($"Text has {textIds.Length} tokens, exceeding IndexTTS-1.5's max_text_tokens ({_cfg.MaxTextTokens}).", nameof(text));
+        // Validate + segment text (cheap, no tensor allocation) before computing the reference mel, so a rejected
+        // prompt never leaves an undisposed Tensor behind.
+        List<int[]> segments = SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment);
+        if (segments.Count == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
+        int totalTokens = 0;
+        foreach (int[] seg in segments) totalTokens += seg.Length;
+        if (totalTokens > _cfg.MaxTextTokens)
+            throw new ArgumentException($"Text has {totalTokens} tokens, exceeding IndexTTS-1.5's max_text_tokens ({_cfg.MaxTextTokens}).", nameof(text));
 
         float[] refAt24k = referenceSampleRate == _cfg.SampleRate
             ? referenceAudioMono
             : Resampler.Create(referenceSampleRate, _cfg.SampleRate).Resample(referenceAudioMono);
         (Tensor refMel, int refMelLen) = ComputeMelChannelsLast(refAt24k);
-
         Tensor prefix = _speakerEncoder.Forward(backend, refMel, refMelLen);
 
-        Random rng = new(unchecked((int)opts.Seed));
-        Tensor latent = _t2s.Generate(backend, prefix, textIds, opts, rng);
-        prefix.Dispose();
+        try
+        {
+            if (segments.Count == 1) return SynthesizeSegment(backend, prefix, refMel, refMelLen, segments[0], opts, opts.Seed);
 
+            List<float[]> pieces = new(segments.Count);
+            for (int i = 0; i < segments.Count; i++)
+            {
+                // Distinct-but-deterministic per-segment seed: reusing the exact same seed for every segment would
+                // make every segment's sampling trajectory start identically, which is more repetitive than the
+                // reference's own per-segment-independent generation.
+                ulong segSeed = unchecked(opts.Seed + (ulong)i);
+                pieces.Add(SynthesizeSegment(backend, prefix, refMel, refMelLen, segments[i], opts, segSeed));
+            }
+            int total = 0;
+            foreach (float[] p in pieces) total += p.Length;
+            float[] joined = new float[total];
+            int offset = 0;
+            foreach (float[] p in pieces) { p.CopyTo(joined, offset); offset += p.Length; }
+            return joined;
+        }
+        finally
+        {
+            prefix.Dispose();
+            refMel.Dispose();
+        }
+    }
+
+    /// <summary>Runs the AR decode + vocoder for one already-tokenized segment against a shared speaker
+    /// <paramref name="prefix"/>/<paramref name="refMel"/> (both owned by the caller).</summary>
+    private float[] SynthesizeSegment(IBackend backend, Tensor prefix, Tensor refMel, int refMelLen, int[] textIds, IndexTtsOptions opts, ulong seed)
+    {
+        Random rng = new(unchecked((int)seed));
+        Tensor latent = _t2s.Generate(backend, prefix, textIds, opts, rng);
         Tensor wave = _bigVgan.Forward(backend, latent, (int)latent.Shape[1], refMel, refMelLen);
         latent.Dispose();
-        refMel.Dispose();
 
         int n = (int)wave.ElementCount;
         float[] pcm = new float[n];
@@ -148,6 +190,75 @@ public sealed class IndexTtsPipeline : IDisposable
         }
         wave.Dispose();
         return pcm;
+    }
+
+    /// <summary>Splits <paramref name="text"/> into token-id segments, each tokenizing to at most
+    /// <paramref name="maxTokensPerSegment"/> ids: sentence-bounded first (splitting on <c>. ! ? 。！？</c>),
+    /// falling back to comma/semicolon splitting for an overlong single sentence, and finally a hard token-count
+    /// cut for an overlong single clause with no further punctuation to split on.</summary>
+    private List<int[]> SplitIntoTokenSegments(string text, int maxTokensPerSegment)
+    {
+        List<int[]> result = [];
+        List<string> pending = [];
+        int pendingTokens = 0;
+
+        void FlushPending()
+        {
+            if (pending.Count == 0) return;
+            int[] ids = EncodeNormalized(string.Concat(pending));
+            if (ids.Length > 0) result.Add(ids);
+            pending.Clear();
+            pendingTokens = 0;
+        }
+
+        foreach (string sentence in SplitOnPattern(text, SentenceBoundaryPattern))
+        {
+            int[] sentIds = EncodeNormalized(sentence);
+            if (sentIds.Length == 0) continue;
+            if (sentIds.Length > maxTokensPerSegment)
+            {
+                FlushPending();
+                foreach (string clause in SplitOnPattern(sentence, ClauseBoundaryPattern))
+                {
+                    int[] clauseIds = EncodeNormalized(clause);
+                    if (clauseIds.Length == 0) continue;
+                    if (clauseIds.Length > maxTokensPerSegment)
+                    {
+                        for (int offset = 0; offset < clauseIds.Length; offset += maxTokensPerSegment)
+                            result.Add(clauseIds[offset..Math.Min(offset + maxTokensPerSegment, clauseIds.Length)]);
+                    }
+                    else if (pendingTokens + clauseIds.Length > maxTokensPerSegment)
+                    {
+                        FlushPending();
+                        pending.Add(clause);
+                        pendingTokens = clauseIds.Length;
+                    }
+                    else
+                    {
+                        pending.Add(clause);
+                        pendingTokens += clauseIds.Length;
+                    }
+                }
+                continue;
+            }
+            if (pendingTokens + sentIds.Length > maxTokensPerSegment) FlushPending();
+            pending.Add(sentence);
+            pendingTokens += sentIds.Length;
+        }
+        FlushPending();
+        return result;
+    }
+
+    private int[] EncodeNormalized(string segment) => _tokenizer.Encode(IndexTtsTextNormalizer.InjectCjkBoundaries(segment));
+
+    private static readonly Regex SentenceBoundaryPattern = new(@"[^.!?。！？]+[.!?。！？]*\s*", RegexOptions.Compiled);
+    private static readonly Regex ClauseBoundaryPattern = new(@"[^,;，；]+[,;，；]*\s*", RegexOptions.Compiled);
+
+    private static List<string> SplitOnPattern(string text, Regex pattern)
+    {
+        List<string> parts = [];
+        foreach (Match m in pattern.Matches(text)) if (m.Value.Trim().Length > 0) parts.Add(m.Value);
+        return parts.Count > 0 ? parts : [text];
     }
 
     /// <summary>Runs the shared mel front end and transposes its channels-first <c>[nMels, T]</c> output into the

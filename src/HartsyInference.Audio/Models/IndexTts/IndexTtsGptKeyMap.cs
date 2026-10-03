@@ -25,26 +25,37 @@ internal static unsafe class IndexTtsGptKeyMap
         Dictionary<string, Tensor> w = new(raw);
         Tensor[] owned = new Tensor[numLayers * 4];
         int oi = 0;
-        for (int i = 0; i < numLayers; i++)
+        try
         {
-            string src = $"{rawPrefix}.{i}";
-            string dst = $"{blockPrefix}.{i}";
-            w[$"{dst}.layernorm_1.weight"] = raw[$"{src}.ln_1.weight"];
-            w[$"{dst}.layernorm_1.bias"] = raw[$"{src}.ln_1.bias"];
-            Tensor attProjW = TransposeMatrix(raw[$"{src}.attn.c_attn.weight"]);
-            w[$"{dst}.attn.att_proj.weight"] = owned[oi++] = attProjW;
-            w[$"{dst}.attn.att_proj.bias"] = raw[$"{src}.attn.c_attn.bias"];
-            Tensor outProjW = TransposeMatrix(raw[$"{src}.attn.c_proj.weight"]);
-            w[$"{dst}.attn.out_proj.weight"] = owned[oi++] = outProjW;
-            w[$"{dst}.attn.out_proj.bias"] = raw[$"{src}.attn.c_proj.bias"];
-            w[$"{dst}.layernorm_2.weight"] = raw[$"{src}.ln_2.weight"];
-            w[$"{dst}.layernorm_2.bias"] = raw[$"{src}.ln_2.bias"];
-            Tensor mlpInW = TransposeMatrix(raw[$"{src}.mlp.c_fc.weight"]);
-            w[$"{dst}.mlp.in_proj.weight"] = owned[oi++] = mlpInW;
-            w[$"{dst}.mlp.in_proj.bias"] = raw[$"{src}.mlp.c_fc.bias"];
-            Tensor mlpOutW = TransposeMatrix(raw[$"{src}.mlp.c_proj.weight"]);
-            w[$"{dst}.mlp.out_proj.weight"] = owned[oi++] = mlpOutW;
-            w[$"{dst}.mlp.out_proj.bias"] = raw[$"{src}.mlp.c_proj.bias"];
+            for (int i = 0; i < numLayers; i++)
+            {
+                string src = $"{rawPrefix}.{i}";
+                string dst = $"{blockPrefix}.{i}";
+                w[$"{dst}.layernorm_1.weight"] = raw[$"{src}.ln_1.weight"];
+                w[$"{dst}.layernorm_1.bias"] = raw[$"{src}.ln_1.bias"];
+                Tensor attProjW = TransposeMatrix(raw[$"{src}.attn.c_attn.weight"]);
+                w[$"{dst}.attn.att_proj.weight"] = owned[oi++] = attProjW;
+                w[$"{dst}.attn.att_proj.bias"] = raw[$"{src}.attn.c_attn.bias"];
+                Tensor outProjW = TransposeMatrix(raw[$"{src}.attn.c_proj.weight"]);
+                w[$"{dst}.attn.out_proj.weight"] = owned[oi++] = outProjW;
+                w[$"{dst}.attn.out_proj.bias"] = raw[$"{src}.attn.c_proj.bias"];
+                w[$"{dst}.layernorm_2.weight"] = raw[$"{src}.ln_2.weight"];
+                w[$"{dst}.layernorm_2.bias"] = raw[$"{src}.ln_2.bias"];
+                Tensor mlpInW = TransposeMatrix(raw[$"{src}.mlp.c_fc.weight"]);
+                w[$"{dst}.mlp.in_proj.weight"] = owned[oi++] = mlpInW;
+                w[$"{dst}.mlp.in_proj.bias"] = raw[$"{src}.mlp.c_fc.bias"];
+                Tensor mlpOutW = TransposeMatrix(raw[$"{src}.mlp.c_proj.weight"]);
+                w[$"{dst}.mlp.out_proj.weight"] = owned[oi++] = mlpOutW;
+                w[$"{dst}.mlp.out_proj.bias"] = raw[$"{src}.mlp.c_proj.bias"];
+            }
+        }
+        catch
+        {
+            // A truncated/incompatible checkpoint can throw partway through (e.g. a missing key on layer 5 of
+            // 24) — every transpose already completed for earlier layers is a real tensor nothing else
+            // references yet (the caller never receives `owned` to dispose them), so they must be freed here.
+            for (int j = 0; j < oi; j++) owned[j].Dispose();
+            throw;
         }
         return (w, owned);
     }
