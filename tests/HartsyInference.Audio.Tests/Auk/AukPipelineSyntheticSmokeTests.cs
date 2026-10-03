@@ -3,6 +3,7 @@ using HartsyInference.Audio.Models.Auk;
 using HartsyInference.Audio.Models.LanguageModels.Qwen2;
 using HartsyInference.Audio.Models.QwenOmni;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
 using Xunit;
@@ -245,6 +246,23 @@ public sealed class AukPipelineSyntheticSmokeTests : IDisposable
         Tensor a = Own(new Tensor(new TensorShape(2, 3), DType.F32)); // 6 * 4 bytes
         Tensor b = Own(new Tensor(new TensorShape(4), DType.F32)); // 4 * 4 bytes
         Assert.Equal(40, AukPipeline.WeightBytes([a, b]));
+    }
+
+    [Fact]
+    public void IsOutOfVram_TrueForTheExceptionItselfOrAnywhereInItsInnerChain()
+    {
+        Assert.True(AukPipeline.IsOutOfVram(new OutOfVramException(100, 10)));
+        Assert.True(AukPipeline.IsOutOfVram(new InvalidOperationException("wrapped", new OutOfVramException(100, 10))));
+        Assert.True(AukPipeline.IsOutOfVram(new InvalidOperationException("double-wrapped",
+            new InvalidOperationException("inner", new OutOfVramException(100, 10)))));
+    }
+
+    [Fact]
+    public void IsOutOfVram_FalseWhenNoOutOfVramExceptionAppearsInTheChain()
+    {
+        Assert.False(AukPipeline.IsOutOfVram(new InvalidOperationException("unrelated")));
+        Assert.False(AukPipeline.IsOutOfVram(new InvalidOperationException("wrapped", new ArgumentException("inner"))));
+        Assert.False(AukPipeline.IsOutOfVram(new OperationCanceledException()));
     }
 
     [Fact]
