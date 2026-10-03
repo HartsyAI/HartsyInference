@@ -107,6 +107,12 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         }
 
         List<int> generated = new(Math.Min(cap, 256));
+        // Seeded with StartMelToken: the reference's HF RepetitionPenaltyLogitsProcessor runs over the complete
+        // `input_ids` it has fed the model, which already ends with the start token before the first generation
+        // step — so the real penalty can suppress re-sampling it from step 0, unlike a set built fresh from
+        // `generated` (which never contains the start token at all). Updated incrementally (one Add per accepted
+        // step) rather than rebuilt from `generated` every step, which would be O(cap) allocation+copy per step.
+        HashSet<int> seenForPenalty = [StartMelToken];
         using (Tensor textEmb = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h))
         using (Tensor prefix = Concat(speechConditioning, textEmb, condLen, textLen, h))
         using (IKvCache cache = _gpt.CreateCache())
@@ -122,9 +128,10 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
                 backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
 
                 using Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
-                int nextToken = SampleNextToken(logits, generated, options, rng);
+                int nextToken = SampleNextToken(logits, seenForPenalty, options, rng);
                 if (nextToken == StopMelToken) break;
                 generated.Add(nextToken);
+                seenForPenalty.Add(nextToken);
                 prevToken = nextToken;
             }
         }
@@ -159,16 +166,19 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     /// <c>RepetitionPenaltyLogitsProcessor</c> (it gathers from the ORIGINAL scores and scatters back, so a
     /// repeated id's single-application result simply overwrites itself rather than compounding) — the reference
     /// IndexTTS generates through this exact HF processor. Applying it per-occurrence instead would, e.g., divide
-    /// a positive logit by <c>penalty^2</c> after only two occurrences of the same code.</remarks>
-    private static int SampleNextToken(Tensor logits, List<int> generated, IndexTtsOptions options, Random rng)
+    /// a positive logit by <c>penalty^2</c> after only two occurrences of the same code. <paramref name="seen"/>
+    /// is the caller's running set (already seeded with <see cref="StartMelToken"/>, matching the reference's
+    /// <c>input_ids</c>, which already ends with the start token before the first step) — rebuilding a fresh
+    /// <see cref="HashSet{T}"/> from the full generated-so-far list on every step would be O(cap) per step.</remarks>
+    private static int SampleNextToken(Tensor logits, HashSet<int> seen, IndexTtsOptions options, Random rng)
     {
         float* lp = (float*)logits.DataPointer;
         int n = (int)logits.ElementCount;
         Span<float> span = new(lp, n);
-        if (options.RepetitionPenalty != 1f && generated.Count > 0)
+        if (options.RepetitionPenalty != 1f)
         {
             float penalty = options.RepetitionPenalty;
-            foreach (int id in new HashSet<int>(generated))
+            foreach (int id in seen)
             {
                 float v = span[id];
                 span[id] = v > 0 ? v / penalty : v * penalty;

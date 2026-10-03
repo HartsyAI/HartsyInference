@@ -116,16 +116,18 @@ public sealed class IndexTtsPipeline : IDisposable
         ThrowIfDisposed();
         IndexTtsOptions opts = options ?? new IndexTtsOptions();
 
-        float[] refAt24k = referenceSampleRate == _cfg.SampleRate
-            ? referenceAudioMono
-            : Resampler.Create(referenceSampleRate, _cfg.SampleRate).Resample(referenceAudioMono);
-        (Tensor refMel, int refMelLen) = ComputeMelChannelsLast(refAt24k);
-
+        // Validate text (cheap, no allocation) before computing the reference mel, so a rejected prompt never
+        // leaves an undisposed Tensor behind.
         string normalized = IndexTtsTextNormalizer.InjectCjkBoundaries(text);
         int[] textIds = _tokenizer.Encode(normalized);
         if (textIds.Length == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
         if (textIds.Length > _cfg.MaxTextTokens)
             throw new ArgumentException($"Text has {textIds.Length} tokens, exceeding IndexTTS-1.5's max_text_tokens ({_cfg.MaxTextTokens}).", nameof(text));
+
+        float[] refAt24k = referenceSampleRate == _cfg.SampleRate
+            ? referenceAudioMono
+            : Resampler.Create(referenceSampleRate, _cfg.SampleRate).Resample(referenceAudioMono);
+        (Tensor refMel, int refMelLen) = ComputeMelChannelsLast(refAt24k);
 
         Tensor prefix = _speakerEncoder.Forward(backend, refMel, refMelLen);
 
