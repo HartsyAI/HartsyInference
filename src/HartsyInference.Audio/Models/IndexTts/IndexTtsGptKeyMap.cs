@@ -14,28 +14,39 @@ internal static unsafe class IndexTtsGptKeyMap
 {
     /// <summary>Returns a new dictionary containing <paramref name="raw"/>'s entries plus a <c>{blockPrefix}.{i}.*</c>
     /// entry per layer under <see cref="HartsyInference.Audio.Models.LanguageModels.Gpt.GptBlock"/>'s expected
-    /// sub-keys, so the result can be passed directly to <c>GptBackbone.LoadWeights</c>.</summary>
-    public static Dictionary<string, Tensor> Translate(IReadOnlyDictionary<string, Tensor> raw, string rawPrefix, string blockPrefix, int numLayers)
+    /// sub-keys, so the result can be passed directly to <c>GptBackbone.LoadWeights</c>, plus the freshly allocated
+    /// transposed weight tensors the caller must dispose. <see cref="HartsyInference.Audio.Models.LanguageModels.Gpt.GptBlock.Dispose"/>
+    /// is a no-op by design — Bark's weights are all borrowed references the checkpoint loader owns — but
+    /// <see cref="TransposeMatrix"/> allocates genuinely new tensors nothing else references, so leaving disposal
+    /// to <see cref="HartsyInference.Audio.Models.LanguageModels.Gpt.GptBlock"/> would leak them.</summary>
+    public static (Dictionary<string, Tensor> Weights, Tensor[] OwnedTensors) Translate(
+        IReadOnlyDictionary<string, Tensor> raw, string rawPrefix, string blockPrefix, int numLayers)
     {
         Dictionary<string, Tensor> w = new(raw);
+        Tensor[] owned = new Tensor[numLayers * 4];
+        int oi = 0;
         for (int i = 0; i < numLayers; i++)
         {
             string src = $"{rawPrefix}.{i}";
             string dst = $"{blockPrefix}.{i}";
             w[$"{dst}.layernorm_1.weight"] = raw[$"{src}.ln_1.weight"];
             w[$"{dst}.layernorm_1.bias"] = raw[$"{src}.ln_1.bias"];
-            w[$"{dst}.attn.att_proj.weight"] = TransposeMatrix(raw[$"{src}.attn.c_attn.weight"]);
+            Tensor attProjW = TransposeMatrix(raw[$"{src}.attn.c_attn.weight"]);
+            w[$"{dst}.attn.att_proj.weight"] = owned[oi++] = attProjW;
             w[$"{dst}.attn.att_proj.bias"] = raw[$"{src}.attn.c_attn.bias"];
-            w[$"{dst}.attn.out_proj.weight"] = TransposeMatrix(raw[$"{src}.attn.c_proj.weight"]);
+            Tensor outProjW = TransposeMatrix(raw[$"{src}.attn.c_proj.weight"]);
+            w[$"{dst}.attn.out_proj.weight"] = owned[oi++] = outProjW;
             w[$"{dst}.attn.out_proj.bias"] = raw[$"{src}.attn.c_proj.bias"];
             w[$"{dst}.layernorm_2.weight"] = raw[$"{src}.ln_2.weight"];
             w[$"{dst}.layernorm_2.bias"] = raw[$"{src}.ln_2.bias"];
-            w[$"{dst}.mlp.in_proj.weight"] = TransposeMatrix(raw[$"{src}.mlp.c_fc.weight"]);
+            Tensor mlpInW = TransposeMatrix(raw[$"{src}.mlp.c_fc.weight"]);
+            w[$"{dst}.mlp.in_proj.weight"] = owned[oi++] = mlpInW;
             w[$"{dst}.mlp.in_proj.bias"] = raw[$"{src}.mlp.c_fc.bias"];
-            w[$"{dst}.mlp.out_proj.weight"] = TransposeMatrix(raw[$"{src}.mlp.c_proj.weight"]);
+            Tensor mlpOutW = TransposeMatrix(raw[$"{src}.mlp.c_proj.weight"]);
+            w[$"{dst}.mlp.out_proj.weight"] = owned[oi++] = mlpOutW;
             w[$"{dst}.mlp.out_proj.bias"] = raw[$"{src}.mlp.c_proj.bias"];
         }
-        return w;
+        return (w, owned);
     }
 
     /// <summary>Transposes a 2-D <c>[rows, cols]</c> tensor to <c>[cols, rows]</c> (HF <c>Conv1D</c> → <c>nn.Linear</c> convention).</summary>

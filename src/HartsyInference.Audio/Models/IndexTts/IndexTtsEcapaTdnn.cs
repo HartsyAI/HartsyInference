@@ -194,7 +194,11 @@ internal sealed unsafe class IndexTtsEcapaTdnn : IDisposable
                 if (i == 0) yi = xi;
                 else
                 {
-                    if (prevY is not null)
+                    // Res2Net (Gao et al.): group 0 passes through untouched; group 1 feeds its TDNN block
+                    // directly (y_1 = K_1(x_1), no addition); only group 2 onward add the previous group's
+                    // output before their block (y_i = K_i(x_i + y_{i-1})). Adding y_0 into group 1 here would
+                    // corrupt every downstream SE-Res2Net stage's speaker-embedding conditioning.
+                    if (i > 1 && prevY is not null)
                     {
                         float* xip2 = (float*)xi.DataPointer;
                         float* pyp = (float*)prevY.DataPointer;

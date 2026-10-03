@@ -32,6 +32,7 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     private int _disposed;
 
     private Tensor? _textEmbed, _textPos, _melEmbed, _melPos, _finalNormW, _finalNormB, _melHeadW, _melHeadB;
+    private Tensor[]? _ownedGptWeights;
 
     public IndexTtsT2sDecoder(GptConfig cfg, int maxMelTokens)
     {
@@ -52,7 +53,8 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         _melHeadW = WhisperOps.EnsureF32(w["model.mel_head.weight"]);
         _melHeadB = WhisperOps.EnsureF32(w["model.mel_head.bias"]);
 
-        Dictionary<string, Tensor> translated = IndexTtsGptKeyMap.Translate(w, "model.gpt.h", "h", _cfg.NumLayers);
+        (Dictionary<string, Tensor> translated, Tensor[] owned) = IndexTtsGptKeyMap.Translate(w, "model.gpt.h", "h", _cfg.NumLayers);
+        _ownedGptWeights = owned;
         _gpt.LoadWeights(translated, posKey: null, blockPrefix: "h", lnFGammaKey: "model.gpt.ln_f.weight", lnFBetaKey: "model.gpt.ln_f.bias");
     }
 
@@ -69,10 +71,16 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     /// and the inline version was collecting the former under the latter's index while also never computing a
     /// state for the final sampled code at all). Pass 1 samples the code sequence only (no latent collection:
     /// those hidden states are the wrong ones). Pass 2 re-embeds the now-known full sequence
-    /// <c>[conditioning; text; sampled codes]</c> and runs ONE non-cached causal forward over it — exactly the
-    /// reference's <c>get_logits(..., return_latent=True)</c> — then slices out the mel segment's hidden states
-    /// and applies <c>final_norm</c> (LayerNorm is per-position, so normalizing the slice equals normalizing the
-    /// whole sequence first).</remarks>
+    /// <c>[conditioning; text; StartMelToken; sampled codes]</c> and runs ONE non-cached causal forward over it —
+    /// matching the reference's <c>UnifiedVoice.forward(..., return_latent=True)</c>, which pads its mel sequence
+    /// to <c>[start_mel, codes..., stop_mel, stop_mel]</c> and then strips exactly the trailing two positions
+    /// (<c>mel_logits[:, :-2]</c>), netting <c>[start_mel's own hidden state, then one state per generated
+    /// code]</c> — <c>N+1</c> latent frames for <c>N</c> generated codes, NOT <c>N</c>; BigVGAN is conditioned on
+    /// that extra leading frame too, confirmed by reading the real <c>index-tts</c> GitHub source directly (an
+    /// earlier version of this method omitted the start token and returned only <c>N</c> frames, which would both
+    /// shorten the waveform by one frame and shift every mel position embedding by one relative to pass 1's own
+    /// usage). Then slices out the mel segment's hidden states and applies <c>final_norm</c> (LayerNorm is
+    /// per-position, so normalizing the slice equals normalizing the whole sequence first).</remarks>
     public Tensor Generate(IBackend backend, Tensor speechConditioning, int[] textTokenIds, IndexTtsOptions options, Random rng)
     {
         if (_textEmbed is null) throw new InvalidOperationException("IndexTtsT2sDecoder weights not loaded.");
@@ -87,8 +95,11 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
 
         int cap = Math.Min(options.MaxMelTokens ?? _maxMelTokens, _maxMelTokens);
         // Leave room in the KV cache for conditioning + text before the decode loop starts consuming it, so a
-        // long prompt can't run ForwardStep past the cache's capacity and throw mid-generation.
-        cap = Math.Min(cap, _cfg.BlockSize - condLen - textLen);
+        // long prompt can't run ForwardStep past the cache's capacity and throw mid-generation. The extra -1
+        // reserves a slot for pass 2's re-embedding, whose mel segment is N+1 long (StartMelToken plus every
+        // generated code) — one longer than pass 1's own cache ever holds, since the AR loop never feeds the
+        // last sampled code back as an input.
+        cap = Math.Min(cap, _cfg.BlockSize - condLen - textLen - 1);
         if (cap <= 0)
         {
             throw new InvalidOperationException(
@@ -121,12 +132,17 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         if (generated.Count == 0)
             throw new InvalidOperationException("IndexTTS generated zero mel frames (immediate stop token).");
 
+        int[] melWithStart = new int[generated.Count + 1];
+        melWithStart[0] = StartMelToken;
+        generated.CopyTo(melWithStart, 1);
+        int melSegLen = melWithStart.Length; // N+1: StartMelToken's own state plus one per generated code.
+
         using (Tensor textEmb2 = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h))
         using (Tensor condText = Concat(speechConditioning, textEmb2, condLen, textLen, h))
-        using (Tensor melEmb = EmbedWithPosition(generated.ToArray(), _melEmbed!, _melPos!, h))
-        using (Tensor fullSeq = Concat(condText, melEmb, condLen + textLen, generated.Count, h))
+        using (Tensor melEmb = EmbedWithPosition(melWithStart, _melEmbed!, _melPos!, h))
+        using (Tensor fullSeq = Concat(condText, melEmb, condLen + textLen, melSegLen, h))
         using (Tensor fullOut = _gpt.Forward(backend, fullSeq, nonCausal: false, cache: null, positionsApplied: true))
-        using (Tensor melSlice = SliceSequence(fullOut, condLen + textLen, generated.Count, h))
+        using (Tensor melSlice = SliceSequence(fullOut, condLen + textLen, melSegLen, h))
         {
             Tensor latent = new(melSlice.Shape, DType.F32);
             backend.LayerNorm(latent, melSlice, _finalNormW!, _finalNormB!, 1e-5f);
@@ -220,6 +236,10 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _gpt.Dispose();
+        // GptBlock.Dispose() is a no-op by design (its weights are normally borrowed references the checkpoint
+        // loader owns) — but IndexTtsGptKeyMap.Translate allocates genuinely new transposed tensors nothing else
+        // references, so they must be disposed here instead.
+        if (_ownedGptWeights is not null) foreach (Tensor t in _ownedGptWeights) t.Dispose();
         GC.SuppressFinalize(this);
     }
 }
