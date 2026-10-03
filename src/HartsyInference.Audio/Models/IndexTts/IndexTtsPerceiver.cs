@@ -179,10 +179,12 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
 
     private void RmsNorm(Tensor output, Tensor input, Tensor gamma)
     {
+        // Reference: out = F.normalize(x, dim=-1) * sqrt(dim) * gamma. L2-normalize divides by ||x||_2 =
+        // sqrt(dim)*rms(x), so the sqrt(dim) factor exactly cancels that back to plain RMS-normalize * gamma —
+        // NOT an extra sqrt(dim) on top of invRms (that would be the ~35.8x over-scale a review caught here).
         float* ip = (float*)input.DataPointer;
         float* op = (float*)output.DataPointer;
         float* gp = (float*)gamma.DataPointer;
-        float normScale = MathF.Sqrt(_dim);
         for (int i = 0; i < NumLatents; i++)
         {
             float* row = ip + (long)i * _dim;
@@ -190,7 +192,7 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
             for (int e = 0; e < _dim; e++) sumSq += (double)row[e] * row[e];
             float invRms = (float)(1.0 / Math.Sqrt(sumSq / _dim + 1e-12));
             float* outRow = op + (long)i * _dim;
-            for (int e = 0; e < _dim; e++) outRow[e] = row[e] * invRms * normScale * gp[e];
+            for (int e = 0; e < _dim; e++) outRow[e] = row[e] * invRms * gp[e];
         }
     }
 

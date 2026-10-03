@@ -29,18 +29,22 @@ public sealed class IndexTtsPipeline : IDisposable
     private readonly IndexTtsT2sDecoder _t2s;
     private readonly IndexTtsBigVganGenerator _bigVgan;
     private readonly MelSpectrogramExtractor _melExtractor;
+    private readonly PytorchPickleLoader _gptLoader;
+    private readonly PytorchPickleLoader _bigVganLoader;
     private int _disposed;
 
     public string ModelName => "indextts-1.5";
 
     private IndexTtsPipeline(IndexTtsConfig cfg, IndexTtsTokenizer tokenizer, IndexTtsSpeakerEncoder speakerEncoder,
-        IndexTtsT2sDecoder t2s, IndexTtsBigVganGenerator bigVgan)
+        IndexTtsT2sDecoder t2s, IndexTtsBigVganGenerator bigVgan, PytorchPickleLoader gptLoader, PytorchPickleLoader bigVganLoader)
     {
         _cfg = cfg;
         _tokenizer = tokenizer;
         _speakerEncoder = speakerEncoder;
         _t2s = t2s;
         _bigVgan = bigVgan;
+        _gptLoader = gptLoader;
+        _bigVganLoader = bigVganLoader;
         _melExtractor = new MelSpectrogramExtractor(MelSpectrogramExtractor.F5VocosConfig());
     }
 
@@ -56,7 +60,12 @@ public sealed class IndexTtsPipeline : IDisposable
 
         IndexTtsTokenizer tokenizer = new(tokenizerPath);
 
-        using PytorchPickleLoader gptLoader = new();
+        // The loaders must outlive this method: WhisperOps.EnsureF32 passes an already-F32 tensor through
+        // unchanged (the caller does not own the result, per its own doc), so every weight the model classes
+        // below retain is the SAME Tensor the loader owns. Disposing the loader here would free those tensors
+        // out from under a pipeline that hasn't synthesized anything yet. Both loaders are kept as fields and
+        // disposed only in IndexTtsPipeline.Dispose().
+        PytorchPickleLoader gptLoader = new();
         gptLoader.Load(gptPath, recursiveFlatten: true);
         IReadOnlyDictionary<string, Tensor> gptWeights = gptLoader.GetAllTensors();
 
@@ -66,13 +75,13 @@ public sealed class IndexTtsPipeline : IDisposable
         IndexTtsT2sDecoder t2s = new(resolved.Gpt, resolved.MaxMelTokens);
         t2s.LoadWeights(gptWeights);
 
-        using PytorchPickleLoader bigVganLoader = new();
+        PytorchPickleLoader bigVganLoader = new();
         bigVganLoader.Load(bigVganPath, recursiveFlatten: true);
         IReadOnlyDictionary<string, Tensor> bigVganWeights = bigVganLoader.GetAllTensors();
         IndexTtsBigVganGenerator bigVgan = new(resolved.BigVgan);
         bigVgan.LoadWeights(bigVganWeights, "generator", "generator.speaker_encoder");
 
-        return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan));
+        return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan, gptLoader, bigVganLoader));
     }
 
     /// <summary>Clones the voice in <paramref name="referenceAudioMono"/> speaking <paramref name="text"/>.
@@ -150,6 +159,10 @@ public sealed class IndexTtsPipeline : IDisposable
         _speakerEncoder.Dispose();
         _t2s.Dispose();
         _bigVgan.Dispose();
+        // The loaders own the actual weight-tensor memory every component above holds references into (see
+        // LoadAsync's remarks); dispose them last so nothing above touches freed tensors mid-teardown.
+        _gptLoader.Dispose();
+        _bigVganLoader.Dispose();
         GC.SuppressFinalize(this);
     }
 }

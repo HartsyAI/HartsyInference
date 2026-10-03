@@ -14,13 +14,9 @@ namespace HartsyInference.Audio.Models.IndexTts;
 /// <see cref="GptBackbone.Forward"/>'s <c>positionsApplied</c> doc), and IndexTTS's own second LayerNorm
 /// (<c>final_norm</c>) applied on top of the GPT body's own internal <c>ln_f</c> — both are real, verified against
 /// the checkpoint and the reference <c>GPT2InferenceModel.lm_head = Sequential(final_norm, mel_head)</c>.</summary>
-/// <remarks>Two-pass generation, matching the reference <c>infer()</c> exactly: (1) autoregressively sample mel
-/// codes with a KV-cache prefill + per-step decode, stopping at <c>stop_mel_token</c> or <c>max_mel_tokens</c>;
-/// (2) the per-step <c>final_norm</c>'d hidden states collected during pass 1 ARE the "latent" sequence IndexTTS's
-/// BigVGAN consumes directly — no separate non-causal re-forward pass is needed since this decoder captures each
-/// step's post-final_norm hidden state as it goes, which is value-identical to recomputing it from the known
-/// codes afterward (final_norm/ln_f are per-position, so a later full-sequence forward over the same tokens
-/// reproduces the same hidden state at each position).</remarks>
+/// <remarks>Two-pass generation, matching the reference <c>infer()</c> exactly — see <see cref="Generate"/>'s own
+/// remarks for why both passes are required (the per-step hidden states from the sampling pass are NOT the ones
+/// BigVGAN needs; a second non-cached forward over the known sequence is).</remarks>
 internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
 {
     public const int StartMelToken = 8192;
@@ -60,14 +56,23 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         _gpt.LoadWeights(translated, posKey: null, blockPrefix: "h", lnFGammaKey: "model.gpt.ln_f.weight", lnFBetaKey: "model.gpt.ln_f.bias");
     }
 
-    /// <summary>Autoregressively generates mel-code latents conditioned on <paramref name="speechConditioning"/>
-    /// (the Perceiver's 32-vector prefix, no position embedding) and <paramref name="textTokenIds"/> (wrapped with
-    /// <see cref="StartTextToken"/>/<see cref="StopTextToken"/>, embedded, and text-positioned here — the real
+    /// <summary>Generates mel-code latents conditioned on <paramref name="speechConditioning"/> (the Perceiver's
+    /// 32-vector prefix, no position embedding) and <paramref name="textTokenIds"/> (wrapped with
+    /// <see cref="StartTextToken"/>/<see cref="StopTextToken"/>, embedded, and text-positioned — the real
     /// <c>prepare_gpt_inputs</c> pads every text sequence with these sentinels before embedding, confirmed against
     /// the reference source). Returns <c>[1, melLen, hidden]</c> final_norm'd hidden states — IndexTTS's "latent",
-    /// fed directly to BigVGAN (the sampled mel codes themselves are discarded once generation stops; see
-    /// <see cref="Models.Codecs"/> and <c>docs/Research/INDEX_TTS_ARCHITECTURE.md</c> for why no codec decode is
-    /// in this pipeline's inference path at all).</summary>
+    /// fed directly to BigVGAN.</summary>
+    /// <remarks>Genuinely two passes, matching the reference exactly (an earlier version of this method tried to
+    /// collect latents inline during the one sampling pass — wrong, because the hidden state produced by feeding
+    /// token i-1 as input is NOT the same as the hidden state at token i's own position: causal attention means
+    /// "the state that predicts token i" and "the state produced by token i as input" are off by one position,
+    /// and the inline version was collecting the former under the latter's index while also never computing a
+    /// state for the final sampled code at all). Pass 1 samples the code sequence only (no latent collection:
+    /// those hidden states are the wrong ones). Pass 2 re-embeds the now-known full sequence
+    /// <c>[conditioning; text; sampled codes]</c> and runs ONE non-cached causal forward over it — exactly the
+    /// reference's <c>get_logits(..., return_latent=True)</c> — then slices out the mel segment's hidden states
+    /// and applies <c>final_norm</c> (LayerNorm is per-position, so normalizing the slice equals normalizing the
+    /// whole sequence first).</remarks>
     public Tensor Generate(IBackend backend, Tensor speechConditioning, int[] textTokenIds, IndexTtsOptions options, Random rng)
     {
         if (_textEmbed is null) throw new InvalidOperationException("IndexTtsT2sDecoder weights not loaded.");
@@ -80,63 +85,52 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         wrappedTextIds[^1] = StopTextToken;
         int textLen = wrappedTextIds.Length;
 
-        Tensor textEmb = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h);
-        Tensor prefix = Concat(speechConditioning, textEmb, condLen, textLen, h);
-        textEmb.Dispose();
-
-        using IKvCache cache = _gpt.CreateCache();
-        Tensor prefillOut = _gpt.Forward(backend, prefix, nonCausal: false, cache, positionsApplied: true);
-        prefillOut.Dispose();
-        prefix.Dispose();
-
-        List<Tensor> latents = new(Math.Min(_maxMelTokens, 256));
-        List<int> generated = new(latents.Capacity);
         int cap = Math.Min(options.MaxMelTokens ?? _maxMelTokens, _maxMelTokens);
-
-        try
+        // Leave room in the KV cache for conditioning + text before the decode loop starts consuming it, so a
+        // long prompt can't run ForwardStep past the cache's capacity and throw mid-generation.
+        cap = Math.Min(cap, _cfg.BlockSize - condLen - textLen);
+        if (cap <= 0)
         {
+            throw new InvalidOperationException(
+                $"Conditioning ({condLen}) + text ({textLen}) tokens leave no room for mel generation within block size {_cfg.BlockSize}.");
+        }
+
+        List<int> generated = new(Math.Min(cap, 256));
+        using (Tensor textEmb = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h))
+        using (Tensor prefix = Concat(speechConditioning, textEmb, condLen, textLen, h))
+        using (IKvCache cache = _gpt.CreateCache())
+        {
+            _gpt.Forward(backend, prefix, nonCausal: false, cache, positionsApplied: true).Dispose();
+
             int prevToken = StartMelToken;
             for (int step = 0; step < cap; step++)
             {
                 using Tensor stepInput = EmbedOneWithPosition(prevToken, _melEmbed!, _melPos!, step, h);
                 using Tensor hiddenStep = _gpt.ForwardStep(backend, stepInput, cache, positionsApplied: true);
+                using Tensor normedStep = new(hiddenStep.Shape, DType.F32);
+                backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
 
-                Tensor normedStep = new(hiddenStep.Shape, DType.F32);
-                bool normedStepOwnedByLatents = false;
-                try
-                {
-                    backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
-
-                    using Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
-                    int nextToken = SampleNextToken(logits, generated, options, rng);
-
-                    if (nextToken == StopMelToken) break;
-                    latents.Add(normedStep);
-                    normedStepOwnedByLatents = true;
-                    generated.Add(nextToken);
-                    prevToken = nextToken;
-                }
-                finally
-                {
-                    if (!normedStepOwnedByLatents) normedStep.Dispose();
-                }
+                using Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
+                int nextToken = SampleNextToken(logits, generated, options, rng);
+                if (nextToken == StopMelToken) break;
+                generated.Add(nextToken);
+                prevToken = nextToken;
             }
-
-            if (latents.Count == 0)
-                throw new InvalidOperationException("IndexTTS generated zero mel frames (immediate stop token).");
-
-            Tensor latent = new(new TensorShape(1, latents.Count, h), DType.F32);
-            float* lp = (float*)latent.DataPointer;
-            for (int i = 0; i < latents.Count; i++)
-            {
-                float* src = (float*)latents[i].DataPointer;
-                for (int c = 0; c < h; c++) lp[(long)i * h + c] = src[c];
-            }
-            return latent;
         }
-        finally
+
+        if (generated.Count == 0)
+            throw new InvalidOperationException("IndexTTS generated zero mel frames (immediate stop token).");
+
+        using (Tensor textEmb2 = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h))
+        using (Tensor condText = Concat(speechConditioning, textEmb2, condLen, textLen, h))
+        using (Tensor melEmb = EmbedWithPosition(generated.ToArray(), _melEmbed!, _melPos!, h))
+        using (Tensor fullSeq = Concat(condText, melEmb, condLen + textLen, generated.Count, h))
+        using (Tensor fullOut = _gpt.Forward(backend, fullSeq, nonCausal: false, cache: null, positionsApplied: true))
+        using (Tensor melSlice = SliceSequence(fullOut, condLen + textLen, generated.Count, h))
         {
-            foreach (Tensor t in latents) t.Dispose();
+            Tensor latent = new(melSlice.Shape, DType.F32);
+            backend.LayerNorm(latent, melSlice, _finalNormW!, _finalNormB!, 1e-5f);
+            return latent;
         }
     }
 
@@ -201,6 +195,17 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         for (long i = 0; i < aCount; i++) op[i] = ap[i];
         long bCount = (long)bLen * hidden;
         for (long i = 0; i < bCount; i++) op[aCount + i] = bp[i];
+        return outT;
+    }
+
+    /// <summary>Slices <paramref name="seq"/> <c>[1, totalLen, hidden]</c> to <c>[1, length, hidden]</c> starting at <paramref name="offset"/>.</summary>
+    private static Tensor SliceSequence(Tensor seq, int offset, int length, int hidden)
+    {
+        Tensor outT = new(new TensorShape(1, length, hidden), DType.F32);
+        float* op = (float*)outT.DataPointer;
+        float* sp = (float*)seq.DataPointer + (long)offset * hidden;
+        long count = (long)length * hidden;
+        for (long i = 0; i < count; i++) op[i] = sp[i];
         return outT;
     }
 
