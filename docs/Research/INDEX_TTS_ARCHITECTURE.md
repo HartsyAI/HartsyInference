@@ -171,4 +171,48 @@ Per project rule "validate against references": compare on three fronts:
 | Safetensors loader (for Qwen-3 emo sub-model) | [SAFETENSORS_FORMAT.md](SAFETENSORS_FORMAT.md) |
 | DiT block reuse from Flux/SD3 | [SD3_ARCHITECTURE.md](SD3_ARCHITECTURE.md), [FLUX_ARCHITECTURE.md](FLUX_ARCHITECTURE.md) |
 | Qwen-3 0.6B (architecture identical to the native LLM path) | `HartsyInference.LLM` |
+
+## Phase 1 implementation notes (ground-truthed against the real checkpoint)
+
+The sections above were written from the paper/HF model card before any checkpoint was downloaded, and several
+claims didn't survive contact with the real `IndexTeam/IndexTTS-1.5` weights and the upstream `index-tts` source
+(`indextts/gpt/model.py`, `indextts/BigVGAN/models.py`, `indextts/BigVGAN/ECAPA_TDNN.py`). Corrections:
+
+- **The DVAE codec is not used at inference at all.** The reference `IndexTTS.infer()` has its entire `self.dvae`
+  load block commented out. `dvae.pth` only ever defined the GPT's mel-code vocabulary at training time. §1's
+  "Vocos-style decoder" description and the earlier assumption that HartsyInference's existing DAC codec might be
+  reusable here are both moot — no codec decode step exists in the shipped pipeline (`IndexTtsPipeline.cs`).
+- **BigVGAN's primary input is the GPT's own final-layer hidden states ("latent"), not a decoded mel.**
+  `conv_pre` takes `gpt_dim=1280` channels, confirmed in the real `bigvgan_generator.pth`. Generation is two-pass:
+  autoregressively sample mel-code tokens (for the stop condition only), then re-embed the known sequence and take
+  the `final_norm`'d hidden state at each mel position as BigVGAN's conditioning signal.
+- **BigVGAN embeds its own ECAPA-TDNN speaker encoder** (`generator.speaker_encoder`, SpeechBrain's standard
+  topology) that computes a 512-dim d-vector from the raw reference mel, injected via `cond_layer` once and
+  `conds[i]` at every upsampling stage (`cond_d_vector_in_each_upsampling_layer: true`) — a second, separate
+  speech-conditioning path from the GPT's own Conformer-Perceiver.
+- **The GPT body is a literal, standard HuggingFace `GPT2Model`** (`build_hf_gpt_transformer`), with its own
+  `wte`/`wpe` stripped (the caller always supplies `inputs_embeds`). It carries real biases throughout
+  (`c_attn`, `c_proj`, `c_fc` all have non-empty bias tensors) and stores projection weights in HF `Conv1D`'s
+  `[in, out]` layout — the transpose of the `nn.Linear` `[out, in]` convention
+  `HartsyInference.Audio.Models.LanguageModels.Gpt.GptBlock` assumed. Both gaps are now fixed in `GptBlock`/
+  `GptBackbone` (bias-or-zero loading for every projection; an optional `positionsApplied` flag + nullable
+  `posKey`, since IndexTTS uses two separate position tables — text and mel each restart at position 0 — rather
+  than one table spanning the whole sequence) rather than forked.
+- **The Conformer conditioning encoder is non-macaron with a real convolution module and Transformer-XL
+  relative-position attention** (`pos_bias_u`/`pos_bias_v` + `linear_pos` + rel_shift) — the same algorithm as
+  CosyVoice's `UpsampleConformerEncoder`/`RelPosBlock`, not the macaron+RoPE shape `Mert2ConformerLayer` uses.
+  Its `conv2d2` subsampling front end (a single 3×3/stride-2 `Conv2d` over the mel) halves the time axis once.
+- **The Perceiver-Resampler is the `naturalspeech2-pytorch` variant**, not the two-pass cross-then-self shape
+  `ChatterboxPerceiver` uses: one attention call per layer where the latents' keys/values are
+  `concat(latents, proj_context(conformerOutput))`, bias-free throughout, GEGLU feed-forward, and a closing
+  RMSNorm (not LayerNorm) — confirmed key-for-key against the real `gpt.perceiver_encoder.*` weights.
+- Despite the upstream filename, `bpe.model`'s `trainer_spec.model_type` is **Unigram, not BPE** (verified by
+  direct protobuf parsing) — `Microsoft.ML.Tokenizers.SentencePieceTokenizer` (already proven on T5/Gemma's
+  Unigram models in this repo) loads it directly; no BPE-fallback path or hand-rolled parser was needed.
+
+Open risks not yet resolved (no .NET build environment was available to compile/test this port): the exact
+text-frontend behavior IndexTTS's own CJK/pinyin handling implements beyond simple boundary spacing; whether the
+generated latent sequence should include or exclude the position where `stop_mel_token` was sampled (this port
+excludes it); and all real-weight numerical parity, which needs the checkpoint run end-to-end against the Python
+reference once a build environment is available. See `docs/Checklists/MODEL_STATUS_AUDIO.md`'s IndexTTS-1.5 row.
 | (Comparison) StyleTTS-2-class non-AR TTS | [KOKORO_ARCHITECTURE.md](KOKORO_ARCHITECTURE.md) |

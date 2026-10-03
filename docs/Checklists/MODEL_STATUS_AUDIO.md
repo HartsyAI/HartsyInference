@@ -100,6 +100,7 @@ oracle (medium.en caught failures base.en concealed). Music requires listening, 
 | **Stable Audio Open Small** | ✅ | DiT/VAE/timing-conditioner parity cosine 1.0 each. ([details](#stable-audio-open-small)) |
 | **DiffRhythm / AudioLDM 2 / ACE-Step XL** | ❌/🔧 | Music roadmap; see the [Remaining work](#remaining-work) section for the per-model build state and ROI order. |
 | **PocketTTS** (continuous-latent) | ✅ | **Swarm-deployed + parity-verified 2026-07-16.** Production voiced path built on the verified cores: `PocketTtsStreamingTransformer.ForwardPrimed` (voice-KV prefix + RoPE offset), `PocketTtsFlowLm.GenerateVoiced` (LUT conditioner + out_eos stop + noise std=√temp), `PocketTtsVoice` (KV-state loader), rewritten `PocketTtsPipeline` (SentencePiece + emb_std/mean denorm). ([details](#pockettts)) |
+| **IndexTTS-1.5** (zero-shot clone) | 🔧 | Structural port against the real `IndexTeam/IndexTTS-1.5` checkpoint (keys/shapes inspected directly, not guessed): Conformer-Perceiver speech conditioning → biased HF GPT-2 T2S decoder (two-pass: AR code sampling, then latent re-extraction) → custom 24 kHz BigVGAN-v2 with an embedded ECAPA-TDNN d-vector, conditioned on the GPT's own hidden states rather than a decoded mel — the shipped `dvae.pth` is training-only and unused at inference (reference `infer()` has the whole load path commented out). No real-weight output has been generated yet (no .NET build environment in the authoring session); see `docs/Research/INDEX_TTS_ARCHITECTURE.md`'s implementation-notes addendum for the verified architecture trail and open risks. No emotion/duration control (IndexTTS-2). |
 
 ## Notes
 
@@ -120,7 +121,7 @@ See [ROADMAP.md](ROADMAP.md) for cross-cutting infra (multi-GPU, kernel perf, qu
 ### Not-started ASR / TTS models
 - [ ] NVIDIA NeMo family: Parakeet CTC / RNN-T / TDT, Canary, FastConformer.
 - [ ] SenseVoice, FireRedASR.
-- [ ] XTTS-v2, ChatTTS, Higgs Audio v2, IndexTTS 1.5 / 2, CosyVoice 1.
+- [ ] XTTS-v2, ChatTTS, Higgs Audio v2, IndexTTS-2, CosyVoice 1.
 
 ### Checkpoint-gated scaffolds (backbone verified, need real weights)
 - [ ] Kyutai STT (no depformer).
