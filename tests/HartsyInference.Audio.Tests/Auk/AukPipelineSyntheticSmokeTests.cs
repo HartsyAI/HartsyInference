@@ -266,6 +266,19 @@ public sealed class AukPipelineSyntheticSmokeTests : IDisposable
     }
 
     [Fact]
+    public void ShouldDisableResidentAfterFailure_OnlyTrueForAnOomWhileActuallyResident()
+    {
+        // Resident mode was attempted (sequential=false) and really did OOM -- the margin was wrong.
+        Assert.True(AukPipeline.ShouldDisableResidentAfterFailure(sequential: false, new OutOfVramException(100, 10)));
+        // Already sequential (never went resident) OOMing under temporary external pressure says nothing
+        // about the resident margin -- must not cost every later call the optimization.
+        Assert.False(AukPipeline.ShouldDisableResidentAfterFailure(sequential: true, new OutOfVramException(100, 10)));
+        // Resident but a non-OOM failure (e.g. cancellation) -- not a margin problem.
+        Assert.False(AukPipeline.ShouldDisableResidentAfterFailure(sequential: false, new OperationCanceledException()));
+        Assert.False(AukPipeline.ShouldDisableResidentAfterFailure(sequential: true, new OperationCanceledException()));
+    }
+
+    [Fact]
     public void Generate_RejectsMissingDurationOverBudgetAndCancellation()
     {
         using AukPipeline pipeline = Build(flash: true);

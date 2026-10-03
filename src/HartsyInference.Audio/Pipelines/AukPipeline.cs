@@ -186,21 +186,25 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         catch (Exception ex)
         {
             // FitsResident already counted these bytes as resident, optimistically, before any stage actually
-            // ran. A failure here (an OOM from PreloadWeights, most importantly) leaves what is really on the
-            // device unknown: maybe nothing from this call landed, maybe some stages did before a later one
-            // threw, and a caller's OOM recovery (AudioRuntime.EvictForRetry) may already be wiping the whole
-            // backend's device memory on its way to retrying -- out from under this count either way. Zeroing
-            // it is the safe side of that uncertainty: the next call re-measures live VRAM from scratch and,
-            // worst case, redoes a preload that was in fact still resident -- never an OOM from believing we
-            // hold bytes we don't.
+            // ran. A failure here leaves what is really on the device unknown: maybe nothing from this call
+            // landed, maybe some stages did before a later one threw (cancellation after a successful preload,
+            // most notably -- not just an OOM), and a caller's OOM recovery (AudioRuntime.EvictForRetry) may
+            // already be wiping the whole backend's device memory on its way to retrying. Rather than leave that
+            // ambiguity for the next call to guess at, make it true: free every stage now (a no-op for whatever
+            // a sweep already took, or was never actually loaded) so our now-zeroed count matches reality instead
+            // of merely hoping a future PreloadWeights redoes what in fact never got freed.
             _residentBytes = 0;
-            // A genuine OOM while resident means the margin was wrong for real activation/allocator overhead,
-            // not merely stale accounting -- and the caller's one-shot retry (AudioRuntime.EvictForRetry) wipes
-            // the whole device first, so a fresh FitsResident measurement on that retry would very likely pass
-            // again and reproduce the exact same OOM with no way out. Disabling resident mode for the rest of
-            // this instance's life trades a permanently-slower pipeline for one that never gets stuck repeating
-            // a failure it cannot recover from.
-            if (IsOutOfVram(ex)) _residentDisabledByOom = true;
+            FreeAllStageWeights(backend);
+            // A genuine OOM is only resident mode's fault if this call was actually attempting it -- a sequential
+            // call OOMing under temporary external pressure says nothing about the resident margin being wrong,
+            // and permanently disabling resident for that would cost every later call the optimization for no
+            // reason. When it *was* a resident attempt, the margin was wrong for real activation/allocator
+            // overhead, not merely stale accounting -- and the caller's one-shot retry (AudioRuntime.EvictForRetry)
+            // wipes the whole device first, so a fresh FitsResident measurement on that retry would very likely
+            // pass again and reproduce the exact same OOM with no way out. Disabling resident mode for the rest of
+            // this instance's life trades a permanently-slower pipeline for one that never gets stuck repeating a
+            // failure it cannot recover from.
+            if (ShouldDisableResidentAfterFailure(sequential, ex)) _residentDisabledByOom = true;
             throw;
         }
     }
@@ -216,6 +220,12 @@ public sealed class AukPipeline : IAudioPipeline, IDisposable
         }
         return false;
     }
+
+    /// <summary>True only for an out-of-VRAM failure during a call that was itself attempting resident mode
+    /// (<paramref name="sequential"/> false). A sequential call OOMing says nothing about the resident margin being
+    /// wrong -- it never went resident -- so permanently disabling resident for the rest of this instance's life
+    /// over that would cost every later call the optimization for a failure resident mode had no part in.</summary>
+    public static bool ShouldDisableResidentAfterFailure(bool sequential, Exception error) => !sequential && IsOutOfVram(error);
 
     /// <summary>Latent frames for <paramref name="seconds"/> of output, rejecting more than <see cref="MaxSeconds"/>.</summary>
     public static int ResolveFrames(double seconds, int sampleRate, int hop)
