@@ -8,6 +8,23 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.246
+
+- **IndexTTS-1.5 speech model, structural port (Phase 1: zero-shot cloning only).** `hartsy speak -m indextts
+  --reference <wav> "text"` clones a voice from a reference clip: a Conformer-Perceiver speech-conditioning
+  encoder feeds a standard biased HF GPT-2 text-to-speech decoder (sampled autoregressively, two-pass — generate
+  codes, then re-extract the matching final-layer hidden states), and a custom 24 kHz BigVGAN-v2 vocodes those
+  hidden states directly, conditioned by an embedded ECAPA-TDNN speaker d-vector. No emotion or duration control
+  (IndexTTS-2, not yet implemented) and no codec decode step — the shipped `dvae.pth` is training-only, confirmed
+  unused in the reference `infer()`. Not numerically verified against the reference yet; see
+  `MODEL_STATUS_AUDIO.md` and `docs/Research/INDEX_TTS_ARCHITECTURE.md`'s implementation-notes addendum for open
+  risks (exact text-frontend CJK handling, sampling defaults).
+- `GptBackbone`/`GptBlock` now load bias-or-zero for every projection (previously hardcoded bias-free), so a
+  standard biased HF GPT-2 checkpoint loads correctly alongside Bark's bias-free one; `GptBackbone.Forward`/
+  `ForwardStep` take an optional `positionsApplied` flag and `LoadWeights`' `posKey` is now nullable, for
+  checkpoints (like IndexTTS) with per-segment position tables or none at all rather than one table spanning the
+  whole sequence.
+
 ## alpha.245
 
 - **AuK: skip per-call weight eviction when VRAM has room.** `AukOptions.SequentialResidency` defaults to `true`,

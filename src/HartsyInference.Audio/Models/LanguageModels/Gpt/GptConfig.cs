@@ -13,8 +13,7 @@ public sealed record GptConfig
     public int HeadDim => Hidden / NumHeads;
     public int MlpDim => 4 * Hidden;
 
-    /// <summary>Whether linear/attention projections carry bias. Real Bark/GPT-2 checkpoints are bias-free (false).</summary>
-    // PARITY-TODO: GptBackbone must honor Bias.
+    /// <summary>Unused by <see cref="GptBackbone"/>: it always loads bias-or-zero per projection, so a bias-free checkpoint (Bark) and a biased one (IndexTTS, standard HF GPT-2) both load correctly without a flag. Kept for source compatibility.</summary>
     public bool Bias { get; init; } = false;
 
     /// <summary>Bark full preset (hidden 1024 / 24 layers / 16 heads).</summary>
@@ -22,4 +21,7 @@ public sealed record GptConfig
 
     /// <summary>Bark-Small preset (hidden 768 / 12 layers / 12 heads — GPT-2-small footprint).</summary>
     public static GptConfig BarkSmall => new() { Hidden = 768, NumLayers = 12, NumHeads = 12 };
+
+    /// <summary>IndexTTS-1.5 T2S preset (hidden 1280 / 24 layers / 20 heads); checkpoint is a standard biased HF GPT-2.</summary>
+    public static GptConfig IndexTts15 => new() { Hidden = 1_280, NumLayers = 24, NumHeads = 20, BlockSize = 1_402 };
 }

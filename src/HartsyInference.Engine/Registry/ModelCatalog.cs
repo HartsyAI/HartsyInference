@@ -1150,6 +1150,22 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // `hartsy speak -m indextts --reference <wav> "text"` — zero-shot clone only, no emotion/duration
+                // control (that is IndexTTS-2, not yet implemented). dvae.pth is listed for repo completeness but
+                // confirmed unused at inference — see IndexTtsPipeline's doc comment.
+                Id = "indextts", Modality = tts, DisplayName = "IndexTTS-1.5", Architecture = "GPT-2 T2S + Conformer-Perceiver + BigVGAN-v2 (ECAPA d-vector conditioning)", Status = st,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "config.yaml", TargetSubdir = "Audio/IndexTts", Role = "config" },
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "bpe.model", TargetSubdir = "Audio/IndexTts", Role = "tokenizer" },
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "gpt.pth", TargetSubdir = "Audio/IndexTts", Role = "transformer" },
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "dvae.pth", TargetSubdir = "Audio/IndexTts", Role = "codec (unused at inference)" },
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "bigvgan_generator.pth", TargetSubdir = "Audio/IndexTts", Role = "vocoder" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "dia", Modality = tts, DisplayName = "Dia-1.6B (0626)", Architecture = "byte-level dialogue TTS + DAC codec", Status = ok,
                 CliDrivable = true, // `hartsy speak -m dia "[S1] ... [S2] ..."` — TtsCatalog "dia"; needs the 0626 checkpoint (the original degenerates)
                 Assets = new ModelAsset[]

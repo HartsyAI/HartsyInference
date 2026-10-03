@@ -5,15 +5,16 @@ using HartsyInference.LLM.Transformer;
 
 namespace HartsyInference.Audio.Models.LanguageModels.Gpt;
 
-/// <summary>One GPT-2 pre-norm block: <c>x + Attn(LN1(x))</c> then <c>x + MLP(LN2(x))</c>, fused QKV projection, all linears <c>bias=False</c>; checkpoint key scheme follows HF Bark (<c>layernorm_1</c>, <c>attn.att_proj</c>, <c>attn.out_proj</c>, <c>layernorm_2</c>, <c>mlp.in_proj</c>, <c>mlp.out_proj</c>).</summary>
+/// <summary>One GPT-2 pre-norm block: <c>x + Attn(LN1(x))</c> then <c>x + MLP(LN2(x))</c>, fused QKV projection; checkpoint key scheme follows HF Bark (<c>layernorm_1</c>, <c>attn.att_proj</c>, <c>attn.out_proj</c>, <c>layernorm_2</c>, <c>mlp.in_proj</c>, <c>mlp.out_proj</c>).</summary>
+/// <remarks>Every linear's bias loads via <see cref="LoadBiasOrZero"/> — a zero tensor for Bark's bias-free checkpoint, the real bias for a standard biased HF GPT-2 (e.g. IndexTTS) — so one code path serves both without a config flag.</remarks>
 public sealed unsafe class GptBlock : IDisposable
 {
     private readonly GptConfig _cfg;
     private int _disposed;
 
     private Tensor? _ln1G, _ln1B, _ln2G, _ln2B;
-    private Tensor? _attW, _outW;         // att_proj [3H, H], out_proj [H, H]
-    private Tensor? _mlpInW, _mlpOutW;    // [4H, H], [H, 4H]
+    private Tensor? _attW, _attB, _outW, _outB;         // att_proj [3H, H], out_proj [H, H]
+    private Tensor? _mlpInW, _mlpInB, _mlpOutW, _mlpOutB;    // [4H, H], [H, 4H]
 
     public GptBlock(GptConfig cfg) => _cfg = cfg;
 
@@ -22,11 +23,15 @@ public sealed unsafe class GptBlock : IDisposable
         _ln1G = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_1.weight"]);
         _ln1B = LoadBiasOrZero(w, $"{prefix}.layernorm_1.bias", _ln1G);
         _attW = WhisperOps.EnsureF32(w[$"{prefix}.attn.att_proj.weight"]);
+        _attB = LoadBiasOrZero(w, $"{prefix}.attn.att_proj.bias", 3 * _cfg.Hidden);
         _outW = WhisperOps.EnsureF32(w[$"{prefix}.attn.out_proj.weight"]);
+        _outB = LoadBiasOrZero(w, $"{prefix}.attn.out_proj.bias", _cfg.Hidden);
         _ln2G = WhisperOps.EnsureF32(w[$"{prefix}.layernorm_2.weight"]);
         _ln2B = LoadBiasOrZero(w, $"{prefix}.layernorm_2.bias", _ln2G);
         _mlpInW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.in_proj.weight"]);
+        _mlpInB = LoadBiasOrZero(w, $"{prefix}.mlp.in_proj.bias", _cfg.MlpDim);
         _mlpOutW = WhisperOps.EnsureF32(w[$"{prefix}.mlp.out_proj.weight"]);
+        _mlpOutB = LoadBiasOrZero(w, $"{prefix}.mlp.out_proj.bias", _cfg.Hidden);
     }
 
     /// <summary>Full-sequence forward with NO KV cache — used for the bidirectional Bark-Fine stage (<paramref name="causalMask"/> null) and parity-debug teacher forcing (causal mask); the incremental AR path goes through <see cref="ForwardCached"/> instead.</summary>
@@ -40,7 +45,7 @@ public sealed unsafe class GptBlock : IDisposable
         // ── Attention ──
         Tensor ln1 = new(x.Shape, DType.F32);
         backend.LayerNorm(ln1, x, _ln1G!, _ln1B!, 1e-5f);
-        Tensor qkv = WhisperOps.ProjectLinear(backend, ln1, _attW!, bias: null, 1, t, h, 3 * h);
+        Tensor qkv = WhisperOps.ProjectLinear(backend, ln1, _attW!, _attB, 1, t, h, 3 * h);
         ln1.Dispose();
 
         // Split the fused QKV on-device (last-dim slices), then permute [1,t,h] → [1,nh,t,d]. Keeping the
@@ -69,7 +74,7 @@ public sealed unsafe class GptBlock : IDisposable
         Tensor attnFlat = new(new TensorShape(1, t, h), DType.F32);
         backend.Permute0213(attnFlat, attn, nh, t, d);
         attn.Dispose();
-        Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, _outW!, bias: null, 1, t, h, h);
+        Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, _outW!, _outB, 1, t, h, h);
         attnFlat.Dispose();
 
         Tensor res1 = new(x.Shape, DType.F32);
@@ -79,10 +84,10 @@ public sealed unsafe class GptBlock : IDisposable
         // ── MLP ──
         Tensor ln2 = new(res1.Shape, DType.F32);
         backend.LayerNorm(ln2, res1, _ln2G!, _ln2B!, 1e-5f);
-        Tensor fc = WhisperOps.ProjectLinear(backend, ln2, _mlpInW!, bias: null, 1, t, h, _cfg.MlpDim);
+        Tensor fc = WhisperOps.ProjectLinear(backend, ln2, _mlpInW!, _mlpInB, 1, t, h, _cfg.MlpDim);
         ln2.Dispose();
         backend.Gelu(fc, fc);
-        Tensor proj = WhisperOps.ProjectLinear(backend, fc, _mlpOutW!, bias: null, 1, t, _cfg.MlpDim, h);
+        Tensor proj = WhisperOps.ProjectLinear(backend, fc, _mlpOutW!, _mlpOutB, 1, t, _cfg.MlpDim, h);
         fc.Dispose();
 
         Tensor res2 = new(res1.Shape, DType.F32);
@@ -104,7 +109,7 @@ public sealed unsafe class GptBlock : IDisposable
         // ── Attention ──
         Tensor ln1 = new(x.Shape, DType.F32);
         backend.LayerNorm(ln1, x, _ln1G!, _ln1B!, 1e-5f);
-        Tensor qkv = WhisperOps.ProjectLinear(backend, ln1, _attW!, bias: null, 1, t, h, 3 * h);
+        Tensor qkv = WhisperOps.ProjectLinear(backend, ln1, _attW!, _attB, 1, t, h, 3 * h);
         ln1.Dispose();
 
         // Split the fused QKV on-device (last-dim slices), then permute [1,t,h] → [1,nh,t,d].
@@ -138,7 +143,7 @@ public sealed unsafe class GptBlock : IDisposable
         Tensor attnFlat = new(new TensorShape(1, t, h), DType.F32);
         backend.Permute0213(attnFlat, attn, nh, t, d);
         attn.Dispose();
-        Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, _outW!, bias: null, 1, t, h, h);
+        Tensor attnOut = WhisperOps.ProjectLinear(backend, attnFlat, _outW!, _outB, 1, t, h, h);
         attnFlat.Dispose();
 
         Tensor res1 = new(x.Shape, DType.F32);
@@ -148,10 +153,10 @@ public sealed unsafe class GptBlock : IDisposable
         // ── MLP ──
         Tensor ln2 = new(res1.Shape, DType.F32);
         backend.LayerNorm(ln2, res1, _ln2G!, _ln2B!, 1e-5f);
-        Tensor fc = WhisperOps.ProjectLinear(backend, ln2, _mlpInW!, bias: null, 1, t, h, _cfg.MlpDim);
+        Tensor fc = WhisperOps.ProjectLinear(backend, ln2, _mlpInW!, _mlpInB, 1, t, h, _cfg.MlpDim);
         ln2.Dispose();
         backend.Gelu(fc, fc);
-        Tensor proj = WhisperOps.ProjectLinear(backend, fc, _mlpOutW!, bias: null, 1, t, _cfg.MlpDim, h);
+        Tensor proj = WhisperOps.ProjectLinear(backend, fc, _mlpOutW!, _mlpOutB, 1, t, _cfg.MlpDim, h);
         fc.Dispose();
 
         Tensor res2 = new(res1.Shape, DType.F32);
@@ -171,9 +176,19 @@ public sealed unsafe class GptBlock : IDisposable
         return zero;
     }
 
+    /// <summary>Returns a <c>[outDim]</c> zero vector when the checkpoint has no bias for a <c>[outDim, inDim]</c> projection — the weight itself is the wrong shape to borrow from, unlike the 1-D LayerNorm case <see cref="LoadBiasOrZero(IReadOnlyDictionary{string,Tensor},string,Tensor)"/> handles.</summary>
+    internal static Tensor LoadBiasOrZero(IReadOnlyDictionary<string, Tensor> w, string key, int outDim)
+    {
+        if (w.TryGetValue(key, out Tensor? b)) return WhisperOps.EnsureF32(b);
+        Tensor zero = new(new TensorShape(outDim), DType.F32);
+        float* p = (float*)zero.DataPointer;
+        for (long i = 0; i < zero.ElementCount; i++) p[i] = 0f;
+        return zero;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
-        Tensor?[] all = [_ln1G, _ln1B, _attW, _outW, _ln2G, _ln2B, _mlpInW, _mlpOutW];
+        Tensor?[] all = [_ln1G, _ln1B, _attW, _attB, _outW, _outB, _ln2G, _ln2B, _mlpInW, _mlpInB, _mlpOutW, _mlpOutB];
         foreach (Tensor? t in all) if (t is not null) yield return t;
     }
 
