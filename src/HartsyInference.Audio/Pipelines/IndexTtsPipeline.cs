@@ -62,30 +62,51 @@ public sealed class IndexTtsPipeline : IDisposable
         ct.ThrowIfCancellationRequested();
         IndexTtsConfig resolved = cfg ?? IndexTtsConfig.V1_5;
 
-        IndexTtsTokenizer tokenizer = new(tokenizerPath);
+        IndexTtsTokenizer? tokenizer = null;
+        PytorchPickleLoader? gptLoader = null;
+        IndexTtsSpeakerEncoder? speakerEncoder = null;
+        IndexTtsT2sDecoder? t2s = null;
+        PytorchPickleLoader? bigVganLoader = null;
+        IndexTtsBigVganGenerator? bigVgan = null;
+        try
+        {
+            tokenizer = new IndexTtsTokenizer(tokenizerPath);
 
-        // The loaders must outlive this method: WhisperOps.EnsureF32 passes an already-F32 tensor through
-        // unchanged (the caller does not own the result, per its own doc), so every weight the model classes
-        // below retain is the SAME Tensor the loader owns. Disposing the loader here would free those tensors
-        // out from under a pipeline that hasn't synthesized anything yet. Both loaders are kept as fields and
-        // disposed only in IndexTtsPipeline.Dispose().
-        PytorchPickleLoader gptLoader = new();
-        gptLoader.Load(gptPath, recursiveFlatten: true);
-        IReadOnlyDictionary<string, Tensor> gptWeights = gptLoader.GetAllTensors();
+            // The loaders must outlive this method: WhisperOps.EnsureF32 passes an already-F32 tensor through
+            // unchanged (the caller does not own the result, per its own doc), so every weight the model classes
+            // below retain is the SAME Tensor the loader owns. Disposing the loader here would free those tensors
+            // out from under a pipeline that hasn't synthesized anything yet. Both loaders are kept as fields and
+            // disposed only in IndexTtsPipeline.Dispose() on the success path — or right here, alongside every
+            // other component already constructed, if a later step throws (a corrupt/incompatible checkpoint
+            // must not leak the gigabytes already loaded).
+            gptLoader = new PytorchPickleLoader();
+            gptLoader.Load(gptPath, recursiveFlatten: true);
+            IReadOnlyDictionary<string, Tensor> gptWeights = gptLoader.GetAllTensors();
 
-        IndexTtsSpeakerEncoder speakerEncoder = new(resolved.ConditioningEncoder, resolved.Gpt.Hidden);
-        speakerEncoder.LoadWeights(gptWeights, "model.conditioning_encoder", "model.perceiver_encoder");
+            speakerEncoder = new IndexTtsSpeakerEncoder(resolved.ConditioningEncoder, resolved.Gpt.Hidden);
+            speakerEncoder.LoadWeights(gptWeights, "model.conditioning_encoder", "model.perceiver_encoder");
 
-        IndexTtsT2sDecoder t2s = new(resolved.Gpt, resolved.MaxMelTokens);
-        t2s.LoadWeights(gptWeights);
+            t2s = new IndexTtsT2sDecoder(resolved.Gpt, resolved.MaxMelTokens);
+            t2s.LoadWeights(gptWeights);
 
-        PytorchPickleLoader bigVganLoader = new();
-        bigVganLoader.Load(bigVganPath, recursiveFlatten: true);
-        IReadOnlyDictionary<string, Tensor> bigVganWeights = bigVganLoader.GetAllTensors();
-        IndexTtsBigVganGenerator bigVgan = new(resolved.BigVgan);
-        bigVgan.LoadWeights(bigVganWeights, "generator", "generator.speaker_encoder");
+            bigVganLoader = new PytorchPickleLoader();
+            bigVganLoader.Load(bigVganPath, recursiveFlatten: true);
+            IReadOnlyDictionary<string, Tensor> bigVganWeights = bigVganLoader.GetAllTensors();
+            bigVgan = new IndexTtsBigVganGenerator(resolved.BigVgan);
+            bigVgan.LoadWeights(bigVganWeights, "generator", "generator.speaker_encoder");
 
-        return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan, gptLoader, bigVganLoader));
+            return Task.FromResult(new IndexTtsPipeline(resolved, tokenizer, speakerEncoder, t2s, bigVgan, gptLoader, bigVganLoader));
+        }
+        catch
+        {
+            bigVgan?.Dispose();
+            t2s?.Dispose();
+            speakerEncoder?.Dispose();
+            bigVganLoader?.Dispose();
+            gptLoader?.Dispose();
+            tokenizer?.Dispose();
+            throw;
+        }
     }
 
     /// <summary>Clones the voice in <paramref name="referenceAudioMono"/> speaking <paramref name="text"/>.

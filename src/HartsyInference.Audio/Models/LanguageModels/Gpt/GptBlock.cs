@@ -35,19 +35,13 @@ public sealed unsafe class GptBlock : IDisposable
     }
 
     /// <summary>Loads an attention/MLP projection's bias only when <see cref="GptConfig.Bias"/> is set (a real HF
-    /// GPT-2 checkpoint, e.g. IndexTTS); returns a zero vector without touching <paramref name="w"/> otherwise
-    /// (Bark/GPT-2-small's bias-free convention), so the config flag actually gates behavior instead of sitting
-    /// unused.</summary>
-    private Tensor LoadProjectionBias(IReadOnlyDictionary<string, Tensor> w, string key, int outDim) =>
-        _cfg.Bias ? LoadBiasOrZero(w, key, outDim) : ZeroVector(outDim);
-
-    private static Tensor ZeroVector(int size)
-    {
-        Tensor zero = new(new TensorShape(size), DType.F32);
-        float* p = (float*)zero.DataPointer;
-        for (long i = 0; i < zero.ElementCount; i++) p[i] = 0f;
-        return zero;
-    }
+    /// GPT-2 checkpoint, e.g. IndexTTS); returns null without touching <paramref name="w"/> otherwise
+    /// (Bark/GPT-2-small's bias-free convention — <see cref="WhisperOps.ProjectLinear"/>'s bias parameter is
+    /// already nullable and every backend's <c>Linear</c> already skips the add for null, the same contract Bark
+    /// relied on before this flag existed), so the config flag actually gates behavior instead of sitting unused,
+    /// without allocating a materialized zero tensor nothing would ever dispose.</summary>
+    private Tensor? LoadProjectionBias(IReadOnlyDictionary<string, Tensor> w, string key, int outDim) =>
+        _cfg.Bias ? LoadBiasOrZero(w, key, outDim) : null;
 
     /// <summary>Full-sequence forward with NO KV cache — used for the bidirectional Bark-Fine stage (<paramref name="causalMask"/> null) and parity-debug teacher forcing (causal mask); the incremental AR path goes through <see cref="ForwardCached"/> instead.</summary>
     public Tensor Forward(IBackend backend, Tensor x, Tensor? causalMask)
