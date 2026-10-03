@@ -45,7 +45,11 @@ public sealed class IndexTtsPipeline : IDisposable
         _bigVgan = bigVgan;
         _gptLoader = gptLoader;
         _bigVganLoader = bigVganLoader;
-        _melExtractor = new MelSpectrogramExtractor(MelSpectrogramExtractor.F5VocosConfig());
+        // IndexTTS's own MelSpectrogramFeatures matches F5VocosConfig's torchaudio MelSpectrogram parameterization
+        // exactly (24kHz, n_fft 1024, hop 256, 100 mels, HTK scale, magnitude spectrum, center padding, natural
+        // log) EXCEPT the log floor: the reference calls safe_log(mel, clip_val=1e-7), not F5/Vocos's 1e-5 —
+        // verified against the real index-tts source (utils/common.py's safe_log, utils/feature_extractors.py).
+        _melExtractor = new MelSpectrogramExtractor(MelSpectrogramExtractor.F5VocosConfig() with { LogFloor = 1e-7f });
     }
 
     /// <summary>Loads IndexTTS-1.5 from already-downloaded checkpoint files. <paramref name="dvaePath"/> is

@@ -20,6 +20,7 @@ internal sealed unsafe class IndexTtsBigVganGenerator : IDisposable
 {
     private readonly IndexTtsBigVganConfig _cfg;
     private readonly IndexTtsEcapaTdnn _speakerEncoder = new();
+    private readonly List<Tensor> _owned = [];
     private readonly int _numStages;
     private readonly Tensor?[] _upsW = [];
     private readonly Tensor?[] _upsB = [];
@@ -48,14 +49,14 @@ internal sealed unsafe class IndexTtsBigVganGenerator : IDisposable
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string speakerEncoderPrefix)
     {
-        _convPreW = WeightNormFusion.Compose(w, $"{prefix}.conv_pre");
+        _convPreW = Own(WeightNormFusion.Compose(w, $"{prefix}.conv_pre"));
         _convPreB = EnsureF32(w[$"{prefix}.conv_pre.bias"]);
         _condLayerW = EnsureF32(w[$"{prefix}.cond_layer.weight"]);
         _condLayerB = EnsureF32(w[$"{prefix}.cond_layer.bias"]);
 
         for (int i = 0; i < _numStages; i++)
         {
-            _upsW[i] = WeightNormFusion.Compose(w, $"{prefix}.ups.{i}.0");
+            _upsW[i] = Own(WeightNormFusion.Compose(w, $"{prefix}.ups.{i}.0"));
             _upsB[i] = EnsureF32(w[$"{prefix}.ups.{i}.0.bias"]);
             _condsW[i] = EnsureF32(w[$"{prefix}.conds.{i}.weight"]);
             _condsB[i] = EnsureF32(w[$"{prefix}.conds.{i}.bias"]);
@@ -66,7 +67,7 @@ internal sealed unsafe class IndexTtsBigVganGenerator : IDisposable
         int finalCh = _cfg.UpsampleInitialChannel / (1 << _numStages);
         _activationPost = new AntiAliasedSnake(finalCh);
         _activationPost.LoadWeights(w, $"{prefix}.activation_post");
-        _convPostW = WeightNormFusion.Compose(w, $"{prefix}.conv_post");
+        _convPostW = Own(WeightNormFusion.Compose(w, $"{prefix}.conv_post"));
         _convPostB = EnsureF32(w[$"{prefix}.conv_post.bias"]);
 
         _speakerEncoder.LoadWeights(w, speakerEncoderPrefix);
@@ -153,6 +154,12 @@ internal sealed unsafe class IndexTtsBigVganGenerator : IDisposable
 
     private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
+    private Tensor Own(Tensor t)
+    {
+        _owned.Add(t);
+        return t;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         Tensor?[] core = [_convPreW, _convPreB, _condLayerW, _condLayerB, _convPostW, _convPostB];
@@ -172,6 +179,7 @@ internal sealed unsafe class IndexTtsBigVganGenerator : IDisposable
         foreach (IndexTtsBigVganResBlock[] stage in _resblocks) foreach (IndexTtsBigVganResBlock rb in stage) rb.Dispose();
         _activationPost?.Dispose();
         _speakerEncoder.Dispose();
+        foreach (Tensor t in _owned) t.Dispose();
         GC.SuppressFinalize(this);
     }
 }

@@ -15,6 +15,7 @@ internal sealed unsafe class IndexTtsBigVganResBlock : IDisposable
     private readonly int _channels, _kernel;
     private readonly int[] _dilations;
     private readonly AntiAliasedSnake[] _activations;   // 6: interleaved acts1[0..2] / acts2[0..2]
+    private readonly List<Tensor> _owned = [];
     private Tensor?[] _convs1W = [], _convs1B = [];
     private Tensor?[] _convs2W = [], _convs2B = [];
     private int _disposed;
@@ -34,9 +35,9 @@ internal sealed unsafe class IndexTtsBigVganResBlock : IDisposable
     {
         for (int i = 0; i < _dilations.Length; i++)
         {
-            _convs1W[i] = WeightNormFusion.Compose(w, $"{prefix}.convs1.{i}");
+            _convs1W[i] = Own(WeightNormFusion.Compose(w, $"{prefix}.convs1.{i}"));
             _convs1B[i] = EnsureF32(w[$"{prefix}.convs1.{i}.bias"]);
-            _convs2W[i] = WeightNormFusion.Compose(w, $"{prefix}.convs2.{i}");
+            _convs2W[i] = Own(WeightNormFusion.Compose(w, $"{prefix}.convs2.{i}"));
             _convs2B[i] = EnsureF32(w[$"{prefix}.convs2.{i}.bias"]);
         }
         for (int i = 0; i < _activations.Length; i++) _activations[i].LoadWeights(w, $"{prefix}.activations.{i}");
@@ -77,6 +78,12 @@ internal sealed unsafe class IndexTtsBigVganResBlock : IDisposable
 
     private static Tensor EnsureF32(Tensor t) => t.DType == DType.F32 ? t : t.CastTo(DType.F32);
 
+    private Tensor Own(Tensor t)
+    {
+        _owned.Add(t);
+        return t;
+    }
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         for (int i = 0; i < _dilations.Length; i++)
@@ -91,6 +98,7 @@ internal sealed unsafe class IndexTtsBigVganResBlock : IDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         foreach (AntiAliasedSnake act in _activations) act.Dispose();
+        foreach (Tensor t in _owned) t.Dispose();
         GC.SuppressFinalize(this);
     }
 }

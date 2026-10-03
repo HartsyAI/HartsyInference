@@ -132,9 +132,10 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         if (generated.Count == 0)
             throw new InvalidOperationException("IndexTTS generated zero mel frames (immediate stop token).");
 
-        int[] melWithStart = new int[generated.Count + 1];
+        List<int> trimmed = RemoveLongSilence(generated);
+        int[] melWithStart = new int[trimmed.Count + 1];
         melWithStart[0] = StartMelToken;
-        generated.CopyTo(melWithStart, 1);
+        trimmed.CopyTo(melWithStart, 1);
         int melSegLen = melWithStart.Length; // N+1: StartMelToken's own state plus one per generated code.
 
         using (Tensor textEmb2 = EmbedWithPosition(wrappedTextIds, _textEmbed!, _textPos!, h))
@@ -154,6 +155,11 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     /// divided by the penalty, negative ones multiplied) over already-generated codes — <see cref="LogitSampling"/>
     /// has no built-in penalty, and IndexTTS's reference default (repetition_penalty≈10 in the upstream CLI) makes
     /// this matter in practice for avoiding stuck/looping codes.</summary>
+    /// <remarks>Applies the penalty at most once per distinct token id, matching HF's
+    /// <c>RepetitionPenaltyLogitsProcessor</c> (it gathers from the ORIGINAL scores and scatters back, so a
+    /// repeated id's single-application result simply overwrites itself rather than compounding) — the reference
+    /// IndexTTS generates through this exact HF processor. Applying it per-occurrence instead would, e.g., divide
+    /// a positive logit by <c>penalty^2</c> after only two occurrences of the same code.</remarks>
     private static int SampleNextToken(Tensor logits, List<int> generated, IndexTtsOptions options, Random rng)
     {
         float* lp = (float*)logits.DataPointer;
@@ -162,7 +168,7 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         if (options.RepetitionPenalty != 1f && generated.Count > 0)
         {
             float penalty = options.RepetitionPenalty;
-            foreach (int id in generated)
+            foreach (int id in new HashSet<int>(generated))
             {
                 float v = span[id];
                 span[id] = v > 0 ? v / penalty : v * penalty;
@@ -171,6 +177,27 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         return options.Temperature <= 0f
             ? LogitSampling.ArgMax(span)
             : LogitSampling.SampleTopK(span, options.Temperature, options.TopK, rng);
+    }
+
+    /// <summary>Caps any run of <paramref name="silentToken"/> at <paramref name="keepRun"/> consecutive
+    /// occurrences, matching the reference <c>remove_long_silence</c> (only when the total count across the whole
+    /// sequence exceeds <paramref name="maxTotal"/> — a few scattered silence codes are left untouched). Unlike
+    /// the reference, <paramref name="codes"/> here never contains the stop token (the AR loop already stopped
+    /// before appending it), so no stop-token bookkeeping is needed.</summary>
+    private static List<int> RemoveLongSilence(List<int> codes, int silentToken = 52, int maxTotal = 30, int keepRun = 10)
+    {
+        int total = 0;
+        foreach (int c in codes) if (c == silentToken) total++;
+        if (total <= maxTotal) return codes;
+
+        List<int> trimmed = new(codes.Count);
+        int run = 0;
+        foreach (int c in codes)
+        {
+            if (c != silentToken) { trimmed.Add(c); run = 0; }
+            else if (run < keepRun) { trimmed.Add(c); run++; }
+        }
+        return trimmed;
     }
 
     /// <summary>Embeds <paramref name="ids"/> and adds the matching learned position (index == sequence position,
