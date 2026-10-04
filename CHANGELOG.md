@@ -26,6 +26,8 @@ stable release will require. Dates are UTC.
     lacks. 98.7% word agreement with misaki on 527 sentences (1 → 419 exact).
   - Non-streaming synthesis (CLI, HTTP, Wyoming) handed PLBERT the whole text and threw past 512 phonemes. Input
     is now split on newlines and chunked at 510 phonemes on the strongest pause, as `KPipeline` does.
+- `IndexTtsConfigValuesTests` used `var`, which failed the Audio test project's build under code-style enforcement
+  (IDE0008); now explicitly typed.
 
 ## alpha.248
 
