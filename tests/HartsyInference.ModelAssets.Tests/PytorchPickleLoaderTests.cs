@@ -102,6 +102,34 @@ public sealed unsafe class PytorchPickleLoaderTests
         finally { if (File.Exists(path)) File.Delete(path); }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Loads_BareTensorRoot_AsData(bool recursive)
+    {
+        // torch.save(tensor, path) — no dict wrapper at all (e.g. IndexTTS-2's feat1.pt/feat2.pt). Both the
+        // non-recursive and the recursive flattener should name it "data", matching each other.
+        string path = Path.Combine(Path.GetTempPath(), $"hi_pttest_bare_{Guid.NewGuid():N}.pt");
+        try
+        {
+            float[] w = [1f, 2f, 3f, 4f]; // shape [2,2]
+            List<byte> b = [0x80, 0x02];
+            EmitTensor(b, "0", 4, [2, 2], [2, 1]);
+            b.Add((byte)'.'); // STOP
+            WriteTorchZip(path, [.. b], storageKey: "0", FloatsToBytes(w));
+
+            using PytorchPickleLoader loader = new();
+            loader.Load(path, recursiveFlatten: recursive);
+            Dictionary<string, Tensor> tensors = loader.GetAllTensors();
+
+            Assert.True(tensors.ContainsKey("data"));
+            Tensor t = tensors["data"];
+            float* p = (float*)t.DataPointer;
+            for (int i = 0; i < 4; i++) Assert.Equal(w[i], p[i], 6);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
     [Fact]
     public void NonRecursiveLoad_ReportsTensorsUnderOtherWrappers()
     {
