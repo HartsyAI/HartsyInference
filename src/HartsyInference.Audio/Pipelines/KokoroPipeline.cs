@@ -88,6 +88,11 @@ public sealed class KokoroPipeline : IDisposable
         }
     }
 
+    /// <summary>Called with each chunk's predicted durations and its F0 and energy curves (<c>[1, 1, 2*T_total]</c>,
+    /// borrowed for the call) as the prosody predictor returns them, so a parity test can diff them against the
+    /// reference model.</summary>
+    internal Action<int[], Tensor, Tensor>? TestProsodyObserver { get; set; }
+
     /// <summary>The token count <see cref="Synthesize"/> sees for <paramref name="phonemes"/> (diagnostics: the text
     /// encoder and the voice-pack row depend on it).</summary>
     internal int CountTokens(string phonemes) => _tokenizer.Encode(phonemes).Length;
@@ -328,6 +333,7 @@ public sealed class KokoroPipeline : IDisposable
                 timer?.Mark("f0n");
                 try
                 {
+                    TestProsodyObserver?.Invoke(durations, f0, n);
                     KokoroOps.StageBoundary(_testStageObserver, "f0n", cancel);
                     float[] audio = _decoder.Forward(backend, asr, f0, n, sDec, cancel);
                     timer?.Mark("decoder");
