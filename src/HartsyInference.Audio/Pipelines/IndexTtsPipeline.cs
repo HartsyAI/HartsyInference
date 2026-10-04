@@ -119,15 +119,23 @@ public sealed class IndexTtsPipeline : IDisposable
         }
     }
 
-    /// <summary>Converts every tensor in <paramref name="raw"/> to F32, appending any tensor that was genuinely
-    /// newly-allocated (i.e. not already F32) to <paramref name="converted"/> so the caller can dispose it later —
-    /// <see cref="WhisperOps.EnsureF32"/>'s passthrough-when-already-F32 contract means a reference check is
-    /// enough to tell the two cases apart.</summary>
+    /// <summary>Converts every floating-point tensor in <paramref name="raw"/> to F32, appending any tensor that
+    /// was genuinely newly-allocated (i.e. not already F32) to <paramref name="converted"/> so the caller can
+    /// dispose it later — <see cref="WhisperOps.EnsureF32"/>'s passthrough-when-already-F32 contract means a
+    /// reference check is enough to tell the two cases apart. Non-floating-point tensors (e.g. a GPT-2-style
+    /// checkpoint's integer position-id or boolean causal-mask buffers) pass through untouched: nothing downstream
+    /// reads them as weights, and <see cref="WhisperOps.EnsureF32"/> only knows how to cast floating-point
+    /// source dtypes.</summary>
     private static Dictionary<string, Tensor> ToF32(IReadOnlyDictionary<string, Tensor> raw, List<Tensor> converted)
     {
         Dictionary<string, Tensor> result = new(raw.Count);
         foreach ((string key, Tensor tensor) in raw)
         {
+            if (!tensor.DType.IsFloatingPoint)
+            {
+                result[key] = tensor;
+                continue;
+            }
             Tensor f32 = WhisperOps.EnsureF32(tensor);
             if (!ReferenceEquals(f32, tensor)) converted.Add(f32);
             result[key] = f32;

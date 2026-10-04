@@ -8,6 +8,17 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.247
+
+- **IndexTTS-1.5: fix a load crash on the real checkpoint's integer buffers.** `IndexTtsPipeline.LoadAsync`'s
+  `ToF32` helper (added in alpha.246 to centrally fix BF16-checkpoint leaks) was unconditionally casting every
+  tensor in each loaded weight dictionary to F32, including non-floating-point buffers the real `gpt.pth`
+  checkpoint carries (GPT-2-style integer/boolean position-id and causal-mask buffers) — `EnsureF32` has no I64
+  source case, so the pipeline failed to load with "Unsupported dtype conversion: I64 -> F32." the first time it
+  ran against the real checkpoint end to end (via a live deployment, not the unit test suite's all-F32 synthetic
+  weights). `ToF32` now passes non-floating-point tensors through unchanged, matching every downstream consumer's
+  assumption that those buffers are never read as weights.
+
 ## alpha.246
 
 - **IndexTTS-1.5 speech model, structural port (Phase 1: zero-shot cloning only).** `hartsy speak -m indextts
