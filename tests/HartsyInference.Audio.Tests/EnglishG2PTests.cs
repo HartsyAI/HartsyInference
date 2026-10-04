@@ -18,7 +18,7 @@ public sealed class EnglishG2PTests
          "twenty": "twˈɛnti", "four": "fˈɔɹ", "walk": "wˈɔk", "that": {"DEFAULT": "ðæt", "DT": "ðˈæt"},
          "used": {"DEFAULT": "jˈuzd", "VBD": "jˈust"}, "and": "ænd", "fifty": "fˈɪfti", "minus": "mˈInəs",
          "at": "æt", "end": "ˈɛnd", "say": "sˈA", "is": "ɪz", "of": "ʌv", "he": "hi", "it": "ɪt", "am": "æm",
-         "I": "ˈI", "in": "ɪn", "O": "ˈO"}
+         "I": "ˈI", "in": "ɪn", "O": "ˈO", "million": "mˈɪljᵊn"}
         """;
 
     private static EnglishG2P G2P(string cmudict = "")
@@ -52,6 +52,10 @@ public sealed class EnglishG2PTests
     [InlineData("-3.5", "mˈInəs θɹˈi pYnt fˈIv")]
     [InlineData("50%", "fˈɪfti pəɹsˈɛnt")]
     [InlineData("1,000", "wˈʌn θˈWzᵊnd")]
+    // The currency follows a spaced magnitude, as spaCy's CD tag carries it in misaki.
+    [InlineData("$5 million", "fˈIv mˈɪljᵊn dˈɑləɹz")]
+    // Unicode decimal digits read as numbers (misaki numeric_if_needed).
+    [InlineData("٣", "θɹˈi")]
     public void ToIpa_ReadsNumbersAsMisaki(string text, string expected) => Assert.Equal(expected, G2P().ToIpa(text));
 
     [Fact]

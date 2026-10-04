@@ -28,6 +28,11 @@ public sealed partial class EnglishG2P
         "'n'", "'n", "n'", "'em", "'tis", "'twas", "'cause", "'til", "'round", "'bout", "o'", "'s",
     };
 
+    private static readonly HashSet<string> Magnitudes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "hundred", "thousand", "million", "billion", "trillion", "quadrillion",
+    };
+
     private readonly MisakiLexicon _lexicon;
     private readonly Dictionary<string, string[]>? _cmudict;
     private readonly EspeakPhonemizer? _espeak;
@@ -71,7 +76,7 @@ public sealed partial class EnglishG2P
     public string ToIpa(string text)
     {
         ArgumentNullException.ThrowIfNull(text);
-        List<Word> words = Tokenize(text.Replace('‘', '\'').Replace('’', '\'').Trim());
+        List<Word> words = Tokenize(AsciiDigits(text.Replace('‘', '\'').Replace('’', '\'').Trim()));
         bool mixedCase = text.Any(char.IsLower);
         TokenContext ctx = new(null);
         bool futureTo = false;
@@ -300,6 +305,21 @@ public sealed partial class EnglishG2P
         return string.Join(' ', LetterRunRegex().Matches(lower).Select(static m => LetterToSound(m.Value)));
     }
 
+    /// <summary>misaki <c>numeric_if_needed</c>: any Unicode decimal digit ("١٢") as its ASCII digit, so number
+    /// reading sees it.</summary>
+    private static string AsciiDigits(string text)
+    {
+        if (!text.Any(static c => char.IsDigit(c) && !char.IsAsciiDigit(c))) return text;
+        return string.Create(text.Length, text, static (span, source) =>
+        {
+            for (int i = 0; i < source.Length; i++)
+            {
+                char c = source[i];
+                span[i] = char.IsDigit(c) && !char.IsAsciiDigit(c) ? (char)('0' + (int)char.GetNumericValue(c)) : c;
+            }
+        });
+    }
+
     private static List<Word> Tokenize(string text)
     {
         List<Word> words = [];
@@ -310,7 +330,23 @@ public sealed partial class EnglishG2P
             AddChunk(chunks[c].Value, words);
             if (words.Count > firstWord && c < chunks.Count - 1) words[^1].Space = true;
         }
+        CarryCurrencyToMagnitudes(words);
         return words;
+    }
+
+    /// <summary>spaCy tags "million" in "$5 million" as a number, so misaki reads the currency after the whole amount
+    /// ("five million dollars"): a currency moves along a run of spaced magnitude words.</summary>
+    private static void CarryCurrencyToMagnitudes(List<Word> words)
+    {
+        for (int i = 0; i + 1 < words.Count; i++)
+        {
+            Token last = words[i].Tokens[^1];
+            Word next = words[i + 1];
+            if (last.Currency is null || !words[i].Space || next.Tokens.Count != 1
+                || !Magnitudes.Contains(next.Tokens[0].Text)) continue;
+            next.Tokens[0].Currency = last.Currency;
+            last.Currency = null;
+        }
     }
 
     /// <summary>Splits one whitespace-delimited chunk the way spaCy's tokenizer and misaki's <c>subtokenize</c> do:

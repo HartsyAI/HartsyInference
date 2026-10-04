@@ -23,7 +23,9 @@ stable release will require. Dates are UTC.
     currency misread. `EnglishG2P` is now a port of misaki's English G2P over its gold/silver dictionaries
     (Apache-2.0, fetched once, SHA-256 pinned) with context-dependent function words, -s/-ed/-ing morphology,
     acronyms, numbers, years, currency and quotes; CMUdict, the espeak port and letter rules cover words misaki
-    lacks. 98.7% word agreement with misaki on 527 sentences (1 → 419 exact).
+    lacks. 98.7% word agreement with misaki on 527 sentences (1 → 419 exact). The CMUdict-only
+    `EnglishG2P(string)`/`(Stream)` constructors remain, obsolete; their output changes too (context-dependent
+    "the"/"to", numbers read through the fallback), since they now run the same front-end over an empty lexicon.
   - Non-streaming synthesis (CLI, HTTP, Wyoming) handed PLBERT the whole text and threw past 512 phonemes. Input
     is now split on newlines and chunked at 510 phonemes on the strongest pause, as `KPipeline` does.
 - `IndexTtsConfigValuesTests` used `var`, which failed the Audio test project's build under code-style enforcement
