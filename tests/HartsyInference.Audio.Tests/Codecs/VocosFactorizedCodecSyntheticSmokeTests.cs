@@ -1,6 +1,7 @@
 using HartsyInference.Audio.Models.Codecs;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
+using HartsyInference.ModelAssets.PyTorch;
 using HartsyInference.ModelAssets.SafeTensors;
 using Xunit;
 
@@ -226,6 +227,54 @@ public sealed class VocosFactorizedCodecRealWeightTests
                 foreach (float v in continuous.AsSpan<float>()) Assert.True(float.IsFinite(v));
             }
             finally { input.Dispose(); continuous.Dispose(); }
+        }
+        finally
+        {
+            foreach (Tensor t in weights.Values) t.Dispose();
+        }
+    }
+}
+
+/// <summary>Loads the real IndexTTS-2.5 <c>codec.pth</c> (a training checkpoint — <c>model.*</c> weights plus an
+/// <c>optimizer.state.*</c> section this class ignores; too large to bundle — point
+/// <c>INDEXTTS2_CODEC_PTH_PATH</c> at a local copy). Unlike IndexTTS-2.0's dependency, this checkpoint's decoder
+/// IS live (the real <c>infer_v2_5.py</c> calls <c>.decode()</c> on AR-generated codes), so this test exercises
+/// both halves plus the 2x down/up resample.</summary>
+[Trait("Category", "Integration")]
+public sealed class VocosFactorizedCodecIndexTts25RealWeightTests
+{
+    [Fact]
+    public void Quantize_AndDecode_SucceedAgainstRealCodecPth()
+    {
+        string? path = Environment.GetEnvironmentVariable("INDEXTTS2_CODEC_PTH_PATH");
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;   // resource-gated: skip without the real checkpoint file
+
+        using PytorchPickleLoader loader = new();
+        loader.Load(path, recursiveFlatten: true);
+        Dictionary<string, Tensor> weights = loader.GetAllTensors();
+        try
+        {
+            using VocosFactorizedCodec codec = new(VocosFactorizedCodecConfig.IndexTts2V5);
+            codec.LoadWeights(weights, prefix: "model", loadDecoder: true);
+
+            const int t = 20;
+            Random rng = new(6);
+            Tensor input = new(new TensorShape(1, t, VocosFactorizedCodecConfig.IndexTts2V5.HiddenSize), DType.F32);
+            foreach (ref float v in input.AsSpan<float>()) v = (float)(rng.NextDouble() * 2 - 1);
+
+            using CpuBackend backend = new();
+            (int[] codes, Tensor continuous) = codec.Quantize(backend, input, t);
+            try
+            {
+                Assert.Equal((t + 1) / 2, codes.Length);
+                foreach (int c in codes) Assert.InRange(c, 0, VocosFactorizedCodecConfig.IndexTts2V5.CodebookSize - 1);
+                foreach (float v in continuous.AsSpan<float>()) Assert.True(float.IsFinite(v));
+            }
+            finally { input.Dispose(); continuous.Dispose(); }
+
+            using Tensor decoded = codec.Decode(backend, codes);
+            Assert.Equal(codes.Length * 2, (int)decoded.Shape[1]);
+            foreach (float v in decoded.AsSpan<float>()) Assert.True(float.IsFinite(v));
         }
         finally
         {
