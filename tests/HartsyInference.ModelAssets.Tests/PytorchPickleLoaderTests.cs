@@ -74,6 +74,35 @@ public sealed unsafe class PytorchPickleLoaderTests
     }
 
     [Fact]
+    public void Loads_TensorWrappedIn_RebuildFromTypeV2()
+    {
+        // Newer torch.save emits `_rebuild_from_type_v2(_rebuild_tensor_v2, Tensor, (storage, offset, size,
+        // stride), {'_has_been_cloned': True})` for a tensor carrying subclass/clone metadata — e.g. IndexTTS-2's
+        // real gpt.pth. Confirms the wrapper unwraps to the same tensor the plain _rebuild_tensor_v2 path yields.
+        string path = Path.Combine(Path.GetTempPath(), $"hi_pttest_rbft2_{Guid.NewGuid():N}.pt");
+        try
+        {
+            float[] w = [1f, 2f, 3f, 4f]; // shape [2,2]
+            byte[] pickle = BuildStateDictPickleViaRebuildFromTypeV2("w", storageKey: "0", numel: 4, size: [2, 2], stride: [2, 1]);
+            WriteTorchZip(path, pickle, storageKey: "0", FloatsToBytes(w));
+
+            using PytorchPickleLoader loader = new();
+            loader.Load(path);
+            Dictionary<string, Tensor> tensors = loader.GetAllTensors();
+
+            Assert.True(tensors.ContainsKey("w"));
+            Tensor t = tensors["w"];
+            Assert.Equal(DType.F32, t.DType);
+            Assert.Equal(2, t.Shape.Rank);
+            Assert.Equal(2, (int)t.Shape[0]);
+            Assert.Equal(2, (int)t.Shape[1]);
+            float* p = (float*)t.DataPointer;
+            for (int i = 0; i < 4; i++) Assert.Equal(w[i], p[i], 6);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
     public void NonRecursiveLoad_ReportsTensorsUnderOtherWrappers()
     {
         string path = Path.Combine(Path.GetTempPath(), $"hi_pttest_nested_{Guid.NewGuid():N}.pt");
@@ -184,6 +213,52 @@ public sealed unsafe class PytorchPickleLoaderTests
         Global(b, "collections", "OrderedDict"); b.Add(0x29); b.Add((byte)'R'); // backward_hooks = OrderedDict()
         b.Add((byte)'t');                               // TUPLE (args)
         b.Add((byte)'R');                               // REDUCE -> tensor
+    }
+
+    private static byte[] BuildStateDictPickleViaRebuildFromTypeV2(string key, string storageKey, long numel, int[] size, int[] stride)
+    {
+        List<byte> b = [];
+        b.Add(0x80); b.Add(0x02);                       // PROTO 2
+        Global(b, "collections", "OrderedDict");
+        b.Add(0x29); b.Add((byte)'R');                  // EMPTY_TUPLE, REDUCE -> OrderedDict
+        b.Add((byte)'(');                               // MARK (dict items)
+        Str(b, key);                                    // key
+        EmitTensorViaRebuildFromTypeV2(b, storageKey, numel, size, stride);
+        b.Add((byte)'u');                               // SETITEMS -> dict[key]=tensor
+        b.Add((byte)'.');                               // STOP
+        return [.. b];
+    }
+
+    /// <summary>Emits <c>_rebuild_from_type_v2(_rebuild_tensor_v2, Tensor, (storage, 0, size, stride, False,
+    /// OrderedDict()), {'_has_been_cloned': True})</c> — the wrapper newer torch.save uses for a tensor carrying
+    /// subclass/clone metadata, in place of calling <c>_rebuild_tensor_v2</c> directly.</summary>
+    private static void EmitTensorViaRebuildFromTypeV2(List<byte> b, string storageKey, long numel, int[] size, int[] stride)
+    {
+        Global(b, "torch._tensor", "_rebuild_from_type_v2");
+        b.Add((byte)'(');                               // MARK (outer args)
+        Global(b, "torch._utils", "_rebuild_tensor_v2"); // outer args[0] = inner func
+        Global(b, "torch", "Tensor");                    // outer args[1] = type (ignored)
+        b.Add((byte)'(');                                // MARK (inner args tuple)
+        b.Add((byte)'(');                                // MARK (pid)
+        Str(b, "storage");
+        Global(b, "torch", "FloatStorage");
+        Str(b, storageKey);
+        Str(b, "cpu");
+        Int1(b, (int)numel);
+        b.Add((byte)'t');                                // TUPLE (pid)
+        b.Add((byte)'Q');                                // BINPERSID -> storage ref
+        Int1(b, 0);                                      // storage_offset
+        Int1(b, size[0]); Int1(b, size[1]); b.Add(0x86);  // size TUPLE2
+        Int1(b, stride[0]); Int1(b, stride[1]); b.Add(0x86); // stride TUPLE2
+        b.Add(0x89);                                     // NEWFALSE requires_grad
+        Global(b, "collections", "OrderedDict"); b.Add(0x29); b.Add((byte)'R'); // backward_hooks = OrderedDict()
+        b.Add((byte)'t');                                // TUPLE (inner args) -> outer args[2]
+        b.Add((byte)'}');                                // EMPTY_DICT -> outer args[3] (state)
+        Str(b, "_has_been_cloned");
+        b.Add(0x88);                                     // NEWTRUE
+        b.Add((byte)'s');                                // SETITEM -> state['_has_been_cloned']=True
+        b.Add((byte)'t');                                // TUPLE (outer args)
+        b.Add((byte)'R');                                // REDUCE -> tensor
     }
 
     /// <summary>A root dict of two wrappers, <c>{"a": {"w": t}, "b": {"w": t}}</c>, both over storage "0".</summary>
