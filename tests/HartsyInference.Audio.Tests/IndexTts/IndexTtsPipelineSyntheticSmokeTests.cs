@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Models.IndexTts;
 using HartsyInference.Audio.Models.LanguageModels.Gpt;
 using HartsyInference.Audio.Pipelines;
@@ -410,7 +411,8 @@ public sealed class IndexTtsPipelineSyntheticSmokeTests : IDisposable
         Assert.Equal(Hidden, (int)prefix.Shape[2]);
 
         IndexTtsOptions opts = new() { Seed = 1, MaxMelTokens = MelCap };
-        Tensor latent = Own(parts.T2s.Generate(backend, prefix, TextIds, opts, new Random(1)));
+        uint rngState1 = DeterministicRng.Seed(1);
+        Tensor latent = Own(parts.T2s.Generate(backend, prefix, TextIds, opts, ref rngState1));
         int latentLen = (int)latent.Shape[1];
         Assert.InRange(latentLen, 1, MelCap + 1); // N generated codes + the StartMelToken's own latent frame.
 
@@ -431,11 +433,14 @@ public sealed class IndexTtsPipelineSyntheticSmokeTests : IDisposable
         Tensor prefix = Own(parts.Speaker.Forward(backend, refMel, RefMelFrames));
         IndexTtsOptions opts = new() { Seed = 1, MaxMelTokens = MelCap };
 
-        Tensor a = Own(parts.T2s.Generate(backend, prefix, TextIds, opts, new Random(123)));
-        Tensor b = Own(parts.T2s.Generate(backend, prefix, TextIds, opts, new Random(123)));
+        uint rngStateA = DeterministicRng.Seed(123);
+        uint rngStateB = DeterministicRng.Seed(123);
+        Tensor a = Own(parts.T2s.Generate(backend, prefix, TextIds, opts, ref rngStateA));
+        Tensor b = Own(parts.T2s.Generate(backend, prefix, TextIds, opts, ref rngStateB));
         Assert.Equal(a.AsSpan<float>().ToArray(), b.AsSpan<float>().ToArray());
 
-        Tensor c = Own(parts.T2s.Generate(backend, prefix, TextIds, opts, new Random(999)));
+        uint rngStateC = DeterministicRng.Seed(999);
+        Tensor c = Own(parts.T2s.Generate(backend, prefix, TextIds, opts, ref rngStateC));
         Assert.NotEqual(a.AsSpan<float>().ToArray(), c.AsSpan<float>().ToArray());
     }
 
