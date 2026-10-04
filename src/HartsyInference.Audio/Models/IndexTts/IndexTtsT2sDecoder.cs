@@ -81,7 +81,7 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     /// shorten the waveform by one frame and shift every mel position embedding by one relative to pass 1's own
     /// usage). Then slices out the mel segment's hidden states and applies <c>final_norm</c> (LayerNorm is
     /// per-position, so normalizing the slice equals normalizing the whole sequence first).</remarks>
-    public Tensor Generate(IBackend backend, Tensor speechConditioning, int[] textTokenIds, IndexTtsOptions options, Random rng)
+    public Tensor Generate(IBackend backend, Tensor speechConditioning, int[] textTokenIds, IndexTtsOptions options, ref uint rngState)
     {
         if (_textEmbed is null) throw new InvalidOperationException("IndexTtsT2sDecoder weights not loaded.");
         int h = _cfg.Hidden;
@@ -128,7 +128,7 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
                 backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
 
                 using Tensor logits = WhisperOps.ProjectLinear(backend, normedStep, _melHeadW!, _melHeadB, 1, 1, h, NumMelCodes);
-                int nextToken = SampleNextToken(logits, seenForPenalty, options, rng);
+                int nextToken = SampleNextToken(logits, seenForPenalty, options, ref rngState);
                 if (nextToken == StopMelToken) break;
                 generated.Add(nextToken);
                 seenForPenalty.Add(nextToken);
@@ -158,10 +158,12 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         }
     }
 
-    /// <summary>Top-k temperature sampling with a multiplicative repetition penalty (CTRL-style: positive logits
-    /// divided by the penalty, negative ones multiplied) over already-generated codes — <see cref="LogitSampling"/>
-    /// has no built-in penalty, and IndexTTS's reference default (repetition_penalty≈10 in the upstream CLI) makes
-    /// this matter in practice for avoiding stuck/looping codes.</summary>
+    /// <summary>Temperature/top-k/top-p (nucleus) sampling with a multiplicative repetition penalty (CTRL-style:
+    /// positive logits divided by the penalty, negative ones multiplied) over already-generated codes — matching
+    /// the reference CLI's default filter stack (<c>top_k=30, top_p=0.8</c>, via <see cref="NucleusSampler"/>, the
+    /// same shared top-k→top-p draw CosyVoice/Spark-TTS use) and its <c>repetition_penalty=10.0</c>. The reference
+    /// additionally runs this through HF <c>generate()</c>'s <c>num_beams=3</c> beam search combined with
+    /// sampling — not implemented here; this is single-sequence sampling only.</summary>
     /// <remarks>Applies the penalty at most once per distinct token id, matching HF's
     /// <c>RepetitionPenaltyLogitsProcessor</c> (it gathers from the ORIGINAL scores and scatters back, so a
     /// repeated id's single-application result simply overwrites itself rather than compounding) — the reference
@@ -170,7 +172,7 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
     /// is the caller's running set (already seeded with <see cref="StartMelToken"/>, matching the reference's
     /// <c>input_ids</c>, which already ends with the start token before the first step) — rebuilding a fresh
     /// <see cref="HashSet{T}"/> from the full generated-so-far list on every step would be O(cap) per step.</remarks>
-    private static int SampleNextToken(Tensor logits, HashSet<int> seen, IndexTtsOptions options, Random rng)
+    private static int SampleNextToken(Tensor logits, HashSet<int> seen, IndexTtsOptions options, ref uint rngState)
     {
         float* lp = (float*)logits.DataPointer;
         int n = (int)logits.ElementCount;
@@ -186,7 +188,7 @@ internal sealed unsafe class IndexTtsT2sDecoder : IDisposable
         }
         return options.Temperature <= 0f
             ? LogitSampling.ArgMax(span)
-            : LogitSampling.SampleTopK(span, options.Temperature, options.TopK, rng);
+            : NucleusSampler.Draw(span, n, options.Temperature, options.TopK, options.TopP, ref rngState);
     }
 
     /// <summary>Caps any run of <paramref name="silentToken"/> at <paramref name="keepRun"/> consecutive

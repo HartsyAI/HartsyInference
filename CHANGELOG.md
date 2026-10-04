@@ -8,7 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.248
+## alpha.249
 
 - **Kokoro-82M: output now matches the official model.** Reported as "works but sounds bad"; three faults, all
   backend-independent:
@@ -26,6 +26,22 @@ stable release will require. Dates are UTC.
     lacks. 98.7% word agreement with misaki on 527 sentences (1 → 419 exact).
   - Non-streaming synthesis (CLI, HTTP, Wyoming) handed PLBERT the whole text and threw past 512 phonemes. Input
     is now split on newlines and chunked at 510 phonemes on the strongest pause, as `KPipeline` does.
+
+## alpha.248
+
+- **IndexTTS-1.5: nucleus (top-p) sampling and tail fade-out, found by auditing against the real `index-tts`
+  Python source.** `IndexTtsT2sDecoder`'s AR sampler only applied top-k + temperature; the reference CLI's
+  default decode stack also applies top-p=0.8 nucleus filtering after top-k (it decodes through HF
+  `generate()` with both `top_k=30` and `top_p=0.8`). Swapped to the shared `NucleusSampler.Draw` (already used
+  by CosyVoice/Spark-TTS) so the same temperature → top-k → top-p → multinomial-draw pipeline applies here too,
+  layered under the existing CTRL-style repetition penalty. Also: `IndexTtsPipeline.Synthesize` now applies a
+  20 ms raised-cosine fade-out to the very end of the generated waveform, matching the reference's
+  `fade_out_tail` (`utils/common.py`) — decoding is stochastic, so the stop token occasionally samples early and
+  the last PCM sample lands far from zero, producing an audible click (and sometimes a burst of noise, since
+  BigVGAN's receptive field is incomplete right at that boundary); on a normal generation ending in silence the
+  fade is a no-op. The reference's other default, `num_beams=3` (beam search combined with sampling via HF
+  `generate()`), remains unimplemented — a materially bigger change (parallel beams/caches, score tracking),
+  tracked as a known Phase-2-scale gap, not fixed here.
 
 ## alpha.247
 
