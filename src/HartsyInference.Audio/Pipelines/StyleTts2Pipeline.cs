@@ -133,9 +133,8 @@ public sealed unsafe class StyleTts2Pipeline : IDisposable
     //      s = 0.7*diffusion + 0.3*reference (beta=0.7); the diffusion-predicted style is text-conditioned and
     //      STABILIZES prosody. Our StyleDiffusionSampler/StyleDenoiser are still a scaffold. Options: (a) implement
     //      the ADPM2 + KarrasSchedule(sigma_min=1e-4,sigma_max=3,rho=9) sampler over StyleDenoiser and do the
-    //      alpha/beta blend; (b) short of that, investigate whether F0Ntrain input is right (reference feeds the
-    //      ALIGNED predictor.text_encoder output `d`, we feed aligned raw d_bert) and whether F0 dips to 0 (→ the
-    //      SineGen UV mask kills voicing → whisper).
+    //      alpha/beta blend; (b) short of that, check whether F0 dips to 0 (→ the SineGen UV mask kills voicing →
+    //      whisper). F0Ntrain now reads the aligned DurationEncoder output `d`, as the reference does.
     //   3. PHONEMIZER STRESS — our espeak port mis-stresses unstressed articles ("a" → ˈeɪ) and drops some word
     //      stress ("there" → no ˈ) vs espeak-ng; can perturb the predicted prosody. Port-accuracy issue.
     //   4. Verify F0Ntrain / the hifigan 1-frame asr/en shift (reference applies it for decoder.type=="hifigan";

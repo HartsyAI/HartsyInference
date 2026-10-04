@@ -8,6 +8,29 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.249
+
+- **Kokoro-82M: output now matches the official model.** Reported as "works but sounds bad"; three faults, all
+  backend-independent:
+  - The F0/energy predictor read the length-regulated PLBERT features instead of the length-regulated
+    DurationEncoder output the reference feeds it (`model.py`: `en = d @ pred_aln_trg`). Same shape, so nothing
+    failed, but pitch was off by ~74 Hz on average and a fifth of frames had the wrong voicing. The voice-pack
+    style row was also two rows late (`pack[len(ps)-1]` counts phonemes, not BOS/EOS). Against the official
+    PyTorch `KModel` on the same phonemes, durations are now identical and F0 is within 0.001 Hz
+    (`KokoroProsodyParityTests`, reference from `tools/kokoro/prosody_reference.py`). StyleTTS 2 shares the fix.
+  - The English G2P was a CMUdict mapping that agreed with misaki (Kokoro's training phonemizer) on 44% of words:
+    every monosyllable stressed, no flap, curly apostrophes splitting words ("don’t" → "don tee"), numbers and
+    currency misread. `EnglishG2P` is now a port of misaki's English G2P over its gold/silver dictionaries
+    (Apache-2.0, fetched once, SHA-256 pinned) with context-dependent function words, -s/-ed/-ing morphology,
+    acronyms, numbers, years, currency and quotes; CMUdict, the espeak port and letter rules cover words misaki
+    lacks. 98.7% word agreement with misaki on 527 sentences (1 → 419 exact). The CMUdict-only
+    `EnglishG2P(string)`/`(Stream)` constructors remain, obsolete; their output changes too (context-dependent
+    "the"/"to", numbers read through the fallback), since they now run the same front-end over an empty lexicon.
+  - Non-streaming synthesis (CLI, HTTP, Wyoming) handed PLBERT the whole text and threw past 512 phonemes. Input
+    is now split on newlines and chunked at 510 phonemes on the strongest pause, as `KPipeline` does.
+- `IndexTtsConfigValuesTests` used `var`, which failed the Audio test project's build under code-style enforcement
+  (IDE0008); now explicitly typed.
+
 ## alpha.248
 
 - **IndexTTS-1.5: nucleus (top-p) sampling and tail fade-out, found by auditing against the real `index-tts`

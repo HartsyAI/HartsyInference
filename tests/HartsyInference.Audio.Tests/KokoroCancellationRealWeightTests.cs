@@ -28,12 +28,11 @@ public sealed class KokoroCancellationRealWeightTests
     [Fact]
     public async Task CancellingAtEachBoundary_StopsThere_AndTheNextCallIsByteIdentical()
     {
-        string cmudict = GpuBenchSupport.Cmudict();
-        if (!RealWeightGate.Require(_output.WriteLine, [.. GpuBenchSupport.KokoroFiles(), cmudict])) return;
+        if (!RealWeightGate.Require(_output.WriteLine, [.. GpuBenchSupport.KokoroFiles(), .. GpuBenchSupport.KokoroG2PFiles()])) return;
 
         using CpuBackend backend = new();
         using KokoroPipeline kokoro = await KokoroPipeline.LoadAsync();
-        string ipa = new EnglishG2P(cmudict).ToIpa(Sentence);
+        string ipa = GpuBenchSupport.KokoroG2P().ToIpa(Sentence);
         List<string> seen = [];
         kokoro.TestStageObserver = seen.Add;
 

@@ -151,12 +151,11 @@ public sealed class VoiceTurnBenchTests
     public async Task ProbeB_Kokoro_Sentences_Via_EnglishG2P()
     {
         if (!Gated()) return;
-        string cmudict = CmudictPath();
-        if (!RealWeightGate.Require(_out.WriteLine, KokoroFiles().Concat(WhisperFiles(WhisperSmallEn)).Concat([cmudict]).ToArray())) return;
+        if (!RealWeightGate.Require(_out.WriteLine, KokoroFiles().Concat(WhisperFiles(WhisperSmallEn))
+            .Concat(GpuBenchSupport.KokoroG2PFiles()).ToArray())) return;
         using IBackend backend = OpenBackend();
 
-        EnglishG2P g2p = new EnglishG2P(cmudict);
-        _out.WriteLine($"cmudict: {cmudict} ({g2p.WordCount} entries)");
+        EnglishG2P g2p = GpuBenchSupport.KokoroG2P();
         Stopwatch load = Stopwatch.StartNew();
         using KokoroPipeline kokoro = await KokoroPipeline.LoadAsync();
         using WhisperPipeline verify = await WhisperPipeline.LoadAsync(WhisperSmallEn);
@@ -292,8 +291,6 @@ public sealed class VoiceTurnBenchTests
     private static string ModelsRoot() =>
         EngineKnobs.ModelsRoot.Value is { Length: > 0 } root ? Path.GetFullPath(root) : TestPaths.ModelsDir;
 
-    /// <summary>Same file the Kokoro descriptor opens: <c>{models}/audio/cmudict.dict</c>.</summary>
-    private static string CmudictPath() => Path.Combine(ModelsRoot(), "audio", "cmudict.dict");
 
     /// <summary>Same file <c>WakeModelSet.LoadDenoiser</c> opens: <c>{models}/audio/wake/denoise/rnnoise.safetensors</c>.</summary>
     private static string RnnoisePath() => Path.Combine(ModelsRoot(), "audio", "wake", "denoise", "rnnoise.safetensors");

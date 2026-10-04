@@ -13,16 +13,16 @@ namespace HartsyInference.Audio.Models.Kokoro;
 ///   <item><b>Energy curve</b> (N): <c>[B, 1, 2*T_total]</c></item>
 /// </list>
 ///
-/// <para>Two parallel paths share the DurationEncoder front-end:</para>
+/// <para>Two paths share the DurationEncoder front-end:</para>
 /// <code>
 ///   d_bert → DurationEncoder(s_pred) → [B, T, 640]
 ///                                       │
 ///                          ┌────────────┴────────────┐
 ///                          ▼                          ▼
 ///                   predictor.lstm              (later, per-frame)
-///                   BiLSTM(640→512)             d_bert_expanded ←─ alignment
+///                   BiLSTM(640→512)             en = d expanded ←─ alignment
 ///                   duration_proj(50)+sig+sum   │
-///                          │                    ▼ concat(style)
+///                          │                    ▼
 ///                          ▼                   predictor.shared (BiLSTM 640→512)
 ///                      durations               │
 ///                                              ▼
@@ -32,7 +32,7 @@ namespace HartsyInference.Audio.Models.Kokoro;
 /// </code>
 ///
 /// <para>The pipeline that owns this class is responsible for converting durations into
-/// an alignment matrix and producing <c>d_bert_expanded</c> — that's a simple repeat
+/// an alignment matrix and producing the expanded DurationEncoder output — that's a simple repeat
 /// based on integer durations and doesn't need to live here.</para></summary>
 public sealed unsafe class KokoroProsodyPredictor
 {
@@ -186,30 +186,25 @@ public sealed unsafe class KokoroProsodyPredictor
         return (x, durations);
     }
 
-    /// <summary>F0Ntrain — runs predictor.shared + F0 + N chains over the expanded
-    /// <c>d_bert</c>. <paramref name="dBertExpanded"/> is <c>[1, 512, T_total]</c>
-    /// channels-first (already passed through the alignment-based length regulator).
+    /// <summary>F0Ntrain — runs predictor.shared + F0 + N chains over the length-regulated DurationEncoder output
+    /// <paramref name="enExpanded"/> <c>[1, 640, T_total]</c> channels-first (the style-concatenated <c>DurFeatures</c>
+    /// of <see cref="PredictDurations"/>, as the reference feeds <c>en = d @ alignment</c>).
     /// <paramref name="stylePred"/> is <c>[1, 128]</c>.
     ///
     /// <para>Returns <c>(F0, N)</c> both <c>[1, 1, 2*T_total]</c> channels-first. Caller
     /// owns disposal of both tensors.</para></summary>
-    public (Tensor F0, Tensor N) F0Ntrain(IBackend backend, Tensor dBertExpanded, Tensor stylePred)
+    public (Tensor F0, Tensor N) F0Ntrain(IBackend backend, Tensor enExpanded, Tensor stylePred)
     {
-        int batch = (int)dBertExpanded.Shape[0];
+        int batch = (int)enExpanded.Shape[0];
         int dHid = _cfg.HiddenDim;
-        int sty = _cfg.StyleDim;
-        if ((int)dBertExpanded.Shape[1] != dHid)
-            throw new ArgumentException($"F0Ntrain expects [B, {dHid}, T_total], got {dBertExpanded.Shape}.");
-        int tTotal = (int)dBertExpanded.Shape[2];
+        int dIn = dHid + _cfg.StyleDim;
+        if (enExpanded.Shape.Rank != 3 || (int)enExpanded.Shape[1] != dIn)
+            throw new ArgumentException($"F0Ntrain expects [B, {dIn}, T_total], got {enExpanded.Shape}.");
+        int tTotal = (int)enExpanded.Shape[2];
 
-        // 1. Transpose to channels-last for the BiLSTM, concat style.
-        Tensor xCL = new(new TensorShape(batch, tTotal, dHid), DType.F32);
-        backend.Transpose2D(xCL, dBertExpanded, dHid, tTotal);
-
-        Tensor styleRep = KokoroOps.RepeatStyleAcrossTime(backend, stylePred, batch, tTotal, sty);
-        Tensor lstmIn = AppendStyleAcrossTime(backend, xCL, styleRep);
-        styleRep.Dispose();
-        xCL.Dispose();
+        // 1. Transpose to channels-last for the BiLSTM; the style half is already concatenated.
+        Tensor lstmIn = new(new TensorShape(batch, tTotal, dIn), DType.F32);
+        backend.Transpose2D(lstmIn, enExpanded, dIn, tTotal);
 
         // 2. predictor.shared BiLSTM(640 → 512).
         Tensor shared = _sharedLstm.Forward(backend, lstmIn, batch, tTotal);

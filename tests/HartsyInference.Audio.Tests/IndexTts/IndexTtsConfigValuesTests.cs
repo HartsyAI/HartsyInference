@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Models.IndexTts;
+using HartsyInference.Audio.Models.LanguageModels.Gpt;
 using Xunit;
 
 namespace HartsyInference.Audio.Tests.IndexTts;
@@ -12,7 +13,7 @@ public sealed class IndexTtsConfigValuesTests
     [Fact]
     public void Gpt_MatchesRealConfigYaml()
     {
-        var gpt = IndexTtsConfig.V1_5.Gpt;
+        GptConfig gpt = IndexTtsConfig.V1_5.Gpt;
         Assert.Equal(1_280, gpt.Hidden);
         Assert.Equal(24, gpt.NumLayers);
         Assert.Equal(20, gpt.NumHeads);
@@ -22,7 +23,7 @@ public sealed class IndexTtsConfigValuesTests
     [Fact]
     public void ConditioningEncoder_MatchesRealConfigYaml()
     {
-        var c = IndexTtsConfig.V1_5.ConditioningEncoder;
+        IndexTtsConformerConfig c = IndexTtsConfig.V1_5.ConditioningEncoder;
         Assert.Equal(100, c.InputSize);
         Assert.Equal(512, c.OutputSize);
         Assert.Equal(8, c.AttentionHeads);
@@ -33,7 +34,7 @@ public sealed class IndexTtsConfigValuesTests
     [Fact]
     public void BigVgan_MatchesRealConfigYaml()
     {
-        var b = IndexTtsConfig.V1_5.BigVgan;
+        IndexTtsBigVganConfig b = IndexTtsConfig.V1_5.BigVgan;
         Assert.Equal(1_280, b.GptDim);
         Assert.Equal(512, b.SpeakerEmbeddingDim);
         Assert.Equal(1_536, b.UpsampleInitialChannel);
@@ -45,7 +46,7 @@ public sealed class IndexTtsConfigValuesTests
     [Fact]
     public void TopLevel_MatchesRealConfigYaml()
     {
-        var cfg = IndexTtsConfig.V1_5;
+        IndexTtsConfig cfg = IndexTtsConfig.V1_5;
         Assert.Equal(600, cfg.MaxTextTokens);
         Assert.Equal(800, cfg.MaxMelTokens);
         Assert.Equal(24_000, cfg.SampleRate);

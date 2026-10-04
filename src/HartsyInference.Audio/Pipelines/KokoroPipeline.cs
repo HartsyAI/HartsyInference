@@ -16,11 +16,8 @@ namespace HartsyInference.Audio.Pipelines;
 /// TextEncoder, ProsodyPredictor, iSTFTNetDecoder) and the voice-pack-driven style
 /// path into a single <see cref="Synthesize"/> call.
 ///
-/// <para>The pipeline is phoneme-in / audio-out. English text → IPA phoneme G2P is
-/// <i>not</i> bundled — the upstream Kokoro release uses misaki (Python + spaCy +
-/// espeak-ng), which we don't have in pure-C# yet. Callers should phonemize externally
-/// (e.g. via the misaki CLI or eSpeak-NG); for a quick demo, supply a known-good IPA
-/// string and select the matching voice pack.</para>
+/// <para>The pipeline is phoneme-in / audio-out: it takes the misaki-style IPA that
+/// <see cref="HartsyInference.Audio.Frontends.EnglishG2P"/> produces, the symbol set Kokoro was trained on.</para>
 ///
 /// <para>Pipeline shape:</para>
 /// <code>
@@ -29,33 +26,28 @@ namespace HartsyInference.Audio.Pipelines;
 ///       ▼
 ///   token_ids [1, T+2]                          ← BOS/EOS padded
 ///       │
-///       ▼  voice_pack.GetStyle(T+2)
+///       ▼  voice_pack.GetStyle(T)
 ///   style [1, 256] ──┬──→ s_dec  [1, 128]
 ///                    └──→ s_pred [1, 128]
 ///       │
 ///       ├──► PLBERT(token_ids) → d_bert [1, T+2, 512]
 ///       │       │
-///       │       ▼  + s_pred  → DurationEncoder + LSTM + duration_proj
+///       │       ▼  + s_pred  → DurationEncoder → d [1, T+2, 640] → LSTM + duration_proj
 ///       │      durations [T+2] (int)
 ///       │       │
 ///       │       ▼  build alignment matrix from durations → length regulator
-///       │      d_bert_expanded [1, 512, T_total]      T_total = sum(durations)
+///       │      en = d expanded [1, 640, T_total]      T_total = sum(durations)
 ///       │       │
-///       │       ▼  + s_pred  → predictor.shared + F0 chain + N chain
+///       │       ▼  predictor.shared + F0 chain + N chain (s_pred)
 ///       │      F0, N  [1, 1, 2*T_total]
 ///       │
 ///       └──► TextEncoder(token_ids) → text_features [1, T+2, 512]
 ///              │
-///              ▼  length-regulate via SAME alignment as d_bert
+///              ▼  length-regulate via SAME alignment as d
 ///             asr [1, 512, T_total]
 ///
 ///   asr, F0, N, s_dec  →  KokoroIStftNetDecoder.Forward  →  audio (24 kHz float)
-/// </code>
-///
-/// <para>The current decoder forward pass is the documented placeholder described in
-/// <see cref="KokoroIStftNetDecoder"/> — it produces F0-modulated audio for prosody QA.
-/// The full HiFi-GAN+iSTFT generator is the staged follow-up; the predictor + alignment
-/// + style paths are however fully wired.</para></summary>
+/// </code></summary>
 public sealed class KokoroPipeline : IDisposable
 {
     // Single-file repack hosted by tools/repack: the official hexgrad checkpoint flattened +
@@ -95,6 +87,11 @@ public sealed class KokoroPipeline : IDisposable
             _decoder.TestStageObserver = value;
         }
     }
+
+    /// <summary>Called with each chunk's predicted durations and its F0 and energy curves (<c>[1, 1, 2*T_total]</c>,
+    /// borrowed for the call) as the prosody predictor returns them, so a parity test can diff them against the
+    /// reference model.</summary>
+    internal Action<int[], Tensor, Tensor>? TestProsodyObserver { get; set; }
 
     /// <summary>The token count <see cref="Synthesize"/> sees for <paramref name="phonemes"/> (diagnostics: the text
     /// encoder and the voice-pack row depend on it).</summary>
@@ -213,7 +210,9 @@ public sealed class KokoroPipeline : IDisposable
     /// <summary>Synthesizes audio from an IPA phoneme string. <paramref name="voiceName"/>
     /// must match a file under <c>voices/{voiceName}.bin</c> in the Kokoro repo cache
     /// (e.g. <c>"af_heart"</c>). <paramref name="speed"/> scales the predicted durations
-    /// (1.0 = natural; 1.5 = faster, 0.7 = slower). <paramref name="cancel"/> is checked at every stage boundary,
+    /// (1.0 = natural; 1.5 = faster, 0.7 = slower). A string longer than PLBERT can take is split by
+    /// <see cref="KokoroPhonemeChunker"/> and the pieces' audio concatenated, as the reference pipeline does.
+    /// <paramref name="cancel"/> is checked at every stage boundary,
     /// from before PLBERT to just before the iSTFT head; a cancelled call throws
     /// <see cref="OperationCanceledException"/> at the next one.</summary>
     public float[] Synthesize(IBackend backend, string phonemes, string voiceName = "af_heart", float speed = 1f,
@@ -221,16 +220,36 @@ public sealed class KokoroPipeline : IDisposable
     {
         ThrowIfDisposed();
         KokoroVoicePack pack = GetOrLoadVoicePack(voiceName);
-        int[] tokenIds = _tokenizer.Encode(phonemes);
-        if (tokenIds.Length < 3)
-            throw new ArgumentException("phonemes must encode to at least one visible token.");
+        return SynthesizeChunked(phonemes, tokenIds =>
+        {
+            // The reference picks the style row by phoneme count (pack[len(ps) - 1]), not counting the pads.
+            using Tensor style = pack.GetStyle(tokenIds.Length - 2);
+            (Tensor sDec, Tensor sPred) = KokoroVoicePack.SplitStyle(style);
+            try
+            {
+                return SynthesizeCore(backend, tokenIds, sDec, sPred, speed, cancel);
+            }
+            finally
+            {
+                sDec.Dispose();
+                sPred.Dispose();
+            }
+        });
+    }
 
-        // Voice-pack slice for the predictor + decoder, then run the shared core.
-        using Tensor style = pack.GetStyle(tokenIds.Length);
-        (Tensor sDec, Tensor sPred) = KokoroVoicePack.SplitStyle(style);
+    /// <summary>Synthesizes from an externally-provided 256-d style vector — the reuse entry point for
+    /// StyleTTS 2, whose decoder/predictor style halves come from a reference-audio <c>StyleEncoder</c>
+    /// or the diffusion style sampler rather than a Kokoro voice pack. The vector is split
+    /// <c>[:128] → decoder (acoustic)</c>, <c>[128:] → predictor (prosodic)</c>, matching the voice-pack
+    /// convention. Long input is chunked and <paramref name="cancel"/> checked as <see cref="Synthesize"/> does.</summary>
+    public float[] SynthesizeFromStyle(IBackend backend, string phonemes, Tensor refStyle256, float speed = 1f,
+        CancellationToken cancel = default)
+    {
+        ThrowIfDisposed();
+        (Tensor sDec, Tensor sPred) = KokoroVoicePack.SplitStyle(refStyle256);
         try
         {
-            return SynthesizeCore(backend, tokenIds, sDec, sPred, speed, cancel);
+            return SynthesizeChunked(phonemes, tokenIds => SynthesizeCore(backend, tokenIds, sDec, sPred, speed, cancel));
         }
         finally
         {
@@ -239,28 +258,32 @@ public sealed class KokoroPipeline : IDisposable
         }
     }
 
-    /// <summary>Synthesizes from an externally-provided 256-d style vector — the reuse entry point for
-    /// StyleTTS 2, whose decoder/predictor style halves come from a reference-audio <c>StyleEncoder</c>
-    /// or the diffusion style sampler rather than a Kokoro voice pack. The vector is split
-    /// <c>[:128] → decoder (acoustic)</c>, <c>[128:] → predictor (prosodic)</c>, matching the voice-pack
-    /// convention. <paramref name="cancel"/> is checked as <see cref="Synthesize"/> checks it.</summary>
-    public float[] SynthesizeFromStyle(IBackend backend, string phonemes, Tensor refStyle256, float speed = 1f,
-        CancellationToken cancel = default)
+    /// <summary>Tokenizes each <see cref="KokoroPhonemeChunker"/> chunk, synthesizes it, and concatenates the audio;
+    /// chunks with no in-vocab symbol are skipped.</summary>
+    private float[] SynthesizeChunked(string phonemes, Func<int[], float[]> synthesize)
     {
-        ThrowIfDisposed();
-        int[] tokenIds = _tokenizer.Encode(phonemes);
-        if (tokenIds.Length < 3)
-            throw new ArgumentException("phonemes must encode to at least one visible token.");
-        (Tensor sDec, Tensor sPred) = KokoroVoicePack.SplitStyle(refStyle256);
-        try
+        ArgumentNullException.ThrowIfNull(phonemes);
+        List<float[]> parts = new();
+        long total = 0;
+        foreach (string chunk in KokoroPhonemeChunker.Split(phonemes))
         {
-            return SynthesizeCore(backend, tokenIds, sDec, sPred, speed, cancel);
+            int[] tokenIds = _tokenizer.Encode(chunk);
+            if (tokenIds.Length < 3) continue;
+            float[] audio = synthesize(tokenIds);
+            parts.Add(audio);
+            total += audio.Length;
         }
-        finally
+        if (parts.Count == 0)
+            throw new ArgumentException("phonemes must encode to at least one visible token.", nameof(phonemes));
+        if (parts.Count == 1) return parts[0];
+        float[] joined = new float[total];
+        int offset = 0;
+        foreach (float[] part in parts)
         {
-            sDec.Dispose();
-            sPred.Dispose();
+            part.CopyTo(joined, offset);
+            offset += part.Length;
         }
+        return joined;
     }
 
     /// <summary>The shared PLBERT → TextEncoder → duration → length-regulate → F0/N → decoder path.
@@ -287,28 +310,30 @@ public sealed class KokoroPipeline : IDisposable
             timer?.Mark("textenc");
             KokoroOps.StageBoundary(_testStageObserver, "textenc", cancel);
 
-            // Predict durations.
+            // Predict durations. durFeatures is the DurationEncoder output d [1, T, 640] the F0/N branch reads.
             (Tensor durFeatures, int[] durations) = _predictor.PredictDurations(backend, dBert, sPred, speed);
-            durFeatures.Dispose();
             timer?.Mark("durations");
-            KokoroOps.StageBoundary(_testStageObserver, "durations", cancel);
-
-            // Every predicted duration is clamped to ≥ 1 frame, so T_total ≥ T and the alignment is total.
-            int tTotal = 0;
-            for (int i = 0; i < durations.Length; i++) tTotal += durations[i];
-
-            // Length-regulate d_bert + text_features → channels-first [1, 512, T_total].
-            int[] frameToPhoneme = AlignmentIndices(durations, tTotal);
-            Tensor dBertExpanded = LengthRegulate(backend, dBert, frameToPhoneme);
-            Tensor asr = LengthRegulate(backend, textFeatures, frameToPhoneme);
-            timer?.Mark("regulate");
+            Tensor? enExpanded = null;
+            Tensor? asr = null;
             try
             {
+                KokoroOps.StageBoundary(_testStageObserver, "durations", cancel);
+
+                // Every predicted duration is clamped to ≥ 1 frame, so T_total ≥ T and the alignment is total.
+                int tTotal = 0;
+                for (int i = 0; i < durations.Length; i++) tTotal += durations[i];
+
+                // Length-regulate d + text_features → channels-first [1, C, T_total].
+                int[] frameToPhoneme = AlignmentIndices(durations, tTotal);
+                enExpanded = LengthRegulate(backend, durFeatures, frameToPhoneme);
+                asr = LengthRegulate(backend, textFeatures, frameToPhoneme);
+                timer?.Mark("regulate");
                 KokoroOps.StageBoundary(_testStageObserver, "regulate", cancel);
-                (Tensor f0, Tensor n) = _predictor.F0Ntrain(backend, dBertExpanded, sPred);
+                (Tensor f0, Tensor n) = _predictor.F0Ntrain(backend, enExpanded, sPred);
                 timer?.Mark("f0n");
                 try
                 {
+                    TestProsodyObserver?.Invoke(durations, f0, n);
                     KokoroOps.StageBoundary(_testStageObserver, "f0n", cancel);
                     float[] audio = _decoder.Forward(backend, asr, f0, n, sDec, cancel);
                     timer?.Mark("decoder");
@@ -323,8 +348,9 @@ public sealed class KokoroPipeline : IDisposable
             }
             finally
             {
-                dBertExpanded.Dispose();
-                asr.Dispose();
+                durFeatures.Dispose();
+                enExpanded?.Dispose();
+                asr?.Dispose();
             }
         }
         finally

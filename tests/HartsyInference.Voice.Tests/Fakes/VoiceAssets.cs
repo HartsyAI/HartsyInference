@@ -38,7 +38,9 @@ internal static class VoiceAssets
     public static string[] KokoroFiles()
     {
         string dir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");
-        return [Path.Combine(dir, "config.json"), Path.Combine(dir, "voices", "af_heart.bin"), Path.Combine(RepoPaths.ModelsRoot(), "audio", "cmudict.dict")];
+        string audio = Path.Combine(RepoPaths.ModelsRoot(), "audio");
+        return [Path.Combine(dir, "config.json"), Path.Combine(dir, "voices", "af_heart.bin"), Path.Combine(audio, "cmudict.dict"),
+            Path.Combine(audio, "misaki_us_gold.json"), Path.Combine(audio, "misaki_us_silver.json")];
     }
 
     /// <summary>The JFK clip at 16 kHz mono, ±1.</summary>
