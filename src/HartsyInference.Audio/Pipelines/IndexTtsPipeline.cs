@@ -1,4 +1,5 @@
 using System.Text.RegularExpressions;
+using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.IndexTts;
 using HartsyInference.Audio.Models.Whisper;
@@ -148,6 +149,9 @@ public sealed class IndexTtsPipeline : IDisposable
     /// <see cref="IndexTtsConfig.MaxTextTokens"/> (600, the GPT's actual trained text-position-table size).</summary>
     private const int DefaultMaxTextTokensPerSegment = 120;
 
+    /// <summary>Tail fade-out length, matching the reference's own <c>TAIL_FADE_MS</c> (<c>utils/common.py</c>).</summary>
+    private const float TailFadeMs = 20.0f;
+
     /// <summary>Clones the voice in <paramref name="referenceAudioMono"/> speaking <paramref name="text"/>.
     /// Returns 24 kHz mono PCM float samples in [-1, 1].</summary>
     /// <remarks>Text longer than <see cref="DefaultMaxTextTokensPerSegment"/> tokens is split into sentence-bounded
@@ -180,7 +184,8 @@ public sealed class IndexTtsPipeline : IDisposable
 
         try
         {
-            if (segments.Count == 1) return SynthesizeSegment(backend, prefix, refMel, refMelLen, segments[0], opts, opts.Seed);
+            if (segments.Count == 1)
+                return FadeOutTail(SynthesizeSegment(backend, prefix, refMel, refMelLen, segments[0], opts, opts.Seed), _cfg.SampleRate);
 
             List<float[]> pieces = new(segments.Count);
             for (int i = 0; i < segments.Count; i++)
@@ -196,7 +201,7 @@ public sealed class IndexTtsPipeline : IDisposable
             float[] joined = new float[total];
             int offset = 0;
             foreach (float[] p in pieces) { p.CopyTo(joined, offset); offset += p.Length; }
-            return joined;
+            return FadeOutTail(joined, _cfg.SampleRate);
         }
         finally
         {
@@ -205,12 +210,35 @@ public sealed class IndexTtsPipeline : IDisposable
         }
     }
 
+    /// <summary>Ramps the final <paramref name="fadeMs"/> of <paramref name="pcm"/> down to zero with a
+    /// raised-cosine (zero slope at the end, so the fade introduces no new derivative discontinuity) — matching
+    /// the reference's own <c>fade_out_tail</c> (<c>utils/common.py</c>). IndexTTS's output length is derived from
+    /// the sampled stop token, not from acoustic content; decoding is stochastic, so the stop token occasionally
+    /// lands early and the waveform's last sample is far from zero, producing an audible click (and, since BigVGAN's
+    /// receptive field is incomplete right at that boundary, sometimes a burst of noise on top of it). On a normal
+    /// generation this is free — the tail is already silence — so it's applied unconditionally rather than gated
+    /// behind a detection threshold. Mutates and returns <paramref name="pcm"/> (the caller is this method's only
+    /// owner at the call site, unlike the reference which returns a new tensor).</summary>
+    private static float[] FadeOutTail(float[] pcm, int sampleRate, float fadeMs = TailFadeMs)
+    {
+        if (pcm.Length == 0 || fadeMs <= 0f) return pcm;
+        int n = Math.Min((int)(sampleRate * fadeMs / 1000.0), pcm.Length);
+        if (n <= 1) return pcm;
+        int start = pcm.Length - n;
+        for (int i = 0; i < n; i++)
+        {
+            float ramp = 0.5f * (1f + MathF.Cos(i / (float)(n - 1) * MathF.PI));
+            pcm[start + i] *= ramp;
+        }
+        return pcm;
+    }
+
     /// <summary>Runs the AR decode + vocoder for one already-tokenized segment against a shared speaker
     /// <paramref name="prefix"/>/<paramref name="refMel"/> (both owned by the caller).</summary>
     private float[] SynthesizeSegment(IBackend backend, Tensor prefix, Tensor refMel, int refMelLen, int[] textIds, IndexTtsOptions opts, ulong seed)
     {
-        Random rng = new(unchecked((int)seed));
-        Tensor latent = _t2s.Generate(backend, prefix, textIds, opts, rng);
+        uint rngState = DeterministicRng.Seed(unchecked((int)seed));
+        Tensor latent = _t2s.Generate(backend, prefix, textIds, opts, ref rngState);
         Tensor wave;
         try
         {
