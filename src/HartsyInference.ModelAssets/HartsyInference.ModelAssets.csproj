@@ -12,6 +12,7 @@
 
   <ItemGroup>
     <InternalsVisibleTo Include="HartsyInference.ModelAssets.Tests" />
+    <InternalsVisibleTo Include="HartsyInference.ModelAssets.Tokenizers.Tests" />
   </ItemGroup>
 
   <ItemGroup>
