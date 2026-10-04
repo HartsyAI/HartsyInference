@@ -90,14 +90,14 @@ public sealed class SentenceStreamingTtsDigestTests
     [Fact]
     public async Task Kokoro_WholeTextSynthesize_MatchesADirectPipelineCall()
     {
-        if (!KokoroPresent(out string cmudict)) return;
+        if (!KokoroPresent(out string[] g2pFiles)) return;
 
         using CpuBackend backend = new();
         using ITtsRunner runner = await TtsCatalog.Kokoro.LoadAsync(new TtsLoadContext { Backend = backend }, "", CancellationToken.None);
         float[] viaRunner = runner.Synthesize(backend, new TtsJob { Text = TwoSentences });
 
         using KokoroPipeline direct = await KokoroPipeline.LoadAsync();
-        EnglishG2P g2p = new(cmudict);
+        EnglishG2P g2p = new(MisakiLexicon.FromFiles(g2pFiles[0], g2pFiles[1]), g2pFiles[2]);
         float[] viaPipeline = direct.Synthesize(backend, g2p.ToIpa(TwoSentences), voiceName: "af_heart", speed: 1f);
 
         _output.WriteLine($"Kokoro whole-text: {viaRunner.Length} samples, digest {PcmDigest.Of(viaRunner)}");
@@ -159,16 +159,17 @@ public sealed class SentenceStreamingTtsDigestTests
     }
 
     /// <summary>Kokoro's config, weights (the published repack or the in-engine conversion of the canonical .pth), the
-    /// default voice and the CMU dictionary. Checked before any load so nothing is downloaded by a test.</summary>
-    private bool KokoroPresent(out string cmudict)
+    /// default voice and the G2P dictionaries. Checked before any load so nothing is downloaded by a test.</summary>
+    private bool KokoroPresent(out string[] g2pFiles)
     {
         string repoDir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");
         string repack = Path.Combine(AudioModelCache.GetRepoDirectory("Hartsy/kokoro-82m-safetensors", "tts"), "kokoro-82m.safetensors");
         string converted = Path.Combine(repoDir, "kokoro-82m.safetensors");
         string weights = File.Exists(repack) ? repack : converted;
-        cmudict = AudioModelRoot.SharedFile("cmudict.dict");
-        return RealWeightGate.Require(_output.WriteLine, Path.Combine(repoDir, "config.json"), weights,
-            Path.Combine(repoDir, "voices", "af_heart.bin"), cmudict);
+        g2pFiles = [AudioModelRoot.SharedFile("misaki_us_gold.json"), AudioModelRoot.SharedFile("misaki_us_silver.json"),
+            AudioModelRoot.SharedFile("cmudict.dict")];
+        return RealWeightGate.Require(_output.WriteLine,
+            [Path.Combine(repoDir, "config.json"), weights, Path.Combine(repoDir, "voices", "af_heart.bin"), .. g2pFiles]);
     }
 
     /// <summary>Mirrors <c>EspeakPhonemizer.FromCache</c>'s search, so the Piper test skips rather than throws without the data.</summary>

@@ -5,7 +5,7 @@ namespace HartsyInference.Audio.Models.Kokoro;
 /// <summary>A Kokoro "voice pack" is a length-keyed style table: a raw float32 binary
 /// blob shaped as <c>[N, 1, 256]</c> where each row is a 256-dim style vector tuned for
 /// a specific phoneme-sequence length. At inference time the pipeline selects
-/// <c>style[len(tokens) - 1]</c> (clamped to <c>[0, N-1]</c>) and slices it into
+/// <c>style[len(phonemes) - 1]</c> (clamped to <c>[0, N-1]</c>) and slices it into
 /// <c>s_dec = style[:128]</c> + <c>s_pred = style[128:]</c>.
 ///
 /// <para>Voice packs ship one-per-voice (<c>af_heart.bin</c>, <c>bm_lewis.bin</c>, etc.)
@@ -71,15 +71,15 @@ public sealed class KokoroVoicePack : IDisposable
     }
 
     /// <summary>Returns a fresh <c>[1, 256]</c> tensor containing the style row for a
-    /// sequence of <paramref name="tokenCount"/> phoneme tokens (including the leading
-    /// + trailing BOS/EOS pads). The index is clamped into <c>[0, NumBuckets-1]</c>.
+    /// sequence of <paramref name="phonemeCount"/> phonemes, not counting the BOS/EOS pads (the reference
+    /// <c>pack[len(ps) - 1]</c>). The index is clamped into <c>[0, NumBuckets-1]</c>.
     ///
     /// <para>The returned tensor is independent of the underlying pack — disposing it
     /// is required and does not affect future calls.</para></summary>
-    public Tensor GetStyle(int tokenCount)
+    public Tensor GetStyle(int phonemeCount)
     {
         ThrowIfDisposed();
-        int idx = Math.Clamp(tokenCount - 1, 0, NumBuckets - 1);
+        int idx = Math.Clamp(phonemeCount - 1, 0, NumBuckets - 1);
         Tensor row = new(new TensorShape(1, StyleWidth), DType.F32);
         unsafe
         {

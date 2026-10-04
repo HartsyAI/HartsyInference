@@ -128,9 +128,8 @@ public sealed class KokoroFirstSynthesisBenchTests
             _out.WriteLine($"SKIPPED: set {GateEnvVar}=1 to run the Kokoro first-synthesis bench.");
             return;
         }
-        string cmudict = GpuBenchSupport.Cmudict();
         if (!RealWeightGate.Require(_out.WriteLine,
-                GpuBenchSupport.KokoroFiles().Concat(GpuBenchSupport.WhisperFiles(WhisperTiny)).Concat([cmudict]).ToArray()))
+                GpuBenchSupport.KokoroFiles().Concat(GpuBenchSupport.WhisperFiles(WhisperTiny)).Concat(GpuBenchSupport.KokoroG2PFiles()).ToArray()))
         {
             return;
         }
@@ -152,7 +151,7 @@ public sealed class KokoroFirstSynthesisBenchTests
         }
         try
         {
-            await RunAsync(cmudict, knobs, profile, captured);
+            await RunAsync(knobs, profile, captured);
         }
         finally
         {
@@ -164,7 +163,7 @@ public sealed class KokoroFirstSynthesisBenchTests
         }
     }
 
-    private async Task RunAsync(string cmudict, string? knobs, bool profile, ConcurrentQueue<string> captured)
+    private async Task RunAsync(string? knobs, bool profile, ConcurrentQueue<string> captured)
     {
         bool gaps = string.Equals(Environment.GetEnvironmentVariable(ModeEnvVar), "gaps", StringComparison.OrdinalIgnoreCase);
         bool reverse = string.Equals(Environment.GetEnvironmentVariable(OrderEnvVar), "reverse", StringComparison.OrdinalIgnoreCase);
@@ -183,7 +182,7 @@ public sealed class KokoroFirstSynthesisBenchTests
         }
 
         using CudaBackend backend = GpuBenchSupport.Open3060(_out.WriteLine, OrdinalEnvVar);
-        EnglishG2P g2p = new EnglishG2P(cmudict);
+        EnglishG2P g2p = GpuBenchSupport.KokoroG2P();
         Stopwatch load = Stopwatch.StartNew();
         using KokoroPipeline kokoro = await KokoroPipeline.LoadAsync();
         using WhisperPipeline verify = await WhisperPipeline.LoadAsync(WhisperTiny);
