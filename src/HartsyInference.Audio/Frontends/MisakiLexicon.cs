@@ -36,6 +36,10 @@ public sealed partial class MisakiLexicon
         _silvers = silvers;
     }
 
+    /// <summary>A lexicon with no entries: every word goes to the front-end's fallbacks.</summary>
+    public static MisakiLexicon Empty { get; } = new(new Dictionary<string, Entry>(StringComparer.Ordinal),
+        new Dictionary<string, Entry>(StringComparer.Ordinal));
+
     /// <summary>Entries in the gold dictionary, after misaki's case-variant growth.</summary>
     public int GoldCount => _golds.Count;
 
@@ -163,22 +167,31 @@ public sealed partial class MisakiLexicon
             case "a" or "A": return ctx.FutureVowel is null ? "ˈA" : "ɐ";
             case "AM": return GetNnp(word);
             case "am" or "Am":
-                return ctx.FutureVowel is null || word != "am" || stress > 0 ? _golds["am"].Default : "ɐm";
+                return ctx.FutureVowel is null || word != "am" || stress > 0 ? Gold("am") : "ɐm";
             case "an" or "An" or "AN": return "ɐn";
             case "I": return SecondaryStress + "I";
             case "to" or "To" or "TO":
-                return ctx.FutureVowel switch { null => _golds["to"].Default, false => "tə", true => "tʊ" };
+                return ctx.FutureVowel switch { null => Gold("to"), false => "tə", true => "tʊ" };
             case "in" or "In" or "IN": return (ctx.FutureVowel is null ? PrimaryStress.ToString() : "") + "ɪn";
             case "the" or "The" or "THE": return ctx.FutureVowel == true ? "ði" : "ðə";
             // misaki's tagger marks the pronoun "that" (DT, stressed). Without one, only a "that" closing a clause it
             // did not open is read as the pronoun ("do that!"): measured against spaCy, everywhere else the
             // conjunction/relative reading is the more common one.
             case "that" or "That" or "THAT":
-                return ctx.FutureVowel is null && !atClauseStart ? _golds["that"].ByTag!["DT"] : _golds["that"].Default;
+                return ctx.FutureVowel is null && !atClauseStart ? Gold("that", "DT") : Gold("that");
             case "used" or "Used" or "USED":
-                return nextIsWordTo ? _golds["used"].ByTag!["VBD"] : _golds["used"].Default;
+                return nextIsWordTo ? Gold("used", "VBD") : Gold("used");
         }
         return VersusRegex().IsMatch(word) ? Lookup("versus", null, ctx) : null;
+    }
+
+    /// <summary>A gold reading (a tagged one when <paramref name="tag"/> is given), or null when the lexicon lacks it,
+    /// so a special case over a partial lexicon falls through to the ordinary lookup instead of throwing.</summary>
+    private string? Gold(string word, string? tag = null)
+    {
+        if (!_golds.TryGetValue(word, out Entry? entry)) return null;
+        if (tag is null) return entry.Default;
+        return entry.ByTag is not null && entry.ByTag.TryGetValue(tag, out string? tagged) ? tagged : entry.Default;
     }
 
     private bool IsKnown(string word)
@@ -344,11 +357,21 @@ public sealed partial class MisakiLexicon
                 result.Add(Lookup(w, w == "point" ? -2 : null, null));
             }
         }
-        void ExtendNum(string digits) => ExtendWords(EnglishNumberWords.Cardinal(long.Parse(digits, CultureInfo.InvariantCulture)));
+        // A run too long for a long is read digit by digit, as misaki reads an over-long non-head number.
+        void ExtendNum(string digits)
+        {
+            if (long.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out long n))
+                ExtendWords(EnglishNumberWords.Cardinal(n));
+            else
+                foreach (char d in digits) ExtendWords(EnglishNumberWords.Cardinal(d - '0'));
+        }
         bool isCurrencySymbol = currency is char cs && Currencies.ContainsKey(cs);
         if (IsDigits(word) && suffix is not null && Ordinals.Contains(suffix))
         {
-            ExtendWords(EnglishNumberWords.Ordinal(long.Parse(word, CultureInfo.InvariantCulture)));
+            if (long.TryParse(word, NumberStyles.None, CultureInfo.InvariantCulture, out long ordinal))
+                ExtendWords(EnglishNumberWords.Ordinal(ordinal));
+            else
+                ExtendNum(word);
         }
         else if (result.Count == 0 && word.Length == 4 && !isCurrencySymbol && IsDigits(word))
         {
@@ -402,7 +425,8 @@ public sealed partial class MisakiLexicon
             List<(long Num, string Unit)> pairs = [];
             for (int i = 0; i < Math.Min(parts.Length, 2); i++)
             {
-                long n = parts[i].Length == 0 ? 0 : long.Parse(parts[i], CultureInfo.InvariantCulture);
+                long n = 0;
+                if (parts[i].Length != 0 && !long.TryParse(parts[i], NumberStyles.None, CultureInfo.InvariantCulture, out n)) return null;
                 pairs.Add((n, i == 0 ? unit : fraction));
             }
             if (pairs.Count > 1)
@@ -424,8 +448,8 @@ public sealed partial class MisakiLexicon
             if (clean.Length == 0) return null;
             if (!clean.Contains('.'))
             {
-                long n = long.Parse(clean, CultureInfo.InvariantCulture);
-                ExtendWords(suffix is not null && Ordinals.Contains(suffix) ? EnglishNumberWords.Ordinal(n) : EnglishNumberWords.Cardinal(n));
+                if (!long.TryParse(clean, NumberStyles.None, CultureInfo.InvariantCulture, out long n)) ExtendNum(clean);
+                else ExtendWords(suffix is not null && Ordinals.Contains(suffix) ? EnglishNumberWords.Ordinal(n) : EnglishNumberWords.Cardinal(n));
             }
             else if (clean[0] == '.')
             {

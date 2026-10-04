@@ -65,6 +65,29 @@ public sealed class EnglishG2PTests
     }
 
     [Fact]
+    public void ToIpa_ANumberTooLongForALong_IsReadDigitByDigit()
+    {
+        Assert.Equal(string.Join(' ', Enumerable.Repeat("wˈʌn", 23)), G2P().ToIpa(new string('1', 23)));
+    }
+
+    [Fact]
+    public void ToIpa_AWordBeforeAFallbackCompound_SeesTheCompoundsFirstSound()
+    {
+        // "blorft-zz" is not in the lexicon, so it falls back whole; "the" must hear its consonant, not "apple".
+        Assert.StartsWith("ðə ", G2P().ToIpa("the blorft-zz apple"));
+    }
+
+    [Fact]
+    public void ObsoleteCmudictOnlyConstructor_StillReadsWordsAndNumbers()
+    {
+#pragma warning disable CS0618
+        EnglishG2P g2p = new(new MemoryStream(Encoding.UTF8.GetBytes("hello  HH AH0 L OW1\ntwo  T UW1\n")));
+#pragma warning restore CS0618
+        Assert.Equal(2, g2p.WordCount);
+        Assert.Equal("həlˈO tˈu", g2p.ToIpa("hello 2"));
+    }
+
+    [Fact]
     public void LetterToSound_UsesMisakiSingleSymbols_AndStressesTheFirstVowel()
     {
         Assert.Equal("ʧˈɑp", EnglishG2P.LetterToSound("chop"));

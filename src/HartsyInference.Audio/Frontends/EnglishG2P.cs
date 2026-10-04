@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
 using HartsyInference.Audio.Phonemizer.Espeak;
@@ -41,11 +42,29 @@ public sealed partial class EnglishG2P
         _espeak = espeak;
     }
 
+    /// <summary>The pre-misaki front-end: CMUdict only, read from <paramref name="cmudict"/>. Kept for callers built
+    /// against it; Kokoro's own phonemes need the misaki lexicon.</summary>
+    [Obsolete("Pass a MisakiLexicon: without it every word takes the CMUdict fallback, which is not what Kokoro was trained on.")]
+    public EnglishG2P(Stream cmudict)
+        : this(MisakiLexicon.Empty, cmudict ?? throw new ArgumentNullException(nameof(cmudict)))
+    {
+    }
+
+    /// <summary>As <see cref="EnglishG2P(Stream)"/>, reading CMUdict from <paramref name="cmudictPath"/>.</summary>
+    [Obsolete("Pass a MisakiLexicon: without it every word takes the CMUdict fallback, which is not what Kokoro was trained on.")]
+    public EnglishG2P(string cmudictPath)
+        : this(MisakiLexicon.Empty, cmudictPath ?? throw new ArgumentNullException(nameof(cmudictPath)))
+    {
+    }
+
     /// <summary>As the stream constructor, reading CMUdict from <paramref name="cmudictPath"/> when given.</summary>
     public EnglishG2P(MisakiLexicon lexicon, string? cmudictPath, EspeakPhonemizer? espeak = null)
         : this(lexicon, OpenOptional(cmudictPath), espeak)
     {
     }
+
+    /// <summary>Number of CMUdict fallback entries loaded.</summary>
+    public int WordCount => _cmudict?.Count ?? 0;
 
     /// <summary>Converts free text to the phoneme string Kokoro consumes: words separated by spaces, punctuation
     /// attached as written.</summary>
@@ -145,6 +164,8 @@ public sealed partial class EnglishG2P
         {
             w[0].Ps = Fallback(string.Concat(w.Select(static t => t.Text)));
             for (int j = 1; j < w.Count; j++) w[j].Ps = "";
+            // misaki leaves the context at the word to the right here; the fallback reading is what the word before hears.
+            ctx = NextContext(ctx, w[0].Ps);
         }
         else
         {
@@ -233,7 +254,8 @@ public sealed partial class EnglishG2P
             string piece = m.Value;
             string? ps;
             if (piece.Any(char.IsLetter)) ps = FallbackPiece(piece);
-            else if (piece.Any(char.IsAsciiDigit)) ps = _lexicon.Phonemize(piece, new TokenContext(null), null, true, false, false, false);
+            else if (piece.Any(char.IsAsciiDigit))
+                ps = _lexicon.Phonemize(piece, new TokenContext(null), null, true, false, false, false) ?? NumberFallback(piece);
             else if (piece.Length == 1 && NonQuotePuncts.Contains(piece[0]))
             {
                 sb.Append(piece);
@@ -251,6 +273,16 @@ public sealed partial class EnglishG2P
             joinNext = false;
         }
         return sb.ToString();
+    }
+
+    /// <summary>The digits of a number the lexicon cannot read (it lacks the number words), as words through
+    /// <see cref="FallbackPiece"/>.</summary>
+    private string NumberFallback(string piece)
+    {
+        string digits = new(piece.Where(char.IsAsciiDigit).ToArray());
+        string words = long.TryParse(digits, NumberStyles.None, CultureInfo.InvariantCulture, out long n)
+            ? EnglishNumberWords.Cardinal(n) : string.Join(' ', digits.Select(static d => EnglishNumberWords.Cardinal(d - '0')));
+        return string.Join(' ', LetterRunRegex().Matches(words).Select(m => FallbackPiece(m.Value)).Where(static p => p.Length > 0));
     }
 
     private string FallbackPiece(string word)
