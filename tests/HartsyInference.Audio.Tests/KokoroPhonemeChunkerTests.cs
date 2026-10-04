@@ -31,6 +31,12 @@ public sealed class KokoroPhonemeChunkerTests
     }
 
     [Fact]
+    public void AMarkAtTheChunkStart_IsNotCutOffAlone()
+    {
+        Assert.Equal([". aa bb", "cc"], KokoroPhonemeChunker.Split(". aa bb cc", maxLength: 8));
+    }
+
+    [Fact]
     public void StepsPastAClosingQuoteOrBracket()
     {
         Assert.Equal(["“aa.”", "bb cc"], KokoroPhonemeChunker.Split("“aa.” bb cc", maxLength: 7));

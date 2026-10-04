@@ -48,7 +48,8 @@ public static class KokoroPhonemeChunker
     {
         foreach (string marks in Waterfall)
         {
-            for (int i = limit - 1; i >= start; i--)
+            // A mark must close something: one at the chunk's start would cut off a lone pause token.
+            for (int i = limit - 1; i > start; i--)
             {
                 if (marks.IndexOf(s[i]) < 0) continue;
                 int cut = i + 1;
