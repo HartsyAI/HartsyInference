@@ -11,6 +11,7 @@ stable release will require. Dates are UTC.
 ## alpha.250
 
 - Add the Fish Audio S2 architecture contract and research baseline for the new Dual-AR TTS family.
+- Add the Kolibri-1 checkpoint contract for the upcoming MoE and FP8 runtime path.
 
 ## alpha.249
 
