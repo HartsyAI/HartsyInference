@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Frontends;
+using HartsyInference.Audio.Models.Kokoro;
 using HartsyInference.Audio.Phonemizer.Espeak;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
@@ -34,8 +35,13 @@ internal sealed class KokoroFrontend
     private readonly Dictionary<char, Func<string, string>> _frontends = [];
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    /// <summary>The language code of <paramref name="voice"/>: its first letter, lower-cased.</summary>
-    public static char LanguageOf(string voice) => voice.Length == 0 ? 'a' : char.ToLowerInvariant(voice[0]);
+    /// <summary>The language code of <paramref name="voice"/>: its first letter, lower-cased. For a blend
+    /// (<see cref="KokoroVoiceMix"/>) the first voice's.</summary>
+    public static char LanguageOf(string voice)
+    {
+        string first = voice.TrimStart();
+        return first.Length == 0 ? 'a' : char.ToLowerInvariant(first[0]);
+    }
 
     /// <summary>The phonemizer for the language <paramref name="voice"/> speaks, built on first use.</summary>
     /// <exception cref="HartsyInferenceException">The voice's language has no front-end here.</exception>
