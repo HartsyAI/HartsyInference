@@ -113,6 +113,21 @@ public static class ModelCatalog
                         TargetSubdir = "LLM/qwen35moe", Role = "mmproj" },
                 },
             },
+            new CatalogEntry
+            {
+                Id = "clef", Modality = txt, DisplayName = "Cloudflare Clef",
+                Architecture = "Qwen3.5 Gated-DeltaNet + full-attn hybrid (+Qwen3-VL vision)",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "Cloudflare_clef-IQ2_XXS.gguf",
+                        TargetSubdir = "LLM/clef", Role = "transformer",
+                        Sha256 = "f39f8d6c2f1ba7f1f5684c1e920e622882e12f81" },
+                    new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "mmproj-Cloudflare_clef-f16.gguf",
+                        TargetSubdir = "LLM/clef", Role = "mmproj",
+                        Sha256 = "122adfe7a13b308042536c795c9233ab6fcfecb5" },
+                },
+            },
 
             // Text / LLM — dense families. `hartsy text -m <id>` verified end-to-end 2026-07-22 (CLI catalog
             // pass) on the 3060 (--low-vram-quant) unless noted; see MODEL_STATUS_LLM.md for the exact
