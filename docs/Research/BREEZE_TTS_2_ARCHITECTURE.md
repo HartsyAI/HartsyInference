@@ -17,9 +17,10 @@ This note records the implementation boundary; it does not establish runtime ver
 
 ## Reuse boundary
 
-The existing `QwenTts` package already contains the Qwen3 talker, MTP/depth code predictor, and 12 Hz codec
-decoder. Breeze must reuse those components only where tensor keys, conditioning layout, and codec configuration
-match the Breeze checkpoint. Its top-level model and text encoder remain separate from `Qwen3TtsModel`.
+The codec path is the shared `Models.Codecs.Mimi` implementation with `MimiConfig.Mimi24kHzDsm`: 32 total
+quantizers and one SEANet residual block per stage. Qwen3-TTS's custom Snake/ConvNeXt decoder is incompatible
+and must not be reused. Language-model and depth-predictor components may be reused only where tensor keys and
+conditioning layout match the Breeze checkpoint. Its top-level model and text encoder remain separate.
 
 ## Open questions before loader wiring
 

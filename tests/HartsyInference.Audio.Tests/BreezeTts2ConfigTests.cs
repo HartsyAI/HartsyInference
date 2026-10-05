@@ -17,9 +17,12 @@ public sealed class BreezeTts2ConfigTests
         Assert.Equal(1_024, config.DepthDecoderHiddenSize);
         Assert.Equal(8_192, config.DepthDecoderIntermediateSize);
         Assert.Equal(16, config.NumCodebooks);
-        Assert.Equal(32, config.CodecQuantizers);
+        Assert.Equal(32, config.Codec.TotalCodebooks);
+        Assert.Equal(2_048, config.Codec.CodebookSize);
+        Assert.Equal(1, config.Codec.NumSemanticCodebooks);
+        Assert.Equal([1], config.Codec.ResidualDilations);
         Assert.Equal(12.5f, config.CodecFrameRate);
-        Assert.Equal(24_000, config.SampleRate);
+        Assert.Equal(24_000, config.Codec.SampleRate);
         Assert.Equal(262_144, config.AudioTokenId);
         Assert.Equal(2_051, config.AudioVocabSize);
     }
