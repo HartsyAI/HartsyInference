@@ -11,6 +11,7 @@ namespace HartsyInference.Engine.Audio;
 /// case is cleared first.</summary>
 internal static class EspeakDataInstaller
 {
+    // The Windows wheel only because it is the smallest: the data tree is the same in every platform's wheel.
     private const string WheelUrl = "https://files.pythonhosted.org/packages/9d/ed/a3d872fbad4f3a3f3db0e8c31768ab14e77cd77306de16b8b20b1e1df7ea/espeakng_loader-0.2.4-py3-none-win_amd64.whl";
     private const string WheelSha256 = "41f1e08ac9deda2efd1ea9de0b81dab9f5ae3c4b24284f76533d0a7b1dd7abd7";
     private const string DataPrefix = "espeakng_loader/espeak-ng-data/";
@@ -23,8 +24,11 @@ internal static class EspeakDataInstaller
     /// an older release reads some words differently from what Kokoro was trained on.</summary>
     public static async Task<string> EnsureAsync(CancellationToken cancel)
     {
-        string? overridden = Environment.GetEnvironmentVariable("ESPEAK_DATA_DIR");
-        if (!string.IsNullOrEmpty(overridden) && File.Exists(Path.Combine(overridden, "phontab"))) return overridden;
+        if (EspeakPhonemizer.DataDirectoryOverride is string overridden)
+        {
+            if (File.Exists(Path.Combine(overridden, "phontab"))) return overridden;
+            Logs.Warning($"[Audio] ESPEAK_DATA_DIR '{overridden}' holds no espeak-ng data (no phontab); ignoring it.");
+        }
         string target = EspeakPhonemizer.CacheDataDirectory;
         if (File.Exists(Path.Combine(target, "phontab"))) return target;
         await _gate.WaitAsync(cancel).ConfigureAwait(false);

@@ -8,7 +8,23 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.250
+- **Fixed: releasing a tensor's device copy binds the owning cache's CUDA context first.** A tensor's dispose
+  callback runs on whichever thread disposes it, and in SwarmUI that is a pool thread shared by every extension's copy
+  of the engine, so it can arrive with another device's context current. The residency-cache migration had dropped the
+  bind from `ReleaseActivationCore` and from `DemotePromotedWeight`, the callback for a promoted weight, which CUDA
+  frees with the synchronous `cuMemFree`. That call resolves against the context current on the thread, so the free
+  could land in the wrong device's context or fail against it. Both paths now call the cache's `MakeCurrent`, after the
+  retire gate and not before it: a retiring backend closes the gate and only then destroys its context, so a bind
+  placed earlier would throw against a context that is already gone.
+- **Fixed: `GpuBackendBase.FreeAllDeviceMemory` on CUDA no longer leaks Q8_1 activation sidecars.** An activation can
+  carry a sidecar of three more device buffers, and the shared sweep hands buffers back without calling the
+  per-activation eviction hook, so only the CUDA wrapper around it (`GpuTransferHelper.FreeAllCached(State)`) released
+  them. `FreeAllDeviceMemory` holds the cache only as `IGpuResidency`, so it called the shared sweep directly and went
+  around the wrapper: every sidecar alive at a model-swap boundary stayed on the card. The wrapper's body is now
+  `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
+  to it. Teardown and `EvictGpuCache` behave as before.
+
+## alpha.252
 
 - **Kokoro-82M: all its stock languages, each read the way the official pipeline reads it.** The voice's first letter
   picks the front-end, as `KPipeline` does. Before this, every voice went through the American G2P, so British
@@ -47,6 +63,15 @@ stable release will require. Dates are UTC.
   English sentences matching espeak-ng 1.52 exactly: 59 → 377 of 400 (`EspeakSentenceParityTests`). Single words:
   385 of 400 (`EspeakParityTests`, floor raised to 95%; its fixture is regenerated from espeak-ng 1.52 by
   `tools/kokoro/espeak_parity_reference.py`).
+
+## alpha.251
+
+- Add Breeze TTS 2, Kolibri-1, Clef, ControlFoley, and Fish Audio S2 model contracts.
+
+## alpha.250
+
+- Add the Fish Audio S2 architecture contract and research baseline for the new Dual-AR TTS family.
+- Add the Kolibri-1 checkpoint contract for the upcoming MoE and FP8 runtime path.
 
 ## alpha.249
 

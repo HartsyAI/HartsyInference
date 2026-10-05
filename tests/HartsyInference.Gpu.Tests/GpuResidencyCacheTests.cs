@@ -48,6 +48,13 @@ public sealed class GpuResidencyCacheTests
 
         protected override void FreeDevice(Buffer buffer, long bytes)
         {
+            // A free made while another device's context is current is the bug under test: on CUDA it resolves
+            // against the wrong context. Recorded rather than thrown so a test can say which buffer, and so the
+            // free still takes effect and teardown stays clean.
+            if (!_bound)
+            {
+                FreedWhileForeign.Add(buffer);
+            }
             buffer.Freed = true;
             FreedBuffers.Add(buffer);
         }
@@ -56,7 +63,32 @@ public sealed class GpuResidencyCacheTests
 
         protected override void DownloadSynced(nint hostDestination, Buffer source, long bytes) => Downloads++;
 
-        protected override void MakeCurrent() { }
+        private bool _bound = true;
+
+        /// <summary>Buffers whose free was issued while this cache's context was NOT the thread's current one.</summary>
+        public List<Buffer> FreedWhileForeign { get; } = [];
+
+        /// <summary>How many times the cache asked for its own context to be made current.</summary>
+        public int MakeCurrentCalls { get; private set; }
+
+        /// <summary>Stands in for a context that no longer exists: binding it throws, as <c>CudaContext.EnsureCurrent</c>
+        /// does once the backend has disposed it.</summary>
+        public bool ContextDestroyed { get; set; }
+
+        /// <summary>Stands in for a thread whose current context is another device's — what a thread-pool thread
+        /// is left with after a different backend, or another extension's copy of this library, ran on it. Only
+        /// <see cref="MakeCurrent"/> puts this cache's context back.</summary>
+        public void SimulateForeignContext() => _bound = false;
+
+        protected override void MakeCurrent()
+        {
+            if (ContextDestroyed)
+            {
+                throw new ObjectDisposedException(nameof(FakeCache), "The context was destroyed.");
+            }
+            MakeCurrentCalls++;
+            _bound = true;
+        }
 
         protected override bool HostReadForbidden => RefuseHostReads;
 
@@ -301,6 +333,125 @@ public sealed class GpuResidencyCacheTests
 
         Assert.Equal(0, cache.Downloads);
         Assert.False(buffer.Freed);
+    }
+
+    // ── A free follows the thread's current context, not the cache's ─────────────────────────────────────
+    //
+    // A tensor is disposed, and a host read fires its callbacks, on whatever thread happened to drop it — and on a
+    // shared thread pool that thread's current device context is whichever backend ran there last, quite possibly
+    // another device's. The calls that FREE resolve against the current context rather than the buffer's own, so
+    // every callback that releases a buffer must make its own cache's context current first. The host-read sync
+    // callback always did; the dispose and demotion callbacks did not. SimulateForeignContext is the thread the
+    // callback arrives on, and FreedWhileForeign records any free made before MakeCurrent put the cache back.
+
+    /// <summary>A tensor disposed while another device's context is current: the release is the ordinary one, a
+    /// dispose (or the drain of a finalizer's queued cleanup) of an activation the cache holds.</summary>
+    [Fact]
+    public void Disposing_An_Activation_Frees_Its_Buffer_Into_The_Caches_Own_Context()
+    {
+        using FakeCache cache = new();
+        Tensor tensor = NewTensor();
+        FakeCache.Buffer buffer = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, buffer, Size(tensor));
+
+        cache.SimulateForeignContext();
+        tensor.Dispose();
+
+        Assert.True(buffer.Freed);
+        Assert.DoesNotContain(buffer, cache.FreedWhileForeign);
+    }
+
+    /// <summary>A promoted weight is freed by a different path from an activation (on CUDA a different free call
+    /// altogether, from a different allocator), so it is not covered by the activation case.</summary>
+    [Fact]
+    public void Disposing_A_Promoted_Weight_Frees_It_Into_The_Caches_Own_Context()
+    {
+        using FakeCache cache = new();
+        Tensor weight = NewTensor();
+        cache.ForcePromote(weight, Size(weight));
+        FakeCache.Buffer promoted = Assert.Single(cache.WeightAllocations);
+
+        cache.SimulateForeignContext();
+        weight.Dispose();
+
+        Assert.True(promoted.Freed);
+        Assert.DoesNotContain(promoted, cache.FreedWhileForeign);
+    }
+
+    /// <summary>A host access demotes a promoted weight through the same callback as its disposal, and drops the
+    /// conversions of it too — buffers of their own, freed one after the other under one binding.</summary>
+    [Fact]
+    public void A_Host_Read_Of_A_Promoted_Weight_Frees_It_And_Its_Conversions_Into_The_Caches_Own_Context()
+    {
+        using FakeCache cache = new();
+        using Tensor weight = NewTensor();
+        cache.ForcePromote(weight, Size(weight));
+        FakeCache.Buffer promoted = Assert.Single(cache.WeightAllocations);
+        FakeCache.Buffer cast = cache.AllocateForTest(16);
+        cache.StoreWeightCast(weight, DType.F16, cast, 16);
+
+        cache.SimulateForeignContext();
+        unsafe
+        {
+            _ = weight.DataPointer;
+        }
+
+        Assert.True(promoted.Freed);
+        Assert.True(cast.Freed);
+        Assert.Empty(cache.FreedWhileForeign);
+    }
+
+    /// <summary>The control: the sync callback of an activation read back to host has always made the context
+    /// current before it released the buffer. This pins the contract the two release callbacks above now share
+    /// with it, so the three cannot drift apart again.</summary>
+    [Fact]
+    public void A_Host_Read_Of_An_Activation_Frees_Its_Buffer_Into_The_Caches_Own_Context()
+    {
+        using FakeCache cache = new();
+        using Tensor tensor = NewTensor();
+        FakeCache.Buffer buffer = cache.AllocateForTest(Size(tensor));
+        cache.CacheActivation(tensor, buffer, Size(tensor));
+
+        cache.SimulateForeignContext();
+        unsafe
+        {
+            _ = tensor.DataPointer;
+        }
+
+        Assert.Equal(1, cache.Downloads);
+        Assert.True(buffer.Freed);
+        Assert.DoesNotContain(buffer, cache.FreedWhileForeign);
+    }
+
+    /// <summary>Making the context current is not free of risk: once a backend has destroyed its context, binding it
+    /// throws. A retiring backend closes the callback gate BEFORE it destroys the context, so a release arriving
+    /// afterwards is turned away at the gate — but only if the bind comes after the gate. A bind placed ahead of it
+    /// would throw out of <c>Tensor.Dispose</c> on exactly the model-swap path the gate exists to make safe.</summary>
+    [Fact]
+    public void A_Release_Arriving_After_The_Gate_Closes_Neither_Binds_Nor_Throws()
+    {
+        using FakeCache cache = new();
+        Tensor activation = NewTensor();
+        cache.CacheActivation(activation, cache.AllocateForTest(Size(activation)), Size(activation));
+        Tensor weight = NewTensor();
+        cache.ForcePromote(weight, Size(weight));
+
+        cache.BlockCallbacks = true;
+        cache.ContextDestroyed = true;
+        int bindsBefore = cache.MakeCurrentCalls;
+        try
+        {
+            activation.Dispose();
+            weight.Dispose();
+
+            Assert.Equal(bindsBefore, cache.MakeCurrentCalls);
+            Assert.Empty(cache.FreedBuffers);
+        }
+        finally
+        {
+            // The cache's own teardown binds the context too, and would throw over whatever failed above.
+            cache.ContextDestroyed = false;
+        }
     }
 
     /// <summary>Promotion happens behind the caller's back, so host data stays authoritative: a later host write

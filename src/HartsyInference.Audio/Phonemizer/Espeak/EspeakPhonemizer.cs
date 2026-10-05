@@ -62,6 +62,17 @@ public sealed class EspeakPhonemizer : IPhonemizer
         return false;
     }
 
+    /// <summary>The directory <c>ESPEAK_DATA_DIR</c> names, if it is set (whether or not it holds the data); a
+    /// directory that does hold it overrides every other location.</summary>
+    public static string? DataDirectoryOverride
+    {
+        get
+        {
+            string? env = Environment.GetEnvironmentVariable("ESPEAK_DATA_DIR");
+            return string.IsNullOrEmpty(env) ? null : env;
+        }
+    }
+
     /// <summary>The model-cache directory <see cref="FromCache"/> reads <c>espeak-ng-data</c> from when neither
     /// <c>ESPEAK_DATA_DIR</c> nor a system install provides it; where the engine installs its copy.</summary>
     public static string CacheDataDirectory
@@ -77,8 +88,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
 
     private static IEnumerable<string> CandidateDataDirs()
     {
-        string? env = Environment.GetEnvironmentVariable("ESPEAK_DATA_DIR");
-        if (!string.IsNullOrEmpty(env)) yield return env;
+        if (DataDirectoryOverride is string env) yield return env;
 
         yield return CacheDataDirectory;
         yield return Path.GetDirectoryName(CacheDataDirectory)!;
@@ -329,17 +339,31 @@ public sealed class EspeakPhonemizer : IPhonemizer
     private List<string> SplitNumbers(IEnumerable<string> words, out HashSet<int> digitByDigit)
     {
         List<string> result = [];
-        digitByDigit = [];
+        HashSet<int> spelled = [];
         char sep = _options.ThousandsSep;
         uint breaks = _options.BreakNumbers;
-        foreach (string w in words)
+        foreach (string word in words)
+        {
+            if (!IsDigit09(word[0]) || word.All(IsDigit09))
+            {
+                AddNumber(word);
+                continue;
+            }
+            foreach (string part in SeparatedNumber(word))
+                AddNumber(part);
+        }
+        digitByDigit = spelled;
+        return result;
+
+        void AddNumber(string w)
         {
             int n = w.Length;
-            if (!IsDigit09(w[0]) || n <= 4 || n > 32)
+            bool allDigits = w.All(IsDigit09);
+            if (!allDigits || n <= 4 || n > 32)
             {
-                if (IsDigit09(w[0]) && (n > _options.MaxDigits || (n > 1 && w[0] == '0'))) digitByDigit.Add(result.Count);
+                if (allDigits && (n > _options.MaxDigits || (n > 1 && w[0] == '0'))) spelled.Add(result.Count);
                 result.Add(w);
-                continue;
+                return;
             }
             bool individual = n > _options.MaxDigits || w[0] == '0';
             System.Text.StringBuilder group = new();
@@ -351,7 +375,7 @@ public sealed class EspeakPhonemizer : IPhonemizer
                 if (nx > 0 && (breaks & (1U << nx)) != 0)
                 {
                     if (sep != ' ' && sep != '\0') group.Append(sep);
-                    if (individual) digitByDigit.Add(result.Count);
+                    if (individual) spelled.Add(result.Count);
                     result.Add(group.ToString());
                     group.Clear();
                     if (!individual)
@@ -361,10 +385,49 @@ public sealed class EspeakPhonemizer : IPhonemizer
                     }
                 }
             }
-            if (individual) digitByDigit.Add(result.Count);
+            if (individual) spelled.Add(result.Count);
             result.Add(group.ToString());
         }
-        return result;
+    }
+
+    // A number written with separators, as TranslateClause and TranslateNumber read it: the decimal separator
+    // stays in its number ("3.5"); a thousands separator before a group of exactly three digits ends a word that
+    // keeps it ("1," then "234", read together as one thousand two hundred thirty-four); any other separator only
+    // splits the digits ("1,23" reads one, twenty-three).
+    private IEnumerable<string> SeparatedNumber(string word)
+    {
+        char decimalSep = _options.DecimalSep, thousandsSep = _options.ThousandsSep;
+        System.Text.StringBuilder current = new();
+        int i = 0;
+        while (i < word.Length)
+        {
+            char c = word[i];
+            if (IsDigit09(c))
+            {
+                current.Append(c);
+                i++;
+                continue;
+            }
+            int run = i + 1;
+            while (run < word.Length && IsDigit09(word[run])) run++;
+            string digits = word[(i + 1)..run];
+            if (c == decimalSep)
+            {
+                current.Append(c).Append(digits);
+            }
+            else if (c == thousandsSep && digits.Length == 3)
+            {
+                yield return current.Append(c).ToString();
+                current.Clear().Append(digits);
+            }
+            else
+            {
+                yield return current.ToString();
+                current.Clear().Append(digits);
+            }
+            i = run;
+        }
+        if (current.Length > 0) yield return current.ToString();
     }
 
     // A number word: TranslateNumber, else each digit by its _N entry (TranslateRules' digit path).
@@ -705,9 +768,15 @@ public sealed class EspeakPhonemizer : IPhonemizer
             }
             else if (char.IsDigit(text[i]))
             {
+                // A '.' or ',' between digits stays in the number, for SplitNumbers to read as a decimal point or a
+                // thousands separator.
                 System.Text.StringBuilder digits = new();
-                while (i < text.Length && char.IsDigit(text[i]))
-                    digits.Append((char)('0' + (int)char.GetNumericValue(text[i++])));
+                while (i < text.Length && (char.IsDigit(text[i])
+                    || (text[i] is '.' or ',' && i + 1 < text.Length && char.IsDigit(text[i + 1]) && digits.Length > 0)))
+                {
+                    digits.Append(char.IsDigit(text[i]) ? (char)('0' + (int)char.GetNumericValue(text[i])) : text[i]);
+                    i++;
+                }
                 yield return digits.ToString();
             }
             else
