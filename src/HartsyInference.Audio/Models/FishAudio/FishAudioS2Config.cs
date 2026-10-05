@@ -8,12 +8,12 @@ public sealed record FishAudioS2Config
     /// <summary>Slow autoregressive transformer configuration.</summary>
     public FishAudioTransformerConfig Slow { get; init; } = new()
     {
-        HiddenSize = 4_096,
+        HiddenSize = 2_560,
         NumHiddenLayers = 36,
         NumAttentionHeads = 32,
         NumKeyValueHeads = 8,
-        IntermediateSize = 11_008,
-        VocabSize = 151_936,
+        IntermediateSize = 9_728,
+        VocabSize = 155_776,
         MaxPositionEmbeddings = 32_768,
         RopeTheta = 1_000_000f,
         RmsNormEps = 1e-6f,
@@ -22,15 +22,16 @@ public sealed record FishAudioS2Config
     /// <summary>Fast autoregressive depth transformer configuration.</summary>
     public FishAudioTransformerConfig Fast { get; init; } = new()
     {
-        HiddenSize = 1_024,
+        HiddenSize = 2_560,
         NumHiddenLayers = 4,
-        NumAttentionHeads = 16,
-        NumKeyValueHeads = 2,
-        IntermediateSize = 4_096,
+        NumAttentionHeads = 32,
+        NumKeyValueHeads = 8,
+        IntermediateSize = 9_728,
         VocabSize = 4_096,
-        MaxPositionEmbeddings = 16,
+        MaxPositionEmbeddings = 11,
         RopeTheta = 1_000_000f,
         RmsNormEps = 1e-6f,
+        QkNorm = false,
     };
 
     public int NumCodebooks { get; init; } = 10;
@@ -40,21 +41,4 @@ public sealed record FishAudioS2Config
 
     /// <summary>Published S2 Pro architecture contract.</summary>
     public static FishAudioS2Config S2Pro => new();
-}
-
-/// <summary>Transformer dimensions kept separate from <c>Qwen2Config</c> until the checkpoint loader accounts
-/// for S2's QK normalization and tokenizer contract.</summary>
-public sealed record FishAudioTransformerConfig
-{
-    public required int HiddenSize { get; init; }
-    public required int NumHiddenLayers { get; init; }
-    public required int NumAttentionHeads { get; init; }
-    public required int NumKeyValueHeads { get; init; }
-    public required int IntermediateSize { get; init; }
-    public required int VocabSize { get; init; }
-    public required int MaxPositionEmbeddings { get; init; }
-    public float RopeTheta { get; init; } = 1_000_000f;
-    public float RmsNormEps { get; init; } = 1e-6f;
-    public bool QkNorm { get; init; } = true;
-    public int HeadDim => HiddenSize / NumAttentionHeads;
 }
