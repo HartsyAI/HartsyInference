@@ -73,9 +73,8 @@ public sealed class KokoroBenchTests
             _out.WriteLine($"SKIPPED: set {GateEnvVar}=1 to run the Kokoro 3060 bench.");
             return;
         }
-        string cmudict = GpuBenchSupport.Cmudict();
         if (!RealWeightGate.Require(_out.WriteLine,
-                GpuBenchSupport.KokoroFiles().Concat(GpuBenchSupport.WhisperFiles(WhisperTiny)).Concat([cmudict]).ToArray()))
+                GpuBenchSupport.KokoroFiles().Concat(GpuBenchSupport.WhisperFiles(WhisperTiny)).Concat(GpuBenchSupport.KokoroG2PFiles()).ToArray()))
         {
             return;
         }
@@ -96,7 +95,7 @@ public sealed class KokoroBenchTests
         }
         try
         {
-            await RunAsync(cmudict, outDir, refDir, exact);
+            await RunAsync(outDir, refDir, exact);
         }
         finally
         {
@@ -109,11 +108,11 @@ public sealed class KokoroBenchTests
         }
     }
 
-    private async Task RunAsync(string cmudict, string? outDir, string? refDir, bool exact)
+    private async Task RunAsync(string? outDir, string? refDir, bool exact)
     {
         using IBackend backend = GpuBenchSupport.Open3060(_out.WriteLine, OrdinalEnvVar);
 
-        EnglishG2P g2p = new EnglishG2P(cmudict);
+        EnglishG2P g2p = GpuBenchSupport.KokoroG2P();
         Stopwatch load = Stopwatch.StartNew();
         using KokoroPipeline kokoro = await KokoroPipeline.LoadAsync();
         using WhisperPipeline verify = await WhisperPipeline.LoadAsync(WhisperTiny);

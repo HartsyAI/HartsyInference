@@ -1123,6 +1123,49 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // `hartsy speak -m auk --reference <wav> "text"` (zero-shot clone) or `-m auk --instruction "<voice description>"
+                // --duration <s> "text"`; `-m auk:flash` is the 4-step distilled DiT (nfe/cfg locked). Only Qwen2.5-Omni-3B
+                // shards 1 and 2 are listed: the thinker text LM and audio tower are the only tensors AuK reads. LICENSE: the
+                // Omni encoder is under the Qwen Research License (not Apache-2.0) — see Qwen/Qwen2.5-Omni-3B on the hub.
+                Id = "auk", Modality = tts, DisplayName = "AuK / AuK-Flash", Architecture = "instruction flow-matching DiT + Qwen2.5-Omni encoder", Status = st,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "tencent/AuK", RepoPath = "auk_base.safetensors", TargetSubdir = "Audio/AuK", Role = "transformer",
+                        Sha256 = "29c65c0c6045e8d8fb454019f99c9680508f553fc98fa143feaca3711d0b8614" },
+                    new() { Repo = "tencent/AuK-Flash", RepoPath = "auk_flash.safetensors", TargetSubdir = "Audio/AuK", Role = "transformer (auk:flash)",
+                        Sha256 = "9b3ec1400a9ebcc87ee540ebfad0aeeb08e4f210149e190b1469fd8eeb977fe4" },
+                    new() { Repo = "tencent/AuK", RepoPath = "vae.safetensors", TargetSubdir = "Audio/AuK", Role = "vae",
+                        Sha256 = "0f5857fd0d6b916d161c73fef433e0ccb42484a2dad3aa08e8a51975e29a0645" },
+                    new() { Repo = "Qwen/Qwen2.5-Omni-3B", RepoPath = "model-00001-of-00003.safetensors", TargetSubdir = "Audio/AuK/Qwen2.5-Omni-3B",
+                        Role = "text encoder (audio tower; Qwen Research License)",
+                        Sha256 = "349972cebff443030e9e96e1e930d7230979c6961cf046fa29fc580e4bcf49a6" },
+                    new() { Repo = "Qwen/Qwen2.5-Omni-3B", RepoPath = "model-00002-of-00003.safetensors", TargetSubdir = "Audio/AuK/Qwen2.5-Omni-3B",
+                        Role = "text encoder (thinker LM; Qwen Research License)",
+                        Sha256 = "b29a76dfefb3aa33a5bd0faa19c681d039a44de57223653ea0e933df728c6d8c" },
+                    new() { Repo = "Qwen/Qwen2.5-Omni-3B", RepoPath = "model.safetensors.index.json", TargetSubdir = "Audio/AuK/Qwen2.5-Omni-3B", Role = "text encoder index" },
+                    new() { Repo = "Qwen/Qwen2.5-Omni-3B", RepoPath = "tokenizer.json", TargetSubdir = "Audio/AuK/Qwen2.5-Omni-3B", Role = "tokenizer",
+                        Sha256 = "8441917e39ae0244e06d704b95b3124795cec478e297f9afac39ba670d7e9d99" },
+                },
+            },
+            new CatalogEntry
+            {
+                // `hartsy speak -m indextts --reference <wav> "text"` — zero-shot clone only, no emotion/duration
+                // control (that is IndexTTS-2, not yet implemented). dvae.pth is listed for repo completeness but
+                // confirmed unused at inference — see IndexTtsPipeline's doc comment.
+                Id = "indextts", Modality = tts, DisplayName = "IndexTTS-1.5", Architecture = "GPT-2 T2S + Conformer-Perceiver + BigVGAN-v2 (ECAPA d-vector conditioning)", Status = st,
+                CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "config.yaml", TargetSubdir = "Audio/IndexTts", Role = "config" },
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "bpe.model", TargetSubdir = "Audio/IndexTts", Role = "tokenizer" },
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "gpt.pth", TargetSubdir = "Audio/IndexTts", Role = "transformer" },
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "dvae.pth", TargetSubdir = "Audio/IndexTts", Role = "codec (unused at inference)" },
+                    new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "bigvgan_generator.pth", TargetSubdir = "Audio/IndexTts", Role = "vocoder" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "dia", Modality = tts, DisplayName = "Dia-1.6B (0626)", Architecture = "byte-level dialogue TTS + DAC codec", Status = ok,
                 CliDrivable = true, // `hartsy speak -m dia "[S1] ... [S2] ..."` — TtsCatalog "dia"; needs the 0626 checkpoint (the original degenerates)
                 Assets = new ModelAsset[]

@@ -98,6 +98,19 @@ public sealed record Qwen2Config
         TieWordEmbeddings = false,
     };
 
+    /// <summary>Qwen2.5-Omni-3B thinker text LM (AuK's conditioning encoder): untied head, QKV bias, plain 1D RoPE for text plus audio-only inputs.</summary>
+    public static Qwen2Config Qwen25Omni_3B_Thinker => new()
+    {
+        HiddenSize = 2_048,
+        NumHiddenLayers = 36,
+        NumAttentionHeads = 16,
+        NumKeyValueHeads = 2,
+        IntermediateSize = 11_008,
+        VocabSize = 151_936,
+        MaxPositionEmbeddings = 32_768,
+        TieWordEmbeddings = false,
+    };
+
     /// <summary>Qwen2.5-0.5B preset (VibeVoice-Streaming-0.5B backbone).</summary>
     public static Qwen2Config Qwen25_0_5B => new()
     {

@@ -212,6 +212,8 @@ public static class GenerationDispatch
             Exaggeration = parameters.GetDoubleOrNull("exaggeration"),
             NfeStep = parameters.GetIntOrNull("nfe-step"),
             CfgScale = parameters.GetDoubleOrNull("cfg-scale"),
+            Instruction = parameters.GetStringOrNull("instruction"),
+            DurationSeconds = parameters.GetDoubleOrNull("duration"),
             Seed = Math.Max(0, parameters.GetInt("seed", 0)),
         };
         AudioResult result = await engine.Speech.SynthesizeAsync(spec, request, cancel).ConfigureAwait(false);

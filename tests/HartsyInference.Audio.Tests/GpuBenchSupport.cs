@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Frontends;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Cuda;
@@ -44,8 +45,20 @@ internal static class GpuBenchSupport
     public static string ModelsRoot() =>
         EngineKnobs.ModelsRoot.Value is { Length: > 0 } root ? Path.GetFullPath(root) : TestPaths.ModelsDir;
 
-    /// <summary>The public-domain CMU dictionary the engine's English G2P reads.</summary>
-    public static string Cmudict() => Path.Combine(ModelsRoot(), "audio", "cmudict.dict");
+    /// <summary>The files the engine's Kokoro G2P reads: misaki's two dictionaries, then the CMU dictionary.</summary>
+    public static string[] KokoroG2PFiles()
+    {
+        string audio = Path.Combine(ModelsRoot(), "audio");
+        return [Path.Combine(audio, "misaki_us_gold.json"), Path.Combine(audio, "misaki_us_silver.json"),
+            Path.Combine(audio, "cmudict.dict")];
+    }
+
+    /// <summary>The engine's Kokoro G2P over <see cref="KokoroG2PFiles"/> (no espeak fallback).</summary>
+    public static EnglishG2P KokoroG2P()
+    {
+        string[] files = KokoroG2PFiles();
+        return new EnglishG2P(MisakiLexicon.FromFiles(files[0], files[1]), files[2]);
+    }
 
     public static string[] WhisperFiles(string repo)
     {

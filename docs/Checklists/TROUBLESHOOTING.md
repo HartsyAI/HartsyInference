@@ -953,6 +953,12 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   keep `WhisperConfig.VocabSize` equal to the embedding's row count (the decoder now refuses a mismatch; before, it
   read the next tensor in the file as a phantom logit). The HF files also name no-speech `<|nocaptions|>`, not
   `<|nospeech|>`.
+- **Kokoro sounds flat, robotic or oddly stressed but every word is there:** check what feeds the prosody branch
+  and the phonemes before the vocoder. The F0/N predictor must read the length-regulated DurationEncoder output
+  `d` (640 ch, style-concatenated), not the PLBERT features: both are `[T, 640]` once style is appended, so the
+  wrong one runs silently and only pitch/energy go wrong. Diff `pred_dur`/F0/N against `KModel` with
+  `tools/kokoro/prosody_reference.py`. Phonemes must be misaki's, not a CMUdict mapping: Kokoro was trained on
+  misaki's unstressed function words, flap `T` and `ᵊ`; compare `EnglishG2P` against misaki itself.
 - **F5-TTS:** ConvNeXt filler-tail masking; ×1000 timestep sinusoid scale; erf-GELU stem vs tanh-GELU FFN.
 - **Fish-Speech:** the fast depth-LM must take the **PRE-norm** slow hidden (`norm_fastlayer_input=False`).
 - **espeak `MatchRule` RULE_PRE OOB:** indexed past the per-word buffer start on words like "Americans" —

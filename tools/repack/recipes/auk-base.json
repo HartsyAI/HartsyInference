@@ -1,0 +1,8 @@
+{
+  // Tencent AuK base from the official fp32 checkpoint, cast to bf16. The learned layer mixing (layer_weights, layer_scale),
+  // norms, biases and the rotary inv_freq buffer (already bf16-rounded upstream, loaded by the engine) stay fp32.
+  "name": "auk-base", "model": "auk", "variant": "base", "source_repo": "tencent/AuK", "dtype": "bf16",
+  "stands_in_for": [ "tts/tencent--AuK/auk_base.safetensors" ],
+  "components": [ { "source_file": "tencent--AuK/auk_base.safetensors" } ],
+  "keep_dtype": [ "layer_weights", "layer_scale", "*norm*", "*.bias", "*inv_freq*" ]
+}

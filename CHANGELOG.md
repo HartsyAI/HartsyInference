@@ -24,6 +24,106 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.251
+
+- Add Breeze TTS 2, Kolibri-1, Clef, ControlFoley, and Fish Audio S2 model contracts.
+
+## alpha.250
+
+- Add the Fish Audio S2 architecture contract and research baseline for the new Dual-AR TTS family.
+- Add the Kolibri-1 checkpoint contract for the upcoming MoE and FP8 runtime path.
+
+## alpha.249
+
+- **Kokoro-82M: output now matches the official model.** Reported as "works but sounds bad"; three faults, all
+  backend-independent:
+  - The F0/energy predictor read the length-regulated PLBERT features instead of the length-regulated
+    DurationEncoder output the reference feeds it (`model.py`: `en = d @ pred_aln_trg`). Same shape, so nothing
+    failed, but pitch was off by ~74 Hz on average and a fifth of frames had the wrong voicing. The voice-pack
+    style row was also two rows late (`pack[len(ps)-1]` counts phonemes, not BOS/EOS). Against the official
+    PyTorch `KModel` on the same phonemes, durations are now identical and F0 is within 0.001 Hz
+    (`KokoroProsodyParityTests`, reference from `tools/kokoro/prosody_reference.py`). StyleTTS 2 shares the fix.
+  - The English G2P was a CMUdict mapping that agreed with misaki (Kokoro's training phonemizer) on 44% of words:
+    every monosyllable stressed, no flap, curly apostrophes splitting words ("don’t" → "don tee"), numbers and
+    currency misread. `EnglishG2P` is now a port of misaki's English G2P over its gold/silver dictionaries
+    (Apache-2.0, fetched once, SHA-256 pinned) with context-dependent function words, -s/-ed/-ing morphology,
+    acronyms, numbers, years, currency and quotes; CMUdict, the espeak port and letter rules cover words misaki
+    lacks. 98.7% word agreement with misaki on 527 sentences (1 → 419 exact). The CMUdict-only
+    `EnglishG2P(string)`/`(Stream)` constructors remain, obsolete; their output changes too (context-dependent
+    "the"/"to", numbers read through the fallback), since they now run the same front-end over an empty lexicon.
+  - Non-streaming synthesis (CLI, HTTP, Wyoming) handed PLBERT the whole text and threw past 512 phonemes. Input
+    is now split on newlines and chunked at 510 phonemes on the strongest pause, as `KPipeline` does.
+- `IndexTtsConfigValuesTests` used `var`, which failed the Audio test project's build under code-style enforcement
+  (IDE0008); now explicitly typed.
+
+## alpha.248
+
+- **IndexTTS-1.5: nucleus (top-p) sampling and tail fade-out, found by auditing against the real `index-tts`
+  Python source.** `IndexTtsT2sDecoder`'s AR sampler only applied top-k + temperature; the reference CLI's
+  default decode stack also applies top-p=0.8 nucleus filtering after top-k (it decodes through HF
+  `generate()` with both `top_k=30` and `top_p=0.8`). Swapped to the shared `NucleusSampler.Draw` (already used
+  by CosyVoice/Spark-TTS) so the same temperature → top-k → top-p → multinomial-draw pipeline applies here too,
+  layered under the existing CTRL-style repetition penalty. Also: `IndexTtsPipeline.Synthesize` now applies a
+  20 ms raised-cosine fade-out to the very end of the generated waveform, matching the reference's
+  `fade_out_tail` (`utils/common.py`) — decoding is stochastic, so the stop token occasionally samples early and
+  the last PCM sample lands far from zero, producing an audible click (and sometimes a burst of noise, since
+  BigVGAN's receptive field is incomplete right at that boundary); on a normal generation ending in silence the
+  fade is a no-op. The reference's other default, `num_beams=3` (beam search combined with sampling via HF
+  `generate()`), remains unimplemented — a materially bigger change (parallel beams/caches, score tracking),
+  tracked as a known Phase-2-scale gap, not fixed here.
+
+## alpha.247
+
+- **IndexTTS-1.5: fix a load crash on the real checkpoint's integer buffers.** `IndexTtsPipeline.LoadAsync`'s
+  `ToF32` helper (added in alpha.246 to centrally fix BF16-checkpoint leaks) was unconditionally casting every
+  tensor in each loaded weight dictionary to F32, including non-floating-point buffers the real `gpt.pth`
+  checkpoint carries (GPT-2-style integer/boolean position-id and causal-mask buffers) — `EnsureF32` has no I64
+  source case, so the pipeline failed to load with "Unsupported dtype conversion: I64 -> F32." the first time it
+  ran against the real checkpoint end to end (via a live deployment, not the unit test suite's all-F32 synthetic
+  weights). `ToF32` now passes non-floating-point tensors through unchanged, matching every downstream consumer's
+  assumption that those buffers are never read as weights.
+
+## alpha.246
+
+- **IndexTTS-1.5 speech model, structural port (Phase 1: zero-shot cloning only).** `hartsy speak -m indextts
+  --reference <wav> "text"` clones a voice from a reference clip: a Conformer-Perceiver speech-conditioning
+  encoder feeds a standard biased HF GPT-2 text-to-speech decoder (sampled autoregressively, two-pass — generate
+  codes, then re-extract the matching final-layer hidden states), and a custom 24 kHz BigVGAN-v2 vocodes those
+  hidden states directly, conditioned by an embedded ECAPA-TDNN speaker d-vector. No emotion or duration control
+  (IndexTTS-2, not yet implemented) and no codec decode step — the shipped `dvae.pth` is training-only, confirmed
+  unused in the reference `infer()`. Not numerically verified against the reference yet; see
+  `MODEL_STATUS_AUDIO.md` and `docs/Research/INDEX_TTS_ARCHITECTURE.md`'s implementation-notes addendum for open
+  risks (exact text-frontend CJK handling, sampling defaults).
+- `GptBackbone`/`GptBlock` now load bias-or-zero for every projection (previously hardcoded bias-free), so a
+  standard biased HF GPT-2 checkpoint loads correctly alongside Bark's bias-free one; `GptBackbone.Forward`/
+  `ForwardStep` take an optional `positionsApplied` flag and `LoadWeights`' `posKey` is now nullable, for
+  checkpoints (like IndexTTS) with per-segment position tables or none at all rather than one table spanning the
+  whole sequence.
+
+## alpha.245
+
+- **AuK: skip per-call weight eviction when VRAM has room.** `AukOptions.SequentialResidency` defaults to `true`,
+  and every stage (audio tower, thinker, DiT, VAE) freed its device weights at the end of every single call
+  regardless of free VRAM, so back-to-back generations each paid a full host->device re-upload of every stage.
+  Measured on a live 4090, this was ~3s of fixed overhead per generation. `Generate` now only evicts a stage when
+  the device doesn't clearly have room to hold every stage the call touches resident at once; a backend that can't
+  report VRAM (CPU) is unaffected. Output is unchanged either way.
+
+## alpha.244
+
+- **AuK and AuK-Flash (Tencent) speech model, structural port.** `auk:flash` (4 fixed steps, no guidance) and
+  `auk:base` (32 steps, CFG 2.0, sway) run zero-shot voice cloning and instruction-described voices through
+  `hartsy speak -m auk:flash` (`--reference`, `--instruction`, `--duration`) and the speech API. The pipeline is
+  task-agnostic: an instruction plus a source clip drives the same DiT for editing, enhancement and separation, but
+  only TTS is exposed by the engine in this release. Conditioning comes from the Qwen2.5-Omni-3B thinker (text LM
+  plus audio tower; only shards 1 and 2 are downloaded) fused over all 36 hidden states; audio is decoded by the
+  24 kHz BigVGAN-flow VAE. Not numerically verified against the reference yet (see `MODEL_STATUS_AUDIO.md`).
+  The Qwen2.5-Omni encoder is under the Qwen Research License; the AuK weights are MIT.
+- `GenericTransformer.ForwardEmbeds` and `Qwen2Model.ForwardEmbeds` take an optional per-layer tap; behavior is
+  unchanged when it is null.
+- `SpeechRequest` gains optional `Instruction` and `DurationSeconds`.
+- bf16 repack recipes `auk-base`, `auk-flash` and `auk-vae` for `CheckpointRepacker`; nothing is uploaded.
+
 ## alpha.243
 
 - **Fixed: a CUDA op runs in its own backend's context even when another copy of the engine left a different one

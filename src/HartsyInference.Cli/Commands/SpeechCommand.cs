@@ -68,6 +68,16 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [Description("Classifier-free guidance strength; model default when unset.")]
         public float? CfgScale { get; init; }
 
+        /// <summary>AuK instruction: the edit command when a reference is given, the voice description otherwise.</summary>
+        [CommandOption("--instruction")]
+        [Description("AuK instruction: with --reference the verbatim edit command, without it the voice description for the text.")]
+        public string? Instruction { get; init; }
+
+        /// <summary>Output length in seconds, for models that need it (AuK without a reference).</summary>
+        [CommandOption("--duration")]
+        [Description("Output length in seconds (AuK without a reference clip; at most 30).")]
+        public float? Duration { get; init; }
+
         /// <summary>Directory to save the WAV to.</summary>
         [CommandOption("-o|--output")]
         [Description("Directory to save the WAV (defaults to the output root).")]
@@ -96,6 +106,9 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         parameters.PutIfSet("exaggeration", settings.Exaggeration);
         parameters.PutIfSet("nfe-step", settings.NfeStep);
         parameters.PutIfSet("cfg-scale", settings.CfgScale);
+        if (settings.Instruction is { Length: > 0 })
+            parameters.Put("instruction", settings.Instruction);
+        parameters.PutIfSet("duration", settings.Duration);
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Speech);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath, "en_US-lessac-medium");

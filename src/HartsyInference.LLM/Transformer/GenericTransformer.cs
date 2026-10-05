@@ -390,10 +390,12 @@ public sealed unsafe class GenericTransformer : IDisposable
 
     /// <summary>Embedding-in path: runs decoder layers <c>[startLayer, endLayer)</c> (default the full stack) and returns the <c>[1, T, hidden]</c> hidden state, final-normed when <paramref name="applyFinalNorm"/> is true.</summary>
     /// <remarks>The cache advances once per call (after the layers run) UNLESS <paramref name="advanceCache"/> is false: a staged (layer-split) driver calls this once per stage over ONE shared cache, and only the final stage may advance, or the write cursor moves stages× per token. <paramref name="tokenIds"/> is required when <see cref="TransformerConfig.PerLayerEmbeddingDim"/> is set (Gemma-4), whose per-layer embedding mixing needs the actual token ids, not just their embedding — every other architecture ignores it.
+    /// <para><paramref name="layerTap"/>, when set, is invoked as <c>(layerIndex, hidden)</c> with every executed layer's RAW output (before the final norm, so it matches HF <c>output_hidden_states[i + 1]</c> for layers before the last); the last layer's tap is also raw, and the final-normed value is the returned tensor. The tensor is borrowed: it is disposed when the next layer finishes, so the tap must consume or copy it before returning and must not retain it. A null tap leaves the forward unchanged.</para>
     /// <para><paramref name="cancel"/> is checked before the call starts and before every layer, so a long prefill stops at the next layer boundary with <see cref="OperationCanceledException"/>. While the token can be cancelled, the host also stays at most <see cref="RunAheadLayers"/> layers ahead of the device (<see cref="DeviceRunAhead"/>): an asynchronous backend would otherwise have queued the whole forward before a late cancel lands, leaving it all to run. The math and kernel shapes are those of an uncancelled call. A stopped call commits nothing: the cache length is not advanced, and the K/V rows the finished layers wrote past it are never read (attention takes the valid length explicitly) and are overwritten by the next call.</para></remarks>
     public Tensor ForwardEmbeds(IBackend backend, Tensor embeds, int t, int posStart, IKvCache cache,
         bool applyFinalNorm = true, int startLayer = 0, int? endLayer = null, Tensor? crossStates = null,
-        int crossLen = 0, ReadOnlySpan<int> tokenIds = default, bool advanceCache = true, CancellationToken cancel = default)
+        int crossLen = 0, ReadOnlySpan<int> tokenIds = default, bool advanceCache = true, CancellationToken cancel = default,
+        Action<int, Tensor>? layerTap = null)
     {
         ThrowIfDisposed();
         int last = endLayer ?? _layers.Length;
@@ -510,6 +512,7 @@ public sealed unsafe class GenericTransformer : IDisposable
                 if (ownsHidden) hidden.Dispose();
                 hidden = next;
                 ownsHidden = true;
+                layerTap?.Invoke(i, hidden);
             }
             if (advanceCache)
             {
