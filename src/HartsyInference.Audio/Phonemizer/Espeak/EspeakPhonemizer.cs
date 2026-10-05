@@ -195,13 +195,20 @@ public sealed class EspeakPhonemizer : IPhonemizer
         // A hyphen between letters joins two words (FLAG_HYPHEN): each is read on its own, written without a space.
         hyphenated = [];
         HashSet<int> afterHyphen = [];
-        for (int i = split.Count - 1; i >= 0; i--)
+        HashSet<int> digits = [];
+        List<string> kept = new(split.Count);
+        for (int i = 0; i < split.Count; i++)
         {
-            if (split[i] != Hyphen) continue;
-            if (i + 1 < split.Count) afterHyphen.Add(i);
-            split.RemoveAt(i);
-            digitByDigit = digitByDigit.Select(d => d > i ? d - 1 : d).ToHashSet();
+            if (split[i] == Hyphen)
+            {
+                if (i + 1 < split.Count) afterHyphen.Add(kept.Count); // the next word, once the marker is gone
+                continue;
+            }
+            if (digitByDigit.Contains(i)) digits.Add(kept.Count);
+            kept.Add(split[i]);
         }
+        split = kept;
+        digitByDigit = digits;
         List<IReadOnlyList<byte>> words = new(split.Count);
         ClauseState state = new() { Numbers = new EspeakNumbers(_lookup, _phon, _options) };
         string[] lower = split.Select(w => w.ToLowerInvariant()).ToArray();
