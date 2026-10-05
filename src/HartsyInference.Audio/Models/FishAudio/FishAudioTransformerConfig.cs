@@ -14,5 +14,6 @@ public sealed record FishAudioTransformerConfig
     public float RopeTheta { get; init; } = 1_000_000f;
     public float RmsNormEps { get; init; } = 1e-6f;
     public bool QkNorm { get; init; } = true;
+    /// <summary>Explicit checkpoint head width; zero preserves source compatibility for older callers.</summary>
     public int HeadDim { get; init; }
 }

@@ -9,13 +9,13 @@ public sealed record FishAudioS2Config
     public FishAudioTransformerConfig Slow { get; init; } = new()
     {
         HiddenSize = 2_560,
-        HeadDim = 128,
         NumHiddenLayers = 36,
         NumAttentionHeads = 32,
         NumKeyValueHeads = 8,
         IntermediateSize = 9_728,
         VocabSize = 155_776,
         MaxPositionEmbeddings = 32_768,
+        HeadDim = 128,
         RopeTheta = 1_000_000f,
         RmsNormEps = 1e-6f,
     };
@@ -24,13 +24,13 @@ public sealed record FishAudioS2Config
     public FishAudioTransformerConfig Fast { get; init; } = new()
     {
         HiddenSize = 2_560,
-        HeadDim = 128,
         NumHiddenLayers = 4,
         NumAttentionHeads = 32,
         NumKeyValueHeads = 8,
         IntermediateSize = 9_728,
         VocabSize = 4_096,
         MaxPositionEmbeddings = 11,
+        HeadDim = 128,
         RopeTheta = 1_000_000f,
         RmsNormEps = 1e-6f,
         QkNorm = false,
