@@ -39,7 +39,8 @@ public sealed record FishAudioS2Config
     public int NumCodebooks { get; init; } = 10;
     public int CodebookSize { get; init; } = 4_096;
     public int SemanticCodebookSize { get; init; } = 4_096;
-    public int ResidualCodebookSize { get; init; } = 1_024;
+    /// <summary>The released S2 codec uses the same 4096-entry vocabulary for every residual codebook.</summary>
+    public int ResidualCodebookSize { get; init; } = 4_096;
     public int SampleRate { get; init; } = 44_100;
     public int FrameRate { get; init; } = 21;
 
