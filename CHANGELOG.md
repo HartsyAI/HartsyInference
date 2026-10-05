@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.251
+
+- Add Breeze TTS 2, Kolibri-1, Clef, ControlFoley, and Fish Audio S2 model contracts.
+
 ## alpha.250
 
 - Add the Fish Audio S2 architecture contract and research baseline for the new Dual-AR TTS family.
