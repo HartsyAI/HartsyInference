@@ -58,6 +58,16 @@ public sealed class IndexTts2TiktokenTokenizer
         return result;
     }
 
+    /// <summary>Real <c>lang_to_token</c>: the GPT's <c>lang_embedding</c> row index for a language code —
+    /// literally that code's position in <see cref="LanguageCodes"/> (declaration order in the real
+    /// <c>LANGUAGES</c> dict), falling back to <c>"common"</c>'s index (the last entry) for an unrecognized
+    /// code, matching the real source's own fallback exactly.</summary>
+    public static int LangToToken(string lang)
+    {
+        int index = Array.IndexOf(LanguageCodes, lang.ToLowerInvariant());
+        return index >= 0 ? index : Array.IndexOf(LanguageCodes, "common");
+    }
+
     // indextts/utils/tokenizer.py's LANGUAGES dict, keys in declaration order (values are display names, unused
     // for tokenization — only the codes become special-token literals).
     private static readonly string[] LanguageCodes =
