@@ -4,7 +4,7 @@ namespace HartsyInference.Audio.Models.ControlFoley;
 public sealed record ControlFoleyConfig
 {
     public int SampleRate { get; init; } = 44_100;
-    public int Channels { get; init; } = 2;
+    public int Channels { get; init; } = 1;
     public int DefaultFrameRate { get; init; } = 24;
     public bool SupportsTextConditioning { get; init; } = true;
     public bool SupportsVideoConditioning { get; init; } = true;
