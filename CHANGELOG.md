@@ -24,6 +24,49 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.252
+
+- **Kokoro-82M: all its stock languages, each read the way the official pipeline reads it.** The voice's first letter
+  picks the front-end, as `KPipeline` does. Before this, every voice went through the American G2P, so British
+  voices spoke American English and Spanish, French, Hindi, Italian and Portuguese voices read their text as if it
+  were English.
+  - `b` voices (British) use misaki's British mode: the `gb_gold`/`gb_silver` dictionaries (same pinned commit,
+    SHA-256 checked), British -s/-ed/-ing endings, no flap, and espeak en-gb for words misaki lacks. 98.6% word
+    agreement with misaki `G2P(british=True)` on 300 sentences, the same as American.
+  - `e`/`f`/`h`/`i`/`p` voices (Spanish, French, Hindi, Italian, Brazilian Portuguese) go through the new
+    `KokoroEspeakG2P`, a port of misaki's `EspeakG2P` over the pure-C# espeak. Word agreement with misaki:
+    es 99.9%, fr-fr 99.6%, it 100%, pt-br 100%, hi 99.5% (`KokoroEspeakParityTests`, 475 sentences).
+  - `j`/`z` voices (Japanese, Mandarin) now fail with a clear error instead of reading their text as English.
+  - Kokoro installs espeak-ng data into the model cache on first use. This is the data misaki phonemizes with,
+    espeak-ng 1.52, taken from the pinned `espeakng_loader` 0.2.4 wheel (about 9 MB, SHA-256 checked, GPL-3.0).
+    The other espeak models find the same copy.
+- **espeak port: the language-dependent parts of espeak-ng 1.52**, which only English had before. Other languages
+  missed the stress, numbers and dictionary choices these govern:
+  - Per-language stress rules and flags (`SetWordStress`, every stress rule).
+  - Letter groups.
+  - Numbers read as words (`numbers.c`: cardinals, thousands, decimals, ordinal suffixes, lakh grouping).
+  - Conditional dictionary entries (`$atend`, `$atstart`, `$noun`, `$verb`, `$past`, `$only`, `$capital`) and
+    multi-word entries.
+  - `$text` replacements, `.replace` character tables, `$alt`/`$alt2` vowel quality, and `$pause`/`$brk` pauses.
+  - Prefix and suffix stripping as `TranslateWord3` does it.
+  - Rules can now see the neighbouring words in the clause.
+  - Doubled consonants, symbols (% ° & +), and hyphen-joined words written without a space.
+- **espeak port: bug fixes that also affect English (Piper, StyleTTS 2, Zonos, NeuTTS, ZipVoice):**
+  - A phoneme program's `NextVowelStarts` block was read one word short. This inserted a stray `l` after every
+    English `r` ("θɹlˈuː").
+  - A phoneme's IPA name kept the bytes after its terminator.
+  - A word starting with a pause lost its leading space.
+  - Words with a suffix at the very start of a sentence could throw `IndexOutOfRangeException`.
+  - Quote marks were read as part of the word ("'I" read as the letter i).
+  - Function words marked `$u+` were stressed mid-sentence.
+  - One phonemizer shared by concurrent requests could mix their words. The rule matcher kept its per-word vowel
+    counts, the phoneme interpreter its render-pass flag, and the IPA renderer its scratch buffer on the shared
+    instance. They are now held per call, and a test checks that parallel reads match serial ones.
+
+  English sentences matching espeak-ng 1.52 exactly: 59 → 377 of 400 (`EspeakSentenceParityTests`). Single words:
+  385 of 400 (`EspeakParityTests`, floor raised to 95%; its fixture is regenerated from espeak-ng 1.52 by
+  `tools/kokoro/espeak_parity_reference.py`).
+
 ## alpha.251
 
 - Add Breeze TTS 2, Kolibri-1, Clef, ControlFoley, and Fish Audio S2 model contracts.
