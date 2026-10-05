@@ -12,6 +12,9 @@ report. This note records the implementation contract; it does not claim engine 
   acoustic codebooks for each semantic frame.
 - The codec uses 10 RVQ codebooks with 4096 entries each and an approximately 21 Hz frame rate.
 - S2 supports multilingual, multi-speaker, multi-turn generation and inline natural-language controls.
+- The public tokenizer is Qwen3 BPE with ByteLevel pre-tokenization.
+- The S2 model weights use the Fish Audio Research License; this is separate from the code license of
+  community ports and must be surfaced in model metadata before catalog registration.
 
 ## Implementation boundary
 
@@ -22,11 +25,14 @@ primitives may be reused only after checkpoint-key and intermediate-tensor parit
 ## Open questions before generation wiring
 
 - Exact S2 safetensor key layout and fused QKV ordering.
-- Exact slow-model vocabulary and tokenizer special-token ids.
+- Exact slow-model vocabulary and tokenizer special-token ids. The current configuration's vocabulary size is
+  provisional until `config.json` and tokenizer metadata are inspected together.
 - Fast-model input projection and codebook embedding layout.
 - Codec decoder architecture, tensor prefixes, causal padding, and output scaling.
 - Prompt format for reference audio, multi-turn context, and inline controls.
 - Differences between S2 Pro, S2.1 Pro, OpenAudio S1, and OpenAudio S1-mini checkpoints.
+- Whether the released Hugging Face checkpoint is safetensors/PyTorch-native or requires a conversion step;
+  community GGUF ports are useful behavioral references but are not the engine's weight source.
 
 ## Validation plan
 
