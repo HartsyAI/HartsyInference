@@ -8,9 +8,11 @@ public sealed record BreezeTts2Config
     public int NumBackboneLayers { get; init; } = 28;
     public int NumBackboneHeads { get; init; } = 16;
     public int NumBackboneKeyValueHeads { get; init; } = 8;
+    public int BackboneIntermediateSize { get; init; } = 6_144;
     public int NumDepthDecoderLayers { get; init; } = 12;
     public int NumCodebooks { get; init; } = 16;
-    public int CodecFrameRate { get; init; } = 12;
+    public int CodecQuantizers { get; init; } = 32;
+    public float CodecFrameRate { get; init; } = 12.5f;
     public int SampleRate { get; init; } = 24_000;
     public bool SupportsVoiceDesign { get; init; } = true;
     public bool SupportsVoiceDirection { get; init; } = true;

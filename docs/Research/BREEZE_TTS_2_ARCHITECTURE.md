@@ -9,7 +9,9 @@ This note records the implementation boundary; it does not establish runtime ver
   inline vocal events, and streaming output.
 - The released checkpoint uses a T5Gemma2 text encoder, a Qwen3-derived autoregressive backbone, a 12-layer
   depth decoder, and 16 audio codebooks.
-- The bundled audio tokenizer is based on Qwen3-TTS 12 Hz and produces 24 kHz audio.
+- The bundled audio tokenizer is a causal Mimi configuration derived from `kyutai/mimi`: 32 quantizers,
+  codebook size 2048, 12.5 Hz frame rate, and 24 kHz mono output. The generated audio stream uses 16 codebooks;
+  the codec itself has 32 quantizers.
 - The eager path is the first implementation target. CUDA graph and fast-path modes are performance work,
   not part of the initial correctness contract.
 
@@ -27,6 +29,8 @@ match the Breeze checkpoint. Its top-level model and text encoder remain separat
 - CFG batching and prompt splice rules for design, direction, and clone modes.
 - Inline event tokenization for English parentheses and Chinese brackets.
 - Exact streaming codec state and first-audio chunk contract.
+- Whether Breeze's 16 generated codebooks map directly to the first 16 Mimi quantizers or use a model-specific
+  projection before decoding.
 
 ## Validation plan
 
