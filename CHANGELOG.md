@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## 2.0.0-alpha.250
+
+- Add the Fish Audio S2 architecture contract and research baseline for the new Dual-AR TTS family.
+
 ## alpha.249
 
 - **Kokoro-82M: output now matches the official model.** Reported as "works but sounds bad"; three faults, all
