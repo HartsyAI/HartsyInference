@@ -72,8 +72,8 @@ internal sealed class KokoroFrontend
         }
         if (EspeakLanguages.TryGetValue(lang, out string? language))
         {
-            await EspeakDataInstaller.EnsureAsync(cancel).ConfigureAwait(false);
-            KokoroEspeakG2P g2p = new(EspeakPhonemizer.FromCache(language));
+            string data = await EspeakDataInstaller.EnsureAsync(cancel).ConfigureAwait(false);
+            KokoroEspeakG2P g2p = new(EspeakPhonemizer.FromDataDirectory(data, language));
             return g2p.ToIpa;
         }
         throw new HartsyInferenceException($"Kokoro voice '{voice}' speaks a language ('{lang}') this engine has no "
@@ -110,8 +110,8 @@ internal sealed class KokoroFrontend
         EspeakPhonemizer? espeak = null;
         try
         {
-            await EspeakDataInstaller.EnsureAsync(cancel).ConfigureAwait(false);
-            espeak = EspeakPhonemizer.FromCache(british ? "en-gb" : "en-us");
+            string data = await EspeakDataInstaller.EnsureAsync(cancel).ConfigureAwait(false);
+            espeak = EspeakPhonemizer.FromDataDirectory(data, british ? "en-gb" : "en-us");
         }
         catch (Exception ex) when (ex is HartsyInferenceException or HttpRequestException or IOException or InvalidDataException)
         {

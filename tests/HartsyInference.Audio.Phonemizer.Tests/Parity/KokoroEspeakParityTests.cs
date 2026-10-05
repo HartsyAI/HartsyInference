@@ -43,6 +43,17 @@ public sealed class KokoroEspeakParityTests
         Assert.True(rate >= 0.99, $"{language}: {matched}/{words} = {rate:P1} of words agree\n{misses}");
     }
 
+    [Theory]
+    // Every hyphen joins its own pair of words, however many the clause holds.
+    [InlineData("fr-fr", "c'est-à-dire lundi", "sɛtadˈiʁ lœ̃dˈi")]
+    [InlineData("es", "hispano-franco-italiano", "ispˈanofɾˈankoˌitaljˈano")]
+    public void Hyphens_JoinTheirOwnWords(string language, string text, string misaki)
+    {
+        string? dir = Environment.GetEnvironmentVariable("ESPEAK_DATA_DIR");
+        if (string.IsNullOrEmpty(dir) || !File.Exists(Path.Combine(dir, "phontab"))) return; // gated
+        Assert.Equal(misaki, new KokoroEspeakG2P(EspeakPhonemizer.FromDataDirectory(dir, language)).ToIpa(text));
+    }
+
     private static string[] Strings(JsonElement array) => array.EnumerateArray().Select(e => e.GetString()!).ToArray();
 
     // Longest common subsequence of words.
