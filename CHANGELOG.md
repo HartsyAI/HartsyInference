@@ -12,6 +12,10 @@ stable release will require. Dates are UTC.
 
 - Add the Fish Audio S2 architecture contract and research baseline for the new Dual-AR TTS family.
 
+## 2.0.0-alpha.251
+
+- Add the Breeze TTS 2 architecture contract and research baseline for the Qwen3 12 Hz TTS family.
+
 ## alpha.249
 
 - **Kokoro-82M: output now matches the official model.** Reported as "works but sounds bad"; three faults, all
