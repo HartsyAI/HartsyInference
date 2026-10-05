@@ -162,10 +162,12 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         return outp;
     }
 
-    /// <summary>Per-token top-k expert selection + routing weights (softmax or sigmoid, optional renorm).</summary>
+    /// <summary>Per-token top-k expert selection + routing weights (softmax, sigmoid, or Kolibri's biased-logit
+    /// selection with unbiased sigmoid weights; optional renorm).</summary>
     private void Route(float[] logits, int n, int e, int topK, List<int>[] expertTokens, List<float>[] expertWeights)
     {
-        float[] score = new float[e];
+        float[] selection = new float[e];
+        float[] weight = new float[e];
         int[] pick = new int[topK];
         for (int t = 0; t < n; t++)
         {
@@ -175,12 +177,19 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 float max = float.NegativeInfinity;
                 for (int i = 0; i < e; i++) max = MathF.Max(max, logits[baseOff + i]);
                 float sum = 0f;
-                for (int i = 0; i < e; i++) { float v = MathF.Exp(logits[baseOff + i] - max); score[i] = v; sum += v; }
-                for (int i = 0; i < e; i++) score[i] /= sum;
+                for (int i = 0; i < e; i++) { float v = MathF.Exp(logits[baseOff + i] - max); weight[i] = v; sum += v; }
+                for (int i = 0; i < e; i++) selection[i] = weight[i] /= sum;
             }
             else
             {
-                for (int i = 0; i < e; i++) score[i] = 1f / (1f + MathF.Exp(-logits[baseOff + i]));
+                for (int i = 0; i < e; i++)
+                {
+                    float logit = logits[baseOff + i];
+                    weight[i] = 1f / (1f + MathF.Exp(-logit));
+                    selection[i] = _moe.Scoring == MoeScoring.SigmoidLogitAdd
+                        ? logit + (_correctionBias is not null ? _correctionBias[i] : 0f)
+                        : weight[i];
+                }
             }
 
             // Top-k by score (k is small; a partial selection scan is fine).
@@ -194,15 +203,15 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                     bool already = false;
                     for (int j = 0; j < kk; j++) if (pick[j] == i) { already = true; break; }
                     if (already) continue;
-                    if (score[i] > bestVal) { bestVal = score[i]; best = i; }
+                    if (selection[i] > bestVal) { bestVal = selection[i]; best = i; }
                 }
                 pick[kk] = best;
-                wsum += bestVal;
+                wsum += weight[best];
             }
             for (int kk = 0; kk < topK; kk++)
             {
                 int ex = pick[kk];
-                float wt = score[ex];
+                float wt = weight[ex];
                 if (_moe.NormTopKProb) wt /= wsum;
                 // llama.cpp scales the routed weights by w_scale unconditionally (1.0 is a no-op for Qwen/Mixtral).
                 wt *= _moe.RoutedScalingFactor;
