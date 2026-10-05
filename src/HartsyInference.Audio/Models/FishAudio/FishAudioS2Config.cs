@@ -9,6 +9,7 @@ public sealed record FishAudioS2Config
     public FishAudioTransformerConfig Slow { get; init; } = new()
     {
         HiddenSize = 2_560,
+        HeadDim = 128,
         NumHiddenLayers = 36,
         NumAttentionHeads = 32,
         NumKeyValueHeads = 8,
@@ -23,6 +24,7 @@ public sealed record FishAudioS2Config
     public FishAudioTransformerConfig Fast { get; init; } = new()
     {
         HiddenSize = 2_560,
+        HeadDim = 128,
         NumHiddenLayers = 4,
         NumAttentionHeads = 32,
         NumKeyValueHeads = 8,
@@ -36,6 +38,8 @@ public sealed record FishAudioS2Config
 
     public int NumCodebooks { get; init; } = 10;
     public int CodebookSize { get; init; } = 4_096;
+    public int SemanticCodebookSize { get; init; } = 4_096;
+    public int ResidualCodebookSize { get; init; } = 1_024;
     public int SampleRate { get; init; } = 44_100;
     public int FrameRate { get; init; } = 21;
 
