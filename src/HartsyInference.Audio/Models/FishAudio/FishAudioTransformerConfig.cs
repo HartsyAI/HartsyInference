@@ -14,5 +14,5 @@ public sealed record FishAudioTransformerConfig
     public float RopeTheta { get; init; } = 1_000_000f;
     public float RmsNormEps { get; init; } = 1e-6f;
     public bool QkNorm { get; init; } = true;
-    public int HeadDim => HiddenSize / NumAttentionHeads;
+    public int HeadDim { get; init; }
 }
