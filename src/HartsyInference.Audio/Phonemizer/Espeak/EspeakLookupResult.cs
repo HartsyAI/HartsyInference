@@ -11,4 +11,7 @@ internal readonly struct EspeakLookupResult(List<byte> phonemes, uint flags, uin
 
     /// <summary>Secondary dictionary flags (<c>dictionary_flags2</c>).</summary>
     public uint Flags2 { get; } = flags2;
+
+    /// <summary>Words after this one that a multi-word entry also covers (<c>dictionary_skipwords</c>).</summary>
+    public int SkipWords { get; init; }
 }

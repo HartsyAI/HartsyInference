@@ -10,7 +10,8 @@ report. This note records the implementation contract; it does not claim engine 
 - The slow transformer uses 32 attention heads, 8 KV heads, QK normalization, and RoPE base 1,000,000.
 - The fast AR is a four-layer transformer of approximately 0.42B parameters and emits the remaining
   acoustic codebooks for each semantic frame.
-- The codec uses 10 RVQ codebooks with 4096 entries each and an approximately 21 Hz frame rate.
+- The ModifiedDAC codec uses one 4096-entry semantic codebook and nine 1024-entry residual codebooks at an
+  approximately 21 Hz frame rate. The fast transformer still emits a separate 4096-entry vocabulary.
 - S2 supports multilingual, multi-speaker, multi-turn generation and inline natural-language controls.
 - The public tokenizer is Qwen3 BPE with ByteLevel pre-tokenization.
 - The S2 model weights use the Fish Audio Research License; this is separate from the code license of

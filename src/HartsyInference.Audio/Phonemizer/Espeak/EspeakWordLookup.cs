@@ -26,7 +26,7 @@ internal sealed class EspeakWordLookup
 
     private readonly EspeakDictFile _dict;
     private readonly byte[] _data;
-    private int _dictCondition;
+    private readonly int _dictCondition;
 
     public EspeakWordLookup(EspeakDictFile dict, int dictCondition = 0)
     {
@@ -35,8 +35,15 @@ internal sealed class EspeakWordLookup
         _dictCondition = dictCondition;
     }
 
-    /// <summary>Looks up <paramref name="word"/> (already lowercased, no surrounding spaces); on a hit, returns true and fills <paramref name="result"/> with the stored phoneme codes and flag sets, otherwise false.</summary>
-    public bool Lookup(string word, out EspeakLookupResult result)
+    /// <summary>Looks up <paramref name="word"/> (already lowercased, no surrounding spaces) as a word spoken on its
+    /// own; on a hit, returns true and fills <paramref name="result"/> with the stored phoneme codes and flag sets,
+    /// otherwise false.</summary>
+    public bool Lookup(string word, out EspeakLookupResult result) => Lookup(word, EspeakLookupContext.SingleWord, out result);
+
+    /// <summary>Looks up <paramref name="word"/> where it stands in its clause: entries whose conditions (<c>$atend</c>,
+    /// <c>$atstart</c>, <c>$noun</c>, <c>$verb</c>, <c>$past</c>, <c>$capital</c>, <c>$allcaps</c>, <c>$only</c>,
+    /// <c>$onlys</c>, <c>$sentence</c>) do not hold are skipped, as <c>LookupDict2</c> does.</summary>
+    public bool Lookup(string word, in EspeakLookupContext ctx, out EspeakLookupResult result)
     {
         result = default;
         byte[] key = TransposeAlphabet(word, out int wlen);
@@ -67,6 +74,7 @@ internal sealed class EspeakWordLookup
 
             uint flags = 0;
             uint flags2 = 0;
+            int skipWords = 0;
             bool conditionFailed = false;
 
             while (q < next)
@@ -82,8 +90,13 @@ internal sealed class EspeakWordLookup
                 }
                 else if (flag > 80)
                 {
-                    // multi-word contraction match; not resolved in single-word lookup, treat as non-matching here.
-                    conditionFailed = true;
+                    // a multi-word entry: the following words must be the stored text (e.g. French "en tous ")
+                    int nChars = next - q;
+                    byte[] following = ctx.NextWords is null ? [] : System.Text.Encoding.UTF8.GetBytes(ctx.NextWords);
+                    if (following.Length < nChars || !MemEqual(following, _data, q, nChars))
+                        conditionFailed = true;
+                    else
+                        skipWords = flag - 80;
                     q = next;
                     break;
                 }
@@ -104,14 +117,14 @@ internal sealed class EspeakWordLookup
                 continue;
             }
 
-            // No suffix removed in single-word lookup: a word that requires a suffix cannot match.
-            if ((flags2 & FlagStem) != 0)
+            if (!ConditionsHold(flags, flags2, ctx))
             {
                 p = next;
                 continue;
             }
 
-            result = new EspeakLookupResult(phonemes, flags | FlagFound, flags2);
+            // FLAG_FOUND marks a spelled pronunciation; an entry of flags alone is FLAG_FOUND_ATTRIBUTES
+            result = new EspeakLookupResult(phonemes, flags | (phonemes.Count > 0 ? FlagFound : FlagFoundAttributes), flags2) { SkipWords = skipWords };
             return true;
         }
 
@@ -157,20 +170,21 @@ internal sealed class EspeakWordLookup
             if (bits > 0)
                 outBuf[o++] = (byte)(acc << (8 - bits));
 
-            // [compressed o bytes][leftover original word bytes from o..len][0]
-            byte[] key = new byte[word.Length + 1];
+            // [compressed o bytes][leftover original UTF-8 word bytes from o..len][0]
+            byte[] original = System.Text.Encoding.UTF8.GetBytes(word);
+            byte[] key = new byte[Math.Max(original.Length, o) + 1];
             outBuf[..o].CopyTo(key);
-            for (int i = o; i < word.Length; i++)
-                key[i] = (byte)word[i];
+            for (int i = o; i < original.Length; i++)
+                key[i] = original[i];
             wlen = o | 0x40;
             return key;
         }
 
-        // Not pure alpha: use the raw word bytes as the key (matches the compiler's non-transposed path).
-        byte[] plain = new byte[word.Length + 1];
-        for (int i = 0; i < word.Length; i++)
-            plain[i] = (byte)word[i];
-        wlen = word.Length;
+        // Not pure alpha: the raw UTF-8 word is the key (the compiler's non-transposed path).
+        byte[] utf8 = System.Text.Encoding.UTF8.GetBytes(word);
+        byte[] plain = new byte[utf8.Length + 1];
+        utf8.CopyTo(plain, 0);
+        wlen = utf8.Length;
         return plain;
     }
 
@@ -195,7 +209,47 @@ internal sealed class EspeakWordLookup
         return true;
     }
 
+    // LookupDict2's per-entry conditions, in its order.
+    private static bool ConditionsHold(uint flags, uint flags2, in EspeakLookupContext ctx)
+    {
+        int endFlags = ctx.EndFlags;
+        if ((endFlags & FlagSufx) == 0 && (flags2 & FlagStem) != 0) return false; // must have a suffix
+        if ((endFlags & EspeakRuleCodes.SufxP) != 0 && (flags2 & (FlagOnly | FlagOnlyS)) != 0) return false;
+        if ((endFlags & FlagSufx) != 0)
+        {
+            if ((flags2 & FlagOnly) != 0) return false;
+            if ((flags2 & FlagOnlyS) != 0 && (endFlags & FlagSufxS) == 0) return false;
+        }
+        if ((flags2 & FlagCapital) != 0 && !ctx.FirstUpper) return false;
+        if ((flags2 & FlagAllCaps) != 0 && !ctx.AllUpper) return false;
+        if ((flags & FlagNeedsDot) != 0) return false; // no dot follows a word inside a clause
+        if ((flags2 & FlagAtEnd) != 0 && !ctx.AtEnd) return false;
+        if ((flags2 & FlagAtStart) != 0 && !ctx.AtStart) return false;
+        if ((flags2 & FlagSentence) != 0 && !ctx.Sentence) return false;
+        if ((flags2 & FlagVerb) != 0 && !(ctx.ExpectVerb || (ctx.ExpectVerbS && (endFlags & FlagSufxS) != 0))) return false;
+        if ((flags2 & FlagPast) != 0 && !ctx.ExpectPast) return false;
+        if ((flags2 & FlagNoun) != 0 && (!ctx.ExpectNoun || (endFlags & SufxV) != 0)) return false;
+        return true;
+    }
+
+    // dictionary_flags2 bits and end flags (translate.h).
+    private const uint FlagVerb = 0x10;
+    private const uint FlagNoun = 0x20;
+    private const uint FlagPast = 0x40;
+    private const uint FlagCapital = 0x200;
+    private const uint FlagAllCaps = 0x400;
+    private const uint FlagSentence = 0x2000;
+    private const uint FlagOnly = 0x4000;
+    private const uint FlagOnlyS = 0x8000;
+    private const uint FlagAtEnd = 0x20000;
+    private const uint FlagAtStart = 0x40000;
+    private const uint FlagNeedsDot = 0x02000000;
+    private const int FlagSufx = 0x04;
+    private const int FlagSufxS = 0x08;
+    private const int SufxV = 0x0800;
+
     private const uint FlagFound = 0x80000000;
+    private const uint FlagFoundAttributes = 0x40000000;
     private const uint FlagStressEnd = 0x200;
     private const uint FlagStem = 0x10000; // flags2 bit 16
 }

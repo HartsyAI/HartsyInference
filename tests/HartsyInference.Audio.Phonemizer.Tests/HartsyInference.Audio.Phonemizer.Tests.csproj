@@ -19,6 +19,8 @@
 
   <ItemGroup>
     <None Include="Fixtures\en_ipa_parity.tsv" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\en_sentence_parity.tsv" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\kokoro_espeak_parity.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>
