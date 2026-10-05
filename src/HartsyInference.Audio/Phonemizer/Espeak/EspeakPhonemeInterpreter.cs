@@ -9,6 +9,12 @@ internal sealed class EspeakPhonemeInterpreter
     private readonly ushort[] _prog;
     private readonly EspeakPhoneme _pause; // sentinel for out-of-range list access
 
+    /// <summary><c>LOPT_REDUCE</c>: bit 0 lets stress changes apply to phonemes the dictionary spelled, bit 1 treats an
+    /// unstressed word's strongest syllable as stressed.</summary>
+    public int Reduce { get; init; }
+
+    private bool _tr;
+
     public EspeakPhonemeInterpreter(EspeakPhonemeTable phonemeTable, EspeakPhonemeIndex index)
     {
         _phon = phonemeTable;
@@ -19,6 +25,7 @@ internal sealed class EspeakPhonemeInterpreter
     /// <summary>Runs the program for <paramref name="list"/>[<paramref name="pos"/>] (with neighbours as context), filling <paramref name="phdata"/>; <paramref name="tr"/> false skips the language-dependent stress ChangeIf (matches espeak passing <c>tr == NULL</c> for the IPA render pass).</summary>
     public void Interpret(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int control, bool tr, EspeakPhonemeData phdata)
     {
+        _tr = tr;
         phdata.Reset();
         EspeakPhoneme ph = At(list, pos).Ph;
         phdata.Param[EspeakProgram.ParamSetLength] = ph.StdLength;
@@ -117,7 +124,7 @@ internal sealed class EspeakPhonemeInterpreter
                 case 6:
                     int jt = instn2 >> 1;
                     if (jt == 0) prog += (instn & 0xff) - 1;
-                    else if (jt == 5 || jt == 6) prog += 11; // SwitchOnVowelType: skip the vowel-transition block
+                    else if (jt == 5 || jt == 6) prog += 12; // SwitchOnVowelType: skip its six two-word vowel cases
                     break;
                 case 9:
                     prog++; // 2-word: data in prog[1]
@@ -153,8 +160,9 @@ internal sealed class EspeakPhonemeInterpreter
 
     private static string DecodeIpa(List<byte> bytes)
     {
-        int n = bytes.Count;
-        while (n > 0 && bytes[n - 1] == 0) n--;
+        // ipa_string is a C string: it ends at the first NUL, whatever padding bytes the program word carries after it.
+        int n = bytes.IndexOf(0);
+        if (n < 0) n = bytes.Count;
         return n == 0 ? string.Empty : Encoding.UTF8.GetString(bytes.ToArray(), 0, n);
     }
 
@@ -283,10 +291,17 @@ internal sealed class EspeakPhonemeInterpreter
         else return false;
 
         int stress = At(list, pl).StressLevel & 0xf;
+        if (_tr)
+        {
+            // ChangeIf leaves phonemes the dictionary gave alone, unless the language reduces those too
+            if ((control & 1) != 0 && (At(list, pos).SynthFlags & EspeakProgram.SflagDictionary) != 0 && (Reduce & 1) == 0)
+                return false;
+            if ((Reduce & 2) != 0 && stress >= At(list, pl).WordStress)
+                stress = EspeakProgram.StressPrimary;
+        }
         if (condition == EspeakProgram.StressPrimary) return stress >= At(list, pl).WordStress;
         if (condition == EspeakProgram.StressSecondary) return stress > EspeakProgram.StressSecondary;
         if (condition >= 0 && condition < 4) return stress < level[condition];
-        _ = control;
         return false;
     }
 

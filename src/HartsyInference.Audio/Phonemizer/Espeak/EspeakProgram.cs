@@ -59,6 +59,7 @@ internal static class EspeakProgram
 
     // SFLAG bits used by conditions / rendering.
     public const int SflagSyllable = 0x04;
+    public const int SflagLengthen = 0x08;
     public const int SflagDictionary = 0x10;
     public const int SflagNextPause = 0x2000;
 }

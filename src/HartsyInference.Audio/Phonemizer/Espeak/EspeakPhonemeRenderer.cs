@@ -21,28 +21,49 @@ internal sealed class EspeakPhonemeRenderer
 
     public EspeakPhonemeRenderer(EspeakPhonemeInterpreter interpreter) => _interp = interpreter;
 
-    /// <summary>Renders the list (built by <see cref="EspeakPhonemeList"/>, with two guard entries at each end) to IPA, separating words with a space.</summary>
-    public string Render(IReadOnlyList<EspeakPhonemeListEntry> list)
+    /// <summary>Renders the list (built by <see cref="EspeakPhonemeList"/>, with two guard entries at each end) to IPA, separating words with a space.
+    /// A <paramref name="tie"/> character is written between the letters of a multi-letter phoneme (espeak's
+    /// <c>espeakPHONEMES_TIE</c>), so "ts" as one phoneme reads "t^s" and as two reads "ts".</summary>
+    public string Render(IReadOnlyList<EspeakPhonemeListEntry> list, char? tie = null)
     {
         StringBuilder sb = new();
         bool firstWord = true;
         for (int ix = 2; ix < list.Count - 2; ix++)
         {
             EspeakPhonemeListEntry e = list[ix];
-            if (e.Type == EspeakPhoneme.TypePause) continue;
-
             if (e.SourceIx != 0)
             {
+                // a word starting with a pause still starts a word
                 if (!firstWord) sb.Append(' ');
                 firstWord = false;
             }
+            if (e.Type == EspeakPhoneme.TypePause) continue;
 
             if ((e.SynthFlags & EspeakProgram.SflagSyllable) != 0 && e.StressLevel > 1)
                 sb.Append(e.StressLevel > EspeakProgram.StressSecondary ? 'ˈ' : 'ˌ');
 
-            sb.Append(Mnemonic(list, ix));
+            string mnemonic = Mnemonic(list, ix);
+            if (tie is char t) AppendTied(sb, mnemonic, t);
+            else sb.Append(mnemonic);
+            if ((e.SynthFlags & EspeakProgram.SflagLengthen) != 0)
+                sb.Append('ː'); // the length mark (phonLENGTHEN) after a lengthened phoneme
         }
         return sb.ToString();
+    }
+
+    // GetTranslatedPhonemeString's tie loop: before every non-initial alphabetic codepoint that is not a modifier or
+    // diacritic (U+02B0..U+036F).
+    private static void AppendTied(StringBuilder sb, string mnemonic, char tie)
+    {
+        int count = 0;
+        for (int i = 0; i < mnemonic.Length; i += char.IsSurrogatePair(mnemonic, i) ? 2 : 1)
+        {
+            int c = char.ConvertToUtf32(mnemonic, i);
+            if (count > 0 && (c < 0x2b0 || c > 0x36f) && System.Text.Rune.IsLetter(new System.Text.Rune(c)))
+                sb.Append(tie);
+            sb.Append(char.ConvertFromUtf32(c));
+            count++;
+        }
     }
 
     // WritePhMnemonic (IPA mode): program ipa_string, else mnemonic via ipa1.

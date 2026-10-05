@@ -4,7 +4,8 @@ using Xunit;
 namespace HartsyInference.Audio.Phonemizer.Tests;
 
 /// <summary>Broad parity sweep: runs the <see cref="EspeakPhonemizer"/> over a 400-word fixture and reports the
-/// exact-IPA match rate against espeak-ng's own output (fixture generated offline from libespeak-ng v1.50). Gated on
+/// exact-IPA match rate against espeak-ng's own output (fixture generated offline from libespeak-ng 1.52 by
+/// tools/kokoro/espeak_parity_reference.py). Gated on
 /// <c>ESPEAK_DATA_DIR</c>. The threshold is a regression floor that rises as the remaining espeak refinements land.</summary>
 public sealed class EspeakParityTests
 {
@@ -41,6 +42,6 @@ public sealed class EspeakParityTests
         // ~95% after the phoneme-program VM (data-driven allophones/IPA) + recursive suffix handling + flag-only
         // dictionary fallthrough + prefix stripping (with confirm_prefix + stem stress lock). Remaining misses are a
         // long tail of per-word rule-interpreter vowel choices (ɑː/ə/æ, -ier/-y) and noun/verb stress homographs.
-        Assert.True(rate >= 0.94, $"parity {exact}/{total} = {rate:P1} below floor");
+        Assert.True(rate >= 0.95, $"parity {exact}/{total} = {rate:P1} below floor");
     }
 }

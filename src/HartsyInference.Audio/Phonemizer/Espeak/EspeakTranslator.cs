@@ -122,7 +122,8 @@ internal sealed class EspeakTranslator
                 // A suffix ending, or (unless suppressed) a standard prefix, was found: return the phonemes so far plus
                 // the affix phonemes/type so the caller can strip the affix and re-translate the stem.
                 bool isPrefix = (et & EspeakRuleCodes.SufxP) != 0;
-                if (et != 0 && match1.PhonemesOffset >= 0 && (!isPrefix || (wordFlags & FlagNoPrefix) == 0))
+                if (et != 0 && match1.PhonemesOffset >= 0 && (wordFlags & FlagKeepEndings) == 0
+                    && (!isPrefix || (wordFlags & FlagNoPrefix) == 0))
                 {
                     endType = et;
                     endPhonemes = ReadCodes(match1.PhonemesOffset);
@@ -210,6 +211,7 @@ internal sealed class EspeakTranslator
     private static bool StemEndsWith(byte[] buf, int stemLast, string s)
     {
         int n = s.Length;
+        if (stemLast - n + 1 < 0) return false; // the clause buffer holds nothing before its first word
         for (int i = 0; i < n; i++)
             if (buf[stemLast - n + 1 + i] != (byte)s[i]) return false;
         return true;
@@ -275,6 +277,7 @@ internal sealed class EspeakTranslator
             int distanceRight = -6;
             int distanceLeft = -2;
             bool checkAtStart = false;
+            int curLetterW = 0; // MatchRule's letter_w: the last context letter read, kept for RULE_DOUBLE
 
             EspeakMatchRecord match = Empty();
             match.Points = 1;
@@ -366,9 +369,11 @@ internal sealed class EspeakTranslator
                 {
                     distanceRight += 6;
                     if (distanceRight > 18) distanceRight = 19;
+                    int lastPostW = curLetterW;
                     int letterXbytes = EspeakUtf8.Read(buf, postPtr, out int letterW) - 1;
+                    curLetterW = letterW;
                     byte letter = buf[postPtr++];
-                    failed = MatchAfter(buf, rb, ref rule, ref postPtr, ref distanceRight, letterXbytes, letterW, letter, wordPos, wordStart, groupLength, consumed, ref match, ref addPoints, ref distanceLeft);
+                    failed = MatchAfter(buf, rb, ref rule, ref postPtr, ref distanceRight, letterXbytes, letterW, lastPostW, letter, wordPos, wordStart, groupLength, consumed, ref match, ref addPoints, ref distanceLeft, wordFlags);
                 }
                 else // RULE_PRE
                 {
@@ -395,6 +400,7 @@ internal sealed class EspeakTranslator
                         letterXbytes = EspeakUtf8.Read2(buf, prePtr, true, out letterW) - 1;
                         letter = buf[prePtr];
                     }
+                    curLetterW = letterW;
                     failed = MatchBefore(buf, rb, ref rule, ref prePtr, ref distanceLeft, distanceRight, letterXbytes, letterW, lastLetterW, letter, wordFlags, ref addPoints);
                 }
 
@@ -432,7 +438,7 @@ internal sealed class EspeakTranslator
     }
 
     // The match_type==RULE_POST branch of MatchRule (forward context). Returns the new 'failed' value.
-    private int MatchAfter(byte[] buf, byte rb, ref int rule, ref int postPtr, ref int distanceRight, int letterXbytes, int letterW, byte letter, int wordPos, int wordStart, int groupLength, int consumed, ref EspeakMatchRecord match, ref int addPoints, ref int distanceLeft)
+    private int MatchAfter(byte[] buf, byte rb, ref int rule, ref int postPtr, ref int distanceRight, int letterXbytes, int letterW, int lastLetterW, byte letter, int wordPos, int wordStart, int groupLength, int consumed, ref EspeakMatchRecord match, ref int addPoints, ref int distanceLeft, int wordFlags)
     {
         switch (rb)
         {
@@ -461,7 +467,7 @@ internal sealed class EspeakTranslator
                     break;
                 }
             case EspeakRuleCodes.RuleNotVowel:
-                if (_letters.IsLetter(letterW, 0) || (letterW == ' ' && false))
+                if (_letters.IsLetter(letterW, 0) || (letterW == ' ' && (wordFlags & FlagSuffixVowel) != 0))
                     return 1;
                 addPoints = 20 - distanceRight;
                 postPtr += letterXbytes;
@@ -484,8 +490,13 @@ internal sealed class EspeakTranslator
                 else return 1;
                 break;
             case EspeakRuleCodes.RuleDouble:
-                // RULE_DOUBLE compares against the previous letter; handled via last_letter in pre path. Forward use is rare.
-                return 1;
+                if (letterW == lastLetterW)
+                {
+                    addPoints = 21 - distanceRight;
+                    postPtr += letterXbytes;
+                }
+                else return 1;
+                break;
             case (byte)'-':
                 if (letter == (byte)'-')
                     addPoints = 22 - distanceRight;
@@ -543,6 +554,9 @@ internal sealed class EspeakTranslator
                     break;
                 }
             case EspeakRuleCodes.RuleNoSuffix:
+                if ((wordFlags & FlagSuffixRemoved) != 0)
+                    return 1; // a suffix has been removed
+                postPtr--;
                 addPoints = 1;
                 break;
             default:
@@ -690,14 +704,27 @@ internal sealed class EspeakTranslator
         int p = _dict.LetterGroups[group];
         while (_data[p] != EspeakRuleCodes.RuleGroupEnd)
         {
-            int len = StrLen(p);
-            int w = pre ? wordIdx - len + 1 : wordIdx;
             if (_data[p] == (byte)'~')
                 return 0;
+            int len = StrLen(p);
+            int w = wordIdx;
+            bool skip = false;
+            if (pre)
+            {
+                // Walk back one byte per group letter; reaching the buffer start means the group can't fit.
+                for (int i = 0; i < len - 1; i++)
+                {
+                    w--;
+                    if (w < 0 || buf[w] == 0) { skip = true; break; }
+                }
+            }
             int pp = p;
-            while (_data[pp] == buf[w] && buf[w] != 0) { w++; pp++; }
-            if (_data[pp] == 0)
-                return pre ? len : w - wordIdx;
+            if (!skip)
+            {
+                while (w < buf.Length && _data[pp] == buf[w] && buf[w] != 0) { w++; pp++; }
+                if (_data[pp] == 0)
+                    return pre ? len : w - wordIdx;
+            }
             while (_data[pp++] != 0) { }
             p = pp;
         }
@@ -732,6 +759,12 @@ internal sealed class EspeakTranslator
     // word_flags bits used by the matcher.
     private const int FlagUnpronTest = unchecked((int)0x80000000);
     public const int FlagNoPrefix = 0x40000000; // suppress returning a prefix match (used while re-translating a stem)
+    /// <summary>Translate affix rules in place instead of returning them (espeak's <c>end_phonemes == NULL</c>).</summary>
+    public const int FlagKeepEndings = 0x10000000;
+    /// <summary><c>FLAG_SUFFIX_REMOVED</c>: the word is a stem whose suffix was removed.</summary>
+    public const int FlagSuffixRemoved = 0x2000;
+    /// <summary><c>FLAG_SUFFIX_VOWEL</c>: the removed suffix began with a vowel.</summary>
+    public const int FlagSuffixVowel = 0x08000000;
     private const int FlagFirstUpper = 0x2;
 
     // Suffix flags (translate.h). SufxE/SufxI are spelling-change markers; the FlagSufx* are end-flags.

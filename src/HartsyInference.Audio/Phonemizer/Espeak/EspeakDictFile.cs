@@ -42,6 +42,9 @@ internal sealed class EspeakDictFile
     /// <summary>Offset of the <c>.replace</c> character-replacement table, or -1 when absent.</summary>
     public int ReplaceChars { get; } = -1;
 
+    /// <summary>The <c>.replace</c> table as (from, to) pairs, in file order.</summary>
+    public IReadOnlyList<(string From, string To)> Replacements { get; } = [];
+
     private EspeakDictFile(byte[] data)
     {
         Data = data;
@@ -64,6 +67,30 @@ internal sealed class EspeakDictFile
         Groups2 = groups2.ToArray();
         Groups2Name = groups2Name.ToArray();
         NumGroups2 = groups2.Count;
+        if (ReplaceChars >= 0)
+            Replacements = ReadReplacements(data, ReplaceChars);
+    }
+
+    // The replace table: NUL-terminated UTF-8 "from" and "to" strings until four NUL bytes.
+    private static List<(string, string)> ReadReplacements(byte[] data, int p)
+    {
+        List<(string, string)> pairs = [];
+        while (p + 4 <= data.Length && (data[p] | data[p + 1] | data[p + 2] | data[p + 3]) != 0)
+        {
+            string from = ReadCString(data, ref p);
+            string to = ReadCString(data, ref p);
+            pairs.Add((from, to));
+        }
+        return pairs;
+    }
+
+    private static string ReadCString(byte[] data, ref int p)
+    {
+        int start = p;
+        while (p < data.Length && data[p] != 0) p++;
+        string s = System.Text.Encoding.UTF8.GetString(data, start, p - start);
+        p++;
+        return s;
     }
 
     /// <summary>Reads and parses a compiled dictionary file from <paramref name="path"/>.</summary>
