@@ -26,7 +26,7 @@ internal sealed class EspeakWordLookup
 
     private readonly EspeakDictFile _dict;
     private readonly byte[] _data;
-    private int _dictCondition;
+    private readonly int _dictCondition;
 
     public EspeakWordLookup(EspeakDictFile dict, int dictCondition = 0)
     {

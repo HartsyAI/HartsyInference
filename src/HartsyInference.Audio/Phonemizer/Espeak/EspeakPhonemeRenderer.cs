@@ -17,7 +17,6 @@ internal sealed class EspeakPhonemeRenderer
     ];
 
     private readonly EspeakPhonemeInterpreter _interp;
-    private readonly EspeakPhonemeData _phdata = new();
 
     public EspeakPhonemeRenderer(EspeakPhonemeInterpreter interpreter) => _interp = interpreter;
 
@@ -70,8 +69,9 @@ internal sealed class EspeakPhonemeRenderer
     private string Mnemonic(IReadOnlyList<EspeakPhonemeListEntry> list, int ix)
     {
         EspeakPhonemeListEntry e = list[ix];
-        _interp.Interpret(list, ix, 0, tr: false, _phdata);
-        string ipa = _phdata.IpaString;
+        EspeakPhonemeData phdata = new();
+        _interp.Interpret(list, ix, 0, tr: false, phdata);
+        string ipa = phdata.IpaString;
         if (ipa.Length > 0)
         {
             if (ipa[0] == ' ') return string.Empty;     // explicit "no name"
