@@ -54,6 +54,23 @@ public sealed class KokoroEspeakParityTests
         Assert.Equal(misaki, new KokoroEspeakG2P(EspeakPhonemizer.FromDataDirectory(dir, language)).ToIpa(text));
     }
 
+    [Fact]
+    // Kokoro keeps one phonemizer per language and every request shares it, so concurrent reads must match serial ones.
+    public void SharedPhonemizer_IsSafeAcrossThreads()
+    {
+        string? dir = Environment.GetEnvironmentVariable("ESPEAK_DATA_DIR");
+        if (string.IsNullOrEmpty(dir) || !File.Exists(Path.Combine(dir, "phontab"))) return; // gated
+
+        using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(
+            Path.Combine(AppContext.BaseDirectory, "Fixtures", "kokoro_espeak_parity.json")));
+        string[] corpus = Strings(doc.RootElement.GetProperty("corpus").GetProperty("fr-fr"));
+        KokoroEspeakG2P g2p = new(EspeakPhonemizer.FromDataDirectory(dir, "fr-fr"));
+        string[] serial = corpus.Select(g2p.ToIpa).ToArray();
+        string[] parallel = new string[corpus.Length * 8];
+        Parallel.For(0, parallel.Length, i => parallel[i] = g2p.ToIpa(corpus[i % corpus.Length]));
+        for (int i = 0; i < parallel.Length; i++) Assert.Equal(serial[i % corpus.Length], parallel[i]);
+    }
+
     private static string[] Strings(JsonElement array) => array.EnumerateArray().Select(e => e.GetString()!).ToArray();
 
     // Longest common subsequence of words.

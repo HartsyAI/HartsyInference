@@ -59,6 +59,9 @@ stable release will require. Dates are UTC.
   - Words with a suffix at the very start of a sentence could throw `IndexOutOfRangeException`.
   - Quote marks were read as part of the word ("'I" read as the letter i).
   - Function words marked `$u+` were stressed mid-sentence.
+  - One phonemizer shared by concurrent requests could mix their words. The rule matcher kept its per-word vowel
+    counts, the phoneme interpreter its render-pass flag, and the IPA renderer its scratch buffer on the shared
+    instance. They are now held per call, and a test checks that parallel reads match serial ones.
 
   English sentences matching espeak-ng 1.52 exactly: 59 → 377 of 400 (`EspeakSentenceParityTests`). Single words:
   385 of 400 (`EspeakParityTests`, floor raised to 95%; its fixture is regenerated from espeak-ng 1.52 by

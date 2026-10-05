@@ -9,11 +9,15 @@ internal sealed class EspeakTranslator
     private readonly byte[] _data;
 
     // Language options exercised by the rule matcher; defaults match English (base Latin).
-    private int _dictCondition;
+    private readonly int _dictCondition;
 
-    // Per-word mutable state read by the rules.
-    private int _wordVowelCount;
-    private int _wordStressedCount;
+    // Per-word state the rules read: vowels and stressed vowels emitted so far. Held per call, so one translator can
+    // serve concurrent callers.
+    private sealed class WordCounts
+    {
+        public int Vowels;
+        public int Stressed;
+    }
 
     public EspeakTranslator(EspeakDictFile dict, EspeakPhonemeTable phonemeTable, EspeakLetters letters, int dictCondition = 0)
     {
@@ -59,8 +63,7 @@ internal sealed class EspeakTranslator
         endType = 0;
         endPhonemes = new List<byte>();
         List<byte> phonemes = new(64);
-        _wordVowelCount = 0;
-        _wordStressedCount = 0;
+        WordCounts counts = new();
 
         int p = start;
         while (p < buf.Length && buf[p] != (byte)' ' && buf[p] != 0)
@@ -74,7 +77,7 @@ internal sealed class EspeakTranslator
             int gi = wc - _letters.LetterBitsOffset;
             if (gi >= 0 && gi < 128 && _dict.Groups3[gi] >= 0)
             {
-                MatchRule(buf, ref p, start, wcBytes, _dict.Groups3[gi], out match1, wordFlags);
+                MatchRule(buf, ref p, start, wcBytes, _dict.Groups3[gi], out match1, wordFlags, counts);
                 found = true;
             }
 
@@ -90,11 +93,11 @@ internal sealed class EspeakTranslator
                     {
                         found = true;
                         int p2 = p;
-                        MatchRule(buf, ref p2, start, 2, _dict.Groups2[g], out EspeakMatchRecord match2, wordFlags);
+                        MatchRule(buf, ref p2, start, 2, _dict.Groups2[g], out EspeakMatchRecord match2, wordFlags, counts);
                         if (match2.Points > 0)
                             match2.Points += 35; // account for 2 letters matching
 
-                        MatchRule(buf, ref p, start, 1, _dict.Groups1[c], out match1, wordFlags);
+                        MatchRule(buf, ref p, start, 1, _dict.Groups1[c], out match1, wordFlags, counts);
 
                         if (match2.Points >= match1.Points)
                         {
@@ -108,9 +111,9 @@ internal sealed class EspeakTranslator
             if (!found)
             {
                 if (_dict.Groups1[c] >= 0)
-                    MatchRule(buf, ref p, start, 1, _dict.Groups1[c], out match1, wordFlags);
+                    MatchRule(buf, ref p, start, 1, _dict.Groups1[c], out match1, wordFlags, counts);
                 else
-                    MatchRule(buf, ref p, start, 0, _dict.Groups1[0], out match1, wordFlags);
+                    MatchRule(buf, ref p, start, 0, _dict.Groups1[0], out match1, wordFlags, counts);
 
                 if (match1.Points == 0)
                     p += wcBytes - 1; // unrecognised letter: advance and continue (letter spelling handled later)
@@ -134,7 +137,7 @@ internal sealed class EspeakTranslator
                 {
                     if (match1.DelFwd >= 0)
                         buf[match1.DelFwd] = EspeakRuleCodes.ReplacedE;
-                    AppendPhonemes(phonemes, match1.PhonemesOffset);
+                    AppendPhonemes(phonemes, match1.PhonemesOffset, counts);
                 }
             }
         }
@@ -226,7 +229,7 @@ internal sealed class EspeakTranslator
 
     // Port of AppendPhonemes: copy code bytes from the dictionary data (until 0) into the output, tracking the
     // word's vowel and stressable-vowel counts which the rules consult.
-    private void AppendPhonemes(List<byte> output, int offset)
+    private void AppendPhonemes(List<byte> output, int offset, WordCounts counts)
     {
         bool unstressMark = false;
         int i = offset;
@@ -244,15 +247,15 @@ internal sealed class EspeakTranslator
             else if (ph.Type == EspeakPhoneme.TypeVowel)
             {
                 if ((ph.PhFlags & EspeakPhoneme.FlagUnstressed) == 0 && !unstressMark)
-                    _wordStressedCount++;
+                    counts.Stressed++;
                 unstressMark = false;
-                _wordVowelCount++;
+                counts.Vowels++;
             }
         }
     }
 
     // Faithful port of MatchRule (dictionary.c). buf is the word buffer; wordPos is advanced past consumed letters.
-    private void MatchRule(byte[] buf, ref int wordPos, int wordStart, int groupLength, int ruleStart, out EspeakMatchRecord matchOut, int wordFlags)
+    private void MatchRule(byte[] buf, ref int wordPos, int wordStart, int groupLength, int ruleStart, out EspeakMatchRecord matchOut, int wordFlags, WordCounts counts)
     {
         matchOut = Empty();
         if (ruleStart < 0)
@@ -401,7 +404,7 @@ internal sealed class EspeakTranslator
                         letter = buf[prePtr];
                     }
                     curLetterW = letterW;
-                    failed = MatchBefore(buf, rb, ref rule, ref prePtr, ref distanceLeft, distanceRight, letterXbytes, letterW, lastLetterW, letter, wordFlags, ref addPoints);
+                    failed = MatchBefore(buf, rb, ref rule, ref prePtr, ref distanceLeft, distanceRight, letterXbytes, letterW, lastLetterW, letter, wordFlags, ref addPoints, counts);
                 }
 
                 if (failed == 0)
@@ -575,7 +578,7 @@ internal sealed class EspeakTranslator
     }
 
     // The match_type==RULE_PRE branch of MatchRule (backward context). Returns the new 'failed' value.
-    private int MatchBefore(byte[] buf, byte rb, ref int rule, ref int prePtr, ref int distanceLeft, int distanceRight, int letterXbytes, int letterW, int lastLetterW, byte letter, int wordFlags, ref int addPoints)
+    private int MatchBefore(byte[] buf, byte rb, ref int rule, ref int prePtr, ref int distanceLeft, int distanceRight, int letterXbytes, int letterW, int lastLetterW, byte letter, int wordFlags, ref int addPoints, WordCounts counts)
     {
         switch (rb)
         {
@@ -636,13 +639,13 @@ internal sealed class EspeakTranslator
                 {
                     int syllableCount = 1;
                     while (_data[rule] == EspeakRuleCodes.RuleSyllable) { rule++; syllableCount++; }
-                    if (syllableCount <= _wordVowelCount)
+                    if (syllableCount <= counts.Vowels)
                         addPoints = 18 + syllableCount - distanceLeft;
                     else return 1;
                     break;
                 }
             case EspeakRuleCodes.RuleStressed:
-                if (_wordStressedCount > 0)
+                if (counts.Stressed > 0)
                     addPoints = 19;
                 else return 1;
                 break;
