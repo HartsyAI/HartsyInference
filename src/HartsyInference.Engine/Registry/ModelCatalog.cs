@@ -122,10 +122,10 @@ public static class ModelCatalog
                 {
                     new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "Cloudflare_clef-IQ2_XXS.gguf",
                         TargetSubdir = "LLM/clef", Role = "transformer",
-                        Sha256 = "f39f8d6c2f1ba7f1f5684c1e920e622882e12f81" },
+                        Sha256 = "51b05a26d448ccfd1c667d3a6893804caebd6763f7638c6411c6f54e0b6308cd" },
                     new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "mmproj-Cloudflare_clef-f16.gguf",
                         TargetSubdir = "LLM/clef", Role = "mmproj",
-                        Sha256 = "122adfe7a13b308042536c795c9233ab6fcfecb5" },
+                        Sha256 = "f0e2930e301586f0932262c7d232c74e385d7b4281170111c36a686e16e59ba8" },
                 },
             },
 
