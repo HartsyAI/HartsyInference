@@ -113,7 +113,8 @@ internal sealed class KokoroFrontend
             string data = await EspeakDataInstaller.EnsureAsync(cancel).ConfigureAwait(false);
             espeak = EspeakPhonemizer.FromDataDirectory(data, british ? "en-gb" : "en-us");
         }
-        catch (Exception ex) when (ex is HartsyInferenceException or HttpRequestException or IOException or InvalidDataException)
+        catch (Exception ex) when (ex is HartsyInferenceException or HttpRequestException or IOException or InvalidDataException
+            or UnauthorizedAccessException)
         {
             Logs.Warning($"[Audio][Kokoro] espeak-ng data unavailable ({ex.Message}); words outside misaki's dictionary "
                 + (british ? "fall back to letter rules." : "fall back to the CMU dictionary."));
