@@ -116,8 +116,10 @@ public sealed unsafe class MoeTests
         const string p = "model.layers.0";
         Dictionary<string, Tensor> w = new()
         {
-            [$"{p}.mlp.gate.weight"] = From([0f, 2f], 2, 1),
-            [$"{p}.mlp.gate.e_score_correction_bias"] = From([3f, 0f], 2),
+            // Raw-logit+bias selects expert 0 (0 + 0 > -2 + 1), while
+            // sigmoid(logit)+bias would incorrectly select expert 1.
+            [$"{p}.mlp.gate.weight"] = From([0f, -2f], 2, 1),
+            [$"{p}.mlp.gate.e_score_correction_bias"] = From([0f, 1f], 2),
             [$"{p}.mlp.experts.0.gate_proj.weight"] = From([1f], 1, 1),
             [$"{p}.mlp.experts.0.up_proj.weight"] = From([1f], 1, 1),
             [$"{p}.mlp.experts.0.down_proj.weight"] = From([1f], 1, 1),
@@ -134,6 +136,29 @@ public sealed unsafe class MoeTests
 
         float expected = 0.5f * (1f / (1f + MathF.Exp(-1f)));
         Assert.Equal(expected, ((float*)actual.DataPointer)[0], 5);
+        foreach (Tensor tensor in w.Values) tensor.Dispose();
+    }
+
+    [Fact]
+    public void MoeFeedForward_SigmoidLogitAdd_RequiresCorrectionBias()
+    {
+        MoeConfig moe = new()
+        {
+            NumExperts = 1,
+            NumExpertsPerTok = 1,
+            MoeIntermediateSize = 1,
+            Scoring = MoeScoring.SigmoidLogitAdd,
+        };
+        const string p = "model.layers.0";
+        Dictionary<string, Tensor> w = new()
+        {
+            [$"{p}.mlp.gate.weight"] = From([0f], 1, 1),
+        };
+
+        MoeFeedForward block = new(moe, hiddenSize: 1, lowVram: false);
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => block.LoadWeights(w, p));
+
+        Assert.Contains("e_score_correction_bias", error.Message, StringComparison.Ordinal);
         foreach (Tensor tensor in w.Values) tensor.Dispose();
     }
 

@@ -27,6 +27,10 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
             if (cb.DType != DType.F32) throw new NotSupportedException("MoE correction bias must be F32.");
             _correctionBias = HostCopy(cb, _moe.NumExperts);
         }
+        else if (_moe.Scoring == MoeScoring.SigmoidLogitAdd)
+        {
+            throw new InvalidDataException("SigmoidLogitAdd routing requires an e_score_correction_bias tensor.");
+        }
         int e = _moe.NumExperts;
         _gateW = new Tensor[e];
         _upW = new Tensor[e];
@@ -187,7 +191,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                     float logit = logits[baseOff + i];
                     weight[i] = 1f / (1f + MathF.Exp(-logit));
                     selection[i] = _moe.Scoring == MoeScoring.SigmoidLogitAdd
-                        ? logit + (_correctionBias is not null ? _correctionBias[i] : 0f)
+                        ? logit + _correctionBias![i]
                         : weight[i];
                 }
             }
