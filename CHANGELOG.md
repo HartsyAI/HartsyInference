@@ -24,6 +24,29 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.253
+
+- **Kokoro-82M: Japanese and Mandarin voices.** `j` and `z` voices, which raised an error in alpha.252, now read their
+  text the way misaki does for the official pipeline. Both are pure C#, with no Python, MeCab or native library.
+  - `j` (Japanese) ports misaki's `JAG2P` in its default cutlet mode. A MeCab tokenizer reads full UniDic 3.1.0, the
+    dictionary fugashi uses under misaki, and agrees with fugashi on every token of 474 test sentences. The kana
+    reading, number reading (num2kana), width folding and misaki's kana-to-phoneme table follow. Its output matches
+    `JAG2P()` exactly on all 474 sentences (`KokoroJapaneseParityTests`).
+  - `z` (Mandarin) ports misaki's `ZHG2P`:
+    - cn2an number normalisation;
+    - jieba 0.42.1 segmentation, including its HMM for unknown words;
+    - pypinyin 0.55.0 readings with its phrase matching;
+    - misaki's pinyin-to-IPA conversion and tone marks.
+
+    Its output matches `ZHG2P()` exactly on all 397 test sentences (`KokoroMandarinParityTests`).
+  - Their data is fetched on first use, SHA-256 checked:
+    - Japanese: UniDic 3.1.0 (a 501 MB archive, of which only the five files MeCab reads are kept, about 690 MB
+      installed; BSD licence) and misaki's `ja_words.txt` from the misaki commit the English dictionaries use.
+    - Mandarin: jieba's dictionary and HMM table, and pypinyin's two dictionaries (all MIT, about 10 MB).
+- **Kokoro-82M: voice blending.** A voice may name several packs, as `KPipeline.load_voice` allows: `af_bella,af_sky`
+  averages them row by row, matching `torch.mean` to 6e-8. A part may carry a weight: `af_bella:0.7,af_sky:0.3` or
+  `af_bella(2)+af_sky(1)`. Voice names are checked before they reach a file path.
+
 ## alpha.252
 
 - **Kokoro-82M: all its stock languages, each read the way the official pipeline reads it.** The voice's first letter
