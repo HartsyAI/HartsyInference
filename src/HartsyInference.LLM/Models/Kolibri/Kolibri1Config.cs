@@ -14,8 +14,10 @@ public sealed record Kolibri1Config
     public int ExpertCount { get; init; } = 384;
     public int RoutedExpertsPerToken { get; init; } = 6;
     public int SharedExpertCount { get; init; } = 1;
-    public int SlidingWindow { get; init; } = 512;
+    public int SlidingWindow { get; init; } = 513;
     public int FullAttentionEvery { get; init; } = 5;
+    public bool QkNorm { get; init; } = true;
+    public float RopeTheta { get; init; } = 10_000f;
     public MoeConfig Moe { get; init; } = new()
     {
         NumExperts = 384,
