@@ -1,0 +1,115 @@
+{
+ "timesteps": [
+  0.0,
+  0.37,
+  1.0
+ ],
+ "cfg": 4.5,
+ "steps": 4,
+ "batch": 2,
+ "temporal": [
+  {
+   "seconds": 8.0,
+   "latent": 345,
+   "clip": 64,
+   "visual": 32,
+   "sync": 192,
+   "samples": 353280
+  },
+  {
+   "seconds": 5.0,
+   "latent": 216,
+   "clip": 40,
+   "visual": 20,
+   "sync": 112,
+   "samples": 221184
+  },
+  {
+   "seconds": 10.5,
+   "latent": 453,
+   "clip": 84,
+   "visual": 42,
+   "sync": 248,
+   "samples": 463872
+  },
+  {
+   "seconds": 3.3,
+   "latent": 143,
+   "clip": 26,
+   "visual": 13,
+   "sync": 72,
+   "samples": 146432
+  },
+  {
+   "seconds": 6.0,
+   "latent": 259,
+   "clip": 48,
+   "visual": 24,
+   "sync": 136,
+   "samples": 265216
+  },
+  {
+   "seconds": 1.0,
+   "latent": 44,
+   "clip": 8,
+   "visual": 4,
+   "sync": 16,
+   "samples": 45056
+  },
+  {
+   "seconds": 16.0,
+   "latent": 690,
+   "clip": 128,
+   "visual": 64,
+   "sync": 392,
+   "samples": 706560
+  }
+ ],
+ "v1": {
+  "v2": false,
+  "latent_dim": 8,
+  "clip_dim": 16,
+  "visual_dim": 12,
+  "sync_dim": 10,
+  "text_dim": 14,
+  "audio_dim": 6,
+  "timbre_dim": 18,
+  "hidden_dim": 32,
+  "depth": 5,
+  "fused_depth": 3,
+  "num_heads": 4,
+  "mlp_ratio": 4.0,
+  "latent_seq_len": 12,
+  "clip_seq_len": 8,
+  "visual_seq_len": 4,
+  "sync_seq_len": 16,
+  "text_seq_len": 7
+ },
+ "v2": {
+  "v2": true,
+  "latent_dim": 8,
+  "clip_dim": 16,
+  "visual_dim": 12,
+  "sync_dim": 10,
+  "text_dim": 14,
+  "audio_dim": 6,
+  "timbre_dim": 18,
+  "hidden_dim": 32,
+  "depth": 5,
+  "fused_depth": 3,
+  "num_heads": 4,
+  "mlp_ratio": 4.0,
+  "latent_seq_len": 12,
+  "clip_seq_len": 8,
+  "visual_seq_len": 4,
+  "sync_seq_len": 16,
+  "text_seq_len": 7
+ },
+ "resized": {
+  "latent_seq_len": 10,
+  "clip_seq_len": 6,
+  "visual_seq_len": 3,
+  "sync_seq_len": 8,
+  "t": 0.6
+ }
+}
