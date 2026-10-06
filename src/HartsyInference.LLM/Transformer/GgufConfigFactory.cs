@@ -22,7 +22,10 @@ public static class GgufConfigFactory
         int hidden = RequireUInt(metadata, $"{arch}.embedding_length");
         int heads = RequireUInt(metadata, $"{arch}.attention.head_count");
         int kvHeads = (int)metadata.GetUInt32($"{arch}.attention.head_count_kv", (uint)heads);
-        int intermediate = RequireUInt(metadata, $"{arch}.feed_forward_length");
+        // Kolibri-1 is all-MoE: its converter emits only the expert FFN lengths, no dense feed_forward_length.
+        int intermediate = arch == "kolibri1" && !metadata.ContainsKey($"{arch}.feed_forward_length")
+            ? KolibriDenseFfnFallback(metadata, arch)
+            : RequireUInt(metadata, $"{arch}.feed_forward_length");
 
         // head_dim: GGUF key_length when present, else hidden / heads (coupled).
         int headDim = (int)metadata.GetUInt32($"{arch}.attention.key_length", 0u);
@@ -421,6 +424,14 @@ public static class GgufConfigFactory
         float* p = (float*)f32.DataPointer;
         for (int i = 0; i < n; i++) factors[i] = p[i];
         return factors;
+    }
+
+    private static int KolibriDenseFfnFallback(GgufMetadata metadata, string arch)
+    {
+        foreach (string key in new[] { $"{arch}.expert_feed_forward_length", $"{arch}.expert_shared_feed_forward_length" })
+            if (metadata.ContainsKey(key)) return (int)metadata.GetUInt32(key);
+        throw new ArgumentException(
+            $"GGUF metadata has neither '{arch}.feed_forward_length' nor an expert FFN length for Kolibri-1.", nameof(metadata));
     }
 
     private static int RequireUInt(GgufMetadata metadata, string key)
