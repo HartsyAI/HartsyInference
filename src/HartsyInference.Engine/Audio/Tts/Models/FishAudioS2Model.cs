@@ -11,9 +11,9 @@ namespace HartsyInference.Engine.Audio;
 
 /// <summary>Fish Audio S2 Pro (<c>fishaudio/s2-pro</c>) — a Dual-AR text-to-speech model (36-layer Qwen3-style slow
 /// transformer plus a 4-layer fast transformer over 10 codebooks) decoded by the ModifiedDAC codec to 44.1 kHz mono.
-/// Inline <c>[tag]</c> controls and <c>&lt;|speaker:N|&gt;</c> turns pass through in the text. The weights ship under the
-/// Fish Audio Research License (non-commercial); voice cloning from a reference clip needs the codec encoder, which is
-/// not ported yet.</summary>
+/// Inline <c>[tag]</c> controls and <c>&lt;|speaker:N|&gt;</c> turns pass through in the text. A reference clip plus its
+/// exact transcript clones the voice (the clip is encoded to codes by the ModifiedDAC encoder and carried in the system
+/// turn). The weights ship under the Fish Audio Research License (non-commercial).</summary>
 internal static class FishAudioS2Model
 {
     private const string Repo = "fishaudio/s2-pro";
@@ -56,15 +56,22 @@ internal static class FishAudioS2Model
 
     private static float[] Synthesize(FishAudioS2Pipeline pipeline, IBackend backend, TtsJob job)
     {
-        if (job.Reference is not null || job.ReferenceWavPath is not null)
+        int[,]? referenceCodes = null;
+        if (job.Reference is not null && job.Reference.Data.Length > 0)
         {
-            throw new NotSupportedException(
-                "Fish Audio S2 voice cloning needs the codec encoder to turn the reference clip into codes, which is not "
-                + "ported yet. Omit the reference to use the model's default voice.");
+            if (string.IsNullOrWhiteSpace(job.RefText))
+            {
+                throw new ArgumentException(
+                    "Fish Audio S2 voice cloning needs the exact transcript of the reference clip (the request's reference text).");
+            }
+            float[] clip = AudioClipCodec.DecodeMono(job.Reference, pipeline.SampleRate);
+            referenceCodes = pipeline.EncodeReference(backend, clip);
         }
         return pipeline.Synthesize(backend, new FishAudioS2Pipeline.Request
         {
             Text = job.Text,
+            ReferenceCodes = referenceCodes,
+            ReferenceText = job.RefText,
             Temperature = job.Temperature is { } t ? (float)t : null,
             TopP = job.TopP is { } p ? (float)p : null,
             TopK = job.TopK,

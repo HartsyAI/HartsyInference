@@ -24,6 +24,18 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.260
+
+- **Fish Audio S2 voice cloning.** `ModifiedDacEncoder` ports the other half of the codec: the causal strided encoder
+  (windowed transformer in its last block), the downsampling ConvNeXt stack, the pre-module transformer and the residual
+  quantizer. It matches the official encoder on a tiny random checkpoint (every stage and the exact codes) and, on the
+  real `codec.pth`, reproduced 690 of 690 codes of a generated clip. A request's reference clip plus its exact
+  transcript now becomes the cloning system turn; a reference without a transcript is rejected. The conv/transformer
+  helpers the encoder and decoder share moved into `DacOps`.
+- The tiny Fish Audio S2 test checkpoints (about 2.4 MB) are now tracked: `.gitignore` re-includes
+  `Fixtures/FishAudioS2/*.safetensors`. They were ignored with the other weights, so alpha.259's parity tests had no
+  fixtures to load on a fresh checkout.
+
 ## alpha.259
 
 - **Fish Audio S2 Dual-AR model** (`FishAudioS2DualAr`; not yet registered as a TTS model — the codec and pipeline are

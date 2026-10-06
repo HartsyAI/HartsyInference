@@ -15,6 +15,7 @@ public sealed class FishAudioS2Pipeline : IDisposable
     private readonly FishAudioS2Config _cfg;
     private readonly FishAudioS2DualAr _model;
     private readonly ModifiedDacDecoder _codec;
+    private readonly ModifiedDacEncoder _encoder;
     private readonly Func<string, int[]> _encode;
     private int _disposed;
 
@@ -23,6 +24,7 @@ public sealed class FishAudioS2Pipeline : IDisposable
         _cfg = cfg;
         _model = new FishAudioS2DualAr(cfg);
         _codec = new ModifiedDacDecoder(codec);
+        _encoder = new ModifiedDacEncoder(codec);
         _encode = encode;
     }
 
@@ -32,7 +34,11 @@ public sealed class FishAudioS2Pipeline : IDisposable
     {
         _model.LoadWeights(model);
         _codec.LoadWeights(codec);
+        _encoder.LoadWeights(codec);
     }
+
+    /// <summary>Turns a reference clip (mono, <see cref="SampleRate"/>) into the code grid a cloning prompt carries.</summary>
+    public int[,] EncodeReference(IBackend backend, ReadOnlySpan<float> audio) => _encoder.Encode(backend, audio);
 
     /// <summary>One synthesis request. Null sampling fields use the model defaults.</summary>
     public sealed record Request
@@ -148,7 +154,7 @@ public sealed class FishAudioS2Pipeline : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
-        _model.Dispose(); _codec.Dispose();
+        _model.Dispose(); _codec.Dispose(); _encoder.Dispose();
         GC.SuppressFinalize(this);
     }
 

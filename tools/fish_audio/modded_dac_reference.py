@@ -50,8 +50,12 @@ def build(latent, cb_dim, n_res, sem_size, res_size, dec_dim, dec_rates, layers,
         return md.DAC(encoder_dim=64, encoder_rates=[2, 4, 8, 8], decoder_dim=dec_dim, decoder_rates=dec_rates,
                       quantizer=q, sample_rate=44100, causal=True, encoder_transformer_layers=[0, 0, 0, 4],
                       decoder_transformer_layers=[4, 0, 0, 0], transformer_general_config=general)
+    import functools
+    general = functools.partial(md.ModelArgs, block_size=8192, n_local_heads=-1, head_dim=64, rope_base=10000,
+                                norm_eps=1e-5, dropout_rate=0.0, attn_dropout_rate=0.0, channels_first=True)
     return md.DAC(encoder_dim=enc_dim, encoder_rates=[2, 2, 2, 2], decoder_dim=dec_dim, decoder_rates=dec_rates,
-                  quantizer=q, sample_rate=44100, causal=True)
+                  quantizer=q, sample_rate=44100, causal=True, encoder_transformer_layers=[0, 0, 0, 2],
+                  transformer_general_config=general)
 
 
 if len(sys.argv) > 3:   # real S2 codec
@@ -66,7 +70,15 @@ if len(sys.argv) > 3:   # real S2 codec
     with torch.no_grad():
         z = model.quantizer.decode(codes.clone())
         audio = model.decoder(z)
-    save_file({"codes": codes[0].float().contiguous(), "audio": audio[0, 0].contiguous()}, str(out / "s2_codec_reference.safetensors"))
+    ref = {"codes": codes[0].float().contiguous(), "audio": audio[0, 0].contiguous()}
+    if len(sys.argv) > 4:   # also encode a reference clip (44.1 kHz mono 16-bit WAV)
+        import wave, numpy as np
+        wf = wave.open(sys.argv[4]); pcm = np.frombuffer(wf.readframes(wf.getnframes()), dtype=np.int16).astype(np.float32) / 32768
+        clip = torch.from_numpy(pcm)[None]
+        with torch.no_grad():
+            enc_codes, _ = model.encode(clip)
+        ref["enc_audio"] = clip[0].contiguous(); ref["enc_codes"] = enc_codes[0].float().contiguous()
+    save_file(ref, str(out / "s2_codec_reference.safetensors"))
     print("wrote real reference", audio.shape)
     sys.exit(0)
 
@@ -86,6 +98,8 @@ with torch.no_grad():
         else:
             p.copy_(torch.randn_like(p) * 0.05)
 fp32_rope(model.quantizer.post_module, 16, 10000)
+fp32_rope(model.quantizer.pre_module, 16, 10000)
+fp32_rope(model.encoder.block[4].block[5], 64, 10000)
 codes = torch.stack([torch.randint(0, 32, (T,))] + [torch.randint(0, 16, (T,)) for _ in range(3)])[None]
 taps = {}
 with torch.no_grad():
@@ -108,8 +122,24 @@ with torch.no_grad():
         for j in range(2, 5): x = blk[j](x)
         taps[f"stage{i}"] = x[0].contiguous()
     audio = model.decoder(zu)
-ck = {k: v.contiguous().float() for k, v in model.state_dict().items() if k.startswith(("quantizer.", "decoder."))
-      and not k.endswith(("causal_mask", "freqs_cis")) and "pre_module" not in k and "downsample" not in k}
+# encode side: reference clip -> codes through the official encoder + quantizer
+g = torch.Generator().manual_seed(5)
+audio_in = (torch.randn(1, 1, 640, generator=g) * 0.3).clamp(-1, 1)
+with torch.no_grad():
+    enc = model.encoder.block
+    x = enc[0](audio_in)
+    for i in range(1, 5):
+        x = enc[i](x); taps[f"enc{i-1}"] = x[0].contiguous()
+    x = enc[6](enc[5](x)); taps["latent"] = x[0].contiguous()
+    q = model.quantizer
+    zd = q.downsample(x)
+    zpre = q.pre_module(zd)
+    taps["pre"] = zpre[0].T.contiguous()
+    enc_codes = q(x).codes[0]
+ck = {k: v.contiguous().float() for k, v in model.state_dict().items() if k.startswith(("quantizer.", "decoder.", "encoder."))
+      and not k.endswith(("causal_mask", "freqs_cis"))}
+ck["ref.enc_audio"] = audio_in[0, 0].contiguous()
+ck["ref.enc_codes"] = enc_codes.float().contiguous()
 ck["ref.audio"] = audio[0, 0].contiguous()
 for k, v in taps.items(): ck[f"tap.{k}"] = v.float().contiguous()
 ck["ref.codes"] = codes[0].float().contiguous()
