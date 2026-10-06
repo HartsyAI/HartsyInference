@@ -36,6 +36,7 @@
     <None Include="DeepSeekV41\Fixtures\*.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <None Include="Fixtures\Clef\*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

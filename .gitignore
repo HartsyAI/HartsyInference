@@ -68,6 +68,7 @@ Desktop.ini
 *.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioS2/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/Breeze/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Clef/*.safetensors
 *.gguf
 *.ckpt
 *.pt

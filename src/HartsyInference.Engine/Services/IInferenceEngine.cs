@@ -70,4 +70,7 @@ public interface IInferenceEngine : IDisposable
 
     /// <summary>Text-to-vector embeddings (RAG/semantic-search style dense sentence vectors).</summary>
     IEmbeddingService Embeddings { get; }
+
+    /// <summary>Typed decisions over a state and a schema of questions (Cloudflare Clef).</summary>
+    IDecisionService Decisions { get; }
 }

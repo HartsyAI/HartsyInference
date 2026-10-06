@@ -1159,6 +1159,25 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Cloudflare Clef-Flash (Apache-2.0): Qwen3.5-9B backbone plus a joint schema head; text-only here (no image/video).
+                // API: POST /v1/systemone. The release directory is the model path.
+                Id = "clef-flash", Modality = Modality.Decision, DisplayName = "Clef-Flash (typed decisions)",
+                Architecture = "Qwen3.5 hybrid backbone + joint schema head", Status = st, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model-00001-of-00004.safetensors", TargetSubdir = "Decision/clef-flash", Role = "transformer" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model-00002-of-00004.safetensors", TargetSubdir = "Decision/clef-flash", Role = "transformer" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model-00003-of-00004.safetensors", TargetSubdir = "Decision/clef-flash", Role = "transformer" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model-00004-of-00004.safetensors", TargetSubdir = "Decision/clef-flash", Role = "transformer" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model.safetensors.index.json", TargetSubdir = "Decision/clef-flash", Role = "config" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "joint_head.safetensors", TargetSubdir = "Decision/clef-flash", Role = "head" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "joint_head_config.json", TargetSubdir = "Decision/clef-flash", Role = "config" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "config.json", TargetSubdir = "Decision/clef-flash", Role = "config" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "tokenizer.json", TargetSubdir = "Decision/clef-flash", Role = "tokenizer" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "f5", Modality = tts, DisplayName = "F5-TTS", Architecture = "voice cloning, flow-matching DiT", Status = ok,
                 CliDrivable = true, // `hartsy speak -m f5 --reference <wav> --ref-text "..."` — TtsCatalog key is "f5" (was "f5-tts" here before, which never resolved); clone-only, needs both
                 Assets = new ModelAsset[]

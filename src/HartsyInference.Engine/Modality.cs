@@ -43,4 +43,8 @@ public enum Modality
     /// <summary>Video/image restoration — upscale, deartifact, denoise (SeedVR2). Distinct from
     /// <see cref="Video"/> so the catalog and CLI never conflate restorers with generators.</summary>
     Restore,
+
+    /// <summary>Typed decisions: a state plus a schema of choice / score / true-false questions answered in one pass
+    /// (Cloudflare Clef). API only, through the Jev / SystemOne <c>/v1/systemone</c> route.</summary>
+    Decision,
 }
