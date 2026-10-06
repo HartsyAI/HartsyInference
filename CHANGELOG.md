@@ -24,6 +24,18 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.265
+
+- **Added: ControlFoley video and reference-audio conditioning (Audio layer).** `ControlFoleyPipeline` takes an optional decoded
+  source video (CLIP frames, CAV-MAE-ST visual tokens, Synchformer sync tokens, with the official frame sampling and a
+  bit-exact bicubic resize) and an optional reference clip (CLAP audio embedding and MusicGen-Style timbre feature, with a
+  julius-compatible resampler). Each encoder matches the official python on tiny random instances (~1e-6 to 1e-4) and on real
+  weights (Synchformer ~1.4e-6 relative, CAV-MAE 1e-6, CLAP embedding 1.5e-7, timbre 6e-8). The official CAV-MAE-ST load is a no-op
+  (all 649 checkpoint keys carry a `module.` prefix and `strict=False` ignores them, so official inference runs that branch
+  with random weights); the port strips the prefix and loads the real weights. Not wired into the engine or Swarm: `MusicRequest`
+  has no video field, mp4 decoding is not connected, and no pipeline-level run has been done (it needs the 11 GB network).
+  Version bump: alpha.264 -> alpha.265.
+
 ## alpha.264
 
 - **Added: ControlFoley text-to-audio (`controlfoley`, `hartsy music -m controlfoley`).** Native port of Xiaomi's flow-matching

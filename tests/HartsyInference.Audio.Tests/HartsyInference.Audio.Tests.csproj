@@ -28,7 +28,10 @@
     <None Include="Fixtures\FishAudioS2\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\Breeze\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\ControlFoley\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\ControlFoleyVideo\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\ControlFoleyClip\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\ControlFoleyClap\**\*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures\ControlFoleyStyle\**\*" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\kokoro_zh_parity.json" CopyToOutputDirectory="PreserveNewest" />
     <None Include="Fixtures\kokoro_japanese_parity.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

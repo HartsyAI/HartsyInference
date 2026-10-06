@@ -1,0 +1,1 @@
+{"hidden": 40, "mert_layers": 2, "mert_heads": 4, "mert_ffn": 80, "mert_conv": 16, "pos_kernel": 16, "pos_groups": 4, "dim": 32, "heads": 4, "layers": 2, "bins": 16, "codebooks": 3, "ds": 3, "out_dim": 24, "eval_q": 1, "cases": 2}
