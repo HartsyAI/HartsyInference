@@ -40,6 +40,13 @@ stable release will require. Dates are UTC.
   official implementation to about 1e-7 on a tiny random checkpoint, and decoding with the real released `codec.pth`
   matches to 3e-6 (`tools/fish_audio/modded_dac_reference.py`, `ModifiedDacRealWeightTests`). Reference-audio encoding
   is not ported yet.
+- **Fish Audio S2 Pro text-to-speech** (`fishaudio`, status ValidationPending). `FishAudioS2Prompt` builds fish-speech's
+  conversation prompt (system / user / open assistant turn, `<|speaker:N|>` batching, assistant turns carrying earlier
+  batches' codes), `FishAudioS2Pipeline` runs the Dual-AR loop to `<|im_end|>` and decodes with `ModifiedDacDecoder`,
+  and `FishAudioS2Model` registers it in the speech catalog (`fishaudio/s2-pro`: tokenizer, `codec.pth`, sharded
+  weights). A real-weight CPU run (seed 7) produced 3.2 s that Whisper base.en transcribed word-exact. Reference-voice
+  cloning is refused with a clear message until the codec encoder is ported. The weights are non-commercial
+  (Fish Audio Research License).
 
 ## alpha.258
 
