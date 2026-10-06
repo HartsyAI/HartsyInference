@@ -107,6 +107,7 @@ IQ2_XS/IQ2_XXS/IQ1_S/IQ1_M by known-block test only, no small published file).
 | **RWKV-6** | ✅ verified | `RwkvModel` — WKV6 recurrence + data-dependent token-shift LoRA + GroupNorm. C# runs at **cosine 1.0** (argmax 281) vs the validated Python ref (= official `rwkv` package). No-copy `Reshape` relabel views to fit the 1.6B model in host RAM. RWKV-7 = near-variant. |
 | **Hybrids** (Jamba/Zamba2/Granite-4) | ⬜ planned | Mamba + attention + MoE interleave (7c). |
 | **Qwen3.5 dense** (Gated DeltaNet hybrid) | ✅ verified (0.8B) | `Qwen35Model` (new `HartsyInference.LLM.Ssm.ISsmModel`, not `GenericTransformer` — mixes TWO attention mechanisms per model, not pure-recurrent like the rows above). ([details](#qwen35-dense)) |
+| **Clef-Flash** (`clef-flash`, typed decisions) | 🧪 | Qwen3.5-9B trunk (`Qwen35Model.FromHuggingFace`) + joint schema head, `POST /v1/systemone`. Trunk and head match the official modules on tiny checkpoints (`tools/clef/`); the encoder matches `encode_record` with the real tokenizer. Real-weight CPU run 2026-10-06 (3.5 min, 2 requests): README examples answered correctly. Not done: image/video input, GPU and Swarm runs, numeric comparison against python on the real weights. Apache-2.0. |
 | **Encoder-decoder** (T5/FLAN-T5) | ✅ verified | `T5Model` — full seq2seq (rel-pos bias, no 1/√d scaling, cross-attn, GeGLU). flan-t5-small encoder + decoder **cosine = 1.0** vs HF; e2e "Das Haus ist schön." BART is a near-variant. |
 
 ## Text / vision encoders

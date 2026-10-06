@@ -24,6 +24,15 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.263
+
+- **Added: Cloudflare Clef-Flash typed decisions (`clef-flash`, `POST /v1/systemone`).** The joint schema head, a Qwen3.5
+  trunk built from HuggingFace-keyed weights (`Qwen35Model.FromHuggingFace`, all-position hidden states), the record
+  encoder and the Jev / SystemOne response shape. Text input only; images and video are rejected. The head and trunk
+  match the official modules on tiny random checkpoints, and the encoder matches `encode_record` with the real
+  tokenizer. Real weights, CPU: the README invoice and support examples answer correctly (overdue 0.97, technical 0.96,
+  outage 0.84). New `Modality.Decision`, `IDecisionService`. Version bump: alpha.262 -> alpha.263.
+
 ## alpha.262
 
 - **Added: Breeze TTS 2 (`breeze`) runs natively.** T5Gemma2 text encoder, Qwen3 backbone with audio-frame embedding
