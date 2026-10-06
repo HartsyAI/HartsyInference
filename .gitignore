@@ -67,6 +67,7 @@ Desktop.ini
 ## Model files (large binary files — don't commit)
 *.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioS2/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/Breeze/*.safetensors
 *.gguf
 *.ckpt
 *.pt
