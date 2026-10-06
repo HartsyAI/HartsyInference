@@ -34,6 +34,12 @@ stable release will require. Dates are UTC.
   and the fast model takes the post-norm slow hidden state. Sampling filters on the untempered distribution as upstream
   does. Slow logits, post-norm hidden states and fast logits match the official `DualARTransformer` on a tiny random
   checkpoint to 2e-6 (`tools/fish_audio/s2_dual_ar_reference.py`).
+- **Fish Audio S2 codec decoder** (`ModifiedDacDecoder`): the code-to-waveform half of fish-speech's ModifiedDAC — the
+  semantic + nine residual codebooks, the 8-layer window-limited causal transformer, the causal ConvTranspose/ConvNeXt
+  upsampler and the causal Snake/residual-unit decoder, 2048 samples per frame at 44.1 kHz. Every stage matches the
+  official implementation to about 1e-7 on a tiny random checkpoint, and decoding with the real released `codec.pth`
+  matches to 3e-6 (`tools/fish_audio/modded_dac_reference.py`, `ModifiedDacRealWeightTests`). Reference-audio encoding
+  is not ported yet.
 
 ## alpha.258
 
