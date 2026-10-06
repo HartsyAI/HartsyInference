@@ -70,6 +70,7 @@ Desktop.ini
 !/tests/HartsyInference.Audio.Tests/Fixtures/Breeze/*.safetensors
 !/tests/HartsyInference.LLM.Tests/Fixtures/Clef/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoley/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClip/*.safetensors
 *.gguf
 *.ckpt
 *.pt
