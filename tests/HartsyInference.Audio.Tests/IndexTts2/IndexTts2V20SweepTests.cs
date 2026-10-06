@@ -48,6 +48,7 @@ public sealed class IndexTts2V20SweepTests(ITestOutputHelper output)
         IndexTts2Timings refTimings = new();
         using IndexTts2Reference reference = pipeline.PrepareReference(backend, refAudio.Channels[0], refAudio.SampleRate, refTimings);
         output.WriteLine($"reference prepared in {refTimings.ReferenceMs:F0} ms ({reference.Seconds:F1}s clip)");
+        File.AppendAllText(Path.Combine(outDir, $"timings_{tag}.txt"), $"reference {refTimings.ReferenceMs:F0} ms{Environment.NewLine}");
 
         for (int i = 0; i < Math.Min(limit, sentences.Length); i++)
         {
@@ -56,6 +57,7 @@ public sealed class IndexTts2V20SweepTests(ITestOutputHelper output)
             string path = Path.Combine(outDir, $"s{i}_{tag}.wav");
             WavFile.WriteMono16(path, pcm, 22_050);
             output.WriteLine($"[{i}] {t}");
+            File.AppendAllText(Path.Combine(outDir, $"timings_{tag}.txt"), $"[{i}] {t}{Environment.NewLine}");
         }
     }
 }

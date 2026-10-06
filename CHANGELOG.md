@@ -54,6 +54,12 @@ compared token for token. Earlier checks only listened to the output, so these d
   the real tokenizer's output, including `quick_streaming_tokens`), 200 ms of silence between segments, and the English
   spoken-form normalization the reference runs before tokenizing (contractions, numbers, years, decimals, percent, money,
   ordinals, times, titles, punctuation map). `"2.0"` is now read "two point oh" instead of being passed as digits.
+- **Changed: the S2Mel DiT and `VitsWaveNet` run entirely on backend ops.** The DiT's AdaLN, SwiGLU product, residual adds,
+  concats and transposes, and the WaveNet's conditioning add, gate, split and skip accumulation were host loops that read
+  every activation through `DataPointer` — on a GPU backend each is a device-to-host round trip, dozens per DiT block per
+  flow step (the live server needed about two minutes for six seconds of audio). `cond_x_merge_linear` is also split so
+  the per-frame style broadcast concat is a single per-step vector. Numerics are unchanged (parity test and the VITS
+  tests pass); speed on CUDA is measured after deploy from the new per-generation timing log.
 - **Added: `IndexTts2Reference` / `PrepareReference` / `SynthesizeStream`.** The reference clip's front end (w2v-bert, mel,
   CAM++, conditioning) is computed once and reused, and synthesis can stream one text segment at a time. The engine's
   `indextts2` runner now implements `IStreamingTtsRunner`, caches the most recent reference clip and logs per-stage
