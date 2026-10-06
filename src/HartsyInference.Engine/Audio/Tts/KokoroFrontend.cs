@@ -1,4 +1,5 @@
 using HartsyInference.Audio.Frontends;
+using HartsyInference.Audio.Models.Kokoro;
 using HartsyInference.Audio.Phonemizer.Espeak;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
@@ -9,7 +10,8 @@ namespace HartsyInference.Engine.Audio;
 /// voice name's first letter. <c>a</c> American and <c>b</c> British English read through misaki's lexicon (us_ or
 /// gb_ dictionaries) with espeak and, for American, the CMU dictionary behind it; <c>e</c> Spanish, <c>f</c> French,
 /// <c>h</c> Hindi, <c>i</c> Italian and <c>p</c> Brazilian Portuguese through espeak-ng as misaki's
-/// <c>EspeakG2P</c> uses it. Each is built on first use and kept.</summary>
+/// <c>EspeakG2P</c> uses it; <c>j</c> Japanese through misaki's <c>JAG2P</c> (MeCab over UniDic 3.1.0) and <c>z</c>
+/// Mandarin through misaki's <c>ZHG2P</c> (jieba, pypinyin and cn2an). Each is built on first use and kept.</summary>
 internal sealed class KokoroFrontend
 {
     /// <summary>Public-domain CMU Pronouncing Dictionary — the American fallback after misaki and espeak.</summary>
@@ -34,8 +36,13 @@ internal sealed class KokoroFrontend
     private readonly Dictionary<char, Func<string, string>> _frontends = [];
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    /// <summary>The language code of <paramref name="voice"/>: its first letter, lower-cased.</summary>
-    public static char LanguageOf(string voice) => voice.Length == 0 ? 'a' : char.ToLowerInvariant(voice[0]);
+    /// <summary>The language code of <paramref name="voice"/>: its first letter, lower-cased. For a blend
+    /// (<see cref="KokoroVoiceMix"/>) the first voice's.</summary>
+    public static char LanguageOf(string voice)
+    {
+        string first = voice.TrimStart();
+        return first.Length == 0 ? 'a' : char.ToLowerInvariant(first[0]);
+    }
 
     /// <summary>The phonemizer for the language <paramref name="voice"/> speaks, built on first use.</summary>
     /// <exception cref="HartsyInferenceException">The voice's language has no front-end here.</exception>
@@ -76,8 +83,18 @@ internal sealed class KokoroFrontend
             KokoroEspeakG2P g2p = new(EspeakPhonemizer.FromDataDirectory(data, language));
             return g2p.ToIpa;
         }
+        if (lang == 'j')
+        {
+            KokoroJapaneseG2P g2p = await KokoroJapaneseAssets.LoadAsync(cancel).ConfigureAwait(false);
+            return g2p.ToIpa;
+        }
+        if (lang == 'z')
+        {
+            KokoroMandarinG2P g2p = await KokoroMandarinAssets.LoadAsync(cancel).ConfigureAwait(false);
+            return g2p.ToIpa;
+        }
         throw new HartsyInferenceException($"Kokoro voice '{voice}' speaks a language ('{lang}') this engine has no "
-            + "front-end for. Use a voice starting with a, b, e, f, h, i or p.");
+            + "front-end for. Use a voice starting with a, b, e, f, h, i, j, p or z.");
     }
 
     /// <summary>misaki's lexicon for American (us_) or British (gb_) English, with espeak (en-us or en-gb) behind it
