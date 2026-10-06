@@ -55,6 +55,7 @@ internal static class TtsCatalog
         ["csm"] = CsmTtsModel.Descriptor,
         ["neutts"] = NeuTtsModel.Descriptor,
         ["fishspeech"] = FishSpeechModel.Descriptor,
+        ["fishaudio"] = FishAudioS2Model.Descriptor,
         ["cosyvoice"] = CosyVoiceModel.Descriptor,
         ["f5"] = F5TtsModel.Descriptor,
         ["qwen3tts"] = Qwen3TtsModel.Descriptor,
