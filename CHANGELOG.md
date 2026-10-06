@@ -24,6 +24,14 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.257
+
+- Add Kolibri-1 native GGUF support: key mapping for sandwich norms, Q/K norm, MoE tensors and the router bias;
+  local/global attention with NoPE; and Kolibri's sigmoid-logit-add expert routing, which requires the correction bias.
+- **Fixed: Kolibri-1 GGUFs failed to load.** The published converter emits only the expert FFN lengths, but the loader
+  required `kolibri1.feed_forward_length`. It now falls back to `expert_feed_forward_length`, then
+  `expert_shared_feed_forward_length`, and still throws if none is present.
+
 ## alpha.256
 
 - Add the Breeze TTS 2 architecture and checkpoint configuration contract. Its Mimi codec is the shared
