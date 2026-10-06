@@ -38,8 +38,8 @@ public sealed unsafe class BreezeTts2Pipeline : IDisposable
 
     public int SampleRate => _vocoder.SampleRate;
 
-    /// <param name="model">The main checkpoint (<c>backbone_model.*</c>, <c>depth_decoder.*</c>, <c>text_encoder*.*</c>, <c>lm_head.weight</c>).</param>
-    /// <param name="audioTokenizer">The bundled <c>audio_tokenizer/model.safetensors</c> (<c>decoder.*</c> vocoder, <c>encoder.*</c> Mimi encoder).</param>
+    /// <param name="model">The main checkpoint (<c>backbone_model.*</c>, <c>depth_decoder.*</c>, <c>text_encoder*.*</c>, <c>codec_model.*</c>, <c>lm_head.weight</c>).</param>
+    /// <param name="audioTokenizer">The bundled <c>audio_tokenizer/model.safetensors</c> (the <c>decoder.*</c> vocoder).</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> model, IReadOnlyDictionary<string, Tensor> audioTokenizer)
     {
         _model.LoadWeights(model);
@@ -47,10 +47,10 @@ public sealed unsafe class BreezeTts2Pipeline : IDisposable
         _textProj = model["text_encoder_proj.weight"];
         _vocoder.LoadWeights(audioTokenizer);
 
-        // The tokenizer's Mimi encoder is HF-layout with an extra leading "encoder." on every key.
+        // The checkpoint carries the full HF Mimi (32 quantizers) as codec_model.*; only its encoder is used, for reference clips.
         Dictionary<string, Tensor> mimi = new();
-        foreach (KeyValuePair<string, Tensor> kv in audioTokenizer)
-            if (kv.Key.StartsWith("encoder.", StringComparison.Ordinal)) mimi[kv.Key["encoder.".Length..]] = kv.Value;
+        foreach (KeyValuePair<string, Tensor> kv in model)
+            if (kv.Key.StartsWith("codec_model.", StringComparison.Ordinal)) mimi[kv.Key["codec_model.".Length..]] = kv.Value;
         _referenceEncoder.LoadWeights(mimi);
     }
 

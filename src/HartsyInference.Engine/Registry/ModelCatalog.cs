@@ -1143,6 +1143,22 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Breeze TTS 2 (BreezeBlue): T5Gemma2 text encoder + Qwen3 backbone + depth decoder + Qwen3-TTS-Tokenizer-12Hz
+                // vocoder. Voice clone / design / direction. Research and non-commercial weights.
+                Id = "breeze", Modality = tts, DisplayName = "Breeze TTS 2", Architecture = "T5Gemma2 + Qwen3 backbone + depth decoder", Status = st,
+                CliDrivable = true, // `hartsy speak -m breeze`
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "model-00001-of-00002.safetensors", TargetSubdir = "Audio/BreezeTts2", Role = "transformer" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "model-00002-of-00002.safetensors", TargetSubdir = "Audio/BreezeTts2", Role = "transformer" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "model.safetensors.index.json", TargetSubdir = "Audio/BreezeTts2", Role = "config" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "audio_tokenizer/model.safetensors", TargetSubdir = "Audio/BreezeTts2", Role = "codec" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "audio_tokenizer/config.json", TargetSubdir = "Audio/BreezeTts2", Role = "config" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "tokenizer.json", TargetSubdir = "Audio/BreezeTts2", Role = "tokenizer" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "f5", Modality = tts, DisplayName = "F5-TTS", Architecture = "voice cloning, flow-matching DiT", Status = ok,
                 CliDrivable = true, // `hartsy speak -m f5 --reference <wav> --ref-text "..."` — TtsCatalog key is "f5" (was "f5-tts" here before, which never resolved); clone-only, needs both
                 Assets = new ModelAsset[]

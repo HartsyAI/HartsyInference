@@ -73,6 +73,7 @@ public sealed unsafe class BreezeTts2Model : IDisposable
                 for (int v = 0; v < vocab; v++) dst[(long)v * hid + d] = src[((long)k * hid + d) * vocab + v];
             _codebookHeads[k] = t;
         }
+        GC.KeepAlive(heads);   // the converted copy is only reached through the raw pointer above
     }
 
     /// <summary>Embedding of a generated/prompt audio frame: the sum over codebooks of
