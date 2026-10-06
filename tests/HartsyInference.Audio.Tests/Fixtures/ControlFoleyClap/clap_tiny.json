@@ -1,0 +1,1 @@
+{"embed_dim": 16, "depths": [2, 2, 2, 2], "heads": [2, 2, 4, 4], "joint": 24, "cases": 3}

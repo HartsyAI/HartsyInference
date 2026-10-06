@@ -71,6 +71,7 @@ Desktop.ini
 !/tests/HartsyInference.LLM.Tests/Fixtures/Clef/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoley/*.safetensors
 !/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClip/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClap/*.safetensors
 *.gguf
 *.ckpt
 *.pt
