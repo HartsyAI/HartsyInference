@@ -1,6 +1,8 @@
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.IndexTts2;
+using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
@@ -115,7 +117,11 @@ internal static class IndexTts2Model
                 cfg: v20 ? IndexTts2Config.V2_0 : IndexTts2Config.V2_5, cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][IndexTTS2] Loaded {repo} (IndexTTS-{(v20 ? "2.0" : "2.5")}, emotion-controllable zero-shot cloning, 22050 Hz).");
 
-            return new TtsRunner(22_050, (backend, job) => Synthesize(pipeline, backend, job), pipeline);
+            ReferenceCache references = new(pipeline);
+            return new StreamingTtsRunner(22_050,
+                (backend, job) => Synthesize(pipeline, references, backend, job),
+                (backend, job, token) => Stream(pipeline, references, backend, job, token),
+                references, pipeline);
         },
     };
 
@@ -162,12 +168,79 @@ internal static class IndexTts2Model
 
     private const int ReferenceRate = 24_000;
 
-    private static float[] Synthesize(IndexTts2Pipeline pipeline, HartsyInference.Core.Backends.IBackend backend, TtsJob job)
+    /// <summary>While streaming, short neighbouring sentences are not merged until this many tokens have been
+    /// consumed, so the first audible segment stays small (the reference's <c>quick_streaming_tokens</c>).</summary>
+    private const int StreamQuickTokens = 40;
+
+    private static float[] Synthesize(IndexTts2Pipeline pipeline, ReferenceCache references, HartsyInference.Core.Backends.IBackend backend, TtsJob job)
     {
-        if (job.ReferenceMono24k is not { Length: > 0 })
+        IndexTts2Reference reference = references.Get(backend, RequireReference(pipeline, job));
+        return pipeline.Synthesize(backend, job.Text, reference, BuildOptions(job));
+    }
+
+    private static float[] RequireReference(IndexTts2Pipeline pipeline, TtsJob job)
+    {
+        if (job.ReferenceMono24k is not { Length: > 0 } clip)
         {
             throw new InvalidOperationException($"{pipeline.ModelName} needs a voice reference clip (zero-shot cloning only).");
         }
-        return pipeline.Synthesize(backend, job.Text, job.ReferenceMono24k, ReferenceRate, BuildOptions(job));
+        return clip;
+    }
+
+    /// <summary>Streams one text segment at a time: the first chunk is audible as soon as the first segment is generated.</summary>
+    private static async IAsyncEnumerable<AudioChunk> Stream(IndexTts2Pipeline pipeline, ReferenceCache references,
+        HartsyInference.Core.Backends.IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
+    {
+        float[] clip = RequireReference(pipeline, job);
+        IndexTts2Options options = BuildOptions(job) with { QuickStreamingTokens = StreamQuickTokens };
+        IndexTts2Reference reference = await Task.Run(() => references.Get(backend, clip), cancel).ConfigureAwait(false);
+        using IEnumerator<float[]> chunks = pipeline.SynthesizeStream(backend, job.Text, reference, options, cancel).GetEnumerator();
+        long offset = 0;
+        while (true)
+        {
+            float[]? next = await Task.Run(() => chunks.MoveNext() ? chunks.Current : null, cancel).ConfigureAwait(false);
+            if (next is null)
+            {
+                yield break;
+            }
+            yield return new AudioChunk(next, 22_050, 1, offset);
+            offset += next.Length;
+        }
+    }
+
+    /// <summary>Keeps the prepared reference conditioning of the most recent voice clip — the 24-layer w2v-bert pass over
+    /// the clip is the costliest front-end step and depends on nothing else, so repeated generations with one voice (a
+    /// batch, a conversation) pay it once, as the reference implementation's <c>cache_spk_cond</c> does.</summary>
+    private sealed class ReferenceCache(IndexTts2Pipeline pipeline) : IDisposable
+    {
+        private readonly object _lock = new();
+        private byte[]? _key;
+        private IndexTts2Reference? _reference;
+
+        public IndexTts2Reference Get(HartsyInference.Core.Backends.IBackend backend, float[] clip)
+        {
+            byte[] key = System.Security.Cryptography.SHA256.HashData(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>(clip));
+            lock (_lock)
+            {
+                if (_reference is not null && _key is not null && key.AsSpan().SequenceEqual(_key))
+                {
+                    return _reference;
+                }
+                _reference?.Dispose();
+                _reference = null;
+                _reference = pipeline.PrepareReference(backend, clip, ReferenceRate);
+                _key = key;
+                return _reference;
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_lock)
+            {
+                _reference?.Dispose();
+                _reference = null;
+            }
+        }
     }
 }
