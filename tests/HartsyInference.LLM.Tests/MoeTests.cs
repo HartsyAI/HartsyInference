@@ -101,6 +101,75 @@ public sealed unsafe class MoeTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
+    [Fact]
+    public void MoeFeedForward_SigmoidLogitAdd_SelectsOnBiasedLogitsAndWeightsOnUnbiasedSigmoid()
+    {
+        const int hidden = 1, inter = 1, e = 2, n = 1;
+        MoeConfig moe = new()
+        {
+            NumExperts = e,
+            NumExpertsPerTok = 1,
+            MoeIntermediateSize = inter,
+            NormTopKProb = false,
+            Scoring = MoeScoring.SigmoidLogitAdd,
+        };
+        const string p = "model.layers.0";
+        Dictionary<string, Tensor> w = new()
+        {
+            // Raw-logit+bias selects expert 0 (0 + 0 > -2 + 1), while
+            // sigmoid(logit)+bias would incorrectly select expert 1.
+            [$"{p}.mlp.gate.weight"] = From([0f, -2f], 2, 1),
+            [$"{p}.mlp.gate.e_score_correction_bias"] = From([0f, 1f], 2),
+            [$"{p}.mlp.experts.0.gate_proj.weight"] = From([1f], 1, 1),
+            [$"{p}.mlp.experts.0.up_proj.weight"] = From([1f], 1, 1),
+            [$"{p}.mlp.experts.0.down_proj.weight"] = From([1f], 1, 1),
+            [$"{p}.mlp.experts.1.gate_proj.weight"] = From([9f], 1, 1),
+            [$"{p}.mlp.experts.1.up_proj.weight"] = From([9f], 1, 1),
+            [$"{p}.mlp.experts.1.down_proj.weight"] = From([9f], 1, 1),
+        };
+
+        using CpuBackend backend = new();
+        MoeFeedForward block = new(moe, hidden, lowVram: false);
+        block.LoadWeights(w, p);
+        using Tensor input = From([1f], 1, 1, 1);
+        using Tensor actual = block.Forward(backend, input, n);
+
+        float expected = 0.5f * (1f / (1f + MathF.Exp(-1f)));
+        Assert.Equal(expected, ((float*)actual.DataPointer)[0], 5);
+        foreach (Tensor tensor in w.Values) tensor.Dispose();
+    }
+
+    [Fact]
+    public void MoeFeedForward_SigmoidLogitAdd_RequiresCorrectionBias()
+    {
+        MoeConfig moe = new()
+        {
+            NumExperts = 1,
+            NumExpertsPerTok = 1,
+            MoeIntermediateSize = 1,
+            Scoring = MoeScoring.SigmoidLogitAdd,
+        };
+        const string p = "model.layers.0";
+        Dictionary<string, Tensor> w = new()
+        {
+            [$"{p}.mlp.gate.weight"] = From([0f], 1, 1),
+        };
+
+        MoeFeedForward block = new(moe, hiddenSize: 1, lowVram: false);
+        InvalidDataException error = Assert.Throws<InvalidDataException>(() => block.LoadWeights(w, p));
+
+        Assert.Contains("e_score_correction_bias", error.Message, StringComparison.Ordinal);
+        foreach (Tensor tensor in w.Values) tensor.Dispose();
+    }
+
+    private static Tensor From(float[] values, params long[] shape)
+    {
+        Tensor tensor = new(new TensorShape(shape), DType.F32);
+        float* data = (float*)tensor.DataPointer;
+        for (int i = 0; i < values.Length; i++) data[i] = values[i];
+        return tensor;
+    }
+
     // Independent port of HF DeepSeekV3 MoEGate (noaux_tc) + weighted expert combine.
     private static float[] GroupRoutingReference(float[] x, Dictionary<string, Tensor> w, string p, MoeConfig moe,
         int hidden, int inter, int e, int topK, int n, int nGroup, int topkGroup, float scaling)
