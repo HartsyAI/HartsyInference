@@ -9,6 +9,7 @@ public sealed unsafe class VitsWaveNet
     private readonly int _hidden, _layers, _kernel, _dilationRate;
     private readonly Tensor?[] _inW, _inB, _rsW, _rsB;
     private Tensor? _condW, _condB;     // cond_layer (multispeaker g), optional
+    private Tensor?[]? _condWLayers, _condBLayers;   // per-layer row views (persistent, so a backend's weight cache keeps them resident)
 
     public VitsWaveNet(int hidden, int kernel, int dilationRate, int layers)
     {
@@ -37,82 +38,92 @@ public sealed unsafe class VitsWaveNet
         {
             _condW = VitsWeights.Conv(w, $"{prefix}.cond_layer{convKeySuffix}");
             _condB = VitsWeights.Bias(w, $"{prefix}.cond_layer{convKeySuffix}");
+            _condWLayers = new Tensor?[_layers];
+            _condBLayers = new Tensor?[_layers];
+            for (int i = 0; i < _layers; i++)
+            {
+                _condWLayers[i] = _condW!.SliceRows((long)i * 2 * _hidden, 2 * _hidden);
+                _condBLayers[i] = _condB!.SliceRows((long)i * 2 * _hidden, 2 * _hidden);
+            }
         }
     }
 
-    /// <summary>Runs the stack over <paramref name="x"/> <c>[1, hidden, T]</c>; <paramref name="g"/> is the optional speaker embedding <c>[1, gin, 1]</c> (multispeaker), projected once and sliced per layer into the gate.</summary>
+    /// <summary>Runs the stack over <paramref name="x"/> <c>[1, hidden, T]</c>; <paramref name="g"/> is the optional speaker embedding <c>[1, gin, 1]</c> (multispeaker), projected per layer into the gate. Everything is a backend op (conditioning add, split, gate, residual and skip accumulation) so no activation visits the host between layers.</summary>
     /// <returns>The accumulated skip sum.</returns>
     public Tensor Forward(IBackend backend, Tensor x, int t, Tensor? g = null)
     {
         int h = _hidden;
-        Tensor output = new(new TensorShape(1, h, t), DType.F32);
-        Zero(output);
-        Tensor cur = Clone(x);
-
-        // Project g once → [1, 2*h*layers, 1]; sliced per layer below.
-        Tensor? gCond = null;
-        if (g is not null && _condW is not null)
-        {
-            gCond = new Tensor(new TensorShape(1, 2 * h * _layers, 1), DType.F32);
-            backend.Conv1d(gCond, g, _condW, _condB, 1, 0, 0, 1, 1);
-        }
+        Tensor? skipSum = null;
+        Tensor? cur = null;   // null until the first layer produces a new residual; x itself is never mutated or disposed
 
         for (int i = 0; i < _layers; i++)
         {
+            Tensor input = cur ?? x;
             int dilation = Pow(_dilationRate, i);
             int pad = dilation * (_kernel - 1) / 2;
             Tensor xIn = new(new TensorShape(1, 2 * h, t), DType.F32);
-            backend.Conv1d(xIn, cur, _inW[i]!, _inB[i], 1, pad, pad, dilation, 1);
+            backend.Conv1d(xIn, input, _inW[i]!, _inB[i], 1, pad, pad, dilation, 1);
 
-            // Add the per-layer speaker-conditioning slice (broadcast over time).
-            if (gCond is not null)
+            // Per-layer speaker-conditioning slice (broadcast over time): this layer's rows of cond_layer applied to g.
+            if (g is not null && _condWLayers is not null)
             {
-                float* xip = (float*)xIn.DataPointer;
-                float* gp = (float*)gCond.DataPointer + (long)i * 2 * h;
-                for (int c = 0; c < 2 * h; c++)
-                    for (int j = 0; j < t; j++) xip[(long)c * t + j] += gp[c];
+                using Tensor gLayer = new(new TensorShape(1, 2 * h, 1), DType.F32);
+                backend.Conv1d(gLayer, g, _condWLayers[i]!, _condBLayers![i], 1, 0, 0, 1, 1);
+                using Tensor gBias = gLayer.Reshape(new TensorShape(1, 2 * h));
+                backend.BroadcastAdd(xIn, gBias, 2 * h, t);
             }
 
             // fused tanh(first h) * sigmoid(second h) → acts [1, h, t].
-            Tensor acts = new(new TensorShape(1, h, t), DType.F32);
-            float* xp = (float*)xIn.DataPointer;
-            float* ap = (float*)acts.DataPointer;
-            for (int c = 0; c < h; c++)
-                for (int j = 0; j < t; j++)
-                {
-                    float a = xp[(long)c * t + j];
-                    float b = xp[(long)(h + c) * t + j];
-                    ap[(long)c * t + j] = MathF.Tanh(a) * (1f / (1f + MathF.Exp(-b)));
-                }
+            Tensor first = new(new TensorShape(1, h, t), DType.F32);
+            Tensor second = new(new TensorShape(1, h, t), DType.F32);
+            backend.Split([first, second], xIn, 1);
             xIn.Dispose();
+            backend.Tanh(first, first);
+            backend.Sigmoid(second, second);
+            Tensor acts = new(new TensorShape(1, h, t), DType.F32);
+            backend.Mul(acts, first, second);
+            first.Dispose();
+            second.Dispose();
 
             int rsCh = i < _layers - 1 ? 2 * h : h;
             Tensor rs = new(new TensorShape(1, rsCh, t), DType.F32);
             backend.Conv1d(rs, acts, _rsW[i]!, _rsB[i], 1, 0, 0, 1, 1);
             acts.Dispose();
 
-            float* rp = (float*)rs.DataPointer;
-            float* op = (float*)output.DataPointer;
             if (i < _layers - 1)
             {
                 // residual = (cur + rs[:h]); skip = rs[h:].
-                float* cp = (float*)cur.DataPointer;
-                for (int c = 0; c < h; c++)
-                    for (int j = 0; j < t; j++)
-                    {
-                        cp[(long)c * t + j] += rp[(long)c * t + j];
-                        op[(long)c * t + j] += rp[(long)(h + c) * t + j];
-                    }
+                Tensor residual = new(new TensorShape(1, h, t), DType.F32);
+                Tensor skip = new(new TensorShape(1, h, t), DType.F32);
+                backend.Split([residual, skip], rs, 1);
+                rs.Dispose();
+
+                Tensor newCur = new(new TensorShape(1, h, t), DType.F32);
+                backend.Add(newCur, input, residual);
+                residual.Dispose();
+                cur?.Dispose();
+                cur = newCur;
+
+                skipSum = AccumulateSkip(backend, skipSum, skip);
             }
             else
             {
-                for (long n = 0; n < (long)h * t; n++) op[n] += rp[n];
+                skipSum = AccumulateSkip(backend, skipSum, rs);
             }
-            rs.Dispose();
         }
-        cur.Dispose();
-        gCond?.Dispose();
-        return output;
+        cur?.Dispose();
+        return skipSum!;
+    }
+
+    /// <summary><c>sum + skip</c>; the first skip becomes the running sum itself (the old zero-initialised accumulator, minus the add).</summary>
+    private static Tensor AccumulateSkip(IBackend backend, Tensor? sum, Tensor skip)
+    {
+        if (sum is null) return skip;
+        Tensor next = new(sum.Shape, DType.F32);
+        backend.Add(next, sum, skip);
+        sum.Dispose();
+        skip.Dispose();
+        return next;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -124,11 +135,4 @@ public sealed unsafe class VitsWaveNet
     }
 
     private static int Pow(int b, int e) { int r = 1; for (int i = 0; i < e; i++) r *= b; return r; }
-    private static void Zero(Tensor t) { float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = 0f; }
-    private static Tensor Clone(Tensor t)
-    {
-        Tensor c = new(t.Shape, DType.F32);
-        Buffer.MemoryCopy((void*)t.DataPointer, (void*)c.DataPointer, t.ElementCount * 4, t.ElementCount * 4);
-        return c;
-    }
 }

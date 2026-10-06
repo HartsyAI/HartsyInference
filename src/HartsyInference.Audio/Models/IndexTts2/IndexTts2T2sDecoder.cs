@@ -39,6 +39,9 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
     public const int StartTextToken = 0;
     public const int StopTextToken = 1;
 
+    /// <summary>The filler id the reference's <c>prepare_gpt_inputs</c> puts in <c>input_ids</c> (all ones).</summary>
+    private const int FakePromptToken = 1;
+
     private readonly GptConfig _cfg;
     private readonly int _numTextTokens, _maxMelTokens, _emoPerceiverDim;
     private readonly GptBackbone _gpt;
@@ -219,7 +222,9 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
         }
 
         List<int> generated = new(Math.Min(cap, 256));
-        HashSet<int> seenForPenalty = [StartMelToken];
+        // HF's repetition penalty sees the reference's whole `input_ids`: `prepare_gpt_inputs` builds them as all-ones
+        // plus the trailing start-mel token, so token 1 is penalised from the first step exactly like a generated one.
+        HashSet<int> seenForPenalty = [FakePromptToken, StartMelToken];
         using (Tensor textEmb = EmbedTextWithPositionAndLang(wrappedTextIds, Mode == IndexTts2SpeakerConditioning.Campplus ? langId : null, h))
         using (Tensor prefix = Concat(conds, textEmb, condLen, textLen, h))
         using (IKvCache cache = _gpt.CreateCache())
@@ -230,7 +235,7 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
             int prevToken = StartMelToken;
             for (int step = 0; step < cap; step++)
             {
-                using Tensor stepInput = EmbedOneWithPosition(prevToken, _melEmbed!, _melPos!, step, h);
+                using Tensor stepInput = EmbedOneWithPosition(prevToken, _melEmbed!, _melPos!, MelPositionAtStep(step), h);
                 using Tensor hiddenStep = _gpt.ForwardStep(backend, stepInput, cache, positionsApplied: true);
                 using Tensor normedStep = new(hiddenStep.Shape, DType.F32);
                 backend.LayerNorm(normedStep, hiddenStep, _finalNormW!, _finalNormB!, 1e-5f);
@@ -246,7 +251,7 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
 
         if (generated.Count == 0)
             throw new InvalidOperationException("IndexTTS-2 generated zero semantic codes (immediate stop token).");
-        return [.. RemoveLongSilence(generated)];
+        return [.. generated];
     }
 
     /// <summary>Assembles the GPT's conditioning prefix for the loaded <see cref="Mode"/>.</summary>
@@ -405,24 +410,13 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
             : NucleusSampler.Draw(span, n, options.Temperature, options.TopK, options.TopP, ref rngState);
     }
 
-    /// <summary>Same real <c>remove_long_silence</c> cap as IndexTTS-1.5's decoder — see
-    /// <c>IndexTtsT2sDecoder.RemoveLongSilence</c> for the full rationale; identical logic, duplicated rather than
-    /// shared because both are tiny (~10 lines) private helpers on otherwise-unrelated classes.</summary>
-    private static List<int> RemoveLongSilence(List<int> codes, int silentToken = 52, int maxTotal = 30, int keepRun = 10)
-    {
-        int total = 0;
-        foreach (int c in codes) if (c == silentToken) total++;
-        if (total <= maxTotal) return codes;
-
-        List<int> trimmed = new(codes.Count);
-        int run = 0;
-        foreach (int c in codes)
-        {
-            if (c != silentToken) { trimmed.Add(c); run = 0; }
-            else if (run < keepRun) { trimmed.Add(c); run++; }
-        }
-        return trimmed;
-    }
+    /// <summary>The mel position embedding the REFERENCE uses at generation step <paramref name="step"/> (0 = the
+    /// start-mel token). <c>GPT2InferenceModel.forward</c> looks the position up as
+    /// <c>attention_mask.shape[1] - mel_len</c>; HF's mask already counts the token being fed, so the start token gets
+    /// position 0 but the first generated code gets 2, the next 3, and so on — position 1 is never used (an inherited
+    /// tortoise off-by-one). Training and the second GPT pass use plain 0, 1, 2…, yet the released checkpoints were
+    /// evaluated with this decoding, so it is reproduced exactly.</summary>
+    internal static int MelPositionAtStep(int step) => step == 0 ? 0 : step + 1;
 
     private static Tensor EmbedOneWithPosition(int id, Tensor table, Tensor posTable, int position, int hidden)
     {

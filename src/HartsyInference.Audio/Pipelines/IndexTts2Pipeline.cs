@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HartsyInference.Audio.Dsp;
 using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.Codecs;
@@ -47,6 +48,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     private readonly IndexTts2Config _cfg;
     private readonly Func<string, int[]> _encode;
     private readonly IDisposable? _tokenizerOwner;
+    private readonly IndexTtsTokenizer? _spm;
     private readonly IndexTts2SemanticFeatures _semanticFeatures;
     private readonly CamPlusSpeakerEncoder _camplus;
     private readonly VocosFactorizedCodec _semanticCodec;
@@ -77,6 +79,7 @@ public sealed class IndexTts2Pipeline : IDisposable
         _cfg = cfg;
         _encode = encode;
         _tokenizerOwner = tokenizerOwner;
+        _spm = tokenizerOwner as IndexTtsTokenizer;
         _semanticFeatures = semanticFeatures;
         _camplus = camplus;
         _semanticCodec = semanticCodec;
@@ -256,130 +259,234 @@ public sealed class IndexTts2Pipeline : IDisposable
         }
     }
 
+    private const double MaxReferenceSeconds = 15.0;
+
+    /// <summary>Zero crossings of the near-ideal resampler used where the reference's own resampling is librosa's
+    /// <c>soxr_hq</c> (any rate → 22.05 kHz / 16 kHz straight from the file).</summary>
+    private const int PrecisionFilterWidth = 64;
+
+    /// <summary>Reproduces the reference's clip resampling chain: <c>librosa.load</c> brings the file to 22.05 kHz
+    /// (soxr high quality — approximated by a long sinc), and the 16 kHz copy is
+    /// <c>torchaudio.transforms.Resample(22050, 16000)</c> OF THAT 22.05 kHz signal (torchaudio defaults, reproduced
+    /// exactly by <see cref="SincResampler"/>).</summary>
+    private static (float[] Audio16k, float[] Audio22k) ResampleReference(ReadOnlySpan<float> clip, int sampleRate)
+    {
+        float[] audio22k = sampleRate == 22_050 ? clip.ToArray() : SincResampler.Resample(clip, sampleRate, 22_050, PrecisionFilterWidth);
+        float[] audio16k = SincResampler.Resample(audio22k, 22_050, 16_000);
+        return (audio16k, audio22k);
+    }
+
+    /// <summary>Runs the reference clip through every front-end stage that depends on nothing else and returns the
+    /// reusable <see cref="IndexTts2Reference"/> (the reference's <c>cache_*</c> fields). Like the reference, only the
+    /// first 15 seconds of the clip are used.</summary>
+    public IndexTts2Reference PrepareReference(IBackend backend, float[] referenceAudioMono, int referenceSampleRate, IndexTts2Timings? timings = null)
+    {
+        ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(referenceAudioMono);
+        if (referenceAudioMono.Length == 0) throw new ArgumentException("The reference clip is empty.", nameof(referenceAudioMono));
+        Stopwatch sw = Stopwatch.StartNew();
+
+        int cap = (int)Math.Min(int.MaxValue, MaxReferenceSeconds * referenceSampleRate);
+        ReadOnlySpan<float> clip = referenceAudioMono.AsSpan(0, Math.Min(cap, referenceAudioMono.Length));
+        (float[] audio16k, float[] audio22k) = ResampleReference(clip, referenceSampleRate);
+
+        Tensor? spkCondEmb = null, refMel = null, style = null, promptCondition = null, speakerConditioning = null, baseEmoVec = null;
+        try
+        {
+            spkCondEmb = _semanticFeatures.Forward(backend, audio16k);
+            int tSpk = (int)spkCondEmb.Shape[1];
+            refMel = ComputeRefMel(audio22k);
+            int tRef = (int)refMel.Shape[2];
+            style = S3GenReference.SpeakerEmbedding(backend, _camplus, audio16k);
+            promptCondition = ComputePromptCondition(backend, spkCondEmb, tSpk, tRef);
+            // 2.5: spk_emb_proj(CAM++ style). 2.0: Conformer+Perceiver over the w2v-bert feature. CAM++ style still
+            // feeds S2Mel in both versions.
+            speakerConditioning = _cfg.Version == IndexTts2Version.V2_0
+                ? _gpt.ComputeSpeakerConditioningConformerPerceiver(backend, spkCondEmb, tSpk)
+                : _gpt.ComputeSpeakerConditioning(backend, style);
+            baseEmoVec = _gpt.ComputeEmoVec(backend, spkCondEmb, tSpk);
+
+            IndexTts2Reference reference = new(this, spkCondEmb, tSpk, refMel, tRef, style, promptCondition, speakerConditioning, baseEmoVec, audio16k);
+            if (timings is not null) timings.ReferenceMs += sw.Elapsed.TotalMilliseconds;
+            return reference;
+        }
+        catch
+        {
+            spkCondEmb?.Dispose();
+            refMel?.Dispose();
+            style?.Dispose();
+            promptCondition?.Dispose();
+            speakerConditioning?.Dispose();
+            baseEmoVec?.Dispose();
+            throw;
+        }
+    }
+
+    /// <summary>The S2Mel prompt condition, <c>length_regulator(content, ylens=Tref)</c>. The two checkpoints feed it
+    /// different content: 2.0 (<c>infer_v2.py</c>) the semantic codec's quantized embedding of the reference
+    /// (<c>_, S_ref = semantic_codec.quantize(spk_cond_emb)</c>), 2.5 (<c>infer_v2_5.py</c>, where <c>S_ref</c> is
+    /// commented out) the w2v-bert feature itself.</summary>
+    private Tensor ComputePromptCondition(IBackend backend, Tensor spkCondEmb, int tSpk, int tRef)
+    {
+        if (_cfg.Version != IndexTts2Version.V2_0) return _lengthRegulator.Forward(backend, spkCondEmb, tSpk, tRef);
+        (int[] _, Tensor sRef) = _semanticCodec.Quantize(backend, spkCondEmb, tSpk);
+        using (sRef) return _lengthRegulator.Forward(backend, sRef, (int)sRef.Shape[1], tRef);
+    }
+
     /// <summary>Clones the voice in <paramref name="referenceAudioMono"/> speaking <paramref name="text"/> with
     /// the emotion <paramref name="options"/> selects. Returns 22050 Hz mono PCM float samples in [-1, 1].</summary>
     public float[] Synthesize(IBackend backend, string text, float[] referenceAudioMono, int referenceSampleRate, IndexTts2Options? options = null)
     {
+        using IndexTts2Reference reference = PrepareReference(backend, referenceAudioMono, referenceSampleRate, options?.Timings);
+        return Synthesize(backend, text, reference, options);
+    }
+
+    /// <summary>Synthesizes <paramref name="text"/> against an already-prepared reference (see
+    /// <see cref="PrepareReference"/>) — the fast path for repeated generations with one voice.</summary>
+    public float[] Synthesize(IBackend backend, string text, IndexTts2Reference reference, IndexTts2Options? options = null)
+    {
+        List<float[]> chunks = [];
+        int total = 0;
+        foreach (float[] chunk in SynthesizeStream(backend, text, reference, options))
+        {
+            chunks.Add(chunk);
+            total += chunk.Length;
+        }
+        float[] joined = new float[total];
+        int offset = 0;
+        foreach (float[] c in chunks) { c.CopyTo(joined, offset); offset += c.Length; }
+        return joined;
+    }
+
+    /// <summary>Streams the synthesis one text segment at a time: each yielded chunk is that segment's audio (22050 Hz
+    /// mono) followed by <see cref="IndexTts2Options.IntervalSilenceMs"/> of silence when more segments follow, and the
+    /// final chunk carries the tail fade — concatenating the chunks is exactly what <c>Synthesize</c> returns. The
+    /// first chunk is ready after only the first segment has been generated; shrink it with
+    /// <see cref="IndexTts2Options.QuickStreamingTokens"/>. Arguments are validated immediately; generation starts on
+    /// the first <c>MoveNext</c>.</summary>
+    public IEnumerable<float[]> SynthesizeStream(IBackend backend, string text, IndexTts2Reference reference, IndexTts2Options? options = null, CancellationToken ct = default)
+    {
         ThrowIfDisposed();
+        ArgumentNullException.ThrowIfNull(reference);
+        reference.ThrowIfDisposed();
+        if (!ReferenceEquals(reference.Owner, this)) throw new ArgumentException("The reference was prepared by a different pipeline.", nameof(reference));
         IndexTts2Options opts = options ?? new IndexTts2Options();
-
-        List<int[]> segments = IndexTtsPipeline.SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment, EncodeNormalized);
+        List<int[]> segments = SegmentText(text, opts);
         if (segments.Count == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
+        return StreamSegments(backend, text, reference, opts, segments, ct);
+    }
 
-        float[] audio16k = S3GenReference.Resample(referenceAudioMono, referenceSampleRate, 16_000);
-        float[] audio22k = S3GenReference.Resample(referenceAudioMono, referenceSampleRate, 22_050);
+    private IEnumerable<float[]> StreamSegments(IBackend backend, string text, IndexTts2Reference reference, IndexTts2Options opts,
+        List<int[]> segments, CancellationToken ct)
+    {
+        IndexTts2Timings timings = opts.Timings ?? new IndexTts2Timings();
+        Stopwatch wall = Stopwatch.StartNew();
+        timings.SegmentCount += segments.Count;
 
-        Tensor spkCondEmb = _semanticFeatures.Forward(backend, audio16k);
-        int tSpk = (int)spkCondEmb.Shape[1];
-        Tensor refMel = ComputeRefMel(audio22k);
-        int tRef = (int)refMel.Shape[2];
-        Tensor style = S3GenReference.SpeakerEmbedding(backend, _camplus, audio16k);
-        Tensor promptCondition = _lengthRegulator.Forward(backend, spkCondEmb, tSpk, tRef);
-        // 2.5: spk_emb_proj(CAM++ style). 2.0: Conformer+Perceiver over the w2v-bert feature. CAM++ style still
-        // feeds S2Mel in both versions.
-        Tensor speakerConditioning = _cfg.Version == IndexTts2Version.V2_0
-            ? _gpt.ComputeSpeakerConditioningConformerPerceiver(backend, spkCondEmb, tSpk)
-            : _gpt.ComputeSpeakerConditioning(backend, style);
-
+        (Tensor emoVec, bool ownEmoVec) = ResolveEmotion(backend, opts, text, reference, timings);
         try
         {
-            (Tensor emoVec, float[]? normalizedWeights, bool ownEmoVec) = ResolveEmotion(backend, opts, text, spkCondEmb, tSpk, audio16k, style);
-            try
+            int silenceSamples = Math.Max(0, (int)(_cfg.SampleRate * (long)opts.IntervalSilenceMs / 1000L));
+            for (int i = 0; i < segments.Count; i++)
             {
-                if (segments.Count == 1)
-                    return FadeOutTail(SynthesizeSegment(backend, speakerConditioning, emoVec, segments[0], opts, promptCondition, refMel, tRef, style, opts.Seed), _cfg.SampleRate);
+                ct.ThrowIfCancellationRequested();
+                ulong segSeed = unchecked(opts.Seed + (ulong)i);
+                float[] pcm = SynthesizeSegment(backend, reference, emoVec, segments[i], opts, segSeed, timings);
+                timings.AudioSeconds += pcm.Length / (double)_cfg.SampleRate;
+                if (i == 0) timings.FirstAudioMs = wall.Elapsed.TotalMilliseconds;
 
-                List<float[]> pieces = new(segments.Count);
-                for (int i = 0; i < segments.Count; i++)
+                bool last = i == segments.Count - 1;
+                if (last)
                 {
-                    ulong segSeed = unchecked(opts.Seed + (ulong)i);
-                    pieces.Add(SynthesizeSegment(backend, speakerConditioning, emoVec, segments[i], opts, promptCondition, refMel, tRef, style, segSeed));
+                    pcm = FadeOutTail(pcm, _cfg.SampleRate);
                 }
-                int total = 0;
-                foreach (float[] p in pieces) total += p.Length;
-                float[] joined = new float[total];
-                int offset = 0;
-                foreach (float[] p in pieces) { p.CopyTo(joined, offset); offset += p.Length; }
-                return FadeOutTail(joined, _cfg.SampleRate);
-            }
-            finally
-            {
-                if (ownEmoVec) emoVec.Dispose();
+                else if (silenceSamples > 0)
+                {
+                    float[] padded = new float[pcm.Length + silenceSamples];
+                    pcm.CopyTo(padded, 0);
+                    pcm = padded;
+                }
+                yield return pcm;
             }
         }
         finally
         {
-            speakerConditioning.Dispose();
-            promptCondition.Dispose();
-            style.Dispose();
-            refMel.Dispose();
-            spkCondEmb.Dispose();
+            if (ownEmoVec) emoVec.Dispose();
         }
+    }
+
+    /// <summary>The text's segments as token-id arrays. 2.0 follows the reference tokenizer exactly (whole-text
+    /// tokenization, then <see cref="IndexTts2TextSegmenter"/>); 2.5 uses the sentence-level splitter.</summary>
+    private List<int[]> SegmentText(string text, IndexTts2Options opts)
+    {
+        ArgumentNullException.ThrowIfNull(text);
+        if (_spm is null) return IndexTtsPipeline.SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment, EncodeNormalized);
+
+        string prepared = text.Trim().Length == 1 ? text : IndexTtsTextNormalizer.InjectCjkBoundaries(IndexTts2TextNormalizer.Normalize(text));
+        if (prepared.Length == 0) return [];
+        IReadOnlyList<(string Piece, int Id)> pieces = _spm.EncodeToPieces(prepared);
+        IndexTts2TextSegmenter.Token[] tokens = [.. pieces.Select(static p => new IndexTts2TextSegmenter.Token(p.Piece, p.Id))];
+        List<IndexTts2TextSegmenter.Token[]> split = IndexTts2TextSegmenter.Split(tokens, DefaultMaxTextTokensPerSegment, opts.QuickStreamingTokens);
+        return [.. split.Select(static seg => seg.Select(static t => t.Id).ToArray())];
     }
 
     /// <summary>Real emotion resolution (<c>infer_generator</c>'s own branching, read in full): an explicit
     /// vector or QwenEmotion-text guidance forces the audio emotion-reference off and routes through
     /// <see cref="IndexTts2EmotionVectorLookup"/>, blended with the natural <c>merge_emovec</c> result by the
-    /// vector's own (post-normalization) leftover weight (<c>emovec_mat + (1-sum(weights))*emovec</c>);
-    /// otherwise an explicit or implicit (defaults to the speaker's own clip, alpha forced to 1) audio
-    /// reference goes straight through <c>merge_emovec</c>.</summary>
-    private (Tensor EmoVec, float[]? NormalizedWeights, bool Owned) ResolveEmotion(IBackend backend, IndexTts2Options opts, string text,
-        Tensor spkCondEmb, int tSpk, float[] speakerAudio16k, Tensor style)
+    /// vector's own leftover weight (<c>emovec_mat + (1-sum(weights))*emovec</c>, weights exactly as given unless
+    /// <see cref="IndexTts2Options.NormalizeEmoVector"/>); otherwise an explicit or implicit (defaults to the
+    /// speaker's own clip, alpha forced to 1) audio reference goes straight through <c>merge_emovec</c>.</summary>
+    private (Tensor EmoVec, bool Owned) ResolveEmotion(IBackend backend, IndexTts2Options opts, string text, IndexTts2Reference reference, IndexTts2Timings timings)
     {
-        float[]? emoVector = opts.EmoVector;
-        if (opts.UseEmoText)
-        {
-            emoVector = GetQwenEmotion().Infer(opts.EmoText ?? text);
-        }
-
-        if (emoVector is not null)
-        {
-            // Real infer_generator: an explicit/text vector can't be alpha-mixed with an audio reference, so alpha
-            // scales the vector itself (clamped to [0,1], truncated to 4 decimals) instead.
-            float scale = Math.Clamp(opts.EmoAlpha, 0f, 1f);
-            if (scale != 1f)
-            {
-                float[] scaled = new float[emoVector.Length];
-                for (int i = 0; i < scaled.Length; i++) scaled[i] = (int)(emoVector[i] * scale * 10000f) / 10000f;
-                emoVector = scaled;
-            }
-        }
-
-        Tensor baseVec = _gpt.ComputeEmoVec(backend, spkCondEmb, tSpk);
+        Stopwatch sw = Stopwatch.StartNew();
         try
         {
+            float[]? emoVector = opts.EmoVector;
+            if (opts.UseEmoText)
+            {
+                emoVector = GetQwenEmotion().Infer(opts.EmoText ?? text);
+            }
+
             if (emoVector is not null)
             {
+                // Real infer_generator: an explicit/text vector can't be alpha-mixed with an audio reference, so alpha
+                // scales the vector itself (clamped to [0,1], truncated to 4 decimals) instead.
+                float scale = Math.Clamp(opts.EmoAlpha, 0f, 1f);
+                if (scale != 1f)
+                {
+                    float[] scaled = new float[emoVector.Length];
+                    for (int i = 0; i < scaled.Length; i++) scaled[i] = (int)(emoVector[i] * scale * 10000f) / 10000f;
+                    emoVector = scaled;
+                }
+                if (opts.NormalizeEmoVector) emoVector = IndexTts2EmotionVectorLookup.NormalizeEmoVec(emoVector, applyBias: true);
+
                 if (_emoLookup is null)
                     throw new InvalidOperationException("IndexTts2Options.EmoVector/UseEmoText requires the pipeline to be loaded with feat1/feat2 (pass feat1Path/feat2Path to LoadAsync).");
                 uint rngState = DeterministicRng.Seed(unchecked((int)opts.Seed));
-                Tensor emovecMat = _emoLookup.ComputeEmoVecMat(emoVector, style, opts.UseRandomEmoExemplar, ref rngState);
-                float[] normalized = IndexTts2EmotionVectorLookup.NormalizeEmoVec(emoVector, applyBias: true);
-                float leftover = 1f - normalized.Sum();
+                using Tensor emovecMat = _emoLookup.ComputeEmoVecMat(emoVector, reference.Style, opts.UseRandomEmoExemplar, ref rngState);
+                float leftover = 1f - emoVector.Sum();
 
                 // emo_audio_prompt defaults to the speaker's own clip when no external one is given; alpha is
-                // forced to 1.0, so merge_emovec(spk, spk, alpha=1) collapses to base_vec itself.
-                Tensor naturalEmovec = baseVec;
-                Tensor finalVec = AddScaled(emovecMat, naturalEmovec, leftover);
-                emovecMat.Dispose();
-                return (finalVec, normalized, true);
+                // forced to 1.0, so merge_emovec(spk, spk, alpha=1) collapses to the speaker's base vector itself.
+                return (AddScaled(emovecMat, reference.BaseEmoVec, leftover), true);
             }
 
-            Tensor emoCondEmb = opts.EmoAudioReference is { } emoRef
-                ? _semanticFeatures.Forward(backend, S3GenReference.Resample(emoRef.Audio, emoRef.SampleRate, 16_000))
-                : spkCondEmb;
-            float alpha = opts.EmoAudioReference is null ? 1.0f : opts.EmoAlpha;
-            int tEmo = (int)emoCondEmb.Shape[1];
-            Tensor emoVecFromAudio = _gpt.ComputeEmoVec(backend, emoCondEmb, tEmo);
-            if (!ReferenceEquals(emoCondEmb, spkCondEmb)) emoCondEmb.Dispose();
+            if (opts.EmoAudioReference is not { } emoRef)
+            {
+                // Speaker's own clip as the emotion reference, alpha forced to 1: merge_emovec(base, base, 1) == base.
+                return (reference.BaseEmoVec, false);
+            }
 
-            Tensor merged = HartsyInference.Audio.Models.IndexTts2.IndexTts2T2sDecoder.MergeEmoVec(baseVec, emoVecFromAudio, alpha);
-            emoVecFromAudio.Dispose();
-            return (merged, null, true);
+            // reference: _load_and_cut_audio(emo_audio_prompt, 15, sr=16000)
+            int emoCap = (int)Math.Min(int.MaxValue, MaxReferenceSeconds * emoRef.SampleRate);
+            float[] emoAudio = SincResampler.Resample(emoRef.Audio.AsSpan(0, Math.Min(emoCap, emoRef.Audio.Length)), emoRef.SampleRate, 16_000, PrecisionFilterWidth);
+            using Tensor emoCondEmb = _semanticFeatures.Forward(backend, emoAudio);
+            using Tensor emoVecFromAudio = _gpt.ComputeEmoVec(backend, emoCondEmb, (int)emoCondEmb.Shape[1]);
+            return (HartsyInference.Audio.Models.IndexTts2.IndexTts2T2sDecoder.MergeEmoVec(reference.BaseEmoVec, emoVecFromAudio, opts.EmoAlpha), true);
         }
         finally
         {
-            baseVec.Dispose();
+            timings.EmotionMs += sw.Elapsed.TotalMilliseconds;
         }
     }
 
@@ -445,28 +552,54 @@ public sealed class IndexTts2Pipeline : IDisposable
         return result;
     }
 
-    private unsafe float[] SynthesizeSegment(IBackend backend, Tensor speakerConditioning, Tensor emoVec, int[] textIds,
-        IndexTts2Options opts, Tensor promptCondition, Tensor refMel, int tRef, Tensor style, ulong seed)
+    private float[] SynthesizeSegment(IBackend backend, IndexTts2Reference reference, Tensor emoVec, int[] textIds,
+        IndexTts2Options opts, ulong seed, IndexTts2Timings timings)
+    {
+        Stopwatch sw = Stopwatch.StartNew();
+        int[] codes = GenerateCodes(backend, reference, emoVec, textIds, opts, seed);
+        timings.GptMs += sw.Elapsed.TotalMilliseconds;
+        timings.CodeCount += codes.Length;
+
+        sw.Restart();
+        using Tensor cond = SemanticCondition(backend, reference, emoVec, textIds, codes, opts, out int targetLen);
+        timings.SemanticMs += sw.Elapsed.TotalMilliseconds;
+
+        sw.Restart();
+        using Tensor mel = SolveMel(backend, reference, cond, targetLen, opts, seed);
+        timings.FlowMs += sw.Elapsed.TotalMilliseconds;
+
+        sw.Restart();
+        float[] pcm = Vocode(backend, mel, targetLen);
+        timings.VocoderMs += sw.Elapsed.TotalMilliseconds;
+        return pcm;
+    }
+
+    /// <summary>Stage 1: autoregressive sampling of the segment's semantic-codec codes.</summary>
+    internal int[] GenerateCodes(IBackend backend, IndexTts2Reference reference, Tensor emoVec, int[] textIds, IndexTts2Options opts, ulong seed)
     {
         uint rngState = DeterministicRng.Seed(unchecked((int)seed));
-        bool v20 = _cfg.Version == IndexTts2Version.V2_0;
-        int? langId = v20 ? null : IndexTts2TiktokenTokenizer.LangToToken(opts.Language);
-        int maxMel = opts.MaxMelTokens ?? 1_500;
+        int? langId = _cfg.Version == IndexTts2Version.V2_0 ? null : IndexTts2TiktokenTokenizer.LangToToken(opts.Language);
         IndexTtsOptions gptOpts = new()
         {
             Temperature = opts.Temperature,
             TopK = opts.TopK,
             TopP = opts.TopP,
             RepetitionPenalty = opts.RepetitionPenalty,
-            MaxMelTokens = maxMel,
+            MaxMelTokens = opts.MaxMelTokens ?? 1_500,
         };
-        int[] codes = _gpt.Generate(backend, speakerConditioning, emoVec, textIds, langId, gptOpts, ref rngState);
+        return _gpt.Generate(backend, reference.SpeakerConditioning, emoVec, textIds, langId, gptOpts, ref rngState);
+    }
 
+    /// <summary>Stage 2: codes → the length-regulated S2Mel content condition <c>[1, targetLen, 512]</c>
+    /// (2.0: <c>vq2emb(codes) + gpt_layer(second-pass latent)</c>, 2.5: the codec's own <c>Decode</c>), concatenated
+    /// after the reference's prompt condition.</summary>
+    internal Tensor SemanticCondition(IBackend backend, IndexTts2Reference reference, Tensor emoVec, int[] textIds, int[] codes, IndexTts2Options opts, out int targetLen)
+    {
         Tensor sInfer;
-        if (v20)
+        if (_cfg.Version == IndexTts2Version.V2_0)
         {
             // infer_v2.py: S_infer = vq2emb(codes) + gpt_layer(second-pass latent), target = (code_lens * 1.72).long().
-            using Tensor latent = _gpt.ComputeSecondPassLatent(backend, speakerConditioning, emoVec, textIds, codes);
+            using Tensor latent = _gpt.ComputeSecondPassLatent(backend, reference.SpeakerConditioning, emoVec, textIds, codes);
             sInfer = _semanticCodec.VqToEmbedding(backend, codes);
             AddInPlace(sInfer, latent);
         }
@@ -474,35 +607,46 @@ public sealed class IndexTts2Pipeline : IDisposable
         {
             sInfer = _semanticCodec.Decode(backend, codes);
         }
-        int tSInfer = (int)sInfer.Shape[1];
-        int targetLen = Math.Max(1, (int)(tSInfer * _cfg.ContentLengthRatio * opts.DurationFactor));
-        Tensor cond = _lengthRegulator.Forward(backend, sInfer, tSInfer, targetLen);
-        sInfer.Dispose();
+        using (sInfer)
+        {
+            int tSInfer = (int)sInfer.Shape[1];
+            targetLen = Math.Max(1, (int)(tSInfer * _cfg.ContentLengthRatio * opts.DurationFactor));
+            return _lengthRegulator.Forward(backend, sInfer, tSInfer, targetLen);
+        }
+    }
 
+    /// <summary>Stage 3: the 25-step CFG flow-matching solve; returns the generated mel only
+    /// (<c>[1, 80, targetLen]</c>, the reference-prompt frames sliced off).</summary>
+    internal Tensor SolveMel(IBackend backend, IndexTts2Reference reference, Tensor cond, int targetLen, IndexTts2Options opts, ulong seed)
+    {
+        int tRef = reference.TRef;
         int catLen = tRef + targetLen;
-        Tensor mu = ConcatTime(promptCondition, cond, tRef, targetLen, _cfg.LengthRegulatorChannels);
-        cond.Dispose();
+        using Tensor mu = ConcatTime(reference.PromptCondition, cond, tRef, targetLen, _cfg.LengthRegulatorChannels);
+        using Tensor promptX = new(new TensorShape(1, _cfg.S2MelDit.InChannels, catLen), DType.F32);
+        CopyRefMelPrefix(promptX, reference.RefMel, tRef, catLen);
 
-        Tensor promptX = new(new TensorShape(1, _cfg.S2MelDit.InChannels, catLen), DType.F32);
-        CopyRefMelPrefix(promptX, refMel, tRef, catLen);
+        using Tensor vcTarget = _cfm.Solve(backend, mu, reference.Style, promptX, _cfg.DiffusionSteps, _cfg.InferenceCfgRate, unchecked((int)seed), promptLen: tRef);
+        return SliceTime(vcTarget, tRef, targetLen);
+    }
 
-        Tensor vcTarget = _cfm.Solve(backend, mu, style, promptX, _cfg.DiffusionSteps, _cfg.InferenceCfgRate, unchecked((int)seed), promptLen: tRef);
-        mu.Dispose();
-        promptX.Dispose();
-
-        Tensor genOnly = SliceTime(vcTarget, tRef, targetLen);
-        vcTarget.Dispose();
-
-        Tensor wave = _bigVgan.Forward(backend, genOnly, targetLen);
-        genOnly.Dispose();
-
+    /// <summary>Stage 4: BigVGAN-22k, mel → PCM clamped to [-1, 1].</summary>
+    internal unsafe float[] Vocode(IBackend backend, Tensor mel, int melLen)
+    {
+        using Tensor wave = _bigVgan.Forward(backend, mel, melLen);
         int n = (int)wave.ElementCount;
         float[] pcm = new float[n];
         float* wp = (float*)wave.DataPointer;
         for (int i = 0; i < n; i++) pcm[i] = Math.Clamp(wp[i], -1f, 1f);
-        wave.Dispose();
         return pcm;
     }
+
+    // Component access for the stage-level parity tests.
+    internal IndexTts2Dit Dit => _dit;
+    internal IndexTts2SemanticFeatures SemanticFeatures => _semanticFeatures;
+    internal IndexTts2T2sDecoder Gpt => _gpt;
+    internal VocosFactorizedCodec SemanticCodec => _semanticCodec;
+    internal InterpolateLengthRegulator LengthRegulator => _lengthRegulator;
+    internal CamPlusSpeakerEncoder CamPlus => _camplus;
 
     /// <summary><c>a += b</c>, elementwise, same shape.</summary>
     private static unsafe void AddInPlace(Tensor a, Tensor b)
@@ -559,7 +703,7 @@ public sealed class IndexTts2Pipeline : IDisposable
 
     /// <summary>Real <c>mel_fn(audio_22k)</c>: reflect-pad by <c>(n_fft-hop)/2</c>, then the IndexTTS-2 mel
     /// preset (center=False). Returns channel-first <c>[1, 80, T]</c>.</summary>
-    private unsafe Tensor ComputeRefMel(float[] audio22k)
+    internal unsafe Tensor ComputeRefMel(float[] audio22k)
     {
         MelSpectrogramExtractor.Config mcfg = _refMelExtractor.Configuration;
         int pad = (mcfg.NFft - mcfg.HopLength) / 2;

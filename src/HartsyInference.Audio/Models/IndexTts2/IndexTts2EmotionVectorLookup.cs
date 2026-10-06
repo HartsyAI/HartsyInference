@@ -23,8 +23,8 @@ namespace HartsyInference.Audio.Models.IndexTts2;
 ///         emo_vector = [vec * (0.8 / emo_sum) for vec in emo_vector]
 ///     return emo_vector
 ///
-/// # infer_generator, emo_vector branch:
-/// weight_vector = torch.tensor(normalize_emo_vec(emo_vector))
+/// # infer_generator, emo_vector branch (weights used exactly as given — only the WebUI calls normalize_emo_vec):
+/// weight_vector = torch.tensor(emo_vector)
 /// random_index = [find_most_similar_cosine(style, bank) for bank in self.spk_matrix]   # or random, if use_random
 /// emo_matrix = torch.cat([bank[i].unsqueeze(0) for i, bank in zip(random_index, self.emo_matrix)], 0)
 /// emovec_mat = torch.sum(weight_vector.unsqueeze(1) * emo_matrix, 0).unsqueeze(0)
@@ -87,13 +87,15 @@ internal sealed unsafe class IndexTts2EmotionVectorLookup : IDisposable
     }
 
     /// <summary>Real weighted exemplar-selection producing the final <c>emovec_mat</c>, shape <c>[1, hidden]</c>.
-    /// <paramref name="style"/> is the current speaker's CAM++ embedding, <c>[1, styleDim]</c> or <c>[styleDim]</c>.
+    /// <paramref name="weights"/> are used exactly as given (apply <see cref="NormalizeEmoVec"/> first for the
+    /// WebUI's de-emphasis behaviour). <paramref name="style"/> is the current speaker's CAM++ embedding, <c>[1, styleDim]</c> or <c>[styleDim]</c>.
     /// <paramref name="useRandom"/> mirrors the real (debug-only) <c>use_random</c> path — a uniform random index
     /// per category instead of the cosine-nearest exemplar.</summary>
-    public Tensor ComputeEmoVecMat(ReadOnlySpan<float> rawEmoVector, Tensor style, bool useRandom, ref uint rngState)
+    public Tensor ComputeEmoVecMat(ReadOnlySpan<float> weights, Tensor style, bool useRandom, ref uint rngState)
     {
         ThrowIfDisposed();
-        float[] weights = NormalizeEmoVec(rawEmoVector, applyBias: true);
+        if (weights.Length != EmoNum.Length)
+            throw new ArgumentException($"Expected an {EmoNum.Length}-dim emotion vector, got {weights.Length}.", nameof(weights));
         int styleDim = (int)_spkMatrix.Shape[1];
         int hidden = (int)_emoMatrix.Shape[1];
         float* stylePtr = (float*)style.DataPointer;

@@ -1,6 +1,8 @@
 using HartsyInference.Audio.Cache;
 using HartsyInference.Audio.Models.IndexTts2;
+using System.Runtime.CompilerServices;
 using HartsyInference.Audio.Pipelines;
+using HartsyInference.Audio.Streaming;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
@@ -115,7 +117,11 @@ internal static class IndexTts2Model
                 cfg: v20 ? IndexTts2Config.V2_0 : IndexTts2Config.V2_5, cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][IndexTTS2] Loaded {repo} (IndexTTS-{(v20 ? "2.0" : "2.5")}, emotion-controllable zero-shot cloning, 22050 Hz).");
 
-            return new TtsRunner(22_050, (backend, job) => Synthesize(pipeline, backend, job), pipeline);
+            ReferenceCache references = new(pipeline);
+            return new StreamingTtsRunner(22_050,
+                (backend, job) => Synthesize(pipeline, references, backend, job),
+                (backend, job, token) => Stream(pipeline, references, backend, job, token),
+                references, pipeline);
         },
     };
 
@@ -162,12 +168,180 @@ internal static class IndexTts2Model
 
     private const int ReferenceRate = 24_000;
 
-    private static float[] Synthesize(IndexTts2Pipeline pipeline, HartsyInference.Core.Backends.IBackend backend, TtsJob job)
+    /// <summary>While streaming, short neighbouring sentences are not merged until this many tokens have been
+    /// consumed, so the first audible segment stays small (the reference's <c>quick_streaming_tokens</c>).</summary>
+    private const int StreamQuickTokens = 40;
+
+    private static float[] Synthesize(IndexTts2Pipeline pipeline, ReferenceCache references, HartsyInference.Core.Backends.IBackend backend, TtsJob job)
     {
-        if (job.ReferenceMono24k is not { Length: > 0 })
+        IndexTts2Timings timings = new();
+        using ReferenceCache.Lease lease = references.Acquire(backend, RequireReference(pipeline, job), timings);
+        float[] pcm = pipeline.Synthesize(backend, job.Text, lease.Reference, BuildOptions(job) with { Timings = timings });
+        Logs.Info($"[Audio][IndexTTS2] {timings} on {backend.GetType().Name}");
+        return pcm;
+    }
+
+    private static float[] RequireReference(IndexTts2Pipeline pipeline, TtsJob job)
+    {
+        if (job.ReferenceMono24k is not { Length: > 0 } clip)
         {
             throw new InvalidOperationException($"{pipeline.ModelName} needs a voice reference clip (zero-shot cloning only).");
         }
-        return pipeline.Synthesize(backend, job.Text, job.ReferenceMono24k, ReferenceRate, BuildOptions(job));
+        return clip;
+    }
+
+    /// <summary>Streams one text segment at a time: the first chunk is audible as soon as the first segment is generated.</summary>
+    private static async IAsyncEnumerable<AudioChunk> Stream(IndexTts2Pipeline pipeline, ReferenceCache references,
+        HartsyInference.Core.Backends.IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
+    {
+        float[] clip = RequireReference(pipeline, job);
+        // Timings is written only by the stage that is currently running and read after that stage's Task completes, so
+        // the awaits order every access (no concurrent writers or readers).
+        IndexTts2Timings timings = new();
+        IndexTts2Options options = BuildOptions(job) with { QuickStreamingTokens = StreamQuickTokens, Timings = timings };
+        using ReferenceCache.Lease lease = await Task.Run(() => references.Acquire(backend, clip, timings), CancellationToken.None).ConfigureAwait(false);
+        cancel.ThrowIfCancellationRequested();
+        using IEnumerator<float[]> chunks = pipeline.SynthesizeStream(backend, job.Text, lease.Reference, options, cancel).GetEnumerator();
+        long offset = 0;
+        while (true)
+        {
+            // The step must not be abandoned mid-flight: disposing the enumerator (and releasing the reference lease)
+            // while a MoveNext still runs on a pool thread would free tensors it is using. The pipeline checks the token
+            // between segments, so cancellation takes effect at the next segment boundary.
+            float[]? next = await Task.Run(() => chunks.MoveNext() ? chunks.Current : null, CancellationToken.None).ConfigureAwait(false);
+            cancel.ThrowIfCancellationRequested();
+            if (next is null)
+            {
+                Logs.Info($"[Audio][IndexTTS2] {timings} on {backend.GetType().Name}");
+                yield break;
+            }
+            yield return new AudioChunk(next, 22_050, 1, offset);
+            offset += next.Length;
+        }
+    }
+
+    /// <summary>Keeps the prepared reference conditioning of the most recent voice clip — the 24-layer w2v-bert pass over
+    /// the clip is the costliest front-end step and depends on nothing else, so repeated generations with one voice (a
+    /// batch, a conversation) pay it once, as the reference implementation's <c>cache_spk_cond</c> does. Entries are
+    /// reference-counted through <see cref="Lease"/>: a newer clip retires the cached one, but it is only disposed once
+    /// the jobs still using it have released their leases. The key is the clip's hash plus the backend instance, since the
+    /// prepared tensors belong to the backend that built them.</summary>
+    private sealed class ReferenceCache(IndexTts2Pipeline pipeline) : IDisposable
+    {
+        internal sealed class Entry(byte[] key, object backend, IndexTts2Reference reference)
+        {
+            public byte[] Key { get; } = key;
+            public object Backend { get; } = backend;
+            public IndexTts2Reference Reference { get; } = reference;
+            public int Leases;
+            public bool Retired;
+        }
+
+        internal sealed class Lease : IDisposable
+        {
+            private readonly ReferenceCache _owner;
+            private readonly Entry _entry;
+            private int _released;
+
+            internal Lease(ReferenceCache owner, Entry entry)
+            {
+                _owner = owner;
+                _entry = entry;
+            }
+
+            public IndexTts2Reference Reference => _entry.Reference;
+
+            public void Dispose()
+            {
+                if (Interlocked.Exchange(ref _released, 1) == 0)
+                {
+                    _owner.Release(_entry);
+                }
+            }
+        }
+
+        private readonly object _lock = new();
+        private Entry? _current;
+        private bool _disposed;
+
+        public Lease Acquire(HartsyInference.Core.Backends.IBackend backend, float[] clip, IndexTts2Timings? timings = null)
+        {
+            byte[] key = System.Security.Cryptography.SHA256.HashData(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>(clip));
+            lock (_lock)
+            {
+                if (TryLease(key, backend) is { } hit)
+                {
+                    return hit;
+                }
+            }
+
+            // Prepared outside the lock: the w2v-bert pass takes seconds and must not block jobs whose clip is cached.
+            IndexTts2Reference built = pipeline.PrepareReference(backend, clip, ReferenceRate, timings);
+            lock (_lock)
+            {
+                if (_disposed)
+                {
+                    built.Dispose();
+                    throw new ObjectDisposedException(nameof(ReferenceCache));
+                }
+                if (TryLease(key, backend) is { } raced)
+                {
+                    built.Dispose();
+                    return raced;
+                }
+                Entry? old = _current;
+                Entry entry = new(key, backend, built) { Leases = 1 };
+                _current = entry;
+                if (old is not null)
+                {
+                    Retire(old);
+                }
+                return new Lease(this, entry);
+            }
+        }
+
+        private Lease? TryLease(byte[] key, object backend)
+        {
+            if (_current is { } e && !_disposed && ReferenceEquals(e.Backend, backend) && key.AsSpan().SequenceEqual(e.Key))
+            {
+                e.Leases++;
+                return new Lease(this, e);
+            }
+            return null;
+        }
+
+        private static void Retire(Entry entry)
+        {
+            entry.Retired = true;
+            if (entry.Leases == 0)
+            {
+                entry.Reference.Dispose();
+            }
+        }
+
+        private void Release(Entry entry)
+        {
+            lock (_lock)
+            {
+                entry.Leases--;
+                if (entry.Retired && entry.Leases == 0)
+                {
+                    entry.Reference.Dispose();
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            lock (_lock)
+            {
+                _disposed = true;
+                if (_current is { } e)
+                {
+                    _current = null;
+                    Retire(e);
+                }
+            }
+        }
     }
 }

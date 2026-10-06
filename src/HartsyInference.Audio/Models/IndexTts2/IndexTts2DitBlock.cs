@@ -81,7 +81,8 @@ internal sealed unsafe class IndexTts2DitBlock
         bool ownH = false;
         if (skipInX is not null && _skipInW is not null)
         {
-            Tensor cat = ConcatLastDim(x, skipInX, t, _hidden, _hidden);
+            Tensor cat = new(new TensorShape(1, t, 2 * _hidden), DType.F32);
+            backend.Concat(cat, [x, skipInX], 2);
             h = WhisperOps.ProjectLinear(backend, cat, _skipInW, _skipInB, 1, t, 2 * _hidden, _hidden);
             cat.Dispose();
             ownH = true;
@@ -91,7 +92,8 @@ internal sealed unsafe class IndexTts2DitBlock
         Tensor attnOut = Attention(backend, normed, t, ropeCos, ropeSin);
         normed.Dispose();
 
-        Tensor afterAttn = AddLastDim(h, attnOut, t, _hidden);
+        Tensor afterAttn = new(h.Shape, DType.F32);
+        backend.Add(afterAttn, h, attnOut);
         attnOut.Dispose();
         if (ownH) h.Dispose();
 
@@ -99,7 +101,8 @@ internal sealed unsafe class IndexTts2DitBlock
         Tensor ffnOut = Ffn(backend, normed2, t);
         normed2.Dispose();
 
-        Tensor output = AddLastDim(afterAttn, ffnOut, t, _hidden);
+        Tensor output = new(afterAttn.Shape, DType.F32);
+        backend.Add(output, afterAttn, ffnOut);
         ffnOut.Dispose();
         afterAttn.Dispose();
         return output;
@@ -147,40 +150,14 @@ internal sealed unsafe class IndexTts2DitBlock
         gate.Dispose();
 
         Tensor up = WhisperOps.ProjectLinear(backend, normed, _w3!, null, 1, t, _hidden, _ffnDim);
-        float* sp = (float*)silu.DataPointer;
-        float* up_ = (float*)up.DataPointer;
-        long n = silu.ElementCount;
-        for (long i = 0; i < n; i++) sp[i] *= up_[i];
+        Tensor gated = new(silu.Shape, DType.F32);
+        backend.Mul(gated, silu, up);
+        silu.Dispose();
         up.Dispose();
 
-        Tensor down = WhisperOps.ProjectLinear(backend, silu, _w2!, null, 1, t, _ffnDim, _hidden);
-        silu.Dispose();
+        Tensor down = WhisperOps.ProjectLinear(backend, gated, _w2!, null, 1, t, _ffnDim, _hidden);
+        gated.Dispose();
         return down;
-    }
-
-    private static Tensor ConcatLastDim(Tensor a, Tensor b, int t, int aDim, int bDim)
-    {
-        Tensor result = new(new TensorShape(1, t, aDim + bDim), DType.F32);
-        float* ap = (float*)a.DataPointer;
-        float* bp = (float*)b.DataPointer;
-        float* rp = (float*)result.DataPointer;
-        for (int i = 0; i < t; i++)
-        {
-            Buffer.MemoryCopy(ap + (long)i * aDim, rp + (long)i * (aDim + bDim), (long)aDim * 4, (long)aDim * 4);
-            Buffer.MemoryCopy(bp + (long)i * bDim, rp + (long)i * (aDim + bDim) + aDim, (long)bDim * 4, (long)bDim * 4);
-        }
-        return result;
-    }
-
-    private static Tensor AddLastDim(Tensor a, Tensor b, int t, int dim)
-    {
-        Tensor result = new(a.Shape, DType.F32);
-        float* ap = (float*)a.DataPointer;
-        float* bp = (float*)b.DataPointer;
-        float* rp = (float*)result.DataPointer;
-        long n = (long)t * dim;
-        for (long i = 0; i < n; i++) rp[i] = ap[i] + bp[i];
-        return result;
     }
 
     public IEnumerable<Tensor> EnumerateWeights()

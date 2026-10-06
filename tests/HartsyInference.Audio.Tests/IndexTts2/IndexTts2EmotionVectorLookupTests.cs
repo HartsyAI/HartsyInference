@@ -83,10 +83,10 @@ public sealed class IndexTts2EmotionVectorLookupTests
             float* row = (float*)emo.DataPointer + (long)rowIndex * Hidden;
             for (int c = 0; c < Hidden; c++) expectedRow[c] = row[c];
         }
-        float[] expectedWeights = IndexTts2EmotionVectorLookup.NormalizeEmoVec(emoVector);
+        // Weights are applied exactly as given (the reference's library path never normalizes them).
         Span<float> got = result.AsSpan<float>();
         for (int c = 0; c < Hidden; c++)
-            Assert.Equal(expectedWeights[0] * expectedRow[c], got[c], 4);
+            Assert.Equal(emoVector[0] * expectedRow[c], got[c], 4);
     }
 
     [Fact]
