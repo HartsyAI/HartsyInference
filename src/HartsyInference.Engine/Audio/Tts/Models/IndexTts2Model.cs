@@ -43,13 +43,13 @@ internal static class IndexTts2Model
     internal const string QwenDir = "qwen0.6bemo4-merge";
     internal static readonly string[] QwenFiles = ["config.json", "model.safetensors", "tokenizer.json", "chat_template.jinja"];
 
-    /// <summary>True for the 2.0 checkpoint (<c>2.0</c>, <c>v2_0</c> or the bare <c>IndexTeam/IndexTTS-2</c> repo id); everything else, including no variant, is 2.5.</summary>
+    /// <summary>True for the 2.0 checkpoint (exactly <c>2.0</c>, <c>v2_0</c> or <c>IndexTeam/IndexTTS-2</c>); everything else, including no variant and any other custom repo id, is 2.5.</summary>
     internal static bool IsV2_0(string? variant)
     {
         string v = (variant ?? string.Empty).Trim();
-        return v.Contains("2.0", StringComparison.Ordinal)
-            || v.Contains("2_0", StringComparison.Ordinal)
-            || v.EndsWith("IndexTTS-2", StringComparison.OrdinalIgnoreCase);
+        return v.Equals("2.0", StringComparison.OrdinalIgnoreCase)
+            || v.Equals("v2_0", StringComparison.OrdinalIgnoreCase)
+            || v.Equals(Repo20, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>Maps the variant hint to the repo holding the GPT/S2Mel checkpoint; a custom <c>owner/name</c> passes through.</summary>
@@ -80,7 +80,8 @@ internal static class IndexTts2Model
         files.Add(v20 ? new AudioModelFile(MaskGctCodecFile, Repo: MaskGctRepo) : new AudioModelFile(CodecFile));
         foreach (string qwen in QwenFiles)
         {
-            files.Add(new AudioModelFile(QwenPath(qwen)));
+            // Optional: a missing classifier file disables free-text emotion rather than failing the whole load.
+            files.Add(new AudioModelFile(QwenPath(qwen), Required: false));
         }
         files.Add(new AudioModelFile(W2vBertWeightsFile, Repo: W2vBertRepo));
         files.Add(new AudioModelFile(CamplusFile, Repo: CamplusRepo));
@@ -98,12 +99,19 @@ internal static class IndexTts2Model
             string repo = ResolveRepo(variant);
             IReadOnlyDictionary<string, string> fetched = await AudioModelCache.FetchAllAsync(repo, Files(variant), "tts", ct: cancel).ConfigureAwait(false);
 
+            string[] qwenPaths = [.. QwenFiles.Select(f => QwenPath(f))];
+            bool haveQwen = qwenPaths.All(fetched.ContainsKey);
+            if (!haveQwen)
+            {
+                Logs.Info("[Audio][IndexTTS2] QwenEmotion files not all available; free-text emotion (--emotion-text) is disabled.");
+            }
+
             IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
                 fetched[v20 ? BpeFile : TiktokenFile], fetched[GptFile], fetched[S2MelFile],
                 fetched[v20 ? MaskGctCodecFile : CodecFile],
                 fetched[W2vBertWeightsFile], fetched[W2vStatsFile], fetched[CamplusFile], fetched[BigVganFile],
                 feat1Path: fetched[Feat1File], feat2Path: fetched[Feat2File],
-                qwenEmoDir: Path.GetDirectoryName(fetched[QwenPath("config.json")]), qwenBackend: context.Backend,
+                qwenEmoDir: haveQwen ? Path.GetDirectoryName(fetched[qwenPaths[0]]) : null, qwenBackend: haveQwen ? context.Backend : null,
                 cfg: v20 ? IndexTts2Config.V2_0 : IndexTts2Config.V2_5, cancel).ConfigureAwait(false);
             Logs.Info($"[Audio][IndexTTS2] Loaded {repo} (IndexTTS-{(v20 ? "2.0" : "2.5")}, emotion-controllable zero-shot cloning, 22050 Hz).");
 
@@ -120,6 +128,13 @@ internal static class IndexTts2Model
             if (emotion.Count != 8)
             {
                 throw new ArgumentException("IndexTTS-2 emotion needs exactly 8 values (happy, angry, sad, afraid, disgusted, melancholic, surprised, calm).");
+            }
+            foreach (double v in emotion)
+            {
+                if (!double.IsFinite(v) || v < 0d || v > 1.2d)
+                {
+                    throw new ArgumentException($"IndexTTS-2 emotion weights must be between 0 and 1.2; got {v}.");
+                }
             }
             vector = [.. emotion.Select(v => (float)v)];
         }

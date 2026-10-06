@@ -80,7 +80,7 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
 
         /// <summary>IndexTTS-2 emotion: 8 comma-separated weights.</summary>
         [CommandOption("--emotion")]
-        [Description("IndexTTS-2 emotion vector: 8 comma-separated weights (happy,angry,sad,afraid,disgusted,melancholic,surprised,calm; 0-1.2 each).")]
+        [Description("IndexTTS-2 emotion vector: 8 comma-separated weights in IndexTTS-2 order (happy,angry,sad,afraid,disgusted,melancholic,surprised,calm; 0-1.2 each). Other models that read an emotion vector (Zonos) use a different order.")]
         public string? Emotion { get; init; }
 
         /// <summary>IndexTTS-2 emotion-reference WAV.</summary>

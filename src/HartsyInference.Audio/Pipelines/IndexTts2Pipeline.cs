@@ -59,6 +59,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     private readonly string? _qwenEmoDir;
     private readonly IBackend? _qwenBackend;
     private readonly object _qwenLock = new();
+    private readonly object _ownedLock = new();
     private IndexTts2QwenEmotion? _qwenEmotion;
     private readonly MelSpectrogramExtractor _refMelExtractor = new(MelSpectrogramExtractor.IndexTts2RefMelConfig());
     private readonly List<IDisposable> _loaders;
@@ -396,21 +397,41 @@ public sealed class IndexTts2Pipeline : IDisposable
             using System.Text.Json.JsonDocument configDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(_qwenEmoDir, "config.json")));
             TransformerConfig qwenCfg = Qwen3HfConfigReader.FromHuggingFace(configDoc.RootElement);
 
-            SafeTensorsLoader qwenLoader = new();
-            qwenLoader.Load(Path.Combine(_qwenEmoDir, "model.safetensors"));
-            _loaders.Add(qwenLoader);
-            Dictionary<string, Tensor> qwenWeights = IndexTtsPipeline.ToF32(qwenLoader.GetAllTensors(), _convertedWeights);
+            // Built into locals and committed to the pipeline's lists only once everything loaded, so a failed
+            // attempt releases what it allocated instead of leaking it until Dispose (and a retry starts clean).
+            List<Tensor> converted = [];
+            SafeTensorsLoader? qwenLoader = null;
+            GenericTransformer? transformer = null;
+            try
+            {
+                qwenLoader = new SafeTensorsLoader();
+                qwenLoader.Load(Path.Combine(_qwenEmoDir, "model.safetensors"));
+                Dictionary<string, Tensor> qwenWeights = IndexTtsPipeline.ToF32(qwenLoader.GetAllTensors(), converted);
 
-            GenericTransformer transformer = new(qwenCfg);
-            transformer.LoadWeights(qwenWeights, "model");
-            _loaders.Add(transformer);
+                transformer = new GenericTransformer(qwenCfg);
+                transformer.LoadWeights(qwenWeights, "model");
 
-            using FileStream tokenizerStream = File.OpenRead(Path.Combine(_qwenEmoDir, "tokenizer.json"));
-            GgufTokenizer qwenTokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerStream);
-            JinjaChatTemplate template = new(File.ReadAllText(Path.Combine(_qwenEmoDir, "chat_template.jinja")));
+                using FileStream tokenizerStream = File.OpenRead(Path.Combine(_qwenEmoDir, "tokenizer.json"));
+                GgufTokenizer qwenTokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerStream);
+                JinjaChatTemplate template = new(File.ReadAllText(Path.Combine(_qwenEmoDir, "chat_template.jinja")));
 
-            TextGenerationPipeline textPipeline = new(transformer, qwenTokenizer, _qwenBackend, template);
-            return _qwenEmotion = new IndexTts2QwenEmotion(textPipeline);
+                TextGenerationPipeline textPipeline = new(transformer, qwenTokenizer, _qwenBackend, template);
+                IndexTts2QwenEmotion loaded = new(textPipeline);
+                lock (_ownedLock)
+                {
+                    _loaders.Add(qwenLoader);
+                    _loaders.Add(transformer);
+                    _convertedWeights.AddRange(converted);
+                }
+                return _qwenEmotion = loaded;
+            }
+            catch
+            {
+                transformer?.Dispose();
+                qwenLoader?.Dispose();
+                foreach (Tensor t in converted) t.Dispose();
+                throw;
+            }
         }
     }
 
@@ -583,8 +604,12 @@ public sealed class IndexTts2Pipeline : IDisposable
         _bigVgan.Dispose();
         _tokenizerOwner?.Dispose();
         _emoLookup?.Dispose();
-        foreach (IDisposable l in _loaders) l.Dispose();
-        foreach (Tensor t in _convertedWeights) t.Dispose();
+        lock (_qwenLock)
+        lock (_ownedLock)
+        {
+            foreach (IDisposable l in _loaders) l.Dispose();
+            foreach (Tensor t in _convertedWeights) t.Dispose();
+        }
         GC.SuppressFinalize(this);
     }
 }

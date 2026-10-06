@@ -42,6 +42,8 @@ public sealed class IndexTts2SpeechEngineTests
     [InlineData("v2_0", true, "IndexTeam/IndexTTS-2")]
     [InlineData("IndexTeam/IndexTTS-2", true, "IndexTeam/IndexTTS-2")]
     [InlineData("someone/indextts-2-finetune", false, "someone/indextts-2-finetune")]
+    [InlineData("me/foo-v2.05", false, "me/foo-v2.05")]
+    [InlineData("x/IndexTTS-2.0-fp16", false, "x/IndexTTS-2.0-fp16")]
     public void Variant_ResolvesVersionAndRepo(string? variant, bool v20, string repo)
     {
         Assert.Equal(v20, IndexTts2Model.IsV2_0(variant));
@@ -104,6 +106,17 @@ public sealed class IndexTts2SpeechEngineTests
         Assert.Equal(new[] { 0.9f, 0f, 0.2f, 0f, 0f, 0f, 0f, 0.5f }, o.EmoVector);
         Assert.Equal(0.6f, o.EmoAlpha);
     }
+
+    [Theory]
+    [InlineData(-0.1)]
+    [InlineData(1.3)]
+    [InlineData(double.NaN)]
+    public void BuildOptions_RejectsOutOfRangeEmotionWeights(double bad)
+        => Assert.Throws<ArgumentException>(() => IndexTts2Model.BuildOptions(Job(b => b.Request = b.Request with { Emotion = [bad, 0, 0, 0, 0, 0, 0, 0] })));
+
+    [Fact]
+    public void Files_QwenClassifierFilesAreOptional()
+        => Assert.All(IndexTts2Model.Files("2.5").Where(f => f.Name.StartsWith("qwen0.6bemo4-merge/", StringComparison.Ordinal)), f => Assert.False(f.Required));
 
     [Fact]
     public void BuildOptions_RejectsAnEmotionVectorOfTheWrongLength()

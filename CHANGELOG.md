@@ -38,7 +38,8 @@ stable release will require. Dates are UTC.
   Zonos's). `hartsy speak` gets `--emotion`, `--emotion-reference`, `--emotion-alpha`, `--emotion-text` and
   `--emotion-from-text`. The QwenEmotion classifier is loaded on first use, so the default VRAM footprint is unchanged.
   The model's file list now includes `feat1.pt`, `feat2.pt` and the four classifier files (about 1.2 GB), so an
-  existing 2.5 install downloads them on its next load.
+  existing 2.5 install downloads them on its next load. The classifier files are optional: if they are missing,
+  free-text emotion is disabled and the model still loads. Emotion weights outside 0–1.2 are rejected.
 - **Fixed: the explicit emotion-vector mode threw `ObjectDisposedException`.** The pipeline disposed the
   `feat1.pt`/`feat2.pt` loaders right after building the lookup, but an F32 tensor is returned as-is rather than
   copied, so the exemplar banks it still read were freed. The loaders now live as long as the pipeline. Nothing
