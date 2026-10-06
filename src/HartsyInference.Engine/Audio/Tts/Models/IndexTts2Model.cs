@@ -174,8 +174,11 @@ internal static class IndexTts2Model
 
     private static float[] Synthesize(IndexTts2Pipeline pipeline, ReferenceCache references, HartsyInference.Core.Backends.IBackend backend, TtsJob job)
     {
-        IndexTts2Reference reference = references.Get(backend, RequireReference(pipeline, job));
-        return pipeline.Synthesize(backend, job.Text, reference, BuildOptions(job));
+        IndexTts2Timings timings = new();
+        IndexTts2Reference reference = references.Get(backend, RequireReference(pipeline, job), timings);
+        float[] pcm = pipeline.Synthesize(backend, job.Text, reference, BuildOptions(job) with { Timings = timings });
+        Logs.Info($"[Audio][IndexTTS2] {timings} on {backend.GetType().Name}");
+        return pcm;
     }
 
     private static float[] RequireReference(IndexTts2Pipeline pipeline, TtsJob job)
@@ -192,8 +195,9 @@ internal static class IndexTts2Model
         HartsyInference.Core.Backends.IBackend backend, TtsJob job, [EnumeratorCancellation] CancellationToken cancel)
     {
         float[] clip = RequireReference(pipeline, job);
-        IndexTts2Options options = BuildOptions(job) with { QuickStreamingTokens = StreamQuickTokens };
-        IndexTts2Reference reference = await Task.Run(() => references.Get(backend, clip), cancel).ConfigureAwait(false);
+        IndexTts2Timings timings = new();
+        IndexTts2Options options = BuildOptions(job) with { QuickStreamingTokens = StreamQuickTokens, Timings = timings };
+        IndexTts2Reference reference = await Task.Run(() => references.Get(backend, clip, timings), cancel).ConfigureAwait(false);
         using IEnumerator<float[]> chunks = pipeline.SynthesizeStream(backend, job.Text, reference, options, cancel).GetEnumerator();
         long offset = 0;
         while (true)
@@ -201,6 +205,7 @@ internal static class IndexTts2Model
             float[]? next = await Task.Run(() => chunks.MoveNext() ? chunks.Current : null, cancel).ConfigureAwait(false);
             if (next is null)
             {
+                Logs.Info($"[Audio][IndexTTS2] {timings} on {backend.GetType().Name}");
                 yield break;
             }
             yield return new AudioChunk(next, 22_050, 1, offset);
@@ -217,7 +222,7 @@ internal static class IndexTts2Model
         private byte[]? _key;
         private IndexTts2Reference? _reference;
 
-        public IndexTts2Reference Get(HartsyInference.Core.Backends.IBackend backend, float[] clip)
+        public IndexTts2Reference Get(HartsyInference.Core.Backends.IBackend backend, float[] clip, IndexTts2Timings? timings = null)
         {
             byte[] key = System.Security.Cryptography.SHA256.HashData(System.Runtime.InteropServices.MemoryMarshal.AsBytes<float>(clip));
             lock (_lock)
@@ -228,7 +233,7 @@ internal static class IndexTts2Model
                 }
                 _reference?.Dispose();
                 _reference = null;
-                _reference = pipeline.PrepareReference(backend, clip, ReferenceRate);
+                _reference = pipeline.PrepareReference(backend, clip, ReferenceRate, timings);
                 _key = key;
                 return _reference;
             }

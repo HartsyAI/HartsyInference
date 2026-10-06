@@ -260,5 +260,51 @@ public sealed class IndexTts2V20PythonParityTests(ITestOutputHelper output)
         }
     }
 
+    /// <summary>The whole 25-step CFG Euler solve from the reference's own initial noise (the C# solver accepts an
+    /// <c>x0Override</c> for exactly this) against the reference's final mel — the accumulated effect of every
+    /// estimator step, which is what the vocoder actually hears.</summary>
+    [Fact]
+    public void FlowMatchingSolve_FromTheReferenceNoise_MatchesTheReferenceMel()
+    {
+        string? parityDir = Environment.GetEnvironmentVariable("INDEXTTS2_PARITY_DIR");
+        string? v20Dir = Environment.GetEnvironmentVariable("INDEXTTS2_V20_DIR");
+        if (string.IsNullOrEmpty(parityDir) || !File.Exists(Path.Combine(parityDir, "cfm1.safetensors"))) { output.WriteLine("cfm1.safetensors missing — skip."); return; }
+        if (string.IsNullOrEmpty(v20Dir) || !File.Exists(Path.Combine(v20Dir, "s2mel.pth"))) { output.WriteLine("INDEXTTS2_V20_DIR missing — skip."); return; }
+
+        Dump c = LoadDump(Path.Combine(parityDir, "cfm1.safetensors"));
+        Dump d = LoadDump(Path.Combine(parityDir, "case1_b3.safetensors"));
+        IndexTts2Config cfg = IndexTts2Config.V2_0;
+        using HartsyInference.ModelAssets.PyTorch.PytorchPickleLoader loader = new();
+        loader.Load(Path.Combine(v20Dir, "s2mel.pth"), recursiveFlatten: true);
+        List<Tensor> owned = [];
+        try
+        {
+            Dictionary<string, Tensor> w = IndexTtsPipeline.ToF32(loader.GetAllTensors(), owned);
+            using IndexTts2Dit dit = new(cfg.S2MelDit);
+            dit.LoadWeights(w, "net.cfm.estimator");
+            HartsyInference.Audio.Models.CosyVoice.ConditionalCfm cfm = new(dit, cfg.S2MelDit.InChannels);
+
+            int total = (int)c.Shape("cat")[0];
+            int tRef = (int)d.Shape("ref_mel")[1];
+            using Tensor mu = ToTensor(c["cat"], 1, total, 512);
+            using Tensor style = ToTensor(d["style"], 1, 192);
+            using Tensor x0 = ToTensor(c["z"], 1, 80, total);
+            using Tensor promptX = new(new TensorShape(1, 80, total), DType.F32);
+            float[] refMel = d["ref_mel"];
+            Span<float> px = promptX.AsSpan<float>();
+            for (int ch = 0; ch < 80; ch++)
+                refMel.AsSpan(ch * tRef, tRef).CopyTo(px.Slice(ch * total, tRef));
+
+            using CpuBackend backend = new();
+            using Tensor mel = cfm.Solve(backend, mu, style, promptX, cfg.DiffusionSteps, cfg.InferenceCfgRate, seed: 0, x0Override: x0, promptLen: tRef);
+            Compare("25-step CFG solve (full mel)", ToArray(mel), c["out"], 2e-2);
+        }
+        finally
+        {
+            foreach (Tensor t in owned) t.Dispose();
+        }
+        Assert.True(_failures.Count == 0, string.Join(Environment.NewLine, _failures));
+    }
+
     private static CamPlusSpeakerEncoder GetCamplus(IndexTts2Pipeline pipeline) => pipeline.CamPlus;
 }

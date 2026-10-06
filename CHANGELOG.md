@@ -26,10 +26,38 @@ stable release will require. Dates are UTC.
 
 ## alpha.257
 
-- **IndexTTS-2 accuracy pass against the PyTorch reference (work in progress; entries below are final only when the PR
-  is marked ready).** Every stage of the 2.0 pipeline is now checked numerically against a dump of the reference's own
-  intermediates (`IndexTts2V20PythonParityTests`), which found and fixed several divergences that earlier
-  intelligibility-only checks could not see.
+IndexTTS-2 accuracy pass. Every stage of the 2.0 pipeline is now compared numerically with a dump of the PyTorch
+reference's own intermediates (`IndexTts2V20PythonParityTests`, real weights, env-gated), and greedy decoding is
+compared token for token. Earlier checks only listened to the output, so these divergences went unseen:
+
+- **Fixed: the w2v-bert reference features were computed from unscaled audio.** The reference feature extractor feeds the
+  fbank 16-bit-scaled samples; with `[-1, 1]` audio, quiet frames and weak bins clamped to the log floor. Feature error
+  against the reference went from 8.7% to 5e-6 and `hidden_states[17]` from 16% to 1e-5. Affects 2.0 and 2.5 (speaker,
+  emotion and codec inputs all derive from it).
+- **Fixed: the IndexTTS Conformer used the wrong positional encoding.** IndexTTS's `RelPositionalEncoding` hands its
+  attention the plain forward sinusoid `pe[0:T]` and the attention has `rel_shift` removed; the port used the
+  Transformer-XL `2T-1` relative table. 2.0 speaker latents went from 11% to 1e-4 error. The same encoder class serves
+  the emotion encoder of 2.0 and 2.5 and IndexTTS-1.5's speaker encoder, so all three change.
+- **Fixed: generation used the wrong mel position embeddings.** The reference's `GPT2InferenceModel` looks up
+  `attention_mask.shape[1] - mel_len`, giving the start token position 0 but the first code position 2 (position 1 is
+  skipped). Greedy decode now reproduces the reference's codes exactly, with and without repetition penalty.
+- **Fixed (2.0): the S2Mel prompt condition was built from the raw w2v-bert feature**, which is the 2.5 flow; 2.0 feeds
+  the semantic codec's quantized embedding (`S_ref`).
+- **Fixed: reference clips are resampled like the reference.** `SincResampler` reproduces
+  `torchaudio.functional.resample` exactly, applied in the reference's order (file → 22.05 kHz → 16 kHz), and clips are
+  capped at 15 s. The 16 kHz signal now matches to 6e-5 (was 3.4%).
+- **Fixed: the repetition penalty did not include the reference's filler token** (`input_ids` are all ones plus the
+  start token), and `remove_long_silence`, which the reference never calls, was applied. Both now match.
+- **Changed: explicit emotion vectors are used as given** (the reference's library path and the Qwen text path never
+  normalize them; only its WebUI does). `IndexTts2Options.NormalizeEmoVector` opts into the WebUI's bias + 0.8 cap.
+- **Added (2.0): exact reference text handling.** Token-level segment splitting (`split_segments`, golden-tested against
+  the real tokenizer's output, including `quick_streaming_tokens`), 200 ms of silence between segments, and the English
+  spoken-form normalization the reference runs before tokenizing (contractions, numbers, years, decimals, percent, money,
+  ordinals, times, titles, punctuation map). `"2.0"` is now read "two point oh" instead of being passed as digits.
+- **Added: `IndexTts2Reference` / `PrepareReference` / `SynthesizeStream`.** The reference clip's front end (w2v-bert, mel,
+  CAM++, conditioning) is computed once and reused, and synthesis can stream one text segment at a time. The engine's
+  `indextts2` runner now implements `IStreamingTtsRunner`, caches the most recent reference clip and logs per-stage
+  timings (`IndexTts2Timings`) for every generation.
 
 ## alpha.256
 
