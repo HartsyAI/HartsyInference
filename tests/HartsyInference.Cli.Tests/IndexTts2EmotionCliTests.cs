@@ -10,7 +10,8 @@ public sealed class IndexTts2EmotionCliTests
     public void ParseEmotionVector_ReadsEightInvariantCultureNumbers()
     {
         double[]? v = GenerationDispatch.ParseEmotionVector("0.9, 0,0.2,0 ,0,0,0,0.5");
-        Assert.Equal([0.9, 0, 0.2, 0, 0, 0, 0, 0.5], v);
+        Assert.NotNull(v);
+        Assert.Equal(new[] { 0.9, 0, 0.2, 0, 0, 0, 0, 0.5 }, v);
     }
 
     [Theory]

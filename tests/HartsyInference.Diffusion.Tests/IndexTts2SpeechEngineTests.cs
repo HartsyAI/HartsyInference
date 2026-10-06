@@ -1,8 +1,11 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Pipelines;
+using HartsyInference.Engine;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.ModelAssets.Metadata;
 using Xunit;
 
 namespace HartsyInference.Diffusion.Tests;
@@ -84,7 +87,7 @@ public sealed class IndexTts2SpeechEngineTests
     [Fact]
     public void BuildOptions_Defaults_MatchTheReferenceSampler()
     {
-        var o = IndexTts2Model.BuildOptions(Job());
+        IndexTts2Options o = IndexTts2Model.BuildOptions(Job());
         Assert.Equal(0.8f, o.Temperature);
         Assert.Equal(30, o.TopK);
         Assert.Equal(0.8f, o.TopP);
@@ -97,7 +100,7 @@ public sealed class IndexTts2SpeechEngineTests
     [Fact]
     public void BuildOptions_MapsTheEmotionVectorInIndexTts2Order()
     {
-        var o = IndexTts2Model.BuildOptions(Job(b => b.Request = b.Request with { Emotion = [0.9, 0, 0.2, 0, 0, 0, 0, 0.5], EmotionAlpha = 0.6 }));
+        IndexTts2Options o = IndexTts2Model.BuildOptions(Job(b => b.Request = b.Request with { Emotion = [0.9, 0, 0.2, 0, 0, 0, 0, 0.5], EmotionAlpha = 0.6 }));
         Assert.Equal(new[] { 0.9f, 0f, 0.2f, 0f, 0f, 0f, 0f, 0.5f }, o.EmoVector);
         Assert.Equal(0.6f, o.EmoAlpha);
     }
@@ -113,7 +116,7 @@ public sealed class IndexTts2SpeechEngineTests
     [InlineData(null, false, false, null)]
     public void BuildOptions_MapsTextEmotion(string? emotionText, bool fromText, bool useText, string? expectedText)
     {
-        var o = IndexTts2Model.BuildOptions(Job(b => b.Request = b.Request with { EmotionText = emotionText, EmotionFromText = fromText }));
+        IndexTts2Options o = IndexTts2Model.BuildOptions(Job(b => b.Request = b.Request with { EmotionText = emotionText, EmotionFromText = fromText }));
         Assert.Equal(useText, o.UseEmoText);
         Assert.Equal(expectedText, o.EmoText);
     }
