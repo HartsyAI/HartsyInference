@@ -213,15 +213,16 @@ public sealed class IndexTts2Pipeline : IDisposable
 
             if (feat1Path is not null && feat2Path is not null)
             {
+                // The loaders own the tensors' backing storage (an F32 tensor is returned as-is, not copied), so
+                // they stay alive for the pipeline's lifetime — disposing them here would free the banks the
+                // lookup still reads.
                 PytorchPickleLoader feat1Loader = new();
                 feat1Loader.Load(feat1Path, recursiveFlatten: true);
+                loaders.Add(feat1Loader);
                 PytorchPickleLoader feat2Loader = new();
                 feat2Loader.Load(feat2Path, recursiveFlatten: true);
-                // Ownership of both tensors transfers to IndexTts2EmotionVectorLookup; the (now-empty) loaders
-                // can be disposed immediately rather than kept alive for the pipeline's own lifetime.
+                loaders.Add(feat2Loader);
                 emoLookup = new IndexTts2EmotionVectorLookup(feat1Loader.GetAllTensors()["data"], feat2Loader.GetAllTensors()["data"]);
-                feat1Loader.Dispose();
-                feat2Loader.Dispose();
             }
 
             if (qwenEmoDir is not null)
