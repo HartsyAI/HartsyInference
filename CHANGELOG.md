@@ -24,7 +24,7 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
-## alpha.257
+## alpha.261
 
 IndexTTS-2 accuracy pass. Every stage of the 2.0 pipeline is now compared numerically with a dump of the PyTorch
 reference's own intermediates (`IndexTts2V20PythonParityTests`, real weights, env-gated), and greedy decoding is
@@ -48,9 +48,9 @@ compared token for token. Earlier checks only listened to the output, so these d
   capped at 15 s. The 16 kHz signal now matches to 6e-5 (was 3.4%).
 - **Fixed: the repetition penalty did not include the reference's filler token** (`input_ids` are all ones plus the
   start token), and `remove_long_silence`, which the reference never calls, was applied. Both now match.
-- **Behaviour changes to note:** output differs from alpha.256 for the same seed (the fixes above change the model's inputs
+- **Behaviour changes to note:** output differs from alpha.260 for the same seed (the fixes above change the model's inputs
   and decoding); explicit emotion vectors are no longer normalized by default; `remove_long_silence` is gone; 2.0 inserts
-  200 ms of silence between text segments. Version bump: `Directory.Build.props` `VersionSuffix` alpha.256 → alpha.257.
+  200 ms of silence between text segments. Version bump: `Directory.Build.props` `VersionSuffix` alpha.260 → alpha.261.
 - **Changed: explicit emotion vectors are used as given** (the reference's library path and the Qwen text path never
   normalize them; only its WebUI does). `IndexTts2Options.NormalizeEmoVector` opts into the WebUI's bias + 0.8 cap.
 - **Added (2.0): exact reference text handling.** Token-level segment splitting (`split_segments`, golden-tested against
@@ -67,6 +67,57 @@ compared token for token. Earlier checks only listened to the output, so these d
   CAM++, conditioning) is computed once and reused, and synthesis can stream one text segment at a time. The engine's
   `indextts2` runner now implements `IStreamingTtsRunner`, caches the most recent reference clip and logs per-stage
   timings (`IndexTts2Timings`) for every generation.
+## alpha.260
+
+- **Fish Audio S2 voice cloning.** `ModifiedDacEncoder` ports the other half of the codec: the causal strided encoder
+  (windowed transformer in its last block), the downsampling ConvNeXt stack, the pre-module transformer and the residual
+  quantizer. It matches the official encoder on a tiny random checkpoint (every stage and the exact codes) and, on the
+  real `codec.pth`, reproduced 690 of 690 codes of a generated clip. A request's reference clip plus its exact
+  transcript now becomes the cloning system turn; a reference without a transcript is rejected. The conv/transformer
+  helpers the encoder and decoder share moved into `DacOps`.
+- The tiny Fish Audio S2 test checkpoints (about 2.4 MB) are now tracked: `.gitignore` re-includes
+  `Fixtures/FishAudioS2/*.safetensors`. They were ignored with the other weights, so alpha.259's parity tests had no
+  fixtures to load on a fresh checkout.
+
+## alpha.259
+
+- **Fish Audio S2 Dual-AR model** (`FishAudioS2DualAr`; not yet registered as a TTS model — the codec and pipeline are
+  still to come). The 36-layer slow transformer and 4-layer fast transformer run on the shared `GenericTransformer`
+  (per-head Q/K norm, interleaved RoPE, tied text embedding) with BF16 weights kept in their stored dtype. The frame
+  step follows fish-speech's `decode_one_token_ar`: the slow head is constrained to the semantic range plus
+  `<|im_end|>`, Repetition Aware Sampling re-draws a repeated semantic token, code 0 is derived from the main token,
+  and the fast model takes the post-norm slow hidden state. Sampling filters on the untempered distribution as upstream
+  does. Slow logits, post-norm hidden states and fast logits match the official `DualARTransformer` on a tiny random
+  checkpoint to 2e-6 (`tools/fish_audio/s2_dual_ar_reference.py`).
+- **Fish Audio S2 codec decoder** (`ModifiedDacDecoder`): the code-to-waveform half of fish-speech's ModifiedDAC — the
+  semantic + nine residual codebooks, the 8-layer window-limited causal transformer, the causal ConvTranspose/ConvNeXt
+  upsampler and the causal Snake/residual-unit decoder, 2048 samples per frame at 44.1 kHz. Every stage matches the
+  official implementation to about 1e-7 on a tiny random checkpoint, and decoding with the real released `codec.pth`
+  matches to 3e-6 (`tools/fish_audio/modded_dac_reference.py`, `ModifiedDacRealWeightTests`). Reference-audio encoding
+  is not ported yet.
+- **Fish Audio S2 Pro text-to-speech** (`fishaudio`, status ValidationPending). `FishAudioS2Prompt` builds fish-speech's
+  conversation prompt (system / user / open assistant turn, `<|speaker:N|>` batching, assistant turns carrying earlier
+  batches' codes), `FishAudioS2Pipeline` runs the Dual-AR loop to `<|im_end|>` and decodes with `ModifiedDacDecoder`,
+  and `FishAudioS2Model` registers it in the speech catalog (`fishaudio/s2-pro`: tokenizer, `codec.pth`, sharded
+  weights). A real-weight CPU run (seed 7) produced 3.2 s that Whisper base.en transcribed word-exact. Reference-voice
+  cloning is refused with a clear message until the codec encoder is ported. The weights are non-commercial
+  (Fish Audio Research License).
+
+## alpha.258
+
+- Add the `kolibri1` text-model catalog entry (`Hob-forge/Kolibri-1-GGUF`, Q4_K_M, SHA-256 pinned). Status stays
+  Structural: no real checkpoint has been run yet (the smallest quant is 28.6 GB).
+- **Fixed: Kolibri-1 tokenization.** Its `tokenizer.ggml.pre` is `kolibri1` (llama.cpp's Qwen2 pre-tokenizer), which
+  splits digits one at a time and matches contractions case-insensitively. The engine used the GPT-2 default, which
+  groups digit runs and so produced different token ids for any prompt containing numbers.
+
+## alpha.257
+
+- Add Kolibri-1 native GGUF support: key mapping for sandwich norms, Q/K norm, MoE tensors and the router bias;
+  local/global attention with NoPE; and Kolibri's sigmoid-logit-add expert routing, which requires the correction bias.
+- **Fixed: Kolibri-1 GGUFs failed to load.** The published converter emits only the expert FFN lengths, but the loader
+  required `kolibri1.feed_forward_length`. It now falls back to `expert_feed_forward_length`, then
+  `expert_shared_feed_forward_length`, and still throws if none is present.
 
 ## alpha.256
 
