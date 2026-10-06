@@ -22,8 +22,9 @@ public sealed record VocosFactorizedCodecConfig
     public int DownsampleScale { get; init; } = 1;
 
     /// <summary>IndexTTS-2.0's dependency (<c>amphion/MaskGCT</c>'s <c>semantic_codec/model.safetensors</c>): no
-    /// resample. Confirmed only <c>.Quantize</c> is ever called in the real <c>infer_v2.py</c> — the decoder half
-    /// is trained but dead weight for this inference path, so skip loading it (<c>loadDecoder: false</c>).</summary>
+    /// resample. The real <c>infer_v2.py</c> only calls <c>.Quantize</c> (reference encoding) and
+    /// <c>quantizer.vq2emb</c> (<see cref="VocosFactorizedCodec.VqToEmbedding"/>, AR codes → S2Mel content) — the
+    /// decoder half is trained but dead weight for this inference path, so skip loading it (<c>loadDecoder: false</c>).</summary>
     public static VocosFactorizedCodecConfig IndexTts2V0 => new()
     {
         CodebookSize = 8192,
