@@ -1127,6 +1127,22 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Fish Audio S2 Pro: Dual-AR (36L slow + 4L fast over 10 codebooks) + ModifiedDAC decoder. Fish Audio
+                // Research License (non-commercial). Components match the official code; one real-weight CPU run transcribed
+                // word-exact (Whisper base.en). No reference-voice cloning yet (codec encoder not ported); no GPU/Swarm run yet.
+                Id = "fishaudio", Modality = tts, DisplayName = "Fish Audio S2 Pro", Architecture = "Dual-AR + ModifiedDAC", Status = vp,
+                CliDrivable = true, // `hartsy speak -m fishaudio`
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "model-00001-of-00002.safetensors", TargetSubdir = "Audio/FishAudioS2", Role = "transformer" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "model-00002-of-00002.safetensors", TargetSubdir = "Audio/FishAudioS2", Role = "transformer" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "model.safetensors.index.json", TargetSubdir = "Audio/FishAudioS2", Role = "config" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "codec.pth", TargetSubdir = "Audio/FishAudioS2", Role = "codec" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "tokenizer.json", TargetSubdir = "Audio/FishAudioS2", Role = "tokenizer" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "f5", Modality = tts, DisplayName = "F5-TTS", Architecture = "voice cloning, flow-matching DiT", Status = ok,
                 CliDrivable = true, // `hartsy speak -m f5 --reference <wav> --ref-text "..."` — TtsCatalog key is "f5" (was "f5-tts" here before, which never resolved); clone-only, needs both
                 Assets = new ModelAsset[]

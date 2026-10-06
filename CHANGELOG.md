@@ -24,6 +24,30 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.259
+
+- **Fish Audio S2 Dual-AR model** (`FishAudioS2DualAr`; not yet registered as a TTS model — the codec and pipeline are
+  still to come). The 36-layer slow transformer and 4-layer fast transformer run on the shared `GenericTransformer`
+  (per-head Q/K norm, interleaved RoPE, tied text embedding) with BF16 weights kept in their stored dtype. The frame
+  step follows fish-speech's `decode_one_token_ar`: the slow head is constrained to the semantic range plus
+  `<|im_end|>`, Repetition Aware Sampling re-draws a repeated semantic token, code 0 is derived from the main token,
+  and the fast model takes the post-norm slow hidden state. Sampling filters on the untempered distribution as upstream
+  does. Slow logits, post-norm hidden states and fast logits match the official `DualARTransformer` on a tiny random
+  checkpoint to 2e-6 (`tools/fish_audio/s2_dual_ar_reference.py`).
+- **Fish Audio S2 codec decoder** (`ModifiedDacDecoder`): the code-to-waveform half of fish-speech's ModifiedDAC — the
+  semantic + nine residual codebooks, the 8-layer window-limited causal transformer, the causal ConvTranspose/ConvNeXt
+  upsampler and the causal Snake/residual-unit decoder, 2048 samples per frame at 44.1 kHz. Every stage matches the
+  official implementation to about 1e-7 on a tiny random checkpoint, and decoding with the real released `codec.pth`
+  matches to 3e-6 (`tools/fish_audio/modded_dac_reference.py`, `ModifiedDacRealWeightTests`). Reference-audio encoding
+  is not ported yet.
+- **Fish Audio S2 Pro text-to-speech** (`fishaudio`, status ValidationPending). `FishAudioS2Prompt` builds fish-speech's
+  conversation prompt (system / user / open assistant turn, `<|speaker:N|>` batching, assistant turns carrying earlier
+  batches' codes), `FishAudioS2Pipeline` runs the Dual-AR loop to `<|im_end|>` and decodes with `ModifiedDacDecoder`,
+  and `FishAudioS2Model` registers it in the speech catalog (`fishaudio/s2-pro`: tokenizer, `codec.pth`, sharded
+  weights). A real-weight CPU run (seed 7) produced 3.2 s that Whisper base.en transcribed word-exact. Reference-voice
+  cloning is refused with a clear message until the codec encoder is ported. The weights are non-commercial
+  (Fish Audio Research License).
+
 ## alpha.258
 
 - Add the `kolibri1` text-model catalog entry (`Hob-forge/Kolibri-1-GGUF`, Q4_K_M, SHA-256 pinned). Status stays
