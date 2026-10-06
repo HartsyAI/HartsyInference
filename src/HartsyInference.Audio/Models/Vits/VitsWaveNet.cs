@@ -17,19 +17,26 @@ public sealed unsafe class VitsWaveNet
         _rsW = new Tensor?[layers]; _rsB = new Tensor?[layers];
     }
 
-    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
+    /// <param name="convKeySuffix">Extra path segment between each conv's own name and its
+    /// <c>weight</c>/<c>weight_g</c>/<c>weight_v</c>/<c>bias</c> leaf — VITS's own checkpoints need none (the
+    /// default, empty string); IndexTTS-2's S2Mel WaveNet wraps every conv in an <c>SConv1d</c> "streamable
+    /// conv" module, nesting the real weights one level deeper (<c>in_layers.0.conv.conv.weight_g</c> instead
+    /// of <c>in_layers.0.weight_g</c>), so it passes <c>".conv.conv"</c>. Confirmed from the real
+    /// <c>s2mel.pth</c>'s own key names — this nesting is NOT a VITS convention and would not be guessable
+    /// from the Python source's naming alone.</param>
+    public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix, string convKeySuffix = "")
     {
         for (int i = 0; i < _layers; i++)
         {
-            _inW[i] = VitsWeights.Conv(w, $"{prefix}.in_layers.{i}");
-            _inB[i] = VitsWeights.Bias(w, $"{prefix}.in_layers.{i}");
-            _rsW[i] = VitsWeights.Conv(w, $"{prefix}.res_skip_layers.{i}");
-            _rsB[i] = VitsWeights.Bias(w, $"{prefix}.res_skip_layers.{i}");
+            _inW[i] = VitsWeights.Conv(w, $"{prefix}.in_layers.{i}{convKeySuffix}");
+            _inB[i] = VitsWeights.Bias(w, $"{prefix}.in_layers.{i}{convKeySuffix}");
+            _rsW[i] = VitsWeights.Conv(w, $"{prefix}.res_skip_layers.{i}{convKeySuffix}");
+            _rsB[i] = VitsWeights.Bias(w, $"{prefix}.res_skip_layers.{i}{convKeySuffix}");
         }
-        if (w.ContainsKey($"{prefix}.cond_layer.weight") || w.ContainsKey($"{prefix}.cond_layer.weight_g"))
+        if (w.ContainsKey($"{prefix}.cond_layer{convKeySuffix}.weight") || w.ContainsKey($"{prefix}.cond_layer{convKeySuffix}.weight_g"))
         {
-            _condW = VitsWeights.Conv(w, $"{prefix}.cond_layer");
-            _condB = VitsWeights.Bias(w, $"{prefix}.cond_layer");
+            _condW = VitsWeights.Conv(w, $"{prefix}.cond_layer{convKeySuffix}");
+            _condB = VitsWeights.Bias(w, $"{prefix}.cond_layer{convKeySuffix}");
         }
     }
 

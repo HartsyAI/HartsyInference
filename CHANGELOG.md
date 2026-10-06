@@ -24,7 +24,7 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
-## alpha.253
+## alpha.254
 
 - **Kokoro-82M: Japanese and Mandarin voices.** `j` and `z` voices, which raised an error in alpha.252, now read their
   text the way misaki does for the official pipeline. Both are pure C#, with no Python, MeCab or native library.
@@ -46,6 +46,50 @@ stable release will require. Dates are UTC.
 - **Kokoro-82M: voice blending.** A voice may name several packs, as `KPipeline.load_voice` allows: `af_bella,af_sky`
   averages them row by row, matching `torch.mean` to 6e-8. A part may carry a weight: `af_bella:0.7,af_sky:0.3` or
   `af_bella(2)+af_sky(1)`. Voice names are checked before they reach a file path.
+
+## alpha.253
+
+- **IndexTTS-2.5: emotion-controllable zero-shot voice cloning** (`indextts2` catalog entry; zero-shot
+  cloning wired end to end, emotion control modes not yet exposed through `TtsJob`/CLI/HTTP). Shares the
+  GPT-2 T2S decoder shape with IndexTTS-1.5 but conditions on CAM++ speaker embeddings instead of a
+  Conformer-Perceiver, and generates semantic-codec codes rather than mel frames directly. New pieces:
+  - `Wav2Vec2Bert` (new `Models/Wav2Vec2Bert/` folder, not IndexTTS-scoped): a 24-layer, 1024-hidden
+    Conformer with Shaw-style relative-key position bias (`facebook/w2v-bert-2.0`), taking hidden-state
+    layer 17 of 24 — not the final layer, confirmed from the real `infer_v2.py`.
+  - `VocosFactorizedCodec`/`VocosFactorizedCodecConfig` (generic Amphion/MaskGCT-family semantic codec:
+    `VocosBackbone` encoder → `in_project` conv → L2-normalized single-codebook nearest-neighbor lookup
+    `out_project` conv, with the decoder half built but never invoked on the real inference path).
+  - `VocosBackbone`: the first config-driven, shared copy of the ConvNeXt-based Vocos backbone shape this
+    codebase had already copy-pasted five times under one-off names.
+  - `IndexTts2T2sDecoder`: extends the GPT-2 T2S decoder with a second, smaller Conformer+Perceiver for
+    emotion conditioning (`IndexTtsPerceiver.NumLatents` generalized from a hardcoded 32 to a constructor
+    parameter so both uses share one class), the real `merge_emovec` lerp, and an explicit emotion-vector
+    lookup table (`IndexTts2EmotionVectorLookup`, cosine-similarity nearest-exemplar per category from
+    the checkpoint's `feat1.pt`/`feat2.pt`). Also replicates the checkpoint's two zero-initialized
+    "duration slot" conditioning rows for shape fidelity — confirmed inert in the real source
+    (`speed_emb` is never exposed via the public `infer()` API); not a working duration control.
+  - `IndexTts2Dit`/`IndexTts2DitBlock`: the S2Mel flow-matching stage — a 13-layer U-ViT-skip DiT (RoPE
+    attention, SwiGLU FFN, AdaLN norms) with a WaveNet final stage, solved via `ConditionalCfm` (widened
+    to accept any `ICfmEstimator` shape, not just CosyVoice's) over 25 Euler steps with `(1+rate)*cond -
+    rate*uncond` CFG. `VitsWaveNet.LoadWeights` gained an injectable key suffix so VITS and this S2Mel
+    stage share one WaveNet implementation. `InterpolateLengthRegulator` is a new, generic
+    explicit-target-length nearest-neighbor regulator (distinct from `VitsLengthRegulator`'s
+    duration-predictor shape).
+  - `IndexTts2BigVganGenerator`: a slimmer top-level BigVGAN-22kHz assembly (no embedded speaker encoder,
+    unlike IndexTTS-1.5's) reusing `AntiAliasedSnake`/`IndexTtsBigVganResBlock` verbatim.
+  - `IndexTts2QwenEmotion`: free-text emotion classification via a bundled Qwen3-0.6B fine-tune, loaded
+    through `HartsyInference.LLM`'s existing `GenericTransformer`/`TextGenerationPipeline`/
+    `JinjaChatTemplate`/JSON-grammar-constrained sampling — no new LLM infrastructure, just a new
+    `Qwen3HfConfigReader` (`config.json` → `TransformerConfig`, placed as `GgufConfigFactory`'s sibling,
+    not IndexTTS-scoped) and this model's own fixed system prompt/label vocabulary.
+  - `IndexTts2TiktokenTokenizer`: the 2.5 repo's tiktoken-format text tokenizer (`multilingual_zh_ja_
+    yue_char_del.tiktoken`, 58,836 ranks + 1,673 specials = 60,509, matching `number_text_tokens`
+    exactly), built on the existing `TiktokenConverter`/`HfTokenizerJson` rank-file parsing rather than a
+    new parser.
+  - IndexTTS-2.0 is not wired (shares every config value with 2.5 except `number_text_tokens`/tokenizer,
+    but needs its own GPT `conformer_perceiver` speaker-conditioning path that doesn't exist yet).
+  - Real end-to-end generation verified against the real checkpoints: 2.47s of finite, non-silent 22050 Hz
+    PCM (RMS 0.225) from a real reference clip.
 
 ## alpha.252
 
@@ -1462,7 +1506,6 @@ stable release will require. Dates are UTC.
   the runtime now holds its generation lock for the whole Kokoro stream, where the old text-split loop released it
   between chunks.
 
-
 ## alpha.218
 
 - **Audio eviction keeps the incoming model.** `AudioRuntime`'s memory-pressure sweep compared the prefixed job key
@@ -2873,7 +2916,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   struct and C# will throw it away — and it raises the op depth permanently, so every later op is treated as
   nested: no finalizer drain, no orphan sweep, no flush.
 
-
 ## alpha.138
 
 - **The conv half of the LoRA merge is verified against a real adapter.** Rank-4 convolution support has existed
@@ -2895,7 +2937,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   skipped, and the 49 convs are inside that UNet count.
 - The adapter is Pony-trained, which is irrelevant to what is being shown: it shares SDXL's UNet and kohya's key
   grammar, and the claim is that the conv path resolves and fits, not that the output looks like anything.
-
 
 ## alpha.137
 
@@ -3387,7 +3428,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   dispatched, wrote the device buffer and returned without rebinding, so a later host read got the untouched host
   copy and the op looked like it did nothing — a 3.3 absolute error against the reference, versus 2e-7 after.
 
-
 ## alpha.121
 
 - **The fp8 quantize path leaked every weight it wrote.** It worked out what it owned by rescanning the whole
@@ -3439,7 +3479,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   and a dim that is not a multiple of the subgroup, since the cross-subgroup fold is where a norm like this goes
   wrong on small-subgroup hardware. Max absolute error 1.4e-6 in F32, 4.9e-4 in F16 — the latter being F16's own
   precision rather than a disagreement.
-
 
 ## alpha.118
 
@@ -4850,7 +4889,6 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   identical probabilities.
 - **`tools/convert_silero_onnx.py`** emits the safetensors form and, with `--verify`, checks the export against
   onnxruntime end to end (1.25e-6 max abs over 343 chunks).
-
 
 ### Fixed
 - **End-of-speech waited for the silence window twice.** The utterance clock was driven by
