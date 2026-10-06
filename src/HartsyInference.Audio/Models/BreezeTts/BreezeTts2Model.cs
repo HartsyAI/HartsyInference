@@ -117,28 +117,42 @@ public sealed unsafe class BreezeTts2Model : IDisposable
     }
 
     /// <summary>Samples the 16-codebook frame: <paramref name="firstCode"/> from the backbone, the other 15 from the depth
-    /// decoder (incremental, cached). Reserved ids (the 2048+ specials) are never drawn.</summary>
-    public int[] SampleFrame(IBackend backend, float[] backboneHidden, int firstCode, ref uint rng)
+    /// decoder (incremental, cached). With <paramref name="uncondHidden"/> the depth decoder runs a second, unconditional
+    /// stream and each codebook's logits are <c>uncond + cfgScale · (cond − uncond)</c>. Reserved ids (the 2048+ specials)
+    /// are never drawn.</summary>
+    public int[] SampleFrame(IBackend backend, float[] backboneHidden, int firstCode, ref uint rng,
+        float[]? uncondHidden = null, float cfgScale = 1f, float? temperature = null, int? topK = null, float? topP = null)
     {
-        int n = _cfg.NumCodebooks, dd = _cfg.DepthDecoderHiddenSize, v = _cfg.AudioVocabSize;
+        int n = _cfg.NumCodebooks, v = _cfg.AudioVocabSize, h = _cfg.HiddenSize;
         int[] codes = new int[n];
         codes[0] = firstCode;
-        using IKvCache cache = KvCaches.ForDecode(_cfg.NumDepthDecoderLayers, _cfg.DepthDecoderKeyValueHeads,
+        using IKvCache condCache = KvCaches.ForDecode(_cfg.NumDepthDecoderLayers, _cfg.DepthDecoderKeyValueHeads,
             _cfg.DepthDecoderHeadDim, n + 1);
+        using IKvCache? uncondCache = uncondHidden is null ? null : KvCaches.ForDecode(_cfg.NumDepthDecoderLayers,
+            _cfg.DepthDecoderKeyValueHeads, _cfg.DepthDecoderHeadDim, n + 1);
 
         // positions 0 (backbone hidden) and 1 (first code) go in together, then one position per further code
-        float[] inputs = new float[2 * _cfg.HiddenSize];
-        backboneHidden.CopyTo(inputs, 0);
-        EmbedDepthToken(firstCode, 0).CopyTo(inputs, _cfg.HiddenSize);
+        float[] first = EmbedDepthToken(firstCode, 0);
+        float[] condInputs = [.. backboneHidden, .. first];
+        float[]? uncondInputs = uncondHidden is null ? null : [.. uncondHidden, .. first];
         int pos = 0, count = 2;
         for (int k = 1; k < n; k++)
         {
-            float[] hidden = DepthStep(backend, inputs, count, pos, cache);
+            float[] logits = CodebookLogits(backend, DepthStep(backend, condInputs, count, pos, condCache), k - 1);
+            if (uncondInputs is not null)
+            {
+                float[] u = CodebookLogits(backend, DepthStep(backend, uncondInputs, count, pos, uncondCache!), k - 1);
+                for (int i = 0; i < logits.Length; i++) logits[i] = u[i] + cfgScale * (logits[i] - u[i]);
+            }
             pos += count;
-            float[] logits = CodebookLogits(backend, hidden, k - 1);
             for (int r = _cfg.CodebookSize; r < v; r++) logits[r] = float.NegativeInfinity;
-            codes[k] = NucleusSampler.Draw(logits, v, _cfg.Temperature, _cfg.TopK, _cfg.TopP, ref rng);
-            if (k < n - 1) { inputs = EmbedDepthToken(codes[k], k); count = 1; }
+            codes[k] = NucleusSampler.Draw(logits, v, temperature ?? _cfg.Temperature, topK ?? _cfg.TopK, topP ?? _cfg.TopP, ref rng);
+            if (k < n - 1)
+            {
+                condInputs = EmbedDepthToken(codes[k], k);
+                uncondInputs = uncondInputs is null ? null : condInputs;
+                count = 1;
+            }
         }
         return codes;
     }
