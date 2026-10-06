@@ -51,8 +51,20 @@ public sealed record SpeechRequest
     /// <summary>Maximum tokens to generate; null uses the model default (Dia 3072).</summary>
     public int? MaxTokens { get; init; }
 
-    /// <summary>Zonos 8-way emotion vector in the reference order (Happiness, Sadness, Disgust, Fear, Surprise, Anger, Other, Neutral); renormalized to sum 1. Null uses the model default.</summary>
+    /// <summary>8-way emotion vector, in the order of the model that reads it — they differ. Zonos: (Happiness, Sadness, Disgust, Fear, Surprise, Anger, Other, Neutral), renormalized to sum 1. IndexTTS-2: (happy, angry, sad, afraid, disgusted, melancholic, surprised, calm), each 0–1.2. Null uses the model default.</summary>
     public IReadOnlyList<double>? Emotion { get; init; }
+
+    /// <summary>IndexTTS-2: a separate clip whose emotion (not voice) the output adopts; null uses the voice reference's own emotion.</summary>
+    public AudioClip? EmotionReference { get; init; }
+
+    /// <summary>IndexTTS-2: strength of the emotion reference (or of an explicit/text emotion vector), 0–1; null is 1.</summary>
+    public double? EmotionAlpha { get; init; }
+
+    /// <summary>IndexTTS-2: free-text description of the wanted emotion, classified by the bundled QwenEmotion model; overrides <see cref="EmotionReference"/> and <see cref="Emotion"/>.</summary>
+    public string? EmotionText { get; init; }
+
+    /// <summary>IndexTTS-2: classify the spoken <see cref="Text"/> itself for emotion (when <see cref="EmotionText"/> is not set).</summary>
+    public bool EmotionFromText { get; init; }
 
     /// <summary>Zonos speaking rate in phonemes per second (0-40; 15 default, 30 very fast, 10 slow).</summary>
     public double? SpeakingRate { get; init; }

@@ -56,7 +56,10 @@ public sealed class IndexTts2Pipeline : IDisposable
     private readonly ConditionalCfm _cfm;
     private readonly IndexTts2BigVganGenerator _bigVgan;
     private readonly IndexTts2EmotionVectorLookup? _emoLookup;
-    private readonly IndexTts2QwenEmotion? _qwenEmotion;
+    private readonly string? _qwenEmoDir;
+    private readonly IBackend? _qwenBackend;
+    private readonly object _qwenLock = new();
+    private IndexTts2QwenEmotion? _qwenEmotion;
     private readonly MelSpectrogramExtractor _refMelExtractor = new(MelSpectrogramExtractor.IndexTts2RefMelConfig());
     private readonly List<IDisposable> _loaders;
     private readonly List<Tensor> _convertedWeights;
@@ -67,7 +70,7 @@ public sealed class IndexTts2Pipeline : IDisposable
     private IndexTts2Pipeline(IndexTts2Config cfg, Func<string, int[]> encode, IDisposable? tokenizerOwner, IndexTts2SemanticFeatures semanticFeatures,
         CamPlusSpeakerEncoder camplus, VocosFactorizedCodec semanticCodec, IndexTts2T2sDecoder gpt,
         InterpolateLengthRegulator lengthRegulator, IndexTts2Dit dit, IndexTts2BigVganGenerator bigVgan,
-        IndexTts2EmotionVectorLookup? emoLookup, IndexTts2QwenEmotion? qwenEmotion,
+        IndexTts2EmotionVectorLookup? emoLookup, string? qwenEmoDir, IBackend? qwenBackend,
         List<IDisposable> loaders, List<Tensor> convertedWeights)
     {
         _cfg = cfg;
@@ -82,7 +85,8 @@ public sealed class IndexTts2Pipeline : IDisposable
         _cfm = new ConditionalCfm(dit, cfg.S2MelDit.InChannels);
         _bigVgan = bigVgan;
         _emoLookup = emoLookup;
-        _qwenEmotion = qwenEmotion;
+        _qwenEmoDir = qwenEmoDir;
+        _qwenBackend = qwenBackend;
         _loaders = loaders;
         _convertedWeights = convertedWeights;
     }
@@ -99,7 +103,9 @@ public sealed class IndexTts2Pipeline : IDisposable
     /// <paramref name="qwenBackend"/> is required only when <paramref name="qwenEmoDir"/> is given — the
     /// classifier's own <see cref="TextGenerationPipeline"/> needs a backend at construction time, unlike
     /// every other component here which defers to whatever backend <see cref="Synthesize"/> is called with
-    /// (Audio has no dependency on any concrete backend package, so the caller supplies one).</summary>
+    /// (Audio has no dependency on any concrete backend package, so the caller supplies one). The classifier
+    /// (a 0.6B LLM, ~2.4 GB once widened to F32) is loaded lazily on the first <see cref="IndexTts2Options.UseEmoText"/>
+    /// request, so a pipeline that never uses text emotion pays nothing for it; the directory's files are checked up front.</summary>
     public static async Task<IndexTts2Pipeline> LoadAsync(
         string tokenizerPath, string gptPath, string s2melPath, string codecPath,
         string w2vBertSafetensorsPath, string w2vStatsPath, string campplusPath, string bigVganPath,
@@ -119,7 +125,6 @@ public sealed class IndexTts2Pipeline : IDisposable
         IndexTts2Dit? dit = null;
         IndexTts2BigVganGenerator? bigVgan = null;
         IndexTts2EmotionVectorLookup? emoLookup = null;
-        IndexTts2QwenEmotion? qwenEmotion = null;
         List<IDisposable> loaders = [];
         List<Tensor> converted = [];
         try
@@ -223,33 +228,15 @@ public sealed class IndexTts2Pipeline : IDisposable
             {
                 if (qwenBackend is null)
                     throw new ArgumentException("qwenBackend is required when qwenEmoDir is given.", nameof(qwenBackend));
-                string configPath = Path.Combine(qwenEmoDir, "config.json");
-                string weightsPath = Path.Combine(qwenEmoDir, "model.safetensors");
-                string qwenTokenizerPath = Path.Combine(qwenEmoDir, "tokenizer.json");
-                string templatePath = Path.Combine(qwenEmoDir, "chat_template.jinja");
-
-                using System.Text.Json.JsonDocument configDoc = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(configPath, ct));
-                TransformerConfig qwenCfg = Qwen3HfConfigReader.FromHuggingFace(configDoc.RootElement);
-
-                SafeTensorsLoader qwenLoader = new();
-                qwenLoader.Load(weightsPath);
-                loaders.Add(qwenLoader);
-                Dictionary<string, Tensor> qwenWeights = IndexTtsPipeline.ToF32(qwenLoader.GetAllTensors(), converted);
-
-                GenericTransformer transformer = new(qwenCfg);
-                transformer.LoadWeights(qwenWeights, "model");
-                loaders.Add(transformer);
-
-                using FileStream tokenizerStream = File.OpenRead(qwenTokenizerPath);
-                GgufTokenizer qwenTokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerStream);
-                JinjaChatTemplate template = new(await File.ReadAllTextAsync(templatePath, ct));
-
-                TextGenerationPipeline textPipeline = new(transformer, qwenTokenizer, qwenBackend, template);
-                qwenEmotion = new IndexTts2QwenEmotion(textPipeline);
+                foreach (string name in QwenFiles)
+                {
+                    string path = Path.Combine(qwenEmoDir, name);
+                    if (!File.Exists(path)) throw new FileNotFoundException($"QwenEmotion file missing: {path}", path);
+                }
             }
 
             return new IndexTts2Pipeline(resolved, encode, tokenizerOwner, semanticFeatures, camplus, semanticCodec, gpt,
-                lengthRegulator, dit, bigVgan, emoLookup, qwenEmotion, loaders, converted);
+                lengthRegulator, dit, bigVgan, emoLookup, qwenEmoDir, qwenBackend, loaders, converted);
         }
         catch
         {
@@ -340,9 +327,7 @@ public sealed class IndexTts2Pipeline : IDisposable
         float[]? emoVector = opts.EmoVector;
         if (opts.UseEmoText)
         {
-            if (_qwenEmotion is null)
-                throw new InvalidOperationException("IndexTts2Options.UseEmoText requires the pipeline to be loaded with a QwenEmotion classifier (pass qwenEmoDir to LoadAsync).");
-            emoVector = _qwenEmotion.Infer(opts.EmoText ?? text);
+            emoVector = GetQwenEmotion().Infer(opts.EmoText ?? text);
         }
 
         if (emoVector is not null)
@@ -393,6 +378,38 @@ public sealed class IndexTts2Pipeline : IDisposable
         finally
         {
             baseVec.Dispose();
+        }
+    }
+
+    private static readonly string[] QwenFiles = ["config.json", "model.safetensors", "tokenizer.json", "chat_template.jinja"];
+
+    /// <summary>Loads the QwenEmotion classifier on first use (see <see cref="LoadAsync"/>'s remarks).</summary>
+    private IndexTts2QwenEmotion GetQwenEmotion()
+    {
+        if (_qwenEmoDir is null || _qwenBackend is null)
+            throw new InvalidOperationException("IndexTts2Options.UseEmoText requires the pipeline to be loaded with a QwenEmotion classifier (pass qwenEmoDir to LoadAsync).");
+        lock (_qwenLock)
+        {
+            if (_qwenEmotion is not null) return _qwenEmotion;
+
+            using System.Text.Json.JsonDocument configDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(_qwenEmoDir, "config.json")));
+            TransformerConfig qwenCfg = Qwen3HfConfigReader.FromHuggingFace(configDoc.RootElement);
+
+            SafeTensorsLoader qwenLoader = new();
+            qwenLoader.Load(Path.Combine(_qwenEmoDir, "model.safetensors"));
+            _loaders.Add(qwenLoader);
+            Dictionary<string, Tensor> qwenWeights = IndexTtsPipeline.ToF32(qwenLoader.GetAllTensors(), _convertedWeights);
+
+            GenericTransformer transformer = new(qwenCfg);
+            transformer.LoadWeights(qwenWeights, "model");
+            _loaders.Add(transformer);
+
+            using FileStream tokenizerStream = File.OpenRead(Path.Combine(_qwenEmoDir, "tokenizer.json"));
+            GgufTokenizer qwenTokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerStream);
+            JinjaChatTemplate template = new(File.ReadAllText(Path.Combine(_qwenEmoDir, "chat_template.jinja")));
+
+            TextGenerationPipeline textPipeline = new(transformer, qwenTokenizer, _qwenBackend, template);
+            return _qwenEmotion = new IndexTts2QwenEmotion(textPipeline);
         }
     }
 

@@ -220,7 +220,7 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
 
         List<int> generated = new(Math.Min(cap, 256));
         HashSet<int> seenForPenalty = [StartMelToken];
-        using (Tensor textEmb = EmbedTextWithPositionAndLang(wrappedTextIds, langId, h))
+        using (Tensor textEmb = EmbedTextWithPositionAndLang(wrappedTextIds, Mode == IndexTts2SpeakerConditioning.Campplus ? langId : null, h))
         using (Tensor prefix = Concat(conds, textEmb, condLen, textLen, h))
         using (IKvCache cache = _gpt.CreateCache())
         {
@@ -258,7 +258,7 @@ internal sealed unsafe class IndexTts2T2sDecoder : IDisposable
     /// <summary><c>cat([latents + emoVec.unsqueeze(1), speed_emb(1), speed_emb(0)], dim=1)</c> → <c>[1, L+2, hidden]</c>
     /// (<c>speed_emb(zeros)</c> is row 0, <c>speed_emb(ones)</c> is row 1, and the real concat order puts the
     /// "half" (row 1) slot first).</summary>
-    private static Tensor BuildConformerPerceiverConditioning(Tensor speakerLatents, Tensor emoVec, Tensor speedEmbed, int h)
+    internal static Tensor BuildConformerPerceiverConditioning(Tensor speakerLatents, Tensor emoVec, Tensor speedEmbed, int h)
     {
         int latentCount = (int)speakerLatents.Shape[1];
         Tensor conds = new(new TensorShape(1, latentCount + 2, h), DType.F32);

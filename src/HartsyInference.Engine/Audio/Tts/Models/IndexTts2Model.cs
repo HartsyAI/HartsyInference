@@ -1,87 +1,158 @@
 using HartsyInference.Audio.Cache;
+using HartsyInference.Audio.Models.IndexTts2;
 using HartsyInference.Audio.Pipelines;
 using HartsyInference.Core.Logging;
 
 namespace HartsyInference.Engine.Audio;
 
-/// <summary>IndexTTS-2.5 (<c>IndexTeam/IndexTTS-2.5</c>): emotion-controllable zero-shot voice cloning —
-/// a GPT text-to-speech decoder (CAM++ speaker conditioning) generating semantic-codec codes, an S2Mel
-/// flow-matching DiT converting them to an 80-band mel, vocoded by the stock
-/// <c>nvidia/bigvgan_v2_22khz_80band_256x</c> to 22050 Hz. Spans 4 HuggingFace repos: the main checkpoint,
-/// <c>facebook/w2v-bert-2.0</c> (semantic conditioning), <c>funasr/campplus</c> (speaker style), and the
-/// BigVGAN vocoder — <see cref="AudioModelFile.Repo"/> overrides resolve each, same pattern as
-/// <see cref="AukModel"/>'s multi-repo wiring.
-/// <para>This wiring covers zero-shot cloning with the DEFAULT emotion (the speaker's own natural emotion,
-/// matching the real reference's own fallback when no emotion control is requested) — the explicit
-/// emotion-vector, emotion-reference-clip and QwenEmotion-text modes <see cref="IndexTts2Options"/> already
-/// supports are not yet surfaced as job/CLI/HTTP knobs (needs new <see cref="TtsJob"/> fields and
-/// <c>SpeechCommand</c>/<c>AudioEndpoints</c> plumbing — deliberately out of scope here to keep this change
-/// focused on getting the model loadable and callable at all). IndexTTS-2.0 is not wired — see
-/// <see cref="IndexTts2Config"/>'s remarks.</para></summary>
+/// <summary>IndexTTS-2.5 (<c>indextts2</c>, default) and IndexTTS-2.0 (<c>indextts2:2.0</c>): emotion-controllable
+/// zero-shot voice cloning — a GPT text-to-speech decoder generating semantic-codec codes, an S2Mel flow-matching
+/// DiT converting them to an 80-band mel, vocoded by the stock <c>nvidia/bigvgan_v2_22khz_80band_256x</c> to
+/// 22050 Hz. The two checkpoints share that stack; they differ in the GPT's speaker conditioning (2.5: CAM++
+/// projection, 2.0: Conformer+Perceiver), the semantic codec (2.5: the repo's own <c>codec.pth</c>, 2.0:
+/// <c>amphion/MaskGCT</c>'s RepCodec) and the tokenizer (2.5: tiktoken, 2.0: SentencePiece). Each spans several
+/// HuggingFace repos — <see cref="AudioModelFile.Repo"/> overrides resolve them, same pattern as
+/// <see cref="AukModel"/>'s variant-aware multi-repo wiring.
+/// <para>Emotion control follows the real <c>infer_generator</c>: by default the speaker's own clip doubles as the
+/// emotion reference; <see cref="TtsJob.EmotionReference"/> supplies a separate clip (blended by
+/// <see cref="TtsJob.EmotionAlpha"/>), <see cref="TtsJob.Emotion"/> an explicit 8-way vector in IndexTTS-2's own
+/// order (happy, angry, sad, afraid, disgusted, melancholic, surprised, calm — NOT Zonos's order), and
+/// <see cref="TtsJob.EmotionText"/>/<see cref="TtsJob.EmotionFromText"/> a free-text description classified by the
+/// bundled QwenEmotion model (loaded on first use).</para></summary>
 internal static class IndexTts2Model
 {
-    internal const string Repo = "IndexTeam/IndexTTS-2.5";
+    internal const string Repo25 = "IndexTeam/IndexTTS-2.5";
+    internal const string Repo20 = "IndexTeam/IndexTTS-2";
     internal const string W2vBertRepo = "facebook/w2v-bert-2.0";
     internal const string CamplusRepo = "funasr/campplus";
     internal const string BigVganRepo = "nvidia/bigvgan_v2_22khz_80band_256x";
+    internal const string MaskGctRepo = "amphion/MaskGCT";
 
     internal const string TiktokenFile = "multilingual_zh_ja_yue_char_del.tiktoken";
+    internal const string BpeFile = "bpe.model";
     internal const string GptFile = "gpt.pth";
     internal const string S2MelFile = "s2mel.pth";
     internal const string CodecFile = "codec.pth";
+    internal const string MaskGctCodecFile = "semantic_codec/model.safetensors";
     internal const string W2vStatsFile = "wav2vec2bert_stats.pt";
+    internal const string Feat1File = "feat1.pt";
+    internal const string Feat2File = "feat2.pt";
     internal const string W2vBertWeightsFile = "model.safetensors";
     internal const string CamplusFile = "campplus_cn_common.bin";
     internal const string BigVganFile = "bigvgan_generator.pt";
+    internal const string QwenDir = "qwen0.6bemo4-merge";
+    internal static readonly string[] QwenFiles = ["config.json", "model.safetensors", "tokenizer.json", "chat_template.jinja"];
 
-    private static IReadOnlyList<AudioModelFile> Files() =>
-    [
-        new AudioModelFile(TiktokenFile),
-        new AudioModelFile(GptFile),
-        new AudioModelFile(S2MelFile),
-        new AudioModelFile(CodecFile),
-        new AudioModelFile(W2vStatsFile),
-        new AudioModelFile(W2vBertWeightsFile, Repo: W2vBertRepo),
-        new AudioModelFile(CamplusFile, Repo: CamplusRepo),
-        new AudioModelFile(BigVganFile, Repo: BigVganRepo),
-    ];
+    /// <summary>True for the 2.0 checkpoint (<c>2.0</c>, <c>v2_0</c> or the bare <c>IndexTeam/IndexTTS-2</c> repo id); everything else, including no variant, is 2.5.</summary>
+    internal static bool IsV2_0(string? variant)
+    {
+        string v = (variant ?? string.Empty).Trim();
+        return v.Contains("2.0", StringComparison.Ordinal)
+            || v.Contains("2_0", StringComparison.Ordinal)
+            || v.EndsWith("IndexTTS-2", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Maps the variant hint to the repo holding the GPT/S2Mel checkpoint; a custom <c>owner/name</c> passes through.</summary>
+    internal static string ResolveRepo(string? variant)
+    {
+        string id = (variant ?? string.Empty).Trim();
+        if (id.Contains('/', StringComparison.Ordinal))
+        {
+            return id;
+        }
+        return IsV2_0(id) ? Repo20 : Repo25;
+    }
+
+    private static string QwenPath(string file) => $"{QwenDir}/{file}";
+
+    internal static IReadOnlyList<AudioModelFile> Files(string? variant)
+    {
+        bool v20 = IsV2_0(variant);
+        List<AudioModelFile> files =
+        [
+            new AudioModelFile(v20 ? BpeFile : TiktokenFile),
+            new AudioModelFile(GptFile),
+            new AudioModelFile(S2MelFile),
+            new AudioModelFile(W2vStatsFile),
+            new AudioModelFile(Feat1File),
+            new AudioModelFile(Feat2File),
+        ];
+        files.Add(v20 ? new AudioModelFile(MaskGctCodecFile, Repo: MaskGctRepo) : new AudioModelFile(CodecFile));
+        foreach (string qwen in QwenFiles)
+        {
+            files.Add(new AudioModelFile(QwenPath(qwen)));
+        }
+        files.Add(new AudioModelFile(W2vBertWeightsFile, Repo: W2vBertRepo));
+        files.Add(new AudioModelFile(CamplusFile, Repo: CamplusRepo));
+        files.Add(new AudioModelFile(BigVganFile, Repo: BigVganRepo));
+        return files;
+    }
 
     internal static TtsModelDescriptor Descriptor { get; } = new TtsModelDescriptor
     {
-        ResolveRepo = _ => Repo,
-        ResolveFiles = (_, _) => Task.FromResult(Files()),
-        LoadAsync = async (context, _, cancel) =>
+        ResolveRepo = ResolveRepo,
+        ResolveFiles = (variant, _) => Task.FromResult(Files(variant)),
+        LoadAsync = async (context, variant, cancel) =>
         {
-            IReadOnlyDictionary<string, string> fetched = await AudioModelCache.FetchAllAsync(Repo, Files(), "tts", ct: cancel).ConfigureAwait(false);
+            bool v20 = IsV2_0(variant);
+            string repo = ResolveRepo(variant);
+            IReadOnlyDictionary<string, string> fetched = await AudioModelCache.FetchAllAsync(repo, Files(variant), "tts", ct: cancel).ConfigureAwait(false);
 
             IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
-                fetched[TiktokenFile], fetched[GptFile], fetched[S2MelFile], fetched[CodecFile],
+                fetched[v20 ? BpeFile : TiktokenFile], fetched[GptFile], fetched[S2MelFile],
+                fetched[v20 ? MaskGctCodecFile : CodecFile],
                 fetched[W2vBertWeightsFile], fetched[W2vStatsFile], fetched[CamplusFile], fetched[BigVganFile],
-                feat1Path: null, feat2Path: null, qwenEmoDir: null, qwenBackend: null,
-                cfg: null, cancel).ConfigureAwait(false);
-            Logs.Info($"[Audio][IndexTTS2] Loaded {Repo} (IndexTTS-2.5, emotion-controllable zero-shot cloning, 22050 Hz).");
+                feat1Path: fetched[Feat1File], feat2Path: fetched[Feat2File],
+                qwenEmoDir: Path.GetDirectoryName(fetched[QwenPath("config.json")]), qwenBackend: context.Backend,
+                cfg: v20 ? IndexTts2Config.V2_0 : IndexTts2Config.V2_5, cancel).ConfigureAwait(false);
+            Logs.Info($"[Audio][IndexTTS2] Loaded {repo} (IndexTTS-{(v20 ? "2.0" : "2.5")}, emotion-controllable zero-shot cloning, 22050 Hz).");
 
             return new TtsRunner(22_050, (backend, job) => Synthesize(pipeline, backend, job), pipeline);
         },
     };
 
-    private static float[] Synthesize(IndexTts2Pipeline pipeline, HartsyInference.Core.Backends.IBackend backend, TtsJob job)
+    /// <summary>Maps the engine job to <see cref="IndexTts2Options"/>. The reference clips arrive at the engine's shared 24 kHz decode rate; the pipeline resamples internally.</summary>
+    internal static IndexTts2Options BuildOptions(TtsJob job)
     {
-        if (job.ReferenceMono24k is not { Length: > 0 })
+        float[]? vector = null;
+        if (job.Emotion is { Count: > 0 } emotion)
         {
-            throw new InvalidOperationException("IndexTTS-2.5 needs a voice reference clip (zero-shot cloning only).");
+            if (emotion.Count != 8)
+            {
+                throw new ArgumentException("IndexTTS-2 emotion needs exactly 8 values (happy, angry, sad, afraid, disgusted, melancholic, surprised, calm).");
+            }
+            vector = [.. emotion.Select(v => (float)v)];
         }
-        IndexTts2Options options = new()
+
+        (float[] Audio, int SampleRate)? emoReference = null;
+        if (job.EmotionReference is { Data.Length: > 0 } clip)
+        {
+            emoReference = (AudioClipCodec.DecodeMono(clip, ReferenceRate), ReferenceRate);
+        }
+
+        return new IndexTts2Options
         {
             Seed = unchecked((ulong)job.Seed),
             Temperature = job.Temperature.HasValue ? (float)job.Temperature.Value : 0.8f,
             TopK = job.TopK ?? 30,
             TopP = job.TopP.HasValue ? (float)job.TopP.Value : 0.8f,
             MaxMelTokens = job.MaxTokens,
+            EmoVector = vector,
+            EmoAudioReference = emoReference,
+            EmoAlpha = job.EmotionAlpha.HasValue ? (float)job.EmotionAlpha.Value : 1.0f,
+            UseEmoText = !string.IsNullOrWhiteSpace(job.EmotionText) || job.EmotionFromText,
+            EmoText = string.IsNullOrWhiteSpace(job.EmotionText) ? null : job.EmotionText,
         };
-        // job.ReferenceMono24k is 24 kHz (the engine's shared reference-decode rate); Synthesize resamples
-        // internally to whatever each of its own front ends needs (16k/22050), same as every other model
-        // that takes a reference clip at a different native rate than the engine's shared decode.
-        return pipeline.Synthesize(backend, job.Text, job.ReferenceMono24k, 24_000, options);
+    }
+
+    private const int ReferenceRate = 24_000;
+
+    private static float[] Synthesize(IndexTts2Pipeline pipeline, HartsyInference.Core.Backends.IBackend backend, TtsJob job)
+    {
+        if (job.ReferenceMono24k is not { Length: > 0 })
+        {
+            throw new InvalidOperationException($"{pipeline.ModelName} needs a voice reference clip (zero-shot cloning only).");
+        }
+        return pipeline.Synthesize(backend, job.Text, job.ReferenceMono24k, ReferenceRate, BuildOptions(job));
     }
 }
