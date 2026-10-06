@@ -132,10 +132,16 @@ def write_tokens(out: Path) -> None:
 def write_real(controlfoley: Path, out: Path, weights: Path) -> None:
     tokenizer = open_clip.get_tokenizer(TOKENIZER_NAME)
     config = json.loads(Path(open_clip.__file__).parent.joinpath("model_configs", TOKENIZER_NAME + ".json").read_text())
-    model = open_clip.CLIP(embed_dim=config["embed_dim"], vision_cfg=config["vision_cfg"], text_cfg=config["text_cfg"],
-                           quick_gelu=True).eval()
-    state = {k: v.float() for k, v in load_file(str(weights)).items()}
-    print(model.load_state_dict(state, strict=False))
+    with torch.device("meta"):
+        model = open_clip.CLIP(embed_dim=config["embed_dim"], vision_cfg=config["vision_cfg"], text_cfg=config["text_cfg"],
+                               quick_gelu=True)
+    state = load_file(str(weights))
+    for name in list(state.keys()):
+        state[name] = state[name].float()
+    print(model.load_state_dict(state, strict=False, assign=True))
+    del state
+    model.attn_mask = torch.empty(77, 77).fill_(float("-inf")).triu_(1)
+    model.eval()
     model = load_patch_clip(controlfoley)(model)
     prompts = ["a dog barking in the distance", "footsteps on gravel then a door slams", "", "Rain on a tin roof, thunder!",
                "an orchestra tuning up before the concert begins"]
