@@ -19,6 +19,7 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
     private const int SampleRate = 16_000;
     private const int NumMelBins = 80;
     private const int Stride = 2;
+    private const float Int16Scale = 32768f;
 
     private readonly Wav2Vec2BertConfig _cfg;
     private readonly KaldiFbankExtractor _fbank = new(SampleRate, NumMelBins);
@@ -56,8 +57,14 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
         if (_projW is null) throw new InvalidOperationException("Wav2Vec2BertExtractor weights not loaded.");
 
         Tensor stacked = ExtractStackedFeatures(audio16k);
-        int t = (int)stacked.Shape[1];
+        return ForwardFromFeatures(backend, stacked);
+    }
 
+    /// <summary>The encoder half of <see cref="Forward"/> on already-extracted stacked features
+    /// <c>[1, T, 160]</c> (consumed — the tensor is disposed).</summary>
+    internal Tensor ForwardFromFeatures(IBackend backend, Tensor stacked)
+    {
+        int t = (int)stacked.Shape[1];
         Tensor projNormed = new(stacked.Shape, DType.F32);
         backend.LayerNorm(projNormed, stacked, _projLnW!, _projLnB!, _cfg.LayerNormEps);
         stacked.Dispose();
@@ -78,9 +85,15 @@ public sealed class Wav2Vec2BertExtractor : IDisposable
     /// (sample variance, ddof=1, +1e-7 epsilon), drop a trailing odd frame, then reshape consecutive frame PAIRS
     /// into one <c>numMelBins*stride</c>-wide vector (so the 80-bin fbank becomes this model's real 160-dim
     /// input and the frame rate halves to ~20 ms).</summary>
-    private Tensor ExtractStackedFeatures(ReadOnlySpan<float> audio16k)
+    internal Tensor ExtractStackedFeatures(ReadOnlySpan<float> audio16k)
     {
-        float[,] fbank = _fbank.Compute(audio16k);
+        // The reference feature extractor feeds the fbank 16-bit-integer-scaled samples (`waveform * 2**15`, "Kaldi
+        // compliance"). The scale only shifts every log-mel value by a constant — which the per-bin normalization below
+        // removes — EXCEPT where the unscaled energies fall under the log's epsilon floor: quiet frames and weak
+        // high bins of [-1, 1] audio all clamp to log(eps), flattening exactly the low-level detail the encoder sees.
+        float[] scaled = new float[audio16k.Length];
+        for (int i = 0; i < scaled.Length; i++) scaled[i] = audio16k[i] * Int16Scale;
+        float[,] fbank = _fbank.Compute(scaled);
         int frames = fbank.GetLength(0), bins = fbank.GetLength(1);
 
         float[,] normed = new float[frames, bins];

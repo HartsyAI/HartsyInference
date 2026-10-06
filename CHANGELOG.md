@@ -24,6 +24,13 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.257
+
+- **IndexTTS-2 accuracy pass against the PyTorch reference (work in progress; entries below are final only when the PR
+  is marked ready).** Every stage of the 2.0 pipeline is now checked numerically against a dump of the reference's own
+  intermediates (`IndexTts2V20PythonParityTests`), which found and fixed several divergences that earlier
+  intelligibility-only checks could not see.
+
 ## alpha.256
 
 - Add the Breeze TTS 2 architecture and checkpoint configuration contract. Its Mimi codec is the shared

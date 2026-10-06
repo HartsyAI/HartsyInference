@@ -8,7 +8,7 @@ namespace HartsyInference.Audio.Models.IndexTts;
 /// 3×3/stride-2 Conv2d subsampling front end over the mel "image" (halving the time axis), a linear projection
 /// back to <see cref="IndexTtsConformerConfig.OutputSize"/>, 6 <see cref="IndexTtsConformerLayer"/> blocks, and a
 /// final LayerNorm.</summary>
-/// <remarks>The subsampling conv and the relative-position table are built host-side: both run once per reference
+/// <remarks>The subsampling conv and the position table are built host-side: both run once per reference
 /// clip (not per generated token), so a device round trip would only add latency without changing output.</remarks>
 internal sealed unsafe class IndexTtsConformerEncoder : IDisposable
 {
@@ -51,7 +51,7 @@ internal sealed unsafe class IndexTtsConformerEncoder : IDisposable
         long n = subsampled.ElementCount;
         for (long i = 0; i < n; i++) sp[i] *= scale;
 
-        Tensor posEmb = BuildRelPos(tOut, odim);
+        Tensor posEmb = BuildPos(tOut, odim);
         Tensor x = subsampled;
         for (int i = 0; i < _layers.Length; i++)
         {
@@ -139,21 +139,21 @@ internal sealed unsafe class IndexTtsConformerEncoder : IDisposable
         return (projected, tOut);
     }
 
-    /// <summary>Analytic ESPnet relative-position table <c>[1, 2T-1, d]</c> (same convention as CosyVoice's
-    /// <c>UpsampleConformerEncoder.BuildRelPos</c>): index 0 is position +(T-1) descending to -(T-1), even dims
-    /// sin / odd dims cos at the standard 1/10000^(2k/d) frequencies. Computed rather than loaded from the
-    /// checkpoint's cached <c>embed.pos_enc.pe</c> buffer (a fixed-length slice of a precomputed table) to avoid any
-    /// slicing-offset ambiguity — both are the same deterministic sinusoid.</summary>
-    private static Tensor BuildRelPos(int t, int d)
+    /// <summary>The position table <c>[1, T, d]</c> the reference actually feeds its "relative" attention: IndexTTS's
+    /// <c>RelPositionalEncoding</c> inherits <c>PositionalEncoding.__init__</c> (which ignores <c>reverse</c>), so
+    /// <c>position_encoding(0, T)</c> is simply <c>pe[:, 0:T]</c> — the ordinary forward sinusoid for positions
+    /// <c>0..T-1</c>, even dims sin / odd dims cos at <c>1/10000^(2k/d)</c> — and its attention has the
+    /// <c>rel_shift</c> call commented out. The score's position term is therefore <c>(q_i + v)·linear_pos(pe[j])</c>
+    /// for key <c>j</c>, NOT the Transformer-XL/ESPnet <c>2T-1</c> table indexed by <c>i-j</c> that CosyVoice's
+    /// conformer uses; the released checkpoints were trained with this variant.</summary>
+    private static Tensor BuildPos(int t, int d)
     {
-        int len = 2 * t - 1;
-        Tensor pe = new(new TensorShape(1, len, d), DType.F32);
+        Tensor pe = new(new TensorShape(1, t, d), DType.F32);
         float* p = (float*)pe.DataPointer;
         int half = d / 2;
-        for (int i = 0; i < len; i++)
+        for (int pos = 0; pos < t; pos++)
         {
-            int pos = i < t ? (t - 1 - i) : -(i - t + 1);
-            float* row = p + (long)i * d;
+            float* row = p + (long)pos * d;
             for (int k = 0; k < half; k++)
             {
                 double inv = Math.Exp(-(2.0 * k / d) * Math.Log(10000.0));

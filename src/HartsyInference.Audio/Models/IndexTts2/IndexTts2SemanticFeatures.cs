@@ -63,6 +63,8 @@ public sealed unsafe class IndexTts2SemanticFeatures : IDisposable
         return normed;
     }
 
+    internal Wav2Vec2BertExtractor Extractor => _extractor;
+
     public IEnumerable<Tensor> EnumerateWeights()
     {
         foreach (Tensor t in _extractor.EnumerateWeights()) yield return t;

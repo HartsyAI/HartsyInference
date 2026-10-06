@@ -7,11 +7,12 @@ namespace HartsyInference.Audio.Models.IndexTts;
 /// <summary>One IndexTTS-1.5 conditioning-encoder Conformer block (ESPnet <c>ConformerEncoderLayer</c>, non-macaron,
 /// with a convolution module): <c>x += RelPosMHSA(norm_mha(x), pos); x += ConvModule(norm_conv(x)); x +=
 /// FFN(norm_ff(x)); x = norm_final(x)</c>.</summary>
-/// <remarks>The relative-position attention (<c>pos_bias_u</c>/<c>pos_bias_v</c> + <c>linear_pos</c> + rel_shift)
-/// is the same Transformer-XL algorithm as CosyVoice's <c>RelPosBlock</c>
-/// (<see cref="HartsyInference.Audio.Models.CosyVoice.UpsampleConformerEncoder"/>); this adds the conv module and
-/// closing norm that CosyVoice's <c>use_cnn_module=False</c> variant omits, and uses eps 1e-5 (vs. CosyVoice's
-/// 1e-12) per the real checkpoint's LayerNorm construction.</remarks>
+/// <remarks>The attention keeps CosyVoice's <c>pos_bias_u</c>/<c>pos_bias_v</c> + <c>linear_pos</c> structure
+/// (<see cref="HartsyInference.Audio.Models.CosyVoice.UpsampleConformerEncoder"/>) but, exactly like IndexTTS's own
+/// <c>RelPositionMultiHeadedAttention</c>, has <c>rel_shift</c> removed and is fed the plain forward sinusoid for
+/// positions <c>0..T-1</c> (see <see cref="IndexTtsConformerEncoder"/>) rather than a <c>2T-1</c> relative table. The
+/// block adds the conv module and closing norm CosyVoice's <c>use_cnn_module=False</c> variant omits, and uses eps
+/// 1e-5 (vs. CosyVoice's 1e-12) per the real checkpoint's LayerNorm construction.</remarks>
 internal sealed unsafe class IndexTtsConformerLayer
 {
     private readonly IndexTtsConformerConfig _cfg;
@@ -58,8 +59,8 @@ internal sealed unsafe class IndexTtsConformerLayer
         _finalNormB = WhisperOps.EnsureF32(w[$"{prefix}.norm_final.bias"]);
     }
 
-    /// <summary>Runs the block over <paramref name="seq"/> <c>[1, T, C]</c> (channels-last) with relative-position
-    /// table <paramref name="posEmb"/> <c>[1, 2T-1, C]</c>; returns a new tensor.</summary>
+    /// <summary>Runs the block over <paramref name="seq"/> <c>[1, T, C]</c> (channels-last) with position table
+    /// <paramref name="posEmb"/> <c>[1, T, C]</c>; returns a new tensor.</summary>
     public Tensor Forward(IBackend backend, Tensor seq, Tensor posEmb, int t)
     {
         float eps = _cfg.LayerNormEps;
@@ -94,11 +95,11 @@ internal sealed unsafe class IndexTtsConformerLayer
         return outT;
     }
 
-    /// <summary>Transformer-XL relative-position multi-head attention — identical algorithm to CosyVoice's
-    /// <c>RelPosBlock.RelPosAttention</c>: per head, <c>scores = ((q+u)·kᵀ + rel_shift((q+v)·pᵀ)) / √d</c>.</summary>
+    /// <summary>Multi-head attention with IndexTTS's position term: per head, <c>scores = ((q+u)·kᵀ + (q+v)·pᵀ) / √d</c>
+    /// with <c>p = linear_pos(pe[0:T])</c> indexed by the key position and no <c>rel_shift</c>.</summary>
     private Tensor RelPosAttention(IBackend backend, Tensor x, Tensor posEmb, int t)
     {
-        int h = _numHeads, d = _headDim, c = _channels, posLen = 2 * t - 1;
+        int h = _numHeads, d = _headDim, c = _channels, posLen = t;
         Tensor q = WhisperOps.ProjectLinear(backend, x, _qW!, _qB, 1, t, c, c);
         Tensor k = WhisperOps.ProjectLinear(backend, x, _kW!, _kB, 1, t, c, c);
         Tensor v = WhisperOps.ProjectLinear(backend, x, _vW!, _vB, 1, t, c, c);
@@ -124,8 +125,7 @@ internal sealed unsafe class IndexTtsConformerLayer
                 for (int j = 0; j < t; j++)
                 {
                     float* kj = kp + (long)j * c + hOff;
-                    int posIdx = (t - 1) - i + j;
-                    float* pj = pp + (long)posIdx * c + hOff;
+                    float* pj = pp + (long)j * c + hOff;   // position of KEY j (no rel_shift in the reference)
                     float ac = 0f, bd = 0f;
                     for (int e = 0; e < d; e++)
                     {

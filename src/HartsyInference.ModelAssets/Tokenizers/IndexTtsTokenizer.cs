@@ -32,6 +32,18 @@ public sealed class IndexTtsTokenizer : IDisposable
         return result;
     }
 
+    /// <summary>Encodes text to <c>(piece, id)</c> pairs — the reference's <c>tokenizer.tokenize</c> output (pieces keep
+    /// their <c>▁</c> word-start marker), needed by the token-level segment splitter, which keys on piece text
+    /// (<c>"."</c>, <c>"▁."</c>, <c>","</c>…) rather than ids.</summary>
+    public IReadOnlyList<(string Piece, int Id)> EncodeToPieces(string text)
+    {
+        ThrowIfDisposed();
+        IReadOnlyList<EncodedToken> tokens = _tokenizer.EncodeToTokens(text, out _);
+        List<(string, int)> result = new(tokens.Count);
+        foreach (EncodedToken t in tokens) result.Add((t.Value, t.Id));
+        return result;
+    }
+
     public string Decode(ReadOnlySpan<int> tokenIds)
     {
         ThrowIfDisposed();
