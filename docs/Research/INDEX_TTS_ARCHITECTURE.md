@@ -216,3 +216,35 @@ generated latent sequence should include or exclude the position where `stop_mel
 excludes it); and all real-weight numerical parity, which needs the checkpoint run end-to-end against the Python
 reference once a build environment is available. See `docs/Checklists/MODEL_STATUS_AUDIO.md`'s IndexTTS-1.5 row.
 | (Comparison) StyleTTS-2-class non-AR TTS | [KOKORO_ARCHITECTURE.md](KOKORO_ARCHITECTURE.md) |
+
+## IndexTTS-2.0 vs 2.5 (ground-truthed against both real checkpoints and both inference files)
+
+The two released IndexTTS-2 checkpoints share the `UnifiedVoice`/`model_v2.py` classes but run through different
+inference files — `indextts/infer_v2.py` (2.0) and `indextts/infer_v2_5.py` (2.5). They share the GPT backbone, the
+emotion Conformer+Perceiver, the S2Mel DiT, the CAM++ style vector (S2Mel's `style` in both) and the stock BigVGAN.
+They differ in four places, all selected by `IndexTts2Version`:
+
+| | 2.0 (`infer_v2.py`) | 2.5 (`infer_v2_5.py`) |
+|---|---|---|
+| GPT speaker conditioning | `conformer_perceiver`: Conformer+Perceiver over the w2v-bert feature → 32 latents; conds = `[latents + emoVec][speed_emb(1)][speed_emb(0)]`; no `lang_embedding` | `campplus`: `spk_emb_proj(style)` → 1 slot; conds = `[spk + emoVec][0][0]`; `lang_embedding` added to the text |
+| Text | SentencePiece `bpe.model`, 12 001-row embedding | tiktoken rank file, 60 510-row embedding |
+| Semantic codec | `amphion/MaskGCT` RepCodec, no resample; only `quantize` and `quantizer.vq2emb` are used | bundled `codec.pth` EnhancedCodec (2x down/up); `decode(codes)` |
+| Handoff to S2Mel | `S_infer = vq2emb(codes) + gpt_layer(second GPT pass)`, `target = codes × 1.72` | `S_infer = decode(codes)`, `target = len(S_infer) × 1.72 × duration_factor`; no second pass, no `gpt_layer` |
+
+Second pass details (2.0): the `gpt(...)` call re-uses the same conditioning prefix as sampling, embeds the text as
+`[start, tokens…, stop]` from position 0 (no language embedding), and the mel as `[start, c1…cT, stop]`; the
+outputs are taken at the mel positions, `ln_f` then `final_norm` applied, and the last two dropped (the C# feeds
+`[start, c1…c(T-1)]` instead — identical under the causal mask). `gpt_layer` is `s2mel.pth`'s
+`net.gpt_layer.{0,1,2}`: Linear(1280,256) → Linear(256,128) → Linear(128,1024), no activation. `s2mel.pth` carries
+`gpt_layer` in both repos, but 2.5 never uses it.
+
+`speed_emb` is a real `nn.Embedding(2, 1280)` lookup in 2.0's conds, though the public API never varies it
+(`use_speed` is always zeros); the C# reproduces the lookup rather than hard-coding zeros.
+
+A reference-vs-port deviation shared by both versions: the C# decoder trims long runs of the silence token (52)
+from the sampled codes, which the reference defines (`remove_long_silence`) but never calls in either inference file.
+
+Verification: a real-weight CPU pipeline test (`IndexTts2V20PipelineRealWeightTests`) runs neutral, explicit-vector,
+emotion-reference and free-text emotion generation from one reference voice; the neutral clip transcribes through
+Whisper-base as the input text.
+

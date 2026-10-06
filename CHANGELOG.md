@@ -24,6 +24,29 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.255
+
+- **IndexTTS-2.0 (`indextts2:2.0`).** The 2.0 checkpoint (`IndexTeam/IndexTTS-2`) now runs next to 2.5, which stays the
+  default. It differs from 2.5 in the GPT's speaker conditioning (a Conformer+Perceiver over the w2v-bert feature with
+  real `speed_emb` slots, instead of CAM++), the tokenizer (SentencePiece), the semantic codec (MaskGCT's RepCodec,
+  from `amphion/MaskGCT`) and the handoff to the flow-matching stage: a second GPT pass through `s2mel.gpt_layer`,
+  summed with the codec's `vq2emb`. `IndexTts2Version` picks the branch and the 2.5 path is unchanged. A real-weight
+  generation transcribes through Whisper-base as its input text.
+- **Emotion control is exposed for both versions.** `SpeechRequest` gains `EmotionReference` (a clip whose emotion,
+  not voice, the speech adopts), `EmotionAlpha`, `EmotionText` and `EmotionFromText`; the existing `Emotion` vector
+  is read in IndexTTS-2's own order (happy, angry, sad, afraid, disgusted, melancholic, surprised, calm — not
+  Zonos's). `hartsy speak` gets `--emotion`, `--emotion-reference`, `--emotion-alpha`, `--emotion-text` and
+  `--emotion-from-text`. The QwenEmotion classifier is loaded on first use, so the default VRAM footprint is unchanged.
+  The model's file list now includes `feat1.pt`, `feat2.pt` and the four classifier files (about 1.2 GB), so an
+  existing 2.5 install downloads them on its next load. The classifier files are optional: if they are missing,
+  free-text emotion is disabled and the model still loads. Emotion weights outside 0–1.2 are rejected.
+- **Fixed: the explicit emotion-vector mode threw `ObjectDisposedException`.** The pipeline disposed the
+  `feat1.pt`/`feat2.pt` loaders right after building the lookup, but an F32 tensor is returned as-is rather than
+  copied, so the exemplar banks it still read were freed. The loaders now live as long as the pipeline. Nothing
+  reached this path before, because the engine never loaded the banks.
+- **Fixed: `EmoAlpha` was ignored for an explicit or text emotion vector.** The reference scales the vector by the
+  clamped alpha (truncated to four decimals); the port now does too.
+
 ## alpha.254
 
 - **Kokoro-82M: Japanese and Mandarin voices.** `j` and `z` voices, which raised an error in alpha.252, now read their

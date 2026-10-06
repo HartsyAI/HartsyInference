@@ -164,6 +164,30 @@ public sealed class VocosFactorizedCodecSyntheticSmokeTests : IDisposable
     }
 
     [Fact]
+    public void VqToEmbedding_MatchesQuantizesContinuousOutput_WithoutTheDecoderLoaded()
+    {
+        // vq2emb is exactly the out_project(codebook[codes]) half of Quantize — so for the codes Quantize itself
+        // returned, the two must agree, and it must work with loadDecoder: false (IndexTTS-2.0's configuration).
+        Random rng = new(5);
+        Dictionary<string, Tensor> weights = BuildWeights(rng, downsampleScale: 1, withDecoder: false);
+        using VocosFactorizedCodec codec = new(Cfg(1));
+        codec.LoadWeights(weights, loadDecoder: false);
+
+        const int t = 9;
+        Tensor input = Rand(rng, 1.0, 1, t, Hidden);
+        (int[] codes, Tensor continuous) = codec.Quantize(_backend, input, t);
+        using Tensor embedding = codec.VqToEmbedding(_backend, codes);
+        try
+        {
+            Assert.Equal(new TensorShape(1, t, Hidden), embedding.Shape);
+            float[] a = embedding.AsSpan<float>().ToArray(), b = continuous.AsSpan<float>().ToArray();
+            Assert.Equal(b.Length, a.Length);
+            for (int i = 0; i < a.Length; i++) Assert.Equal(b[i], a[i], 5);
+        }
+        finally { continuous.Dispose(); }
+    }
+
+    [Fact]
     public void Quantize_IsDeterministic_AcrossRepeatedCalls()
     {
         Random rng = new(4);

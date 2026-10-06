@@ -3,15 +3,26 @@ using HartsyInference.Audio.Models.LanguageModels.Gpt;
 
 namespace HartsyInference.Audio.Models.IndexTts2;
 
-/// <summary>IndexTTS-2.5 hyperparameters, hand-ported from the real <c>config.yaml</c> (no YAML dependency in
-/// this solution, same posture as every other model's static preset). 2.5-only for now — 2.0 shares every one
-/// of these values except <see cref="NumberTextTokens"/> and the semantic codec's downsample scale, but its
-/// own GPT speaker-conditioning path (<c>condition_type: conformer_perceiver</c>, not 2.5's
-/// <c>campplus</c>/<c>spk_emb_proj</c>) isn't implemented yet — see <see cref="IndexTts2T2sDecoder"/>'s own
-/// remarks. Adding a <c>V2_0</c> preset before that decoder variant exists would be scaffolding nothing can
-/// run, so it is deliberately not here yet.</summary>
+/// <summary>Which released IndexTTS-2 checkpoint family a pipeline runs. They share the GPT/S2Mel/BigVGAN stack but
+/// differ in the speaker-conditioning path, the semantic codec and the text tokenizer (see <see cref="IndexTts2Config"/>).</summary>
+public enum IndexTts2Version
+{
+    /// <summary><c>IndexTeam/IndexTTS-2</c>: <c>infer_v2.py</c> — conformer_perceiver speaker conditioning, SentencePiece
+    /// <c>bpe.model</c>, MaskGCT RepCodec (<c>vq2emb</c> + <c>gpt_layer</c> second pass).</summary>
+    V2_0,
+
+    /// <summary><c>IndexTeam/IndexTTS-2.5</c>: <c>infer_v2_5.py</c> — CAM++ speaker conditioning, tiktoken tokenizer,
+    /// bundled EnhancedCodec (<c>Decode</c>, no second pass).</summary>
+    V2_5,
+}
+
+/// <summary>IndexTTS-2 hyperparameters, hand-ported from the real <c>config.yaml</c> files (no YAML dependency in
+/// this solution, same posture as every other model's static preset). <see cref="V2_0"/> and <see cref="V2_5"/> share
+/// every value except <see cref="NumberTextTokens"/>, the semantic codec's downsample scale and
+/// <see cref="Version"/> itself — the pipeline branches once on <see cref="Version"/> for the rest.</summary>
 public sealed record IndexTts2Config
 {
+    public required IndexTts2Version Version { get; init; }
     public required GptConfig Gpt { get; init; }
     public required int NumberTextTokens { get; init; }
     public required int MaxTextTokens { get; init; }
@@ -32,8 +43,9 @@ public sealed record IndexTts2Config
     /// <summary>Output sample rate (22050 — the stock BigVGAN-22kHz vocoder's rate, NOT IndexTTS-1.5's 24000).</summary>
     public required int SampleRate { get; init; }
 
-    /// <summary>Real <c>infer_v2_5.py</c>'s fixed semantic-codec-frames→mel-frames ratio
-    /// (<c>target_lengths = S_infer.shape[1] * 1.72 * duration_factor</c>) — accounts for the semantic codec's
+    /// <summary>Real fixed semantic-codec-frames→mel-frames ratio — <c>infer_v2_5.py</c>:
+    /// <c>target_lengths = S_infer.shape[1] * 1.72 * duration_factor</c>; <c>infer_v2.py</c>:
+    /// <c>(code_lens * 1.72).long()</c> (no duration factor) — accounts for the semantic codec's
     /// own frame rate vs. the S2Mel stage's 22050 Hz/256-hop mel rate. Not derived from any other config field;
     /// confirmed as a literal constant in the real source.</summary>
     public required float ContentLengthRatio { get; init; }
@@ -45,6 +57,7 @@ public sealed record IndexTts2Config
 
     public static IndexTts2Config V2_5 => new()
     {
+        Version = IndexTts2Version.V2_5,
         Gpt = GptConfig.IndexTts2,
         NumberTextTokens = 60_509,
         MaxTextTokens = 600,
@@ -59,5 +72,15 @@ public sealed record IndexTts2Config
         ContentLengthRatio = 1.72f,
         DiffusionSteps = 25,
         InferenceCfgRate = 0.7f,
+    };
+
+    /// <summary>IndexTTS-2.0: real <c>gpt.number_text_tokens: 12000</c> (the checkpoint's embedding has 12001 rows —
+    /// the same "+1 row" convention as <see cref="V2_5"/>'s 60509 vs 60510), MaskGCT's no-resample semantic codec;
+    /// every other block is byte-identical to 2.5's in the real <c>config.yaml</c> files and checkpoints.</summary>
+    public static IndexTts2Config V2_0 => V2_5 with
+    {
+        Version = IndexTts2Version.V2_0,
+        NumberTextTokens = 12_000,
+        SemanticCodec = VocosFactorizedCodecConfig.IndexTts2V0,
     };
 }

@@ -133,6 +133,36 @@ public sealed unsafe class VocosFactorizedCodec : IDisposable
         }
     }
 
+    /// <summary>The real <c>quantizer.vq2emb(codes)</c>: codebook gather → <c>out_project</c>, nothing else (no
+    /// backbone decoder, no resample, no normalization). Needs only the quantizer weights, so it works with
+    /// <c>loadDecoder: false</c> — IndexTTS-2.0's codes→S2Mel handoff (<c>infer_v2.py</c>:
+    /// <c>S_infer = vq2emb(codes) + gpt_layer(latent)</c>) uses exactly this. Returns channels-last
+    /// <c>[1, T, hiddenSize]</c>, the layout <c>vq2emb(...).transpose(1, 2)</c> yields upstream.</summary>
+    public Tensor VqToEmbedding(IBackend backend, ReadOnlySpan<int> codes)
+    {
+        ThrowIfDisposed();
+        int h = _cfg.HiddenSize, t = codes.Length;
+        Tensor chFirst = QuantizedChannelsFirst(backend, codes);
+        Tensor chLast = new(new TensorShape(1, t, h), DType.F32);
+        backend.Transpose2D(chLast, chFirst, h, t);
+        chFirst.Dispose();
+        return chLast;
+    }
+
+    /// <summary>Codebook gather + <c>out_project</c> into channels-first <c>[1, hiddenSize, T]</c> — the shared
+    /// first half of <see cref="Decode"/> and <see cref="VqToEmbedding"/>.</summary>
+    private Tensor QuantizedChannelsFirst(IBackend backend, ReadOnlySpan<int> codes)
+    {
+        int h = _cfg.HiddenSize, t = codes.Length;
+        Tensor gathered;
+        fixed (int* codesPtr = codes)
+            gathered = VqOps.GatherCodebookVectors(_codebook!, codesPtr, batch: 1, t: t, codebookDim: _cfg.CodebookDim);
+        Tensor quantizedChFirst = new(new TensorShape(1, h, t), DType.F32);
+        backend.Conv1d(quantizedChFirst, gathered, _outProjW!, _outProjB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
+        gathered.Dispose();
+        return quantizedChFirst;
+    }
+
     /// <summary>Decodes discrete codes straight to the continuous embedding — the real <c>decode()</c>: codebook
     /// embed lookup → <c>out_project</c> (no encoder, no nearest-neighbor search) → <see cref="VocosBackbone"/>
     /// decoder → project down → optional 2x upsample. Requires <c>loadDecoder: true</c> at load time.</summary>
@@ -142,12 +172,7 @@ public sealed unsafe class VocosFactorizedCodec : IDisposable
         if (!_decoderLoaded) throw new InvalidOperationException("VocosFactorizedCodec decoder weights not loaded (loadDecoder: false).");
         int h = _cfg.HiddenSize, t = codes.Length;
 
-        Tensor gathered;
-        fixed (int* codesPtr = codes)
-            gathered = VqOps.GatherCodebookVectors(_codebook!, codesPtr, batch: 1, t: t, codebookDim: _cfg.CodebookDim);
-        Tensor quantizedChFirst = new(new TensorShape(1, h, t), DType.F32);
-        backend.Conv1d(quantizedChFirst, gathered, _outProjW!, _outProjB, stride: 1, padLeft: 0, padRight: 0, dilation: 1, groups: 1);
-        gathered.Dispose();
+        Tensor quantizedChFirst = QuantizedChannelsFirst(backend, codes);
 
         Tensor backboneOut = _decoderBackbone.Forward(backend, quantizedChFirst, t);  // [1, t, vocosDim] channels-last
         quantizedChFirst.Dispose();

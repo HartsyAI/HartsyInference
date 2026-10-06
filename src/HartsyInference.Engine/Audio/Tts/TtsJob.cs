@@ -56,8 +56,20 @@ internal sealed record TtsJob
     /// <summary>Max tokens to generate; null is the model default.</summary>
     internal int? MaxTokens { get; init; }
 
-    /// <summary>Zonos 8-way emotion vector; null is the model default.</summary>
+    /// <summary>8-way emotion vector in the reading model's own order (Zonos / IndexTTS-2); null is the model default.</summary>
     internal IReadOnlyList<double>? Emotion { get; init; }
+
+    /// <summary>IndexTTS-2 emotion-reference clip; null uses the voice reference's own emotion.</summary>
+    internal AudioClip? EmotionReference { get; init; }
+
+    /// <summary>IndexTTS-2 emotion strength 0–1; null is 1.</summary>
+    internal double? EmotionAlpha { get; init; }
+
+    /// <summary>IndexTTS-2 free-text emotion description; null/empty when unused.</summary>
+    internal string? EmotionText { get; init; }
+
+    /// <summary>IndexTTS-2: classify <see cref="Text"/> itself for emotion.</summary>
+    internal bool EmotionFromText { get; init; }
 
     /// <summary>Zonos speaking rate in phonemes per second; null is the model default.</summary>
     internal double? SpeakingRate { get; init; }

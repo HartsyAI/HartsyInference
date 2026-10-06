@@ -17,32 +17,36 @@ using HartsyInference.ModelAssets.Tokenizers;
 
 namespace HartsyInference.Audio.Pipelines;
 
-/// <summary>IndexTTS-2.5 emotion-controllable voice-cloning pipeline. Call graph (ground-truthed against the
-/// real <c>infer_v2_5.py</c>'s <c>infer_generator</c>, read in full):
+/// <summary>IndexTTS-2 emotion-controllable voice-cloning pipeline, both released checkpoint families
+/// (<see cref="IndexTts2Version"/>). Call graph (ground-truthed against the real <c>infer_v2_5.py</c> and
+/// <c>infer_v2.py</c>'s <c>infer_generator</c>, read in full):
 /// <code>
 ///   spkCondEmb   = w2vBert(audio16k).hidden[17] normalized          # [1,Tw,1024] — ALSO doubles as the emo
 ///                                                                   # reference when none is given
 ///   refMel       = mel(audio22k)                                    # [1,80,Tref], reflect-padded (n_fft-hop)/2
-///   style        = CAM++(kaldiFbank(audio16k) - mean)                # [1,192] — speaker AND S2Mel style
+///   style        = CAM++(kaldiFbank(audio16k) - mean)                # [1,192] — S2Mel style in BOTH versions
 ///   promptCond   = lengthRegulator(spkCondEmb, ylens=Tref)           # [1,Tref,512]
 ///   emoVec       = merge_emovec(ComputeEmoVec(spkCondEmb), ComputeEmoVec(emoCondEmb), alpha)  # or the explicit
 ///                  8-dim-vector / QwenEmotion-text lookup path, see ResolveEmotion
-///   speakerCond  = spk_emb_proj(style)                                # [1,1,1280]
+///   speakerCond  = 2.5: spk_emb_proj(style)                          # [1,1,1280]
+///                  2.0: conformerPerceiver(spkCondEmb)               # [1,32,1280]
 ///   codes        = gpt.Generate(speakerCond, emoVec, textIds, langId) # AR sample semantic-codec codes
-///   S_infer      = semanticCodec.Decode(codes)                        # [1,T',1024] (T' = codes.Length * 2 — 2.5's downsample)
-///   cond         = lengthRegulator(S_infer, ylens=T'*1.72*durationFactor)  # [1,Tgen,512]
+///   S_infer      = 2.5: semanticCodec.Decode(codes)                   # [1,2T,1024] (EnhancedCodec, 2x upsample)
+///                  2.0: vq2emb(codes) + gpt_layer(gpt.SecondPass(...))# [1,T,1024] (MaskGCT RepCodec, no resample)
+///   cond         = lengthRegulator(S_infer, ylens=len*1.72[*durationFactor])  # [1,Tgen,512]
 ///   vcTarget     = CFM.Solve(mu=cat([promptCond,cond]), spk=style, cond=zeroPadded(refMel), promptLen=Tref)
 ///   wav          = bigVgan(vcTarget[:, :, Tref:])                      # 22050 Hz
 /// </code>
-/// IndexTTS-2.0 (<c>condition_type: conformer_perceiver</c>, a different GPT speaker-conditioning path) is not
-/// supported by this pipeline yet — see <see cref="IndexTts2Config"/>'s remarks.</summary>
+/// The two versions differ only in the speaker-conditioning path, the semantic codec / S2Mel handoff and the text
+/// tokenizer; everything else is shared and byte-for-byte the same code path.</summary>
 public sealed class IndexTts2Pipeline : IDisposable
 {
     private const int DefaultMaxTextTokensPerSegment = 120;
     private const float TailFadeMs = 20.0f;
 
     private readonly IndexTts2Config _cfg;
-    private readonly IndexTts2TiktokenTokenizer _tokenizer;
+    private readonly Func<string, int[]> _encode;
+    private readonly IDisposable? _tokenizerOwner;
     private readonly IndexTts2SemanticFeatures _semanticFeatures;
     private readonly CamPlusSpeakerEncoder _camplus;
     private readonly VocosFactorizedCodec _semanticCodec;
@@ -52,22 +56,27 @@ public sealed class IndexTts2Pipeline : IDisposable
     private readonly ConditionalCfm _cfm;
     private readonly IndexTts2BigVganGenerator _bigVgan;
     private readonly IndexTts2EmotionVectorLookup? _emoLookup;
-    private readonly IndexTts2QwenEmotion? _qwenEmotion;
+    private readonly string? _qwenEmoDir;
+    private readonly IBackend? _qwenBackend;
+    private readonly object _qwenLock = new();
+    private readonly object _ownedLock = new();
+    private IndexTts2QwenEmotion? _qwenEmotion;
     private readonly MelSpectrogramExtractor _refMelExtractor = new(MelSpectrogramExtractor.IndexTts2RefMelConfig());
     private readonly List<IDisposable> _loaders;
     private readonly List<Tensor> _convertedWeights;
     private int _disposed;
 
-    public string ModelName => "indextts2-2.5";
+    public string ModelName => _cfg.Version == IndexTts2Version.V2_0 ? "indextts2-2.0" : "indextts2-2.5";
 
-    private IndexTts2Pipeline(IndexTts2Config cfg, IndexTts2TiktokenTokenizer tokenizer, IndexTts2SemanticFeatures semanticFeatures,
+    private IndexTts2Pipeline(IndexTts2Config cfg, Func<string, int[]> encode, IDisposable? tokenizerOwner, IndexTts2SemanticFeatures semanticFeatures,
         CamPlusSpeakerEncoder camplus, VocosFactorizedCodec semanticCodec, IndexTts2T2sDecoder gpt,
         InterpolateLengthRegulator lengthRegulator, IndexTts2Dit dit, IndexTts2BigVganGenerator bigVgan,
-        IndexTts2EmotionVectorLookup? emoLookup, IndexTts2QwenEmotion? qwenEmotion,
+        IndexTts2EmotionVectorLookup? emoLookup, string? qwenEmoDir, IBackend? qwenBackend,
         List<IDisposable> loaders, List<Tensor> convertedWeights)
     {
         _cfg = cfg;
-        _tokenizer = tokenizer;
+        _encode = encode;
+        _tokenizerOwner = tokenizerOwner;
         _semanticFeatures = semanticFeatures;
         _camplus = camplus;
         _semanticCodec = semanticCodec;
@@ -77,12 +86,17 @@ public sealed class IndexTts2Pipeline : IDisposable
         _cfm = new ConditionalCfm(dit, cfg.S2MelDit.InChannels);
         _bigVgan = bigVgan;
         _emoLookup = emoLookup;
-        _qwenEmotion = qwenEmotion;
+        _qwenEmoDir = qwenEmoDir;
+        _qwenBackend = qwenBackend;
         _loaders = loaders;
         _convertedWeights = convertedWeights;
     }
 
-    /// <summary>Loads IndexTTS-2.5 from already-downloaded checkpoint files. <paramref name="feat1Path"/>/
+    /// <summary>Loads IndexTTS-2 from already-downloaded checkpoint files. <paramref name="cfg"/> selects the
+    /// version (default <see cref="IndexTts2Config.V2_5"/>); the file arguments then mean: <paramref name="tokenizerPath"/>
+    /// = the tiktoken rank file (2.5) or SentencePiece <c>bpe.model</c> (2.0); <paramref name="codecPath"/> = the
+    /// bundled <c>codec.pth</c> (2.5) or <c>amphion/MaskGCT</c>'s <c>semantic_codec/model.safetensors</c> (2.0).
+    /// <paramref name="feat1Path"/>/
     /// <paramref name="feat2Path"/> (the explicit emotion-vector lookup banks) and <paramref name="qwenEmoDir"/>
     /// (the free-text emotion classifier) are optional — omitting either simply disables that emotion mode
     /// (<see cref="IndexTts2Options.EmoVector"/> / <see cref="IndexTts2Options.UseEmoText"/> throw if used
@@ -90,9 +104,11 @@ public sealed class IndexTts2Pipeline : IDisposable
     /// <paramref name="qwenBackend"/> is required only when <paramref name="qwenEmoDir"/> is given — the
     /// classifier's own <see cref="TextGenerationPipeline"/> needs a backend at construction time, unlike
     /// every other component here which defers to whatever backend <see cref="Synthesize"/> is called with
-    /// (Audio has no dependency on any concrete backend package, so the caller supplies one).</summary>
+    /// (Audio has no dependency on any concrete backend package, so the caller supplies one). The classifier
+    /// (a 0.6B LLM, ~2.4 GB once widened to F32) is loaded lazily on the first <see cref="IndexTts2Options.UseEmoText"/>
+    /// request, so a pipeline that never uses text emotion pays nothing for it; the directory's files are checked up front.</summary>
     public static async Task<IndexTts2Pipeline> LoadAsync(
-        string tiktokenPath, string gptPath, string s2melPath, string codecPath,
+        string tokenizerPath, string gptPath, string s2melPath, string codecPath,
         string w2vBertSafetensorsPath, string w2vStatsPath, string campplusPath, string bigVganPath,
         string? feat1Path = null, string? feat2Path = null, string? qwenEmoDir = null, IBackend? qwenBackend = null,
         IndexTts2Config? cfg = null, CancellationToken ct = default)
@@ -100,7 +116,8 @@ public sealed class IndexTts2Pipeline : IDisposable
         ct.ThrowIfCancellationRequested();
         IndexTts2Config resolved = cfg ?? IndexTts2Config.V2_5;
 
-        IndexTts2TiktokenTokenizer? tokenizer = null;
+        IDisposable? tokenizerOwner = null;
+        Func<string, int[]> encode;
         IndexTts2SemanticFeatures? semanticFeatures = null;
         CamPlusSpeakerEncoder? camplus = null;
         VocosFactorizedCodec? semanticCodec = null;
@@ -109,12 +126,20 @@ public sealed class IndexTts2Pipeline : IDisposable
         IndexTts2Dit? dit = null;
         IndexTts2BigVganGenerator? bigVgan = null;
         IndexTts2EmotionVectorLookup? emoLookup = null;
-        IndexTts2QwenEmotion? qwenEmotion = null;
         List<IDisposable> loaders = [];
         List<Tensor> converted = [];
         try
         {
-            tokenizer = new IndexTts2TiktokenTokenizer(tiktokenPath);
+            if (resolved.Version == IndexTts2Version.V2_0)
+            {
+                IndexTtsTokenizer spm = new(tokenizerPath);
+                tokenizerOwner = spm;
+                encode = spm.Encode;
+            }
+            else
+            {
+                encode = new IndexTts2TiktokenTokenizer(tokenizerPath).Encode;
+            }
 
             PytorchPickleLoader gptLoader = new();
             gptLoader.Load(gptPath, recursiveFlatten: true);
@@ -123,6 +148,11 @@ public sealed class IndexTts2Pipeline : IDisposable
 
             gpt = new IndexTts2T2sDecoder(resolved.Gpt, resolved.NumberTextTokens, resolved.MaxMelTokens);
             gpt.LoadWeights(gptWeights);
+            IndexTts2SpeakerConditioning expectedMode = resolved.Version == IndexTts2Version.V2_0
+                ? IndexTts2SpeakerConditioning.ConformerPerceiver
+                : IndexTts2SpeakerConditioning.Campplus;
+            if (gpt.Mode != expectedMode)
+                throw new InvalidDataException($"gpt.pth is a {gpt.Mode} checkpoint but the config is IndexTTS-{(resolved.Version == IndexTts2Version.V2_0 ? "2.0" : "2.5")} ({expectedMode}) — wrong checkpoint for this version.");
 
             SafeTensorsLoader w2vLoader = new();
             w2vLoader.Load(w2vBertSafetensorsPath);
@@ -144,12 +174,25 @@ public sealed class IndexTts2Pipeline : IDisposable
             camplus = new CamPlusSpeakerEncoder();
             camplus.LoadWeights(campplusWeights);
 
-            PytorchPickleLoader codecLoader = new();
-            codecLoader.Load(codecPath, recursiveFlatten: true);
-            loaders.Add(codecLoader);
-            Dictionary<string, Tensor> codecWeights = IndexTtsPipeline.ToF32(codecLoader.GetAllTensors(), converted);
             semanticCodec = new VocosFactorizedCodec(resolved.SemanticCodec);
-            semanticCodec.LoadWeights(codecWeights, prefix: "model", loadDecoder: true);
+            if (resolved.Version == IndexTts2Version.V2_0)
+            {
+                // MaskGCT's RepCodec: a plain safetensors with no module prefix; only Quantize + vq2emb are ever
+                // called, so the decoder half stays unloaded.
+                SafeTensorsLoader codecLoader = new();
+                codecLoader.Load(codecPath);
+                loaders.Add(codecLoader);
+                Dictionary<string, Tensor> codecWeights = IndexTtsPipeline.ToF32(codecLoader.GetAllTensors(), converted);
+                semanticCodec.LoadWeights(codecWeights, prefix: "", loadDecoder: false);
+            }
+            else
+            {
+                PytorchPickleLoader codecLoader = new();
+                codecLoader.Load(codecPath, recursiveFlatten: true);
+                loaders.Add(codecLoader);
+                Dictionary<string, Tensor> codecWeights = IndexTtsPipeline.ToF32(codecLoader.GetAllTensors(), converted);
+                semanticCodec.LoadWeights(codecWeights, prefix: "model", loadDecoder: true);
+            }
 
             lengthRegulator = new InterpolateLengthRegulator(resolved.LengthRegulatorChannels, resolved.LengthRegulatorInChannels, resolved.LengthRegulatorNumStages);
 
@@ -158,6 +201,7 @@ public sealed class IndexTts2Pipeline : IDisposable
             loaders.Add(s2melLoader);
             Dictionary<string, Tensor> s2melWeights = IndexTtsPipeline.ToF32(s2melLoader.GetAllTensors(), converted);
             lengthRegulator.LoadWeights(s2melWeights, "net.length_regulator");
+            if (resolved.Version == IndexTts2Version.V2_0) gpt.LoadGptLayer(s2melWeights, "net.gpt_layer");
             dit = new IndexTts2Dit(resolved.S2MelDit);
             dit.LoadWeights(s2melWeights, "net.cfm.estimator");
 
@@ -170,52 +214,36 @@ public sealed class IndexTts2Pipeline : IDisposable
 
             if (feat1Path is not null && feat2Path is not null)
             {
+                // The loaders own the tensors' backing storage (an F32 tensor is returned as-is, not copied), so
+                // they stay alive for the pipeline's lifetime — disposing them here would free the banks the
+                // lookup still reads.
                 PytorchPickleLoader feat1Loader = new();
                 feat1Loader.Load(feat1Path, recursiveFlatten: true);
+                loaders.Add(feat1Loader);
                 PytorchPickleLoader feat2Loader = new();
                 feat2Loader.Load(feat2Path, recursiveFlatten: true);
-                // Ownership of both tensors transfers to IndexTts2EmotionVectorLookup; the (now-empty) loaders
-                // can be disposed immediately rather than kept alive for the pipeline's own lifetime.
+                loaders.Add(feat2Loader);
                 emoLookup = new IndexTts2EmotionVectorLookup(feat1Loader.GetAllTensors()["data"], feat2Loader.GetAllTensors()["data"]);
-                feat1Loader.Dispose();
-                feat2Loader.Dispose();
             }
 
             if (qwenEmoDir is not null)
             {
                 if (qwenBackend is null)
                     throw new ArgumentException("qwenBackend is required when qwenEmoDir is given.", nameof(qwenBackend));
-                string configPath = Path.Combine(qwenEmoDir, "config.json");
-                string weightsPath = Path.Combine(qwenEmoDir, "model.safetensors");
-                string tokenizerPath = Path.Combine(qwenEmoDir, "tokenizer.json");
-                string templatePath = Path.Combine(qwenEmoDir, "chat_template.jinja");
-
-                using System.Text.Json.JsonDocument configDoc = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(configPath, ct));
-                TransformerConfig qwenCfg = Qwen3HfConfigReader.FromHuggingFace(configDoc.RootElement);
-
-                SafeTensorsLoader qwenLoader = new();
-                qwenLoader.Load(weightsPath);
-                loaders.Add(qwenLoader);
-                Dictionary<string, Tensor> qwenWeights = IndexTtsPipeline.ToF32(qwenLoader.GetAllTensors(), converted);
-
-                GenericTransformer transformer = new(qwenCfg);
-                transformer.LoadWeights(qwenWeights, "model");
-                loaders.Add(transformer);
-
-                using FileStream tokenizerStream = File.OpenRead(tokenizerPath);
-                GgufTokenizer qwenTokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerStream);
-                JinjaChatTemplate template = new(await File.ReadAllTextAsync(templatePath, ct));
-
-                TextGenerationPipeline textPipeline = new(transformer, qwenTokenizer, qwenBackend, template);
-                qwenEmotion = new IndexTts2QwenEmotion(textPipeline);
+                foreach (string name in QwenFiles)
+                {
+                    string path = Path.Combine(qwenEmoDir, name);
+                    if (!File.Exists(path)) throw new FileNotFoundException($"QwenEmotion file missing: {path}", path);
+                }
             }
 
-            return new IndexTts2Pipeline(resolved, tokenizer, semanticFeatures, camplus, semanticCodec, gpt,
-                lengthRegulator, dit, bigVgan, emoLookup, qwenEmotion, loaders, converted);
+            return new IndexTts2Pipeline(resolved, encode, tokenizerOwner, semanticFeatures, camplus, semanticCodec, gpt,
+                lengthRegulator, dit, bigVgan, emoLookup, qwenEmoDir, qwenBackend, loaders, converted);
         }
         catch
         {
             foreach (Tensor t in converted) t.Dispose();
+            tokenizerOwner?.Dispose();
             emoLookup?.Dispose();
             bigVgan?.Dispose();
             dit?.Dispose();
@@ -247,7 +275,11 @@ public sealed class IndexTts2Pipeline : IDisposable
         int tRef = (int)refMel.Shape[2];
         Tensor style = S3GenReference.SpeakerEmbedding(backend, _camplus, audio16k);
         Tensor promptCondition = _lengthRegulator.Forward(backend, spkCondEmb, tSpk, tRef);
-        Tensor speakerConditioning = _gpt.ComputeSpeakerConditioning(backend, style);
+        // 2.5: spk_emb_proj(CAM++ style). 2.0: Conformer+Perceiver over the w2v-bert feature. CAM++ style still
+        // feeds S2Mel in both versions.
+        Tensor speakerConditioning = _cfg.Version == IndexTts2Version.V2_0
+            ? _gpt.ComputeSpeakerConditioningConformerPerceiver(backend, spkCondEmb, tSpk)
+            : _gpt.ComputeSpeakerConditioning(backend, style);
 
         try
         {
@@ -297,9 +329,20 @@ public sealed class IndexTts2Pipeline : IDisposable
         float[]? emoVector = opts.EmoVector;
         if (opts.UseEmoText)
         {
-            if (_qwenEmotion is null)
-                throw new InvalidOperationException("IndexTts2Options.UseEmoText requires the pipeline to be loaded with a QwenEmotion classifier (pass qwenEmoDir to LoadAsync).");
-            emoVector = _qwenEmotion.Infer(opts.EmoText ?? text);
+            emoVector = GetQwenEmotion().Infer(opts.EmoText ?? text);
+        }
+
+        if (emoVector is not null)
+        {
+            // Real infer_generator: an explicit/text vector can't be alpha-mixed with an audio reference, so alpha
+            // scales the vector itself (clamped to [0,1], truncated to 4 decimals) instead.
+            float scale = Math.Clamp(opts.EmoAlpha, 0f, 1f);
+            if (scale != 1f)
+            {
+                float[] scaled = new float[emoVector.Length];
+                for (int i = 0; i < scaled.Length; i++) scaled[i] = (int)(emoVector[i] * scale * 10000f) / 10000f;
+                emoVector = scaled;
+            }
         }
 
         Tensor baseVec = _gpt.ComputeEmoVec(backend, spkCondEmb, tSpk);
@@ -340,6 +383,58 @@ public sealed class IndexTts2Pipeline : IDisposable
         }
     }
 
+    private static readonly string[] QwenFiles = ["config.json", "model.safetensors", "tokenizer.json", "chat_template.jinja"];
+
+    /// <summary>Loads the QwenEmotion classifier on first use (see <see cref="LoadAsync"/>'s remarks).</summary>
+    private IndexTts2QwenEmotion GetQwenEmotion()
+    {
+        if (_qwenEmoDir is null || _qwenBackend is null)
+            throw new InvalidOperationException("IndexTts2Options.UseEmoText requires the pipeline to be loaded with a QwenEmotion classifier (pass qwenEmoDir to LoadAsync).");
+        lock (_qwenLock)
+        {
+            if (_qwenEmotion is not null) return _qwenEmotion;
+
+            using System.Text.Json.JsonDocument configDoc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(_qwenEmoDir, "config.json")));
+            TransformerConfig qwenCfg = Qwen3HfConfigReader.FromHuggingFace(configDoc.RootElement);
+
+            // Built into locals and committed to the pipeline's lists only once everything loaded, so a failed
+            // attempt releases what it allocated instead of leaking it until Dispose (and a retry starts clean).
+            List<Tensor> converted = [];
+            SafeTensorsLoader? qwenLoader = null;
+            GenericTransformer? transformer = null;
+            try
+            {
+                qwenLoader = new SafeTensorsLoader();
+                qwenLoader.Load(Path.Combine(_qwenEmoDir, "model.safetensors"));
+                Dictionary<string, Tensor> qwenWeights = IndexTtsPipeline.ToF32(qwenLoader.GetAllTensors(), converted);
+
+                transformer = new GenericTransformer(qwenCfg);
+                transformer.LoadWeights(qwenWeights, "model");
+
+                using FileStream tokenizerStream = File.OpenRead(Path.Combine(_qwenEmoDir, "tokenizer.json"));
+                GgufTokenizer qwenTokenizer = HfTokenizerJson.LoadByteLevelBpe(tokenizerStream);
+                JinjaChatTemplate template = new(File.ReadAllText(Path.Combine(_qwenEmoDir, "chat_template.jinja")));
+
+                TextGenerationPipeline textPipeline = new(transformer, qwenTokenizer, _qwenBackend, template);
+                IndexTts2QwenEmotion loaded = new(textPipeline);
+                lock (_ownedLock)
+                {
+                    _loaders.Add(qwenLoader);
+                    _loaders.Add(transformer);
+                    _convertedWeights.AddRange(converted);
+                }
+                return _qwenEmotion = loaded;
+            }
+            catch
+            {
+                transformer?.Dispose();
+                qwenLoader?.Dispose();
+                foreach (Tensor t in converted) t.Dispose();
+                throw;
+            }
+        }
+    }
+
     /// <summary><c>a + scale*b</c>, elementwise, both <c>[1, hidden]</c>.</summary>
     private static unsafe Tensor AddScaled(Tensor a, Tensor b, float scale)
     {
@@ -354,7 +449,8 @@ public sealed class IndexTts2Pipeline : IDisposable
         IndexTts2Options opts, Tensor promptCondition, Tensor refMel, int tRef, Tensor style, ulong seed)
     {
         uint rngState = DeterministicRng.Seed(unchecked((int)seed));
-        int langId = IndexTts2TiktokenTokenizer.LangToToken(opts.Language);
+        bool v20 = _cfg.Version == IndexTts2Version.V2_0;
+        int? langId = v20 ? null : IndexTts2TiktokenTokenizer.LangToToken(opts.Language);
         int maxMel = opts.MaxMelTokens ?? 1_500;
         IndexTtsOptions gptOpts = new()
         {
@@ -366,7 +462,18 @@ public sealed class IndexTts2Pipeline : IDisposable
         };
         int[] codes = _gpt.Generate(backend, speakerConditioning, emoVec, textIds, langId, gptOpts, ref rngState);
 
-        Tensor sInfer = _semanticCodec.Decode(backend, codes);
+        Tensor sInfer;
+        if (v20)
+        {
+            // infer_v2.py: S_infer = vq2emb(codes) + gpt_layer(second-pass latent), target = (code_lens * 1.72).long().
+            using Tensor latent = _gpt.ComputeSecondPassLatent(backend, speakerConditioning, emoVec, textIds, codes);
+            sInfer = _semanticCodec.VqToEmbedding(backend, codes);
+            AddInPlace(sInfer, latent);
+        }
+        else
+        {
+            sInfer = _semanticCodec.Decode(backend, codes);
+        }
         int tSInfer = (int)sInfer.Shape[1];
         int targetLen = Math.Max(1, (int)(tSInfer * _cfg.ContentLengthRatio * opts.DurationFactor));
         Tensor cond = _lengthRegulator.Forward(backend, sInfer, tSInfer, targetLen);
@@ -395,6 +502,14 @@ public sealed class IndexTts2Pipeline : IDisposable
         for (int i = 0; i < n; i++) pcm[i] = Math.Clamp(wp[i], -1f, 1f);
         wave.Dispose();
         return pcm;
+    }
+
+    /// <summary><c>a += b</c>, elementwise, same shape.</summary>
+    private static unsafe void AddInPlace(Tensor a, Tensor b)
+    {
+        float* ap = (float*)a.DataPointer, bp = (float*)b.DataPointer;
+        long n = a.ElementCount;
+        for (long i = 0; i < n; i++) ap[i] += bp[i];
     }
 
     private static unsafe void CopyRefMelPrefix(Tensor promptX, Tensor refMel, int tRef, int catLen)
@@ -459,7 +574,7 @@ public sealed class IndexTts2Pipeline : IDisposable
         return outT;
     }
 
-    private int[] EncodeNormalized(string segment) => _tokenizer.Encode(IndexTtsTextNormalizer.InjectCjkBoundaries(segment));
+    private int[] EncodeNormalized(string segment) => _encode(IndexTtsTextNormalizer.InjectCjkBoundaries(segment));
 
     public IEnumerable<Tensor> EnumerateWeights()
     {
@@ -487,9 +602,14 @@ public sealed class IndexTts2Pipeline : IDisposable
         _gpt.Dispose();
         _dit.Dispose();
         _bigVgan.Dispose();
+        _tokenizerOwner?.Dispose();
         _emoLookup?.Dispose();
-        foreach (IDisposable l in _loaders) l.Dispose();
-        foreach (Tensor t in _convertedWeights) t.Dispose();
+        lock (_qwenLock)
+        lock (_ownedLock)
+        {
+            foreach (IDisposable l in _loaders) l.Dispose();
+            foreach (Tensor t in _convertedWeights) t.Dispose();
+        }
         GC.SuppressFinalize(this);
     }
 }

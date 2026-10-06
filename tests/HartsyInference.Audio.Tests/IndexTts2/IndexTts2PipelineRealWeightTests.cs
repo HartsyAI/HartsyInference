@@ -39,8 +39,11 @@ public sealed class IndexTts2PipelineRealWeightTests(ITestOutputHelper output)
         foreach (string p in new[] { tiktokenPath, gptPath, s2melPath, codecPath, statsPath })
             if (!File.Exists(p)) { output.WriteLine($"{p} missing — skip."); return; }
 
+        string feat1 = Path.Combine(v25Dir, "feat1.pt"), feat2 = Path.Combine(v25Dir, "feat2.pt");
+        bool haveFeat = File.Exists(feat1) && File.Exists(feat2);
         using IndexTts2Pipeline pipeline = await IndexTts2Pipeline.LoadAsync(
-            tiktokenPath, gptPath, s2melPath, codecPath, w2vBertPath, statsPath, campplusPath, bigVganPath);
+            tiktokenPath, gptPath, s2melPath, codecPath, w2vBertPath, statsPath, campplusPath, bigVganPath,
+            feat1Path: haveFeat ? feat1 : null, feat2Path: haveFeat ? feat2 : null);
 
         WavFile.DecodedAudio refAudio = WavFile.Read(refWavPath);
         using CpuBackend backend = new();
@@ -57,8 +60,19 @@ public sealed class IndexTts2PipelineRealWeightTests(ITestOutputHelper output)
         output.WriteLine($"Generated {pcm.Length / 22_050.0:F2}s, RMS {rms:F5}");
         Assert.True(rms > 1e-4, $"Generated audio is suspiciously close to silence (RMS {rms:F6}).");
 
-        string outPath = "/tmp/indextts2_e2e_test.wav";
+        string outPath = Path.Combine(Environment.GetEnvironmentVariable("INDEXTTS2_OUT_DIR") ?? Path.GetTempPath(), "indextts2_e2e_test.wav");
+        Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
         WavFile.WriteMono16(outPath, pcm, 22_050);
         output.WriteLine($"Wrote {outPath}");
+
+        if (haveFeat)
+        {
+            // Explicit emotion-vector mode (the feat1/feat2 exemplar lookup) must run without disposed-tensor errors.
+            float[] happy = pipeline.Synthesize(backend, "Hello there.", refAudio.Channels[0], refAudio.SampleRate,
+                new IndexTts2Options { MaxMelTokens = 150, Seed = 7, EmoVector = [0.9f, 0, 0, 0, 0, 0, 0, 0] });
+            Assert.True(happy.Length > 0);
+            foreach (float v in happy) Assert.True(float.IsFinite(v) && v is >= -1f and <= 1f);
+            WavFile.WriteMono16(Path.Combine(Path.GetDirectoryName(outPath)!, "indextts2_e2e_happy.wav"), happy, 22_050);
+        }
     }
 }
