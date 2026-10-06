@@ -92,6 +92,28 @@ public sealed class MelSpectrogramExtractor
         NormScale: 1f,
         PowerSpectrum: false);
 
+    /// <summary>IndexTTS-2's S2Mel reference-mel front end (<c>indextts/s2mel/modules/audio.py:mel_spectrogram</c>,
+    /// the real HiFi-GAN/BigVGAN-style mel): 22050Hz, n_fft=1024, hop=256, win=1024, 80 mel bins, fmax=None
+    /// (librosa's own sr/2 fallback, 11025), magnitude spectrum, natural log clamped at 1e-5, Slaney filters
+    /// (librosa_mel_fn's default). Same reflect-pad-by-<c>(n_fft-hop)/2</c>-then-center=False convention as
+    /// <see cref="CosyVoice2FlowConfig"/> — callers pre-pad to match.</summary>
+    public static Config IndexTts2RefMelConfig() => new(
+        SampleRate: 22_050,
+        NFft: 1_024,
+        WinLength: 1_024,
+        HopLength: 256,
+        NMels: 80,
+        Fmin: 0.0,
+        Fmax: 11_025.0,
+        Norm: Normalization.None,
+        DropLastStftFrame: false,
+        LogBase: LogBase.Natural,
+        LogFloor: 1e-5f,
+        DynamicRangeDb: 0f,
+        NormOffset: 0f,
+        NormScale: 1f,
+        PowerSpectrum: false);
+
     /// <summary>CosyVoice 2 flow-matching mel conditioning (matcha <c>mel_spectrogram</c>): 24kHz, n_fft=1920,
     /// hop=480, win=1920, 80 mel bins, fmax=8000, magnitude spectrum, natural log clamped at 1e-5. The reference
     /// reflect-pads the audio by <c>(n_fft - hop)/2</c> (center=False); callers should pre-pad to match.</summary>

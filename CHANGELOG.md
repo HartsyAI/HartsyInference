@@ -24,6 +24,50 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.253
+
+- **IndexTTS-2.5: emotion-controllable zero-shot voice cloning** (`indextts2` catalog entry; zero-shot
+  cloning wired end to end, emotion control modes not yet exposed through `TtsJob`/CLI/HTTP). Shares the
+  GPT-2 T2S decoder shape with IndexTTS-1.5 but conditions on CAM++ speaker embeddings instead of a
+  Conformer-Perceiver, and generates semantic-codec codes rather than mel frames directly. New pieces:
+  - `Wav2Vec2Bert` (new `Models/Wav2Vec2Bert/` folder, not IndexTTS-scoped): a 24-layer, 1024-hidden
+    Conformer with Shaw-style relative-key position bias (`facebook/w2v-bert-2.0`), taking hidden-state
+    layer 17 of 24 — not the final layer, confirmed from the real `infer_v2.py`.
+  - `VocosFactorizedCodec`/`VocosFactorizedCodecConfig` (generic Amphion/MaskGCT-family semantic codec:
+    `VocosBackbone` encoder → `in_project` conv → L2-normalized single-codebook nearest-neighbor lookup
+    `out_project` conv, with the decoder half built but never invoked on the real inference path).
+  - `VocosBackbone`: the first config-driven, shared copy of the ConvNeXt-based Vocos backbone shape this
+    codebase had already copy-pasted five times under one-off names.
+  - `IndexTts2T2sDecoder`: extends the GPT-2 T2S decoder with a second, smaller Conformer+Perceiver for
+    emotion conditioning (`IndexTtsPerceiver.NumLatents` generalized from a hardcoded 32 to a constructor
+    parameter so both uses share one class), the real `merge_emovec` lerp, and an explicit emotion-vector
+    lookup table (`IndexTts2EmotionVectorLookup`, cosine-similarity nearest-exemplar per category from
+    the checkpoint's `feat1.pt`/`feat2.pt`). Also replicates the checkpoint's two zero-initialized
+    "duration slot" conditioning rows for shape fidelity — confirmed inert in the real source
+    (`speed_emb` is never exposed via the public `infer()` API); not a working duration control.
+  - `IndexTts2Dit`/`IndexTts2DitBlock`: the S2Mel flow-matching stage — a 13-layer U-ViT-skip DiT (RoPE
+    attention, SwiGLU FFN, AdaLN norms) with a WaveNet final stage, solved via `ConditionalCfm` (widened
+    to accept any `ICfmEstimator` shape, not just CosyVoice's) over 25 Euler steps with `(1+rate)*cond -
+    rate*uncond` CFG. `VitsWaveNet.LoadWeights` gained an injectable key suffix so VITS and this S2Mel
+    stage share one WaveNet implementation. `InterpolateLengthRegulator` is a new, generic
+    explicit-target-length nearest-neighbor regulator (distinct from `VitsLengthRegulator`'s
+    duration-predictor shape).
+  - `IndexTts2BigVganGenerator`: a slimmer top-level BigVGAN-22kHz assembly (no embedded speaker encoder,
+    unlike IndexTTS-1.5's) reusing `AntiAliasedSnake`/`IndexTtsBigVganResBlock` verbatim.
+  - `IndexTts2QwenEmotion`: free-text emotion classification via a bundled Qwen3-0.6B fine-tune, loaded
+    through `HartsyInference.LLM`'s existing `GenericTransformer`/`TextGenerationPipeline`/
+    `JinjaChatTemplate`/JSON-grammar-constrained sampling — no new LLM infrastructure, just a new
+    `Qwen3HfConfigReader` (`config.json` → `TransformerConfig`, placed as `GgufConfigFactory`'s sibling,
+    not IndexTTS-scoped) and this model's own fixed system prompt/label vocabulary.
+  - `IndexTts2TiktokenTokenizer`: the 2.5 repo's tiktoken-format text tokenizer (`multilingual_zh_ja_
+    yue_char_del.tiktoken`, 58,836 ranks + 1,673 specials = 60,509, matching `number_text_tokens`
+    exactly), built on the existing `TiktokenConverter`/`HfTokenizerJson` rank-file parsing rather than a
+    new parser.
+  - IndexTTS-2.0 is not wired (shares every config value with 2.5 except `number_text_tokens`/tokenizer,
+    but needs its own GPT `conformer_perceiver` speaker-conditioning path that doesn't exist yet).
+  - Real end-to-end generation verified against the real checkpoints: 2.47s of finite, non-silent 22050 Hz
+    PCM (RMS 0.225) from a real reference clip.
+
 ## alpha.252
 
 - **Kokoro-82M: all its stock languages, each read the way the official pipeline reads it.** The voice's first letter

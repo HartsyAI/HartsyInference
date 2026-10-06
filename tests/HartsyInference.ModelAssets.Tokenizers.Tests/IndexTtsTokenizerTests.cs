@@ -60,4 +60,48 @@ public sealed class IndexTtsTokenizerTests
         using IndexTtsTokenizer tokenizer = new(path);
         Assert.NotEmpty(tokenizer.Encode("中文 and English mixed"));
     }
+
+    [Fact]
+    public void BuildSpecials_MatchesRealConfigVocabSizeExactly()
+    {
+        // 58,836 mergeable ranks (the real multilingual_zh_ja_yue_char_del.tiktoken's line count) + this list's
+        // count must equal config.yaml's gpt.number_text_tokens (60,509), confirmed against the real checkpoint's
+        // text_embedding/text_head row count (60,510 = number_text_tokens + 1) — a stray/missing special here
+        // would desync every subsequent id from the trained embedding rows without any loud failure elsewhere.
+        const int baseVocabSize = 58_836;
+        List<(string Token, int Id)> specials = IndexTts2TiktokenTokenizer.BuildSpecials(baseVocabSize);
+
+        Assert.Equal(1_673, specials.Count);
+        Assert.Equal(baseVocabSize + 1_673, baseVocabSize + specials.Count);
+        Assert.Equal(60_509, baseVocabSize + specials.Count);
+
+        // Order fixes: endoftext, startoftranscript, then the first 99 (of 106) language tags — "yue" (the 100th
+        // LANGUAGES entry) is deliberately excluded since num_languages=99 in the real get_tokenizer() call.
+        Assert.Equal(("<|endoftext|>", baseVocabSize), specials[0]);
+        Assert.Equal(("<|startoftranscript|>", baseVocabSize + 1), specials[1]);
+        Assert.Equal(("<|en|>", baseVocabSize + 2), specials[2]);
+        Assert.DoesNotContain(specials, s => s.Token == "<|yue|>");
+        Assert.DoesNotContain(specials, s => s.Token == "<|common|>");
+
+        // Ids are contiguous and unique.
+        Assert.Equal(specials.Select(s => s.Id), Enumerable.Range(baseVocabSize, specials.Count));
+        Assert.Equal(specials.Count, specials.Select(s => s.Token).Distinct(StringComparer.Ordinal).Count());
+    }
+
+    [Fact]
+    [Trait("Category", "Integration")]
+    public void IndexTts2Tokenizer_RoundTrips_AgainstRealTiktokenFile()
+    {
+        string? path = Environment.GetEnvironmentVariable("INDEXTTS2_TIKTOKEN_PATH");
+        if (string.IsNullOrEmpty(path) || !File.Exists(path)) return;   // resource-gated: skip without the real file
+
+        IndexTts2TiktokenTokenizer tokenizer = new(path);
+        const string text = "The quick brown fox jumps over the lazy dog. 中文和英文混合测试。";
+        int[] ids = tokenizer.Encode(text);
+        Assert.NotEmpty(ids);
+        foreach (int id in ids) Assert.InRange(id, 0, 60_508);   // number_text_tokens = 60509
+
+        string decoded = tokenizer.Decode(ids);
+        Assert.False(string.IsNullOrWhiteSpace(decoded));
+    }
 }
