@@ -38,7 +38,7 @@ public sealed unsafe class BreezeTts2Pipeline : IDisposable
 
     public int SampleRate => _vocoder.SampleRate;
 
-    /// <param name="model">The main checkpoint (<c>backbone_model.*</c>, <c>depth_decoder.*</c>, <c>text_encoder*.*</c>, <c>codec_model.*</c>, <c>lm_head.weight</c>).</param>
+    /// <param name="model">The main checkpoint (<c>backbone_model.*</c>, <c>depth_decoder.*</c>, <c>text_encoder*.*</c>, <c>lm_head.weight</c>).</param>
     /// <param name="audioTokenizer">The bundled <c>audio_tokenizer/model.safetensors</c> (the <c>decoder.*</c> vocoder).</param>
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> model, IReadOnlyDictionary<string, Tensor> audioTokenizer)
     {
@@ -47,11 +47,11 @@ public sealed unsafe class BreezeTts2Pipeline : IDisposable
         _textProj = model["text_encoder_proj.weight"];
         _vocoder.LoadWeights(audioTokenizer);
 
-        // The checkpoint carries the full HF Mimi (32 quantizers) as codec_model.*; only its encoder is used, for reference clips.
+        // Reference clips are encoded with the tokenizer's own encoder (encoder.*); the main checkpoint's codec_model.* is a different Mimi.
         Dictionary<string, Tensor> mimi = new();
-        foreach (KeyValuePair<string, Tensor> kv in model)
-            if (kv.Key.StartsWith("codec_model.", StringComparison.Ordinal)) mimi[kv.Key["codec_model.".Length..]] = kv.Value;
-        _referenceEncoder.LoadWeights(mimi);
+        foreach (KeyValuePair<string, Tensor> kv in audioTokenizer)
+            if (kv.Key.StartsWith("encoder.", StringComparison.Ordinal)) mimi[kv.Key["encoder.".Length..]] = kv.Value;
+        _referenceEncoder.LoadEncoderWeights(mimi);
     }
 
     /// <summary>Encodes a 24 kHz mono reference clip into <c>[T][16]</c> frames (Mimi, first 16 quantizers).</summary>
@@ -72,6 +72,15 @@ public sealed unsafe class BreezeTts2Pipeline : IDisposable
             for (int i = 0; i < n; i++) result[j][i] = p[(long)i * (int)codes.Shape[2] + j];
         }
         return result;
+    }
+
+    /// <summary>Decodes <c>[T][numCodebooks]</c> frames (for example <see cref="EncodeReference"/>'s output) back to PCM.</summary>
+    public float[] DecodeFrames(IBackend backend, int[][] frames)
+    {
+        int[,] grid = new int[_cfg.NumCodebooks, frames.Length];
+        for (int j = 0; j < frames.Length; j++)
+            for (int i = 0; i < _cfg.NumCodebooks; i++) grid[i, j] = frames[j][i];
+        return frames.Length == 0 ? [] : _vocoder.Decode(backend, grid);
     }
 
     public sealed record Request

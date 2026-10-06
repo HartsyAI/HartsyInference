@@ -70,6 +70,18 @@ public sealed unsafe class Mimi
         }
     }
 
+    /// <summary>Loads only the encode path (audio → codes) from an HF-layout Mimi encoder checkpoint that has no decoder weights.</summary>
+    public void LoadEncoderWeights(IReadOnlyDictionary<string, Tensor> w)
+    {
+        w = NormalizeKeys(w);
+        _rvq.LoadWeights(w);
+        _encoder.LoadWeights(w);
+        _encoderTransformer.LoadWeights(w);
+        _downsampleW = Whisper.WhisperOps.EnsureF32(w["downsample.conv.weight"]);
+        _downsampleB = w.TryGetValue("downsample.conv.bias", out Tensor? db) ? Whisper.WhisperOps.EnsureF32(db) : null;
+        _encodeLoaded = true;
+    }
+
     /// <summary>Decodes <c>[B, K, T]</c> Int32 codes (K = total codebooks) to PCM <c>[B, 1, T*frame_size]</c>.</summary>
     public Tensor Decode(IBackend backend, Tensor codes, int batch, int tFrames)
     {

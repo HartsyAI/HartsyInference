@@ -63,6 +63,12 @@ public sealed class BreezeTts2RealWeightTests(ITestOutputHelper output)
         string? refText = Environment.GetEnvironmentVariable("HARTSY_BREEZE_REF_TEXT");
         if (Environment.GetEnvironmentVariable("HARTSY_BREEZE_REF_WAV") is { Length: > 0 } refWav)
             refFrames = pipeline.EncodeReference(backend, ReadWav(refWav));
+        if (refFrames is not null && Environment.GetEnvironmentVariable("HARTSY_BREEZE_ROUNDTRIP_OUT") is { Length: > 0 } rt)
+        {
+            File.WriteAllText(rt + ".json", JsonSerializer.Serialize(refFrames));
+            WriteWav(rt, pipeline.DecodeFrames(backend, refFrames), pipeline.SampleRate);   // encode → vocoder decode of the reference itself
+            if (maxFrames <= 1) return;
+        }
 
         System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
         float[] audio = pipeline.Synthesize(backend, new BreezeTts2Pipeline.Request
