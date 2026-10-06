@@ -161,7 +161,7 @@ public sealed unsafe class ControlFoleyNetworkParityTests
 
         foreach (string name in new[] { "clip_f", "visual_f", "sync_f", "text_f", "audio_f", "timbre_f" })
         {
-            Tensor[] inputs = ["clip_f", "visual_f", "sync_f", "text_f", "audio_f", "timbre_f"]
+            Tensor[] inputs = new[] { "clip_f", "visual_f", "sync_f", "text_f", "audio_f", "timbre_f" }
                 .Select(n => n == name ? EmptyFor(net, n, bs) : f[$"cond.{n}"]).ToArray();
             using ControlFoleyConditions cond = net.PreprocessConditions(backend, inputs[0], inputs[1], inputs[2], inputs[3], inputs[4], inputs[5]);
             using Tensor flow = net.PredictFlow(backend, f["cond.latent"], Enumerable.Repeat(t1, bs).ToArray(), cond, out Tensor mm);
