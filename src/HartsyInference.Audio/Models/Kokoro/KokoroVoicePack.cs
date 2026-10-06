@@ -83,6 +83,7 @@ public sealed class KokoroVoicePack : IDisposable
         foreach (float w in weights) total += w;
         if (!(total > 0)) throw new ArgumentException("The weights must sum to a positive number.", nameof(weights));
 
+        foreach (KokoroVoicePack pack in packs) pack.ThrowIfDisposed();
         int n = packs.Min(static p => p.NumBuckets);
         Tensor table = new(new TensorShape(n, StyleWidth), DType.F32);
         long count = (long)n * StyleWidth;
@@ -94,7 +95,6 @@ public sealed class KokoroVoicePack : IDisposable
                 double acc = 0;
                 for (int k = 0; k < packs.Count; k++)
                 {
-                    packs[k].ThrowIfDisposed();
                     acc += weights[k] * ((float*)packs[k]._table.DataPointer)[i];
                 }
                 dst[i] = (float)(acc / total);

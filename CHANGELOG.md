@@ -1506,6 +1506,7 @@ stable release will require. Dates are UTC.
   the runtime now holds its generation lock for the whole Kokoro stream, where the old text-split loop released it
   between chunks.
 
+
 ## alpha.218
 
 - **Audio eviction keeps the incoming model.** `AudioRuntime`'s memory-pressure sweep compared the prefixed job key
@@ -2916,6 +2917,7 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   struct and C# will throw it away — and it raises the op depth permanently, so every later op is treated as
   nested: no finalizer drain, no orphan sweep, no flush.
 
+
 ## alpha.138
 
 - **The conv half of the LoRA merge is verified against a real adapter.** Rank-4 convolution support has existed
@@ -2937,6 +2939,7 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   skipped, and the 49 convs are inside that UNet count.
 - The adapter is Pony-trained, which is irrelevant to what is being shown: it shares SDXL's UNet and kohya's key
   grammar, and the claim is that the conv path resolves and fits, not that the output looks like anything.
+
 
 ## alpha.137
 
@@ -3428,6 +3431,7 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   dispatched, wrote the device buffer and returned without rebinding, so a later host read got the untouched host
   copy and the op looked like it did nothing — a 3.3 absolute error against the reference, versus 2e-7 after.
 
+
 ## alpha.121
 
 - **The fp8 quantize path leaked every weight it wrote.** It worked out what it owned by rescanning the whole
@@ -3479,6 +3483,7 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   and a dim that is not a multiple of the subgroup, since the cross-subgroup fold is where a norm like this goes
   wrong on small-subgroup hardware. Max absolute error 1.4e-6 in F32, 4.9e-4 in F16 — the latter being F16's own
   precision rather than a disagreement.
+
 
 ## alpha.118
 
@@ -4889,6 +4894,7 @@ sites, and the `hartsy pack` command that produces a whole upload-ready bundle, 
   identical probabilities.
 - **`tools/convert_silero_onnx.py`** emits the safetensors form and, with `--verify`, checks the export against
   onnxruntime end to end (1.25e-6 max abs over 343 chunks).
+
 
 ### Fixed
 - **End-of-speech waited for the silence window twice.** The utterance clock was driven by

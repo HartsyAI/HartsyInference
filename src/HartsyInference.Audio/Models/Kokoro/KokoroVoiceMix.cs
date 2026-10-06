@@ -22,7 +22,7 @@ public sealed partial class KokoroVoiceMix
 
     /// <summary>Parses <paramref name="spec"/>.</summary>
     /// <exception cref="ArgumentException">A part is not a voice name (letters, digits, <c>_</c>, <c>-</c>) with an
-    /// optional positive weight.</exception>
+    /// optional positive weight (digits and a decimal point; no sign or exponent, since <c>+</c> separates parts).</exception>
     public static KokoroVoiceMix Parse(string spec)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(spec);
@@ -34,7 +34,10 @@ public sealed partial class KokoroVoiceMix
                 throw new ArgumentException($"Kokoro voice '{raw}' in '{spec}' is not a voice name with an optional "
                     + "weight, such as af_bella, af_bella(2) or af_bella:0.5.", nameof(spec));
             string w = m.Groups["w1"].Success ? m.Groups["w1"].Value : m.Groups["w2"].Value;
-            float weight = w.Length == 0 ? 1f : float.Parse(w, NumberStyles.Float, CultureInfo.InvariantCulture);
+            float weight = 1f;
+            if (w.Length != 0
+                && !float.TryParse(w, NumberStyles.Float, CultureInfo.InvariantCulture, out weight))
+                throw new ArgumentException($"Kokoro voice weight '{w}' in '{raw}' is not a number.", nameof(spec));
             if (!(weight > 0f) || float.IsInfinity(weight))
                 throw new ArgumentException($"Kokoro voice weight in '{raw}' must be a positive number.", nameof(spec));
             parts.Add((m.Groups["name"].Value, weight));
@@ -52,6 +55,6 @@ public sealed partial class KokoroVoiceMix
         return KokoroVoicePack.WeightedMean(name, packs, Parts.Select(static p => p.Weight).ToArray());
     }
 
-    [GeneratedRegex(@"^(?<name>[A-Za-z0-9_\-]+)(?:\((?<w1>[0-9.eE+\-]+)\)|:(?<w2>[0-9.eE+\-]+))?$")]
+    [GeneratedRegex(@"^(?<name>[A-Za-z0-9_\-]+)(?:\((?<w1>[0-9.]+)\)|:(?<w2>[0-9.]+))?$")]
     private static partial Regex PartRegex();
 }

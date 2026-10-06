@@ -121,6 +121,8 @@ internal static class KokoroJapaneseAssets
             if (!await ReadFullyAsync(zip, name, cancel).ConfigureAwait(false)
                 || !await ReadFullyAsync(zip, extra, cancel).ConfigureAwait(false))
                 throw new InvalidDataException("The UniDic archive ends inside a file header.");
+            if (compressed == 0xFFFFFFFF || size == 0xFFFFFFFF)
+                throw new InvalidDataException("The UniDic archive uses Zip64 sizes; this reader handles the pinned archive's plain zip only.");
             if ((flags & 8) != 0) throw new InvalidDataException("The UniDic archive uses data descriptors; cannot stream it.");
             string entry = Encoding.UTF8.GetString(name);
             await using BoundedStream data = new(zip, compressed);

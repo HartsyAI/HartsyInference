@@ -29,6 +29,10 @@ public sealed class KokoroVoiceMixTests
     [InlineData("af_bella(0)")]
     [InlineData("af_bella(-1)")]
     [InlineData("af bella")]
+    [InlineData("af_bella(1.2.3)")]
+    [InlineData("af_bella:.")]
+    [InlineData("af_bella(e)")]
+    [InlineData("af_bella(1e3)")]
     public void Parse_RejectsWhatIsNotAVoice(string spec) => Assert.Throws<ArgumentException>(() => KokoroVoiceMix.Parse(spec));
 
     [Fact]
