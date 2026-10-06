@@ -24,6 +24,14 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.258
+
+- Add the `kolibri1` text-model catalog entry (`Hob-forge/Kolibri-1-GGUF`, Q4_K_M, SHA-256 pinned). Status stays
+  Structural: no real checkpoint has been run yet (the smallest quant is 28.6 GB).
+- **Fixed: Kolibri-1 tokenization.** Its `tokenizer.ggml.pre` is `kolibri1` (llama.cpp's Qwen2 pre-tokenizer), which
+  splits digits one at a time and matches contractions case-insensitively. The engine used the GPT-2 default, which
+  groups digit runs and so produced different token ids for any prompt containing numbers.
+
 ## alpha.257
 
 - Add Kolibri-1 native GGUF support: key mapping for sandwich norms, Q/K norm, MoE tensors and the router bias;
