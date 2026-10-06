@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -36,6 +37,11 @@ internal static unsafe class ControlFoleyOps
     /// symmetric <c>(k-1)/2</c> padding (the only padding the released model uses).</summary>
     internal static Tensor ConvLastChannel(IBackend backend, Tensor x, Tensor weight, Tensor? bias)
     {
+        if (weight.DType == DType.BF16)
+        {
+            return ConvUnfolded(backend, x, weight, bias);
+        }
+
         int b = (int)x.Shape[0], t = (int)x.Shape[1], c = (int)x.Shape[2];
         int co = (int)weight.Shape[0], k = (int)weight.Shape[2];
         if (weight.Shape[1] != c || k % 2 == 0)
@@ -72,6 +78,85 @@ internal static unsafe class ControlFoleyOps
             }
         }
 
+        return o;
+    }
+
+    /// <summary>Converts a checkpoint tensor for use: a BF16 conv weight <c>[out, in, k]</c> becomes <c>[out, k, in]</c> so
+    /// the convolution runs as one Linear over the unfolded input (half the memory of F32, no conv kernel for BF16);
+    /// everything else is widened to F32 except BF16 matrices, which stay as stored. Created tensors go to <paramref name="owned"/>.</summary>
+    internal static Tensor PrepareWeight(Tensor t, List<Tensor> owned)
+    {
+        if (t.DType == DType.BF16 && t.Shape.Rank == 2)
+        {
+            return t;
+        }
+
+        if (t.DType == DType.BF16 && t.Shape.Rank == 3)
+        {
+            int co = (int)t.Shape[0], ci = (int)t.Shape[1], k = (int)t.Shape[2];
+            Tensor o = new(new TensorShape(co, k, ci), DType.BF16);
+            ushort* src = (ushort*)t.DataPointer, dst = (ushort*)o.DataPointer;
+            for (int a = 0; a < co; a++)
+            {
+                for (int j = 0; j < k; j++)
+                {
+                    for (int i = 0; i < ci; i++)
+                    {
+                        dst[((long)a * k + j) * ci + i] = src[((long)a * ci + i) * k + j];
+                    }
+                }
+            }
+
+            owned.Add(o);
+            return o;
+        }
+
+        Tensor f = WhisperOps.EnsureF32(t);
+        if (!ReferenceEquals(f, t))
+        {
+            owned.Add(f);
+        }
+
+        return f;
+    }
+
+    /// <summary>Same-padded convolution with a BF16 weight laid out <c>[out, k, in]</c>: unfold k shifted copies of the
+    /// input along channels and apply one Linear.</summary>
+    private static Tensor ConvUnfolded(IBackend backend, Tensor x, Tensor weight, Tensor? bias)
+    {
+        int b = (int)x.Shape[0], t = (int)x.Shape[1], c = (int)x.Shape[2];
+        int co = (int)weight.Shape[0], k = (int)weight.Shape[1];
+        if (weight.Shape[2] != c || k % 2 == 0)
+        {
+            throw new ArgumentException($"Conv weight {weight.Shape} does not fit input {x.Shape} with 'same' padding.");
+        }
+
+        int pad = (k - 1) / 2;
+        using Tensor unfolded = new(new TensorShape(b, t, k * c), DType.F32);
+        float* src = (float*)x.DataPointer, dst = (float*)unfolded.DataPointer;
+        for (int bi = 0; bi < b; bi++)
+        {
+            for (int ti = 0; ti < t; ti++)
+            {
+                float* row = dst + ((long)bi * t + ti) * k * c;
+                for (int j = 0; j < k; j++)
+                {
+                    int s = ti + j - pad;
+                    if (s < 0 || s >= t)
+                    {
+                        new Span<float>(row + (long)j * c, c).Clear();
+                    }
+                    else
+                    {
+                        Buffer.MemoryCopy(src + ((long)bi * t + s) * c, row + (long)j * c, c * 4L, c * 4L);
+                    }
+                }
+            }
+        }
+
+        using Tensor flat = weight.Reshape(new TensorShape(co, k * c));
+        Tensor o = New(b, t, co);
+        backend.Linear(o, unfolded, flat, bias);
         return o;
     }
 

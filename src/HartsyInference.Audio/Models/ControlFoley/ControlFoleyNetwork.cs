@@ -148,13 +148,7 @@ public sealed class ControlFoleyNetwork : IDisposable
             throw new KeyNotFoundException($"Missing ControlFoley weight '{key}'.");
         }
 
-        Tensor f = WhisperOps.EnsureF32(t);
-        if (!ReferenceEquals(f, t))
-        {
-            _owned.Add(f);
-        }
-
-        return f;
+        return ControlFoleyOps.PrepareWeight(t, _owned);
     }
 
     private Projection LoadProjection(IReadOnlyDictionary<string, Tensor> w, string name)
@@ -496,7 +490,7 @@ public sealed class ControlFoleyNetwork : IDisposable
             return;
         }
 
-        foreach (Tensor t in _owned)
+        foreach (Tensor t in _owned.Concat(_joint.SelectMany(j => j.OwnedTensors)).Concat(_fused.SelectMany(f => f.OwnedTensors)))
         {
             t.Dispose();
         }

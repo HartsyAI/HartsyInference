@@ -1,4 +1,3 @@
-using HartsyInference.Audio.Models.Whisper;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
@@ -10,6 +9,7 @@ namespace HartsyInference.Audio.Models.ControlFoley;
 internal sealed unsafe class ControlFoleyBlock
 {
     private readonly int _heads;
+    private readonly List<Tensor> _owned = [];
     private readonly Tensor _qkvW, _qkvB, _qNorm, _kNorm, _adaW, _adaB;
     private readonly Tensor? _linear1W, _linear1B, _w1, _w2, _w3;
 
@@ -46,8 +46,11 @@ internal sealed unsafe class ControlFoleyBlock
     internal static ControlFoleyBlock Load(IReadOnlyDictionary<string, Tensor> w, string prefix, int heads, bool preOnly)
         => new(heads, preOnly, w, prefix);
 
-    private static Tensor F(IReadOnlyDictionary<string, Tensor> w, string key)
-        => w.TryGetValue(key, out Tensor? t) ? WhisperOps.EnsureF32(t) : throw new KeyNotFoundException($"Missing ControlFoley weight '{key}'.");
+    private Tensor F(IReadOnlyDictionary<string, Tensor> w, string key)
+        => w.TryGetValue(key, out Tensor? t) ? ControlFoleyOps.PrepareWeight(t, _owned) : throw new KeyNotFoundException($"Missing ControlFoley weight '{key}'.");
+
+    /// <summary>Tensors this block created while loading (widened or re-laid-out copies); released with the network.</summary>
+    internal IEnumerable<Tensor> OwnedTensors => _owned;
 
     internal IEnumerable<Tensor> Weights()
     {

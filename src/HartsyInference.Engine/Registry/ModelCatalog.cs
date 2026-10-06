@@ -1445,6 +1445,21 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // ControlFoley (Xiaomi, CC-BY-NC-4.0) text-to-audio at 44.1 kHz: DFN5B CLIP text features -> flow-matching DiT ->
+                // VAE + BigVGAN v2. The 11 GB float32 network is preferred as controlfoley_bf16.safetensors when placed beside it.
+                // Video and reference-audio conditioning are not wired. `hartsy music -m controlfoley "rain on a tin roof"`.
+                Id = "controlfoley", Modality = mus, DisplayName = "ControlFoley (text-to-audio)", Architecture = "flow-matching DiT + VAE + BigVGAN v2",
+                Status = st, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "YJX-Xiaomi/ControlFoley", RepoPath = "weights/controlfoley.pth", TargetSubdir = "Audio/ControlFoley", Role = "transformer" },
+                    new() { Repo = "YJX-Xiaomi/ControlFoley", RepoPath = "ext_weights/v1-44.pth", TargetSubdir = "Audio/ControlFoley", Role = "vae" },
+                    new() { Repo = "nvidia/bigvgan_v2_44khz_128band_512x", RepoPath = "bigvgan_generator.pt", TargetSubdir = "Audio/ControlFoley", Role = "vocoder" },
+                    new() { Repo = "apple/DFN5B-CLIP-ViT-H-14-384", RepoPath = "open_clip_pytorch_model.bin", TargetSubdir = "Audio/ControlFoley", Role = "text encoder" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "heartmula", Modality = mus, DisplayName = "HeartMuLa (oss-3B)", Architecture = "CSM-LM + flow-match HeartCodec", Status = ok,
                 CliDrivable = true, // `hartsy music -m heartmula` — MusicCatalog "heartmula"; 48 kHz, real-weight verified (see MODEL_STATUS_AUDIO.md)
             },

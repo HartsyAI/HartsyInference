@@ -185,6 +185,43 @@ public sealed unsafe class ControlFoleyNetworkParityTests
     };
 
     [Fact]
+    public void Bf16Weights_TrackTheFloat32Reference()
+    {
+        JsonElement meta = Meta();
+        using Fixture f = new("controlfoley_net_v1.safetensors");
+        using IBackend backend = new CpuBackend();
+        List<Tensor> converted = [];
+        Dictionary<string, Tensor> weights = new();
+        foreach (KeyValuePair<string, Tensor> kv in f.Tensors)
+        {
+            bool isWeight = !kv.Key.StartsWith("cond.", StringComparison.Ordinal) && !kv.Key.StartsWith("ref.", StringComparison.Ordinal);
+            if (isWeight && kv.Value.Shape.Rank is 2 or 3)
+            {
+                Tensor bf16 = kv.Value.CastTo(DType.BF16);
+                converted.Add(bf16);
+                weights[kv.Key] = bf16;
+            }
+            else
+            {
+                weights[kv.Key] = kv.Value;
+            }
+        }
+
+        using ControlFoleyNetwork net = new(Config(meta.GetProperty("v1")));
+        net.LoadWeights(weights);
+        int bs = meta.GetProperty("batch").GetInt32();
+        float t0 = meta.GetProperty("timesteps")[0].GetSingle();
+        using ControlFoleyConditions cond = Preprocess(backend, net, f);
+        using Tensor flow = net.PredictFlow(backend, f["cond.latent"], Enumerable.Repeat(t0, bs).ToArray(), cond, out Tensor multimodal);
+        multimodal.Dispose();
+        AssertClose(f["ref.flow.t0"], flow, "bf16 flow", tol: 5e-2f);
+        foreach (Tensor t in converted)
+        {
+            t.Dispose();
+        }
+    }
+
+    [Fact]
     public void EulerTrajectory_MatchesOfficialFlowMatching()
     {
         JsonElement meta = Meta();

@@ -24,6 +24,8 @@ internal sealed unsafe class ControlFoleyJointBlock
             ControlFoleyBlock.Load(w, $"{prefix}.text_block", heads, preOnly),
             ControlFoleyBlock.Load(w, $"{prefix}.audio_block", heads, preOnly));
 
+    internal IEnumerable<Tensor> OwnedTensors => _latent.OwnedTensors.Concat(_clip.OwnedTensors).Concat(_text.OwnedTensors).Concat(_audio.OwnedTensors);
+
     internal IEnumerable<Tensor> Weights() => _latent.Weights().Concat(_clip.Weights()).Concat(_text.Weights()).Concat(_audio.Weights());
 
     /// <summary>Updates the four streams in place.</summary>
