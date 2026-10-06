@@ -4,23 +4,40 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Pipelines;
 
-/// <summary>ControlFoley text-to-audio: CLIP text features, the flow-matching network (classifier-free guidance against the
-/// negative prompt), then the VAE and BigVGAN decoder, as in the official <c>demo.py</c> without video or reference audio.
-/// The pipeline borrows the three models; the caller disposes them.</summary>
+/// <summary>ControlFoley text-to-audio and video-to-audio: CLIP text features, optional video conditions (CLIP frames,
+/// CAV-MAE visual tokens, Synchformer tokens), the flow-matching network (classifier-free guidance against the negative
+/// prompt), then the VAE and BigVGAN decoder, as in the official <c>demo.py</c> without reference audio.
+/// The pipeline borrows the models; the caller disposes them.</summary>
 public sealed unsafe class ControlFoleyPipeline
 {
     private readonly ControlFoleyNetwork _network;
     private readonly ControlFoleyClip _clip;
     private readonly ControlFoleyAudioDecoder _decoder;
+    private readonly ControlFoleySynchformer? _synchformer;
+    private readonly ControlFoleyCavMae? _cavMae;
 
     public ControlFoleyPipeline(ControlFoleyNetwork network, ControlFoleyClip clip, ControlFoleyAudioDecoder decoder)
+        : this(network, clip, decoder, null, null)
     {
+    }
+
+    /// <summary>Creates a pipeline that can also condition on video; both video encoders are needed together.</summary>
+    public ControlFoleyPipeline(ControlFoleyNetwork network, ControlFoleyClip clip, ControlFoleyAudioDecoder decoder,
+        ControlFoleySynchformer? synchformer, ControlFoleyCavMae? cavMae)
+    {
+        if ((synchformer is null) != (cavMae is null))
+        {
+            throw new ArgumentException("Synchformer and CAV-MAE-ST must be supplied together.");
+        }
+
         ArgumentNullException.ThrowIfNull(network);
         ArgumentNullException.ThrowIfNull(clip);
         ArgumentNullException.ThrowIfNull(decoder);
         _network = network;
         _clip = clip;
         _decoder = decoder;
+        _synchformer = synchformer;
+        _cavMae = cavMae;
     }
 
     /// <summary>Output sample rate in Hz.</summary>
@@ -40,6 +57,16 @@ public sealed unsafe class ControlFoleyPipeline
         public float CfgStrength { get; init; } = 4.5f;
 
         public int Seed { get; init; } = 42;
+
+        /// <summary>Decoded source video; needs a pipeline built with the video encoders. The duration shrinks to the
+        /// clip's usable length when it is shorter than <see cref="DurationSeconds"/>.</summary>
+        public ControlFoleyRawVideo? Video { get; init; }
+
+        /// <summary>Ignore the CLIP stream and keep only the visual and sync streams (<c>--mask_away_clip</c>).</summary>
+        public bool MaskAwayClip { get; init; }
+
+        /// <summary>Frame rates and sizes used to sample <see cref="Video"/>.</summary>
+        public ControlFoleyVideoOptions VideoOptions { get; init; } = ControlFoleyVideoOptions.Default;
     }
 
     /// <summary>Generates mono PCM at <see cref="SampleRate"/>.</summary>
@@ -51,7 +78,20 @@ public sealed unsafe class ControlFoleyPipeline
             throw new ArgumentOutOfRangeException(nameof(request), "Duration and steps must be positive.");
         }
 
-        ControlFoleyTemporalConfig temporal = ControlFoleyTemporalConfig.Default44k with { TotalTimeSeconds = request.DurationSeconds };
+        double duration = request.DurationSeconds;
+        ControlFoleyVideoInput? video = null;
+        if (request.Video is not null)
+        {
+            if (_synchformer is null || _cavMae is null)
+            {
+                throw new InvalidOperationException("This pipeline was built without the Synchformer and CAV-MAE-ST encoders.");
+            }
+
+            video = ControlFoleyVideoPreprocessor.Prepare(request.Video, duration, request.VideoOptions);
+            duration = Math.Min(duration, video.TotalDuration);
+        }
+
+        ControlFoleyTemporalConfig temporal = ControlFoleyTemporalConfig.Default44k with { TotalTimeSeconds = duration };
         _network.UpdateSequenceLengths(temporal);
         ControlFoleyNetworkConfig cfg = _network.Config;
 
@@ -60,9 +100,15 @@ public sealed unsafe class ControlFoleyPipeline
         cancel.ThrowIfCancellationRequested();
         using Tensor textF = FromHost(text, 1, cfg.TextSeqLen, cfg.TextDim);
         using Tensor negativeF = FromHost(negative, 1, cfg.TextSeqLen, cfg.TextDim);
-        using Tensor clipF = _network.GetEmptyClipSequence(1);
-        using Tensor visualF = _network.GetEmptyVisualSequence(1);
-        using Tensor syncF = _network.GetEmptySyncSequence(1);
+        using Tensor clipF = video is not null && !request.MaskAwayClip
+            ? FromHost(_clip.EncodeImages(backend, video.Clip), 1, cfg.ClipSeqLen, cfg.ClipDim)
+            : _network.GetEmptyClipSequence(1);
+        using Tensor visualF = video is not null
+            ? FromHost(_cavMae!.EncodePooled(backend, video.Visual), 1, cfg.VisualSeqLen, cfg.VisualDim)
+            : _network.GetEmptyVisualSequence(1);
+        using Tensor syncF = video is not null
+            ? FromHost(_synchformer!.Encode(backend, video.Sync), 1, cfg.SyncSeqLen, cfg.SyncDim)
+            : _network.GetEmptySyncSequence(1);
         using Tensor audioF = _network.GetEmptyAudioSequence(1);
         using Tensor timbreF = _network.GetEmptyTimbreSequence(1);
         using ControlFoleyConditions conditions = _network.PreprocessConditions(backend, clipF, visualF, syncF, textF, audioF, timbreF);
@@ -74,7 +120,7 @@ public sealed unsafe class ControlFoleyPipeline
 
         float[] flat = new ReadOnlySpan<float>((void*)latent.DataPointer, (int)latent.ElementCount).ToArray();
         float[] audio = _decoder.Decode(backend, flat);
-        int samples = Math.Min(audio.Length, (int)(request.DurationSeconds * SampleRate));
+        int samples = Math.Min(audio.Length, (int)(duration * SampleRate));
         return audio.AsSpan(0, samples).ToArray();
     }
 
