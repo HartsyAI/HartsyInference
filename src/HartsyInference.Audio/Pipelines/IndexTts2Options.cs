@@ -53,6 +53,24 @@ public sealed record IndexTts2Options
     /// <summary>Text to classify when <see cref="UseEmoText"/> is set; null uses the main synthesis text.</summary>
     public string? EmoText { get; init; }
 
+    /// <summary>Applies the reference WebUI's <c>normalize_emo_vec</c> to <see cref="EmoVector"/> (per-category
+    /// de-emphasis bias, total capped at 0.8) before use. Off by default: the reference's library entry point
+    /// (<c>infer_generator</c>) and the QwenEmotion text path use the weights exactly as given — only the WebUI
+    /// normalizes the sliders a user drags. Turn on for slider-style input, where weights may sum above 1.</summary>
+    public bool NormalizeEmoVector { get; init; }
+
+    /// <summary>Silence inserted between consecutive text segments, in milliseconds — the reference's
+    /// <c>interval_silence</c> (200).</summary>
+    public int IntervalSilenceMs { get; init; } = 200;
+
+    /// <summary>The reference's <c>quick_streaming_tokens</c>: while fewer than this many tokens have been consumed, short
+    /// neighbouring segments are not merged, so the first segment stays small and its audio arrives sooner when
+    /// streaming. 0 (the reference default) merges as aggressively as the segment limit allows. IndexTTS-2.0 only.</summary>
+    public int QuickStreamingTokens { get; init; }
+
+    /// <summary>Optional sink that receives per-stage timings (see <see cref="IndexTts2Timings"/>).</summary>
+    public IndexTts2Timings? Timings { get; init; }
+
     /// <summary>Real <c>duration_factor</c>: scales the length-regulated target frame count
     /// (<c>target_lengths = semanticFrames * 1.72 * durationFactor</c>). 1.0 is the real default.</summary>
     public float DurationFactor { get; init; } = 1.0f;
