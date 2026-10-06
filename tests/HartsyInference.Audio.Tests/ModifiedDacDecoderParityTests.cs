@@ -18,6 +18,7 @@ public sealed unsafe class ModifiedDacDecoderParityTests
         LatentDim = 64, CodebookDim = 8, NumResidualCodebooks = 3, SemanticCodebookSize = 32, ResidualCodebookSize = 16,
         DecoderDim = 32, DecoderRates = [2, 2, 2, 2], TransformerLayers = 2, TransformerHeads = 4, TransformerHeadDim = 16,
         TransformerIntermediate = 96, TransformerWindow = 8,
+        EncoderDim = 4, EncoderRates = [2, 2, 2, 2], EncoderTransformerLayers = [0, 0, 0, 2],
     };
 
     private static float[] Read(Tensor t) => new ReadOnlySpan<float>((void*)t.DataPointer, (int)t.ElementCount).ToArray();
@@ -56,5 +57,36 @@ public sealed unsafe class ModifiedDacDecoderParityTests
         float worst = 0f;
         for (int i = 0; i < expected.Length; i++) worst = MathF.Max(worst, MathF.Abs(expected[i] - audio[i]));
         Assert.True(worst <= 1e-4f, $"max |Δ| = {worst}");
+    }
+
+    [Fact]
+    public void Encode_MatchesOfficialImplementation()
+    {
+        using SafeTensorsLoader loader = new();
+        loader.Load(Path.Combine(Dir, "modded_dac_tiny.safetensors"));
+        Dictionary<string, Tensor> weights = new();
+        foreach (string name in loader.Descriptors.Keys) weights[name] = loader.GetTensor(name);
+
+        float[] audio = Read(weights["ref.enc_audio"]);
+        float[] flat = Read(weights["ref.enc_codes"]);
+        int books = 4, t = flat.Length / books;
+
+        using IBackend backend = new CpuBackend();
+        using ModifiedDacEncoder encoder = new(Tiny());
+        encoder.LoadWeights(weights);
+        Dictionary<string, float[]> taps = new();
+        int[,] codes = encoder.Encode(backend, audio, (name, v) => taps[name] = v);
+
+        foreach (KeyValuePair<string, float[]> tap in taps)
+        {
+            float[] want = Read(weights[$"tap.{tap.Key}"]);
+            float worst = 0f;
+            for (int i = 0; i < want.Length; i++) worst = MathF.Max(worst, MathF.Abs(want[i] - tap.Value[i]));
+            Assert.True(worst <= 1e-4f * MathF.Max(1f, want.Max(MathF.Abs)), $"encoder stage {tap.Key}: max |Δ| = {worst}");
+        }
+        Assert.Equal(t, codes.GetLength(1));
+        for (int i = 0; i < books; i++)
+            for (int j = 0; j < t; j++)
+                Assert.Equal((int)flat[i * t + j], codes[i, j]);
     }
 }

@@ -64,12 +64,29 @@ public sealed class FishAudioS2RealWeightTests(ITestOutputHelper output)
 
         string text = Environment.GetEnvironmentVariable("HARTSY_FISH_S2_TEXT") ?? "Hello, this is a test of the Fish Audio speech model.";
         System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
-        float[] audio = pipeline.Synthesize(backend, new FishAudioS2Pipeline.Request { Text = text, Seed = 7, MaxFrames = 120 });
+        int[,]? referenceCodes = null;
+        string? referenceText = Environment.GetEnvironmentVariable("HARTSY_FISH_S2_REF_TEXT");
+        if (Environment.GetEnvironmentVariable("HARTSY_FISH_S2_REF_WAV") is { Length: > 0 } refWav)
+            referenceCodes = pipeline.EncodeReference(backend, ReadWav(refWav));
+        int maxFrames = int.TryParse(Environment.GetEnvironmentVariable("HARTSY_FISH_S2_MAX_FRAMES"), out int m) ? m : 120;
+        float[] audio = pipeline.Synthesize(backend, new FishAudioS2Pipeline.Request
+        {
+            Text = text, Seed = 7, MaxFrames = maxFrames, ReferenceCodes = referenceCodes, ReferenceText = referenceText,
+        });
         output.WriteLine($"{audio.Length} samples ({audio.Length / (double)pipeline.SampleRate:F2} s) in {watch.Elapsed.TotalSeconds:F1} s");
         string? outPath = Environment.GetEnvironmentVariable("HARTSY_FISH_S2_OUT");
         if (outPath is not null) WriteWav(outPath, audio, pipeline.SampleRate);
         Assert.NotEmpty(audio);
         foreach (SafeTensorsLoader l in loaders) l.Dispose();
+    }
+
+    private static float[] ReadWav(string path)
+    {
+        byte[] bytes = File.ReadAllBytes(path);
+        int data = 44;   // canonical 44-byte header (the writer below, or any plain 16-bit mono PCM WAV)
+        float[] samples = new float[(bytes.Length - data) / 2];
+        for (int i = 0; i < samples.Length; i++) samples[i] = BitConverter.ToInt16(bytes, data + 2 * i) / 32768f;
+        return samples;
     }
 
     private static void WriteWav(string path, float[] samples, int rate)

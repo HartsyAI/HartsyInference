@@ -47,4 +47,33 @@ public sealed unsafe class ModifiedDacRealWeightTests(ITestOutputHelper output)
         output.WriteLine($"max |Δ| = {worst:E2}, reference rms = {MathF.Sqrt(rms / expected.Length):E2}");
         Assert.True(worst <= 2e-3f, $"max |Δ| = {worst}");
     }
+
+    [Fact]
+    public void RealS2Codec_EncodesLikeTheOfficialImplementation()
+    {
+        string? dir = Environment.GetEnvironmentVariable("HARTSY_FISH_S2_CODEC_DIR");
+        if (string.IsNullOrEmpty(dir)) return;
+
+        using SafeTensorsLoader reference = new();
+        reference.Load(Path.Combine(dir, "s2_codec_reference.safetensors"));
+        if (!reference.Descriptors.ContainsKey("enc_codes")) return;
+        using SafeTensorsLoader codec = new();
+        codec.Load(Path.Combine(dir, "codec.safetensors"));
+        Dictionary<string, Tensor> weights = new();
+        foreach (string name in codec.Descriptors.Keys) weights[name] = codec.GetTensor(name);
+
+        float[] audio = Read(reference.GetTensor("enc_audio"));
+        float[] expected = Read(reference.GetTensor("enc_codes"));
+        using IBackend backend = new CpuBackend();
+        using ModifiedDacEncoder encoder = new(ModifiedDacConfig.S2);
+        encoder.LoadWeights(weights);
+        int[,] codes = encoder.Encode(backend, audio);
+
+        int books = codes.GetLength(0), t = codes.GetLength(1);
+        Assert.Equal(expected.Length, books * t);
+        int same = 0;
+        for (int i = 0; i < books; i++) for (int j = 0; j < t; j++) if ((int)expected[i * t + j] == codes[i, j]) same++;
+        output.WriteLine($"{same}/{books * t} codes identical to the official encoder");
+        Assert.True(same >= 0.98 * books * t, $"{same}/{books * t} codes identical");
+    }
 }
