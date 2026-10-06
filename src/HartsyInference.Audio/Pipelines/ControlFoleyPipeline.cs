@@ -1,13 +1,14 @@
+using HartsyInference.Audio.Io;
 using HartsyInference.Audio.Models.ControlFoley;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Audio.Pipelines;
 
-/// <summary>ControlFoley text-to-audio and video-to-audio: CLIP text features, optional video conditions (CLIP frames,
-/// CAV-MAE visual tokens, Synchformer tokens), the flow-matching network (classifier-free guidance against the negative
-/// prompt), then the VAE and BigVGAN decoder, as in the official <c>demo.py</c> without reference audio.
-/// The pipeline borrows the models; the caller disposes them.</summary>
+/// <summary>ControlFoley text-, video- and reference-audio-to-audio: CLIP text features, optional video conditions (CLIP frames,
+/// CAV-MAE visual tokens, Synchformer tokens), an optional reference clip (CLAP embedding and MusicGen-Style timbre), the
+/// flow-matching network (classifier-free guidance against the negative prompt), then the VAE and BigVGAN decoder, as in the
+/// official <c>demo.py</c>. The pipeline borrows the models; the caller disposes them.</summary>
 public sealed unsafe class ControlFoleyPipeline
 {
     private readonly ControlFoleyNetwork _network;
@@ -15,19 +16,32 @@ public sealed unsafe class ControlFoleyPipeline
     private readonly ControlFoleyAudioDecoder _decoder;
     private readonly ControlFoleySynchformer? _synchformer;
     private readonly ControlFoleyCavMae? _cavMae;
+    private readonly ControlFoleyClap? _clap;
+    private readonly ControlFoleyStyleEncoder? _style;
 
-    public ControlFoleyPipeline(ControlFoleyNetwork network, ControlFoleyClip clip, ControlFoleyAudioDecoder decoder)
-        : this(network, clip, decoder, null, null)
-    {
-    }
+    /// <summary>Rate the CLAP embedding of the reference clip is computed at.</summary>
+    public const int ClapSampleRate = 16_000;
 
-    /// <summary>Creates a pipeline that can also condition on video; both video encoders are needed together.</summary>
+    /// <summary>Rate of the timbre excerpt.</summary>
+    public const int TimbreSampleRate = 32_000;
+
+    /// <summary>Shortest and longest timbre excerpt in seconds; shorter clips are zero-padded and longer ones truncated.</summary>
+    public const int MinTimbreSeconds = 2, MaxTimbreSeconds = 4;
+
+    /// <summary>Creates a pipeline. Video conditioning needs both <paramref name="synchformer"/> and <paramref name="cavMae"/>;
+    /// reference audio needs both <paramref name="clap"/> and <paramref name="style"/>.</summary>
     public ControlFoleyPipeline(ControlFoleyNetwork network, ControlFoleyClip clip, ControlFoleyAudioDecoder decoder,
-        ControlFoleySynchformer? synchformer, ControlFoleyCavMae? cavMae)
+        ControlFoleySynchformer? synchformer = null, ControlFoleyCavMae? cavMae = null, ControlFoleyClap? clap = null,
+        ControlFoleyStyleEncoder? style = null)
     {
         if ((synchformer is null) != (cavMae is null))
         {
             throw new ArgumentException("Synchformer and CAV-MAE-ST must be supplied together.");
+        }
+
+        if ((clap is null) != (style is null))
+        {
+            throw new ArgumentException("CLAP and the timbre encoder must be supplied together.");
         }
 
         ArgumentNullException.ThrowIfNull(network);
@@ -38,7 +52,12 @@ public sealed unsafe class ControlFoleyPipeline
         _decoder = decoder;
         _synchformer = synchformer;
         _cavMae = cavMae;
+        _clap = clap;
+        _style = style;
     }
+
+    /// <summary>Whether reference-audio conditioning is available (both encoders were supplied).</summary>
+    public bool SupportsReferenceAudio => _clap is not null && _style is not null;
 
     /// <summary>Output sample rate in Hz.</summary>
     public int SampleRate => _decoder.SampleRate;
@@ -67,7 +86,13 @@ public sealed unsafe class ControlFoleyPipeline
 
         /// <summary>Frame rates and sizes used to sample <see cref="Video"/>.</summary>
         public ControlFoleyVideoOptions VideoOptions { get; init; } = ControlFoleyVideoOptions.Default;
+
+        /// <summary>Optional reference clip (mono, at <see cref="ReferenceAudio.SampleRate"/>) whose content and timbre the output follows.</summary>
+        public ReferenceAudio? Reference { get; init; }
     }
+
+    /// <summary>A mono reference clip. Callers mix multi-channel audio down first, as <c>demo.py</c> does after resampling.</summary>
+    public sealed record ReferenceAudio(float[] Samples, int SampleRate);
 
     /// <summary>Generates mono PCM at <see cref="SampleRate"/>.</summary>
     public float[] Generate(IBackend backend, Request request, CancellationToken cancel = default)
@@ -76,6 +101,11 @@ public sealed unsafe class ControlFoleyPipeline
         if (request.DurationSeconds <= 0 || request.Steps <= 0)
         {
             throw new ArgumentOutOfRangeException(nameof(request), "Duration and steps must be positive.");
+        }
+
+        if (request.Reference is not null)
+        {
+            ValidateReference(request.Reference);
         }
 
         double duration = request.DurationSeconds;
@@ -109,8 +139,8 @@ public sealed unsafe class ControlFoleyPipeline
         using Tensor syncF = video is not null
             ? FromHost(_synchformer!.Encode(backend, video.Sync), 1, cfg.SyncSeqLen, cfg.SyncDim)
             : _network.GetEmptySyncSequence(1);
-        using Tensor audioF = _network.GetEmptyAudioSequence(1);
-        using Tensor timbreF = _network.GetEmptyTimbreSequence(1);
+        using Tensor audioF = request.Reference is null ? _network.GetEmptyAudioSequence(1) : EncodeClap(backend, request.Reference, cfg);
+        using Tensor timbreF = request.Reference is null ? _network.GetEmptyTimbreSequence(1) : EncodeTimbre(backend, request.Reference, cfg);
         using ControlFoleyConditions conditions = _network.PreprocessConditions(backend, clipF, visualF, syncF, textF, audioF, timbreF);
         using ControlFoleyConditions empty = _network.GetEmptyConditions(backend, 1, negativeF);
 
@@ -122,6 +152,35 @@ public sealed unsafe class ControlFoleyPipeline
         float[] audio = _decoder.Decode(backend, flat);
         int samples = Math.Min(audio.Length, (int)(duration * SampleRate));
         return audio.AsSpan(0, samples).ToArray();
+    }
+
+    private Tensor EncodeClap(IBackend backend, ReferenceAudio reference, ControlFoleyNetworkConfig cfg)
+    {
+        float[] audio = SincResampler.Resample(reference.Samples, reference.SampleRate, ClapSampleRate);
+        return FromHost(_clap!.Embed(backend, audio), 1, 1, cfg.AudioDim);
+    }
+
+    /// <summary>The timbre excerpt of <c>demo.py</c>: resampled to 32 kHz, zero-padded to 2 s or cut to 4 s, encoded as
+    /// <c>duration = samples / 32000</c>.</summary>
+    private Tensor EncodeTimbre(IBackend backend, ReferenceAudio reference, ControlFoleyNetworkConfig cfg)
+    {
+        float[] audio = SincResampler.Resample(reference.Samples, reference.SampleRate, TimbreSampleRate);
+        int length = Math.Clamp(audio.Length, MinTimbreSeconds * TimbreSampleRate, MaxTimbreSeconds * TimbreSampleRate);
+        Array.Resize(ref audio, length);
+        return FromHost(_style!.EncodeTimbre(backend, audio), 1, 1, cfg.TimbreDim);
+    }
+
+    private void ValidateReference(ReferenceAudio reference)
+    {
+        if (_clap is null || _style is null)
+        {
+            throw new InvalidOperationException("Reference audio needs the CLAP and timbre encoders; construct the pipeline with both.");
+        }
+
+        if (reference.Samples.Length == 0 || reference.SampleRate <= 0)
+        {
+            throw new ArgumentException("Reference audio needs samples and a positive sample rate.", nameof(reference));
+        }
     }
 
     private static Tensor FromHost(float[] data, int b, int t, int d)
