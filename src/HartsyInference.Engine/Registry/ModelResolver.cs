@@ -23,6 +23,7 @@ public static class ModelResolver
         [Modality.Fx] = "Audio",
         [Modality.Embedding] = "Embedding",
         [Modality.Restore] = "Video",
+        [Modality.Decision] = "Decision",
     };
 
     /// <summary>Resolves a model selection for <paramref name="modality"/>. <paramref name="modelArg"/> may be a catalog id, a local path, or an HF repo id; <paramref name="modelPathArg"/> is an explicit override that wins.</summary>

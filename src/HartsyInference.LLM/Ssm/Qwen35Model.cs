@@ -9,9 +9,10 @@ namespace HartsyInference.LLM.Ssm;
 
 /// <summary>Qwen3.5 (<c>qwen35</c> GGUF arch) — a hybrid decoder, NOT a transformer or a pure recurrent model: most layers are Gated DeltaNet (a delta-rule linear attention), interleaved every <see cref="FullAttentionInterval"/>-th layer with a REGULAR causal self-attention layer (GQA + partial RoPE + KV cache, Qwen3-style QK-norm, plus a fused query+gate projection unique to this arch).</summary>
 /// <remarks>Text-only: the GGUF's 4-section M-RoPE degenerates to a single partial-rotary RoPE (<see cref="RotaryDim"/> = sum of the 4 sections × 2) since every section gets the same position for non-multimodal input. Ported from llama.cpp's <c>src/models/{qwen35.cpp, delta-net-base.cpp}</c> (no local reference model existed at implementation time). Linear projections run through <see cref="IBackend"/>; the conv/delta-rule/gated-norm run host-side, matching every other recurrent model in this namespace (<see cref="Mamba2Model"/> et al.).</remarks>
-public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable
+public sealed unsafe partial class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecodable
 {
-    private readonly GgufModelLoader.LoadedGgufModel _handle;
+    private readonly GgufModelLoader.LoadedGgufModel? _handle;
+    private readonly List<Tensor> _ownedTensors = [];
     private readonly IReadOnlyDictionary<string, Tensor> _w;
 
     public IEnumerable<Tensor> EnumerateWeights()
@@ -53,7 +54,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
     private int _pos;
     private int _disposed;
 
-    public GgufMetadata Metadata => _handle.Metadata;
+    public GgufMetadata Metadata => _handle?.Metadata ?? throw new NotSupportedException("A model built from HuggingFace weights has no GGUF metadata.");
     public int DModel { get; }
     public int NumLayers { get; }
     public int VocabSize { get; }
@@ -78,10 +79,10 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
     private int ConvDim => KeyDim * 2 + ValueDim;
     private int KHeadsPerVHead => NumVHeads / NumKHeads;   // repeat factor when NumKHeads < NumVHeads
 
-    private Qwen35Model(GgufModelLoader.LoadedGgufModel handle, IReadOnlyDictionary<string, Tensor> w,
+    private Qwen35Model(GgufModelLoader.LoadedGgufModel? handle, IReadOnlyDictionary<string, Tensor> w,
         int dModel, int layers, int vocab, float eps, int fullAttnInterval, bool[]? recrOverride,
         int numHeads, int numKvHeads, int attnHeadDim, int rotaryDim, float ropeTheta,
-        int convK, int headKDim, int headVDim, int numKHeads, int numVHeads, MoeFeedForward?[] moe)
+        int convK, int headKDim, int headVDim, int numKHeads, int numVHeads, MoeFeedForward?[] moe, int maxAttnSeqLen = MaxAttnSeqLen)
     {
         _handle = handle; _w = w;
         _moe = moe; _isMoe = Array.Exists(moe, m => m is not null);
@@ -106,7 +107,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
             _convHistory[i] = new float[(convK - 1) * ConvDim];
             _deltaState[i] = new float[NumVHeads * HeadVDim * HeadVDim];
         }
-        _kvCache = new FixedKvCache(layers, 1, numKvHeads, attnHeadDim, MaxAttnSeqLen);
+        _kvCache = new FixedKvCache(layers, 1, numKvHeads, attnHeadDim, maxAttnSeqLen);
     }
 
     /// <summary>Zeroes every layer's carried state (Gated DeltaNet matrices + conv history) and the KV cache — call before the first <see cref="ForwardLastLogits"/> of a new generation.</summary>
@@ -297,7 +298,9 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
     }
 
     /// <summary>Shared decode core: consumes an initial hidden state <paramref name="h"/> (owned — disposed here), runs every layer (Gated-DeltaNet or full-attention), final RMSNorm, and projects the last position to vocab logits; the ids-in and embeds-in entry points differ only in how <paramref name="h"/> is seeded.</summary>
-    private float[] ForwardFromHidden(IBackend backend, Tensor h, int seq)
+    private float[] ForwardFromHidden(IBackend backend, Tensor h, int seq) => ProjectLast(backend, RunTrunk(backend, h, seq), seq);
+
+    private Tensor RunTrunk(IBackend backend, Tensor h, int seq)
     {
         int d = DModel;
         // seq==1 decode: one rope table for the token position, shared by every attention layer
@@ -321,6 +324,12 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
         backend.RmsNorm(normed, h, W("output_norm.weight"), Eps);
         h.Dispose();
         backend.Sync();
+        return normed;
+    }
+
+    private float[] ProjectLast(IBackend backend, Tensor normed, int seq)
+    {
+        int d = DModel;
         using Tensor last = new(new TensorShape(1, 1, d), DType.F32);
         Buffer.MemoryCopy((byte*)normed.DataPointer + (long)(seq - 1) * d * 4, (void*)last.DataPointer, (long)d * 4, (long)d * 4);
         normed.Dispose();
@@ -953,6 +962,7 @@ public sealed unsafe class Qwen35Model : IDisposable, ISsmModel, ISsmGraphDecoda
     {
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _kvCache.Dispose();
-        _handle.Dispose();
+        _handle?.Dispose();
+        foreach (Tensor t in _ownedTensors) t.Dispose();
     }
 }
