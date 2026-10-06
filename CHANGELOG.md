@@ -24,6 +24,15 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.262
+
+- **Added: Breeze TTS 2 (`breeze`) runs natively.** T5Gemma2 text encoder, Qwen3 backbone with audio-frame embedding
+  sums, CSM-style depth decoder, classifier-free guidance against the template negative prompts, the Qwen3-TTS 12 Hz
+  vocoder, and reference-clip encoding with the audio tokenizer's own Mimi encoder (`Mimi.LoadEncoderWeights`). Parity
+  tests compare the encoder and the backbone/depth stack with the official modules on tiny random checkpoints. Real
+  weights, CPU: plain and voice-design (cfg 4) runs transcribe word-exact, and a cloned-voice run transcribes
+  word-exact. The weights are research / non-commercial. Version bump: alpha.261 -> alpha.262.
+
 ## alpha.261
 
 IndexTTS-2 accuracy pass. Every stage of the 2.0 pipeline is now compared numerically with a dump of the PyTorch
