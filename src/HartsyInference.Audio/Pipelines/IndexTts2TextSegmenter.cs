@@ -16,6 +16,9 @@ internal static class IndexTts2TextSegmenter
     private static readonly string[] SentenceEnds = [".", "!", "?", "▁.", "▁?", "▁..."];
     private static readonly string[] CommaTokens = [",", "▁,"];
     private static readonly string[] HyphenTokens = ["-"];
+    /// <summary>Safety limit only (the reference has none): the comma/hyphen recursion can only revisit the same list when a
+    /// segment holds both and neither splits, which the reference would answer with a Python RecursionError. Real input never
+    /// gets near it, so it cannot change the output.</summary>
     private const int MaxRecursion = 32;
 
     /// <summary><c>tokenizer.split_segments(tokens, max_text_tokens_per_segment, quick_streaming_tokens)</c>.</summary>

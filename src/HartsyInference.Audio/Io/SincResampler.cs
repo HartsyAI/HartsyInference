@@ -14,6 +14,9 @@ public static class SincResampler
     public const int DefaultLowpassFilterWidth = 6;
     public const double DefaultRolloff = 0.99;
 
+    /// <summary>Largest per-phase kernel table (<c>new × kernelLen</c> floats, 128 MB) the resampler will build.</summary>
+    private const long MaxKernelEntries = 32_000_000;
+
     /// <summary>Resamples mono <paramref name="input"/> from <paramref name="inRate"/> to <paramref name="outRate"/> Hz.
     /// Output length is <c>ceil(outRate · length / inRate)</c>, as in torchaudio.</summary>
     public static float[] Resample(ReadOnlySpan<float> input, int inRate, int outRate,
@@ -30,7 +33,10 @@ public static class SincResampler
         int kernelLen = 2 * width + orig;
 
         // kernels[p, k] for output phase p and tap k: t = (-p / new + (k - width) / orig) * baseFreq.
-        float[] kernels = new float[(long)@new * kernelLen];
+        long kernelEntries = (long)@new * kernelLen;
+        if (kernelEntries > MaxKernelEntries)
+            throw new ArgumentException($"Resampling {inRate} -> {outRate} Hz needs a {kernelEntries:N0}-entry kernel table (limit {MaxKernelEntries:N0}); use a rate pair with a smaller reduced ratio.", nameof(outRate));
+        float[] kernels = new float[kernelEntries];
         double scale = baseFreq / orig;
         for (int p = 0; p < @new; p++)
         {

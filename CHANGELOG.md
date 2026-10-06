@@ -48,6 +48,9 @@ compared token for token. Earlier checks only listened to the output, so these d
   capped at 15 s. The 16 kHz signal now matches to 6e-5 (was 3.4%).
 - **Fixed: the repetition penalty did not include the reference's filler token** (`input_ids` are all ones plus the
   start token), and `remove_long_silence`, which the reference never calls, was applied. Both now match.
+- **Behaviour changes to note:** output differs from alpha.256 for the same seed (the fixes above change the model's inputs
+  and decoding); explicit emotion vectors are no longer normalized by default; `remove_long_silence` is gone; 2.0 inserts
+  200 ms of silence between text segments. Version bump: `Directory.Build.props` `VersionSuffix` alpha.256 → alpha.257.
 - **Changed: explicit emotion vectors are used as given** (the reference's library path and the Qwen text path never
   normalize them; only its WebUI does). `IndexTts2Options.NormalizeEmoVector` opts into the WebUI's bias + 0.8 cap.
 - **Added (2.0): exact reference text handling.** Token-level segment splitting (`split_segments`, golden-tested against
