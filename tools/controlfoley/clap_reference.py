@@ -109,6 +109,28 @@ def tiny(out_dir: str):
     print("wrote", out_dir)
 
 
+def read_strided(remote, lazy) -> np.ndarray:
+    """RemotePth.read assumes contiguous storage; torchlibrosa's melW is a transposed view, so honour the strides."""
+    item = np.dtype(lazy.storage.dtype).itemsize
+    extent = 1 + sum((n - 1) * st for n, st in zip(lazy.size, lazy.stride)) if lazy.size else 1
+    flat = rp_read_flat(remote, lazy, extent)
+    view = np.lib.stride_tricks.as_strided(flat, shape=lazy.size, strides=[st * item for st in lazy.stride])
+    return np.array(view)
+
+
+def rp_read_flat(remote, lazy, count: int) -> np.ndarray:
+    import struct
+    import zipfile
+
+    info = remote._zip.getinfo(f"{remote._prefix}/data/{lazy.storage.key}")
+    assert info.compress_type == zipfile.ZIP_STORED
+    item = np.dtype(lazy.storage.dtype).itemsize
+    remote._file.seek(info.header_offset)
+    name_len, extra_len = struct.unpack("<HH", remote._file.read(30)[26:30])
+    remote._file.seek(info.header_offset + 30 + name_len + extra_len + lazy.offset * item)
+    return np.frombuffer(remote._file.read(count * item), dtype=lazy.storage.dtype).copy()
+
+
 def convert(out_path: str):
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     import io
@@ -142,10 +164,9 @@ def convert(out_path: str):
     out = {}
     for key, lazy in obj["state_dict"].items():
         name = key[7:] if key.startswith("module.") else key
-        if not keep(name):
+        if not (keep(name) or name.endswith("logmel_extractor.melW") or "stft.conv_" in name):
             continue
-        remote.index = {key: lazy}
-        out[name] = torch.from_numpy(remote.read(key)).float().contiguous()
+        out[name] = torch.from_numpy(read_strided(remote, lazy)).float().contiguous()
     save_file(out, out_path)
     print("wrote", out_path, len(out), "tensors")
 
