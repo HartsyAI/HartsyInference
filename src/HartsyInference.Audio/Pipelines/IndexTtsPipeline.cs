@@ -126,8 +126,9 @@ public sealed class IndexTtsPipeline : IDisposable
     /// reference check is enough to tell the two cases apart. Non-floating-point tensors (e.g. a GPT-2-style
     /// checkpoint's integer position-id or boolean causal-mask buffers) pass through untouched: nothing downstream
     /// reads them as weights, and <see cref="WhisperOps.EnsureF32"/> only knows how to cast floating-point
-    /// source dtypes.</summary>
-    private static Dictionary<string, Tensor> ToF32(IReadOnlyDictionary<string, Tensor> raw, List<Tensor> converted)
+    /// source dtypes. Internal (not private) so <see cref="IndexTts2Pipeline"/> shares the exact same
+    /// BF16-checkpoint-loading convenience instead of duplicating it.</summary>
+    internal static Dictionary<string, Tensor> ToF32(IReadOnlyDictionary<string, Tensor> raw, List<Tensor> converted)
     {
         Dictionary<string, Tensor> result = new(raw.Count);
         foreach ((string key, Tensor tensor) in raw)
@@ -169,7 +170,7 @@ public sealed class IndexTtsPipeline : IDisposable
 
         // Validate + segment text (cheap, no tensor allocation) before computing the reference mel, so a rejected
         // prompt never leaves an undisposed Tensor behind.
-        List<int[]> segments = SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment);
+        List<int[]> segments = SplitIntoTokenSegments(text, DefaultMaxTextTokensPerSegment, EncodeNormalized);
         if (segments.Count == 0) throw new ArgumentException("Text produced zero tokens after tokenization.", nameof(text));
         int totalTokens = 0;
         foreach (int[] seg in segments) totalTokens += seg.Length;
@@ -269,8 +270,11 @@ public sealed class IndexTtsPipeline : IDisposable
     /// <summary>Splits <paramref name="text"/> into token-id segments, each tokenizing to at most
     /// <paramref name="maxTokensPerSegment"/> ids: sentence-bounded first (splitting on <c>. ! ? 。！？</c>),
     /// falling back to comma/semicolon splitting for an overlong single sentence, and finally a hard token-count
-    /// cut for an overlong single clause with no further punctuation to split on.</summary>
-    private List<int[]> SplitIntoTokenSegments(string text, int maxTokensPerSegment)
+    /// cut for an overlong single clause with no further punctuation to split on. Generalized to an
+    /// <paramref name="encode"/> delegate (rather than a field closed over a concrete tokenizer type) so
+    /// <see cref="IndexTts2Pipeline"/> can share this exact segment-splitting logic across both IndexTTS-2's
+    /// tokenizer types (SentencePiece for 2.0, tiktoken for 2.5) without duplicating it.</summary>
+    internal static List<int[]> SplitIntoTokenSegments(string text, int maxTokensPerSegment, Func<string, int[]> encode)
     {
         List<int[]> result = [];
         List<string> pending = [];
@@ -279,7 +283,7 @@ public sealed class IndexTtsPipeline : IDisposable
         void FlushPending()
         {
             if (pending.Count == 0) return;
-            int[] ids = EncodeNormalized(string.Concat(pending));
+            int[] ids = encode(string.Concat(pending));
             if (ids.Length > 0) result.Add(ids);
             pending.Clear();
             pendingTokens = 0;
@@ -287,14 +291,14 @@ public sealed class IndexTtsPipeline : IDisposable
 
         foreach (string sentence in SplitOnPattern(text, SentenceBoundaryPattern))
         {
-            int[] sentIds = EncodeNormalized(sentence);
+            int[] sentIds = encode(sentence);
             if (sentIds.Length == 0) continue;
             if (sentIds.Length > maxTokensPerSegment)
             {
                 FlushPending();
                 foreach (string clause in SplitOnPattern(sentence, ClauseBoundaryPattern))
                 {
-                    int[] clauseIds = EncodeNormalized(clause);
+                    int[] clauseIds = encode(clause);
                     if (clauseIds.Length == 0) continue;
                     if (clauseIds.Length > maxTokensPerSegment)
                     {

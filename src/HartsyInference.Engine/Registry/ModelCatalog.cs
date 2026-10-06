@@ -1166,6 +1166,39 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                Id = "indextts2", Modality = tts, DisplayName = "IndexTTS-2.5 / IndexTTS-2.0", Architecture = "GPT-2 T2S (2.5: CAM++ conditioning, 2.0: Conformer+Perceiver) + S2Mel flow-matching DiT + BigVGAN-v2 22kHz", Status = st,
+                CliDrivable = true, // `hartsy speak -m indextts2[:2.0] --reference <wav> "text"` — TtsCatalog "indextts2"; emotion via --emotion / --emotion-reference / --emotion-text
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "multilingual_zh_ja_yue_char_del.tiktoken", TargetSubdir = "Audio/IndexTts2", Role = "tokenizer" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "gpt.pth", TargetSubdir = "Audio/IndexTts2", Role = "transformer" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "s2mel.pth", TargetSubdir = "Audio/IndexTts2", Role = "flow-matching DiT" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "codec.pth", TargetSubdir = "Audio/IndexTts2", Role = "semantic codec (2x EnhancedCodec; decodes the GPT's codes)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "wav2vec2bert_stats.pt", TargetSubdir = "Audio/IndexTts2", Role = "semantic feature normalization stats" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "feat1.pt", TargetSubdir = "Audio/IndexTts2", Role = "emotion exemplar bank 1" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "feat2.pt", TargetSubdir = "Audio/IndexTts2", Role = "emotion exemplar bank 2" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "qwen0.6bemo4-merge/config.json", TargetSubdir = "Audio/IndexTts2", Role = "text-emotion classifier config" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "qwen0.6bemo4-merge/model.safetensors", TargetSubdir = "Audio/IndexTts2", Role = "text-emotion classifier (Qwen3-0.6B)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "qwen0.6bemo4-merge/tokenizer.json", TargetSubdir = "Audio/IndexTts2", Role = "text-emotion classifier tokenizer" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "qwen0.6bemo4-merge/chat_template.jinja", TargetSubdir = "Audio/IndexTts2", Role = "text-emotion classifier chat template" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "bpe.model", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "tokenizer (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "gpt.pth", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "transformer (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "s2mel.pth", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "flow-matching DiT (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "wav2vec2bert_stats.pt", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "semantic feature normalization stats (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "feat1.pt", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "emotion exemplar bank 1 (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "feat2.pt", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "emotion exemplar bank 2 (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "qwen0.6bemo4-merge/config.json", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "text-emotion classifier config (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "qwen0.6bemo4-merge/model.safetensors", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "text-emotion classifier (Qwen3-0.6B; indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "qwen0.6bemo4-merge/tokenizer.json", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "text-emotion classifier tokenizer (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "qwen0.6bemo4-merge/chat_template.jinja", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "text-emotion classifier chat template (indextts2:2.0)" },
+                    new() { Repo = "amphion/MaskGCT", RepoPath = "semantic_codec/model.safetensors", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "semantic codec (RepCodec; indextts2:2.0)" },
+                    new() { Repo = "facebook/w2v-bert-2.0", RepoPath = "model.safetensors", TargetSubdir = "Audio/IndexTts2/w2v-bert-2.0", Role = "semantic feature extractor" },
+                    new() { Repo = "funasr/campplus", RepoPath = "campplus_cn_common.bin", TargetSubdir = "Audio/IndexTts2", Role = "speaker/style encoder" },
+                    new() { Repo = "nvidia/bigvgan_v2_22khz_80band_256x", RepoPath = "bigvgan_generator.pt", TargetSubdir = "Audio/IndexTts2", Role = "vocoder" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "dia", Modality = tts, DisplayName = "Dia-1.6B (0626)", Architecture = "byte-level dialogue TTS + DAC codec", Status = ok,
                 CliDrivable = true, // `hartsy speak -m dia "[S1] ... [S2] ..."` — TtsCatalog "dia"; needs the 0626 checkpoint (the original degenerates)
                 Assets = new ModelAsset[]

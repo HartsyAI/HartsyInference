@@ -24,11 +24,102 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
-## alpha.253
+## alpha.256
 
-- Add the Breeze TTS 2 architecture and checkpoint configuration contract.
+- Add the Breeze TTS 2 architecture and checkpoint configuration contract. Its Mimi codec is the shared
+  `MimiConfig.Mimi24kHzDsm` preset, and `MimiConfig.FrameRateHz` reports the true 12.5 Hz output rate.
 - Keep Fish Audio S2's 4096-entry fast-decoder vocabulary distinct from ModifiedDAC's 1024-entry residual
   codebooks.
+
+## alpha.255
+
+- **IndexTTS-2.0 (`indextts2:2.0`).** The 2.0 checkpoint (`IndexTeam/IndexTTS-2`) now runs next to 2.5, which stays the
+  default. It differs from 2.5 in the GPT's speaker conditioning (a Conformer+Perceiver over the w2v-bert feature with
+  real `speed_emb` slots, instead of CAM++), the tokenizer (SentencePiece), the semantic codec (MaskGCT's RepCodec,
+  from `amphion/MaskGCT`) and the handoff to the flow-matching stage: a second GPT pass through `s2mel.gpt_layer`,
+  summed with the codec's `vq2emb`. `IndexTts2Version` picks the branch and the 2.5 path is unchanged. A real-weight
+  generation transcribes through Whisper-base as its input text.
+- **Emotion control is exposed for both versions.** `SpeechRequest` gains `EmotionReference` (a clip whose emotion,
+  not voice, the speech adopts), `EmotionAlpha`, `EmotionText` and `EmotionFromText`; the existing `Emotion` vector
+  is read in IndexTTS-2's own order (happy, angry, sad, afraid, disgusted, melancholic, surprised, calm — not
+  Zonos's). `hartsy speak` gets `--emotion`, `--emotion-reference`, `--emotion-alpha`, `--emotion-text` and
+  `--emotion-from-text`. The QwenEmotion classifier is loaded on first use, so the default VRAM footprint is unchanged.
+  The model's file list now includes `feat1.pt`, `feat2.pt` and the four classifier files (about 1.2 GB), so an
+  existing 2.5 install downloads them on its next load. The classifier files are optional: if they are missing,
+  free-text emotion is disabled and the model still loads. Emotion weights outside 0–1.2 are rejected.
+- **Fixed: the explicit emotion-vector mode threw `ObjectDisposedException`.** The pipeline disposed the
+  `feat1.pt`/`feat2.pt` loaders right after building the lookup, but an F32 tensor is returned as-is rather than
+  copied, so the exemplar banks it still read were freed. The loaders now live as long as the pipeline. Nothing
+  reached this path before, because the engine never loaded the banks.
+- **Fixed: `EmoAlpha` was ignored for an explicit or text emotion vector.** The reference scales the vector by the
+  clamped alpha (truncated to four decimals); the port now does too.
+
+## alpha.254
+
+- **Kokoro-82M: Japanese and Mandarin voices.** `j` and `z` voices, which raised an error in alpha.252, now read their
+  text the way misaki does for the official pipeline. Both are pure C#, with no Python, MeCab or native library.
+  - `j` (Japanese) ports misaki's `JAG2P` in its default cutlet mode. A MeCab tokenizer reads full UniDic 3.1.0, the
+    dictionary fugashi uses under misaki, and agrees with fugashi on every token of 474 test sentences. The kana
+    reading, number reading (num2kana), width folding and misaki's kana-to-phoneme table follow. Its output matches
+    `JAG2P()` exactly on all 474 sentences (`KokoroJapaneseParityTests`).
+  - `z` (Mandarin) ports misaki's `ZHG2P`:
+    - cn2an number normalisation;
+    - jieba 0.42.1 segmentation, including its HMM for unknown words;
+    - pypinyin 0.55.0 readings with its phrase matching;
+    - misaki's pinyin-to-IPA conversion and tone marks.
+
+    Its output matches `ZHG2P()` exactly on all 397 test sentences (`KokoroMandarinParityTests`).
+  - Their data is fetched on first use, SHA-256 checked:
+    - Japanese: UniDic 3.1.0 (a 501 MB archive, of which only the five files MeCab reads are kept, about 690 MB
+      installed; BSD licence) and misaki's `ja_words.txt` from the misaki commit the English dictionaries use.
+    - Mandarin: jieba's dictionary and HMM table, and pypinyin's two dictionaries (all MIT, about 10 MB).
+- **Kokoro-82M: voice blending.** A voice may name several packs, as `KPipeline.load_voice` allows: `af_bella,af_sky`
+  averages them row by row, matching `torch.mean` to 6e-8. A part may carry a weight: `af_bella:0.7,af_sky:0.3` or
+  `af_bella(2)+af_sky(1)`. Voice names are checked before they reach a file path.
+
+## alpha.253
+
+- **IndexTTS-2.5: emotion-controllable zero-shot voice cloning** (`indextts2` catalog entry; zero-shot
+  cloning wired end to end, emotion control modes not yet exposed through `TtsJob`/CLI/HTTP). Shares the
+  GPT-2 T2S decoder shape with IndexTTS-1.5 but conditions on CAM++ speaker embeddings instead of a
+  Conformer-Perceiver, and generates semantic-codec codes rather than mel frames directly. New pieces:
+  - `Wav2Vec2Bert` (new `Models/Wav2Vec2Bert/` folder, not IndexTTS-scoped): a 24-layer, 1024-hidden
+    Conformer with Shaw-style relative-key position bias (`facebook/w2v-bert-2.0`), taking hidden-state
+    layer 17 of 24 — not the final layer, confirmed from the real `infer_v2.py`.
+  - `VocosFactorizedCodec`/`VocosFactorizedCodecConfig` (generic Amphion/MaskGCT-family semantic codec:
+    `VocosBackbone` encoder → `in_project` conv → L2-normalized single-codebook nearest-neighbor lookup
+    `out_project` conv, with the decoder half built but never invoked on the real inference path).
+  - `VocosBackbone`: the first config-driven, shared copy of the ConvNeXt-based Vocos backbone shape this
+    codebase had already copy-pasted five times under one-off names.
+  - `IndexTts2T2sDecoder`: extends the GPT-2 T2S decoder with a second, smaller Conformer+Perceiver for
+    emotion conditioning (`IndexTtsPerceiver.NumLatents` generalized from a hardcoded 32 to a constructor
+    parameter so both uses share one class), the real `merge_emovec` lerp, and an explicit emotion-vector
+    lookup table (`IndexTts2EmotionVectorLookup`, cosine-similarity nearest-exemplar per category from
+    the checkpoint's `feat1.pt`/`feat2.pt`). Also replicates the checkpoint's two zero-initialized
+    "duration slot" conditioning rows for shape fidelity — confirmed inert in the real source
+    (`speed_emb` is never exposed via the public `infer()` API); not a working duration control.
+  - `IndexTts2Dit`/`IndexTts2DitBlock`: the S2Mel flow-matching stage — a 13-layer U-ViT-skip DiT (RoPE
+    attention, SwiGLU FFN, AdaLN norms) with a WaveNet final stage, solved via `ConditionalCfm` (widened
+    to accept any `ICfmEstimator` shape, not just CosyVoice's) over 25 Euler steps with `(1+rate)*cond -
+    rate*uncond` CFG. `VitsWaveNet.LoadWeights` gained an injectable key suffix so VITS and this S2Mel
+    stage share one WaveNet implementation. `InterpolateLengthRegulator` is a new, generic
+    explicit-target-length nearest-neighbor regulator (distinct from `VitsLengthRegulator`'s
+    duration-predictor shape).
+  - `IndexTts2BigVganGenerator`: a slimmer top-level BigVGAN-22kHz assembly (no embedded speaker encoder,
+    unlike IndexTTS-1.5's) reusing `AntiAliasedSnake`/`IndexTtsBigVganResBlock` verbatim.
+  - `IndexTts2QwenEmotion`: free-text emotion classification via a bundled Qwen3-0.6B fine-tune, loaded
+    through `HartsyInference.LLM`'s existing `GenericTransformer`/`TextGenerationPipeline`/
+    `JinjaChatTemplate`/JSON-grammar-constrained sampling — no new LLM infrastructure, just a new
+    `Qwen3HfConfigReader` (`config.json` → `TransformerConfig`, placed as `GgufConfigFactory`'s sibling,
+    not IndexTTS-scoped) and this model's own fixed system prompt/label vocabulary.
+  - `IndexTts2TiktokenTokenizer`: the 2.5 repo's tiktoken-format text tokenizer (`multilingual_zh_ja_
+    yue_char_del.tiktoken`, 58,836 ranks + 1,673 specials = 60,509, matching `number_text_tokens`
+    exactly), built on the existing `TiktokenConverter`/`HfTokenizerJson` rank-file parsing rather than a
+    new parser.
+  - IndexTTS-2.0 is not wired (shares every config value with 2.5 except `number_text_tokens`/tokenizer,
+    but needs its own GPT `conformer_perceiver` speaker-conditioning path that doesn't exist yet).
+  - Real end-to-end generation verified against the real checkpoints: 2.47s of finite, non-silent 22050 Hz
+    PCM (RMS 0.225) from a real reference clip.
 
 ## alpha.252
 

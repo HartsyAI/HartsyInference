@@ -22,6 +22,7 @@ public sealed class BreezeTts2ConfigTests
         Assert.Equal(1, config.Codec.NumSemanticCodebooks);
         Assert.Equal([1], config.Codec.ResidualDilations);
         Assert.Equal(12.5f, config.CodecFrameRate);
+        Assert.Equal(config.CodecFrameRate, (float)config.Codec.FrameRateHz);
         Assert.Equal(24_000, config.Codec.SampleRate);
         Assert.Equal(262_144, config.AudioTokenId);
         Assert.Equal(2_051, config.AudioVocabSize);

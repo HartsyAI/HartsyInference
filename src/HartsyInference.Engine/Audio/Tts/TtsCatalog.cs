@@ -70,6 +70,7 @@ internal static class TtsCatalog
         ["zipvoice"] = ZipVoiceModel.Descriptor,
         ["auk"] = AukModel.Descriptor,
         ["indextts"] = IndexTtsModel.Descriptor,
+        ["indextts2"] = IndexTts2Model.Descriptor,
     };
 
     /// <summary>VibeVoice — long-form multi-speaker synthesis (default, 1.5B) or the single-speaker low-latency Realtime-0.5B variant (<c>vibevoice:realtime</c>). Both need a 24 kHz voice reference.</summary>
@@ -186,7 +187,14 @@ internal static class TtsCatalog
     private static float KokoroSpeed(TtsJob job) => job.Speed.HasValue ? (float)job.Speed.Value : 1f;
 
     /// <summary>Ensures a Kokoro voice pack exists as the raw-float32 <c>.bin</c> the engine reads. The HF repo ships each voice as a torch-saved <c>.pt</c> whose single contiguous f32 storage at <c>*/data/0</c> is that payload.</summary>
-    private static async Task EnsureKokoroVoiceAsync(string voiceName, CancellationToken cancel)
+    private static async Task EnsureKokoroVoiceAsync(string voiceSpec, CancellationToken cancel)
+    {
+        // A blend ("af_bella,af_sky") needs each of its packs; the pipeline mixes them.
+        foreach ((string voice, float _) in KokoroVoiceMix.Parse(voiceSpec).Parts)
+            await EnsureKokoroVoicePackAsync(voice, cancel).ConfigureAwait(false);
+    }
+
+    private static async Task EnsureKokoroVoicePackAsync(string voiceName, CancellationToken cancel)
     {
         string repoDir = AudioModelCache.GetRepoDirectory("hexgrad/Kokoro-82M", "tts");
         string binPath = Path.Combine(repoDir, "voices", $"{voiceName}.bin");

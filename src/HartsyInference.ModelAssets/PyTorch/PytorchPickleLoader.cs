@@ -310,10 +310,9 @@ public sealed class PytorchPickleLoader : IDisposable
     {
         if (node is PickleTensor t)
         {
-            if (prefix.Length > 0)
-            {
-                outMap[prefix] = t;
-            }
+            // A bare-tensor root (torch.save(tensor, path), e.g. IndexTTS-2's feat1.pt/feat2.pt) has no key of its
+            // own — name it "data" for the same reason the non-recursive FlattenStateDict does.
+            outMap[prefix.Length > 0 ? prefix : "data"] = t;
             return;
         }
         if (node is Dictionary<string, object?> dict)

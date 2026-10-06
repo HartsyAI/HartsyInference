@@ -12,7 +12,12 @@ public static class TiktokenConverter
     /// <summary>Builds the tokenizer JSON as UTF-8 bytes.</summary>
     /// <param name="splitPattern">The pre-tokenizer regex (tiktoken's <c>pat_str</c>).</param>
     /// <param name="normalizer">A <c>tokenizers</c> normalizer type such as <c>NFC</c>, or null for none.</param>
-    public static byte[] ToHuggingFaceJson(string tiktokenPath, string splitPattern, string? normalizer = "NFC")
+    /// <param name="addedTokens">Special tokens appended above the rank file's own vocabulary (e.g. the
+    /// language/control tags a model's Python <c>tiktoken.Encoding(..., special_tokens=...)</c> call registers
+    /// alongside the mergeable ranks) — id order must match the source exactly since it is baked into trained
+    /// embedding rows. Omit for a rank file with no specials of its own.</param>
+    public static byte[] ToHuggingFaceJson(string tiktokenPath, string splitPattern, string? normalizer = "NFC",
+        IReadOnlyList<(string Token, int Id)>? addedTokens = null)
     {
         List<byte[]> byRank = [];
         Dictionary<string, int> rankOf = new(StringComparer.Ordinal);
@@ -21,7 +26,7 @@ public static class TiktokenConverter
             if (string.IsNullOrWhiteSpace(line))
                 continue;
             int space = line.IndexOf(' ');
-            byte[] token = Convert.FromBase64String(line[..space]);
+            byte[] token = DecodeBase64Lenient(line[..space]);
             int rank = int.Parse(line[(space + 1)..], System.Globalization.CultureInfo.InvariantCulture);
             if (rank != byRank.Count)
                 throw new InvalidDataException($"'{tiktokenPath}' ranks are not dense and ordered (expected {byRank.Count}, got {rank}).");
@@ -49,7 +54,18 @@ public static class TiktokenConverter
         }
 
         StringBuilder json = new(capacity: 8 << 20);
-        json.Append("{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[],\"normalizer\":");
+        json.Append("{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[");
+        if (addedTokens is not null)
+        {
+            for (int i = 0; i < addedTokens.Count; i++)
+            {
+                if (i > 0)
+                    json.Append(',');
+                json.Append("{\"id\":").Append(addedTokens[i].Id).Append(",\"content\":").Append(Quote(addedTokens[i].Token))
+                    .Append(",\"single_word\":false,\"lstrip\":false,\"rstrip\":false,\"normalized\":false,\"special\":true}");
+            }
+        }
+        json.Append("],\"normalizer\":");
         json.Append(normalizer is null ? "null" : "{\"type\":" + Quote(normalizer) + "}");
         json.Append(",\"pre_tokenizer\":{\"type\":\"Sequence\",\"pretokenizers\":[{\"type\":\"Split\",\"pattern\":{\"Regex\":");
         json.Append(Quote(splitPattern));
@@ -73,6 +89,19 @@ public static class TiktokenConverter
         }
         json.Append("]}}");
         return Encoding.UTF8.GetBytes(json.ToString());
+    }
+
+    /// <summary>Matches Python's <c>base64.b64decode</c> default leniency: a field made up of nothing but
+    /// padding (<c>"="</c>, any count, including empty) decodes to zero bytes instead of raising — real tiktoken
+    /// rank files can carry such a line (confirmed: IndexTTS-2.5's <c>multilingual_zh_ja_yue_char_del.tiktoken</c>
+    /// has rank 48474 as a bare <c>"="</c>), and Python's loader silently accepts it as an inert empty-byte
+    /// vocabulary entry. Any field with real data characters still goes through strict decoding unchanged.</summary>
+    private static byte[] DecodeBase64Lenient(string field)
+    {
+        foreach (char c in field)
+            if (c != '=')
+                return Convert.FromBase64String(field);
+        return [];
     }
 
     private static string Latin1(byte[] bytes) => Encoding.Latin1.GetString(bytes);

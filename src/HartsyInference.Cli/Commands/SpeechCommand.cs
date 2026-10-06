@@ -78,6 +78,31 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         [Description("Output length in seconds (AuK without a reference clip; at most 30).")]
         public float? Duration { get; init; }
 
+        /// <summary>IndexTTS-2 emotion: 8 comma-separated weights.</summary>
+        [CommandOption("--emotion")]
+        [Description("IndexTTS-2 emotion vector: 8 comma-separated weights in IndexTTS-2 order (happy,angry,sad,afraid,disgusted,melancholic,surprised,calm; 0-1.2 each). Other models that read an emotion vector (Zonos) use a different order.")]
+        public string? Emotion { get; init; }
+
+        /// <summary>IndexTTS-2 emotion-reference WAV.</summary>
+        [CommandOption("--emotion-reference")]
+        [Description("IndexTTS-2: a separate WAV whose emotion (not voice) the speech adopts.")]
+        public string? EmotionReference { get; init; }
+
+        /// <summary>IndexTTS-2 emotion strength.</summary>
+        [CommandOption("--emotion-alpha")]
+        [Description("IndexTTS-2: emotion strength 0-1 (default 1).")]
+        public float? EmotionAlpha { get; init; }
+
+        /// <summary>IndexTTS-2 free-text emotion.</summary>
+        [CommandOption("--emotion-text")]
+        [Description("IndexTTS-2: describe the wanted emotion in words (classified by the bundled QwenEmotion model).")]
+        public string? EmotionText { get; init; }
+
+        /// <summary>IndexTTS-2 emotion from the spoken text itself.</summary>
+        [CommandOption("--emotion-from-text")]
+        [Description("IndexTTS-2: infer the emotion from the text being spoken.")]
+        public bool EmotionFromText { get; init; }
+
         /// <summary>Directory to save the WAV to.</summary>
         [CommandOption("-o|--output")]
         [Description("Directory to save the WAV (defaults to the output root).")]
@@ -109,6 +134,15 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
         if (settings.Instruction is { Length: > 0 })
             parameters.Put("instruction", settings.Instruction);
         parameters.PutIfSet("duration", settings.Duration);
+        if (settings.Emotion is { Length: > 0 })
+            parameters.Put("emotion", settings.Emotion);
+        if (settings.EmotionReference is { Length: > 0 })
+            parameters.Put("emotion-reference", settings.EmotionReference);
+        parameters.PutIfSet("emotion-alpha", settings.EmotionAlpha);
+        if (settings.EmotionText is { Length: > 0 })
+            parameters.Put("emotion-text", settings.EmotionText);
+        if (settings.EmotionFromText)
+            parameters.Put("emotion-from-text", "true");
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Speech);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath, "en_US-lessac-medium");

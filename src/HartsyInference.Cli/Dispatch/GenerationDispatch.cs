@@ -214,10 +214,31 @@ public static class GenerationDispatch
             CfgScale = parameters.GetDoubleOrNull("cfg-scale"),
             Instruction = parameters.GetStringOrNull("instruction"),
             DurationSeconds = parameters.GetDoubleOrNull("duration"),
+            Emotion = ParseEmotionVector(parameters.GetStringOrNull("emotion")),
+            EmotionReference = LoadAudioClip(parameters.GetStringOrNull("emotion-reference")),
+            EmotionAlpha = parameters.GetDoubleOrNull("emotion-alpha"),
+            EmotionText = parameters.GetStringOrNull("emotion-text"),
+            EmotionFromText = parameters.GetBool("emotion-from-text", false),
             Seed = Math.Max(0, parameters.GetInt("seed", 0)),
         };
         AudioResult result = await engine.Speech.SynthesizeAsync(spec, request, cancel).ConfigureAwait(false);
         return AudioArtifact(result, "speech");
+    }
+
+    /// <summary>Parses <c>--emotion</c>'s comma-separated weights; null when unset, <see cref="ArgumentException"/> unless exactly 8 numbers.</summary>
+    internal static double[]? ParseEmotionVector(string? csv)
+    {
+        if (string.IsNullOrWhiteSpace(csv)) return null;
+        string[] parts = csv.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        double[] values = new double[parts.Length];
+        for (int i = 0; i < parts.Length; i++)
+        {
+            if (!double.TryParse(parts[i], NumberStyles.Float, CultureInfo.InvariantCulture, out values[i]))
+                throw new ArgumentException($"--emotion value '{parts[i]}' is not a number.");
+        }
+        if (values.Length != 8)
+            throw new ArgumentException($"--emotion needs exactly 8 comma-separated weights, got {values.Length}.");
+        return values;
     }
 
     /// <summary>Voice conversion through <see cref="IVoiceConversionService"/>; the CLI's "prompt" is the source audio path.</summary>
