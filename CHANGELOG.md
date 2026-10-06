@@ -24,6 +24,17 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.264
+
+- **Added: ControlFoley text-to-audio (`controlfoley`, `hartsy music -m controlfoley`).** Native port of Xiaomi's flow-matching
+  generator (54-block DiT with classifier-free guidance and the euler sampler), the DFN5B CLIP text/image encoder and
+  tokenizer, and the 44.1 kHz VAE + BigVGAN v2 decoder. Each part matches the official python on tiny random checkpoints
+  (~1e-6) and on real weights (decoder 7e-5 on a fixed latent, CLIP 6e-7, network 8.8e-5 velocity on a truncated real
+  network). Matrices and convolution kernels can stay bf16 (`controlfoley_bf16.safetensors`, converted with
+  `tools/controlfoley/convert_network_bf16.py`), which lets the 2.8B-parameter network run in 16 GB. Full-depth CPU run: 4 s
+  of audio, 10 steps, 9 min, finite and non-silent. Video and reference-audio conditioning are not wired yet. Weights are
+  CC-BY-NC-4.0. Version bump: alpha.263 -> alpha.264.
+
 ## alpha.263
 
 - **Added: Cloudflare Clef-Flash typed decisions (`clef-flash`, `POST /v1/systemone`).** The joint schema head, a Qwen3.5

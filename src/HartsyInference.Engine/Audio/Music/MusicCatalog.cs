@@ -81,6 +81,7 @@ internal static class MusicCatalog
         ["minimaxmusic3"] = MiniMaxMusic3MusicModel.Descriptor,
             ["yue2"] = Yue2MusicModel.Descriptor,
         ["stableaudio"] = StableAudioMusicModel.Descriptor,
+        ["controlfoley"] = ControlFoleyMusicModel.Descriptor,
     };
 
     /// <summary>Resolves a placed checkpoint for the registry-backed families: an explicit local path wins, then the registered variant file (or, for folder checkpoints, the variant directory) under the family's weights dir.</summary>
