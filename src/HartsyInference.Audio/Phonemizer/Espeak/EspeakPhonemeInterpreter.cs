@@ -9,6 +9,10 @@ internal sealed class EspeakPhonemeInterpreter
     private readonly ushort[] _prog;
     private readonly EspeakPhoneme _pause; // sentinel for out-of-range list access
 
+    /// <summary><c>LOPT_REDUCE</c>: bit 0 lets stress changes apply to phonemes the dictionary spelled, bit 1 treats an
+    /// unstressed word's strongest syllable as stressed.</summary>
+    public int Reduce { get; init; }
+
     public EspeakPhonemeInterpreter(EspeakPhonemeTable phonemeTable, EspeakPhonemeIndex index)
     {
         _phon = phonemeTable;
@@ -77,7 +81,7 @@ internal sealed class EspeakPhonemeInterpreter
                     break;
                 case 1:
                     if (!tr) break; // language-dependent ChangeIf, skipped in render pass
-                    if (instn2 < 8 && StressCondition(list, pos, instn2 & 7, 1))
+                    if (instn2 < 8 && StressCondition(list, pos, instn2 & 7, 1, tr))
                     {
                         phdata.Param[EspeakProgram.ParamChangePhoneme] = instn & 0xff;
                         endFlag = 1;
@@ -92,7 +96,7 @@ internal sealed class EspeakPhonemeInterpreter
                         while (prog >= 0 && prog < _prog.Length && (cur & EspeakProgram.InstnConditionMask) == EspeakProgram.InstnConditionTag)
                         {
                             if (++condGuard > 64) break; // guard against malformed condition chains
-                            bool truth2 = InterpretCondition(list, pos, prog, control);
+                            bool truth2 = InterpretCondition(list, pos, prog, control, tr);
                             prog += NumInstnWords(prog);
                             if (prog < 0 || prog >= _prog.Length) break;
                             if (_prog[prog] == EspeakProgram.InstnNot) { truth2 = !truth2; prog++; }
@@ -117,7 +121,7 @@ internal sealed class EspeakPhonemeInterpreter
                 case 6:
                     int jt = instn2 >> 1;
                     if (jt == 0) prog += (instn & 0xff) - 1;
-                    else if (jt == 5 || jt == 6) prog += 11; // SwitchOnVowelType: skip the vowel-transition block
+                    else if (jt == 5 || jt == 6) prog += 12; // SwitchOnVowelType: skip its six two-word vowel cases
                     break;
                 case 9:
                     prog++; // 2-word: data in prog[1]
@@ -153,8 +157,9 @@ internal sealed class EspeakPhonemeInterpreter
 
     private static string DecodeIpa(List<byte> bytes)
     {
-        int n = bytes.Count;
-        while (n > 0 && bytes[n - 1] == 0) n--;
+        // ipa_string is a C string: it ends at the first NUL, whatever padding bytes the program word carries after it.
+        int n = bytes.IndexOf(0);
+        if (n < 0) n = bytes.Count;
         return n == 0 ? string.Empty : Encoding.UTF8.GetString(bytes.ToArray(), 0, n);
     }
 
@@ -166,7 +171,7 @@ internal sealed class EspeakPhonemeInterpreter
             : new EspeakPhonemeListEntry(1, _pause) { Type = EspeakPhoneme.TypePause, SourceIx = 1 };
 
     // Port of InterpretCondition. progPos points at the condition instruction word.
-    private bool InterpretCondition(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int progPos, int control)
+    private bool InterpretCondition(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int progPos, int control, bool tr)
     {
         int instn = _prog[progPos] & 0xfff;
         int data = instn & 0xff;
@@ -221,14 +226,14 @@ internal sealed class EspeakPhonemeInterpreter
                 EspeakProgram.ConditionIsPhonemeType => ph.Type == data,
                 EspeakProgram.ConditionIsPlace => ((ph.PhFlags >> 16) & 0xf) == data,
                 EspeakProgram.ConditionIsPhflagSet => (ph.PhFlags & (1u << data)) != 0,
-                EspeakProgram.ConditionIsOther => OtherCondition(list, pos, pl, ph, data, control),
+                EspeakProgram.ConditionIsOther => OtherCondition(list, pos, pl, ph, data, control, tr),
                 _ => false,
             };
         }
         return false;
     }
 
-    private bool OtherCondition(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int pl, EspeakPhoneme ph, int data, int control)
+    private bool OtherCondition(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int pl, EspeakPhoneme ph, int data, int control, bool tr)
     {
         _ = control;
         switch (data)
@@ -238,7 +243,7 @@ internal sealed class EspeakPhonemeInterpreter
             case EspeakProgram.StressNotStressed:
             case EspeakProgram.StressSecondary:
             case EspeakProgram.StressPrimary:
-                return StressCondition(list, pos, data, 0);
+                return StressCondition(list, pos, data, 0, tr);
             case EspeakProgram.IsBreak:
                 return ph.Type == EspeakPhoneme.TypePause || (At(list, pos).SynthFlags & EspeakProgram.SflagNextPause) != 0;
             case EspeakProgram.IsWordStart:
@@ -274,7 +279,7 @@ internal sealed class EspeakPhonemeInterpreter
         }
     }
 
-    private bool StressCondition(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int condition, int control)
+    private bool StressCondition(IReadOnlyList<EspeakPhonemeListEntry> list, int pos, int condition, int control, bool tr)
     {
         ReadOnlySpan<int> level = [1, 2, 4, 15];
         int pl;
@@ -283,10 +288,17 @@ internal sealed class EspeakPhonemeInterpreter
         else return false;
 
         int stress = At(list, pl).StressLevel & 0xf;
+        if (tr)
+        {
+            // ChangeIf leaves phonemes the dictionary gave alone, unless the language reduces those too
+            if ((control & 1) != 0 && (At(list, pos).SynthFlags & EspeakProgram.SflagDictionary) != 0 && (Reduce & 1) == 0)
+                return false;
+            if ((Reduce & 2) != 0 && stress >= At(list, pl).WordStress)
+                stress = EspeakProgram.StressPrimary;
+        }
         if (condition == EspeakProgram.StressPrimary) return stress >= At(list, pl).WordStress;
         if (condition == EspeakProgram.StressSecondary) return stress > EspeakProgram.StressSecondary;
         if (condition >= 0 && condition < 4) return stress < level[condition];
-        _ = control;
         return false;
     }
 

@@ -30,11 +30,16 @@ public sealed partial class MisakiLexicon
     private readonly Dictionary<string, Entry> _golds;
     private readonly Dictionary<string, Entry> _silvers;
 
-    private MisakiLexicon(Dictionary<string, Entry> golds, Dictionary<string, Entry> silvers)
+    private MisakiLexicon(Dictionary<string, Entry> golds, Dictionary<string, Entry> silvers, bool british = false)
     {
         _golds = golds;
         _silvers = silvers;
+        British = british;
     }
+
+    /// <summary>misaki's British mode (<c>gb_gold.json</c>/<c>gb_silver.json</c>): the suffixes -s, -ed and -ing take
+    /// an <c>ɪ</c> where American takes <c>ᵻ</c>, and there is no flap.</summary>
+    public bool British { get; }
 
     /// <summary>A lexicon with no entries: every word goes to the front-end's fallbacks.</summary>
     public static MisakiLexicon Empty { get; } = new(new Dictionary<string, Entry>(StringComparer.Ordinal),
@@ -43,20 +48,21 @@ public sealed partial class MisakiLexicon
     /// <summary>Entries in the gold dictionary, after misaki's case-variant growth.</summary>
     public int GoldCount => _golds.Count;
 
-    /// <summary>Loads <c>us_gold.json</c> and <c>us_silver.json</c>.</summary>
-    public static MisakiLexicon FromFiles(string goldPath, string silverPath)
+    /// <summary>Loads <c>us_gold.json</c> and <c>us_silver.json</c> (or the <c>gb_</c> pair with
+    /// <paramref name="british"/>).</summary>
+    public static MisakiLexicon FromFiles(string goldPath, string silverPath, bool british = false)
     {
         using FileStream gold = File.OpenRead(goldPath);
         using FileStream silver = File.OpenRead(silverPath);
-        return FromStreams(gold, silver);
+        return FromStreams(gold, silver, british);
     }
 
     /// <summary>Loads the two dictionaries from JSON streams of <c>{word: phonemes | {tag: phonemes | null}}</c>.</summary>
-    public static MisakiLexicon FromStreams(Stream gold, Stream silver)
+    public static MisakiLexicon FromStreams(Stream gold, Stream silver, bool british = false)
     {
         ArgumentNullException.ThrowIfNull(gold);
         ArgumentNullException.ThrowIfNull(silver);
-        return new MisakiLexicon(Grow(Parse(gold)), Grow(Parse(silver)));
+        return new MisakiLexicon(Grow(Parse(gold)), Grow(Parse(silver)), british);
     }
 
     /// <summary>Phonemizes one token, or returns null when the lexicon has no reading for it.</summary>
@@ -227,12 +233,12 @@ public sealed partial class MisakiLexicon
         return ApplyStress(ps, stress);
     }
 
-    private static string? S(string? stem)
+    private string? S(string? stem)
     {
         if (string.IsNullOrEmpty(stem)) return null;
         char last = stem[^1];
         if ("ptkfθ".Contains(last)) return stem + "s";
-        if ("szʃʒʧʤ".Contains(last)) return stem + "ᵻz";
+        if ("szʃʒʧʤ".Contains(last)) return stem + (British ? "ɪz" : "ᵻz");
         return stem + "z";
     }
 
@@ -248,14 +254,14 @@ public sealed partial class MisakiLexicon
         return S(Lookup(stem, stress, ctx));
     }
 
-    private static string? Ed(string? stem)
+    private string? Ed(string? stem)
     {
         if (string.IsNullOrEmpty(stem)) return null;
         char last = stem[^1];
         if ("pkfθʃsʧ".Contains(last)) return stem + "t";
-        if (last == 'd') return stem + "ᵻd";
+        if (last == 'd') return stem + (British ? "ɪd" : "ᵻd");
         if (last != 't') return stem + "d";
-        if (stem.Length < 2) return stem + "ɪd";
+        if (British || stem.Length < 2) return stem + "ɪd";
         if (UsTaus.Contains(stem[^2])) return stem[..^1] + "ɾᵻd";
         return stem + "ᵻd";
     }
@@ -271,10 +277,14 @@ public sealed partial class MisakiLexicon
         return Ed(Lookup(stem, stress, ctx));
     }
 
-    private static string? Ing(string? stem)
+    private string? Ing(string? stem)
     {
         if (string.IsNullOrEmpty(stem)) return null;
-        if (stem.Length > 1 && stem[^1] == 't' && UsTaus.Contains(stem[^2])) return stem[..^1] + "ɾɪŋ";
+        if (British)
+        {
+            if (stem[^1] is 'ə' or 'ː') return null;
+        }
+        else if (stem.Length > 1 && stem[^1] == 't' && UsTaus.Contains(stem[^2])) return stem[..^1] + "ɾɪŋ";
         return stem + "ɪŋ";
     }
 

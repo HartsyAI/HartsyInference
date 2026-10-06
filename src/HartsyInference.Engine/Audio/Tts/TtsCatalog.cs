@@ -25,18 +25,6 @@ namespace HartsyInference.Engine.Audio;
 /// <summary>The text-to-speech model registry: catalog id → descriptor, plus the shared runner cache. Adding a model is a descriptor, not a class.</summary>
 internal static class TtsCatalog
 {
-    /// <summary>Public-domain CMU Pronouncing Dictionary — the English G2P source, fetched on first use.</summary>
-    private const string CmudictUrl = "https://raw.githubusercontent.com/cmusphinx/cmudict/master/cmudict.dict";
-
-    /// <summary>misaki's American-English dictionaries (Apache-2.0), pinned to one commit: the lexicon Kokoro's G2P
-    /// reads first. Name, URL and SHA-256 of each.</summary>
-    private const string MisakiDataUrl = "https://raw.githubusercontent.com/hexgrad/misaki/fba1236595f2d2bf21d414ba6e57d25256afada3/misaki/data/";
-    private static readonly (string File, string Sha256)[] MisakiLexiconFiles =
-    [
-        ("us_gold.json", "dc414872a49a28ae6c141463d502fd945f3b2fde040484fdc47d00cc4612686f"),
-        ("us_silver.json", "de8f67be911bb6c659187b4a65fd966b6a30e56350e0f790d763210b053ac475"),
-    ];
-
     /// <summary>Longest sentence Kokoro is handed whole, in characters of text. PLBERT has 512 positions and that is
     /// a count of phonemes after G2P, which expands digits and adds stress marks, so the text bound stays well under it.</summary>
     private const int KokoroMaxSentenceChars = 300;
@@ -145,18 +133,21 @@ internal static class TtsCatalog
     private static bool IsRealtimeVariant(string variant) =>
         (variant ?? string.Empty).Contains("realtime", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Kokoro-82M — fast CPU-capable TTS at 24 kHz over the engine's English G2P, backed by the CMU dictionary; voice packs are fetched per voice (default <c>af_heart</c>).</summary>
+    /// <summary>Kokoro-82M — fast CPU-capable TTS at 24 kHz; the voice's first letter picks its language's front-end
+    /// (<see cref="KokoroFrontend"/>), and voice packs are fetched per voice (default <c>af_heart</c>).</summary>
     internal static TtsModelDescriptor Kokoro { get; } = new TtsModelDescriptor
     {
         ResolveRepo = _ => "hexgrad/Kokoro-82M",
         LoadAsync = async (_, _, cancel) =>
         {
-            EnglishG2P g2p = await LoadKokoroG2PAsync(cancel).ConfigureAwait(false);
+            KokoroFrontend frontends = new();
+            await frontends.ForVoiceAsync("af_heart", cancel).ConfigureAwait(false);
             KokoroPipeline pipeline = await KokoroPipeline.LoadAsync(cancel).ConfigureAwait(false);
             await EnsureKokoroVoiceAsync("af_heart", cancel).ConfigureAwait(false);
             float[] Synth(IBackend backend, TtsJob job)
             {
                 string voice = KokoroVoice(job);
+                Func<string, string> g2p = frontends.ForVoiceAsync(voice, job.Cancel).GetAwaiter().GetResult();
                 EnsureKokoroVoiceAsync(voice, job.Cancel).GetAwaiter().GetResult();
                 return pipeline.Synthesize(backend, KokoroPhonemes(g2p, job.Text), voiceName: voice,
                     speed: KokoroSpeed(job), cancel: job.Cancel);
@@ -167,9 +158,10 @@ internal static class TtsCatalog
             {
                 string voice = KokoroVoice(job);
                 float speed = KokoroSpeed(job);
+                Func<string, string> g2p = await frontends.ForVoiceAsync(voice, cancel).ConfigureAwait(false);
                 await EnsureKokoroVoiceAsync(voice, cancel).ConfigureAwait(false);
                 await foreach (AudioChunk chunk in SentenceChunkedSynthesis.StreamBySentence(job.Text, 24_000,
-                    (sentence, token) => pipeline.Synthesize(backend, g2p.ToIpa(sentence), voiceName: voice, speed: speed,
+                    (sentence, token) => pipeline.Synthesize(backend, g2p(sentence), voiceName: voice, speed: speed,
                         cancel: token),
                     static (work, token) => Task.Run(work, token),
                     SentenceSplitter.MinSentenceLength, KokoroMaxSentenceChars, cancel).ConfigureAwait(false))
@@ -181,46 +173,13 @@ internal static class TtsCatalog
         },
     };
 
-    /// <summary>Kokoro's front-end: misaki's lexicon, with espeak (when its data is installed), then the CMU dictionary,
-    /// for the words it misses. Each file is fetched once into the shared audio folder.</summary>
-    private static async Task<EnglishG2P> LoadKokoroG2PAsync(CancellationToken cancel)
-    {
-        string[] lexicon = new string[MisakiLexiconFiles.Length];
-        for (int i = 0; i < lexicon.Length; i++)
-        {
-            (string file, string sha256) = MisakiLexiconFiles[i];
-            lexicon[i] = AudioModelRoot.SharedFile("misaki_" + file);
-            if (!File.Exists(lexicon[i]))
-            {
-                Logs.Info($"[Audio][Kokoro] Downloading the misaki pronunciation dictionary ({file})...");
-                await AudioFileFetcher.EnsureAsync(MisakiDataUrl + file, lexicon[i], sha256, cancel).ConfigureAwait(false);
-            }
-        }
-        string cmudict = AudioModelRoot.SharedFile("cmudict.dict");
-        if (!File.Exists(cmudict))
-        {
-            Logs.Info("[Audio][Kokoro] Downloading the public-domain CMU Pronouncing Dictionary (cmudict.dict)...");
-            await AudioFileFetcher.EnsureAsync(CmudictUrl, cmudict, cancel).ConfigureAwait(false);
-        }
-        EspeakPhonemizer? espeak = null;
-        try
-        {
-            espeak = EspeakPhonemizer.FromCache("en-us");
-        }
-        catch (HartsyInferenceException ex)
-        {
-            Logs.Verbose($"[Audio][Kokoro] espeak-ng data unavailable ({ex.Message}); unknown words fall back to the CMU dictionary.");
-        }
-        return new EnglishG2P(MisakiLexicon.FromFiles(lexicon[0], lexicon[1]), cmudict, espeak);
-    }
-
     /// <summary>Phonemizes each line on its own and joins them with newlines, which
     /// <see cref="KokoroPhonemeChunker"/> keeps as chunk boundaries: the reference <c>KPipeline</c> splits its input on
     /// newlines before phonemizing.</summary>
-    private static string KokoroPhonemes(EnglishG2P g2p, string text)
+    private static string KokoroPhonemes(Func<string, string> g2p, string text)
     {
         string[] lines = text.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-        return lines.Length <= 1 ? g2p.ToIpa(text) : string.Join('\n', lines.Select(g2p.ToIpa));
+        return lines.Length <= 1 ? g2p(text) : string.Join('\n', lines.Select(g2p));
     }
 
     private static string KokoroVoice(TtsJob job) => string.IsNullOrEmpty(job.Voice) ? "af_heart" : job.Voice;
