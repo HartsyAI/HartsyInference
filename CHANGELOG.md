@@ -24,6 +24,13 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.256
+
+- Add the Breeze TTS 2 architecture and checkpoint configuration contract. Its Mimi codec is the shared
+  `MimiConfig.Mimi24kHzDsm` preset, and `MimiConfig.FrameRateHz` reports the true 12.5 Hz output rate.
+- Keep Fish Audio S2's 4096-entry fast-decoder vocabulary distinct from ModifiedDAC's 1024-entry residual
+  codebooks.
+
 ## alpha.255
 
 - **IndexTTS-2.0 (`indextts2:2.0`).** The 2.0 checkpoint (`IndexTeam/IndexTTS-2`) now runs next to 2.5, which stays the
