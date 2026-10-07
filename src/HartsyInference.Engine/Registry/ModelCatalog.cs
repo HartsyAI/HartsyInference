@@ -57,10 +57,7 @@ public static class ModelCatalog
                         Sha256 = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5" },
                 },
             },
-            // Kolibri-1 (Aleph-Alpha, 78B sparse MoE). Unit-tested (GGUF key map, local/global + NoPE attention, sigmoid-logit-add routing)
-            // and run on real weights 2026-10-07: the Q2_K quant (26.7 GB) loads across a 4090 + 3060 and answers coherently for a few
-            // hundred tokens, then degrades (Q2_K is lossy). Q4_K_M (44 GB), the pinned quant, needs an estimated 48 GB of VRAM: the text engine
-            // has no host offload. Status stays ValidationPending until a Q4_K_M run.
+            // Kolibri-1 (Aleph-Alpha, 78B sparse MoE). ValidationPending: the pinned Q4_K_M has not been run (see MODEL_STATUS_LLM.md).
             new CatalogEntry
             {
                 Id = "kolibri1", Modality = txt, DisplayName = "Kolibri-1 (78B MoE)", Architecture = "Kolibri-1 sparse MoE transformer",
