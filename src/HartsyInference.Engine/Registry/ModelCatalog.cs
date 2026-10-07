@@ -64,7 +64,7 @@ public static class ModelCatalog
             new CatalogEntry
             {
                 Id = "kolibri1", Modality = txt, DisplayName = "Kolibri-1 (78B MoE)", Architecture = "Kolibri-1 sparse MoE transformer",
-                Status = st, CliDrivable = true,
+                Status = vp, CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "Hob-forge/Kolibri-1-GGUF", RepoPath = "Kolibri-1-Q4_K_M.gguf",

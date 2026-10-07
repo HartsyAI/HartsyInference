@@ -30,7 +30,7 @@ stable release will require. Dates are UTC.
 
 ## alpha.271
 
-- **Docs: Kolibri-1 real-weight run recorded.** The Q2_K quant loads across two GPUs on the swarm server and answers coherently for a few hundred tokens before degrading; the pinned Q4_K_M needs about 48 GB of VRAM (no host offload in the text engine). The catalog comment and `MODEL_STATUS_LLM.md` say so; the entry stays ValidationPending. The ControlFoley video / reference-audio and Clef-Flash live Swarm runs are recorded in the audio and LLM status tables.
+- **Changed: the `kolibri1` catalog entry moves from Structural to ValidationPending.** A real-weight run on the swarm server (2026-10-07) loaded the Q2_K quant across a 4090 + 3060 and answered coherently for a few hundred tokens before degrading; the pinned Q4_K_M (44 GB) has not been run and needs an estimated 48 GB of VRAM because the text engine has no host offload. The catalog comment and the status tables record this, along with the live Swarm runs of ControlFoley (video, video + reference clip) and Clef-Flash.
 
 ## alpha.270
 
