@@ -14,7 +14,7 @@ public sealed class GgufLanguageModel : IDisposable
     private int _disposed;
 
     /// <summary>GGUF quant formats the CUDA path supports directly (dequant-to-F16 and the fused GEMV); other quant tensors are dequantized to F32 at load.</summary>
-    private static readonly HashSet<string> GpuSupportedQuant = ["Q8_0", "Q4_0", "Q5_0", "Q4_K", "Q5_K", "Q6_K"];
+    private static readonly HashSet<string> GpuSupportedQuant = ["Q8_0", "Q4_0", "Q5_0", "Q2_K", "Q3_K", "Q4_K", "Q5_K", "Q6_K"];
 
     /// <summary>Whether a quantized tensor of this type stays compressed for a quantized-capable backend; any other quantized type is dequantized to F32 on load.</summary>
     public static bool KeepsQuantizedOnGpu(string dtypeName) => GpuSupportedQuant.Contains(dtypeName);

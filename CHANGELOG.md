@@ -30,10 +30,13 @@ stable release will require. Dates are UTC.
 
 ## alpha.270
 
-- **Fixed: the layer-split GGUF load uses the quantized-load RAM estimate.** `LoadSharded` loads without dequantizing, like the
-  single-device CUDA path, but its guard still demanded 2.5x the file, so a 26.7 GB Kolibri-1 Q2_K was refused on a 64 GB
-  server ("need ~66.7 GB headroom") although its weights stay compressed. It now needs 1.15x the file plus the F32 size of
-  any tensor that is still expanded. The tensor-parallel path keeps 2.5x.
+- **Fixed: the layer-split GGUF load uses the quantized-load RAM estimate, and Q2_K / Q3_K stay compressed on the GPU.**
+  `LoadSharded` loads without dequantizing, like the single-device CUDA path, but its guard still demanded 2.5x the file,
+  so a 26.7 GB Kolibri-1 Q2_K was refused on a 64 GB server ("need ~66.7 GB headroom"). It now needs 1.15x the file plus
+  the F32 size of any tensor that is still expanded. The keep-compressed list (`GgufLanguageModel`) was missing Q2_K and
+  Q3_K although the CUDA backend has dequantize and fused GEMV kernels for both, so those files were expanded to F32 on
+  load (~290 GB for the Kolibri Q2_K). The tensor-parallel path keeps 2.5x. The layer-split sharding test now uses the
+  production estimate for its RAM precondition.
 
 ## alpha.269
 

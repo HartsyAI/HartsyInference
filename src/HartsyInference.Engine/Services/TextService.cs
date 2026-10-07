@@ -820,16 +820,7 @@ public sealed class TextService : ITextService, IDisposable
         try { fileBytes = new FileInfo(path).Length; }
         catch (Exception ex) { Logs.Debug($"[TextService] Could not stat '{path}': {ex.Message}"); return; }
         double availableBytes = availableKb * 1024.0;
-        double expandedBytes = 0;
-        if (!dequantizesEverything)
-        {
-            using GgufLoader probe = new GgufLoader();
-            probe.Load(path);
-            expandedBytes = DequantizedHostBytes(probe.Descriptors.Values);
-        }
-        double requiredBytes = dequantizesEverything
-            ? fileBytes * RamHeadroomMultiplier
-            : fileBytes * QuantizedResidentHeadroomMultiplier + expandedBytes;
+        double requiredBytes = RequiredHostRamBytes(path, fileBytes, dequantizesEverything, out double expandedBytes);
         if (availableBytes < requiredBytes)
         {
             throw new HartsyInferenceException(
@@ -840,6 +831,19 @@ public sealed class TextService : ITextService, IDisposable
                     : $" ({QuantizedResidentHeadroomMultiplier}x the file plus {expandedBytes / 1024 / 1024 / 1024:0.0} GB of tensors expanded to F32). ")
                 + "Free RAM or use a smaller quant, then retry — loading anyway risks crashing the whole process.");
         }
+    }
+
+    /// <summary>Free host RAM a GGUF load needs: <see cref="RamHeadroomMultiplier"/> times the file when everything is dequantized, else
+    /// <see cref="QuantizedResidentHeadroomMultiplier"/> times the file plus the F32 size of the tensors still expanded (read from the header).</summary>
+    internal static double RequiredHostRamBytes(string path, long fileBytes, bool dequantizesEverything, out double expandedBytes)
+    {
+        expandedBytes = 0;
+        if (dequantizesEverything)
+            return fileBytes * RamHeadroomMultiplier;
+        using GgufLoader probe = new GgufLoader();
+        probe.Load(path);
+        expandedBytes = DequantizedHostBytes(probe.Descriptors.Values);
+        return fileBytes * QuantizedResidentHeadroomMultiplier + expandedBytes;
     }
 
     /// <summary>Host bytes of F32 copies the load builds even for a quantized-capable backend: every quantized tensor it cannot keep compressed,
