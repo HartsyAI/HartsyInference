@@ -40,6 +40,9 @@ public sealed class DeepSeekV41HyperConnection
         ArgumentNullException.ThrowIfNull(bias);
         ArgumentOutOfRangeException.ThrowIfLessThan(hc, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(dim, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(iters, 1);
+        ArgumentOutOfRangeException.ThrowIfNegative(hcEps);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(normEps);
         int mix = (2 + hc) * hc;
         if (fn.Length != (long)mix * hc * dim) throw new ArgumentException("fn must be [(2 + hc) * hc, hc * dim].", nameof(fn));
         if (scale.Length != 3) throw new ArgumentException("scale must hold 3 values.", nameof(scale));
@@ -69,28 +72,22 @@ public sealed class DeepSeekV41HyperConnection
         CheckSize(post.Length, tokens, Hc, nameof(post));
         CheckSize(comb.Length, tokens, Hc * Hc, nameof(comb));
 
-        using Tensor mixes = new(new TensorShape(tokens, mix), DType.F32);
-        Span<float> m = mixes.AsSpan<float>();
+        float[] projected = DeepSeekV41HostMath.Linear(x, _fn, tokens, flat, mix);
         for (int t = 0; t < tokens; t++)
         {
             ReadOnlySpan<float> row = x.Slice(t * flat, flat);
             float sq = 0f;
             for (int i = 0; i < flat; i++) sq += row[i] * row[i];
             float rsqrt = 1f / MathF.Sqrt(sq / flat + _normEps);
-            for (int o = 0; o < mix; o++)
-            {
-                ReadOnlySpan<float> w = _fn.AsSpan(o * flat, flat);
-                float sum = 0f;
-                for (int i = 0; i < flat; i++) sum += row[i] * w[i];
-                m[t * mix + o] = sum * rsqrt;
-            }
+            for (int o = 0; o < mix; o++) projected[t * mix + o] *= rsqrt;
         }
+        using Tensor mixes = DeepSeekV41HostMath.Tensor(projected, tokens, mix);
 
         using Tensor preT = new(new TensorShape(tokens, Hc), DType.F32);
         using Tensor postT = new(new TensorShape(tokens, Hc), DType.F32);
         using Tensor combT = new(new TensorShape(tokens, Hc, Hc), DType.F32);
-        using Tensor scaleT = Vector(_scale);
-        using Tensor biasT = Vector(_bias);
+        using Tensor scaleT = DeepSeekV41HostMath.Tensor(_scale, 3);
+        using Tensor biasT = DeepSeekV41HostMath.Tensor(_bias, _bias.Length);
         _backend.HcSplitSinkhorn(preT, postT, combT, mixes, scaleT, biasT, Hc, _iters, _hcEps);
         preT.AsReadOnlySpan<float>().CopyTo(pre);
         postT.AsReadOnlySpan<float>().CopyTo(post);
@@ -106,8 +103,8 @@ public sealed class DeepSeekV41HyperConnection
         CheckSize(x.Length, tokens, Hc * Dim, nameof(x));
         CheckSize(pre.Length, tokens, Hc, nameof(pre));
         CheckSize(y.Length, tokens, Dim, nameof(y));
-        using Tensor xT = Wrap(x, tokens, Hc, Dim);
-        using Tensor preT = Wrap(pre, tokens, Hc);
+        using Tensor xT = DeepSeekV41HostMath.Tensor(x, tokens, Hc, Dim);
+        using Tensor preT = DeepSeekV41HostMath.Tensor(pre, tokens, Hc);
         using Tensor yT = new(new TensorShape(tokens, Dim), DType.F32);
         _backend.HcPreMix(yT, xT, preT);
         yT.AsReadOnlySpan<float>().CopyTo(y);
@@ -118,7 +115,7 @@ public sealed class DeepSeekV41HyperConnection
     /// <param name="residual">The stream before the sublayer, <c>[tokens, hc, dim]</c>.</param>
     /// <param name="post">Coefficients, <c>[tokens, hc]</c>.</param>
     /// <param name="comb">Coefficients, <c>[tokens, hc, hc]</c>.</param>
-    /// <param name="output">Receives <c>[tokens, hc, dim]</c>; must not alias <paramref name="residual"/>.</param>
+    /// <param name="output">Receives <c>[tokens, hc, dim]</c>; the inputs are copied first, so it may alias <paramref name="residual"/>.</param>
     public void Expand(ReadOnlySpan<float> sub, ReadOnlySpan<float> residual, ReadOnlySpan<float> post, ReadOnlySpan<float> comb, int tokens,
         Span<float> output)
     {
@@ -127,10 +124,10 @@ public sealed class DeepSeekV41HyperConnection
         CheckSize(post.Length, tokens, Hc, nameof(post));
         CheckSize(comb.Length, tokens, Hc * Hc, nameof(comb));
         CheckSize(output.Length, tokens, Hc * Dim, nameof(output));
-        using Tensor subT = Wrap(sub, tokens, Dim);
-        using Tensor resT = Wrap(residual, tokens, Hc, Dim);
-        using Tensor postT = Wrap(post, tokens, Hc);
-        using Tensor combT = Wrap(comb, tokens, Hc, Hc);
+        using Tensor subT = DeepSeekV41HostMath.Tensor(sub, tokens, Dim);
+        using Tensor resT = DeepSeekV41HostMath.Tensor(residual, tokens, Hc, Dim);
+        using Tensor postT = DeepSeekV41HostMath.Tensor(post, tokens, Hc);
+        using Tensor combT = DeepSeekV41HostMath.Tensor(comb, tokens, Hc, Hc);
         using Tensor outT = new(new TensorShape(tokens, Hc, Dim), DType.F32);
         _backend.HcPostMix(outT, subT, resT, postT, combT);
         outT.AsReadOnlySpan<float>().CopyTo(output);
@@ -139,19 +136,5 @@ public sealed class DeepSeekV41HyperConnection
     private static void CheckSize(int length, int tokens, int perToken, string name)
     {
         if (length != (long)tokens * perToken) throw new ArgumentException($"{name} must hold tokens x {perToken} values.", name);
-    }
-
-    private static Tensor Vector(float[] values)
-    {
-        Tensor t = new(new TensorShape(values.Length), DType.F32);
-        values.CopyTo(t.AsSpan<float>());
-        return t;
-    }
-
-    private static Tensor Wrap(ReadOnlySpan<float> values, params long[] shape)
-    {
-        Tensor t = new(new TensorShape(shape), DType.F32);
-        values.CopyTo(t.AsSpan<float>());
-        return t;
     }
 }

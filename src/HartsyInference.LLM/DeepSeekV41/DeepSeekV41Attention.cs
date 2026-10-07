@@ -5,7 +5,7 @@ namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>Host reference for one V4.1 attention layer: low-rank queries, a shared key/value latent, a sliding window plus optional compressed positions, and a grouped low-rank output.</summary>
 /// <remarks>Follows upstream <c>Attention.forward</c> step for step. A prefill must start at position 0 and decode takes one token at a time, as upstream does;
-/// a later multi-token chunk is the caller's to split. Cached latents are kept after their quantize-dequantize round trip, which is what the quantized cache decodes to.</remarks>
+/// a later multi-token chunk is the caller's to split. A call at position 0 starts a new sequence and clears the state. Cached latents are kept after their quantize-dequantize round trip, which is what the quantized cache decodes to.</remarks>
 public sealed class DeepSeekV41Attention
 {
     private readonly IBackend _backend;
@@ -25,10 +25,13 @@ public sealed class DeepSeekV41Attention
         ArgumentNullException.ThrowIfNull(rope);
         if (settings.Heads * settings.HeadDim % settings.OGroups != 0) throw new ArgumentException("Heads x HeadDim must divide into OGroups.", nameof(settings));
         if (rope.HalfDim * 2 != settings.RopeDim) throw new ArgumentException("The rope table width must equal RopeDim.", nameof(rope));
-        if (settings.IsKvSource != (weights.Compressor is not null) && settings.CompressRatio > 0)
-            throw new ArgumentException("Compressor weights must be present exactly on a KV-source layer.", nameof(weights));
-        if (settings.CompressRatio > 0 && settings.IsIndexSource != (weights.Indexer is not null))
-            throw new ArgumentException("Indexer weights must be present exactly on an index-source layer.", nameof(weights));
+        if (settings.CompressRatio > 0)
+        {
+            if (settings.IsKvSource != (weights.Compressor is not null))
+                throw new ArgumentException("Compressor weights must be present exactly on a KV-source layer.", nameof(weights));
+            if (settings.IsIndexSource != (weights.Indexer is not null))
+                throw new ArgumentException("Indexer weights must be present exactly on an index-source layer.", nameof(weights));
+        }
         _backend = backend;
         _s = settings;
         _w = weights;
@@ -52,6 +55,10 @@ public sealed class DeepSeekV41Attention
         if (x.Length != (long)tokens * s.Dim || y.Length != x.Length) throw new ArgumentException("x and y must each hold tokens x Dim values.");
         if (startPos + tokens > _rope.Length) throw new ArgumentOutOfRangeException(nameof(startPos), "The rope table does not reach this position.");
         int hd = s.HeadDim, rd = s.RopeDim, heads = s.Heads, win = s.Window;
+        // validated before anything is mutated, so a refusal leaves the state as it was
+        if (state.CompressKv is { } compressCapacity && s.CompressRatio > 0 && ((startPos + tokens) / s.CompressRatio) * hd > compressCapacity.Length)
+            throw new InvalidOperationException("The compressed cache is full; allocate state for a longer sequence.");
+        if (startPos == 0) state.Reset();
 
         float[] qr = DeepSeekV41HostMath.Linear(x, _w.WqA, tokens, s.Dim, s.QLoraRank);
         DeepSeekV41HostMath.RmsNormRows(qr, _w.QNorm, s.QLoraRank, s.NormEps);
@@ -98,6 +105,8 @@ public sealed class DeepSeekV41Attention
                 {
                     compressIdx = shared.Topk ?? throw new InvalidOperationException("A reusing layer ran before any index-source layer.");
                     compressCols = shared.TopkWidth;
+                    if (compressIdx.Length != tokens * compressCols)
+                        throw new InvalidOperationException("The shared top-k indices are from a pass with a different token count; an index-source layer must run first in each pass.");
                 }
 
                 if (latent is not null) StoreLatent(latent, latentRows, startPos, state);
@@ -115,7 +124,7 @@ public sealed class DeepSeekV41Attention
             {
                 int row = idxRows == 1 ? 0 : t;
                 windowSlots.Slice(row * idxCols, idxCols).CopyTo(indices.AsSpan(t * (idxCols + compressCols), idxCols));
-                if (compressCols > 0) compressIdx.AsSpan(t * compressCols, compressCols).CopyTo(indices.AsSpan(t * (idxCols + compressCols) + idxCols, compressCols));
+                if (compressCols > 0) compressIdx!.AsSpan(t * compressCols, compressCols).CopyTo(indices.AsSpan(t * (idxCols + compressCols) + idxCols, compressCols));
             }
 
             using Tensor query = DeepSeekV41HostMath.Tensor(q, tokens, heads, hd);
@@ -243,7 +252,8 @@ public sealed class DeepSeekV41Attention
         for (int i = 0; i < positions.Length; i++)
         {
             _rope.CosRow(positions[i]).CopyTo(cos.AsSpan(i * half, half));
-            for (int j = 0; j < half; j++) sin[i * half + j] = inverse ? -_rope.SinRow(positions[i])[j] : _rope.SinRow(positions[i])[j];
+            ReadOnlySpan<float> sinRow = _rope.SinRow(positions[i]);
+            for (int j = 0; j < half; j++) sin[i * half + j] = inverse ? -sinRow[j] : sinRow[j];
         }
         using Tensor x = DeepSeekV41HostMath.Tensor(data, shape);
         using Tensor c = DeepSeekV41HostMath.Tensor(cos, 1, positions.Length, half);

@@ -43,7 +43,8 @@ stable release will require. Dates are UTC.
   It reuses the backend `ApplyRopeInterleaved`, `ActQuantDequantInPlace`, `BuildWindowIndices`, `IndexerScores` and
   `SparseLatentAttention` ops. Per-layer cache is `DeepSeekV41AttentionState`; `DeepSeekV41SharedAttention` carries the compressed
   KV, index keys, top-k indices and candidate mask between layers and, as upstream's runtime does, persists across forward passes.
-  A prefill starts at position 0 and later calls take one token. `DeepSeekV41HyperConnection` is the mHC wrapper around a sublayer
+  A call at position 0 starts a new sequence and clears the layer's state, later calls take one token, and cache capacity is checked
+  before anything is mutated. `DeepSeekV41HyperConnection` is the mHC wrapper around a sublayer
   (`hc_mixes` projection with its flattened RMS statistic, then the shared `Hc*` ops). A six-layer stack covering window-only,
   source, reuse, candidate-source and candidate-restricted layers matches the unmodified upstream through an 11-token prefill and six
   decode steps (`dump_attention_fixture.py`), within 1e-2: the harness's `sparse_attn` rounds probabilities to bf16 like the real

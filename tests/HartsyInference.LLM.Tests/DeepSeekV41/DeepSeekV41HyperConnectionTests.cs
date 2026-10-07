@@ -56,4 +56,15 @@ public sealed class DeepSeekV41HyperConnectionTests
         Assert.Throws<ArgumentException>(() => conn.Mixes(new float[hc * dim - 1], 1, new float[hc], new float[hc], new float[hc * hc]));
         Assert.Throws<ArgumentException>(() => conn.Collapse(new float[hc * dim], new float[hc], 1, new float[dim + 1]));
     }
+
+    [Fact]
+    public void Rejects_Out_Of_Range_Iterations_And_Epsilons()
+    {
+        using CpuBackend cpu = new();
+        const int hc = 2, dim = 4;
+        float[] fn = new float[8 * hc * dim], scale = new float[3], bias = new float[8];
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41HyperConnection(cpu, hc, dim, 0, 1e-6f, 1e-6f, fn, scale, bias));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41HyperConnection(cpu, hc, dim, 3, -1f, 1e-6f, fn, scale, bias));
+        Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41HyperConnection(cpu, hc, dim, 3, 1e-6f, 0f, fn, scale, bias));
+    }
 }

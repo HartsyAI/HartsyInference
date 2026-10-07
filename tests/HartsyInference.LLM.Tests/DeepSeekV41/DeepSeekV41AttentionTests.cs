@@ -76,6 +76,10 @@ public sealed class DeepSeekV41AttentionTests
             {
                 float[] x = Floats(step.GetProperty("x")[i]), expected = Floats(step.GetProperty("y")[i]), y = new float[x.Length];
                 layers[i].Forward(x, len, start, states[i], shared, y);
+                // the chosen indices are exact, so a wrong selection fails here without relying on the output tolerance
+                JsonElement picks = step.GetProperty("topk")[i];
+                if (picks.ValueKind != JsonValueKind.Null)
+                    Assert.True(Ints(picks).SequenceEqual(shared.Topk!), $"step {stepNo} layer {i} indices: [{string.Join(",", Ints(picks))}] vs [{string.Join(",", shared.Topk!)}]");
                 for (int j = 0; j < y.Length; j++)
                     Assert.True(Math.Abs(expected[j] - y[j]) <= Tolerance * Math.Max(1f, Math.Abs(expected[j])),
                         $"step {stepNo} (start {start}) layer {i}[{j}]: {expected[j]} vs {y[j]}");
@@ -93,5 +97,36 @@ public sealed class DeepSeekV41AttentionTests
         float[] x = new float[2 * settings.Dim];
         Assert.Throws<NotSupportedException>(() =>
             layer.Forward(x, 2, 5, new DeepSeekV41AttentionState(settings, 64), new DeepSeekV41SharedAttention(), new float[x.Length]));
+    }
+
+    [Fact]
+    public void A_State_Reused_For_A_New_Sequence_Gives_The_Same_Result_As_A_Fresh_One()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41Attention layer = BuildLayer(cpu, 1, out DeepSeekV41AttentionSettings settings);
+        JsonElement first = Fx.GetProperty("steps")[0], second = Fx.GetProperty("steps")[1];
+        float[] x = Floats(first.GetProperty("x")[1]), fresh = new float[x.Length], reused = new float[x.Length];
+
+        layer.Forward(x, first.GetProperty("len").GetInt32(), 0, new DeepSeekV41AttentionState(settings, 64), new DeepSeekV41SharedAttention(), fresh);
+
+        DeepSeekV41AttentionState dirty = new(settings, 64);
+        DeepSeekV41SharedAttention shared = new();
+        layer.Forward(x, first.GetProperty("len").GetInt32(), 0, dirty, shared, new float[x.Length]);
+        layer.Forward(Floats(second.GetProperty("x")[1]), 1, 11, dirty, shared, new float[settings.Dim]);
+        layer.Forward(x, first.GetProperty("len").GetInt32(), 0, dirty, shared, reused);
+
+        Assert.Equal(fresh, reused);
+    }
+
+    [Fact]
+    public void A_Cache_Too_Small_For_The_Prefill_Is_Refused_Before_Any_State_Changes()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41Attention layer = BuildLayer(cpu, 1, out DeepSeekV41AttentionSettings settings);
+        DeepSeekV41AttentionState tiny = new(settings, 4);
+        float[] x = Floats(Fx.GetProperty("steps")[0].GetProperty("x")[1]);
+        Assert.Throws<InvalidOperationException>(() => layer.Forward(x, 11, 0, tiny, new DeepSeekV41SharedAttention(), new float[x.Length]));
+        Assert.All(tiny.Window, v => Assert.Equal(0f, v));
+        Assert.All(tiny.CompressKv!, v => Assert.Equal(0f, v));
     }
 }

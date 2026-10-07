@@ -64,12 +64,14 @@ def main() -> None:
     steps = []
     with torch.no_grad():
         for start, length in [(0, prefill)] + [(prefill + i, 1) for i in range(decode)]:
-            ins, outs = [], []
-            for attn in layers:
+            ins, outs, picks = [], [], []
+            for i, attn in enumerate(layers):
                 x = torch.randn(1, length, args.dim)
                 ins.append(flat(x))
                 outs.append(flat(attn(x, start)))
-            steps.append({"start": start, "len": length, "x": ins, "y": outs})
+                # the indices an index-source layer just chose, offset past the window rows (exact, unlike the outputs)
+                picks.append([int(v) for v in mod.shared_attn.topk_idxs.reshape(-1)] if attn.is_index_source else None)
+            steps.append({"start": start, "len": length, "x": ins, "y": outs, "topk": picks})
     out = {
         "config": {k: (list(v) if isinstance(v, tuple) else v) for k, v in cfg.items()},
         "layers": [named(l) for l in layers], "steps": steps,
