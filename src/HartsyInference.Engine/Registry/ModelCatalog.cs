@@ -126,6 +126,23 @@ public static class ModelCatalog
                         TargetSubdir = "LLM/qwen35moe", Role = "mmproj" },
                 },
             },
+            // Cloudflare Clef GGUF (Q2_K): 64-layer Qwen3.5 hybrid VLM for chat. The typed-decision release is "clef-flash".
+            // Pending until the real-weight run is green.
+            new CatalogEntry
+            {
+                Id = "clef", Modality = txt, DisplayName = "Cloudflare Clef",
+                Architecture = "Qwen3.5 Gated-DeltaNet + full-attn hybrid (+Qwen3-VL vision)",
+                Status = vp, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "Cloudflare_clef-Q2_K.gguf",
+                        TargetSubdir = "LLM/clef", Role = "transformer",
+                        Sha256 = "be3985c88b2fee90f1aabdaa7e5546f94a30d8b37b2f626121a725c5404b523b" },
+                    new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "mmproj-Cloudflare_clef-f16.gguf",
+                        TargetSubdir = "LLM/clef", Role = "mmproj",
+                        Sha256 = "f0e2930e301586f0932262c7d232c74e385d7b4281170111c36a686e16e59ba8" },
+                },
+            },
 
             // Text / LLM — dense families. `hartsy text -m <id>` verified end-to-end 2026-07-22 (CLI catalog
             // pass) on the 3060 (--low-vram-quant) unless noted; see MODEL_STATUS_LLM.md for the exact

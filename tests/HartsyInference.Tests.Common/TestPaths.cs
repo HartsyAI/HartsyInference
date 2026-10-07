@@ -467,6 +467,10 @@ public static class TestPaths
         /// for the Qwen3-Coder-style XML-argument dialect (<c>HartsyInference.Tools.Tests</c>).</summary>
         public static string Qwen35_08BQ4KM => Resolve("QWEN35_08B_GGUF_PATH", Path.Combine(ModelsDir, "llm", "qwen35", "Qwen3.5-0.8B-Q4_K_M.gguf"));
 
+        /// <summary>Cloudflare Clef Q2_K GGUF. Clef is a 64-layer Qwen3.5 hybrid VLM; its mmproj sidecar is
+        /// discovered from the checkpoint directory by <c>TextService</c>.</summary>
+        public static string ClefQ2K => Resolve("CLEF_GGUF_PATH", Path.Combine(ModelsDir, "llm", "clef", "Cloudflare_clef-Q2_K.gguf"));
+
         /// <summary>DeepSeek-R1-Distill-Qwen-1.5B, Q4_K_M GGUF — the tool-call template-detection fixtures' real
         /// source for a template that renders a prior tool call but never the caller's <c>tools</c> list.</summary>
         public static string DeepSeekR1DistillQwen15BQ4KM => Resolve("DEEPSEEK_R1_DISTILL_QWEN_15B_GGUF_PATH",
