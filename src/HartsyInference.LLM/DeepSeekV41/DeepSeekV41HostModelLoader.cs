@@ -62,7 +62,7 @@ public static class DeepSeekV41HostModelLoader
 
             DeepSeekV41HostModel model = new(dim, hc, cfg.VocabSize, normEps, read.Matrix("embed.weight", cfg.VocabSize, dim), blocks,
                 read.Vector("norm.weight", dim), read.Matrix("head.weight", cfg.VocabSize, dim));
-            return new DeepSeekV41LoadedModel(model, checkpoint, ownsCheckpoint, stores);
+            return new DeepSeekV41LoadedModel(model, checkpoint, ownsCheckpoint, stores, options.MaxTokens);
         }
         catch
         {

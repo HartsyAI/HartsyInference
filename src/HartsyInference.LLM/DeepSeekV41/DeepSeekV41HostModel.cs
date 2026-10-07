@@ -56,6 +56,9 @@ public sealed class DeepSeekV41HostModel
         _engramConstants = engramConstants;
     }
 
+    /// <summary>Host bytes one sequence of <paramref name="maxTokens"/> positions will hold across all layers.</summary>
+    public long EstimateStateBytes(int maxTokens) => _blocks.Sum(b => DeepSeekV41AttentionState.EstimateBytes(b.AttentionSettings, maxTokens));
+
     /// <summary>Creates empty per-sequence state for up to <paramref name="maxTokens"/> positions.</summary>
     public DeepSeekV41SequenceState CreateState(int maxTokens)
     {

@@ -14,6 +14,9 @@ public sealed class DeepSeekV41LoadedModel : IDisposable
     private readonly DeepSeekV41Checkpoint _checkpoint;
     private bool _disposed;
 
+    /// <summary>The longest sequence this model was loaded for; it sized the rope tables.</summary>
+    public int MaxTokens { get; }
+
     /// <summary>The model.</summary>
     /// <exception cref="ObjectDisposedException">The loaded model was disposed, so its checkpoint and row stores are gone.</exception>
     public DeepSeekV41HostModel Model => _disposed ? throw new ObjectDisposedException(nameof(DeepSeekV41LoadedModel)) : _model;
@@ -22,8 +25,9 @@ public sealed class DeepSeekV41LoadedModel : IDisposable
     /// <exception cref="ObjectDisposedException">The loaded model was disposed.</exception>
     public DeepSeekV41Checkpoint Checkpoint => _disposed ? throw new ObjectDisposedException(nameof(DeepSeekV41LoadedModel)) : _checkpoint;
 
-    internal DeepSeekV41LoadedModel(DeepSeekV41HostModel model, DeepSeekV41Checkpoint checkpoint, bool ownsCheckpoint, List<EngramTableStore> stores)
+    internal DeepSeekV41LoadedModel(DeepSeekV41HostModel model, DeepSeekV41Checkpoint checkpoint, bool ownsCheckpoint, List<EngramTableStore> stores, int maxTokens)
     {
+        MaxTokens = maxTokens;
         _model = model;
         _checkpoint = checkpoint;
         _ownedCheckpoint = ownsCheckpoint ? checkpoint : null;
