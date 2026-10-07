@@ -75,7 +75,7 @@ public sealed class SpeechCommand : Command<SpeechCommand.Settings>
 
         /// <summary>Output length in seconds, for models that need it (AuK without a reference).</summary>
         [CommandOption("--duration")]
-        [Description("Output length in seconds (AuK without a reference clip; at most 30).")]
+        [Description("Output length in seconds (AuK; required without a reference clip, otherwise it overrides the clip length and the --ref-text estimate; at most 30).")]
         public float? Duration { get; init; }
 
         /// <summary>IndexTTS-2 emotion: 8 comma-separated weights.</summary>

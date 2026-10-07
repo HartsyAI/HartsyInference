@@ -75,7 +75,7 @@ public sealed record SpeechRequest
     /// <summary>AuK instruction. With a reference clip it is the verbatim edit/enhance/separation command; without one it is the voice description that frames <see cref="Text"/>; null/empty with a reference means zero-shot cloning of <see cref="Text"/>.</summary>
     public string? Instruction { get; init; }
 
-    /// <summary>Output length in seconds, for models that cannot infer it (AuK without a reference clip); null lets the model decide.</summary>
+    /// <summary>Output length in seconds, for models that cannot infer it (AuK: required without a reference clip; with one it overrides the clip length and the reference-text estimate); null lets the model decide.</summary>
     public double? DurationSeconds { get; init; }
 
     /// <summary>Sampling seed for reproducibility; 0 leaves it unset.</summary>

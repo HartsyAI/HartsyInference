@@ -24,6 +24,10 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.266
+
+- **AuK review follow-ups.** A default (`--seed 0`) AuK run draws a fresh random seed and logs it instead of reusing one fixed noise, matching the documented "0 leaves it unset" contract. A Flash request that sets steps or CFG logs the discarded values. An explicit `--duration` is pinned as winning over the reference clip length, with tests, and `AukDuration.Frames` no longer rounds a float `0.6` (0.6000000238) up a frame. The Qwen2.5-Omni shard index sha256 is pinned. Checked against the real Hugging Face headers: every pinned sha and size matches, and every key and shape the AuK, VAE and Qwen loaders require exists.
+
 ## alpha.265
 
 - **Added: ControlFoley video and reference-audio conditioning (Audio layer).** `ControlFoleyPipeline` takes an optional decoded
