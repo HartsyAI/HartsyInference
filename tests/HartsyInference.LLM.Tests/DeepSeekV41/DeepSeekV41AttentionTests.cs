@@ -49,9 +49,8 @@ public sealed class DeepSeekV41AttentionTests
         return new DeepSeekV41Attention(cpu, settings, weights, rope);
     }
 
-    // The harness's sparse_attn port rounds attention probabilities to bf16 before the value matmul, as the real kernel does, so outputs differ from
-    // this exact-softmax reference by up to a few 1e-3; a wrong index choice or cache row moves them by 1e-1 or more.
-    private const float Tolerance = 1e-2f;
+    // The fixture runs upstream with an exact-softmax sparse_attn, so what remains is float32 accumulation order; the real kernel's bf16 probabilities are not modelled.
+    private const float Tolerance = 1e-3f;
 
     [Fact]
     public void Layer_Stack_Matches_Upstream_Through_Prefill_And_Decode()

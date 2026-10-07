@@ -22,4 +22,15 @@ public sealed class DeepSeekV41SharedAttention
 
     /// <summary>Entries per token in <see cref="Candidates"/>.</summary>
     public int CandidateWidth { get; set; }
+
+    /// <summary>Drops every slot, so nothing from one sequence can reach the next.</summary>
+    public void Reset()
+    {
+        CompressKv = null;
+        IndexKeys = null;
+        Topk = null;
+        TopkWidth = 0;
+        Candidates = null;
+        CandidateWidth = 0;
+    }
 }
