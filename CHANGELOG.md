@@ -28,6 +28,15 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.269
+
+- **Fixed: the host-RAM guard no longer refuses a quantized GGUF a CUDA device loads without dequantizing.** `TextService`
+  demanded 2.5x the file size free before every GGUF load, which is the cost of dequantizing onto host buffers. A backend
+  that reads quantized weights (`SupportsQuantized`) keeps Q4_0/Q5_0/Q8_0/Q4_K/Q5_K/Q6_K compressed and reads them through
+  the mmap, so it now needs 1.15x the file plus the F32 size of any other quantized tensor in it and of the token and
+  per-layer embedding tables (those are always widened). Dequantizing backends, SSM models and the tensor-parallel and layer-split paths keep 2.5x. A 44 GB Kolibri-1
+  Q4_K_M was refused on a 64 GB server with "need ~110 GB headroom".
+
 ## alpha.268
 
 - **Fixed: a ControlFoley video or reference clip no longer needs a prompt.** `MusicService` refused a request with an empty
