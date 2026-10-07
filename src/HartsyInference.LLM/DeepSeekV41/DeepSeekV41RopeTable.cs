@@ -73,7 +73,7 @@ public sealed class DeepSeekV41RopeTable
 
         double low = Math.Max(Math.Floor(CorrectedDim(scaling.BetaFast)), 0.0);
         double high = Math.Min(Math.Ceiling(CorrectedDim(scaling.BetaSlow)), rotaryDim - 1);
-        double span = Math.Max(high - low, 1e-3);
+        double span = Math.Max(high - low, 1e-3); // upstream's guard, which also clamps a negative span
         for (int i = 0; i < half; i++)
         {
             double ramp = Math.Clamp((i - low) / span, 0.0, 1.0);

@@ -3,7 +3,8 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <summary>Softmax pooling of <c>ratio</c> consecutive tokens into one KV latent, plus the partial group carried between calls.</summary>
 /// <remarks>Works per absolute position, so prefill from 0, chunked prefill and single-token decode all share one path and
 /// agree with upstream <c>Compressor</c>. Inputs are the already projected <c>wkv</c> and <c>wgate</c> rows; the caller
-/// applies the output RMS norm. Ratio 1 has no pooling and no state, so it is not handled here.</remarks>
+/// applies the output RMS norm. Ratio 1 has no pooling and no state, so it is not handled here. Upstream's compressor has
+/// no positional bias and no overlapping windows, so plain per-group softmax is the whole operation.</remarks>
 public sealed class DeepSeekV41CompressorState
 {
     private readonly float[] _kv;
