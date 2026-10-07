@@ -275,6 +275,7 @@ public static class HartsyInferenceServiceExtensions
         app.MapTextEndpoints();
         app.MapAudioEndpoints();
         app.MapEmbeddingEndpoints();
+        app.MapDecisionEndpoints();
         app.MapVisionEndpoints();
         app.MapMeshEndpoints();
         app.MapVideoEndpoints();

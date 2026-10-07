@@ -39,6 +39,11 @@ public sealed record MimiConfig
     public int CodebookDim { get; init; } = 256;
     public IReadOnlyList<int> ResidualDilations { get; init; } = [1, 1];
 
+    /// <summary>Output frame rate in Hz: the encoder strides give 25 Hz, and Mimi's 2× frame-rate downsample
+    /// before quantization halves it to 12.5 Hz.</summary>
+    public double FrameRateHz => FrameRate / 2.0;
+
+    /// <summary>Frame rate of the SEANet encoder strides alone, before Mimi's 2× downsample (see <see cref="FrameRateHz"/>).</summary>
     public int FrameRate
     {
         get

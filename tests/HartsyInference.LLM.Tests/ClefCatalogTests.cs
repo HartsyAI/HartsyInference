@@ -18,13 +18,15 @@ public sealed class ClefCatalogTests
             text =>
             {
                 Assert.Equal("bartowski/Cloudflare_clef-GGUF", text.Repo);
-                Assert.Equal("Cloudflare_clef-IQ2_XXS.gguf", text.RepoPath);
+                Assert.Equal("Cloudflare_clef-Q2_K.gguf", text.RepoPath);
                 Assert.Equal("transformer", text.Role);
+                Assert.Matches("^[0-9a-f]{64}$", text.Sha256);
             },
             vision =>
             {
                 Assert.Equal("mmproj-Cloudflare_clef-f16.gguf", vision.RepoPath);
                 Assert.Equal("mmproj", vision.Role);
+                Assert.Matches("^[0-9a-f]{64}$", vision.Sha256);
             });
     }
 }

@@ -19,6 +19,7 @@ public static class Modalities
         Modality.Fx => "fx",
         Modality.Embedding => "embedding",
         Modality.Restore => "restore",
+        Modality.Decision => "decision",
         _ => modality.ToString().ToLowerInvariant(),
     };
 
@@ -48,6 +49,8 @@ public static class Modalities
             case "embedding":
             case "embed": modality = Modality.Embedding; return true;
             case "restore": modality = Modality.Restore; return true;
+            case "decision":
+            case "decide": modality = Modality.Decision; return true;
             default: return false;
         }
     }
@@ -57,6 +60,6 @@ public static class Modalities
     {
         Modality.Image, Modality.Text, Modality.Speech, Modality.Music, Modality.Transcribe,
         Modality.Vision, Modality.Video, Modality.Mesh, Modality.World, Modality.VoiceConvert, Modality.Fx,
-        Modality.Embedding, Modality.Restore,
+        Modality.Embedding, Modality.Restore, Modality.Decision,
     };
 }

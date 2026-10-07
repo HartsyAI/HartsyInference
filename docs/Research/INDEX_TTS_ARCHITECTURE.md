@@ -216,3 +216,60 @@ generated latent sequence should include or exclude the position where `stop_mel
 excludes it); and all real-weight numerical parity, which needs the checkpoint run end-to-end against the Python
 reference once a build environment is available. See `docs/Checklists/MODEL_STATUS_AUDIO.md`'s IndexTTS-1.5 row.
 | (Comparison) StyleTTS-2-class non-AR TTS | [KOKORO_ARCHITECTURE.md](KOKORO_ARCHITECTURE.md) |
+
+## IndexTTS-2.0 vs 2.5 (ground-truthed against both real checkpoints and both inference files)
+
+The two released IndexTTS-2 checkpoints share the `UnifiedVoice`/`model_v2.py` classes but run through different
+inference files — `indextts/infer_v2.py` (2.0) and `indextts/infer_v2_5.py` (2.5). They share the GPT backbone, the
+emotion Conformer+Perceiver, the S2Mel DiT, the CAM++ style vector (S2Mel's `style` in both) and the stock BigVGAN.
+They differ in four places, all selected by `IndexTts2Version`:
+
+| | 2.0 (`infer_v2.py`) | 2.5 (`infer_v2_5.py`) |
+|---|---|---|
+| GPT speaker conditioning | `conformer_perceiver`: Conformer+Perceiver over the w2v-bert feature → 32 latents; conds = `[latents + emoVec][speed_emb(1)][speed_emb(0)]`; no `lang_embedding` | `campplus`: `spk_emb_proj(style)` → 1 slot; conds = `[spk + emoVec][0][0]`; `lang_embedding` added to the text |
+| Text | SentencePiece `bpe.model`, 12 001-row embedding | tiktoken rank file, 60 510-row embedding |
+| Semantic codec | `amphion/MaskGCT` RepCodec, no resample; only `quantize` and `quantizer.vq2emb` are used | bundled `codec.pth` EnhancedCodec (2x down/up); `decode(codes)` |
+| Handoff to S2Mel | `S_infer = vq2emb(codes) + gpt_layer(second GPT pass)`, `target = codes × 1.72` | `S_infer = decode(codes)`, `target = len(S_infer) × 1.72 × duration_factor`; no second pass, no `gpt_layer` |
+
+Second pass details (2.0): the `gpt(...)` call re-uses the same conditioning prefix as sampling, embeds the text as
+`[start, tokens…, stop]` from position 0 (no language embedding), and the mel as `[start, c1…cT, stop]`; the
+outputs are taken at the mel positions, `ln_f` then `final_norm` applied, and the last two dropped (the C# feeds
+`[start, c1…c(T-1)]` instead — identical under the causal mask). `gpt_layer` is `s2mel.pth`'s
+`net.gpt_layer.{0,1,2}`: Linear(1280,256) → Linear(256,128) → Linear(128,1024), no activation. `s2mel.pth` carries
+`gpt_layer` in both repos, but 2.5 never uses it.
+
+`speed_emb` is a real `nn.Embedding(2, 1280)` lookup in 2.0's conds, though the public API never varies it
+(`use_speed` is always zeros); the C# reproduces the lookup rather than hard-coding zeros.
+
+A reference-vs-port deviation shared by both versions: the C# decoder trims long runs of the silence token (52)
+from the sampled codes, which the reference defines (`remove_long_silence`) but never calls in either inference file.
+
+Verification: a real-weight CPU pipeline test (`IndexTts2V20PipelineRealWeightTests`) runs neutral, explicit-vector,
+emotion-reference and free-text emotion generation from one reference voice; the neutral clip transcribes through
+Whisper-base as the input text.
+
+
+## Reference-parity findings (alpha.257, checked against the PyTorch reference stage by stage)
+
+`IndexTts2V20PythonParityTests` feeds the C# stages the reference's own intermediates and compares outputs; a second test
+compares greedy decoding token for token. Things a listen-only check could not see, all now matching:
+
+| Stage | What the reference really does | Error before → after |
+|---|---|---|
+| w2v-bert input | `SeamlessM4TFeatureExtractor` multiplies the waveform by 2^15 before the Kaldi fbank; with `[-1,1]` audio quiet frames hit the log floor | features 8.7% → 5e-6; `hidden_states[17]` 16% → 1e-5 |
+| Conformer position encoding | IndexTTS's `RelPositionalEncoding` inherits `PositionalEncoding.__init__` (ignores `reverse`), so the attention gets `pe[0:T]` (forward sinusoid) and `rel_shift` is removed — not the 2T-1 relative table | 2.0 speaker latents 11% → 1e-4 |
+| Decode positions | `GPT2InferenceModel.forward` uses `attention_mask.shape[1] - mel_len` → start token 0, first code 2, then 3, 4… (position 1 skipped) | greedy codes now identical |
+| 2.0 prompt condition | `length_regulator(S_ref)` with `S_ref` the semantic codec's quantized embedding (2.5's `infer_v2_5.py` comments `S_ref` out and uses the w2v-bert feature) | exact |
+| Resampling | file → 22.05 kHz (librosa soxr) → 16 kHz with `torchaudio.transforms.Resample` (sinc_interp_hann, 6 zero crossings, 0.99 roll-off) | 16 kHz signal 3.4% → 6e-5 |
+| Repetition penalty | HF applies it to `input_ids`, which are all ones plus the start token → token 1 is penalised from step 0 | codes identical with penalty 10 |
+| `remove_long_silence` | defined, never called | removed |
+| Emotion vector | library path and QwenEmotion path use weights as given; only the WebUI calls `normalize_emo_vec` | opt-in `NormalizeEmoVector` |
+| Segmentation | tokenize the whole text once, then `split_segments` (punctuation pieces, comma/hyphen recursion, merge rules, `quick_streaming_tokens`); 200 ms silence between segments | golden-tested |
+| Text normalization | WeTextProcessing English FST (numbers, dates, money, titles…) then the punctuation map | digits were read as raw digits |
+
+Remaining numeric differences against the reference, all benign: CAM++ style 4e-3 relative (log-floor sensitivity in the
+fbank), the S2Mel DiT estimator 1e-3–4e-3 per step (25-step solve from identical noise: 7.7e-3, cosine 0.99997), BigVGAN
+1.6e-5, everything else ≤ 1e-4. Not implemented: beam search (`num_beams=3`), the reference's default for the GPT.
+
+Resource note: the reference dump and harness live outside the repo; to regenerate, run the reference's `infer_generator`
+stage by stage on CPU and write each intermediate to safetensors (see the test's remarks for the keys).

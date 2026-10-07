@@ -100,21 +100,32 @@ internal sealed class PickleMachine
     {
         object?[] args = (object?[])Pop()!;
         object? func = Pop();
-        if (func is PickleGlobal g)
+        _stack.Add(func is PickleGlobal g ? ApplyReduce(g, args) : null);
+    }
+
+    /// <summary>Models the handful of torch reduce targets a <c>state_dict</c> pickle can call, by name only
+    /// (never by importing/executing the referenced function). <c>_rebuild_from_type_v2(func, type, args, state)</c>
+    /// — emitted by newer PyTorch for a tensor carrying subclass metadata (e.g. a cloned/no-grad flag) — is just a
+    /// wrapper that calls <paramref name="func"/>'s own target on its own <c>args</c> tuple and discards
+    /// <paramref name="args"/>[1] (the type) and [3] (the state dict); recursing back through this same dispatch
+    /// keeps that unwrap generic instead of hardcoding only the <c>_rebuild_tensor_v2</c> case it happens to wrap
+    /// today.</summary>
+    private object? ApplyReduce(PickleGlobal g, object?[] args)
+    {
+        switch (g.Name)
         {
-            switch (g.Name)
-            {
-                case "_rebuild_tensor_v2" or "_rebuild_tensor":
-                    _stack.Add(new PickleTensor(
-                        (PickleStorage)args[0]!, ToLong(args[1]), ToLongArray(args[2]), ToLongArray(args[3])));
-                    return;
-                case "_rebuild_parameter":
-                    _stack.Add(args[0]); return; // wraps a tensor; unwrap
-                case "OrderedDict":
-                    _stack.Add(new Dictionary<string, object?>()); return;
-            }
+            case "_rebuild_tensor_v2" or "_rebuild_tensor":
+                return new PickleTensor(
+                    (PickleStorage)args[0]!, ToLong(args[1]), ToLongArray(args[2]), ToLongArray(args[3]));
+            case "_rebuild_parameter":
+                return args[0]; // wraps a tensor; unwrap
+            case "_rebuild_from_type_v2":
+                return args[0] is PickleGlobal inner ? ApplyReduce(inner, (object?[])args[2]!) : null;
+            case "OrderedDict":
+                return new Dictionary<string, object?>();
+            default:
+                return null; // inert for any reduce we don't model
         }
-        _stack.Add(null); // inert for any reduce we don't model
     }
 
     private object ResolvePersid(object? pid)

@@ -22,7 +22,10 @@ public static class GgufConfigFactory
         int hidden = RequireUInt(metadata, $"{arch}.embedding_length");
         int heads = RequireUInt(metadata, $"{arch}.attention.head_count");
         int kvHeads = (int)metadata.GetUInt32($"{arch}.attention.head_count_kv", (uint)heads);
-        int intermediate = RequireUInt(metadata, $"{arch}.feed_forward_length");
+        // Kolibri-1 is all-MoE: its converter emits only the expert FFN lengths, no dense feed_forward_length.
+        int intermediate = arch == "kolibri1" && !metadata.ContainsKey($"{arch}.feed_forward_length")
+            ? KolibriDenseFfnFallback(metadata, arch)
+            : RequireUInt(metadata, $"{arch}.feed_forward_length");
 
         // head_dim: GGUF key_length when present, else hidden / heads (coupled).
         int headDim = (int)metadata.GetUInt32($"{arch}.attention.key_length", 0u);
@@ -68,6 +71,7 @@ public static class GgufConfigFactory
         // Ported directly from llama.cpp's src/models/gemma4.cpp (no local reference model existed to diff
         // against at implementation time — verify empirically against a real checkpoint before trusting output).
         bool isGemma4 = arch == "gemma4";
+        bool isKolibri1 = arch == "kolibri1";
         int perLayerEmbedDim = isGemma4 ? (int)metadata.GetUInt32($"{arch}.embedding_length_per_layer_input", 0u) : 0;
         // Gemma-4's mobile-oriented E2B/E4B variants (Gemma-3n lineage) skip computing K/V on their last N
         // layers entirely, reusing an earlier "donor" layer's cache slot instead (see TransformerConfig.KvDonorLayer
@@ -89,14 +93,16 @@ public static class GgufConfigFactory
         // period every other sliding-window architecture here uses — read it directly rather than guessing a
         // period from a single scalar (a bool array silently misread as a scalar UINT32 defaults to 0, which
         // made every layer read back as "global" and corrupted per-layer head-dim sizing).
-        bool[]? swaArray = isGemma4 ? metadata.GetBoolArray($"{arch}.attention.sliding_window_pattern") : null;
+        bool[]? swaArray = isGemma4 || isKolibri1
+            ? metadata.GetBoolArray($"{arch}.attention.sliding_window_pattern") : null;
         bool[]? globalLayers = swaArray is { Length: > 0 } ? new bool[decoderLayers] : null;
         if (globalLayers is not null)
             for (int i = 0; i < decoderLayers; i++) globalLayers[i] = !swaArray![i];   // is_swa=true -> local -> NOT global
         // GLM-4 (LLM_ARCH_GLM4, 0414 lineage): Gemma-style sandwich norm but RMSNorm + QKV biases + fused gate/up
         // FFN + partial RoPE + NORM (interleaved) rope. The fused gate/up is split in GgufLanguageModel.
         bool isGlm4 = arch == "glm4";
-        bool sandwich = (isGemma || isGlm4) && weights.ContainsKey("model.layers.0.post_feedforward_layernorm.weight");
+        bool sandwich = (isGemma || isGlm4 || isKolibri1)
+            && weights.ContainsKey("model.layers.0.post_feedforward_layernorm.weight");
         float embScale = isGemma ? (float)Math.Sqrt(hidden) : 1f;
         // Gemma-4 hardcodes attention scaling to 1.0 (no query_pre_attn_scalar) — forcing QueryPreAttnScalar=1
         // makes the existing AttnScale property (1/sqrt(QueryPreAttnScalar)) come out to the desired constant 1.
@@ -241,8 +247,15 @@ public static class GgufConfigFactory
             int sharedFfn = (int)metadata.GetUInt32($"{arch}.expert_shared_feed_forward_length", 0u);
             if (sharedFfn == 0)
                 sharedFfn = (int)metadata.GetUInt32($"{arch}.expert_shared_count", 0u) * expertFfn;
-            // expert_gating_func: 1 = softmax (Mixtral/Qwen/OLMoE), 2 = sigmoid (DeepSeek-V3).
-            bool sigmoid = metadata.GetUInt32($"{arch}.expert_gating_func", 1u) == 2u;
+            // expert_gating_func: 1 = softmax, 2 = sigmoid, 5 = Kolibri's biased-logit selection with
+            // unbiased sigmoid routing weights.
+            uint expertGating = metadata.GetUInt32($"{arch}.expert_gating_func", 1u);
+            MoeScoring scoring = expertGating switch
+            {
+                2u => MoeScoring.Sigmoid,
+                5u => MoeScoring.SigmoidLogitAdd,
+                _ => MoeScoring.Softmax,
+            };
             int firstDense = (int)metadata.GetUInt32($"{arch}.leading_dense_block_count", 0u);
             // DeepSeek-V3 / Kimi-K2 node-limited routing: experts partitioned into expert_group_count groups, the
             // top expert_group_used_count groups eligible per token. 0 = flat top-k (V2-Lite, Mixtral, Qwen-MoE).
@@ -260,7 +273,7 @@ public static class GgufConfigFactory
                 NumExpertsPerTok = expertUsed,
                 MoeIntermediateSize = expertFfn,
                 SharedExpertIntermediateSize = sharedFfn,
-                Scoring = sigmoid ? MoeScoring.Sigmoid : MoeScoring.Softmax,
+                Scoring = scoring,
                 NormTopKProb = normTopK,
                 FirstDenseLayers = firstDense,
                 ExpertGroupCount = groupCount,
@@ -325,7 +338,7 @@ public static class GgufConfigFactory
             AlibiSlopes = alibiMaxBias > 0f ? TransformerConfig.ComputeAlibiSlopes(heads, alibiMaxBias) : System.Array.Empty<float>(),
             ParallelResidual = isCohere || gptneoxParallel,
             // cohere2 = sliding-window+RoPE on 3 of every 4 layers, full-attention+NoPE on the 4th.
-            NoRopeOnGlobalLayers = arch == "cohere2",
+            NoRopeOnGlobalLayers = arch is "cohere2" or "kolibri1",
             RopeLocalTheta = localTheta,
             SlidingWindow = swWindow,
             SlidingWindowPattern = swPattern,
@@ -411,6 +424,14 @@ public static class GgufConfigFactory
         float* p = (float*)f32.DataPointer;
         for (int i = 0; i < n; i++) factors[i] = p[i];
         return factors;
+    }
+
+    private static int KolibriDenseFfnFallback(GgufMetadata metadata, string arch)
+    {
+        foreach (string key in new[] { $"{arch}.expert_feed_forward_length", $"{arch}.expert_shared_feed_forward_length" })
+            if (metadata.ContainsKey(key)) return (int)metadata.GetUInt32(key);
+        throw new ArgumentException(
+            $"GGUF metadata has neither '{arch}.feed_forward_length' nor an expert FFN length for Kolibri-1.", nameof(metadata));
     }
 
     private static int RequireUInt(GgufMetadata metadata, string key)

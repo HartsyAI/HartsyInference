@@ -689,6 +689,7 @@ public sealed class VideoPlanningEndpointsTests : IClassFixture<WebApplicationFa
         public IMeshService Mesh => throw new NotSupportedException();
         public IWorldService World => throw new NotSupportedException();
         public IEmbeddingService Embeddings => throw new NotSupportedException();
+        public IDecisionService Decisions => throw new NotSupportedException();
 
         public bool IsSupported(Modality modality) => modality == Modality.Video;
         public void SetBackend(string selector) => throw new NotSupportedException();

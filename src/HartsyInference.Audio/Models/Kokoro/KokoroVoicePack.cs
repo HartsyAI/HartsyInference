@@ -70,6 +70,39 @@ public sealed class KokoroVoicePack : IDisposable
         return new KokoroVoicePack(Path.GetFileNameWithoutExtension(path), table, n);
     }
 
+    /// <summary>A pack whose every style row is the weighted mean of the same row in <paramref name="packs"/> (the
+    /// reference blends voices with <c>torch.mean(torch.stack(packs), 0)</c>, i.e. equal weights). Packs of different
+    /// lengths blend over the rows they share.</summary>
+    public static KokoroVoicePack WeightedMean(string name, IReadOnlyList<KokoroVoicePack> packs, IReadOnlyList<float> weights)
+    {
+        ArgumentNullException.ThrowIfNull(packs);
+        ArgumentNullException.ThrowIfNull(weights);
+        if (packs.Count == 0 || packs.Count != weights.Count)
+            throw new ArgumentException("WeightedMean needs one weight per pack and at least one pack.", nameof(weights));
+        double total = 0;
+        foreach (float w in weights) total += w;
+        if (!(total > 0)) throw new ArgumentException("The weights must sum to a positive number.", nameof(weights));
+
+        foreach (KokoroVoicePack pack in packs) pack.ThrowIfDisposed();
+        int n = packs.Min(static p => p.NumBuckets);
+        Tensor table = new(new TensorShape(n, StyleWidth), DType.F32);
+        long count = (long)n * StyleWidth;
+        unsafe
+        {
+            float* dst = (float*)table.DataPointer;
+            for (long i = 0; i < count; i++)
+            {
+                double acc = 0;
+                for (int k = 0; k < packs.Count; k++)
+                {
+                    acc += weights[k] * ((float*)packs[k]._table.DataPointer)[i];
+                }
+                dst[i] = (float)(acc / total);
+            }
+        }
+        return new KokoroVoicePack(name, table, n);
+    }
+
     /// <summary>Returns a fresh <c>[1, 256]</c> tensor containing the style row for a
     /// sequence of <paramref name="phonemeCount"/> phonemes, not counting the BOS/EOS pads (the reference
     /// <c>pack[len(ps) - 1]</c>). The index is clamped into <c>[0, NumBuckets-1]</c>.

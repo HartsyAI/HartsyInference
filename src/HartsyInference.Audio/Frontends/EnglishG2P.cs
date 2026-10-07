@@ -38,7 +38,8 @@ public sealed partial class EnglishG2P
     private readonly EspeakPhonemizer? _espeak;
 
     /// <summary>Builds the front-end over <paramref name="lexicon"/>, with optional OOV fallbacks: a CMUdict stream
-    /// (lines <c>"word  PH PH ..."</c>, first pronunciation wins) and an en-us espeak phonemizer.</summary>
+    /// (lines <c>"word  PH PH ..."</c>, first pronunciation wins; American only) and an espeak phonemizer for the
+    /// lexicon's English (en-us, or en-gb for a British lexicon).</summary>
     public EnglishG2P(MisakiLexicon lexicon, Stream? cmudict = null, EspeakPhonemizer? espeak = null)
     {
         ArgumentNullException.ThrowIfNull(lexicon);
@@ -293,11 +294,12 @@ public sealed partial class EnglishG2P
     private string FallbackPiece(string word)
     {
         string lower = word.ToLowerInvariant();
-        if (_cmudict is not null && _cmudict.TryGetValue(lower, out string[]? phones))
+        // CMUdict is American, so British reads the words misaki lacks through espeak en-gb alone, as misaki does.
+        if (!_lexicon.British && _cmudict is not null && _cmudict.TryGetValue(lower, out string[]? phones))
             return ArpabetToIpa.ConvertWord(phones);
         if (_espeak is not null)
         {
-            string ipa = EspeakToMisaki.Convert(_espeak.PhonemizeToIpa(word, "en-us"));
+            string ipa = EspeakToMisaki.Convert(_espeak.PhonemizeTied(word, '^'), _lexicon.British);
             if (ipa.Length > 0) return ipa;
         }
         // A piece with no vowel letter ("kg") is an abbreviation; espeak spells those out.

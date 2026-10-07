@@ -6,6 +6,9 @@ internal sealed class EspeakPhonemeList
     // stress_phonemes[] indexed by stress level (matches EspeakStress); inverted here to recover the level.
     private static readonly byte[] StressPhonemes = [3, 2, 4, 5, 6, 7, 26];
 
+    private const byte PhonLengthen = 12;
+    private const byte PhonEndWord = 15;
+
     private readonly EspeakPhonemeTable _phon;
     private readonly EspeakPhonemeInterpreter _interp;
     private readonly int _stressFlags;
@@ -26,19 +29,26 @@ internal sealed class EspeakPhonemeList
     }
 
     /// <summary>Builds the phoneme list for one clause from each word's stressed phoneme codes, then applies the change-phonemes pass and reduction; guard pause entries bracket the list so context conditions are safe.</summary>
-    public List<EspeakPhonemeListEntry> Build(IReadOnlyList<IReadOnlyList<byte>> words)
+    public List<EspeakPhonemeListEntry> Build(IReadOnlyList<IReadOnlyList<byte>> words, IReadOnlySet<int>? hyphenated = null,
+        IReadOnlySet<int>? fromDictionary = null)
     {
         List<EspeakPhonemeListEntry> list = [PauseEntry(), PauseEntry()]; // leading guards (indices 0,1)
 
         for (int w = 0; w < words.Count; w++)
         {
             int pendingStress = EspeakProgram.StressUnstressed;
-            bool wordStart = true;
+            bool wordStart = hyphenated is null || !hyphenated.Contains(w); // no new word after a hyphen
             int wordMax = 0;
             List<int> wordVowelEntries = [];
 
             foreach (byte code in words[w])
             {
+                if (code == PhonEndWord) { wordStart = true; continue; } // || in a word's phonemes: a word break
+                if (code == PhonLengthen && list.Count > 2)
+                {
+                    list[^1].SynthFlags |= EspeakProgram.SflagLengthen; // ':' lengthens the phoneme before it
+                    continue;
+                }
                 if (!_phon.TryGet(code, out EspeakPhoneme ph)) continue;
                 if (ph.Type == EspeakPhoneme.TypeStress)
                 {
@@ -48,6 +58,7 @@ internal sealed class EspeakPhonemeList
                 }
 
                 EspeakPhonemeListEntry e = new(code, ph) { Type = ph.Type };
+                if (fromDictionary is not null && fromDictionary.Contains(w)) e.SynthFlags |= EspeakProgram.SflagDictionary;
                 if (wordStart) { e.SourceIx = w + 1; wordStart = false; }
                 if (ph.Type == EspeakPhoneme.TypeVowel)
                 {
@@ -132,6 +143,17 @@ internal sealed class EspeakPhonemeList
                     }
                 }
                 else unstressCount = 0;
+            }
+
+            // A lengthened fricative, nasal or liquid is written doubled ("ll"), other phonemes keep the length mark.
+            EspeakPhonemeListEntry nx = list[j + 1];
+            if ((nx.SynthFlags & EspeakProgram.SflagLengthen) != 0 && nx.Type is EspeakPhoneme.TypeFricative
+                    or EspeakPhoneme.TypeVFricative or EspeakPhoneme.TypeNasal or EspeakPhoneme.TypeLiquid)
+            {
+                nx.SynthFlags &= ~EspeakProgram.SflagLengthen;
+                EspeakPhonemeListEntry twin = new(nx.PhCode, nx.Ph) { Type = nx.Type, SourceIx = nx.SourceIx, StressLevel = nx.StressLevel, WordStress = nx.WordStress };
+                nx.SourceIx = 0;
+                list.Insert(j + 1, twin);
             }
 
             // Append a linking phoneme (e.g. the rhotic ɹ that a rhotic vowel inserts before a following vowel).

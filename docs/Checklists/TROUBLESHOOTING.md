@@ -959,6 +959,15 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
   wrong one runs silently and only pitch/energy go wrong. Diff `pred_dur`/F0/N against `KModel` with
   `tools/kokoro/prosody_reference.py`. Phonemes must be misaki's, not a CMUdict mapping: Kokoro was trained on
   misaki's unstressed function words, flap `T` and `ᵊ`; compare `EnglishG2P` against misaki itself.
+- **A Kokoro voice speaks the wrong language or accent:** the voice's first letter picks its front-end
+  (`KokoroFrontend`: a/b English, e/f/h/i/p espeak). Spanish, French, Hindi, Italian and Portuguese need
+  espeak-ng 1.52 data. Kokoro installs it into the model cache on first use (`EspeakDataInstaller`), and
+  `ESPEAK_DATA_DIR` overrides it. Older system data (Ubuntu's 1.51) reads some words differently from what the
+  model was trained on. Check a sentence against misaki `EspeakG2P` with `KokoroEspeakParityTests`.
+- **espeak output differs from espeak-ng only inside sentences:** espeak reads a clause, not single words. Rules
+  look into the next word, entries depend on position (`$atend`), the previous word (`$noun`/`$verb`) or the
+  following words (multi-word entries), and `$u+` words are stressed only at the end of a clause.
+  `EspeakSentenceParityTests` covers this.
 - **F5-TTS:** ConvNeXt filler-tail masking; ×1000 timestep sinusoid scale; erf-GELU stem vs tanh-GELU FFN.
 - **Fish-Speech:** the fast depth-LM must take the **PRE-norm** slow hidden (`norm_fastlayer_input=False`).
 - **espeak `MatchRule` RULE_PRE OOB:** indexed past the per-word buffer start on words like "Americans" —

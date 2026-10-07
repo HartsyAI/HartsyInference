@@ -24,4 +24,10 @@ public sealed record GptConfig
 
     /// <summary>IndexTTS-1.5 T2S preset (hidden 1280 / 24 layers / 20 heads); checkpoint is a standard biased HF GPT-2.</summary>
     public static GptConfig IndexTts15 => new() { Hidden = 1_280, NumLayers = 24, NumHeads = 20, BlockSize = 1_402, Bias = true };
+
+    /// <summary>IndexTTS-2 T2S preset (hidden 1280 / 24 layers / 20 heads, same width/depth as 1.5) — shared by
+    /// both 2.0 and 2.5 (confirmed identical <c>gpt.model_dim</c>/<c>layers</c>/<c>heads</c> in both real
+    /// config.yaml files; only vocab size and the speaker-conditioning path differ). BlockSize is
+    /// <c>max_mel_tokens(1815) + max_text_tokens(600) + 2</c>, the real <c>post_init_gpt2_config</c>'s formula.</summary>
+    public static GptConfig IndexTts2 => new() { Hidden = 1_280, NumLayers = 24, NumHeads = 20, BlockSize = 2_417, Bias = true };
 }

@@ -84,7 +84,8 @@ public sealed class GgufLanguageModel : IDisposable
         string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
         bool llama3Family = pre is "llama-bpe" or "llama3" or "smaug-bpe";
         bool gpt4o = pre is "gpt-4o" or "o200k";   // o200k_base split (Phi-4, GPT-OSS, GPT-4o)
-        string? preRegex = llama3Family ? Llama3PreTokenRegex : gpt4o ? Gpt4oPreTokenRegex : null;
+        bool singleDigit = pre == "kolibri1";   // llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN2; matches Kolibri-1's tokenizer.json split
+        string? preRegex = llama3Family ? Llama3PreTokenRegex : gpt4o ? Gpt4oPreTokenRegex : singleDigit ? Qwen2PreTokenRegex : null;
         return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, preRegex, ignoreMerges: llama3Family);
     }
 
@@ -118,6 +119,10 @@ public sealed class GgufLanguageModel : IDisposable
             return ChatMlOrRaw();
         }
     }
+
+    // Qwen2-style split (Kolibri-1's tokenizer.json): case-insensitive contractions, single digits, newline-aware whitespace.
+    internal const string Qwen2PreTokenRegex =
+        @"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
     // Llama-3 / GPT-4 byte-level pre-token split (matches llama.cpp LLAMA3 + HF tokenizer.json).
     private const string Llama3PreTokenRegex =

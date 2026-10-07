@@ -209,7 +209,8 @@ public sealed class KokoroPipeline : IDisposable
 
     /// <summary>Synthesizes audio from an IPA phoneme string. <paramref name="voiceName"/>
     /// must match a file under <c>voices/{voiceName}.bin</c> in the Kokoro repo cache
-    /// (e.g. <c>"af_heart"</c>). <paramref name="speed"/> scales the predicted durations
+    /// (e.g. <c>"af_heart"</c>), or name a blend of such packs (<see cref="KokoroVoiceMix"/>, e.g.
+    /// <c>"af_bella,af_sky"</c>). <paramref name="speed"/> scales the predicted durations
     /// (1.0 = natural; 1.5 = faster, 0.7 = slower). A string longer than PLBERT can take is split by
     /// <see cref="KokoroPhonemeChunker"/> and the pieces' audio concatenated, as the reference pipeline does.
     /// <paramref name="cancel"/> is checked at every stage boundary,
@@ -415,6 +416,17 @@ public sealed class KokoroPipeline : IDisposable
     private KokoroVoicePack GetOrLoadVoicePack(string voiceName)
     {
         if (_voicePackCache.TryGetValue(voiceName, out KokoroVoicePack? cached)) return cached;
+        KokoroVoiceMix mix = KokoroVoiceMix.Parse(voiceName);
+        if (mix.IsBlend)
+        {
+            // A blend such as "af_bella,af_sky" (KPipeline.load_voice): the component packs, then their mean.
+            KokoroVoicePack[] parts = mix.Parts.Select(p => GetOrLoadVoicePack(p.Voice)).ToArray();
+            KokoroVoicePack blend = mix.Blend(voiceName, parts);
+            _voicePackCache[voiceName] = blend;
+            return blend;
+        }
+        voiceName = mix.PrimaryVoice;
+        if (_voicePackCache.TryGetValue(voiceName, out cached)) return cached;
         string path = Path.Combine(_repoDir, "voices", $"{voiceName}.bin");
         if (!File.Exists(path))
             throw new FileNotFoundException(

@@ -14,26 +14,35 @@ namespace HartsyInference.Audio.Models.IndexTts;
 /// LayerNorm — verified against the real <c>gpt.pth</c> checkpoint's key set and the upstream source.</remarks>
 internal sealed unsafe class IndexTtsPerceiver : IDisposable
 {
-    private const int NumLatents = 32;
-    private const int DimHead = 64;
-    private const int Heads = 8;
+    private readonly int _numLatents;
+    private readonly int _dimHead;
+    private readonly int _heads;
 
     private readonly int _dim;        // 1280 (GPT hidden)
     private readonly int _dimContext; // 512 (Conformer output)
     private readonly int _depth;
     private int _disposed;
 
-    private Tensor? _latents;                 // [32, dim]
+    private Tensor? _latents;                 // [numLatents, dim]
     private Tensor? _projCtxW, _projCtxB;      // [dim, dimContext]
     private Tensor?[] _toQ = [], _toKv = [], _toOut = [];
     private Tensor?[] _ffW1 = [], _ffB1 = [], _ffW2 = [], _ffB2 = [];
     private Tensor? _normGamma;                // RMSNorm scale [dim]
 
-    public IndexTtsPerceiver(int dim, int dimContext, int depth = 2)
+    /// <summary><paramref name="numLatents"/>/<paramref name="heads"/>/<paramref name="dimHead"/> default to
+    /// IndexTTS-1.5's speaker perceiver (32 latents, 8 heads of 64) — IndexTTS-2's emotion perceiver is the same
+    /// upstream <c>PerceiverResampler</c> shape instantiated with <c>num_latents=1, heads=4</c> (real
+    /// <c>model_v2.py</c>: <c>PerceiverResampler(1024, dim_context=512, ff_mult=2, heads=4, num_latents=1)</c>);
+    /// <c>ff_mult</c> needs no parameter since <see cref="FeedForward"/> already infers it from the loaded
+    /// weight's own shape.</summary>
+    public IndexTtsPerceiver(int dim, int dimContext, int depth = 2, int numLatents = 32, int heads = 8, int dimHead = 64)
     {
         _dim = dim;
         _dimContext = dimContext;
         _depth = depth;
+        _numLatents = numLatents;
+        _heads = heads;
+        _dimHead = dimHead;
         _toQ = new Tensor?[depth]; _toKv = new Tensor?[depth]; _toOut = new Tensor?[depth];
         _ffW1 = new Tensor?[depth]; _ffB1 = new Tensor?[depth]; _ffW2 = new Tensor?[depth]; _ffB2 = new Tensor?[depth];
     }
@@ -62,7 +71,7 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
         if (_latents is null) throw new InvalidOperationException("IndexTtsPerceiver weights not loaded.");
         Tensor context = WhisperOps.ProjectLinear(backend, conformerOut, _projCtxW!, _projCtxB, 1, t, _dimContext, _dim);
 
-        Tensor latents = new(new TensorShape(1, NumLatents, _dim), DType.F32);
+        Tensor latents = new(new TensorShape(1, _numLatents, _dim), DType.F32);
         float* lp = (float*)_latents!.DataPointer;
         float* l0 = (float*)latents.DataPointer;
         for (long i = 0; i < latents.ElementCount; i++) l0[i] = lp[i];
@@ -90,17 +99,17 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
     /// each other. All linears bias-free.</summary>
     private Tensor Attention(IBackend backend, Tensor latents, Tensor context, int tContext, int layer)
     {
-        int dimInner = DimHead * Heads;
-        int kvLen = NumLatents + tContext;
+        int dimInner = _dimHead * _heads;
+        int kvLen = _numLatents + tContext;
 
-        Tensor q = WhisperOps.ProjectLinear(backend, latents, _toQ[layer]!, null, 1, NumLatents, _dim, dimInner);
+        Tensor q = WhisperOps.ProjectLinear(backend, latents, _toQ[layer]!, null, 1, _numLatents, _dim, dimInner);
 
         Tensor kvInput = new(new TensorShape(1, kvLen, _dim), DType.F32);
         float* kvp = (float*)kvInput.DataPointer;
         float* latp = (float*)latents.DataPointer;
         float* ctxp = (float*)context.DataPointer;
-        for (long i = 0; i < (long)NumLatents * _dim; i++) kvp[i] = latp[i];
-        for (long i = 0; i < (long)tContext * _dim; i++) kvp[(long)NumLatents * _dim + i] = ctxp[i];
+        for (long i = 0; i < (long)_numLatents * _dim; i++) kvp[i] = latp[i];
+        for (long i = 0; i < (long)tContext * _dim; i++) kvp[(long)_numLatents * _dim + i] = ctxp[i];
 
         Tensor kv = WhisperOps.ProjectLinear(backend, kvInput, _toKv[layer]!, null, 1, kvLen, _dim, 2 * dimInner);
         kvInput.Dispose();
@@ -108,15 +117,15 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
         float* qp = (float*)q.DataPointer;
         float* kvAll = (float*)kv.DataPointer;   // [1, kvLen, 2*dimInner] — k then v per row
 
-        Tensor outMerged = new(new TensorShape(1, NumLatents, dimInner), DType.F32);
+        Tensor outMerged = new(new TensorShape(1, _numLatents, dimInner), DType.F32);
         float* om = (float*)outMerged.DataPointer;
-        float scale = 1f / MathF.Sqrt(DimHead);
+        float scale = 1f / MathF.Sqrt(_dimHead);
         float[] scores = new float[kvLen];
 
-        for (int h = 0; h < Heads; h++)
+        for (int h = 0; h < _heads; h++)
         {
-            int hOff = h * DimHead;
-            for (int i = 0; i < NumLatents; i++)
+            int hOff = h * _dimHead;
+            for (int i = 0; i < _numLatents; i++)
             {
                 float* qi = qp + (long)i * dimInner + hOff;
                 float maxS = float.NegativeInfinity;
@@ -124,7 +133,7 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
                 {
                     float* kj = kvAll + (long)j * 2 * dimInner + hOff;
                     float dot = 0f;
-                    for (int e = 0; e < DimHead; e++) dot += qi[e] * kj[e];
+                    for (int e = 0; e < _dimHead; e++) dot += qi[e] * kj[e];
                     float s = dot * scale;
                     scores[j] = s;
                     if (s > maxS) maxS = s;
@@ -133,18 +142,18 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
                 for (int j = 0; j < kvLen; j++) { float e = MathF.Exp(scores[j] - maxS); scores[j] = e; sum += e; }
                 float invSum = 1f / sum;
                 float* oi = om + (long)i * dimInner + hOff;
-                for (int e = 0; e < DimHead; e++) oi[e] = 0f;
+                for (int e = 0; e < _dimHead; e++) oi[e] = 0f;
                 for (int j = 0; j < kvLen; j++)
                 {
                     float a = scores[j] * invSum;
                     float* vj = kvAll + (long)j * 2 * dimInner + dimInner + hOff;
-                    for (int e = 0; e < DimHead; e++) oi[e] += a * vj[e];
+                    for (int e = 0; e < _dimHead; e++) oi[e] += a * vj[e];
                 }
             }
         }
         q.Dispose(); kv.Dispose();
 
-        Tensor o = WhisperOps.ProjectLinear(backend, outMerged, _toOut[layer]!, null, 1, NumLatents, dimInner, _dim);
+        Tensor o = WhisperOps.ProjectLinear(backend, outMerged, _toOut[layer]!, null, 1, _numLatents, dimInner, _dim);
         outMerged.Dispose();
         return o;
     }
@@ -154,11 +163,11 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
     {
         int doubled = (int)_ffW1[layer]!.Shape[0];
         int inner = doubled / 2;
-        Tensor h = WhisperOps.ProjectLinear(backend, latents, _ffW1[layer]!, _ffB1[layer], 1, NumLatents, _dim, doubled);
-        Tensor gated = new(new TensorShape(1, NumLatents, inner), DType.F32);
+        Tensor h = WhisperOps.ProjectLinear(backend, latents, _ffW1[layer]!, _ffB1[layer], 1, _numLatents, _dim, doubled);
+        Tensor gated = new(new TensorShape(1, _numLatents, inner), DType.F32);
         float* hp = (float*)h.DataPointer;
         float* gp = (float*)gated.DataPointer;
-        for (int i = 0; i < NumLatents; i++)
+        for (int i = 0; i < _numLatents; i++)
         {
             float* row = hp + (long)i * doubled;
             float* outRow = gp + (long)i * inner;
@@ -172,7 +181,7 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
             }
         }
         h.Dispose();
-        Tensor o = WhisperOps.ProjectLinear(backend, gated, _ffW2[layer]!, _ffB2[layer], 1, NumLatents, inner, _dim);
+        Tensor o = WhisperOps.ProjectLinear(backend, gated, _ffW2[layer]!, _ffB2[layer], 1, _numLatents, inner, _dim);
         gated.Dispose();
         return o;
     }
@@ -185,7 +194,7 @@ internal sealed unsafe class IndexTtsPerceiver : IDisposable
         float* ip = (float*)input.DataPointer;
         float* op = (float*)output.DataPointer;
         float* gp = (float*)gamma.DataPointer;
-        for (int i = 0; i < NumLatents; i++)
+        for (int i = 0; i < _numLatents; i++)
         {
             float* row = ip + (long)i * _dim;
             double sumSq = 0d;

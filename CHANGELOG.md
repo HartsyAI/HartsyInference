@@ -24,6 +24,286 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.266
+
+- **AuK review follow-ups.** A default (`--seed 0`) AuK run draws a fresh random seed and logs it instead of reusing one fixed noise, matching the documented "0 leaves it unset" contract. A Flash request that sets steps or CFG logs the discarded values. An explicit `--duration` is pinned as winning over the reference clip length, with tests, and `AukDuration.Frames` no longer rounds a float `0.6` (0.6000000238) up a frame. The Qwen2.5-Omni shard index sha256 is pinned. Checked against the real Hugging Face headers: every pinned sha and size matches, and every key and shape the AuK, VAE and Qwen loaders require exists.
+
+## alpha.265
+
+- **Added: ControlFoley video and reference-audio conditioning (Audio layer).** `ControlFoleyPipeline` takes an optional decoded
+  source video (CLIP frames, CAV-MAE-ST visual tokens, Synchformer sync tokens, with the official frame sampling and a
+  bit-exact bicubic resize) and an optional reference clip (CLAP audio embedding and MusicGen-Style timbre feature, with a
+  julius-compatible resampler). Each encoder matches the official python on tiny random instances (~1e-6 to 1e-4) and on real
+  weights (Synchformer ~1.4e-6 relative, CAV-MAE 1e-6, CLAP embedding 1.5e-7, timbre 6e-8). The official CAV-MAE-ST load is a no-op
+  (all 649 checkpoint keys carry a `module.` prefix and `strict=False` ignores them, so official inference runs that branch
+  with random weights); the port strips the prefix and loads the real weights. Not wired into the engine or Swarm: `MusicRequest`
+  has no video field, mp4 decoding is not connected, and no pipeline-level run has been done (it needs the 11 GB network).
+  Version bump: alpha.264 -> alpha.265.
+
+## alpha.264
+
+- **Added: ControlFoley text-to-audio (`controlfoley`, `hartsy music -m controlfoley`).** Native port of Xiaomi's flow-matching
+  generator (54-block DiT with classifier-free guidance and the euler sampler), the DFN5B CLIP text/image encoder and
+  tokenizer, and the 44.1 kHz VAE + BigVGAN v2 decoder. Each part matches the official python on tiny random checkpoints
+  (~1e-6) and on real weights (decoder 7e-5 on a fixed latent, CLIP 6e-7, network 8.8e-5 velocity on a truncated real
+  network). Matrices and convolution kernels can stay bf16 (`controlfoley_bf16.safetensors`, converted with
+  `tools/controlfoley/convert_network_bf16.py`), which lets the 2.8B-parameter network run in 16 GB. Full-depth CPU run: 4 s
+  of audio, 10 steps, 9 min, finite and non-silent. Video and reference-audio conditioning are not wired yet. Weights are
+  CC-BY-NC-4.0. Version bump: alpha.263 -> alpha.264.
+
+## alpha.263
+
+- **Added: Cloudflare Clef-Flash typed decisions (`clef-flash`, `POST /v1/systemone`).** The joint schema head, a Qwen3.5
+  trunk built from HuggingFace-keyed weights (`Qwen35Model.FromHuggingFace`, all-position hidden states), the record
+  encoder and the Jev / SystemOne response shape. Text input only; images and video are rejected. The head and trunk
+  match the official modules on tiny random checkpoints, and the encoder matches `encode_record` with the real
+  tokenizer. Real weights, CPU: the README invoice and support examples answer correctly (overdue 0.97, technical 0.96,
+  outage 0.84). New `Modality.Decision`, `IDecisionService`. Version bump: alpha.262 -> alpha.263.
+
+## alpha.262
+
+- **Added: Breeze TTS 2 (`breeze`) runs natively.** T5Gemma2 text encoder, Qwen3 backbone with audio-frame embedding
+  sums, CSM-style depth decoder, classifier-free guidance against the template negative prompts, the Qwen3-TTS 12 Hz
+  vocoder, and reference-clip encoding with the audio tokenizer's own Mimi encoder (`Mimi.LoadEncoderWeights`). Parity
+  tests compare the encoder and the backbone/depth stack with the official modules on tiny random checkpoints. Real
+  weights, CPU: plain and voice-design (cfg 4) runs transcribe word-exact, and a cloned-voice run transcribes
+  word-exact. The weights are research / non-commercial. Version bump: alpha.261 -> alpha.262.
+
+## alpha.261
+
+IndexTTS-2 accuracy pass. Every stage of the 2.0 pipeline is now compared numerically with a dump of the PyTorch
+reference's own intermediates (`IndexTts2V20PythonParityTests`, real weights, env-gated), and greedy decoding is
+compared token for token. Earlier checks only listened to the output, so these divergences went unseen:
+
+- **Fixed: the w2v-bert reference features were computed from unscaled audio.** The reference feature extractor feeds the
+  fbank 16-bit-scaled samples; with `[-1, 1]` audio, quiet frames and weak bins clamped to the log floor. Feature error
+  against the reference went from 8.7% to 5e-6 and `hidden_states[17]` from 16% to 1e-5. Affects 2.0 and 2.5 (speaker,
+  emotion and codec inputs all derive from it).
+- **Fixed: the IndexTTS Conformer used the wrong positional encoding.** IndexTTS's `RelPositionalEncoding` hands its
+  attention the plain forward sinusoid `pe[0:T]` and the attention has `rel_shift` removed; the port used the
+  Transformer-XL `2T-1` relative table. 2.0 speaker latents went from 11% to 1e-4 error. The same encoder class serves
+  the emotion encoder of 2.0 and 2.5 and IndexTTS-1.5's speaker encoder, so all three change.
+- **Fixed: generation used the wrong mel position embeddings.** The reference's `GPT2InferenceModel` looks up
+  `attention_mask.shape[1] - mel_len`, giving the start token position 0 but the first code position 2 (position 1 is
+  skipped). Greedy decode now reproduces the reference's codes exactly, with and without repetition penalty.
+- **Fixed (2.0): the S2Mel prompt condition was built from the raw w2v-bert feature**, which is the 2.5 flow; 2.0 feeds
+  the semantic codec's quantized embedding (`S_ref`).
+- **Fixed: reference clips are resampled like the reference.** `SincResampler` reproduces
+  `torchaudio.functional.resample` exactly, applied in the reference's order (file → 22.05 kHz → 16 kHz), and clips are
+  capped at 15 s. The 16 kHz signal now matches to 6e-5 (was 3.4%).
+- **Fixed: the repetition penalty did not include the reference's filler token** (`input_ids` are all ones plus the
+  start token), and `remove_long_silence`, which the reference never calls, was applied. Both now match.
+- **Behaviour changes to note:** output differs from alpha.260 for the same seed (the fixes above change the model's inputs
+  and decoding); explicit emotion vectors are no longer normalized by default; `remove_long_silence` is gone; 2.0 inserts
+  200 ms of silence between text segments. Version bump: `Directory.Build.props` `VersionSuffix` alpha.260 → alpha.261.
+- **Changed: explicit emotion vectors are used as given** (the reference's library path and the Qwen text path never
+  normalize them; only its WebUI does). `IndexTts2Options.NormalizeEmoVector` opts into the WebUI's bias + 0.8 cap.
+- **Added (2.0): exact reference text handling.** Token-level segment splitting (`split_segments`, golden-tested against
+  the real tokenizer's output, including `quick_streaming_tokens`), 200 ms of silence between segments, and the English
+  spoken-form normalization the reference runs before tokenizing (contractions, numbers, years, decimals, percent, money,
+  ordinals, times, titles, punctuation map). `"2.0"` is now read "two point oh" instead of being passed as digits.
+- **Changed: the S2Mel DiT and `VitsWaveNet` run entirely on backend ops.** The DiT's AdaLN, SwiGLU product, residual adds,
+  concats and transposes, and the WaveNet's conditioning add, gate, split and skip accumulation were host loops that read
+  every activation through `DataPointer` — on a GPU backend each is a device-to-host round trip, dozens per DiT block per
+  flow step (the live server needed about two minutes for six seconds of audio). `cond_x_merge_linear` is also split so
+  the per-frame style broadcast concat is a single per-step vector. Numerics are unchanged (parity test and the VITS
+  tests pass); speed on CUDA is measured after deploy from the new per-generation timing log.
+- **Added: `IndexTts2Reference` / `PrepareReference` / `SynthesizeStream`.** The reference clip's front end (w2v-bert, mel,
+  CAM++, conditioning) is computed once and reused, and synthesis can stream one text segment at a time. The engine's
+  `indextts2` runner now implements `IStreamingTtsRunner`, caches the most recent reference clip and logs per-stage
+  timings (`IndexTts2Timings`) for every generation.
+## alpha.260
+
+- **Fish Audio S2 voice cloning.** `ModifiedDacEncoder` ports the other half of the codec: the causal strided encoder
+  (windowed transformer in its last block), the downsampling ConvNeXt stack, the pre-module transformer and the residual
+  quantizer. It matches the official encoder on a tiny random checkpoint (every stage and the exact codes) and, on the
+  real `codec.pth`, reproduced 690 of 690 codes of a generated clip. A request's reference clip plus its exact
+  transcript now becomes the cloning system turn; a reference without a transcript is rejected. The conv/transformer
+  helpers the encoder and decoder share moved into `DacOps`.
+- The tiny Fish Audio S2 test checkpoints (about 2.4 MB) are now tracked: `.gitignore` re-includes
+  `Fixtures/FishAudioS2/*.safetensors`. They were ignored with the other weights, so alpha.259's parity tests had no
+  fixtures to load on a fresh checkout.
+
+## alpha.259
+
+- **Fish Audio S2 Dual-AR model** (`FishAudioS2DualAr`; not yet registered as a TTS model — the codec and pipeline are
+  still to come). The 36-layer slow transformer and 4-layer fast transformer run on the shared `GenericTransformer`
+  (per-head Q/K norm, interleaved RoPE, tied text embedding) with BF16 weights kept in their stored dtype. The frame
+  step follows fish-speech's `decode_one_token_ar`: the slow head is constrained to the semantic range plus
+  `<|im_end|>`, Repetition Aware Sampling re-draws a repeated semantic token, code 0 is derived from the main token,
+  and the fast model takes the post-norm slow hidden state. Sampling filters on the untempered distribution as upstream
+  does. Slow logits, post-norm hidden states and fast logits match the official `DualARTransformer` on a tiny random
+  checkpoint to 2e-6 (`tools/fish_audio/s2_dual_ar_reference.py`).
+- **Fish Audio S2 codec decoder** (`ModifiedDacDecoder`): the code-to-waveform half of fish-speech's ModifiedDAC — the
+  semantic + nine residual codebooks, the 8-layer window-limited causal transformer, the causal ConvTranspose/ConvNeXt
+  upsampler and the causal Snake/residual-unit decoder, 2048 samples per frame at 44.1 kHz. Every stage matches the
+  official implementation to about 1e-7 on a tiny random checkpoint, and decoding with the real released `codec.pth`
+  matches to 3e-6 (`tools/fish_audio/modded_dac_reference.py`, `ModifiedDacRealWeightTests`). Reference-audio encoding
+  is not ported yet.
+- **Fish Audio S2 Pro text-to-speech** (`fishaudio`, status ValidationPending). `FishAudioS2Prompt` builds fish-speech's
+  conversation prompt (system / user / open assistant turn, `<|speaker:N|>` batching, assistant turns carrying earlier
+  batches' codes), `FishAudioS2Pipeline` runs the Dual-AR loop to `<|im_end|>` and decodes with `ModifiedDacDecoder`,
+  and `FishAudioS2Model` registers it in the speech catalog (`fishaudio/s2-pro`: tokenizer, `codec.pth`, sharded
+  weights). A real-weight CPU run (seed 7) produced 3.2 s that Whisper base.en transcribed word-exact. Reference-voice
+  cloning is refused with a clear message until the codec encoder is ported. The weights are non-commercial
+  (Fish Audio Research License).
+
+## alpha.258
+
+- Add the `kolibri1` text-model catalog entry (`Hob-forge/Kolibri-1-GGUF`, Q4_K_M, SHA-256 pinned). Status stays
+  Structural: no real checkpoint has been run yet (the smallest quant is 28.6 GB).
+- **Fixed: Kolibri-1 tokenization.** Its `tokenizer.ggml.pre` is `kolibri1` (llama.cpp's Qwen2 pre-tokenizer), which
+  splits digits one at a time and matches contractions case-insensitively. The engine used the GPT-2 default, which
+  groups digit runs and so produced different token ids for any prompt containing numbers.
+
+## alpha.257
+
+- Add Kolibri-1 native GGUF support: key mapping for sandwich norms, Q/K norm, MoE tensors and the router bias;
+  local/global attention with NoPE; and Kolibri's sigmoid-logit-add expert routing, which requires the correction bias.
+- **Fixed: Kolibri-1 GGUFs failed to load.** The published converter emits only the expert FFN lengths, but the loader
+  required `kolibri1.feed_forward_length`. It now falls back to `expert_feed_forward_length`, then
+  `expert_shared_feed_forward_length`, and still throws if none is present.
+
+## alpha.256
+
+- Add the Breeze TTS 2 architecture and checkpoint configuration contract. Its Mimi codec is the shared
+  `MimiConfig.Mimi24kHzDsm` preset, and `MimiConfig.FrameRateHz` reports the true 12.5 Hz output rate.
+- Keep Fish Audio S2's 4096-entry fast-decoder vocabulary distinct from ModifiedDAC's 1024-entry residual
+  codebooks.
+
+## alpha.255
+
+- **IndexTTS-2.0 (`indextts2:2.0`).** The 2.0 checkpoint (`IndexTeam/IndexTTS-2`) now runs next to 2.5, which stays the
+  default. It differs from 2.5 in the GPT's speaker conditioning (a Conformer+Perceiver over the w2v-bert feature with
+  real `speed_emb` slots, instead of CAM++), the tokenizer (SentencePiece), the semantic codec (MaskGCT's RepCodec,
+  from `amphion/MaskGCT`) and the handoff to the flow-matching stage: a second GPT pass through `s2mel.gpt_layer`,
+  summed with the codec's `vq2emb`. `IndexTts2Version` picks the branch and the 2.5 path is unchanged. A real-weight
+  generation transcribes through Whisper-base as its input text.
+- **Emotion control is exposed for both versions.** `SpeechRequest` gains `EmotionReference` (a clip whose emotion,
+  not voice, the speech adopts), `EmotionAlpha`, `EmotionText` and `EmotionFromText`; the existing `Emotion` vector
+  is read in IndexTTS-2's own order (happy, angry, sad, afraid, disgusted, melancholic, surprised, calm — not
+  Zonos's). `hartsy speak` gets `--emotion`, `--emotion-reference`, `--emotion-alpha`, `--emotion-text` and
+  `--emotion-from-text`. The QwenEmotion classifier is loaded on first use, so the default VRAM footprint is unchanged.
+  The model's file list now includes `feat1.pt`, `feat2.pt` and the four classifier files (about 1.2 GB), so an
+  existing 2.5 install downloads them on its next load. The classifier files are optional: if they are missing,
+  free-text emotion is disabled and the model still loads. Emotion weights outside 0–1.2 are rejected.
+- **Fixed: the explicit emotion-vector mode threw `ObjectDisposedException`.** The pipeline disposed the
+  `feat1.pt`/`feat2.pt` loaders right after building the lookup, but an F32 tensor is returned as-is rather than
+  copied, so the exemplar banks it still read were freed. The loaders now live as long as the pipeline. Nothing
+  reached this path before, because the engine never loaded the banks.
+- **Fixed: `EmoAlpha` was ignored for an explicit or text emotion vector.** The reference scales the vector by the
+  clamped alpha (truncated to four decimals); the port now does too.
+
+## alpha.254
+
+- **Kokoro-82M: Japanese and Mandarin voices.** `j` and `z` voices, which raised an error in alpha.252, now read their
+  text the way misaki does for the official pipeline. Both are pure C#, with no Python, MeCab or native library.
+  - `j` (Japanese) ports misaki's `JAG2P` in its default cutlet mode. A MeCab tokenizer reads full UniDic 3.1.0, the
+    dictionary fugashi uses under misaki, and agrees with fugashi on every token of 474 test sentences. The kana
+    reading, number reading (num2kana), width folding and misaki's kana-to-phoneme table follow. Its output matches
+    `JAG2P()` exactly on all 474 sentences (`KokoroJapaneseParityTests`).
+  - `z` (Mandarin) ports misaki's `ZHG2P`:
+    - cn2an number normalisation;
+    - jieba 0.42.1 segmentation, including its HMM for unknown words;
+    - pypinyin 0.55.0 readings with its phrase matching;
+    - misaki's pinyin-to-IPA conversion and tone marks.
+
+    Its output matches `ZHG2P()` exactly on all 397 test sentences (`KokoroMandarinParityTests`).
+  - Their data is fetched on first use, SHA-256 checked:
+    - Japanese: UniDic 3.1.0 (a 501 MB archive, of which only the five files MeCab reads are kept, about 690 MB
+      installed; BSD licence) and misaki's `ja_words.txt` from the misaki commit the English dictionaries use.
+    - Mandarin: jieba's dictionary and HMM table, and pypinyin's two dictionaries (all MIT, about 10 MB).
+- **Kokoro-82M: voice blending.** A voice may name several packs, as `KPipeline.load_voice` allows: `af_bella,af_sky`
+  averages them row by row, matching `torch.mean` to 6e-8. A part may carry a weight: `af_bella:0.7,af_sky:0.3` or
+  `af_bella(2)+af_sky(1)`. Voice names are checked before they reach a file path.
+
+## alpha.253
+
+- **IndexTTS-2.5: emotion-controllable zero-shot voice cloning** (`indextts2` catalog entry; zero-shot
+  cloning wired end to end, emotion control modes not yet exposed through `TtsJob`/CLI/HTTP). Shares the
+  GPT-2 T2S decoder shape with IndexTTS-1.5 but conditions on CAM++ speaker embeddings instead of a
+  Conformer-Perceiver, and generates semantic-codec codes rather than mel frames directly. New pieces:
+  - `Wav2Vec2Bert` (new `Models/Wav2Vec2Bert/` folder, not IndexTTS-scoped): a 24-layer, 1024-hidden
+    Conformer with Shaw-style relative-key position bias (`facebook/w2v-bert-2.0`), taking hidden-state
+    layer 17 of 24 — not the final layer, confirmed from the real `infer_v2.py`.
+  - `VocosFactorizedCodec`/`VocosFactorizedCodecConfig` (generic Amphion/MaskGCT-family semantic codec:
+    `VocosBackbone` encoder → `in_project` conv → L2-normalized single-codebook nearest-neighbor lookup
+    `out_project` conv, with the decoder half built but never invoked on the real inference path).
+  - `VocosBackbone`: the first config-driven, shared copy of the ConvNeXt-based Vocos backbone shape this
+    codebase had already copy-pasted five times under one-off names.
+  - `IndexTts2T2sDecoder`: extends the GPT-2 T2S decoder with a second, smaller Conformer+Perceiver for
+    emotion conditioning (`IndexTtsPerceiver.NumLatents` generalized from a hardcoded 32 to a constructor
+    parameter so both uses share one class), the real `merge_emovec` lerp, and an explicit emotion-vector
+    lookup table (`IndexTts2EmotionVectorLookup`, cosine-similarity nearest-exemplar per category from
+    the checkpoint's `feat1.pt`/`feat2.pt`). Also replicates the checkpoint's two zero-initialized
+    "duration slot" conditioning rows for shape fidelity — confirmed inert in the real source
+    (`speed_emb` is never exposed via the public `infer()` API); not a working duration control.
+  - `IndexTts2Dit`/`IndexTts2DitBlock`: the S2Mel flow-matching stage — a 13-layer U-ViT-skip DiT (RoPE
+    attention, SwiGLU FFN, AdaLN norms) with a WaveNet final stage, solved via `ConditionalCfm` (widened
+    to accept any `ICfmEstimator` shape, not just CosyVoice's) over 25 Euler steps with `(1+rate)*cond -
+    rate*uncond` CFG. `VitsWaveNet.LoadWeights` gained an injectable key suffix so VITS and this S2Mel
+    stage share one WaveNet implementation. `InterpolateLengthRegulator` is a new, generic
+    explicit-target-length nearest-neighbor regulator (distinct from `VitsLengthRegulator`'s
+    duration-predictor shape).
+  - `IndexTts2BigVganGenerator`: a slimmer top-level BigVGAN-22kHz assembly (no embedded speaker encoder,
+    unlike IndexTTS-1.5's) reusing `AntiAliasedSnake`/`IndexTtsBigVganResBlock` verbatim.
+  - `IndexTts2QwenEmotion`: free-text emotion classification via a bundled Qwen3-0.6B fine-tune, loaded
+    through `HartsyInference.LLM`'s existing `GenericTransformer`/`TextGenerationPipeline`/
+    `JinjaChatTemplate`/JSON-grammar-constrained sampling — no new LLM infrastructure, just a new
+    `Qwen3HfConfigReader` (`config.json` → `TransformerConfig`, placed as `GgufConfigFactory`'s sibling,
+    not IndexTTS-scoped) and this model's own fixed system prompt/label vocabulary.
+  - `IndexTts2TiktokenTokenizer`: the 2.5 repo's tiktoken-format text tokenizer (`multilingual_zh_ja_
+    yue_char_del.tiktoken`, 58,836 ranks + 1,673 specials = 60,509, matching `number_text_tokens`
+    exactly), built on the existing `TiktokenConverter`/`HfTokenizerJson` rank-file parsing rather than a
+    new parser.
+  - IndexTTS-2.0 is not wired (shares every config value with 2.5 except `number_text_tokens`/tokenizer,
+    but needs its own GPT `conformer_perceiver` speaker-conditioning path that doesn't exist yet).
+  - Real end-to-end generation verified against the real checkpoints: 2.47s of finite, non-silent 22050 Hz
+    PCM (RMS 0.225) from a real reference clip.
+
+## alpha.252
+
+- **Kokoro-82M: all its stock languages, each read the way the official pipeline reads it.** The voice's first letter
+  picks the front-end, as `KPipeline` does. Before this, every voice went through the American G2P, so British
+  voices spoke American English and Spanish, French, Hindi, Italian and Portuguese voices read their text as if it
+  were English.
+  - `b` voices (British) use misaki's British mode: the `gb_gold`/`gb_silver` dictionaries (same pinned commit,
+    SHA-256 checked), British -s/-ed/-ing endings, no flap, and espeak en-gb for words misaki lacks. 98.6% word
+    agreement with misaki `G2P(british=True)` on 300 sentences, the same as American.
+  - `e`/`f`/`h`/`i`/`p` voices (Spanish, French, Hindi, Italian, Brazilian Portuguese) go through the new
+    `KokoroEspeakG2P`, a port of misaki's `EspeakG2P` over the pure-C# espeak. Word agreement with misaki:
+    es 99.9%, fr-fr 99.6%, it 100%, pt-br 100%, hi 99.5% (`KokoroEspeakParityTests`, 475 sentences).
+  - `j`/`z` voices (Japanese, Mandarin) now fail with a clear error instead of reading their text as English.
+  - Kokoro installs espeak-ng data into the model cache on first use. This is the data misaki phonemizes with,
+    espeak-ng 1.52, taken from the pinned `espeakng_loader` 0.2.4 wheel (about 9 MB, SHA-256 checked, GPL-3.0).
+    The other espeak models find the same copy.
+- **espeak port: the language-dependent parts of espeak-ng 1.52**, which only English had before. Other languages
+  missed the stress, numbers and dictionary choices these govern:
+  - Per-language stress rules and flags (`SetWordStress`, every stress rule).
+  - Letter groups.
+  - Numbers read as words (`numbers.c`: cardinals, thousands, decimals, ordinal suffixes, lakh grouping).
+  - Conditional dictionary entries (`$atend`, `$atstart`, `$noun`, `$verb`, `$past`, `$only`, `$capital`) and
+    multi-word entries.
+  - `$text` replacements, `.replace` character tables, `$alt`/`$alt2` vowel quality, and `$pause`/`$brk` pauses.
+  - Prefix and suffix stripping as `TranslateWord3` does it.
+  - Rules can now see the neighbouring words in the clause.
+  - Doubled consonants, symbols (% ° & +), and hyphen-joined words written without a space.
+- **espeak port: bug fixes that also affect English (Piper, StyleTTS 2, Zonos, NeuTTS, ZipVoice):**
+  - A phoneme program's `NextVowelStarts` block was read one word short. This inserted a stray `l` after every
+    English `r` ("θɹlˈuː").
+  - A phoneme's IPA name kept the bytes after its terminator.
+  - A word starting with a pause lost its leading space.
+  - Words with a suffix at the very start of a sentence could throw `IndexOutOfRangeException`.
+  - Quote marks were read as part of the word ("'I" read as the letter i).
+  - Function words marked `$u+` were stressed mid-sentence.
+  - One phonemizer shared by concurrent requests could mix their words. The rule matcher kept its per-word vowel
+    counts, the phoneme interpreter its render-pass flag, and the IPA renderer its scratch buffer on the shared
+    instance. They are now held per call, and a test checks that parallel reads match serial ones.
+
+  English sentences matching espeak-ng 1.52 exactly: 59 → 377 of 400 (`EspeakSentenceParityTests`). Single words:
+  385 of 400 (`EspeakParityTests`, floor raised to 95%; its fixture is regenerated from espeak-ng 1.52 by
+  `tools/kokoro/espeak_parity_reference.py`).
+
 ## alpha.251
 
 - Add Breeze TTS 2, Kolibri-1, Clef, ControlFoley, and Fish Audio S2 model contracts.

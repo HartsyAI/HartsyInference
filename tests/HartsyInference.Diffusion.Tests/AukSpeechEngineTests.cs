@@ -99,5 +99,41 @@ public sealed class AukSpeechEngineTests
     }
 
     [Fact]
+    public void CatalogEntry_PinsTheShardIndexToo()
+        => Assert.Equal("5b7629198e2ef80e37612a491d9bfd71639d2f212632d36d8ab086922e74e129",
+            ModelCatalog.Find("auk")!.Assets.Single(a => a.RepoPath == "model.safetensors.index.json").Sha256);
+
+    [Theory]
+    [InlineData(7, 7)]
+    [InlineData(-3, -3)]
+    public void ResolveSeed_KeepsAnExplicitSeed(int seed, int expected) => Assert.Equal(expected, AukModel.ResolveSeed(seed, () => 99));
+
+    [Fact]
+    public void ResolveSeed_DrawsAFreshNonZeroSeedWhenUnset()
+    {
+        Assert.Equal(99, AukModel.ResolveSeed(0, () => 99));
+        Assert.Equal(1, AukModel.ResolveSeed(0, () => 0));
+        HashSet<int> seen = [];
+        for (int i = 0; i < 8; i++)
+        {
+            int seed = AukModel.ResolveSeed(0);
+            Assert.NotEqual(0, seed);
+            seen.Add(seed);
+        }
+        Assert.True(seen.Count > 1, "an unset seed must not collapse to one fixed value");
+    }
+
+    [Fact]
+    public void FlashIgnoredKnobsMessage_NamesWhatWasDiscarded()
+    {
+        Assert.Null(AukModel.FlashIgnoredKnobsMessage(null, null));
+        Assert.Contains("steps=16", AukModel.FlashIgnoredKnobsMessage(16, null), StringComparison.Ordinal);
+        string both = AukModel.FlashIgnoredKnobsMessage(8, 2.5)!;
+        Assert.Contains("steps=8", both, StringComparison.Ordinal);
+        Assert.Contains("cfg=2.5", both, StringComparison.Ordinal);
+        Assert.Contains("ignored", both, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ModelIdentity_IsRegistered() => Assert.NotNull(ModelIdentityCatalog.Find("auk"));
 }

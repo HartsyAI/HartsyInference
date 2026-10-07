@@ -37,11 +37,23 @@ public sealed unsafe class ConditionalCfm(ICfmEstimator estimator, int melBins)
     /// DIFFERENT random draw than the one the corresponding frames get in a monolithic call (the RNG stream
     /// position depends on how many frames precede it in THIS call, which varies chunk to chunk) — the fix is
     /// to draw noise ONCE for the whole utterance and slice the caller's own absolute-position sub-range.</remarks>
+    /// <param name="promptLen">When greater than 0, the leading <paramref name="promptLen"/> frames of <c>x</c>
+    /// are clamped to zero before the loop starts and again after every Euler step — IndexTTS-2's S2Mel CFM
+    /// keeps the in-context reference-mel prefix's noise channel at exactly zero throughout the trajectory
+    /// (confirmed from the real <c>BASECFM.solve_euler</c>: <c>x[..., :prompt_len] = 0</c> both before the loop
+    /// and at the end of every iteration). 0 (the default) disables this and matches every existing call site
+    /// (CosyVoice has no such clamp).</param>
     public Tensor Solve(IBackend backend, Tensor mu, Tensor spk, Tensor cond,
-        int numSteps, float cfgRate, int seed, Tensor? attnMask = null, Tensor? x0Override = null)
+        int numSteps, float cfgRate, int seed, Tensor? attnMask = null, Tensor? x0Override = null, int promptLen = 0)
     {
-        int t = (int)mu.Shape[2];
+        // Derived from `cond` rather than `mu`: both are frame-count-aligned with the solved `x` in every
+        // known estimator, but `cond`'s shape convention (`[1, melBins, T]`, channel-first — same as `x`) is the
+        // one guaranteed across estimators, unlike `mu`'s (CosyVoice's own token-conditioning mel happens to
+        // share that layout, but IndexTTS-2's content conditioning is channel-LAST with a different width at
+        // this axis — reading T from `mu` there would silently pick up the content width instead).
+        int t = (int)cond.Shape[2];
         Tensor x = x0Override is not null ? CopyTensor(x0Override) : RandNormal(_melBins, t, seed);
+        if (promptLen > 0) ZeroPrefix(x, promptLen);
 
         // t_span = linspace(0, 1, numSteps + 1); uniform dt.
         float dt = 1f / numSteps;
@@ -69,11 +81,23 @@ public sealed unsafe class ConditionalCfm(ICfmEstimator estimator, int melBins)
             long n = x.ElementCount;
             for (long i = 0; i < n; i++) xp[i] += dt * vp[i];
             v.Dispose();
+            if (promptLen > 0) ZeroPrefix(x, promptLen);
         }
         zMu?.Dispose();
         zSpk?.Dispose();
         zCond?.Dispose();
         return x;
+    }
+
+    /// <summary>Zeroes <c>x[:, :, :promptLen]</c> in place (<c>x</c> is <c>[1, channels, T]</c>).</summary>
+    private static void ZeroPrefix(Tensor x, int promptLen)
+    {
+        int channels = (int)x.Shape[1];
+        int t = (int)x.Shape[2];
+        float* xp = (float*)x.DataPointer;
+        for (int c = 0; c < channels; c++)
+            for (int j = 0; j < promptLen && j < t; j++)
+                xp[(long)c * t + j] = 0f;
     }
 
     private static void CombineCfg(Tensor cond, Tensor uncond, float cfg)

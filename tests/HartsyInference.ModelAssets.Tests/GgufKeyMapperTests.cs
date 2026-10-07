@@ -79,6 +79,19 @@ public sealed class GgufKeyMapperTests
     }
 
     [Fact]
+    public void GetByArchitecture_KolibriMapsSandwichNormsAndRouterBias()
+    {
+        IGgufKeyMapper? mapper = GgufKeyMapperRegistry.GetByArchitecture("kolibri1");
+
+        Assert.NotNull(mapper);
+        Assert.Equal("model.layers.0.post_attention_layernorm.weight", mapper!.MapKey("blk.0.post_attention_norm.weight"));
+        Assert.Equal("model.layers.0.pre_feedforward_layernorm.weight", mapper.MapKey("blk.0.ffn_norm.weight"));
+        Assert.Equal("model.layers.0.post_feedforward_layernorm.weight", mapper.MapKey("blk.0.post_ffw_norm.weight"));
+        Assert.Equal("model.layers.0.mlp.gate.e_score_correction_bias", mapper.MapKey("blk.0.exp_probs_b.bias"));
+        Assert.Equal("model.layers.0.self_attn.q_proj.weight", mapper.MapKey("blk.0.attn_q.weight"));
+    }
+
+    [Fact]
     public void GetByArchitecture_Deepseek2ResolvesToDeepSeekMapper_WithMlaKeys()
     {
         IGgufKeyMapper? ds = GgufKeyMapperRegistry.GetByArchitecture("deepseek2");

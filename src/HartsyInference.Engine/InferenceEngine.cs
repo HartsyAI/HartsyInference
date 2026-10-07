@@ -88,6 +88,7 @@ public sealed class InferenceEngine : IInferenceEngine
     private readonly Lazy<MeshService> _mesh;
     private readonly Lazy<WorldService> _world;
     private readonly Lazy<EmbeddingService> _embeddings;
+    private readonly Lazy<DecisionService> _decisions;
 
     /// <summary>Creates an engine that lazily constructs the backend named by <paramref name="backendSelector"/>
     /// (<c>auto</c>/<c>cpu</c>/<c>cuda</c>/<c>vulkan</c>, optionally with a <c>:{ordinal}</c> device suffix) on first use.</summary>
@@ -112,6 +113,7 @@ public sealed class InferenceEngine : IInferenceEngine
         _mesh = new Lazy<MeshService>(() => new MeshService(this));
         _world = new Lazy<WorldService>(() => new WorldService(this));
         _embeddings = new Lazy<EmbeddingService>(() => new EmbeddingService(this));
+        _decisions = new Lazy<DecisionService>(() => new DecisionService(this));
     }
 
     /// <summary>Creates an engine on a specific device, for hosts that carry the backend name and the GPU id as separate settings.</summary>
@@ -198,6 +200,9 @@ public sealed class InferenceEngine : IInferenceEngine
 
     /// <inheritdoc/>
     public IEmbeddingService Embeddings => _embeddings.Value;
+
+    /// <inheritdoc/>
+    public IDecisionService Decisions => _decisions.Value;
 
     /// <inheritdoc/>
     public void SetBackend(string selector)
@@ -833,6 +838,8 @@ public sealed class InferenceEngine : IInferenceEngine
         // being torn down/switched — same reasoning as TextService above.
         if (_embeddings.IsValueCreated)
             ReleaseLogged("the embedding service", _embeddings.Value.Dispose, ref failures);
+        if (_decisions.IsValueCreated)
+            ReleaseLogged("the decision service", _decisions.Value.Dispose, ref failures);
         // Audio pipelines are cached per-engine by the audio runtime; drop THIS engine's so none outlives the backend
         // it was constructed against. Other engines' resident audio models are untouched.
         if (_audioRuntime is not null)

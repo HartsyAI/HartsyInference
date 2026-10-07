@@ -26,6 +26,7 @@ public static class GgufKeyMapperRegistry
         Register(r, new Gpt2KeyMapper());
         Register(r, new Glm4KeyMapper());
         Register(r, new DeepSeekKeyMapper());
+        Register(r, new KolibriKeyMapper());
         // mllama before llama: its cross_attn_* keys are a strict superset of the llama-family signature.
         Register(r, new MllamaKeyMapper());
         Register(r, new LlamaKeyMapper());

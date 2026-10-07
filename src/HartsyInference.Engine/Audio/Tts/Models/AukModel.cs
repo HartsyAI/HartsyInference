@@ -96,6 +96,36 @@ internal static class AukModel
         return IsFlash(id) ? FlashRepo : AukRepo;
     }
 
+    /// <summary>The seed to sample with: an explicit non-zero seed is kept; 0 means "unset" (see <c>SpeechRequest.Seed</c>), which upstream AuK treats as unseeded, so a fresh non-zero seed is drawn from <paramref name="random"/> (default <see cref="Random.Shared"/>).</summary>
+    internal static int ResolveSeed(int seed, Func<int>? random = null)
+    {
+        if (seed != 0)
+        {
+            return seed;
+        }
+        int drawn = random is null ? Random.Shared.Next(1, int.MaxValue) : random();
+        return drawn == 0 ? 1 : drawn;
+    }
+
+    /// <summary>The log line for step/CFG requests that AuK-Flash's pinned recipe discards, or null when none were requested.</summary>
+    internal static string? FlashIgnoredKnobsMessage(int? nfeStep, double? cfgScale)
+    {
+        if (!nfeStep.HasValue && !cfgScale.HasValue)
+        {
+            return null;
+        }
+        List<string> requested = [];
+        if (nfeStep.HasValue)
+        {
+            requested.Add($"steps={nfeStep.Value}");
+        }
+        if (cfgScale.HasValue)
+        {
+            requested.Add(FormattableString.Invariant($"cfg={cfgScale.Value}"));
+        }
+        return $"[Audio][AuK] Flash uses a fixed 4-step schedule with no guidance; the requested {string.Join(", ", requested)} is ignored.";
+    }
+
     /// <summary>The DiT checkpoint file name of the variant.</summary>
     internal static string CheckpointFile(string? variant) => IsFlash(variant) ? FlashFile : BaseFile;
 
@@ -119,13 +149,18 @@ internal static class AukModel
     {
         bool hasReference = job.ReferenceMono24k is { Length: > 0 };
         string instruction = BuildInstruction(job.Text, job.Instruction, hasReference);
-        if (pipeline.IsFlash && (job.NfeStep.HasValue || job.CfgScale.HasValue))
+        if (pipeline.IsFlash && FlashIgnoredKnobsMessage(job.NfeStep, job.CfgScale) is { } ignored)
         {
-            Logs.Info("[Audio][AuK] Flash uses a fixed 4-step schedule with no guidance; the requested steps/CFG are ignored.");
+            Logs.Info(ignored);
+        }
+        int seed = ResolveSeed(job.Seed);
+        if (job.Seed == 0)
+        {
+            Logs.Info($"[Audio][AuK] No seed given; sampling with random seed {seed} (pass --seed {seed} to reproduce).");
         }
         AukOptions options = new AukOptions
         {
-            Seed = job.Seed,
+            Seed = seed,
             Steps = job.NfeStep,
             CfgScale = job.CfgScale.HasValue ? (float)job.CfgScale.Value : null,
             Speed = job.Speed ?? 1.0,

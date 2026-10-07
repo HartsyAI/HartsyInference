@@ -66,6 +66,13 @@ Desktop.ini
 
 ## Model files (large binary files — don't commit)
 *.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/FishAudioS2/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/Breeze/*.safetensors
+!/tests/HartsyInference.LLM.Tests/Fixtures/Clef/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoley/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClip/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyClap/*.safetensors
+!/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyStyle/*.safetensors
 *.gguf
 *.ckpt
 *.pt
@@ -136,3 +143,4 @@ src/HartsyInference.Cuda/Kernels/**/*.ptx
 
 # Pinned Engram hash constants (dumped from upstream engram.py; embedded into HartsyInference.LLM)
 !/src/HartsyInference.LLM/DeepSeekV41/Engram/Constants/*.bin
+!/tests/HartsyInference.Audio.Tests/Fixtures/ControlFoleyVideo/*.safetensors

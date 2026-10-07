@@ -57,6 +57,19 @@ public static class ModelCatalog
                         Sha256 = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5" },
                 },
             },
+            // Kolibri-1 (Aleph-Alpha, 78B sparse MoE). Structural: the GGUF key map, local/global + NoPE attention and
+            // sigmoid-logit-add routing are unit-tested, but no real checkpoint has been run yet (smallest quant is 28.6 GB).
+            new CatalogEntry
+            {
+                Id = "kolibri1", Modality = txt, DisplayName = "Kolibri-1 (78B MoE)", Architecture = "Kolibri-1 sparse MoE transformer",
+                Status = st, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Hob-forge/Kolibri-1-GGUF", RepoPath = "Kolibri-1-Q4_K_M.gguf",
+                        TargetSubdir = "LLM/kolibri1", Role = "transformer",
+                        Sha256 = "c2ac1301424441ef210b6de50ce25e8ccf69f86494df53d6ba52ed558456062e" },
+                },
+            },
             // `hartsy text -m llama3/mistral` verified end-to-end 2026-07-22 (CLI catalog pass): both coherent
             // and correct on the 3060 (--low-vram-quant).
             new CatalogEntry
@@ -113,6 +126,8 @@ public static class ModelCatalog
                         TargetSubdir = "LLM/qwen35moe", Role = "mmproj" },
                 },
             },
+            // Cloudflare Clef GGUF (Q2_K): 64-layer Qwen3.5 hybrid VLM for chat. The typed-decision release is "clef-flash".
+            // Pending until the real-weight run is green.
             new CatalogEntry
             {
                 Id = "clef", Modality = txt, DisplayName = "Cloudflare Clef",
@@ -120,9 +135,9 @@ public static class ModelCatalog
                 Status = vp, CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
-                    new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "Cloudflare_clef-IQ2_XXS.gguf",
+                    new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "Cloudflare_clef-Q2_K.gguf",
                         TargetSubdir = "LLM/clef", Role = "transformer",
-                        Sha256 = "51b05a26d448ccfd1c667d3a6893804caebd6763f7638c6411c6f54e0b6308cd" },
+                        Sha256 = "be3985c88b2fee90f1aabdaa7e5546f94a30d8b37b2f626121a725c5404b523b" },
                     new() { Repo = "bartowski/Cloudflare_clef-GGUF", RepoPath = "mmproj-Cloudflare_clef-f16.gguf",
                         TargetSubdir = "LLM/clef", Role = "mmproj",
                         Sha256 = "f0e2930e301586f0932262c7d232c74e385d7b4281170111c36a686e16e59ba8" },
@@ -1129,6 +1144,57 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Fish Audio S2 Pro: Dual-AR (36L slow + 4L fast over 10 codebooks) + ModifiedDAC decoder. Fish Audio
+                // Research License (non-commercial). Components match the official code; one real-weight CPU run transcribed
+                // word-exact (Whisper base.en). Reference-voice cloning needs the clip's exact transcript; no GPU/Swarm run yet.
+                Id = "fishaudio", Modality = tts, DisplayName = "Fish Audio S2 Pro", Architecture = "Dual-AR + ModifiedDAC", Status = vp,
+                CliDrivable = true, // `hartsy speak -m fishaudio`
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "model-00001-of-00002.safetensors", TargetSubdir = "Audio/FishAudioS2", Role = "transformer" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "model-00002-of-00002.safetensors", TargetSubdir = "Audio/FishAudioS2", Role = "transformer" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "model.safetensors.index.json", TargetSubdir = "Audio/FishAudioS2", Role = "config" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "codec.pth", TargetSubdir = "Audio/FishAudioS2", Role = "codec" },
+                    new() { Repo = "fishaudio/s2-pro", RepoPath = "tokenizer.json", TargetSubdir = "Audio/FishAudioS2", Role = "tokenizer" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Breeze TTS 2 (BreezeBlue): T5Gemma2 text encoder + Qwen3 backbone + depth decoder + Qwen3-TTS-Tokenizer-12Hz
+                // vocoder. Voice clone / design / direction. Research and non-commercial weights.
+                Id = "breeze", Modality = tts, DisplayName = "Breeze TTS 2", Architecture = "T5Gemma2 + Qwen3 backbone + depth decoder", Status = st,
+                CliDrivable = true, // `hartsy speak -m breeze`
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "model-00001-of-00002.safetensors", TargetSubdir = "Audio/BreezeTts2", Role = "transformer" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "model-00002-of-00002.safetensors", TargetSubdir = "Audio/BreezeTts2", Role = "transformer" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "model.safetensors.index.json", TargetSubdir = "Audio/BreezeTts2", Role = "config" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "audio_tokenizer/model.safetensors", TargetSubdir = "Audio/BreezeTts2", Role = "codec" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "audio_tokenizer/config.json", TargetSubdir = "Audio/BreezeTts2", Role = "config" },
+                    new() { Repo = "BreezeBlue/Breeze-TTS-2", RepoPath = "tokenizer.json", TargetSubdir = "Audio/BreezeTts2", Role = "tokenizer" },
+                },
+            },
+            new CatalogEntry
+            {
+                // Cloudflare Clef-Flash (Apache-2.0): Qwen3.5-9B backbone plus a joint schema head; text-only here (no image/video).
+                // API: POST /v1/systemone. The release directory is the model path.
+                Id = "clef-flash", Modality = Modality.Decision, DisplayName = "Clef-Flash (typed decisions)",
+                Architecture = "Qwen3.5 hybrid backbone + joint schema head", Status = st, CliDrivable = false,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model-00001-of-00004.safetensors", TargetSubdir = "Decision/clef-flash", Role = "transformer" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model-00002-of-00004.safetensors", TargetSubdir = "Decision/clef-flash", Role = "transformer" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model-00003-of-00004.safetensors", TargetSubdir = "Decision/clef-flash", Role = "transformer" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model-00004-of-00004.safetensors", TargetSubdir = "Decision/clef-flash", Role = "transformer" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "model.safetensors.index.json", TargetSubdir = "Decision/clef-flash", Role = "config" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "joint_head.safetensors", TargetSubdir = "Decision/clef-flash", Role = "head" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "joint_head_config.json", TargetSubdir = "Decision/clef-flash", Role = "config" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "config.json", TargetSubdir = "Decision/clef-flash", Role = "config" },
+                    new() { Repo = "Cloudflare/clef-flash", RepoPath = "tokenizer.json", TargetSubdir = "Decision/clef-flash", Role = "tokenizer" },
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "f5", Modality = tts, DisplayName = "F5-TTS", Architecture = "voice cloning, flow-matching DiT", Status = ok,
                 CliDrivable = true, // `hartsy speak -m f5 --reference <wav> --ref-text "..."` — TtsCatalog key is "f5" (was "f5-tts" here before, which never resolved); clone-only, needs both
                 Assets = new ModelAsset[]
@@ -1158,7 +1224,8 @@ public static class ModelCatalog
                     new() { Repo = "Qwen/Qwen2.5-Omni-3B", RepoPath = "model-00002-of-00003.safetensors", TargetSubdir = "Audio/AuK/Qwen2.5-Omni-3B",
                         Role = "text encoder (thinker LM; Qwen Research License)",
                         Sha256 = "b29a76dfefb3aa33a5bd0faa19c681d039a44de57223653ea0e933df728c6d8c" },
-                    new() { Repo = "Qwen/Qwen2.5-Omni-3B", RepoPath = "model.safetensors.index.json", TargetSubdir = "Audio/AuK/Qwen2.5-Omni-3B", Role = "text encoder index" },
+                    new() { Repo = "Qwen/Qwen2.5-Omni-3B", RepoPath = "model.safetensors.index.json", TargetSubdir = "Audio/AuK/Qwen2.5-Omni-3B", Role = "text encoder index",
+                        Sha256 = "5b7629198e2ef80e37612a491d9bfd71639d2f212632d36d8ab086922e74e129" },
                     new() { Repo = "Qwen/Qwen2.5-Omni-3B", RepoPath = "tokenizer.json", TargetSubdir = "Audio/AuK/Qwen2.5-Omni-3B", Role = "tokenizer",
                         Sha256 = "8441917e39ae0244e06d704b95b3124795cec478e297f9afac39ba670d7e9d99" },
                 },
@@ -1177,6 +1244,39 @@ public static class ModelCatalog
                     new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "gpt.pth", TargetSubdir = "Audio/IndexTts", Role = "transformer" },
                     new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "dvae.pth", TargetSubdir = "Audio/IndexTts", Role = "codec (unused at inference)" },
                     new() { Repo = "IndexTeam/IndexTTS-1.5", RepoPath = "bigvgan_generator.pth", TargetSubdir = "Audio/IndexTts", Role = "vocoder" },
+                },
+            },
+            new CatalogEntry
+            {
+                Id = "indextts2", Modality = tts, DisplayName = "IndexTTS-2.5 / IndexTTS-2.0", Architecture = "GPT-2 T2S (2.5: CAM++ conditioning, 2.0: Conformer+Perceiver) + S2Mel flow-matching DiT + BigVGAN-v2 22kHz", Status = st,
+                CliDrivable = true, // `hartsy speak -m indextts2[:2.0] --reference <wav> "text"` — TtsCatalog "indextts2"; emotion via --emotion / --emotion-reference / --emotion-text
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "multilingual_zh_ja_yue_char_del.tiktoken", TargetSubdir = "Audio/IndexTts2", Role = "tokenizer" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "gpt.pth", TargetSubdir = "Audio/IndexTts2", Role = "transformer" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "s2mel.pth", TargetSubdir = "Audio/IndexTts2", Role = "flow-matching DiT" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "codec.pth", TargetSubdir = "Audio/IndexTts2", Role = "semantic codec (2x EnhancedCodec; decodes the GPT's codes)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "wav2vec2bert_stats.pt", TargetSubdir = "Audio/IndexTts2", Role = "semantic feature normalization stats" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "feat1.pt", TargetSubdir = "Audio/IndexTts2", Role = "emotion exemplar bank 1" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "feat2.pt", TargetSubdir = "Audio/IndexTts2", Role = "emotion exemplar bank 2" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "qwen0.6bemo4-merge/config.json", TargetSubdir = "Audio/IndexTts2", Role = "text-emotion classifier config" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "qwen0.6bemo4-merge/model.safetensors", TargetSubdir = "Audio/IndexTts2", Role = "text-emotion classifier (Qwen3-0.6B)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "qwen0.6bemo4-merge/tokenizer.json", TargetSubdir = "Audio/IndexTts2", Role = "text-emotion classifier tokenizer" },
+                    new() { Repo = "IndexTeam/IndexTTS-2.5", RepoPath = "qwen0.6bemo4-merge/chat_template.jinja", TargetSubdir = "Audio/IndexTts2", Role = "text-emotion classifier chat template" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "bpe.model", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "tokenizer (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "gpt.pth", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "transformer (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "s2mel.pth", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "flow-matching DiT (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "wav2vec2bert_stats.pt", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "semantic feature normalization stats (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "feat1.pt", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "emotion exemplar bank 1 (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "feat2.pt", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "emotion exemplar bank 2 (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "qwen0.6bemo4-merge/config.json", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "text-emotion classifier config (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "qwen0.6bemo4-merge/model.safetensors", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "text-emotion classifier (Qwen3-0.6B; indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "qwen0.6bemo4-merge/tokenizer.json", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "text-emotion classifier tokenizer (indextts2:2.0)" },
+                    new() { Repo = "IndexTeam/IndexTTS-2", RepoPath = "qwen0.6bemo4-merge/chat_template.jinja", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "text-emotion classifier chat template (indextts2:2.0)" },
+                    new() { Repo = "amphion/MaskGCT", RepoPath = "semantic_codec/model.safetensors", TargetSubdir = "Audio/IndexTts2/v2.0", Role = "semantic codec (RepCodec; indextts2:2.0)" },
+                    new() { Repo = "facebook/w2v-bert-2.0", RepoPath = "model.safetensors", TargetSubdir = "Audio/IndexTts2/w2v-bert-2.0", Role = "semantic feature extractor" },
+                    new() { Repo = "funasr/campplus", RepoPath = "campplus_cn_common.bin", TargetSubdir = "Audio/IndexTts2", Role = "speaker/style encoder" },
+                    new() { Repo = "nvidia/bigvgan_v2_22khz_80band_256x", RepoPath = "bigvgan_generator.pt", TargetSubdir = "Audio/IndexTts2", Role = "vocoder" },
                 },
             },
             new CatalogEntry
@@ -1360,6 +1460,21 @@ public static class ModelCatalog
             {
                 Id = "stableaudio", Modality = mus, DisplayName = "Stable Audio Open Small", Architecture = "latent diffusion (Oobleck VAE)", Status = ok,
                 CliDrivable = true, // `hartsy music -m stableaudio` — MusicCatalog key is "stableaudio" (no hyphen); Swarm-verified 11.89s stereo 44.1kHz in 2.85s gen (2026-07-20)
+            },
+            new CatalogEntry
+            {
+                // ControlFoley (Xiaomi, CC-BY-NC-4.0) text-to-audio at 44.1 kHz: DFN5B CLIP text features -> flow-matching DiT ->
+                // VAE + BigVGAN v2. The 11 GB float32 network is preferred as controlfoley_bf16.safetensors when placed beside it.
+                // Video and reference-audio conditioning are not wired. `hartsy music -m controlfoley "rain on a tin roof"`.
+                Id = "controlfoley", Modality = mus, DisplayName = "ControlFoley (text-to-audio)", Architecture = "flow-matching DiT + VAE + BigVGAN v2",
+                Status = st, CliDrivable = true,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "YJX-Xiaomi/ControlFoley", RepoPath = "weights/controlfoley.pth", TargetSubdir = "Audio/ControlFoley", Role = "transformer" },
+                    new() { Repo = "YJX-Xiaomi/ControlFoley", RepoPath = "ext_weights/v1-44.pth", TargetSubdir = "Audio/ControlFoley", Role = "vae" },
+                    new() { Repo = "nvidia/bigvgan_v2_44khz_128band_512x", RepoPath = "bigvgan_generator.pt", TargetSubdir = "Audio/ControlFoley", Role = "vocoder" },
+                    new() { Repo = "apple/DFN5B-CLIP-ViT-H-14-384", RepoPath = "open_clip_pytorch_model.bin", TargetSubdir = "Audio/ControlFoley", Role = "text encoder" },
+                },
             },
             new CatalogEntry
             {

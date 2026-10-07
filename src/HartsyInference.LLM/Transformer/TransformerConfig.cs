@@ -47,6 +47,10 @@ public enum MoeScoring
 
     /// <summary>Independent sigmoid per expert, then top-k (DeepSeek-V3).</summary>
     Sigmoid,
+
+    /// <summary>Select top-k on raw router logits plus a correction bias, but weight selected experts with the
+    /// unbiased sigmoid of the original logits (Kolibri-1).</summary>
+    SigmoidLogitAdd,
 }
 
 /// <summary>Mixture-of-Experts feed-forward configuration: the dense SwiGLU FFN is replaced (on MoE layers) by a router that selects <see cref="NumExpertsPerTok"/> of <see cref="NumExperts"/> experts per token plus optional always-on shared expert(s), mirroring the HF config fields.</summary>
