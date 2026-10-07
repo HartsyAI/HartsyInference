@@ -8,6 +8,12 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: `ToolRegistry` is thread-safe, supports `Remove`, and takes an optional tool timeout.** `Add`, `Remove`,
+  lookup and `Definitions`/`Names` can run concurrently; `Definitions` is an immutable insertion-ordered snapshot, so
+  a request in flight never sees it change. `Remove(name)` unregisters a tool. A per-tool timeout (new `Add` overloads)
+  or `ToolRegistry.DefaultTimeout` cancels the handler's token on expiry and returns the usual `{"error": ...}` result
+  instead of throwing, even for a handler that ignores its token; the caller's own cancellation still propagates. No
+  timeout by default, so existing hosts behave as before.
 - **Added: Cloudflare Clef GGUF catalog entry (`clef`, Q2_K + f16 mmproj, status ValidationPending).** The 64-layer
   Qwen3.5 hybrid VLM loads through the existing `qwen35` path; both LFS SHA-256s are pinned and match the Hugging Face
   tree metadata. bartowski no longer ships an IQ2_XXS, so Q2_K (~11.7 GB) is the smallest quant. No real-weight run has
