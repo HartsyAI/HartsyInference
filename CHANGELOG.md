@@ -28,6 +28,10 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.271
+
+- **Docs: Kolibri-1 real-weight run recorded.** The Q2_K quant loads across two GPUs on the swarm server and answers coherently for a few hundred tokens before degrading; the pinned Q4_K_M needs about 48 GB of VRAM (no host offload in the text engine). The catalog comment and `MODEL_STATUS_LLM.md` say so; the entry stays ValidationPending.
+
 ## alpha.270
 
 - **Fixed: the layer-split GGUF load uses the quantized-load RAM estimate, and Q2_K / Q3_K stay compressed on the GPU.**
