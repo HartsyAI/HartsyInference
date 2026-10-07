@@ -31,4 +31,17 @@ public sealed class HostRamGuardTests
     {
         Assert.Equal(0, TextService.DequantizedHostBytes([Tensor("a", DType.Q4_K, 256, 256), Tensor("b", DType.Q8_0, 256, 256)]));
     }
+
+    [Fact]
+    public void DequantizedHostBytes_CountsTheEmbeddingTablesTheLoadAlwaysWidens()
+    {
+        GgufTensorDescriptor[] tensors =
+        [
+            Tensor("token_embd.weight", DType.Q4_K, 1024, 256),
+            Tensor("per_layer_token_embd.weight", DType.Q6_K, 2048, 256),
+            Tensor("blk.0.attn_q.weight", DType.Q4_K, 256, 256),
+        ];
+
+        Assert.Equal((1024.0 * 256 + 2048.0 * 256) * 4, TextService.DequantizedHostBytes(tensors));
+    }
 }

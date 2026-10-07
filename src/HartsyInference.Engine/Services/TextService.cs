@@ -842,13 +842,16 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>Host bytes the F32 expansion of every quantized tensor a quantized-capable backend cannot keep compressed will occupy.</summary>
+    /// <summary>Host bytes of F32 copies the load builds even for a quantized-capable backend: every quantized tensor it cannot keep compressed,
+    /// plus the token and per-layer embedding tables, which <c>GenericTransformer.LoadWeights</c> always widens.</summary>
     internal static double DequantizedHostBytes(IEnumerable<GgufTensorDescriptor> tensors)
     {
         double bytes = 0;
         foreach (GgufTensorDescriptor tensor in tensors)
         {
-            if (tensor.DType.IsQuantized && !GgufLanguageModel.KeepsQuantizedOnGpu(tensor.DType.Name))
+            bool widenedEmbedding = tensor.Name is "token_embd.weight" or "per_layer_token_embd.weight";
+            bool expanded = tensor.DType.IsQuantized && !GgufLanguageModel.KeepsQuantizedOnGpu(tensor.DType.Name);
+            if ((expanded || widenedEmbedding) && tensor.DType != DType.F32)
                 bytes += tensor.Shape.ElementCount * 4.0;
         }
         return bytes;
