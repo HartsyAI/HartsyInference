@@ -349,7 +349,7 @@ public sealed class TextService : ITextService, IDisposable
         }
         if (shardDevices.Length >= 2 && tpDegree <= 1 && !SsmLanguageModel.IsSsmArchitecture(architecture0))
         {
-            EnsureRamHeadroomFor(path, dequantizesEverything: true);
+            EnsureRamHeadroomFor(path, dequantizesEverything: false);
             LoadSharded(slot, deviceKey, path, request, shardDevices);
             return;
         }

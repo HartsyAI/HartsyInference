@@ -28,6 +28,13 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.270
+
+- **Fixed: the layer-split GGUF load uses the quantized-load RAM estimate.** `LoadSharded` loads without dequantizing, like the
+  single-device CUDA path, but its guard still demanded 2.5x the file, so a 26.7 GB Kolibri-1 Q2_K was refused on a 64 GB
+  server ("need ~66.7 GB headroom") although its weights stay compressed. It now needs 1.15x the file plus the F32 size of
+  any tensor that is still expanded. The tensor-parallel path keeps 2.5x.
+
 ## alpha.269
 
 - **Fixed: the host-RAM guard no longer refuses a quantized GGUF a CUDA device loads without dequantizing.** `TextService`
