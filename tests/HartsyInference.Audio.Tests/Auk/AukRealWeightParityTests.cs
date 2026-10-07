@@ -22,7 +22,7 @@ namespace HartsyInference.Audio.Tests.Auk;
 /// <remarks><c>HARTSY_AUK_REFDIR</c> names the dump root (one folder per case); <c>HARTSY_AUK_DIR</c>,
 /// <c>HARTSY_AUK_FLASH_DIR</c> and <c>HARTSY_AUK_OMNI_DIR</c> override the checkpoint folders and
 /// <c>HARTSY_AUK_BACKEND</c> (default cuda) picks the backend. <c>HARTSY_AUK_STRICT=1</c> runs CUDA without TF32, cuDNN
-/// attention or reduced-precision GEMM, separating precision drift from logic defects. Without the dumps the tests do
+/// attention, cuDNN audio convs (TF32 engines, not governed by the TF32 knob) or reduced-precision GEMM, separating precision drift from logic defects. Without the dumps the tests do
 /// nothing.</remarks>
 [Trait("Category", "RealWeights")]
 public sealed class AukRealWeightParityTests(ITestOutputHelper output)
@@ -62,6 +62,9 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
             KnobStore.Set(EngineKnobs.NoTf32, true);
             KnobStore.Set(EngineKnobs.SdpaCudnn, false);
             KnobStore.Set(EngineKnobs.HighPrecisionGemm, true);
+            KnobStore.Set(EngineKnobs.AudioConvCudnn, false);
+            KnobStore.Set(EngineKnobs.SageAttn, false);
+            KnobStore.Set(EngineKnobs.SdpaNoF16, true);
         }
         try
         {
@@ -80,6 +83,9 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
                 KnobStore.Clear(EngineKnobs.NoTf32);
                 KnobStore.Clear(EngineKnobs.SdpaCudnn);
                 KnobStore.Clear(EngineKnobs.HighPrecisionGemm);
+                KnobStore.Clear(EngineKnobs.AudioConvCudnn);
+                KnobStore.Clear(EngineKnobs.SageAttn);
+                KnobStore.Clear(EngineKnobs.SdpaNoF16);
             }
         }
     }
