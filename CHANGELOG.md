@@ -28,6 +28,12 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.268
+
+- **Fixed: a ControlFoley video or reference clip no longer needs a prompt.** `MusicService` refused a request with an empty
+  prompt and genre before the model ran, but the official demo scores a video, or follows a reference clip, with no
+  prompt at all. A request carrying `Video` or `ReferenceAudio` now passes that check.
+
 ## alpha.267
 
 - **ControlFoley video-to-audio through the engine.** `MusicRequest` gains `Video` (an encoded clip), `MaskAwayClip` (the

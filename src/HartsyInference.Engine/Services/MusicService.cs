@@ -20,9 +20,10 @@ public sealed class MusicService : IMusicService
     public Task<AudioResult> GenerateAsync(ModelSpec spec, MusicRequest request, IProgress<StepPreview>? progress = null, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        if (string.IsNullOrWhiteSpace(request.Prompt) && string.IsNullOrWhiteSpace(request.Genre))
+        bool conditioned = request.Video is not null || request.ReferenceAudio is not null;
+        if (string.IsNullOrWhiteSpace(request.Prompt) && string.IsNullOrWhiteSpace(request.Genre) && !conditioned)
         {
-            // ACE-Step puts the style in genre and the (optional) lyrics in prompt, so either alone is enough.
+            // ACE-Step puts the style in genre and the (optional) lyrics in prompt, so either alone is enough; a ControlFoley video or reference clip needs neither.
             throw new ArgumentException("No prompt or genre supplied to generate music.", nameof(request));
         }
         // SwarmUI's 2026-09-01 prompt-parser update now resolves <weight[N]:text>/<alternate:...>/<fromto[N]:...>
