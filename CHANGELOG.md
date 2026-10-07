@@ -34,6 +34,22 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.275
+
+- **Added: DeepSeek V4.1 attention layer and hyper-connection wrapper on the host reference path.** `DeepSeekV41Attention`
+  follows upstream `Attention.forward`: low-rank queries, the shared key/value latent with its rope and FP8 round trip, the
+  sliding-window ring, the compressed positions (pooling `DeepSeekV41CompressorState`, the indexer with level-one candidate blocks
+  and top-k via `DeepSeekV41IndexSelection`), `SparseLatentAttention` with the per-head sink, then the grouped `wo_a` and `wo_b`.
+  It reuses the backend `ApplyRopeInterleaved`, `ActQuantDequantInPlace`, `BuildWindowIndices`, `IndexerScores` and
+  `SparseLatentAttention` ops. Per-layer cache is `DeepSeekV41AttentionState`; `DeepSeekV41SharedAttention` carries the compressed
+  KV, index keys, top-k indices and candidate mask between layers and, as upstream's runtime does, persists across forward passes.
+  A prefill starts at position 0 and later calls take one token. `DeepSeekV41HyperConnection` is the mHC wrapper around a sublayer
+  (`hc_mixes` projection with its flattened RMS statistic, then the shared `Hc*` ops). A six-layer stack covering window-only,
+  source, reuse, candidate-source and candidate-restricted layers matches the unmodified upstream through an 11-token prefill and six
+  decode steps (`dump_attention_fixture.py`), within 1e-2: the harness's `sparse_attn` rounds probabilities to bf16 like the real
+  kernel, which this exact-softmax reference does not. Ties in indexer scores break toward the lower index; torch leaves their order
+  unspecified, so the fixture keeps ties out of reach. Not wired into `TextService`.
+
 ## alpha.274
 
 - **Added: DeepSeek V4.1 Engram module on the host reference path.** `DeepSeekV41EngramModule` looks up a position's
