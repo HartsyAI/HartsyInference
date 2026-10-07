@@ -58,7 +58,9 @@ public static class ModelCatalog
                 },
             },
             // Kolibri-1 (Aleph-Alpha, 78B sparse MoE). Structural: the GGUF key map, local/global + NoPE attention and
-            // sigmoid-logit-add routing are unit-tested, but no real checkpoint has been run yet (smallest quant is 28.6 GB).
+            // sigmoid-logit-add routing are unit-tested, but no real checkpoint has been run yet. Q4_K_M (44 GB) is the smallest quant the
+            // GPU path keeps compressed (Q2_K/Q3_K would expand to ~290 GB of F32), and the text engine has no host offload, so it needs
+            // about 48 GB of VRAM: it loads past the RAM guard on a 36 GB two-GPU box and then runs out of VRAM during weight preload.
             new CatalogEntry
             {
                 Id = "kolibri1", Modality = txt, DisplayName = "Kolibri-1 (78B MoE)", Architecture = "Kolibri-1 sparse MoE transformer",
