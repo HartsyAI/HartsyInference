@@ -169,6 +169,15 @@ public sealed record MusicRequest
     /// <summary>End second of the span taken from the reference audio (YuE's <c>--prompt_end_time</c>). The upstream default of 30 s is a real cap, not just a default: the excerpt occupies the model's context ahead of every generated segment.</summary>
     public double ReferenceEndSeconds { get; init; } = 30;
 
+    /// <summary>Negative prompt for classifier-free guidance (ControlFoley); empty for none.</summary>
+    public string NegativePrompt { get; init; } = "";
+
+    /// <summary>Source video the generated audio is conditioned on (ControlFoley video-to-audio): its frames drive the CLIP, visual and synchronisation streams, and the output is cut to the clip's usable length when that is shorter than <see cref="Duration"/>. Needs an <c>ffmpeg</c> binary. Null for text-to-audio.</summary>
+    public VideoClip? Video { get; init; }
+
+    /// <summary>ControlFoley: ignore the video's CLIP stream and keep only the visual and synchronisation streams (the official <c>--mask_away_clip</c>), so the prompt describes the sound rather than competing with the picture.</summary>
+    public bool MaskAwayClip { get; init; }
+
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
     public VramOverrides? Vram { get; init; }
 
