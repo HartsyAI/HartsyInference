@@ -50,8 +50,11 @@ public static class DeepSeekV41HostModelLoader
 
             // one cache across all layers; a key packs (layer, expert)
             int experts = cfg.NRoutedExperts;
-            DeepSeekV41ExpertCache expertCache = new(key => DeepSeekV41ExpertLoader.Load(checkpoint.ExpertBank(key / experts), key % experts, dim, cfg.MoeIntermediateSize),
-                options.ExpertCacheCapacity);
+            DeepSeekV41ExpertCache expertCache = new(key =>
+            {
+                (int cachedLayer, int cachedExpert) = LayerExperts.Unpack(key, experts);
+                return DeepSeekV41ExpertLoader.Load(checkpoint.ExpertBank(cachedLayer), cachedExpert, dim, cfg.MoeIntermediateSize);
+            }, options.ExpertCacheCapacity);
 
             DeepSeekV41Block[] blocks = new DeepSeekV41Block[cfg.NumHiddenLayers];
             for (int layer = 0; layer < blocks.Length; layer++)
@@ -150,9 +153,11 @@ public static class DeepSeekV41HostModelLoader
         }
     }
 
-    // One layer's view of the shared expert cache.
+    // One layer's view of the shared expert cache; a cache key packs (layer, expert) and both directions live here.
     private sealed class LayerExperts(DeepSeekV41ExpertCache cache, int layer, int experts) : IDeepSeekV41ExpertSource
     {
-        public DeepSeekV41SwigluWeights GetExpert(int expert) => cache.GetExpert(layer * experts + expert);
+        public static (int Layer, int Expert) Unpack(int key, int experts) => (key / experts, key % experts);
+
+        public DeepSeekV41SwigluWeights GetExpert(int expert) => cache.GetExpert(checked(layer * experts + expert));
     }
 }

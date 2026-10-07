@@ -149,4 +149,26 @@ public sealed class DeepSeekV41HostModelLoaderTests
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41LoadOptions(8, 0).Validate());
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41LoadOptions(8, 1, 0).Validate());
     }
+
+    [Fact]
+    public void A_Disposed_Loaded_Model_Refuses_Access_And_Disposes_Twice_Safely()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "dsv41-load-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            WriteCheckpoint(dir);
+            using CpuBackend cpu = new();
+            DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(cpu, dir, new DeepSeekV41LoadOptions(MaxTokens: 16));
+            Assert.NotNull(loaded.Model);
+            loaded.Dispose();
+            loaded.Dispose();
+            Assert.Throws<ObjectDisposedException>(() => loaded.Model);
+            Assert.Throws<ObjectDisposedException>(() => loaded.Checkpoint);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
 }
