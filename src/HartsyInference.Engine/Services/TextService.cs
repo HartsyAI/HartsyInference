@@ -34,6 +34,10 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>Minimum free-RAM-to-file-size ratio required before loading a GGUF — load dequantizes tensors the GPU path can't consume onto host buffers atop the mmap, so peak host usage exceeds the file size (~1.5-2x observed); 2.5x is a safety margin so a big model fails cleanly instead of OOM-killing the process.</summary>
     private const double RamHeadroomMultiplier = 2.5;
 
+    /// <summary>Free-RAM-to-file-size ratio for a GGUF a quantized-capable backend loads without dequantizing: the weights stay compressed and
+    /// are read through the mmap, so only the file's own pages plus runtime overhead are needed.</summary>
+    private const double QuantizedResidentHeadroomMultiplier = 1.15;
+
     /// <summary>How long <see cref="Unload"/> waits for an in-flight generation before giving up on a slot. Long enough to cover a full completion, bounded so a host's "free memory" call can never hang forever.</summary>
     private const int UnloadWaitSeconds = 120;
 
@@ -329,7 +333,6 @@ public sealed class TextService : ITextService, IDisposable
         string[] shardDevices = ResolveShardDevices(deviceKey);
         ValidateShardDevices(shardDevices);
         UnloadSlot(slot);
-        EnsureRamHeadroomFor(path);
         string architecture0 = PeekArchitecture(path);
         // TP claims ShardDevices as its rank list (ValidatePlacement enforces Count == degree and excludes
         // every other multi-device mode). This branch MUST come before the layer-split one — without it a
@@ -339,11 +342,13 @@ public sealed class TextService : ITextService, IDisposable
         if (tpDegree > 1 && !deviceKey.Contains('+') && shardDevices.Length == tpDegree
             && !SsmLanguageModel.IsSsmArchitecture(architecture0))
         {
+            EnsureRamHeadroomFor(path, RamHeadroomMultiplier);
             LoadTensorParallel(slot, path, request, shardDevices);
             return;
         }
         if (shardDevices.Length >= 2 && tpDegree <= 1 && !SsmLanguageModel.IsSsmArchitecture(architecture0))
         {
+            EnsureRamHeadroomFor(path, RamHeadroomMultiplier);
             LoadSharded(slot, deviceKey, path, request, shardDevices);
             return;
         }
@@ -376,7 +381,9 @@ public sealed class TextService : ITextService, IDisposable
         // SupportsQuantized, instead of silently paying an F32 expansion forever because it is not CUDA.
         bool dequantize = !backend.Capabilities.SupportsQuantized;
         string architecture = architecture0;
-        if (SsmLanguageModel.IsSsmArchitecture(architecture))
+        bool ssm = SsmLanguageModel.IsSsmArchitecture(architecture);
+        EnsureRamHeadroomFor(path, dequantize || ssm ? RamHeadroomMultiplier : QuantizedResidentHeadroomMultiplier);
+        if (ssm)
         {
             slot.SsmModel = SsmLanguageModel.Load(path, architecture);
             slot.SsmPipeline = new SsmGenerationPipeline(slot.SsmModel.Model, slot.SsmModel.Tokenizer, backend, slot.SsmModel.Template);
@@ -803,7 +810,7 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <summary>Refuses to load when there isn't enough free host RAM to survive dequantization, so a big model fails with a clear error instead of OOM-killing the process. No-op when <c>/proc/meminfo</c> is absent.</summary>
-    private static void EnsureRamHeadroomFor(string path)
+    private static void EnsureRamHeadroomFor(string path, double headroomMultiplier)
     {
         long availableKb = ReadAvailableMemoryKb();
         if (availableKb <= 0)
@@ -812,12 +819,12 @@ public sealed class TextService : ITextService, IDisposable
         try { fileBytes = new FileInfo(path).Length; }
         catch (Exception ex) { Logs.Debug($"[TextService] Could not stat '{path}': {ex.Message}"); return; }
         double availableBytes = availableKb * 1024.0;
-        double requiredBytes = fileBytes * RamHeadroomMultiplier;
+        double requiredBytes = fileBytes * headroomMultiplier;
         if (availableBytes < requiredBytes)
         {
             throw new HartsyInferenceException(
                 $"Not enough free host RAM to safely load '{Path.GetFileName(path)}' ({fileBytes / 1024.0 / 1024 / 1024:0.0} GB file): "
-                + $"{availableBytes / 1024 / 1024 / 1024:0.0} GB free, need ~{requiredBytes / 1024 / 1024 / 1024:0.0} GB headroom for dequantization. "
+                + $"{availableBytes / 1024 / 1024 / 1024:0.0} GB free, need ~{requiredBytes / 1024 / 1024 / 1024:0.0} GB headroom. "
                 + "Free RAM or use a smaller quant, then retry — loading anyway risks crashing the whole process.");
         }
     }
