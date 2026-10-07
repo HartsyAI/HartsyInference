@@ -32,7 +32,8 @@ stable release will require. Dates are UTC.
 
 - **Fixed: a ControlFoley video or reference clip no longer needs a prompt.** `MusicService` refused a request with an empty
   prompt and genre before the model ran, but the official demo scores a video, or follows a reference clip, with no
-  prompt at all. A request carrying `Video` or `ReferenceAudio` now passes that check.
+  prompt at all. A ControlFoley request carrying `Video` or `ReferenceAudio` now passes that check; every other model still
+  needs a prompt or genre.
 
 ## alpha.267
 

@@ -16,15 +16,26 @@ public sealed class MusicService : IMusicService
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal MusicService(InferenceEngine engine) => _engine = engine;
 
+    /// <summary>ACE-Step puts the style in genre and the lyrics in prompt, so either alone is enough. ControlFoley also scores a video
+    /// or follows a reference clip with neither; no other model reads those inputs that way.</summary>
+    internal static bool HasPromptOrConditioning(ModelSpec spec, MusicRequest request)
+    {
+        if (!string.IsNullOrWhiteSpace(request.Prompt) || !string.IsNullOrWhiteSpace(request.Genre))
+        {
+            return true;
+        }
+
+        bool controlFoley = spec.Requested.StartsWith("controlfoley", StringComparison.OrdinalIgnoreCase);
+        return controlFoley && (request.Video is not null || request.ReferenceAudio is not null);
+    }
+
     /// <inheritdoc/>
     public Task<AudioResult> GenerateAsync(ModelSpec spec, MusicRequest request, IProgress<StepPreview>? progress = null, CancellationToken cancel = default)
     {
         ArgumentNullException.ThrowIfNull(request);
-        bool conditioned = request.Video is not null || request.ReferenceAudio is not null;
-        if (string.IsNullOrWhiteSpace(request.Prompt) && string.IsNullOrWhiteSpace(request.Genre) && !conditioned)
+        if (!HasPromptOrConditioning(spec, request))
         {
-            // ACE-Step puts the style in genre and the (optional) lyrics in prompt, so either alone is enough; a ControlFoley video or reference clip needs neither.
-            throw new ArgumentException("No prompt or genre supplied to generate music.", nameof(request));
+            throw new ArgumentException("No prompt, genre, video or reference audio supplied to generate music.", nameof(request));
         }
         // SwarmUI's 2026-09-01 prompt-parser update now resolves <weight[N]:text>/<alternate:...>/<fromto[N]:...>
         // as literal tags in the final prompt text handed to every backend, in place of the Comfy-native
