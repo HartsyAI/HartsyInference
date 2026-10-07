@@ -34,6 +34,20 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.277
+
+- **Added: loading an opened DeepSeek-V4.1 checkpoint into the host reference model.** `DeepSeekV41HostModelLoader` reads every backbone
+  layer by canonical key (attention, compressor, indexer, gate, shared expert, hyper-connection coefficients, norms, embedding and head),
+  dequantizing each weight to F32 through its bound recipe (`WeightDequantizer`), with the config's own logical shapes checked. Routed experts
+  are not loaded up front: one `DeepSeekV41ExpertCache` shared across all layers dequantizes an expert the first time a token routes to it,
+  bounded by `DeepSeekV41LoadOptions.ExpertCacheCapacity`. Engram tables stay on disk behind `EngramTableStore` (storage backing, per-table
+  budget). Two rope tables are built once and shared: the plain one and the compress-theta YaRN one. `DeepSeekV41LoadedModel` owns the
+  checkpoint and stores for the model's lifetime. This is the reference path, so dense weights are held as F32, roughly 30 GiB of host memory
+  for the official checkpoint; draft, vision and DSpark tensors are not read. A real safetensors directory written from the model fixture,
+  opened through `DeepSeekV41Checkpoint` with a full config, reproduces upstream's hidden states and logits through prefill and decode with a
+  three-expert cache forcing evictions. The Engram branch is not covered end to end: its hash ids address the official 384-million-row tables.
+  Not wired into `TextService`.
+
 ## alpha.276
 
 - **Added: DeepSeek V4.1 block and whole-model forward on the host reference path.** `DeepSeekV41Block` composes the optional Engram

@@ -81,7 +81,8 @@ def main() -> None:
         steps.append({"start": start, "len": length, "ids": [int(v) for v in ids[0, start:start + length]],
                       "blocks": list(blocks), "final": finals[0], "logits": flat(logits)})
     out = {"config": {k: (list(v) if isinstance(v, tuple) else v) for k, v in cfg.items()},
-           "params": {n: flat(p) for n, p in model.named_parameters()}, "steps": steps}
+           "params": {n: flat(p) for n, p in model.named_parameters()},
+           "shapes": {n: list(p.shape) for n, p in model.named_parameters()}, "steps": steps}
     os.makedirs(a.out_dir, exist_ok=True)
     with open(os.path.join(a.out_dir, "model_forward.json"), "w") as fh:
         json.dump(out, fh, separators=(",", ":"))
