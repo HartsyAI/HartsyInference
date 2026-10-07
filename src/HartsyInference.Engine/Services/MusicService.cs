@@ -25,8 +25,8 @@ public sealed class MusicService : IMusicService
             return true;
         }
 
-        bool controlFoley = spec.Requested.StartsWith("controlfoley", StringComparison.OrdinalIgnoreCase);
-        return controlFoley && (request.Video is not null || request.ReferenceAudio is not null);
+        bool controlFoley = string.Equals(AudioModelSelector.Parse(spec).Id, "controlfoley", StringComparison.OrdinalIgnoreCase);
+        return controlFoley && (request.Video is { Data.Length: > 0 } || request.ReferenceAudio is { Data.Length: > 0 });
     }
 
     /// <inheritdoc/>

@@ -31,4 +31,12 @@ public sealed class MusicServicePromptTests
         Assert.False(MusicService.HasPromptOrConditioning(Spec("acestep"), new MusicRequest { Prompt = "", ReferenceAudio = Clip }));
         Assert.True(MusicService.HasPromptOrConditioning(Spec("acestep"), new MusicRequest { Prompt = "", Genre = "jazz" }));
     }
+
+    [Fact]
+    public void ControlFoley_SelectorIsNormalisedAndMediaMustHaveBytes()
+    {
+        Assert.True(MusicService.HasPromptOrConditioning(Spec("  controlfoley  "), new MusicRequest { Prompt = "", ReferenceAudio = Clip }));
+        Assert.False(MusicService.HasPromptOrConditioning(Spec("controlfoley"), new MusicRequest { Prompt = "", ReferenceAudio = new AudioClip { Data = [] } }));
+        Assert.False(MusicService.HasPromptOrConditioning(Spec("controlfoley"), new MusicRequest { Prompt = "", Video = new VideoClip { Data = [] } }));
+    }
 }
