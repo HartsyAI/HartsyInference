@@ -26,6 +26,13 @@ Re-check without downloading: `python fetch_upstream.py --verify-only`.
 | `dump_hc_rope_window_fixtures.py` | Writes `fixtures/hc_mix.json` (Sinkhorn 1/3/20 iters, `hc_pre`, `hc_post`), `rope_interleaved_offset.json` (offset rotary and its inverse) and `window_indices.json` (`get_window_topk_idxs` prefill/decode) |
 | `dump_parser_reference.py` | Runs upstream `encoding.py` `parse_message_from_completion_text` on golden, canonical and malformed completions and writes `parser_reference/parser_reference.json` |
 | `cross_check_recipe.py` | Compares that fixture with the `deepseek-recipe` stream parser at ~40 split points per case (`pip install deepseek-recipe`) |
+| `dump_rope_table_fixture.py` | Writes `fixtures/rope_table.json`: upstream `precompute_freqs_cis`, plain and YaRN, as cos/sin tables |
+| `dump_compressor_fixture.py` | Writes `fixtures/compressor_pool.json`: upstream `Compressor` prefill + decode pooling with the norm bypassed |
+| `dump_candidate_select_fixture.py` | Writes `fixtures/candidate_select.json`: `select_candidate_blocks` and the indexer's final sorted top-k |
+| `dump_moe_exec_fixture.py` | Writes `fixtures/moe_exec.json`: upstream `MoE` (gate, routed experts, shared expert) with float32 weights |
+| `dump_engram_module_fixture.py` | Writes `fixtures/engram_module.json`: upstream `Engram` with a bf16-rounded float table in place of the FP8 lookup |
+| `dump_hyper_connection_fixture.py` | Writes `fixtures/hyper_connection.json`: `Block.hc_mixes` / `hc_pre` / `hc_post` called unbound |
+| `dump_attention_fixture.py` | Writes `fixtures/attention_stack.json`: six upstream `Attention` layers (every mode) through prefill and decode, with the indices each index-source layer chose |
 | `dump_derivative_quant_fixtures.py` | Writes `fixtures/derivative_quant_codecs.json`: independent numpy decoders for ModelOpt NVFP4 and Quark MXFP4, and `mx.quantize`/`mx.dequantize` for MLX affine 4/8-bit gs64 (needs `pip install mlx[cpu]`, used only by this script) |
 
 ## Commands
