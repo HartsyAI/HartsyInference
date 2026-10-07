@@ -32,8 +32,9 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the host-RAM guard no longer refuses a quantized GGUF a CUDA device loads without dequantizing.** `TextService`
   demanded 2.5x the file size free before every GGUF load, which is the cost of dequantizing onto host buffers. A backend
-  that reads quantized weights (`SupportsQuantized`) keeps them compressed and reads them through the mmap, so it now needs
-  1.15x. Dequantizing backends, SSM models and the tensor-parallel and layer-split paths keep 2.5x. A 44 GB Kolibri-1
+  that reads quantized weights (`SupportsQuantized`) keeps Q4_0/Q5_0/Q8_0/Q4_K/Q5_K/Q6_K compressed and reads them through
+  the mmap, so it now needs 1.15x the file plus the F32 size of any other quantized tensor in it (those are still
+  expanded). Dequantizing backends, SSM models and the tensor-parallel and layer-split paths keep 2.5x. A 44 GB Kolibri-1
   Q4_K_M was refused on a 64 GB server with "need ~110 GB headroom".
 
 ## alpha.268
