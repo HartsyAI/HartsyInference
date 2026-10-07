@@ -7,6 +7,7 @@ namespace HartsyInference.Video.Tests;
 public sealed class FfmpegProcessDecoderTests
 {
     [Fact]
+    [Trait("Category", "Integration")]
     public async Task DecodeAsync_MaxSeconds_StopsDecodingAfterThatMuchInput()
     {
         string clip = Path.Combine(Path.GetTempPath(), $"hartsy-ffmpeg-{Guid.NewGuid():N}.mp4");

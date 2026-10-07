@@ -28,7 +28,7 @@ stable release will require. Dates are UTC.
 
 - **ControlFoley video-to-audio through the engine.** `MusicRequest` gains `Video` (an encoded clip), `MaskAwayClip` (the
   official `--mask_away_clip`) and `NegativePrompt`. A request with a video is decoded by the ffmpeg child-process
-  decoder at the clip's native size and rate, capped to the requested duration, and conditions the CLIP, CAV-MAE-ST
+  decoder at the clip's native size and rate, decoded up to one second past the requested duration (the preprocessor drops frames beyond it), and conditions the CLIP, CAV-MAE-ST
   and Synchformer streams; the output is cut to the clip's usable length when that is shorter. The Synchformer and
   CAV-MAE-ST weights (`ext_weights/` of `YJX-Xiaomi/ControlFoley`) download on the first video request, so text-only use
   never fetches them. `FfmpegProcessDecoder` gets a `maxSeconds` limit (`-t`) for this.

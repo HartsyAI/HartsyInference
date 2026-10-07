@@ -172,10 +172,10 @@ public sealed record MusicRequest
     /// <summary>Negative prompt for classifier-free guidance (ControlFoley); empty for none.</summary>
     public string NegativePrompt { get; init; } = "";
 
-    /// <summary>Source video the generated audio is conditioned on (ControlFoley video-to-audio): its frames drive the CLIP, visual and synchronisation streams, and the output is cut to the clip's usable length when that is shorter than <see cref="Duration"/>. Needs an <c>ffmpeg</c> binary. Null for text-to-audio.</summary>
+    /// <summary>ControlFoley: source video to score; the output is cut to the clip if shorter than <see cref="Duration"/>. Needs ffmpeg.</summary>
     public VideoClip? Video { get; init; }
 
-    /// <summary>ControlFoley: ignore the video's CLIP stream and keep only the visual and synchronisation streams (the official <c>--mask_away_clip</c>), so the prompt describes the sound rather than competing with the picture.</summary>
+    /// <summary>ControlFoley: ignore the video's CLIP stream (the official <c>--mask_away_clip</c>).</summary>
     public bool MaskAwayClip { get; init; }
 
     /// <summary>Per-request VRAM lever overrides; null follows the backend's policy.</summary>
