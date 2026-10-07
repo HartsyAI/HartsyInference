@@ -7,6 +7,7 @@ using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
+using HartsyInference.Engine.Services;
 using HartsyInference.Tests.Common;
 
 namespace HartsyInference.LLM.Tests;
@@ -200,13 +201,15 @@ public sealed class LlmShardingEngineTests
             return;
         }
 
-        // TextService.EnsureRamHeadroomFor rejects the load outright below ~2.5x the file size (GgufLanguageModel
-        // dequantizes tensors onto host buffers atop the mmap during load) — mirror that gate here so an
-        // under-provisioned host reports a clear skip instead of the engine's own HartsyInferenceException.
+        // TextService.EnsureRamHeadroomFor rejects a layer-split load below its quantized-load estimate (1.15x the file plus
+        // the F32 size of tensors still expanded). Use the production estimate here so an under-provisioned host reports a
+        // clear skip instead of the engine's own HartsyInferenceException.
         double availableRamGb = AvailableRamGb();
-        double checkpointGb = new FileInfo(checkpoint).Length / (1024.0 * 1024.0 * 1024.0);
-        double requiredRamGb = checkpointGb * 2.5;
-        _output.WriteLine($"Host RAM — available: {availableRamGb:F1} GB, required (~2.5x the {checkpointGb:F1} GB checkpoint): {requiredRamGb:F1} GB.");
+        long checkpointBytes = new FileInfo(checkpoint).Length;
+        double checkpointGb = checkpointBytes / (1024.0 * 1024.0 * 1024.0);
+        double requiredRamGb = TextService.RequiredHostRamBytes(checkpoint, checkpointBytes, dequantizesEverything: false, out _)
+            / (1024.0 * 1024.0 * 1024.0);
+        _output.WriteLine($"Host RAM — available: {availableRamGb:F1} GB, required for the {checkpointGb:F1} GB checkpoint: {requiredRamGb:F1} GB.");
         if (availableRamGb > 0 && availableRamGb < requiredRamGb)
         {
             _output.WriteLine("SKIPPED: insufficient free host RAM for GGUF dequantization-on-load — free RAM " +
