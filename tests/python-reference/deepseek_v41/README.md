@@ -33,7 +33,7 @@ Re-check without downloading: `python fetch_upstream.py --verify-only`.
 | `dump_engram_module_fixture.py` | Writes `fixtures/engram_module.json`: upstream `Engram` with a bf16-rounded float table in place of the FP8 lookup |
 | `dump_hyper_connection_fixture.py` | Writes `fixtures/hyper_connection.json`: `Block.hc_mixes` / `hc_pre` / `hc_post` called unbound |
 | `dump_attention_fixture.py` | Writes `fixtures/attention_stack.json` (with an exact-softmax `sparse_attn`, see below): six upstream `Attention` layers (every mode) through prefill and decode, with the indices each index-source layer chose |
-| `dump_model_fixture.py` | Writes `fixtures/model_forward.json`: a small upstream `Transformer` (all layer modes, float32, no Engram/vision/draft) with every parameter, each block's output stream, the final normed hidden states and last-position logits through prefill and decode |
+| `dump_model_fixture.py` | Writes `fixtures/model_forward.json`: a small upstream `Transformer` (all layer modes, float32, no Engram/vision/draft) with every parameter and its shape, each block's output stream, the final normed hidden states and last-position logits through prefill and decode |
 | `dump_derivative_quant_fixtures.py` | Writes `fixtures/derivative_quant_codecs.json`: independent numpy decoders for ModelOpt NVFP4 and Quark MXFP4, and `mx.quantize`/`mx.dequantize` for MLX affine 4/8-bit gs64 (needs `pip install mlx[cpu]`, used only by this script) |
 
 ## Commands
