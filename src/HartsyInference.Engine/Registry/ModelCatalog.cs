@@ -57,12 +57,11 @@ public static class ModelCatalog
                         Sha256 = "7485fe6f11af29433bc51cab58009521f205840f5b4ae3a32fa7f92e8534fdf5" },
                 },
             },
-            // Kolibri-1 (Aleph-Alpha, 78B sparse MoE). Structural: the GGUF key map, local/global + NoPE attention and
-            // sigmoid-logit-add routing are unit-tested, but no real checkpoint has been run yet (smallest quant is 28.6 GB).
+            // Kolibri-1 (Aleph-Alpha, 78B sparse MoE). ValidationPending: the pinned Q4_K_M has not been run (see MODEL_STATUS_LLM.md).
             new CatalogEntry
             {
                 Id = "kolibri1", Modality = txt, DisplayName = "Kolibri-1 (78B MoE)", Architecture = "Kolibri-1 sparse MoE transformer",
-                Status = st, CliDrivable = true,
+                Status = vp, CliDrivable = true,
                 Assets = new ModelAsset[]
                 {
                     new() { Repo = "Hob-forge/Kolibri-1-GGUF", RepoPath = "Kolibri-1-Q4_K_M.gguf",
