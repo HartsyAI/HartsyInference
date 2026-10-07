@@ -143,9 +143,15 @@ public sealed class ToolRegistryTests
         registry.Add("stuck", "", "{}", (_, _) => Task.Run(() => { release.Wait(); return "late"; }));
         registry.Add("blocking", "", "{}", (_, _) => { release.Wait(); return Task.FromResult("late"); });
 
-        Assert.Contains("timed out", ErrorOf(await registry.InvokeAsync(Call("stuck")).WaitAsync(TimeSpan.FromSeconds(5))));
-        Assert.Contains("timed out", ErrorOf(await registry.InvokeAsync(Call("blocking")).WaitAsync(TimeSpan.FromSeconds(5))));
-        release.Set();
+        try
+        {
+            Assert.Contains("timed out", ErrorOf(await registry.InvokeAsync(Call("stuck")).WaitAsync(TimeSpan.FromSeconds(5))));
+            Assert.Contains("timed out", ErrorOf(await registry.InvokeAsync(Call("blocking")).WaitAsync(TimeSpan.FromSeconds(5))));
+        }
+        finally
+        {
+            release.Set();
+        }
     }
 
     [Fact]

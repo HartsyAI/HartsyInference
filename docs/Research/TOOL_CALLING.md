@@ -33,7 +33,8 @@ await foreach (TextChunk chunk in ToolLoop.RunAsync(engine.Text, spec, request, 
 snapshot per read), so a host can build or edit a registry per call. `Remove(name)` unregisters a tool. Handlers have
 no timeout by default; set `ToolRegistry.DefaultTimeout`, or pass a `TimeSpan` to an `Add` overload for one tool, and a
 handler that runs past it has its token cancelled and the call returns `{"error": "... timed out ..."}` (a handler that
-ignores its token is abandoned, not awaited). Cancelling the turn's token still throws.
+ignores its token is abandoned, not awaited). With a timeout set the handler starts on the thread pool, not on the
+caller's synchronization context. Cancelling the turn's token still throws.
 
 `Install` sets the factory to return a `ToolCallStreamFilter` only when `request.Tools` is non-empty; every other
 request keeps the untouched text path. `StopAfterFirstCall` (default true) ends generation at the first completed

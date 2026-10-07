@@ -141,6 +141,7 @@ public sealed class ToolRegistry
     {
         using CancellationTokenSource timeoutSource = new(timeout);
         using CancellationTokenSource linked = CancellationTokenSource.CreateLinkedTokenSource(cancel, timeoutSource.Token);
+        // An abandoned handler may outlive the disposal below; the timeout already cancelled its token, so that is harmless.
         Task<string> running = Task.Run(() => handler.InvokeAsync(argumentsJson, linked.Token), CancellationToken.None);
         try
         {
