@@ -34,6 +34,20 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.279
+
+- **Added: a DeepSeek-V4.1 checkpoint directory now loads and generates through `TextService`.** `HfTextDirectoryLoader` no longer
+  stops at "model class not wired": it builds a `DeepSeekV41TextModel` (the host reference model behind its `IGenerationModel`
+  adapter, the byte-level BPE tokenizer read from the checkpoint's `tokenizer.json` with begin and end of sentence checked against
+  `config.json`, and `DeepSeekV41Encoder` as the chat template), and the slot's shared `TextGenerationPipeline` drives it for
+  `GenerateAsync`, `StreamAsync` and `CountTokens`. The model always loads on the CPU backend (a GPU device request logs that it is
+  ignored), accepts at most 16,384 prompt-plus-generated tokens per request, and a load first checks free host RAM against the F32
+  size of the dense weights. A directory without `tokenizer.json`, or with one that is not byte-level BPE, is refused by name.
+  Covered on the small upstream fixture checkpoint; nothing has run on the real weights, so no matrix row moves to Verified, and
+  the catalog entry stays Structural and not CLI-drivable.
+- **Changed: `HfTextDirectoryLoader.Load` takes the backend and returns the loaded model.** The `NotSupportedException` it threw for a
+  valid V4.1 directory is gone.
+
 ## alpha.278
 
 - **Added: the V4.1 host reference model as an `IGenerationModel`.** `DeepSeekV41GenerationModel` adapts a loaded model so the shared

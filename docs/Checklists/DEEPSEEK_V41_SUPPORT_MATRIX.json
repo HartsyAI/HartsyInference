@@ -248,7 +248,7 @@
       "feature": "DeepSeekV41Model batch decode and scheduler chunked prefill",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
+        "CPU": "Implemented",
         "CUDA": "Unimplemented",
         "Vulkan": "Unimplemented"
       },
@@ -271,7 +271,8 @@
       ],
       "acceptanceTest": "B=3 ragged batch == 3 single runs",
       "pr": 9,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "CPU host reference only: DeepSeekV41GenerationModel (IGenerationModel) over the F32 host model, driven by TextGenerationPipeline and TextService on the small upstream fixture checkpoint; prefill/decode logits match upstream to 1e-3 and a ragged B=2 decode equals the single runs; no scheduler chunked prefill, no CUDA or Vulkan path, nothing run on the real weights, so not Verified"
     },
     {
       "id": "load.shards",

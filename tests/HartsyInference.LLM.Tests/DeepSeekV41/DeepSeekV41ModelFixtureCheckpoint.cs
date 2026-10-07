@@ -69,6 +69,28 @@ internal static class DeepSeekV41ModelFixtureCheckpoint
         });
     }
 
+    // A byte-level BPE tokenizer.json sized to the fixture's 32-token vocabulary: the chat-template specials at ids 0-4 (bos 0 and eos 1, as in
+    // config.json), then single characters, with one merge, "h" + "i", so a prompt of "hi" is a single token. The rest are filler.
+    public static void WriteTokenizer(string directory)
+    {
+        string[] specials = ["<｜begin▁of▁sentence｜>", "<｜end▁of▁sentence｜>", "<｜User｜>", "<｜Assistant｜>", "<｜System｜>"];
+        string[] characters = ["h", "i", "<", "t", "n", "k", ">", "/", "hi"];
+        int vocabSize = Fx.GetProperty("config").GetProperty("vocab_size").GetInt32();
+        JsonObject vocab = new();
+        for (int id = specials.Length; id < vocabSize; id++)
+            vocab[id - specials.Length < characters.Length ? characters[id - specials.Length] : $"unused{id}"] = id;
+        JsonArray added = new();
+        for (int id = 0; id < specials.Length; id++)
+            added.Add(new JsonObject { ["id"] = id, ["content"] = specials[id], ["special"] = true });
+        JsonObject root = new()
+        {
+            ["model"] = new JsonObject { ["type"] = "BPE", ["vocab"] = vocab, ["merges"] = new JsonArray("h i") },
+            ["added_tokens"] = added,
+            ["pre_tokenizer"] = new JsonObject { ["type"] = "ByteLevel", ["add_prefix_space"] = false, ["use_regex"] = false },
+        };
+        File.WriteAllText(Path.Combine(directory, "tokenizer.json"), root.ToJsonString());
+    }
+
     // Every fixture parameter as an F32 tensor under its canonical name, in one shard with an index.
     public static void Write(string directory)
     {
