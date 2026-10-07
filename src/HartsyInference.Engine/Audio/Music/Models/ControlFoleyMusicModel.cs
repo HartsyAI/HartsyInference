@@ -107,6 +107,11 @@ internal static class ControlFoleyMusicModel
             {
                 ControlFoleyRawVideo? raw = request.Video is null ? null : DecodeVideo(request.Video, request.Duration, ct);
                 ControlFoleyPipeline.ReferenceAudio? clipReference = ReadReference(request);
+                if (raw is null && clipReference is null && string.IsNullOrWhiteSpace(request.Prompt))
+                {
+                    throw new ArgumentException("ControlFoley needs a prompt, a video or a usable reference clip.", nameof(request));
+                }
+
                 ControlFoleyPipeline.Request run = new()
                 {
                     Prompt = request.Prompt,
