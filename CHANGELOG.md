@@ -38,7 +38,7 @@ stable release will require. Dates are UTC.
 
 - **Added: the V4.1 host reference model as an `IGenerationModel`.** `DeepSeekV41GenerationModel` adapts a loaded model so the shared
   `TextGenerationPipeline` can drive it: `Prefill` (last row or every row, with the chunk required to start at the committed length),
-  `DecodeBatch` (one token per sequence), `ProjectLogits`, a state-size estimate and host memory capacity. It owns the loaded model, takes
+  `DecodeBatch` (one token per sequence, validated for every sequence before any moves), `ProjectLogits`, a state-size estimate and host memory capacity. It owns the loaded model, takes
   text tokens only (image embeddings are refused) and runs no speculation. `DeepSeekV41GenerationState` is its `ISequenceState`: the
   compressor's partial group and the window ring cannot be truncated in place, so `Truncate` resets and replays the kept prefix from the stored
   token ids, correct but a prefill's cost. The output head's matrix product now runs across cores, one sequential dot product per output so

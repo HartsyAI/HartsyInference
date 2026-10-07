@@ -7,7 +7,7 @@ namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>Adapts a loaded V4.1 host reference model to <see cref="IGenerationModel"/> so the shared pipeline can drive it.</summary>
 /// <remarks>Owns the <see cref="DeepSeekV41LoadedModel"/>: disposing this releases the checkpoint and row stores. Text only (no image embeds), one token per decode step,
-/// no speculation. A prefill must start at the sequence's committed length; a later multi-token chunk is run a token at a time. Not thread-safe: run one sequence at a time.</remarks>
+/// no speculation. A prefill must start at the sequence's committed length; the host model runs a later multi-token chunk a token at a time. A refused call changes no sequence. Not thread-safe: run one sequence at a time.</remarks>
 public sealed class DeepSeekV41GenerationModel : IGenerationModel
 {
     private readonly DeepSeekV41LoadedModel _loaded;
@@ -69,6 +69,15 @@ public sealed class DeepSeekV41GenerationModel : IGenerationModel
     {
         ArgumentNullException.ThrowIfNull(states);
         if (states.Length != tokenIds.Length) throw new ArgumentException($"{tokenIds.Length} tokens for {states.Length} sequence states.");
+        // refuse the whole batch before any sequence moves, as the single-sequence path does
+        HashSet<ISequenceState> seen = new(ReferenceEqualityComparer.Instance);
+        for (int i = 0; i < tokenIds.Length; i++)
+        {
+            DeepSeekV41GenerationState sequence = AsSequence(states[i]);
+            if (!seen.Add(sequence)) throw new ArgumentException("A sequence state appears twice in one batch.", nameof(states));
+            if (sequence.Length >= sequence.Capacity) throw new InvalidOperationException($"Sequence {i} is full ({sequence.Capacity} tokens).");
+            if ((uint)tokenIds[i] >= (uint)_model.VocabSize) throw new ArgumentOutOfRangeException(nameof(tokenIds), tokenIds[i], "Token id is outside the vocabulary.");
+        }
         int dim = _model.Dim;
         float[] hidden = new float[tokenIds.Length * dim];
         for (int i = 0; i < tokenIds.Length; i++) AsSequence(states[i]).Append(tokenIds.Slice(i, 1), hidden.AsSpan(i * dim, dim));

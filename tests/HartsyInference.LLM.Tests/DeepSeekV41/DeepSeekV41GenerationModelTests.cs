@@ -146,6 +146,29 @@ public sealed class DeepSeekV41GenerationModelTests
     }
 
     [Fact]
+    public void A_Refused_Batch_Moves_No_Sequence()
+    {
+        WithModel(model =>
+        {
+            using ISequenceState a = model.CreateSequenceState(new SequenceStateOptions(64)), b = model.CreateSequenceState(new SequenceStateOptions(64));
+            using ISequenceState full = model.CreateSequenceState(new SequenceStateOptions(2));
+            Logits(model, [1, 2], full);
+            Logits(model, [1, 2, 3], a);
+            Logits(model, [4, 5], b);
+
+            Assert.Throws<ArgumentOutOfRangeException>(() => model.DecodeBatch([5, int.MaxValue], [a, b]));
+            Assert.Throws<ArgumentOutOfRangeException>(() => model.DecodeBatch([5, -1], [a, b]));
+            Assert.Throws<InvalidOperationException>(() => model.DecodeBatch([5, 6], [a, full]));
+            Assert.Throws<ArgumentException>(() => model.DecodeBatch([5, 6], [a, a]));
+            Assert.Throws<ArgumentException>(() => model.DecodeBatch([5, 6], [a, new ForeignState()]));
+
+            Assert.Equal(3, a.Length);
+            Assert.Equal(2, b.Length);
+            Assert.Equal(2, full.Length);
+        });
+    }
+
+    [Fact]
     public void Truncate_Replays_The_Kept_Prefix_So_The_Next_Token_Matches_Upstream()
     {
         WithModel(model =>
