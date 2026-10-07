@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.Multimodal;
 using HartsyInference.LLM.Ssm;
@@ -42,7 +43,10 @@ internal sealed class TextDeviceSlot
     /// <summary>The generation pipeline built for <see cref="SsmModel"/> on <see cref="Backend"/>.</summary>
     public SsmGenerationPipeline? SsmPipeline { get; set; }
 
-    /// <summary>Full path of the currently-loaded GGUF file, or null if nothing is loaded.</summary>
+    /// <summary>The loaded DeepSeek-V4.1 host reference model, or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter; the slot's <see cref="Backend"/> is a CPU backend.</summary>
+    public DeepSeekV41TextModel? DeepSeekV41 { get; set; }
+
+    /// <summary>Full path of the currently-loaded model (a GGUF file or a Hugging Face directory), or null if nothing is loaded.</summary>
     public string? LoadedPath { get; set; }
 
     /// <summary>Splice vision encoder (gemma3 / qwen2.5-vl / siglip family), or null when text-only / mllama.</summary>

@@ -12,6 +12,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Generation;
 using HartsyInference.LLM.OutputParsing;
 using HartsyInference.LLM.Transformer;
@@ -111,7 +112,7 @@ public sealed class TextService : ITextService, IDisposable
                 continue;
             try
             {
-                ILlmTokenizer? tokenizer = slot.Model?.Tokenizer ?? slot.SsmModel?.Tokenizer;
+                ILlmTokenizer? tokenizer = slot.Model?.Tokenizer ?? slot.SsmModel?.Tokenizer ?? slot.DeepSeekV41?.Tokenizer;
                 if (tokenizer is not null)
                     return tokenizer.EncodeOrdinary(text).Length;
             }
@@ -174,8 +175,10 @@ public sealed class TextService : ITextService, IDisposable
     private GenOutcome RunText(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel)
     {
         ILlmTokenizer tokenizer = slot.SsmModel is not null ? slot.SsmModel.Tokenizer
+            : slot.DeepSeekV41 is not null ? slot.DeepSeekV41.Tokenizer
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Tokenizer : slot.Model!.Tokenizer;
         IChatTemplate template = slot.SsmModel is not null ? slot.SsmModel.Template
+            : slot.DeepSeekV41 is not null ? slot.DeepSeekV41.Template
             : slot.TpCheckpoint is not null ? slot.TpCheckpoint.Template : slot.Model!.Template;
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer);
@@ -310,8 +313,69 @@ public sealed class TextService : ITextService, IDisposable
         return new GenOutcome(answer, StopReason.Stop, 0, completion);
     }
 
-    /// <summary>The Hugging Face directory path: validates the checkpoint and refuses until a model class consumes it.</summary>
-    private static void LoadHfDirectory(HfCheckpointInfo checkpoint) => HfTextDirectoryLoader.Load(checkpoint);
+    /// <summary>The Hugging Face directory path: loads a DeepSeek-V4.1 checkpoint onto the host reference model. The weights live on the host, so the slot gets a CPU backend whatever device was asked for.</summary>
+    private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
+    {
+        HfTextDirectoryLoader.RequireSupported(checkpoint);
+        if (slot.DeepSeekV41 is not null && slot.LoadedPath == path)
+            return;
+        EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
+        UnloadSlot(slot);
+        if (slot.ExtraStageBackends is not null)
+        {
+            foreach (IBackend stage in slot.ExtraStageBackends)
+            {
+                try { stage.Dispose(); }
+                catch (Exception ex) { Logs.Debug($"[TextService] Disposing stale stage backend failed: {ex.Message}"); }
+            }
+            slot.ExtraStageBackends = null;
+        }
+        if (slot.Backend is not null)
+        {
+            try { slot.Backend.Dispose(); }
+            catch (Exception ex) { Logs.Debug($"[TextService] Disposing stale backend failed: {ex.Message}"); }
+            slot.Backend = null;
+        }
+        slot.Placement = null;
+        if (!string.Equals(BackendFactory.Kind(deviceKey), "cpu", StringComparison.OrdinalIgnoreCase))
+            Logs.Warning($"[TextService] DeepSeek-V4.1 runs on the host reference model only; '{deviceKey}' is ignored and the model loads on the CPU.");
+        IBackend backend = CreateBackendFor("cpu");
+        try
+        {
+            slot.DeepSeekV41 = HfTextDirectoryLoader.Load(checkpoint, backend);
+        }
+        catch
+        {
+            backend.Dispose();
+            throw;
+        }
+        slot.Backend = backend;
+        slot.Pipeline = new TextGenerationPipeline(slot.DeepSeekV41.Generation, slot.DeepSeekV41.Tokenizer, slot.DeepSeekV41.Template);
+        slot.CacheWeightCastsApplied = null;
+        slot.PreloadRedundantWeightSplitsApplied = null;
+        slot.LoadedPath = path;
+        Logs.Info($"[TextService] Loaded DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
+    }
+
+    /// <summary>Refuses a V4.1 load that would not fit: the reference model widens every dense, embedding and head tensor to F32 on the host (at most 4x the stored bytes, for FP8), then adds working room for experts and activations.</summary>
+    private static void EnsureRamHeadroomForDeepSeekV41(string directory)
+    {
+        long availableKb = ReadAvailableMemoryKb();
+        if (availableKb <= 0)
+            return;
+        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(directory);
+        IReadOnlyDictionary<DeepSeekV41WeightClass, long> bytes = checkpoint.Weights.BytesByClass;
+        double requiredBytes = 4.0 * (bytes[DeepSeekV41WeightClass.Dense] + bytes[DeepSeekV41WeightClass.Embed] + bytes[DeepSeekV41WeightClass.Head])
+            + 4.0 * 1024 * 1024 * 1024;
+        double availableBytes = availableKb * 1024.0;
+        if (availableBytes < requiredBytes)
+        {
+            throw new HartsyInferenceException(
+                $"Not enough free host RAM to safely load DeepSeek-V4.1 '{directory}': {availableBytes / 1024 / 1024 / 1024:0.0} GB free, "
+                + $"need ~{requiredBytes / 1024 / 1024 / 1024:0.0} GB for the F32 dense weights of the host reference model. "
+                + "Free RAM, then retry — loading anyway risks crashing the whole process.");
+        }
+    }
 
     private void LoadInto(TextDeviceSlot slot, string deviceKey, ModelSpec spec, TextRequest request)
     {
@@ -322,10 +386,10 @@ public sealed class TextService : ITextService, IDisposable
                 $"(looked under '{RepoPaths.ModelsRoot()}').");
         if (Directory.Exists(path) && HfCheckpointDirectory.TryProbe(path) is { } hfCheckpoint)
         {
-            LoadHfDirectory(hfCheckpoint);
+            LoadHfDirectory(slot, deviceKey, hfCheckpoint, path);
             return;
         }
-        if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null) && slot.LoadedPath == path)
+        if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null) && slot.LoadedPath == path)
         {
             LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
             LogLoadTimeSettingMismatch(slot, deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
@@ -764,7 +828,7 @@ public sealed class TextService : ITextService, IDisposable
         slot.MllamaVision?.Dispose();
         slot.MllamaVision = null;
         slot.VisionPath = null;
-        if (slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null)
+        if (slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null)
         {
             if (slot.Backend is not null)
             {
@@ -790,6 +854,8 @@ public sealed class TextService : ITextService, IDisposable
         slot.TpCheckpoint = null;
         slot.Model?.Dispose();
         slot.Model = null;
+        slot.DeepSeekV41?.Dispose();
+        slot.DeepSeekV41 = null;
         slot.SsmPipeline = null;
         slot.SsmModel?.Dispose();
         slot.SsmModel = null;
