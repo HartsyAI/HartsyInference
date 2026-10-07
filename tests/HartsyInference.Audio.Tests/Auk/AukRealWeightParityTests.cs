@@ -22,8 +22,8 @@ namespace HartsyInference.Audio.Tests.Auk;
 /// <remarks><c>HARTSY_AUK_REFDIR</c> names the dump root (one folder per case); <c>HARTSY_AUK_DIR</c>,
 /// <c>HARTSY_AUK_FLASH_DIR</c> and <c>HARTSY_AUK_OMNI_DIR</c> override the checkpoint folders and
 /// <c>HARTSY_AUK_BACKEND</c> (default cuda) picks the backend. <c>HARTSY_AUK_STRICT=1</c> runs CUDA without TF32, cuDNN
-/// attention, cuDNN audio convs (TF32 engines, not governed by the TF32 knob) or reduced-precision GEMM, separating precision drift from logic defects. Without the dumps the tests do
-/// nothing.</remarks>
+/// attention, cuDNN audio convs (TF32 engines, not governed by the TF32 knob) or reduced-precision GEMM, separating
+/// precision drift from logic defects. Without the dumps the tests do nothing.</remarks>
 [Trait("Category", "RealWeights")]
 public sealed class AukRealWeightParityTests(ITestOutputHelper output)
 {
@@ -92,7 +92,7 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
 
     private void RunCase(IBackend backend, string name, string dir, string aukDir, string flashDir, string omniDir, bool strict)
     {
-        // Strict runs are F32 end to end and must agree to F32 rounding; default runs keep TF32 GEMMs and F16 cuDNN
+        // Strict runs keep reduced precision off and are held tighter; default runs keep TF32 GEMMs and F16 cuDNN
         // attention, whose drift through the 36-layer thinker stays far below upstream's own production bf16 thinker
         // (final-layer corr 0.975 against the F32 reference on the clone case).
         double thinkerMin = strict ? 0.99999 : 0.9995;
@@ -191,8 +191,10 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
             {
                 bool flash = variant == "flash";
                 string vdir = Path.Combine(dir, variant);
-                Dictionary<string, Tensor> auk = Load(Path.Combine(flash ? flashDir : aukDir, flash ? "auk_flash.safetensors" : "auk_base.safetensors"), owned);
-                RunVariant(backend, name, variant, flash, dir, vdir, auk, vaeWeights, hasAudio, frames, lmCfg.HiddenSize, chainHidden);
+                string checkpoint = flash ? Path.Combine(flashDir, "auk_flash.safetensors") : Path.Combine(aukDir, "auk_base.safetensors");
+                Dictionary<string, Tensor> auk = Load(checkpoint, owned);
+                RunVariant(backend, name, variant, flash, dir, vdir, auk, vaeWeights, hasAudio, frames, lmCfg.HiddenSize,
+                    chainHidden, strict);
             }
         }
         finally
@@ -203,7 +205,7 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
 
     private void RunVariant(IBackend backend, string name, string variant, bool flash, string dir, string vdir,
         Dictionary<string, Tensor> auk, Dictionary<string, Tensor> vaeWeights, bool hasAudio, int frames, int hidden,
-        List<float[]> chainHidden)
+        List<float[]> chainHidden, bool strict)
     {
         string tag = $"[{name}/{variant}]";
         AukConfig cfg = AukConfig.Default;
@@ -224,8 +226,7 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
             Expect(Report($"{tag} fused text", fused.AsSpan<float>(), Read(vdir, "fused").Data), 0.99999);
         }
 
-        AukDit dit = new(cfg);
-        using IDisposable ditScope = dit;
+        using AukDit dit = new(cfg);
         dit.LoadWeights(auk);
         Report($"{tag} inv_freq", dit.InvFreq.ToArray(), Read(vdir, "inv_freq").Data);
         Assert.Equal(Read(vdir, "inv_freq").Data, dit.InvFreq.ToArray());
@@ -288,7 +289,7 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
 
                 // Stage 9 input: the chained engine conditioning (own mel, tower, thinker, fusion and VAE encode).
                 using Tensor chainText = Fuse(backend, auk, chainHidden, hidden);
-                Report($"{tag} chained fused text", chainText.AsSpan<float>(), text.AsSpan<float>());
+                Expect(Report($"{tag} chained fused text", chainText.AsSpan<float>(), text.AsSpan<float>()), 0.9999);
                 chainLatent = Sample(backend, dit, schedule, chainText, chainRef, noise);
             }
             finally
@@ -300,7 +301,7 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
             using (chainLatent)
             using (Tensor latent = ToTensor(Read(vdir, $"x_{schedule.Steps:00}")))
             {
-                Report($"{tag} chained final latent", chainLatent.AsSpan<float>(), latent.AsSpan<float>());
+                Expect(Report($"{tag} chained final latent", chainLatent.AsSpan<float>(), latent.AsSpan<float>()), 0.999);
                 backend.PreloadWeights([.. vae.EnumerateWeights()]);
                 try
                 {
@@ -311,7 +312,9 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
 
                     // Stage 9: every stage chained in the engine, only the noise taken from the reference.
                     float[] chainPcm = DecodePcm(backend, vae, stats, chainLatent);
-                    Report($"{tag} chained end to end pcm", chainPcm, refPcm);
+                    // Flash text-only amplifies its first-step error through four large steps (measured 0.99934
+                    // strict, 0.995 default, with word-identical transcripts), so it sets these floors.
+                    Expect(Report($"{tag} chained end to end pcm", chainPcm, refPcm), strict ? 0.998 : 0.99);
                     WavFile.WriteMono16(Path.Combine(vdir, $"engine_{backend.GetType().Name}.wav"), chainPcm, 24_000);
                 }
                 finally
@@ -369,7 +372,8 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
         return fusion.Complete(last);
     }
 
-    /// <summary>The thinker's 36 hidden states (HF <c>output_hidden_states[1:]</c>) with <paramref name="audioRows"/> spliced at the audio placeholders.</summary>
+    /// <summary>The thinker's 36 hidden states (HF <c>output_hidden_states[1:]</c>) with <paramref name="audioRows"/>
+    /// spliced at the audio placeholders.</summary>
     private static List<float[]> RunThinker(IBackend backend, Qwen2Model lm, Qwen2Config lmCfg, QwenOmniConfig omniCfg, int[] ids, Tensor? audioRows)
     {
         int t = ids.Length;
@@ -406,7 +410,8 @@ public sealed class AukRealWeightParityTests(ITestOutputHelper output)
         }
     }
 
-    /// <summary>Logs corr / relative L2 / max-abs of <paramref name="ours"/> against <paramref name="expected"/> and returns the correlation.</summary>
+    /// <summary>Logs corr / relative L2 / max-abs of <paramref name="ours"/> against <paramref name="expected"/> and
+    /// returns the correlation.</summary>
     private double Report(string label, ReadOnlySpan<float> ours, ReadOnlySpan<float> expected)
     {
         Assert.Equal(expected.Length, ours.Length);
