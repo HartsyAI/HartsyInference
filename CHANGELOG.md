@@ -34,6 +34,20 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.273
+
+- **Added: DeepSeek V4.1 MoE layer on the host reference path.** `DeepSeekV41MoeLayer` runs the gate through the existing
+  `IBackend.MoeRoute`, then `DeepSeekV41MoeExecutor` applies the routed SwiGLU experts (up clamped both ways, gate clamped
+  from above, routed weight applied before the down projection, as upstream does) and the shared expert in F32, visiting
+  experts in ascending order like upstream. Experts come from an `IDeepSeekV41ExpertSource`; `DeepSeekV41ExpertLoader`
+  dequantizes one from the checkpoint with shape checks and `DeepSeekV41ExpertCache` keeps the hot ones. The new
+  `WeightDequantizer` picks the host codec from a weight's bound recipe (FP8 block, MXFP4, NVFP4, MLX affine, EXL3) or
+  widens unquantized BF16/F16, and refuses a packed dtype or a recipe-less descriptor rather than misreading it. The
+  layer is checked end to end, gate included, against the unmodified upstream `MoE` with float32 weights. The loader's
+  per-matrix read is tested on an in-memory BF16 expert and its refusals; reading a quantized expert from real shards is
+  not, because the synthetic checkpoint's expert shapes do not match real widths. Not wired into `TextService`; the
+  support matrix marks `core.moe.exec` InProgress with CPU implemented.
+
 ## alpha.272
 
 - **Added: DeepSeek V4.1 host reference primitives for the CPU path.** `DeepSeekV41RopeTable` (interleaved cos/sin with
