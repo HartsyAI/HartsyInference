@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: Cloudflare Clef GGUF catalog entry (`clef`, Q2_K + f16 mmproj, status ValidationPending).** The 64-layer
+  Qwen3.5 hybrid VLM loads through the existing `qwen35` path; both LFS SHA-256s are pinned and match the Hugging Face
+  tree metadata. bartowski no longer ships an IQ2_XXS, so Q2_K (~11.7 GB) is the smallest quant. No real-weight run has
+  happened yet; the entry stays ValidationPending until the opt-in `ClefGgufRealWeightTests` passes.
 - **Fixed: releasing a tensor's device copy binds the owning cache's CUDA context first.** A tensor's dispose
   callback runs on whichever thread disposes it, and in SwarmUI that is a pool thread shared by every extension's copy
   of the engine, so it can arrive with another device's context current. The residency-cache migration had dropped the
