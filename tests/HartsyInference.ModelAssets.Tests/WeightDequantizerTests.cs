@@ -62,4 +62,18 @@ public sealed class WeightDequantizerTests
         Assert.Throws<NotSupportedException>(() =>
             WeightDequantizer.ToF32(weight, new QuantWeightInfo { Format = recipe.FormatName, Recipe = recipe }));
     }
+
+    [Fact]
+    public void A_Quant_Descriptor_Without_A_Recipe_Is_Refused_Rather_Read_As_Plain_Values()
+    {
+        using Tensor weight = new(new TensorShape(1, 4), DType.I8);
+        Assert.Throws<NotSupportedException>(() => WeightDequantizer.ToF32(weight, new QuantWeightInfo { Format = "int8_tensorwise" }));
+    }
+
+    [Fact]
+    public void A_Packed_Dtype_Without_Any_Descriptor_Is_Refused()
+    {
+        using Tensor weight = new(new TensorShape(1, 4), DType.I8);
+        Assert.Throws<NotSupportedException>(() => WeightDequantizer.ToF32(weight, null));
+    }
 }

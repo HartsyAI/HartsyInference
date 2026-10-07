@@ -19,15 +19,30 @@ public static class DeepSeekV41ExpertLoader
             Read(bank, expert, DeepSeekV41ExpertProjection.W2, dim, inter),
             Read(bank, expert, DeepSeekV41ExpertProjection.W3, inter, dim));
 
-    private static float[] Read(DeepSeekV41ExpertBank bank, int expert, DeepSeekV41ExpertProjection projection, long rows, long cols)
+    /// <summary>Dequantizes one matrix to F32 after checking its logical shape is <c>[rows, cols]</c>.</summary>
+    /// <param name="key">Checkpoint key, named in the refusal.</param>
+    /// <param name="weight">The stored tensor (borrowed).</param>
+    /// <param name="quant">Its bound recipe, or null for an unquantized weight.</param>
+    /// <exception cref="HartsyInferenceException">The tensor is not rank 2 or its logical shape differs.</exception>
+    public static float[] ReadMatrix(string key, Tensor weight, QuantWeightInfo? quant, long rows, long cols)
     {
-        Tensor weight = bank.Weight(expert, projection);
-        QuantWeightInfo? quant = bank.Quant(expert, projection);
-        long actualRows = quant?.Recipe?.LogicalRows ?? weight.Shape[0];
-        long actualCols = quant?.Recipe?.LogicalCols ?? weight.Shape[1];
+        long actualRows, actualCols;
+        if (quant?.Recipe is { } recipe)
+        {
+            actualRows = recipe.LogicalRows;
+            actualCols = recipe.LogicalCols;
+        }
+        else
+        {
+            if (weight.Shape.Rank != 2) throw new HartsyInferenceException($"{key} has rank {weight.Shape.Rank}, expected a [{rows}, {cols}] matrix.");
+            actualRows = weight.Shape[0];
+            actualCols = weight.Shape[1];
+        }
         if (actualRows != rows || actualCols != cols)
-            throw new HartsyInferenceException(
-                $"{bank.WeightKey(expert, projection)} is [{actualRows}, {actualCols}], expected [{rows}, {cols}].");
+            throw new HartsyInferenceException($"{key} is [{actualRows}, {actualCols}], expected [{rows}, {cols}].");
         return WeightDequantizer.ToF32(weight, quant);
     }
+
+    private static float[] Read(DeepSeekV41ExpertBank bank, int expert, DeepSeekV41ExpertProjection projection, long rows, long cols) =>
+        ReadMatrix(bank.WeightKey(expert, projection), bank.Weight(expert, projection), bank.Quant(expert, projection), rows, cols);
 }

@@ -19,8 +19,8 @@ public static class DeepSeekV41MoeExecutor
     {
         shared.Validate();
         int dim = shared.Dim;
-        if (x.Length != tokens * dim || y.Length != x.Length) throw new ArgumentException("x and y must each hold tokens x dim values.");
-        if (topkIdx.Length != tokens * k || topkWeight.Length != topkIdx.Length) throw new ArgumentException("topk arrays must hold tokens x k entries.");
+        if (x.Length != (long)tokens * dim || y.Length != x.Length) throw new ArgumentException("x and y must each hold tokens x dim values.");
+        if (topkIdx.Length != (long)tokens * k || topkWeight.Length != topkIdx.Length) throw new ArgumentException("topk arrays must hold tokens x k entries.");
 
         y.Clear();
         List<(int Token, float Weight)>[] routed = new List<(int, float)>[numExperts];
@@ -32,16 +32,17 @@ public static class DeepSeekV41MoeExecutor
                 (routed[e] ??= []).Add((t, topkWeight[t * k + j]));
             }
 
-        float[] scratch = new float[dim];
+        float[] scratch = new float[dim], hidden = new float[shared.Inter];
         for (int e = 0; e < numExperts; e++)
         {
             if (routed[e] is not { Count: > 0 } rows) continue;
             DeepSeekV41SwigluWeights w = experts.GetExpert(e);
             w.Validate();
-            if (w.Dim != dim) throw new InvalidOperationException($"Expert {e} has width {w.Dim}, expected {dim}.");
+            if (w.Dim != dim || w.Inter != shared.Inter)
+                throw new InvalidOperationException($"Expert {e} is {w.Dim} x {w.Inter}, expected {dim} x {shared.Inter}.");
             foreach ((int token, float weight) in rows)
             {
-                Forward(w, x.Slice(token * dim, dim), weight, swigluLimit, scratch);
+                Forward(w, x.Slice(token * dim, dim), weight, swigluLimit, hidden, scratch);
                 Span<float> row = y.Slice(token * dim, dim);
                 for (int d = 0; d < dim; d++) row[d] += scratch[d];
             }
@@ -49,17 +50,16 @@ public static class DeepSeekV41MoeExecutor
 
         for (int t = 0; t < tokens; t++)
         {
-            Forward(shared, x.Slice(t * dim, dim), 1f, swigluLimit, scratch);
+            Forward(shared, x.Slice(t * dim, dim), 1f, swigluLimit, hidden, scratch);
             Span<float> row = y.Slice(t * dim, dim);
             for (int d = 0; d < dim; d++) row[d] += scratch[d];
         }
     }
 
     /// <summary>One expert on one token: clamp, <c>silu(gate) * up</c>, scale by <paramref name="weight"/>, then the down projection.</summary>
-    internal static void Forward(DeepSeekV41SwigluWeights w, ReadOnlySpan<float> x, float weight, float limit, Span<float> output)
+    internal static void Forward(DeepSeekV41SwigluWeights w, ReadOnlySpan<float> x, float weight, float limit, float[] hidden, Span<float> output)
     {
         int dim = w.Dim, inter = w.Inter;
-        float[] hidden = new float[inter];
         for (int i = 0; i < inter; i++)
         {
             ReadOnlySpan<float> w1 = w.W1.AsSpan(i * dim, dim), w3 = w.W3.AsSpan(i * dim, dim);

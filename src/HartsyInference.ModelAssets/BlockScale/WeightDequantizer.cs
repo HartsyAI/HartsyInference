@@ -15,7 +15,11 @@ public static unsafe class WeightDequantizer
     {
         ArgumentNullException.ThrowIfNull(weight);
         QuantRecipe? recipe = quant?.Recipe;
-        if (recipe is null) return UnquantizedToF32(weight);
+        if (recipe is null)
+        {
+            if (quant is not null) throw new NotSupportedException($"Quantization format '{quant.Format}' carries no block-scale recipe; refusing to read it as plain values.");
+            return UnquantizedToF32(weight);
+        }
 
         long byteCount = weight.DType.ComputeByteCount(weight.ElementCount);
         ReadOnlySpan<byte> packed = new(weight.DataPointer, checked((int)byteCount));
@@ -46,6 +50,8 @@ public static unsafe class WeightDequantizer
 
     private static float[] UnquantizedToF32(Tensor weight)
     {
+        if (weight.DType != DType.F32 && weight.DType != DType.BF16 && weight.DType != DType.F16)
+            throw new NotSupportedException($"A {weight.DType} weight without a quantization recipe cannot be read as plain values.");
         if (weight.DType == DType.F32) return weight.AsReadOnlySpan<float>().ToArray();
         using Tensor f32 = weight.CastTo(DType.F32);
         return f32.AsReadOnlySpan<float>().ToArray();

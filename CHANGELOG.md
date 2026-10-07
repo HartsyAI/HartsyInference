@@ -42,10 +42,11 @@ stable release will require. Dates are UTC.
   experts in ascending order like upstream. Experts come from an `IDeepSeekV41ExpertSource`; `DeepSeekV41ExpertLoader`
   dequantizes one from the checkpoint with shape checks and `DeepSeekV41ExpertCache` keeps the hot ones. The new
   `WeightDequantizer` picks the host codec from a weight's bound recipe (FP8 block, MXFP4, NVFP4, MLX affine, EXL3) or
-  widens unquantized BF16/F16. The layer is checked end to end, gate included, against the unmodified upstream `MoE`
-  with float32 weights. The loader's success path is not exercised: the synthetic checkpoint's expert shapes do not match
-  real widths, so only its refusal is tested. Not wired into `TextService`; the support matrix marks `core.moe.exec`
-  InProgress with CPU implemented.
+  widens unquantized BF16/F16, and refuses a packed dtype or a recipe-less descriptor rather than misreading it. The
+  layer is checked end to end, gate included, against the unmodified upstream `MoE` with float32 weights. The loader's
+  per-matrix read is tested on an in-memory BF16 expert and its refusals; reading a quantized expert from real shards is
+  not, because the synthetic checkpoint's expert shapes do not match real widths. Not wired into `TextService`; the
+  support matrix marks `core.moe.exec` InProgress with CPU implemented.
 
 ## alpha.272
 

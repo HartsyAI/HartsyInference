@@ -54,7 +54,7 @@ public sealed class DeepSeekV41MoeLayer
     public void Forward(ReadOnlySpan<float> x, int tokens, ReadOnlySpan<byte> imageTokens, Span<float> y)
     {
         int dim = _shared.Dim, experts = _route.NumExperts, k = _route.TopK;
-        if (x.Length != tokens * dim) throw new ArgumentException("x must hold tokens x dim values.", nameof(x));
+        if (x.Length != (long)tokens * dim) throw new ArgumentException("x must hold tokens x dim values.", nameof(x));
         if (!imageTokens.IsEmpty && imageTokens.Length != tokens) throw new ArgumentException("imageTokens must hold one flag per token.", nameof(imageTokens));
 
         using Tensor logits = new(new TensorShape(tokens, experts), DType.F32);

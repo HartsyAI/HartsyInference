@@ -1,4 +1,5 @@
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.ModelAssets.Quant;
 using Xunit;
@@ -55,5 +56,25 @@ public sealed class DeepSeekV41ExpertCacheTests
         {
             Directory.Delete(dir, true);
         }
+    }
+
+    [Fact]
+    public void ReadMatrix_Widens_An_Unquantized_Bf16_Expert_Matrix()
+    {
+        using Tensor w = new(new TensorShape(2, 3), DType.BF16);
+        ushort[] bits = [0x3F80, 0x4000, 0x4040, 0xBF80, 0xC000, 0xC040]; // 1, 2, 3, -1, -2, -3
+        bits.CopyTo(w.AsSpan<ushort>());
+        Assert.Equal([1f, 2f, 3f, -1f, -2f, -3f], DeepSeekV41ExpertLoader.ReadMatrix("experts.0.w1", w, null, 2, 3));
+    }
+
+    [Fact]
+    public void ReadMatrix_Refuses_A_Wrong_Shape_Or_A_Wrong_Rank_With_The_Key_Named()
+    {
+        using Tensor matrix = new(new TensorShape(2, 3), DType.BF16);
+        using Tensor vector = new(new TensorShape(6), DType.BF16);
+        Assert.Contains("experts.0.w2", Assert.Throws<HartsyInferenceException>(() =>
+            DeepSeekV41ExpertLoader.ReadMatrix("experts.0.w2", matrix, null, 3, 2)).Message);
+        Assert.Contains("rank 1", Assert.Throws<HartsyInferenceException>(() =>
+            DeepSeekV41ExpertLoader.ReadMatrix("experts.0.w3", vector, null, 2, 3)).Message);
     }
 }
