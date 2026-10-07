@@ -34,6 +34,16 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.272
+
+- **Added: DeepSeek V4.1 host reference primitives for the CPU path.** `DeepSeekV41RopeTable` (interleaved cos/sin with
+  upstream's YaRN, which floors and ceils the correction range and applies no mscale), `DeepSeekV41CompressorState`
+  (softmax pooling of `compress_ratio` tokens with the partial group carried across prefill chunks and decode),
+  `DeepSeekV41IndexSelection` (level-one candidate blocks and the indexer's sorted top-k) and
+  `DeepSeekV41GroupedProjection` (block-diagonal `wo_a`). The first three are checked against fixtures dumped from the
+  unmodified upstream `model.py`. The model class is still not wired, so V4.1 directories still refuse to load. The
+  support matrix marks `core.spec` and `load.config` Implemented, which the code already was.
+
 ## alpha.271
 
 - **Changed: the `kolibri1` catalog entry moves from Structural to ValidationPending.** A real-weight run on the swarm server (2026-10-07) loaded the Q2_K quant across a 4090 + 3060 and answered coherently for a few hundred tokens before degrading; the pinned Q4_K_M (44 GB) has not been run and needs an estimated 48 GB of VRAM because the text engine has no host offload. The catalog comment and the status tables record this, along with the live Swarm runs of ControlFoley (video, video + reference clip) and Clef-Flash.

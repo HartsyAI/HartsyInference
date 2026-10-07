@@ -36,9 +36,9 @@
       "feature": "Reference harness and pinned facts",
       "format": "all",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
+        "Vulkan": "Implemented"
       },
       "placement": [
         "n/a"
@@ -54,7 +54,7 @@
       "dependsOn": [],
       "acceptanceTest": "kernel_ports tests; small-config dumps repeatable",
       "pr": 0,
-      "status": "Unimplemented"
+      "status": "Implemented"
     },
     {
       "id": "core.contract",
@@ -338,9 +338,9 @@
       "feature": "Config, HF directory probe, resolver, catalog",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
-        "CUDA": "Unimplemented",
-        "Vulkan": "Unimplemented"
+        "CPU": "Implemented",
+        "CUDA": "Implemented",
+        "Vulkan": "Implemented"
       },
       "placement": [
         "n/a"
@@ -360,7 +360,7 @@
       ],
       "acceptanceTest": "config parse of pinned config.json; resolver cases; HF probe; key mappers; text memory estimate sums to 510286023000 B; TextService validates then throws NotSupported (no model class)",
       "pr": 7,
-      "status": "Unimplemented"
+      "status": "Implemented"
     },
     {
       "id": "quant.official.dequant",
