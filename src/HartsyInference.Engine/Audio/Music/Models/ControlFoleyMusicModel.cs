@@ -14,7 +14,7 @@ namespace HartsyInference.Engine.Audio;
 /// <c>controlfoley_bf16.safetensors</c> (see <c>tools/controlfoley/convert_network_bf16.py</c>) is preferred when present
 /// and needs half the memory. A request with a <see cref="MusicRequest.Video"/> decodes it through ffmpeg and conditions on its
 /// frames; the Synchformer and CAV-MAE-ST encoders are fetched the first time one arrives, so text-only use never downloads them.
-/// Reference-audio conditioning is not wired yet.</summary>
+/// A <see cref="MusicRequest.ReferenceAudio"/> clip conditions on its CLAP embedding and timbre; that encoder set (CLAP plus MusicGen-Style and MERT) is fetched on first use the same way.</summary>
 internal static class ControlFoleyMusicModel
 {
     private const string Repo = "YJX-Xiaomi/ControlFoley";
@@ -23,6 +23,12 @@ internal static class ControlFoleyMusicModel
     private const string Bf16Name = "controlfoley_bf16.safetensors";
     private const string SynchformerFile = "ext_weights/synchformer_state_dict.pth";
     private const string CavMaeFile = "ext_weights/cav_mae_st.pth";
+    private const string ClapFile = "ext_weights/music_speech_audioset_epoch_15_esc_89.98.pt";
+    private const string StyleRepo = "facebook/musicgen-style";
+    private const string StyleFile = "state_dict.bin";
+    private const string StyleHead = "condition_provider.conditioners.self_wav.";
+    private const string MertRepo = "m-a-p/MERT-v1-95M";
+    private const string MertFile = "pytorch_model.bin";
 
     internal static MusicModelDescriptor Descriptor { get; } = new MusicModelDescriptor
     {
@@ -69,45 +75,41 @@ internal static class ControlFoleyMusicModel
             decoder.LoadFromFiles(vaePath, vocoderPath);
 
             ControlFoleyPipeline textPipeline = new(network, clip, decoder);
-            ControlFoleyPipeline? videoPipeline = null;
-            object videoLock = new();
-            Logs.Info($"[Audio][ControlFoley] Loaded (network {Path.GetFileName(networkPath)}, 44.1 kHz mono, text-to-audio; video encoders load on first use).");
+            object encoderLock = new();
+            (ControlFoleySynchformer Synchformer, ControlFoleyCavMae CavMae)? video = null;
+            (ControlFoleyClap Clap, ControlFoleyStyleEncoder Style)? reference = null;
+            Logs.Info($"[Audio][ControlFoley] Loaded (network {Path.GetFileName(networkPath)}, 44.1 kHz mono; video and reference encoders load on first use).");
 
-            ControlFoleyPipeline VideoPipeline(CancellationToken ct)
+            // Each encoder set is fetched and loaded the first time a request needs it, then kept for the runner's life.
+            ControlFoleyPipeline PipelineFor(bool needVideo, bool needReference, CancellationToken ct)
             {
-                lock (videoLock)
+                if (!needVideo && !needReference)
                 {
-                    if (videoPipeline is not null)
+                    return textPipeline;
+                }
+
+                lock (encoderLock)
+                {
+                    if (needVideo && video is null)
                     {
-                        return videoPipeline;
+                        video = LoadVideoEncoders(owned, ct);
                     }
 
-                    string syncPath = AudioModelCache.GetAsync(Repo, SynchformerFile, "music", ct: ct).GetAwaiter().GetResult();
-                    string cavPath = AudioModelCache.GetAsync(Repo, CavMaeFile, "music", ct: ct).GetAwaiter().GetResult();
-                    ControlFoleySynchformer synchformer;
-                    ControlFoleyCavMae cavMae;
-                    lock (owned)
+                    if (needReference && reference is null)
                     {
-                        (IReadOnlyDictionary<string, Tensor> syncWeights, IDisposable syncLoader) = AudioCheckpoints.LoadFile(syncPath);
-                        owned.Add(syncLoader);
-                        synchformer = new(ControlFoleySynchformerConfig.Released);
-                        owned.Add(synchformer);
-                        synchformer.LoadWeights(syncWeights);
-                        (IReadOnlyDictionary<string, Tensor> cavWeights, IDisposable cavLoader) = AudioCheckpoints.LoadFile(cavPath);
-                        owned.Add(cavLoader);
-                        cavMae = new(ControlFoleyCavMaeConfig.Released);
-                        owned.Add(cavMae);
-                        cavMae.LoadWeights(cavWeights);
+                        reference = LoadReferenceEncoders(owned, ct);
                     }
 
-                    videoPipeline = new ControlFoleyPipeline(network, clip, decoder, synchformer, cavMae);
-                    return videoPipeline;
+                    return new ControlFoleyPipeline(network, clip, decoder,
+                        needVideo ? video!.Value.Synchformer : null, needVideo ? video!.Value.CavMae : null,
+                        needReference ? reference!.Value.Clap : null, needReference ? reference!.Value.Style : null);
                 }
             }
 
             MusicAudio Synth(IBackend device, MusicRequest request, CancellationToken ct)
             {
                 ControlFoleyRawVideo? raw = request.Video is null ? null : DecodeVideo(request.Video, request.Duration, ct);
+                ControlFoleyPipeline.ReferenceAudio? clipReference = ReadReference(request);
                 ControlFoleyPipeline.Request run = new()
                 {
                     Prompt = request.Prompt,
@@ -118,9 +120,9 @@ internal static class ControlFoleyMusicModel
                     CfgStrength = (float)(request.CfgScale ?? 4.5),
                     Video = raw,
                     MaskAwayClip = request.MaskAwayClip,
+                    Reference = clipReference,
                 };
-                ControlFoleyPipeline pipeline = raw is null ? textPipeline : VideoPipeline(ct);
-                return MusicAudio.Mono(pipeline.Generate(device, run, ct));
+                return MusicAudio.Mono(PipelineFor(raw is not null, clipReference is not null, ct).Generate(device, run, ct));
             }
 
             return new MusicRunner(textPipeline.SampleRate, Synth, new OwnedDisposables(owned));
@@ -134,6 +136,109 @@ internal static class ControlFoleyMusicModel
 
             throw;
         }
+    }
+
+    private static (ControlFoleySynchformer, ControlFoleyCavMae) LoadVideoEncoders(List<IDisposable> owned, CancellationToken ct)
+    {
+        string syncPath = AudioModelCache.GetAsync(Repo, SynchformerFile, "music", ct: ct).GetAwaiter().GetResult();
+        string cavPath = AudioModelCache.GetAsync(Repo, CavMaeFile, "music", ct: ct).GetAwaiter().GetResult();
+        lock (owned)
+        {
+            (IReadOnlyDictionary<string, Tensor> syncWeights, IDisposable syncLoader) = AudioCheckpoints.LoadFile(syncPath);
+            owned.Add(syncLoader);
+            ControlFoleySynchformer synchformer = new(ControlFoleySynchformerConfig.Released);
+            owned.Add(synchformer);
+            synchformer.LoadWeights(syncWeights);
+            (IReadOnlyDictionary<string, Tensor> cavWeights, IDisposable cavLoader) = AudioCheckpoints.LoadFile(cavPath);
+            owned.Add(cavLoader);
+            ControlFoleyCavMae cavMae = new(ControlFoleyCavMaeConfig.Released);
+            owned.Add(cavMae);
+            cavMae.LoadWeights(cavWeights);
+            return (synchformer, cavMae);
+        }
+    }
+
+    /// <summary>The CLAP audio tower (<c>module.audio_branch.*</c>, <c>module.audio_projection.*</c> of the laion checkpoint
+    /// ControlFoley ships) and the timbre encoder: the MusicGen-Style <c>self_wav</c> conditioner under <c>style.</c> plus MERT-v1-95M
+    /// under <c>mert.</c>, with the same names and exclusions as <c>tools/controlfoley</c> uses to verify them.</summary>
+    private static (ControlFoleyClap, ControlFoleyStyleEncoder) LoadReferenceEncoders(List<IDisposable> owned, CancellationToken ct)
+    {
+        string clapPath = AudioModelCache.GetAsync(Repo, ClapFile, "music", ct: ct).GetAwaiter().GetResult();
+        string stylePath = AudioModelCache.GetAsync(StyleRepo, StyleFile, "music", ct: ct).GetAwaiter().GetResult();
+        string mertPath = AudioModelCache.GetAsync(MertRepo, MertFile, "music", ct: ct).GetAwaiter().GetResult();
+        lock (owned)
+        {
+            (IReadOnlyDictionary<string, Tensor> clapAll, IDisposable clapLoader) = AudioCheckpoints.LoadFile(clapPath);
+            owned.Add(clapLoader);
+            Dictionary<string, Tensor> clapWeights = new(StringComparer.Ordinal);
+            foreach (KeyValuePair<string, Tensor> entry in clapAll)
+            {
+                string name = entry.Key.StartsWith("module.", StringComparison.Ordinal) ? entry.Key["module.".Length..] : entry.Key;
+                if (name.StartsWith("audio_branch.", StringComparison.Ordinal) || name.StartsWith("audio_projection.", StringComparison.Ordinal))
+                {
+                    clapWeights[name] = entry.Value;
+                }
+            }
+
+            ControlFoleyClap clap = new(ControlFoleyClapConfig.HtsatBase);
+            clap.LoadWeights(clapWeights);
+
+            (IReadOnlyDictionary<string, Tensor> styleAll, IDisposable styleLoader) = AudioCheckpoints.LoadFile(stylePath);
+            owned.Add(styleLoader);
+            (IReadOnlyDictionary<string, Tensor> mertAll, IDisposable mertLoader) = AudioCheckpoints.LoadFile(mertPath);
+            owned.Add(mertLoader);
+            Dictionary<string, Tensor> styleWeights = new(StringComparer.Ordinal);
+            foreach (KeyValuePair<string, Tensor> entry in styleAll)
+            {
+                if (!entry.Key.StartsWith(StyleHead, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                string name = entry.Key[StyleHead.Length..];
+                if (name.Contains("num_batches_tracked", StringComparison.Ordinal) || name.EndsWith("inited", StringComparison.Ordinal)
+                    || name.Contains("cluster_size", StringComparison.Ordinal) || name.Contains("embed_avg", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                styleWeights["style." + name] = entry.Value;
+            }
+
+            foreach (KeyValuePair<string, Tensor> entry in mertAll)
+            {
+                if (entry.Key != "masked_spec_embed")
+                {
+                    styleWeights["mert." + entry.Key] = entry.Value;
+                }
+            }
+
+            ControlFoleyStyleEncoder style = new(ControlFoleyStyleConfig.MusicGenStyle);
+            owned.Add(style);
+            style.LoadWeights(styleWeights);
+            return (clap, style);
+        }
+    }
+
+    /// <summary>The request's reference clip as mono samples at its own rate (the pipeline resamples), or null for none. The span
+    /// <see cref="MusicRequest.ReferenceStartSeconds"/> to <see cref="MusicRequest.ReferenceEndSeconds"/> is kept.</summary>
+    private static ControlFoleyPipeline.ReferenceAudio? ReadReference(MusicRequest request)
+    {
+        if (request.ReferenceAudio is null)
+        {
+            return null;
+        }
+
+        AudioBuffer buffer = AudioClipCodec.DecodeNative(request.ReferenceAudio);
+        if (buffer.IsEmpty)
+        {
+            return null;
+        }
+
+        float[] mono = buffer.ToMono();
+        int start = Math.Clamp((int)(request.ReferenceStartSeconds * buffer.SampleRate), 0, mono.Length);
+        int end = Math.Clamp((int)(request.ReferenceEndSeconds * buffer.SampleRate), start, mono.Length);
+        return end > start ? new ControlFoleyPipeline.ReferenceAudio(mono[start..end], buffer.SampleRate) : null;
     }
 
     /// <summary>Decodes the clip at its native size and rate, up to the requested duration, as the official PyAV loader does.</summary>

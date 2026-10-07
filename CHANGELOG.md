@@ -32,6 +32,11 @@ stable release will require. Dates are UTC.
   and Synchformer streams; the output is cut to the clip's usable length when that is shorter. The Synchformer and
   CAV-MAE-ST weights (`ext_weights/` of `YJX-Xiaomi/ControlFoley`) download on the first video request, so text-only use
   never fetches them. `FfmpegProcessDecoder` gets a `maxSeconds` limit (`-t`) for this.
+- **ControlFoley reference audio through the engine.** `MusicRequest.ReferenceAudio` (WAV, the span
+  `ReferenceStartSeconds`..`ReferenceEndSeconds`, mixed to mono) now conditions the generation on the clip's CLAP embedding
+  and MusicGen-Style/MERT timbre, as `demo.py` does. The encoders load straight from the original checkpoints on first use
+  (`music_speech_audioset_epoch_15_esc_89.98.pt` from the ControlFoley repo, `facebook/musicgen-style` `state_dict.bin`,
+  `m-a-p/MERT-v1-95M`); no converted copies are needed.
 
 ## alpha.266
 
