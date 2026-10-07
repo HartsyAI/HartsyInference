@@ -36,5 +36,31 @@ public sealed class AukDurationTests
     }
 
     [Fact]
+    public void ExplicitSeconds_BeatsClipLengthHeuristicAndSpeed_WithAReferenceClip()
+    {
+        // A 10 s clip whose transcript ratio would give 30 s at speed 0.5: the explicit value still wins untouched.
+        Assert.Equal(3.5, AukDuration.ResolveSeconds(3.5, "a long sentence here", "short", 10.0, 0.5));
+        Assert.Equal(3.5, AukDuration.ResolveSeconds(3.5, null, null, 10.0));
+    }
+
+    [Theory]
+    [InlineData(0.0)]
+    [InlineData(-1.0)]
+    [InlineData(double.NaN)]
+    public void ExplicitSeconds_MustBePositiveEvenWithAReferenceClip(double seconds)
+        => Assert.Throws<ArgumentOutOfRangeException>(() => AukDuration.ResolveSeconds(seconds, "a", "b", 10.0));
+
+    [Fact]
+    public void WithoutRefText_TheClipLengthIsUsedWhateverTheGeneratedTextLength()
+        => Assert.Equal(4.0, AukDuration.ResolveSeconds(null, "a very long sentence to speak", "", 4.0));
+
+    [Theory]
+    [InlineData(0.6f, 30)]
+    [InlineData(2.1f, 105)]
+    [InlineData(1.2f, 60)]
+    public void Frames_IgnoresFloatWideningNoise(float cliSeconds, int expected)
+        => Assert.Equal(expected, AukDuration.Frames((double)cliSeconds));
+
+    [Fact]
     public void ResolveFrames_ComposesBoth() => Assert.Equal(100, AukDuration.ResolveFrames(2.0, null, null, null));
 }
