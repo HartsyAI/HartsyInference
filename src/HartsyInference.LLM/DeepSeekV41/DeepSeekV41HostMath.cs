@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.DeepSeekV41;
@@ -6,20 +7,30 @@ namespace HartsyInference.LLM.DeepSeekV41;
 internal static class DeepSeekV41HostMath
 {
     /// <summary><c>y[t,o] = sum_i x[t,i] * w[o,i]</c> for <paramref name="rows"/> rows.</summary>
-    public static float[] Linear(ReadOnlySpan<float> x, ReadOnlySpan<float> w, int rows, int inDim, int outDim)
+    /// <remarks>Each output element is one sequential dot product, so running them across cores changes the speed and nothing else.</remarks>
+    public static unsafe float[] Linear(ReadOnlySpan<float> x, ReadOnlySpan<float> w, int rows, int inDim, int outDim)
     {
         if (x.Length != (long)rows * inDim || w.Length != (long)outDim * inDim) throw new ArgumentException("Linear operands do not match the stated shape.");
-        float[] y = new float[rows * outDim];
-        for (int r = 0; r < rows; r++)
+        float[] y = new float[checked(rows * outDim)];
+        const int Block = 32;
+        int total = y.Length, blocks = (total + Block - 1) / Block;
+        fixed (float* xp = x)
+        fixed (float* wp = w)
+        fixed (float* yp = y)
         {
-            ReadOnlySpan<float> xr = x.Slice(r * inDim, inDim);
-            for (int o = 0; o < outDim; o++)
+            nint xa = (nint)xp, wa = (nint)wp, ya = (nint)yp;
+            CpuParallel.For(blocks, (long)total * inDim, block =>
             {
-                ReadOnlySpan<float> wr = w.Slice(o * inDim, inDim);
-                float sum = 0f;
-                for (int i = 0; i < inDim; i++) sum += xr[i] * wr[i];
-                y[r * outDim + o] = sum;
-            }
+                float* xs = (float*)xa, ws = (float*)wa, ys = (float*)ya;
+                int end = Math.Min(total, (block + 1) * Block);
+                for (int index = block * Block; index < end; index++)
+                {
+                    float* xr = xs + (long)(index / outDim) * inDim, wr = ws + (long)(index % outDim) * inDim;
+                    float sum = 0f;
+                    for (int i = 0; i < inDim; i++) sum += xr[i] * wr[i];
+                    ys[index] = sum;
+                }
+            });
         }
         return y;
     }

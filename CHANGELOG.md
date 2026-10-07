@@ -34,6 +34,17 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.278
+
+- **Added: the V4.1 host reference model as an `IGenerationModel`.** `DeepSeekV41GenerationModel` adapts a loaded model so the shared
+  `TextGenerationPipeline` can drive it: `Prefill` (last row or every row, with the chunk required to start at the committed length),
+  `DecodeBatch` (one token per sequence), `ProjectLogits`, a state-size estimate and host memory capacity. It owns the loaded model, takes
+  text tokens only (image embeddings are refused) and runs no speculation. `DeepSeekV41GenerationState` is its `ISequenceState`: the
+  compressor's partial group and the window ring cannot be truncated in place, so `Truncate` resets and replays the kept prefix from the stored
+  token ids, correct but a prefill's cost. The output head's matrix product now runs across cores, one sequential dot product per output so
+  results are unchanged. A real greedy run through `TextGenerationPipeline` produces upstream's first token and the same sequence as a manual
+  loop. The fixture-checkpoint writer used by the loader tests is now a shared test helper. Not wired into `TextService`.
+
 ## alpha.277
 
 - **Added: loading an opened DeepSeek-V4.1 checkpoint into the host reference model.** `DeepSeekV41HostModelLoader` reads every backbone

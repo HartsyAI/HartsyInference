@@ -37,4 +37,17 @@ public sealed class DeepSeekV41AttentionState
         if (IndexKeys is not null) Array.Clear(IndexKeys);
         Compressor?.Reset();
     }
+
+    /// <summary>Bytes a state for <paramref name="settings"/> holds once sized for <paramref name="maxTokens"/> (F32 rows, plus the partial pooling group).</summary>
+    public static long EstimateBytes(DeepSeekV41AttentionSettings settings, int maxTokens)
+    {
+        ArgumentNullException.ThrowIfNull(settings);
+        long bytes = (long)settings.Window * settings.HeadDim * sizeof(float);
+        if (settings.CompressRatio <= 0 || !settings.IsKvSource) return bytes;
+        long rows = (maxTokens + settings.CompressRatio - 1) / settings.CompressRatio;
+        bytes += rows * settings.HeadDim * sizeof(float);
+        if (settings.CompressRatio > 1) bytes += 2L * settings.CompressRatio * settings.HeadDim * sizeof(float);
+        if (settings.IsIndexSource) bytes += rows * settings.IndexHeadDim * sizeof(float);
+        return bytes;
+    }
 }
