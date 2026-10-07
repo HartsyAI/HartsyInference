@@ -19,8 +19,8 @@ internal static class HfTextDirectoryLoader
         return DeepSeekV41TextModel.Load(backend, info.Root, new DeepSeekV41LoadOptions(MaxSequenceTokens));
     }
 
-    /// <summary>Refuses a directory whose model_type the Text path cannot run, before anything is opened or unloaded.</summary>
-    /// <exception cref="HartsyInferenceException">The model_type is not supported.</exception>
+    /// <summary>Refuses a directory the Text path cannot run for a reason visible without opening a weight (an unsupported model_type, no tokenizer.json), so the caller can do it before it unloads anything.</summary>
+    /// <exception cref="HartsyInferenceException">The model_type is not supported or the tokenizer is missing.</exception>
     internal static void RequireSupported(HfCheckpointInfo info)
     {
         if (!string.Equals(info.ModelType, DeepSeekV41Config.ModelType, StringComparison.Ordinal))
@@ -29,5 +29,7 @@ internal static class HfTextDirectoryLoader
                 $"'{info.Root}' is a Hugging Face checkpoint with model_type '{info.ModelType}', which the Text path cannot load; "
                 + "pass a .gguf file instead.");
         }
+        if (!File.Exists(Path.Combine(info.Root, "tokenizer.json")))
+            throw new HartsyInferenceException($"'{info.Root}' has no tokenizer.json, which the DeepSeek-V4.1 Text path needs to build its prompt.");
     }
 }

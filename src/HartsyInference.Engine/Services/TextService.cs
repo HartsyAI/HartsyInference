@@ -319,8 +319,9 @@ public sealed class TextService : ITextService, IDisposable
         HfTextDirectoryLoader.RequireSupported(checkpoint);
         if (slot.DeepSeekV41 is not null && slot.LoadedPath == path)
             return;
-        EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
         UnloadSlot(slot);
+        // after the unload, so the memory of a model this load replaces counts as free
+        EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
         if (slot.ExtraStageBackends is not null)
         {
             foreach (IBackend stage in slot.ExtraStageBackends)

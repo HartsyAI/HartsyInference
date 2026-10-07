@@ -1,3 +1,4 @@
+using System.Text.Json.Nodes;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Cpu;
 using HartsyInference.Engine;
@@ -68,7 +69,25 @@ public sealed class DeepSeekV41TextLoaderTests : IDisposable
         File.Delete(Path.Combine(_directory, "model-00001-of-00001.safetensors"));
         using CpuBackend backend = new();
 
-        Assert.ThrowsAny<Exception>(() => HfTextDirectoryLoader.Load(info, backend));
+        Exception error = Assert.ThrowsAny<Exception>(() => HfTextDirectoryLoader.Load(info, backend));
+
+        Assert.Contains("model-00001-of-00001", error.Message);
+    }
+
+    [Fact]
+    public void ATokenizerWhoseSpecialIdsDisagreeWithConfig_IsRefused()
+    {
+        WriteFixtureCheckpoint();
+        string config = Path.Combine(_directory, "config.json");
+        JsonObject root = JsonNode.Parse(File.ReadAllText(config))!.AsObject();
+        root["bos_token_id"] = 2;
+        File.WriteAllText(config, root.ToJsonString());
+        HfCheckpointInfo info = HfCheckpointDirectory.TryProbe(_directory)!;
+        using CpuBackend backend = new();
+
+        HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(() => HfTextDirectoryLoader.Load(info, backend));
+
+        Assert.Contains("begin-of-sentence", error.Message);
     }
 
     [Fact]
@@ -123,6 +142,9 @@ public sealed class DeepSeekV41TextLoaderTests : IDisposable
         WriteFixtureCheckpoint();
         using InferenceEngine engine = new("cpu", 0);
 
-        await Assert.ThrowsAnyAsync<Exception>(() => engine.Text.GenerateAsync(Spec(), Request(maxTokens: HfTextDirectoryLoader.MaxSequenceTokens)));
+        ArgumentException error = await Assert.ThrowsAnyAsync<ArgumentException>(
+            () => engine.Text.GenerateAsync(Spec(), Request(maxTokens: HfTextDirectoryLoader.MaxSequenceTokens)));
+
+        Assert.Contains(HfTextDirectoryLoader.MaxSequenceTokens.ToString(), error.Message);
     }
 }
