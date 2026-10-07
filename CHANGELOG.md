@@ -34,6 +34,16 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.274
+
+- **Added: DeepSeek V4.1 Engram module on the host reference path.** `DeepSeekV41EngramModule` looks up a position's
+  `(max_ngram_size - 1) * n_heads` hash rows, projects them with `wkv` into one key per hyper-connection copy plus a shared
+  value, and adds `gate * value` to each copy, where the gate is a sigmoid of the signed square root of a per-copy
+  normalized dot product with its key; masked positions pass through untouched. The row lookup is injected as an
+  `EngramRowGather`, the shape of `EngramTableStore.Gather`, so FP8 table decoding stays where it already lives. Checked
+  against the unmodified upstream `Engram` with a bf16-rounded float table and float32 `wkv` (`dump_engram_module_fixture.py`);
+  upstream's FP8 activation quantization before `wkv` is not modelled. Not wired into `TextService`.
+
 ## alpha.273
 
 - **Added: DeepSeek V4.1 MoE layer on the host reference path.** `DeepSeekV41MoeLayer` runs the gate through the existing
