@@ -180,4 +180,39 @@ public sealed class DeepSeekV41HostModelTests
         for (int t = 0; t < ids.Length; t++) expected.AddRange(all.AsSpan((t * hashLayers + 1) * columns, columns).ToArray());
         Assert.Equal(expected, requested);
     }
+
+    [Fact]
+    public void A_Bad_Id_Late_In_A_Multi_Token_Call_Leaves_The_State_Untouched()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = BuildModel(cpu);
+        DeepSeekV41SequenceState state = model.CreateState(64);
+        model.Forward(new[] { 1, 2, 3 }, state, new float[3 * model.Dim]);
+        Assert.Throws<ArgumentOutOfRangeException>(() => model.Forward(new[] { 4, 5, 999, 6 }, state, new float[4 * model.Dim]));
+        Assert.Equal(3, state.Length);
+
+        DeepSeekV41SequenceState clean = model.CreateState(64);
+        model.Forward(new[] { 1, 2, 3 }, clean, new float[3 * model.Dim]);
+        float[] afterFailure = new float[model.Dim], fresh = new float[model.Dim];
+        model.Forward(new[] { 7 }, state, afterFailure);
+        model.Forward(new[] { 7 }, clean, fresh);
+        Assert.Equal(fresh, afterFailure);
+    }
+
+    [Fact]
+    public void Reset_Drops_The_Shared_Slots_Too()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = BuildModel(cpu);
+        DeepSeekV41SequenceState state = model.CreateState(64);
+        model.Forward(Ints(Fx.GetProperty("steps")[0].GetProperty("ids")), state, new float[11 * model.Dim]);
+        Assert.NotNull(state.Shared.CompressKv);
+        Assert.NotNull(state.Shared.Topk);
+        state.Reset();
+        Assert.Null(state.Shared.CompressKv);
+        Assert.Null(state.Shared.IndexKeys);
+        Assert.Null(state.Shared.Topk);
+        Assert.Null(state.Shared.Candidates);
+        Assert.Equal(0, state.Length);
+    }
 }

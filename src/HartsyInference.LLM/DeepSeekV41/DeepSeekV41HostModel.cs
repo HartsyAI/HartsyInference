@@ -75,6 +75,9 @@ public sealed class DeepSeekV41HostModel
         if (ids.IsEmpty) throw new ArgumentException("Pass at least one token.", nameof(ids));
         if (hidden.Length != (long)ids.Length * _dim) throw new ArgumentException("hidden must hold ids x dim values.", nameof(hidden));
         if (state.Length + ids.Length > state.Capacity) throw new InvalidOperationException("The sequence state is full.");
+        // checked before anything runs, so a bad id late in a multi-token call cannot leave the state half-advanced
+        for (int i = 0; i < ids.Length; i++)
+            if ((uint)ids[i] >= (uint)_vocab) throw new ArgumentOutOfRangeException(nameof(ids), ids[i], "Token id is outside the vocabulary.");
         if (state.Length > 0 && ids.Length > 1)
         {
             for (int i = 0; i < ids.Length; i++) Forward(ids.Slice(i, 1), state, hidden.Slice(i * _dim, _dim));
@@ -89,12 +92,11 @@ public sealed class DeepSeekV41HostModel
     private void Chunk(ReadOnlySpan<int> ids, DeepSeekV41SequenceState state, Span<float> hidden)
     {
         int tokens = ids.Length, startPos = state.Length;
-        float[] stream = new float[tokens * _hc * _dim];
+        float[] stream = new float[checked(tokens * _hc * _dim)];
         for (int t = 0; t < tokens; t++)
         {
-            int id = ids[t];
-            if ((uint)id >= (uint)_vocab) throw new ArgumentOutOfRangeException(nameof(ids), id, "Token id is outside the vocabulary.");
-            for (int c = 0; c < _hc; c++) _embed.AsSpan(id * _dim, _dim).CopyTo(stream.AsSpan((t * _hc + c) * _dim, _dim));
+            int row = checked(ids[t] * _dim);
+            for (int c = 0; c < _hc; c++) _embed.AsSpan(row, _dim).CopyTo(stream.AsSpan((t * _hc + c) * _dim, _dim));
         }
 
         long[] hashIds = [];
@@ -102,7 +104,7 @@ public sealed class DeepSeekV41HostModel
         if (state.Hasher is { } hasher)
         {
             hashLayers = hasher.ValuesPerPosition / EngramConstants.ColumnsPerLayer;
-            hashIds = new long[tokens * hasher.ValuesPerPosition];
+            hashIds = new long[checked(tokens * hasher.ValuesPerPosition)];
             bool[] live = new bool[tokens];
             Array.Fill(live, true);
             hasher.Hash(ids, live, startPos, hashIds);

@@ -31,6 +31,7 @@ public sealed class DeepSeekV41SequenceState
     public void Reset()
     {
         foreach (DeepSeekV41AttentionState layer in Layers) layer.Reset();
+        Shared.Reset();
         Hasher?.Reset();
         Length = 0;
     }
