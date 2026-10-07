@@ -34,6 +34,20 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.276
+
+- **Added: DeepSeek V4.1 block and whole-model forward on the host reference path.** `DeepSeekV41Block` composes the optional Engram
+  lookup, attention and the routed feed-forward layer, each between hyper-connection mixing, with upstream's hand-off of coefficients
+  (attention collapses with the previous block's feed-forward coefficients, the feed-forward layer with the ones attention just derived).
+  `DeepSeekV41HostModel` adds the embedding, the per-copy stream, the final collapse and norm, and the output head. It prefills from
+  position 0 as one chunk and runs a later multi-token call one token at a time, which attention requires. `DeepSeekV41SequenceState` holds
+  each layer's attention cache, the slots shared between layers and the Engram hash history. A six-layer model covering every attention mode
+  matches the unmodified upstream `Transformer` through an 11-token prefill and six decode steps (`dump_model_fixture.py`), to 1e-3.
+  The attention and model fixtures now run upstream with an exact-softmax `sparse_attn` instead of the harness port, which rounds
+  probabilities to bf16 like the real kernel; that rounding made the stack drift by up to a few percent and hid any real defect, and the
+  attention test tolerance drops from 1e-2 to 1e-3. Engram is checked per component and for its hash-id wiring, not in the model fixture.
+  Not wired into `TextService`.
+
 ## alpha.275
 
 - **Added: DeepSeek V4.1 attention layer and hyper-connection wrapper on the host reference path.** `DeepSeekV41Attention`

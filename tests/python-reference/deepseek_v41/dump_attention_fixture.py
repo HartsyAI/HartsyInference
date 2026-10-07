@@ -37,6 +37,9 @@ def main() -> None:
     sys.path.insert(0, os.path.join(a.upstream, "inference"))
     import model as mod
 
+    # exact softmax instead of the port's bf16 probabilities, so the host reference can be compared tightly and a gap means a real defect
+    mod.sparse_attn = kernel_ports.sparse_attn_exact
+
     mod.default_dtype = torch.float32
     torch.set_default_dtype(torch.float32)
     torch.manual_seed(1234)

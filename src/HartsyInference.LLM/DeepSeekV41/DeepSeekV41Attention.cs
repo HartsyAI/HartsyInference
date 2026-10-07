@@ -13,6 +13,9 @@ public sealed class DeepSeekV41Attention
     private readonly DeepSeekV41AttentionWeights _w;
     private readonly DeepSeekV41RopeTable _rope;
 
+    /// <summary>The shape and role this layer was built with, used to size its per-sequence state.</summary>
+    public DeepSeekV41AttentionSettings Settings => _s;
+
     /// <param name="backend">Provides rope, quantize round trips, window indices, indexer scores and sparse attention.</param>
     /// <param name="settings">Shape and role of this layer.</param>
     /// <param name="weights">Dequantized weights; compressor and indexer must be present exactly when the settings call for them.</param>
