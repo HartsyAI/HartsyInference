@@ -22,13 +22,13 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
     /// <summary>Container-bytes variant of <see cref="DecodeFileAsync(string, int?, int?, int?, CancellationToken)"/>:
     /// the frame cap and ffmpeg-side scale run before frames cross the pipe, so a long HD clip never materializes.</summary>
     public async Task<Result> DecodeAsync(byte[] container, string? formatHint, int? maxFrames, int? scaleWidth,
-        int? scaleHeight, CancellationToken cancel = default, bool letterbox = false)
+        int? scaleHeight, CancellationToken cancel = default, bool letterbox = false, double? maxSeconds = null)
     {
         string temp = Path.Combine(Path.GetTempPath(), $"hartsy-dec-{Guid.NewGuid():N}.{formatHint ?? "bin"}");
         await File.WriteAllBytesAsync(temp, container, cancel).ConfigureAwait(false);
         try
         {
-            return await DecodeFileAsync(temp, maxFrames, scaleWidth, scaleHeight, cancel, letterbox).ConfigureAwait(false);
+            return await DecodeFileAsync(temp, maxFrames, scaleWidth, scaleHeight, cancel, letterbox, maxSeconds).ConfigureAwait(false);
         }
         finally
         {
@@ -42,12 +42,14 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
 
     /// <summary>Decodes a video file on disk, optionally capped to <paramref name="maxFrames"/> (<c>-frames:v</c>) and
     /// resampled ffmpeg-side to <paramref name="scaleWidth"/>×<paramref name="scaleHeight"/> (<c>-vf scale</c>); a null
-    /// scale dimension keeps the probed source size.</summary>
+    /// scale dimension keeps the probed source size. <paramref name="maxSeconds"/> stops decoding after that much input.</summary>
     public async Task<Result> DecodeFileAsync(string path, int? maxFrames, int? scaleWidth, int? scaleHeight,
-        CancellationToken cancel = default, bool letterbox = false)
+        CancellationToken cancel = default, bool letterbox = false, double? maxSeconds = null)
     {
         if (maxFrames is <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxFrames), $"maxFrames must be positive; got {maxFrames}.");
+        if (maxSeconds is <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxSeconds), $"maxSeconds must be positive; got {maxSeconds}.");
         if (scaleWidth is <= 0 || scaleHeight is <= 0)
             throw new ArgumentOutOfRangeException(nameof(scaleWidth), $"Scale dimensions must be positive; got {scaleWidth}x{scaleHeight}.");
         (int width, int height, double fps) = await ProbeAsync(path, cancel).ConfigureAwait(false);
@@ -61,11 +63,12 @@ public sealed class FfmpegProcessDecoder(string ffmpegPath = "ffmpeg", string ff
             : $"scale={outWidth}:{outHeight}";
         string scaleArg = scaleWidth is null && scaleHeight is null ? "" : $" -vf \"{filter}\"";
         string capArg = maxFrames is null ? "" : $" -frames:v {maxFrames.Value}";
+        string durationArg = maxSeconds is null ? "" : string.Create(CultureInfo.InvariantCulture, $"-t {maxSeconds.Value} ");
 
         ProcessStartInfo psi = new()
         {
             FileName = _ffmpegPath,
-            Arguments = $"-v error -i \"{path}\"{scaleArg}{capArg} -f rawvideo -pix_fmt rgb24 -",
+            Arguments = $"-v error {durationArg}-i \"{path}\"{scaleArg}{capArg} -f rawvideo -pix_fmt rgb24 -",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
