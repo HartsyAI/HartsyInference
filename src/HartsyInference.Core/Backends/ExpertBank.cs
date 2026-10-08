@@ -7,20 +7,40 @@ public sealed class ExpertBank
     private readonly ExpertWeights?[] _created;
     private readonly object _gate = new();
 
-    /// <summary>Creates a bank; <paramref name="resolve"/> runs at most once per expert and must return weights carrying the requested key.</summary>
-    public ExpertBank(int layer, int count, Func<ExpertKey, ExpertWeights> resolve)
+    /// <summary>
+    /// Creates a bank; <paramref name="resolve"/> runs at most once per expert and must return weights carrying the requested key.
+    /// </summary>
+    /// <param name="layer">Layer number within the bank.</param>
+    /// <param name="count">Routed experts in the layer.</param>
+    /// <param name="resolve">Produces one expert's weights.</param>
+    /// <param name="bank">The bank this layer belongs to; 0 unless a model shares a cache with others.</param>
+    public ExpertBank(int layer, int count, Func<ExpertKey, ExpertWeights> resolve, ushort bank = 0)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(layer);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
         ArgumentNullException.ThrowIfNull(resolve);
         Layer = layer;
+        Bank = bank;
         Count = count;
         _resolve = resolve;
         _created = new ExpertWeights?[count];
     }
 
+    /// <summary>Creates a bank whose experts come from an <see cref="IExpertSource"/>.</summary>
+    public static ExpertBank FromSource(IExpertSource source, int layer, int count, ushort bank = 0)
+    {
+        ArgumentNullException.ThrowIfNull(source);
+        return new ExpertBank(layer, count, source.Resolve, bank);
+    }
+
     /// <summary>Layer number.</summary>
     public int Layer { get; }
+
+    /// <summary>The bank this layer belongs to.</summary>
+    public ushort Bank { get; }
+
+    /// <summary>The cache identity of this layer.</summary>
+    public ExpertLayerKey LayerKey => new(Bank, Layer);
 
     /// <summary>Routed experts in the layer.</summary>
     public int Count { get; }
@@ -39,7 +59,7 @@ public sealed class ExpertBank
     {
         if ((uint)expert >= (uint)Count)
             throw new ArgumentOutOfRangeException(nameof(expert), expert, $"Layer {Layer} has {Count} routed experts.");
-        return new ExpertKey(Layer, expert);
+        return new ExpertKey(Layer, expert, Bank);
     }
 
     /// <summary>The expert's weights; the same object every call.</summary>

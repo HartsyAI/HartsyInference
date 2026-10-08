@@ -12,15 +12,15 @@ public abstract class ExpertCacheBase : IExpertCache
     private const long AgeEveryRequests = 4096;
 
     private readonly object _gate = new();
-    private readonly Dictionary<int, ExpertBank> _banks = [];
+    private readonly Dictionary<ExpertLayerKey, ExpertBank> _banks = [];
     private readonly Dictionary<ExpertKey, ExpertCacheEntry> _entries = [];
-    private readonly Dictionary<int, long> _layerFrequency = [];
+    private readonly Dictionary<ExpertLayerKey, long> _layerFrequency = [];
     private readonly HashSet<ExpertLease> _live = [];
     private long _tick;
     private long _requests;
     private long _residentBytes;
     private long _protectedBytes;
-    private int _currentLayer = -1;
+    private ExpertLayerKey? _currentLayer;
     private bool _disposed;
     private long _hits, _inFlightHits, _misses, _prefetches, _evictions, _bytesUploaded;
 
@@ -90,9 +90,9 @@ public abstract class ExpertCacheBase : IExpertCache
         ArgumentNullException.ThrowIfNull(bank);
         lock (_gate)
         {
-            if (_banks.TryGetValue(bank.Layer, out ExpertBank? existing) && !ReferenceEquals(existing, bank))
-                throw new InvalidOperationException($"Layer {bank.Layer} already has a different expert bank registered.");
-            _banks[bank.Layer] = bank;
+            if (_banks.TryGetValue(bank.LayerKey, out ExpertBank? existing) && !ReferenceEquals(existing, bank))
+                throw new InvalidOperationException($"Layer {bank.LayerKey} already has a different expert bank registered.");
+            _banks[bank.LayerKey] = bank;
         }
     }
 
@@ -108,7 +108,7 @@ public abstract class ExpertCacheBase : IExpertCache
             HashSet<ExpertKey> missingKeys = [];
             long missingBytes = 0;
             int hits = 0, inFlight = 0;
-            if (unique.Count > 0) _currentLayer = unique[0].Layer;
+            if (unique.Count > 0) _currentLayer = unique[0].LayerKey;
             foreach (ExpertKey key in unique)
             {
                 if (_entries.TryGetValue(key, out ExpertCacheEntry? entry))
@@ -157,8 +157,8 @@ public abstract class ExpertCacheBase : IExpertCache
         {
             ThrowIfDisposed();
             HashSet<ExpertKey> requested = [.. unique];
-            HashSet<int> protectedLayers = [.. unique.Select(static key => key.Layer)];
-            if (_currentLayer >= 0) protectedLayers.Add(_currentLayer);
+            HashSet<ExpertLayerKey> protectedLayers = [.. unique.Select(static key => key.LayerKey)];
+            if (_currentLayer is { } current) protectedLayers.Add(current);
             int started = 0;
             foreach (ExpertKey key in unique)
             {
@@ -266,8 +266,8 @@ public abstract class ExpertCacheBase : IExpertCache
 
     private ExpertWeights Resolve(ExpertKey key)
     {
-        if (!_banks.TryGetValue(key.Layer, out ExpertBank? bank))
-            throw new InvalidOperationException($"No expert bank is registered for layer {key.Layer}.");
+        if (!_banks.TryGetValue(key.LayerKey, out ExpertBank? bank))
+            throw new InvalidOperationException($"No expert bank is registered for layer {key.LayerKey}.");
         return bank.Get(key.Expert);
     }
 
@@ -293,7 +293,7 @@ public abstract class ExpertCacheBase : IExpertCache
     private void Touch(ExpertCacheEntry entry, bool resident)
     {
         entry.LastTick = ++_tick;
-        _layerFrequency[entry.Key.Layer] = _layerFrequency.GetValueOrDefault(entry.Key.Layer) + 1;
+        _layerFrequency[entry.Key.LayerKey] = _layerFrequency.GetValueOrDefault(entry.Key.LayerKey) + 1;
         if (!resident || entry.Protected) return;
         entry.Protected = true;
         _protectedBytes += entry.Bytes;
@@ -317,17 +317,17 @@ public abstract class ExpertCacheBase : IExpertCache
         long before = _requests / AgeEveryRequests;
         _requests += requests;
         if (_requests / AgeEveryRequests == before) return;
-        foreach (int layer in _layerFrequency.Keys.ToList()) _layerFrequency[layer] /= 2;
+        foreach (ExpertLayerKey layer in _layerFrequency.Keys.ToList()) _layerFrequency[layer] /= 2;
     }
 
-    private IEnumerable<ExpertCacheEntry> Candidates(HashSet<ExpertKey>? requested, HashSet<int>? protectedLayers)
+    private IEnumerable<ExpertCacheEntry> Candidates(HashSet<ExpertKey>? requested, HashSet<ExpertLayerKey>? protectedLayers)
     {
         List<(ExpertCacheEntry Entry, bool Fenced)> found = [];
         foreach (ExpertCacheEntry entry in _entries.Values)
         {
             if (entry.PinCount > 0) continue;
             if (requested is not null && requested.Contains(entry.Key)) continue;
-            if (protectedLayers is not null && protectedLayers.Contains(entry.Key.Layer)) continue;
+            if (protectedLayers is not null && protectedLayers.Contains(entry.Key.LayerKey)) continue;
             found.Add((entry, PurgeFences(entry)));
         }
         found.Sort((a, b) =>
@@ -336,7 +336,7 @@ public abstract class ExpertCacheBase : IExpertCache
             if (order != 0) return order;
             order = a.Entry.Protected.CompareTo(b.Entry.Protected);
             if (order != 0) return order;
-            order = _layerFrequency.GetValueOrDefault(a.Entry.Key.Layer).CompareTo(_layerFrequency.GetValueOrDefault(b.Entry.Key.Layer));
+            order = _layerFrequency.GetValueOrDefault(a.Entry.Key.LayerKey).CompareTo(_layerFrequency.GetValueOrDefault(b.Entry.Key.LayerKey));
             return order != 0 ? order : a.Entry.LastTick.CompareTo(b.Entry.LastTick);
         });
         return found.Select(static item => item.Entry);
@@ -360,7 +360,7 @@ public abstract class ExpertCacheBase : IExpertCache
         if (--fence.References == 0) DestroyFence(fence.Handle);
     }
 
-    private bool MakeRoom(long incomingBytes, HashSet<ExpertKey> requested, HashSet<int>? protectedLayers, bool mustSucceed)
+    private bool MakeRoom(long incomingBytes, HashSet<ExpertKey> requested, HashSet<ExpertLayerKey>? protectedLayers, bool mustSucceed)
     {
         long over = _residentBytes + incomingBytes - BudgetBytes;
         if (over <= 0) return true;
