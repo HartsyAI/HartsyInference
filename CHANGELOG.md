@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.292
+
+- **Added: the DSpark draft forward for DeepSeek-V4.1-Flash on the CPU host reference.** `DeepSeekV41DSpark` loads the three `mtp` stages (draft attention over the target's sliding window with the block's own latents, a 128-expert feed-forward, hyper-connections) with the Markov and confidence heads, and drafts a block greedily. Against the unmodified upstream `forward_spec` on the real checkpoint (structural mode, one decode step): every stage agrees at relL2 at most 5e-6, the draft ids match exactly. The backbone's rotary moved to a shared helper with no change in output. No change to the generation path.
+
 ## alpha.291
 
 - **Added: the speculation contract (CPU, synthetic evidence).** `SamplerChain.Distribution` exposes the distribution the sampler draws from, without consuming randomness. `RejectionSampler.Verify` is exact speculative sampling: a drafted token is accepted with probability min(1, p/q), and a rejection draws from the normalized residual max(0, p - q), so the emitted tokens follow the target distribution whatever the proposer does. `PromptLookupProposer` drafts from n-gram matches, and `SpeculativeLoop` runs draft, one scoring pass and verification over a stateless scorer. Greedy speculation reproduces plain greedy decoding; the statistical tests (chi-square at 1e6 trials, and a two-sample test against the plain sampler) and two deliberately broken samplers back the claim. No change to the existing pipeline's speculative path.
