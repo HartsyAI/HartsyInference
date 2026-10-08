@@ -8,6 +8,11 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.280
+
+Release cut: publishes the voice-agent call-audio detectors, the thread-safe `ToolRegistry`, the Clef catalog entry and the CUDA
+release fixes below, which merged after alpha.279. No code change beyond the version.
+
 - **Added: in-band DTMF and call-progress detectors for the voice agent, optional and off by default.** New
   `HartsyInference.Audio.Dsp.Telephony`: `DtmfDetector` (Goertzel, all 16 keys, twist/dominance/second-harmonic checks,
   no false key in 614 s of speech, babble and noise) and `CallProgressClassifier` (ringback, busy, fast busy, SIT, dial
