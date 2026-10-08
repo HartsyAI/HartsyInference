@@ -23,7 +23,7 @@ internal static class DeepSeekV41HostMath
         if (x.Length != (long)rows * inDim || w.Length != (long)chunkRows * inDim) throw new ArgumentException("Linear operands do not match the stated shape.");
         if (firstRow < 0 || firstRow + chunkRows > outDim || y.Length != (long)rows * outDim) throw new ArgumentException("The weight window does not fit the output.");
         const int Block = 32;
-        int total = rows * chunkRows, blocks = (total + Block - 1) / Block;
+        int total = checked(rows * chunkRows), blocks = (total + Block - 1) / Block;
         fixed (float* xp = x)
         fixed (float* wp = w)
         fixed (float* yp = y)

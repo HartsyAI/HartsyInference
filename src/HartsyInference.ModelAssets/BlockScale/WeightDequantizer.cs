@@ -80,7 +80,7 @@ public static unsafe class WeightDequantizer
         long first = rowOffset * cols;
         if (weight.DType == DType.F32)
         {
-            weight.AsReadOnlySpan<float>().Slice((int)first, dest.Length).CopyTo(dest);
+            weight.AsReadOnlySpan<float>().Slice(checked((int)first), dest.Length).CopyTo(dest);
         }
         else if (weight.DType == DType.BF16)
         {
@@ -99,7 +99,7 @@ public static unsafe class WeightDequantizer
         }
         else if (weight.DType == DType.F16)
         {
-            ReadOnlySpan<Half> halves = weight.AsReadOnlySpan<Half>().Slice((int)first, dest.Length);
+            ReadOnlySpan<Half> halves = weight.AsReadOnlySpan<Half>().Slice(checked((int)first), dest.Length);
             for (int i = 0; i < dest.Length; i++) dest[i] = (float)halves[i];
         }
         else
