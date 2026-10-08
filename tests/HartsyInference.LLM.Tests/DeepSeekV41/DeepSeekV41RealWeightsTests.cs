@@ -162,8 +162,10 @@ public sealed class DeepSeekV41RealWeightsTests
     private const double ExactHiddenRelL2 = 2e-3;
     private const double ExactLogitsCosine = 0.9999;
     private const double PortsCosineFloor = 0.95;
-    // added after the first run as a regression guard, not a pre-set gate; the measured overlap is 10
+    // added after the first run as regression guards, not pre-set gates; measured: overlap 10, logits relL2 2.8e-6. Cosine and argmax are blind to a
+    // uniform rescale of the head, so the logits' magnitude is gated too, at the hidden tolerance (logits are one linear map of the hidden state).
     private const int ExactTop10Overlap = 9;
+    private const double ExactLogitsRelL2 = 2e-3;
 
     /// <summary>The first N layers of the real checkpoint through the host reference against the UNMODIFIED upstream model on the same real weights, dumped by
     /// <c>tests/python-reference/deepseek_v41/dump_real_layers.py</c> (set <c>DSV41_ORACLE_DIR</c> to its output directory; its <c>meta.json</c> names the layers, mode and ids).</summary>
@@ -224,6 +226,7 @@ public sealed class DeepSeekV41RealWeightsTests
         {
             Assert.True(hiddenRel <= ExactHiddenRelL2, $"hidden relL2 {hiddenRel:E3} > {ExactHiddenRelL2:E1}");
             Assert.True(logitsCos >= ExactLogitsCosine, $"logits cosine {logitsCos:F6} < {ExactLogitsCosine}");
+            Assert.True(logitsRel <= ExactLogitsRelL2, $"logits relL2 {logitsRel:E3} > {ExactLogitsRelL2:E1}");
             Assert.Equal(refTop, hostTop);
             Assert.True(overlap >= ExactTop10Overlap, $"top-10 overlap {overlap}/10 < {ExactTop10Overlap}");
         }
