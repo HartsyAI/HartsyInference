@@ -23,6 +23,8 @@ public sealed class DeepSeekV41VisionRealWeightsTests
     // to a relative L2 and, element by element, to a fraction of the stage's largest value, so a localized error that a norm would hide
     // still fails.
     private const double OutputCosineFloor = 0.9999;
+    // added after the first run, at the same bar: the plan says correlation, which is the cosine of the mean-centred values
+    private const double OutputPearsonFloor = 0.9999;
     private const double StageRelL2 = 1e-3;
     private const double StageMaxAbsFraction = 1e-3;
 
@@ -95,12 +97,15 @@ public sealed class DeepSeekV41VisionRealWeightsTests
                 float[] actual = taps[stage];
                 float[] expected = ReadF32(Path.Combine(oracle!, $"{tag}.{stage}.f32"), actual.Length);
                 double rel = DeepSeekV41VisionMetrics.RelL2(actual, expected), cos = DeepSeekV41VisionMetrics.Cosine(actual, expected);
+                double pearson = DeepSeekV41VisionMetrics.Pearson(actual, expected);
                 double abs = DeepSeekV41VisionMetrics.MaxAbsDiff(actual, expected), scale = DeepSeekV41VisionMetrics.MaxAbs(expected);
-                _output.WriteLine($"{tag} {stage,-11} relL2 {rel:E2} cos {cos:F8} maxAbs {abs:E2} (stage max {scale:F3})");
+                _output.WriteLine($"{tag} {stage,-11} relL2 {rel:E2} cos {cos:F8} pearson {pearson:F8} maxAbs {abs:E2} (stage max {scale:F3})");
                 Assert.All(actual, static v => Assert.True(float.IsFinite(v)));
                 Assert.True(rel <= StageRelL2, $"{tag} {stage}: relL2 {rel:E3} > {StageRelL2:E1}");
                 Assert.True(abs <= StageMaxAbsFraction * scale, $"{tag} {stage}: maxAbs {abs:E3} > {StageMaxAbsFraction * scale:E3}");
-                if (stage == "out") Assert.True(cos >= OutputCosineFloor, $"{tag} aligner output cosine {cos:F6} < {OutputCosineFloor}");
+                if (stage != "out") continue;
+                Assert.True(cos >= OutputCosineFloor, $"{tag} aligner output cosine {cos:F6} < {OutputCosineFloor}");
+                Assert.True(pearson >= OutputPearsonFloor, $"{tag} aligner output correlation {pearson:F6} < {OutputPearsonFloor}");
             }
         }
     }

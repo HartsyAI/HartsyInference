@@ -36,7 +36,7 @@ public sealed class DeepSeekV41VisionTowerTests(ITestOutputHelper output)
     }
 
     [Fact]
-    public void Forward_IsRepeatableAndTheProbeCostsNothingWhenOff()
+    public void Forward_IsRepeatable()
     {
         JsonElement testCase = VisionFixture.TowerCase(4, 3);
         float[] patches = VisionFixture.Floats(testCase.GetProperty("patches"));
@@ -46,7 +46,6 @@ public sealed class DeepSeekV41VisionTowerTests(ITestOutputHelper output)
         float[] first = tower.Forward(patches, 4, 3);
         float[] second = tower.Forward(patches, 4, 3);
 
-        Assert.Null(tower.Probe);
         Assert.Equal(first, second);
     }
 

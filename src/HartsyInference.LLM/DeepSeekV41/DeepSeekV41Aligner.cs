@@ -18,7 +18,7 @@ public sealed class DeepSeekV41Aligner : IDisposable
     /// <param name="backend">Provides the linear and GELU ops.</param>
     /// <param name="config">Vision tower dimensions (feature width and downsample ratio).</param>
     /// <param name="outputDim">The language model's hidden width, which the aligner emits.</param>
-    /// <param name="weights">F32 weights shaped by <paramref name="config"/> and <paramref name="outputDim"/>; the aligner takes ownership.</param>
+    /// <param name="weights">F32 weights shaped by <paramref name="config"/> and <paramref name="outputDim"/>; the aligner owns them once construction succeeds, and a constructor that throws leaves them with the caller.</param>
     /// <exception cref="HartsyInferenceException">A weight is missing, not F32 or mis-shaped.</exception>
     public DeepSeekV41Aligner(IBackend backend, DeepSeekV41VisionConfig config, int outputDim, DeepSeekV41AlignerWeights weights)
     {

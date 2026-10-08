@@ -17,7 +17,7 @@ public sealed class DeepSeekV41VisionTower : IDisposable
 
     /// <param name="backend">Provides linear, norm, rotary, attention and activation ops.</param>
     /// <param name="config">Tower dimensions.</param>
-    /// <param name="weights">F32 weights shaped by <paramref name="config"/>; the tower takes ownership.</param>
+    /// <param name="weights">F32 weights shaped by <paramref name="config"/>; the tower owns them once construction succeeds, and a constructor that throws leaves them with the caller.</param>
     /// <exception cref="HartsyInference.Core.Exceptions.HartsyInferenceException">The config is not runnable or a weight is missing, not F32 or mis-shaped.</exception>
     public DeepSeekV41VisionTower(IBackend backend, DeepSeekV41VisionConfig config, DeepSeekV41VisionWeights weights)
     {

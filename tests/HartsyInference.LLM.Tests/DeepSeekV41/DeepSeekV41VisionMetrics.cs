@@ -27,6 +27,29 @@ internal static class DeepSeekV41VisionMetrics
         return dot / Math.Max(Math.Sqrt(na * nb), 1e-30);
     }
 
+    /// <summary>Pearson correlation: the cosine of the mean-centred values.</summary>
+    public static double Pearson(ReadOnlySpan<float> actual, ReadOnlySpan<float> expected)
+    {
+        int n = expected.Length;
+        double meanActual = 0, meanExpected = 0;
+        for (int i = 0; i < n; i++)
+        {
+            meanActual += actual[i];
+            meanExpected += expected[i];
+        }
+        meanActual /= Math.Max(n, 1);
+        meanExpected /= Math.Max(n, 1);
+        double covariance = 0, varianceActual = 0, varianceExpected = 0;
+        for (int i = 0; i < n; i++)
+        {
+            double a = actual[i] - meanActual, e = expected[i] - meanExpected;
+            covariance += a * e;
+            varianceActual += a * a;
+            varianceExpected += e * e;
+        }
+        return covariance / Math.Max(Math.Sqrt(varianceActual * varianceExpected), 1e-30);
+    }
+
     public static double MaxAbsDiff(ReadOnlySpan<float> actual, ReadOnlySpan<float> expected)
     {
         double max = 0;
