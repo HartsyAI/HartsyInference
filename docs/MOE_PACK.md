@@ -6,20 +6,24 @@ the space reduction: the original checkpoint can be removed once `ExpertPackVeri
 ## Layout
 
 - `experts.bin`: one record per expert, each starting on a 4 KiB boundary. A record is three quantized projections in order:
-  gate `[I, H]`, up `[I, H]`, down `[H, I]`, each in the pack's quant dtype (Q8_0, Q4_K, Q5_K, Q6_K or F32).
-- `manifest.json`: format version, topology fingerprint, H, I, dtype, and per-record `(Layer, Expert, Bank, Offset, Length, SHA-256)`.
+  gate `[I, H]`, up `[I, H]`, down `[H, I]`, each in the pack's quant dtype: Q8_0, Q4_K, Q5_K or Q6_K.
+- `manifest.json`: format version, topology fingerprint, H, I, dtype, the expert count the pack must hold, and per-record
+  `(Layer, Expert, Bank, Offset, Length, SHA-256)`.
 - `COMPLETE`: written last. Readers refuse a directory without it.
 
 ## Publication
 
-Writes go to `experts.bin.partial`. `Finish` renames it to `experts.bin`, then writes the manifest, then `COMPLETE`. A crash
-before `COMPLETE` leaves nothing a reader will open. A completed pack is never overwritten.
+Writes go to `experts.bin.partial`. `Finish` refuses to publish unless exactly the expected number of experts was added; a
+partial set is never published. It then renames the data to `experts.bin`, writes the manifest, and writes `COMPLETE`. A
+crash before `COMPLETE` leaves nothing a reader will open. A completed pack is never overwritten.
 
 ## Refusals and checks
 
 - Opening checks `COMPLETE`, the format version, and, when given, the topology fingerprint the pack was built for.
 - Every read checks the record's SHA-256. A mismatch raises `InvalidDataException` and never returns weights.
 - Dimensions must be multiples of the dtype's block size (256 for Q4_K, 32 for Q8_0).
+- The dtype must be one of Q8_0, Q4_K, Q5_K or Q6_K; F32 and other quant types are refused.
+- The reader checks that the manifest lists the number of experts it declares.
 
 ## Measured on random weights (not real checkpoints)
 

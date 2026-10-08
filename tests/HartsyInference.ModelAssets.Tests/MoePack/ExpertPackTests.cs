@@ -42,7 +42,7 @@ public sealed class ExpertPackTests : IDisposable
             string fingerprint = Fingerprint)
     {
         Dictionary<ExpertKey, (float[] Gate, float[] Up, float[] Down)> sources = [];
-        using ExpertPackWriter writer = new(directory, fingerprint, Hidden, Intermediate, dtype);
+        using ExpertPackWriter writer = new(directory, fingerprint, Hidden, Intermediate, dtype, experts);
         for (int e = 0; e < experts; e++)
         {
             (float[] Gate, float[] Up, float[] Down) source = Expert();
@@ -103,7 +103,7 @@ public sealed class ExpertPackTests : IDisposable
     public void Incomplete_Pack_IsRefused()
     {
         string dir = Path.Combine(_root, "incomplete");
-        using (ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0))
+        using (ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, 1))
         {
             (float[] Gate, float[] Up, float[] Down) source = Expert();
             writer.AddExpert(0, 0, source.Gate, source.Up, source.Down);
@@ -127,7 +127,7 @@ public sealed class ExpertPackTests : IDisposable
         string dir = Path.Combine(_root, "complete");
         WritePack(dir, DType.Q8_0, experts: 2);
 
-        Assert.Throws<InvalidOperationException>(() => new ExpertPackWriter(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0));
+        Assert.Throws<InvalidOperationException>(() => new ExpertPackWriter(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, 2));
     }
 
     [Fact]
@@ -153,7 +153,7 @@ public sealed class ExpertPackTests : IDisposable
     public void DuplicateExpert_AndUnknownKey_AreRejected()
     {
         string dir = Path.Combine(_root, "dup");
-        using ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0);
+        using ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, 1);
         (float[] Gate, float[] Up, float[] Down) source = Expert();
         writer.AddExpert(0, 1, source.Gate, source.Up, source.Down);
         Assert.Throws<ArgumentException>(() => writer.AddExpert(0, 1, source.Gate, source.Up, source.Down));
@@ -166,7 +166,7 @@ public sealed class ExpertPackTests : IDisposable
     [Fact]
     public void Dimensions_MustMatchTheDtypeBlockSize()
     {
-        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "bad"), Fingerprint, 100, Intermediate, DType.Q4_K));
+        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "bad"), Fingerprint, 100, Intermediate, DType.Q4_K, 1));
     }
 
     [Fact]
@@ -199,6 +199,21 @@ public sealed class ExpertPackTests : IDisposable
     [Fact]
     public void F32_IsNotAPackDType()
     {
-        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "f32"), Fingerprint, Hidden, Intermediate, DType.F32));
+        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "f32"), Fingerprint, Hidden, Intermediate, DType.F32, 1));
+        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "q2k"), Fingerprint, Hidden, Intermediate, DType.Q2_K, 1));
+    }
+
+    [Fact]
+    public void PartialPack_IsNeverPublished()
+    {
+        string dir = Path.Combine(_root, "partial");
+        using ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, 3);
+        (float[] Gate, float[] Up, float[] Down) source = Expert();
+        writer.AddExpert(0, 0, source.Gate, source.Up, source.Down);
+        writer.AddExpert(0, 1, source.Gate, source.Up, source.Down);
+
+        Assert.Throws<InvalidOperationException>(() => writer.Finish());
+        Assert.False(File.Exists(Path.Combine(dir, "COMPLETE")));
+        Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir));
     }
 }

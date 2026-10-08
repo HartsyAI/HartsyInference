@@ -23,6 +23,7 @@ public sealed class ExpertPackWriter : IDisposable
     private readonly int _hidden;
     private readonly int _intermediate;
     private readonly DType _dtype;
+    private readonly int _expertCount;
     private readonly FileStream _stream;
     private readonly List<ExpertPackRecord> _records = [];
     private readonly HashSet<(ushort Bank, int Layer, int Expert)> _seen = [];
@@ -34,15 +35,17 @@ public sealed class ExpertPackWriter : IDisposable
     /// <param name="topologyFingerprint">Fingerprint of the topology these experts belong to.</param>
     /// <param name="hidden">Model width H; the quantized row length of gate and up.</param>
     /// <param name="intermediate">Expert inner width I; the quantized row length of down.</param>
-    /// <param name="dtype">Quant dtype of every projection.</param>
-    /// <exception cref="ArgumentException">A dimension is not a multiple of the dtype's block size.</exception>
+    /// <param name="dtype">Quant dtype of every projection: Q8_0, Q4_K, Q5_K or Q6_K.</param>
+    /// <param name="expertCount">Experts the pack must hold. <see cref="Finish"/> refuses to publish any other count.</param>
+    /// <exception cref="ArgumentException">The dtype is not a pack dtype, or a dimension is not a multiple of its block size.</exception>
     /// <exception cref="InvalidOperationException">The directory already holds a completed pack.</exception>
-    public ExpertPackWriter(string directory, string topologyFingerprint, int hidden, int intermediate, DType dtype)
+    public ExpertPackWriter(string directory, string topologyFingerprint, int hidden, int intermediate, DType dtype, int expertCount)
     {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expertCount);
+        if (!ExpertPackDTypes.IsPackDType(dtype))
+            throw new ArgumentException($"{dtype.Name} is not a pack dtype; packs store Q8_0, Q4_K, Q5_K or Q6_K.", nameof(dtype));
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentException.ThrowIfNullOrWhiteSpace(topologyFingerprint);
-        if (!dtype.IsQuantized)
-            throw new ArgumentException($"{dtype.Name} is not a quantized pack dtype; packs store quantized projections only.", nameof(dtype));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(hidden);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(intermediate);
         if (hidden % dtype.BlockElementCount != 0 || intermediate % dtype.BlockElementCount != 0)
@@ -53,6 +56,7 @@ public sealed class ExpertPackWriter : IDisposable
         _hidden = hidden;
         _intermediate = intermediate;
         _dtype = dtype;
+        _expertCount = expertCount;
         Directory.CreateDirectory(directory);
         if (File.Exists(Path.Combine(directory, "COMPLETE")))
             throw new InvalidOperationException($"'{directory}' already holds a completed expert pack.");
@@ -85,16 +89,19 @@ public sealed class ExpertPackWriter : IDisposable
     }
 
     /// <summary>Publishes the pack: data, then manifest, then the <c>COMPLETE</c> marker. Idempotent after success.</summary>
+    /// <exception cref="InvalidOperationException">The pack holds a different number of experts than it was created for.</exception>
     public void Finish()
     {
         if (_finished) return;
+        if (_records.Count != _expertCount)
+            throw new InvalidOperationException($"The pack was created for {_expertCount} experts but holds {_records.Count}; it is not published.");
         _stream.Flush(flushToDisk: true);
         _stream.Dispose();
         string partial = Path.Combine(_directory, "experts.bin.partial");
         string data = Path.Combine(_directory, "experts.bin");
         File.Move(partial, data, overwrite: true);
 
-        ExpertPackManifest manifest = new(FormatVersion, _fingerprint, _hidden, _intermediate, _dtype.Name, _records);
+        ExpertPackManifest manifest = new(FormatVersion, _fingerprint, _hidden, _intermediate, _dtype.Name, _records, _expertCount);
         string manifestPath = Path.Combine(_directory, "manifest.json");
         File.WriteAllText(manifestPath + ".partial", JsonSerializer.Serialize(manifest, ExpertPackJsonContext.Default.ExpertPackManifest));
         File.Move(manifestPath + ".partial", manifestPath, overwrite: true);

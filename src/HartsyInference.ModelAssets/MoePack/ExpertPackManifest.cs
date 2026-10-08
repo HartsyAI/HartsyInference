@@ -10,5 +10,6 @@ namespace HartsyInference.ModelAssets.MoePack;
 /// <param name="Intermediate">Expert inner width I.</param>
 /// <param name="DType">Quant dtype name of every projection (for example Q8_0 or Q4_K).</param>
 /// <param name="Records">One record per expert.</param>
+/// <param name="ExpertCount">The number of experts the pack must hold; a pack with fewer is never published.</param>
 public sealed record ExpertPackManifest(int Format, string TopologyFingerprint, int Hidden, int Intermediate, string DType,
-        List<ExpertPackRecord> Records);
+    List<ExpertPackRecord> Records, int ExpertCount);

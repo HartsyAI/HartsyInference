@@ -43,7 +43,7 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
     /// <summary>Expert inner width I.</summary>
     public int Intermediate { get; }
 
-    /// <summary>Number of experts in the pack.</summary>
+    /// <summary>Number of experts in the pack; the writer guarantees this is the count it was created for.</summary>
     public int Count => _records.Count;
 
     /// <summary>Every expert in the pack, in no particular order.</summary>
@@ -73,6 +73,8 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
             ?? throw new InvalidDataException("The pack manifest is empty.");
         if (manifest.Format != ExpertPackWriter.FormatVersion)
             throw new InvalidDataException($"Expert pack format {manifest.Format} is not version {ExpertPackWriter.FormatVersion}.");
+        if (manifest.Records.Count != manifest.ExpertCount)
+            throw new InvalidDataException($"The manifest lists {manifest.Records.Count} experts; it declares {manifest.ExpertCount}.");
         if (expectedFingerprint is not null && manifest.TopologyFingerprint != expectedFingerprint)
             throw new InvalidDataException("The expert pack was built for a different topology fingerprint.");
         return new ExpertPackReader(directory, manifest, verifyChecksums);
