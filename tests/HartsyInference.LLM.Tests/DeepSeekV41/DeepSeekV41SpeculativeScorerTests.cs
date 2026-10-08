@@ -260,6 +260,54 @@ public sealed class DeepSeekV41SpeculativeScorerTests
         for (int p = 0; p < 12; p++) Assert.Equal(direct.AsSpan(p * width, width).ToArray(), state.MainRow(p).ToArray());
     }
 
+    [Fact]
+    public void Sync_To_A_Shorter_Context_Leaves_The_Row_Of_Its_Last_Token()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
+        int[] held = [.. Prompt, 13, 1, 27];
+
+        // inside the prompt: the shorter context is prefilled afresh, as its own chunk
+        DeepSeekV41GenerationState inside = new(model, Capacity);
+        inside.Append(Prompt, new float[Prompt.Length * model.Dim]);
+        inside.Append([13, 1, 27], new float[3 * model.Dim]);
+        inside.SyncTo(held[..6]);
+        DeepSeekV41GenerationState freshInside = new(model, Capacity);
+        freshInside.Append(held[..6], new float[6 * model.Dim]);
+        Assert.Equal(freshInside.LastHidden.ToArray(), inside.LastHidden.ToArray());
+
+        // past the prompt: the kept prefix is replayed as the prompt chunk, then one token at a time
+        DeepSeekV41GenerationState beyond = new(model, Capacity);
+        beyond.Append(Prompt, new float[Prompt.Length * model.Dim]);
+        beyond.Append([13, 1, 27], new float[3 * model.Dim]);
+        beyond.SyncTo(held[..12]);
+        DeepSeekV41GenerationState freshBeyond = new(model, Capacity);
+        freshBeyond.Append(Prompt, new float[Prompt.Length * model.Dim]);
+        freshBeyond.Append([13], new float[model.Dim]);
+        Assert.Equal(freshBeyond.LastHidden.ToArray(), beyond.LastHidden.ToArray());
+    }
+
+    [Fact]
+    public void Recorded_Main_Rows_Survive_A_Rollback_Through_Sync()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, new[] { 2, 5 });
+        int width = model.MainHiddenWidth, dim = model.Dim;
+        int[] ids = FixtureIds();
+        DeepSeekV41GenerationState state = new(model, Capacity, recordMainRows: true);
+        state.SyncTo(ids[..11]);
+        state.SyncTo(ids[..13]);
+        state.SyncTo(ids[..12]);   // rolls back one token past the prompt
+
+        // the history the state now holds: the prompt as one chunk, then one token at a time
+        DeepSeekV41SequenceState raw = model.CreateState(Capacity);
+        float[] direct = new float[12 * width];
+        model.Forward(ids[..11], raw, new float[11 * dim], direct.AsSpan(0, 11 * width));
+        model.Forward(ids[11..12], raw, new float[dim], direct.AsSpan(11 * width, width));
+        for (int p = 0; p < 12; p++) Assert.Equal(direct.AsSpan(p * width, width).ToArray(), state.MainRow(p).ToArray());
+        Assert.Throws<ArgumentOutOfRangeException>(() => state.MainRow(12).ToArray());
+    }
+
     private static float[][] Rows(DeepSeekV41HostModel model, int count) => Enumerable.Range(0, count).Select(_ => new float[model.VocabSize]).ToArray();
 
     /// <summary>Plain greedy decoding: the prompt as one prefill, then one token at a time.</summary>

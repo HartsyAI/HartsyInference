@@ -41,9 +41,6 @@ public sealed class DeepSeekV41GenerationState : ISequenceState
     /// <summary>The committed token ids, oldest first.</summary>
     internal IReadOnlyList<int> Tokens => _tokens;
 
-    /// <summary>Length of the first append, which the host ran as one prefill chunk; 0 for an empty sequence. Rolling back below it replays a shorter chunk.</summary>
-    internal int PrefillLength => _chunkLength;
-
     /// <summary>Final normed hidden row of the last committed token, <c>[Dim]</c>; its logits are the next-token distribution. Valid after <see cref="SyncTo"/> or an append.</summary>
     internal ReadOnlySpan<float> LastHidden => _lastHidden;
 
@@ -51,6 +48,7 @@ public sealed class DeepSeekV41GenerationState : ISequenceState
     internal ReadOnlySpan<float> MainRow(int position)
     {
         if (_mainWidth == 0) throw new InvalidOperationException("This sequence does not record DSpark target rows.");
+        if ((uint)position >= (uint)Length) throw new ArgumentOutOfRangeException(nameof(position), position, $"The sequence holds {Length} tokens.");
         return CollectionsMarshal.AsSpan(_mainRows).Slice(position * _mainWidth, _mainWidth);
     }
 
