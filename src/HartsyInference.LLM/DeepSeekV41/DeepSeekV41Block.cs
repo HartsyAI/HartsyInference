@@ -66,6 +66,7 @@ public sealed class DeepSeekV41Block
     private Action<string, float[]>? _probe;
 
     /// <summary>Diagnostic tap for oracle comparisons: called with a stage name (<c>attn_in</c>, <c>attn_out</c>, <c>ffn_in</c>, <c>ffn_out</c>, <c>out</c>, and <c>route</c> with the chosen expert ids as values) and a copy of that stage's values. Null in normal use.</summary>
+    /// <remarks>Setting a probe replaces any earlier one. The routing stage reports through this block's MoE layer, which holds one probe.</remarks>
     public Action<string, float[]>? Probe
     {
         get => _probe;
