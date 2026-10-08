@@ -5,6 +5,7 @@ namespace HartsyInference.Vulkan.Tests;
 
 /// <summary>The once-per-device fp8 line a Vulkan backend logs at construction: the reason when off, and a warning only when
 /// the user forced the path on and the device cannot run it.</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanFp8StatusLineTests
 {
     private const string NoExt = "the driver does not offer VK_EXT_shader_float8 (NVIDIA 595 or newer does)";

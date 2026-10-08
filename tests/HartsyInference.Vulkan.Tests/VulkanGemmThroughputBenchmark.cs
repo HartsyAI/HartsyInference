@@ -8,6 +8,7 @@ namespace HartsyInference.Vulkan.Tests;
 /// <summary>GPU-timed F16 Linear throughput at Krea2's 1024² shapes (4352 tokens, hidden 6144, FFN 16384), so a GEMM
 /// kernel change is measured without the rest of a generation around it.</summary>
 [Trait("Category", "GpuBenchmark")]
+[Trait("Category", "GpuIntegration")]
 public sealed class VulkanGemmThroughputBenchmark(ITestOutputHelper output)
 {
     private const int Iterations = 20;
