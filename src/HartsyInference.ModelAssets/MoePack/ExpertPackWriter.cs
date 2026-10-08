@@ -73,8 +73,6 @@ public sealed class ExpertPackWriter : IDisposable
         _intermediate = intermediate;
         _dtype = dtype;
         Directory.CreateDirectory(directory);
-        if (File.Exists(Path.Combine(directory, "COMPLETE")))
-            throw new InvalidOperationException($"'{directory}' already holds a completed expert pack.");
         // One writer per directory. Ownership is the open handle, not the file's existence: FileShare.None makes a second
         // open fail while a writer is alive, and a WRITING file left by a crashed writer (no handle) opens and is taken over.
         _lockPath = Path.Combine(directory, "WRITING");
@@ -88,6 +86,9 @@ public sealed class ExpertPackWriter : IDisposable
         }
         try
         {
+            // Checked under the lock: a writer that published between an earlier check and now must not be overwritten.
+            if (File.Exists(Path.Combine(directory, "COMPLETE")))
+                throw new InvalidOperationException($"'{directory}' already holds a completed expert pack.");
             _stream = new FileStream(Path.Combine(directory, "experts.bin.partial"), FileMode.Create, FileAccess.Write, FileShare.None);
         }
         catch

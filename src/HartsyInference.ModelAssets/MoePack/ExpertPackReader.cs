@@ -112,8 +112,15 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
             throw new InvalidDataException(
                 $"The manifest declares a {manifest.Hidden} x {manifest.Intermediate} matrix; " +
                 $"the pack limit is {ExpertPackWriter.MaxMatrixElements} elements.");
+        if (manifest.ExpertCount <= 0) throw new InvalidDataException("The manifest declares no experts.");
         if (manifest.Records.Count != manifest.ExpertCount)
             throw new InvalidDataException($"The manifest lists {manifest.Records.Count} experts; it declares {manifest.ExpertCount}.");
+        DType dtype = ExpertPackDTypes.Resolve(manifest.DType);
+        // Each width must be a whole number of quant blocks, not just their product: a 16 x 40 Q8_0 matrix has 640 elements
+        // (20 blocks) but its rows split a block.
+        if (manifest.Hidden % dtype.BlockElementCount != 0 || manifest.Intermediate % dtype.BlockElementCount != 0)
+            throw new InvalidDataException(
+                $"Dimensions {manifest.Hidden} x {manifest.Intermediate} are not whole {dtype.Name} blocks of {dtype.BlockElementCount}.");
         return new ExpertPackReader(directory, manifest, verifyChecksums);
     }
 
