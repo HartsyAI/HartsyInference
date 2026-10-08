@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.289
+
+- **Added: a structural oracle for the DeepSeek-V4.1 host reference, at full depth, on the real checkpoint (diagnostics, off by default).** `dump_real_layers.py` runs the unmodified upstream model through lazy weight shims, so any depth fits in RAM. `RealLayers_MatchTheUpstreamModel` compares the host layer by layer, token by token and decode step by decode step, including the expert ids each token was routed to. Diagnostic switches: `DeepSeekV41LoadOptions.QuantizeLatents` and `DeepSeekV41AttentionSettings.QuantizeLatents` (off skips the FP8/FP4 cache round trip), `DeepSeekV41Block.Probe` now also reports `route`, and `DeepSeekV41MoeLayer.RouteProbe`. No change to normal output.
+
 ## alpha.286
 
 - **Added: expert packs, a quantized on-disk store for routed experts.** `ExpertPackWriter` quantizes each expert's gate, up and
