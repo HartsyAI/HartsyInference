@@ -15,6 +15,7 @@ public sealed class BlockScaledGemmTests
     private readonly ITestOutputHelper _output;
     public BlockScaledGemmTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
     [InlineData(200, 320, 256)]
@@ -89,6 +90,7 @@ public sealed class BlockScaledGemmTests
         _output.WriteLine($"TIMING {m}x{n}x{k}: native {nativeMs:F3} ms/Linear, unpack {unpackMs:F3} ms/Linear ({unpackMs / nativeMs:F2}x)");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
     [InlineData(200, 320, 256)]

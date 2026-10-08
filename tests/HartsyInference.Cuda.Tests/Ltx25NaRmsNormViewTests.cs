@@ -56,6 +56,7 @@ public sealed unsafe class Ltx25NaRmsNormViewTests
 
     /// <summary>The form the decoder uses: RmsNorm straight on the rank-6 tensor. It rows by the last dim, so this
     /// is the same arithmetic the view was there to express, and CUDA must match CPU exactly.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RmsNormDirectlyOnTheRank6TensorMatchesCpu()
     {
@@ -80,6 +81,7 @@ public sealed unsafe class Ltx25NaRmsNormViewTests
     /// asserting it is fixed: an in-place CUDA op on a <c>Reshape</c> view does not reach the parent, so the two
     /// backends disagree. If this ever starts failing, the backend gained view write-back and this test — plus the
     /// comment in <c>LtxVideo25NeighborhoodAttention3d.Forward</c> — should be retired.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void InPlaceOpThroughAReshapeViewStillDoesNotReachTheParentOnCuda()
     {

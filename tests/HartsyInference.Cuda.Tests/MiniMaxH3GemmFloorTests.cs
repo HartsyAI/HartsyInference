@@ -21,7 +21,6 @@ namespace HartsyInference.Cuda.Tests;
 /// FullyQualifiedName~MiniMaxH3GemmFloor</c> (needs a free GPU — see benchmarks/minimax_h3/h3_bench.sh for
 /// why a second CUDA tenant invalidates the numbers).</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class MiniMaxH3GemmFloorTests
 {
     private readonly ITestOutputHelper _output;
@@ -39,6 +38,7 @@ public sealed class MiniMaxH3GemmFloorTests
         ("mlp.fc2", 5376, 14336),
     ];
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Fp8LinearFloor_OnH3Shapes()
     {

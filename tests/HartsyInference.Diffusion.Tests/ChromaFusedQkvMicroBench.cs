@@ -94,6 +94,7 @@ public sealed unsafe class ChromaFusedQkvMicroBench
         return fp8;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SingleBlock_Fused_Vs_Split_RealShape()
     {
@@ -172,6 +173,7 @@ public sealed unsafe class ChromaFusedQkvMicroBench
     /// <summary>Same A/B with fp8-scaled weights + native fp8 GEMM — the actual §H3.1 target config.
     /// SKIPs on hardware without native fp8 (SM &lt; 8.9, e.g. the 3060): run with CUDA_VISIBLE_DEVICES=0
     /// on the dual-GPU box to land on the 4090.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SingleBlock_Fused_Vs_Split_Fp8RealShape()
     {

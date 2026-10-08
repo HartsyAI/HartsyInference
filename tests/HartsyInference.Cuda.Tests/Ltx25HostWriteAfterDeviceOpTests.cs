@@ -32,6 +32,7 @@ public sealed unsafe class Ltx25HostWriteAfterDeviceOpTests
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void HostWriteBetweenTwoDeviceOpsIsVisibleToTheSecond()
     {

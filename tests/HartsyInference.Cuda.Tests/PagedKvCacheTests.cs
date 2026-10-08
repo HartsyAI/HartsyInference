@@ -20,6 +20,7 @@ public sealed class PagedKvCacheTests
 
     private const int NumLayers = 2, NumKvHeads = 2, HeadDim = 8, PageSize = 4;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void PagedKvCache_MatchesFixedKvCache_AcrossPrefillAndDecode()
     {
@@ -49,6 +50,7 @@ public sealed class PagedKvCacheTests
         _output.WriteLine($"PASS: parity held through {len} tokens across {pagedCache.PagesHeld} pages.");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void PagedKvPool_SurvivesFragmentedMultiSequenceAdmissionAndEviction()
     {

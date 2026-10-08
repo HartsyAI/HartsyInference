@@ -148,6 +148,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
 
     /// <summary>The materialized GEMM path indexes the mask per query row, so it rebuilds the duplicate. Small
     /// shapes still reach it (the tiled branch only takes over when the score matrix stops fitting).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MaterializedPath_KeyOnlyBias_MatchesTheDuplicate()
     {
@@ -178,6 +179,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
     /// head silently got head 0's row. Ground truth is the full non-broadcast duplicate ([1,heads,Sq,Skv], each
     /// head's own row repeated over every query) run through the ordinary materialized path, which indexes the
     /// mask per query row and was never at risk of this bug.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TiledPath_PerHeadBias_SelectsTheOwningHeadsRow()
     {

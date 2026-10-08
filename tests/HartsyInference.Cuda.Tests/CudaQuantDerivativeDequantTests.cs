@@ -10,7 +10,6 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Device dequant of ModelOpt NVFP4, Quark U8-scale MXFP4 and MLX affine expert matrices against the host codecs.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaQuantDerivativeDequantTests
 {
     private readonly ITestOutputHelper _output;
@@ -128,6 +127,7 @@ public sealed unsafe class CudaQuantDerivativeDequantTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(8, 64, 1, 0, 0.0031f)]
     [InlineData(4, 96, 1, 3, 1.0f)]
@@ -138,12 +138,14 @@ public sealed unsafe class CudaQuantDerivativeDequantTests
         AssertDeviceMatchesHost(
             $"nvfp4 {rows}x{cols} br{blockRows} off{offset} g{global}", seed => BuildNvfp4(rows, cols, blockRows, offset, global, seed));
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(8, 96)]
     [InlineData(64, 2304)]
     public void QuarkU8ScaleMxfp4_IsBitExactAgainstHostCodec(int rows, int cols) =>
         AssertDeviceMatchesHost($"quark {rows}x{cols}", seed => BuildQuark(rows, cols, seed));
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4, 8, 128, 0)]
     [InlineData(4, 4, 192, 2)]
@@ -154,6 +156,7 @@ public sealed unsafe class CudaQuantDerivativeDequantTests
     public void MlxAffine_IsBitExactAgainstHostCodec(int bits, int rows, int cols, int offset) =>
         AssertDeviceMatchesHost($"mlx int{bits} {rows}x{cols} off{offset}", seed => BuildAffine(bits, rows, cols, offset, seed));
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Dequantize_RefusesRecipesTheDeviceCannotRead()
     {

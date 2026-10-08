@@ -16,7 +16,6 @@ namespace HartsyInference.Cuda.Tests;
 [Collection("CudaSerial")]
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaExpertM1FixtureTests
 {
     private const string ShardName = "model-00003-of-00048.safetensors";
@@ -42,6 +41,7 @@ public sealed unsafe class CudaExpertM1FixtureTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Layer0RoutedExperts_UploadAndDeviceDequant_MatchOfficialFixtures()
     {

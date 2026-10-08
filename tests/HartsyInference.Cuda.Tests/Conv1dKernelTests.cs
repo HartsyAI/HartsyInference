@@ -78,6 +78,7 @@ public sealed unsafe class Conv1dKernelTests
     private static int Conv1dTOut(int tIn, int padLeft, int padRight, int dilation, int kernel, int stride)
         => (tIn + padLeft + padRight - dilation * (kernel - 1) - 1) / stride + 1;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Conv1d_Cpu_Vs_Cuda()
     {
@@ -115,6 +116,7 @@ public sealed unsafe class Conv1dKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ConvTranspose1d_Cpu_Vs_Cuda()
     {

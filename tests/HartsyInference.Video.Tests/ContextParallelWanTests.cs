@@ -41,6 +41,7 @@ public unsafe class ContextParallelWanTests
         return ptxDir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Transformer_CpSplitForward_MatchesSingleBackend_SharedTimestep()
     {
@@ -48,6 +49,7 @@ public unsafe class ContextParallelWanTests
         RunTransformerParity(perFrameTimesteps: false);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Transformer_CpSplitForward_MatchesSingleBackend_PerFrameTimesteps()
     {
@@ -119,6 +121,7 @@ public unsafe class ContextParallelWanTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GenerateFromEmbeddings_ContextParallel_MatchesSequential_SameGpu()
     {

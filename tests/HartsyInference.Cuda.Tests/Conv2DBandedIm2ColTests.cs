@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// once per process — it must be set before the first CudaBackend touch, so run this test standalone
 /// (dotnet test --filter Conv2DBandedIm2Col) when validating the banding change.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Conv2DBandedIm2ColTests
 {
     private readonly ITestOutputHelper _output;
@@ -37,6 +36,7 @@ public sealed unsafe class Conv2DBandedIm2ColTests
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Conv2D_BandedIm2Col_MatchesCpu()
     {

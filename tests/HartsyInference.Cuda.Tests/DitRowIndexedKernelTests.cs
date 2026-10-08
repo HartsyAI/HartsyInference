@@ -165,6 +165,7 @@ public sealed unsafe class DitRowIndexedKernelTests
         AssertBitExact(unfused, fused, "GatedResidual");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RowIndexedKernels_Cuda_MatchUnfusedCpuReference()
     {
@@ -203,6 +204,7 @@ public sealed unsafe class DitRowIndexedKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RowIndexedKernels_F16AndBf16_MatchF32Twins()
     {
@@ -252,6 +254,7 @@ public sealed unsafe class DitRowIndexedKernelTests
 
     /// <summary>The BF16 twins of the non-row-indexed adaLN pair, which a BF16 DiT body still needs where the
     /// modulation is one broadcast row per call (a final layer's per-segment head) rather than one per token.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LastDimKernels_Bf16_MatchF32Twins()
     {

@@ -63,6 +63,7 @@ public sealed unsafe class MixPrimitivesTests
             "CPU affine read-only input alias");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_AffineMix_MatchesIndependentReference_PreservesInputs_AndStaysResident()
@@ -134,6 +135,7 @@ public sealed unsafe class MixPrimitivesTests
         AssertExact([2f, 4f, 5.875f, 7.125f, 30f, 31f], Snapshot(target), "noise-free row mix");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(MaskLayouts))]
     [Trait("Category", "GpuIntegration")]
@@ -151,6 +153,7 @@ public sealed unsafe class MixPrimitivesTests
         RunMaskedCase(cuda, cuda, layout, targetShape, maskShape, withNoise: false);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_TwoStepMaskedEuler_RebindsAlternatingScratchWithoutHostSync()
@@ -240,6 +243,7 @@ public sealed unsafe class MixPrimitivesTests
         AssertMalformedContracts(cpu);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_MalformedContractsAndOverlappingStorage_AreRejectedBeforeDispatch()

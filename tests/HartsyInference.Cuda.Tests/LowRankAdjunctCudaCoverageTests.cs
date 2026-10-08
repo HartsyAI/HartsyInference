@@ -16,7 +16,6 @@ namespace HartsyInference.Cuda.Tests;
 /// entirely, and a captured step graph replays whatever the capture recorded. A miss in any one of them is a
 /// generation that succeeds with part of the LoRA applied.</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class LowRankAdjunctCudaCoverageTests
 {
     private const int Rows = 256, Cols = 256, Rank = 8, Batch = 32;
@@ -37,6 +36,7 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
     /// <remarks>The quants here are the ones our own quantizer can PRODUCE. The classic codecs a community H3 or Wan
     /// build actually ships (Q4_0/Q5_0/Q5_1) cannot be written at all, which is precisely why their LoRA has to ride
     /// on the weight rather than merge into it; covering them needs a real downloaded file, not a synthetic one.</remarks>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("Q8_0")]
     [InlineData("Q4_K")]
@@ -57,6 +57,7 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
 
     /// <summary>The decode-shaped route: m=1 with F32 activations returns from a fused GEMV long before the general
     /// GEMM, so an adjunct added inside that branch would be skipped for exactly the shape LLM decode uses.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FusedDecodeGemv_AppliesTheAdjunct()
     {
@@ -73,6 +74,7 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
     }
 
     /// <summary>MiniMax-H3's chunked projections: the window narrows the up matrix and keeps the down matrix whole.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LinearWeightRows_AppliesTheWindowedAdjunct()
     {
@@ -128,6 +130,7 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
 
     /// <summary>The fused-epilogue entry. GELU(base + delta) is not GELU(base) + delta, so the backend must un-fuse
     /// the activation when the weight carries an adjunct rather than adding it after.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LinearGelu_AppliesTheAdjunctBeforeTheActivation()
     {
@@ -145,6 +148,7 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
 
     /// <summary>The grouped resident-int8 chain bypasses LinearImpl for every eligible op, so an adjunct-carrying op
     /// has to fall out of the group — and the ops that stay in it must be unaffected.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LinearMulti_AppliesTheAdjunctOnlyToTheOpThatCarriesOne()
     {
@@ -171,6 +175,7 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
     }
 
     /// <summary>YuE2's low-VRAM AR path reaches the GEMM through QuantizedMatMul rather than Linear.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void QuantizedMatMul_AppliesTheAdjunct()
     {
@@ -188,6 +193,7 @@ public sealed unsafe class LowRankAdjunctCudaCoverageTests
 
     /// <summary>A captured DiT step replays whatever the capture recorded, so the adjunct's own launches have to be
     /// inside the capture — and the factors resident before it, since a host-to-device copy is not a replayable node.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CapturedStepGraph_ReplaysTheAdjunct()
     {

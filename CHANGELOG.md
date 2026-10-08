@@ -16,6 +16,10 @@ stable release will require. Dates are UTC.
   not place a missing expert on the GPU. Every routed (token, slot) pair is counted once. It is allocation-free once warm: the caller owns
   the scratch, the output, the miss list and a reusable lease, and `AcquireResident` binds that lease without allocating. The GPU execution, the CPU kernels and the cross-device combine are not in this change and need the test rig.
 
+## alpha.285
+
+- **Added: real-weight oracle for DeepSeek-V4.1-Flash layer 0, and a diagnostic probe on the host block.** `dump_real_layers.py` runs the unmodified upstream model on the real checkpoint's first layer; `RealLayers_MatchTheUpstreamModel` (gated on `DSV41_ORACLE_DIR`) compares the host reference against it, hidden relL2 4.3e-6 against the float32 oracle. `DeepSeekV41HostModel.SetProbe` / `DeepSeekV41Block.Probe` expose per-sublayer values for such comparisons and are off by default. No behaviour change.
+
 ## alpha.284
 
 - **Added: residency queries and no-upload acquisition on the expert cache.** `IResidencyAwareExpertCache.LookupResident` reports which

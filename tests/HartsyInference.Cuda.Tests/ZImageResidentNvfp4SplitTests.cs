@@ -17,6 +17,7 @@ public sealed class ZImageResidentNvfp4SplitTests
     private readonly ITestOutputHelper _output;
     public ZImageResidentNvfp4SplitTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void SplitQkv_KeepsAResidentNvfp4WeightConsumable()
     {

@@ -22,6 +22,7 @@ public sealed unsafe class GraphDecodeEmbeddingScaleTests
     private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GraniteLikeEmbeddingScale_IsGraphDecodeEligible_AndScalesTableCorrectly()
     {

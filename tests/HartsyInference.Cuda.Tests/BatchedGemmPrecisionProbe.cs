@@ -39,6 +39,7 @@ public sealed unsafe class BatchedGemmPrecisionProbe
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(32, 32, false)]      // GraphDecodeDualEmbedsTests' geometry
     [InlineData(4096, 4096, false)]  // MiniMax Music 3's real projection width

@@ -415,6 +415,7 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "Cuda")]
     public void WarmPackedCfgPairAndEuler_HasNoIntermediateD2h()

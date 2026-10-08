@@ -52,6 +52,7 @@ public sealed unsafe class Q8GemvMicroBench
         (8192, 8192, "DRAM  8192x8192 (128MB)"),
     };
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Q8Gemv_vs_Bf16_M1()
     {

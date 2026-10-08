@@ -63,6 +63,9 @@ public sealed class DeepSeekV41Block
         _engramSlot = engramSlot;
     }
 
+    /// <summary>Diagnostic tap for oracle comparisons: called with a stage name (<c>attn_in</c>, <c>attn_out</c>, <c>ffn_in</c>, <c>ffn_out</c>, <c>out</c>) and a copy of that stage's <c>[tokens, dim]</c> or stream values. Null in normal use.</summary>
+    public Action<string, float[]>? Probe { get; set; }
+
     /// <summary>Collapses a stream into one input with already-derived coefficients; the model uses this for the final head.</summary>
     public void Collapse(ReadOnlySpan<float> x, ReadOnlySpan<float> pre, int tokens, Span<float> y) => _hcFfn.Collapse(x, pre, tokens, y);
 
@@ -101,14 +104,19 @@ public sealed class DeepSeekV41Block
         _hcAttn.Mixes(x, tokens, aPre, aPost, aComb);
         _hcAttn.Collapse(x, preMix, tokens, sublayerIn);
         DeepSeekV41HostMath.RmsNormRows(sublayerIn, _attnNorm, _dim, _normEps);
+        Probe?.Invoke("attn_in", sublayerIn.ToArray());
         _attention.Forward(sublayerIn, tokens, startPos, state, shared, sublayerOut);
+        Probe?.Invoke("attn_out", sublayerOut.ToArray());
         _hcAttn.Expand(sublayerOut, x, aPost, aComb, tokens, mid);
 
         _hcFfn.Mixes(mid, tokens, fPre, fPost, fComb);
         _hcFfn.Collapse(mid, aPre, tokens, sublayerIn);
         DeepSeekV41HostMath.RmsNormRows(sublayerIn, _ffnNorm, _dim, _normEps);
+        Probe?.Invoke("ffn_in", sublayerIn.ToArray());
         _ffn.Forward(sublayerIn, tokens, imageTokens, sublayerOut);
+        Probe?.Invoke("ffn_out", sublayerOut.ToArray());
         _hcFfn.Expand(sublayerOut, mid, fPost, fComb, tokens, x);
+        Probe?.Invoke("out", x.ToArray());
 
         fPre.CopyTo(nextPreMix);
     }

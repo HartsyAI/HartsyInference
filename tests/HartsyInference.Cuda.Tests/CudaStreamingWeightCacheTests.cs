@@ -57,6 +57,7 @@ public sealed class CudaStreamingWeightCacheTests
 
     // ── BeginUploadAsync + AwaitWeights — the core happy path ───────────
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Upload_Then_Await_Then_Readback_Matches_Source()
     {
@@ -83,6 +84,7 @@ public sealed class CudaStreamingWeightCacheTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Upload_Of_Already_Cached_Returns_Empty_Token()
     {
@@ -100,6 +102,7 @@ public sealed class CudaStreamingWeightCacheTests
         cache.AwaitWeights(second); // no-op should not throw
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Upload_Of_Empty_Collection_Returns_Empty_Token()
     {
@@ -111,6 +114,7 @@ public sealed class CudaStreamingWeightCacheTests
         Assert.True(token.IsEmpty);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Multi_Tensor_Upload_All_Visible_After_Await()
     {
@@ -149,6 +153,7 @@ public sealed class CudaStreamingWeightCacheTests
 
     // ── EvictAsync ───────────────────────────────────────────────────────
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Evict_Removes_From_Cache_And_Reupload_Reflects_New_Data()
     {
@@ -186,6 +191,7 @@ public sealed class CudaStreamingWeightCacheTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Evict_Of_Uncached_Tensor_Is_Silent_Noop()
     {
@@ -200,6 +206,7 @@ public sealed class CudaStreamingWeightCacheTests
 
     // ── Token validation ────────────────────────────────────────────────
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Await_With_Token_From_Different_Cache_Throws()
     {
@@ -225,6 +232,7 @@ public sealed class CudaStreamingWeightCacheTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Await_Of_Empty_Token_Is_Noop()
     {
@@ -237,6 +245,7 @@ public sealed class CudaStreamingWeightCacheTests
 
     // ── Budget query ────────────────────────────────────────────────────
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void QueryAvailableWeightCacheBytes_Returns_Plausible_Number()
     {
@@ -255,6 +264,7 @@ public sealed class CudaStreamingWeightCacheTests
         _output.WriteLine($"Free VRAM available for weight cache: {withZeroReserve / (1024.0 * 1024.0):F1} MB");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void QueryAvailableWeightCacheBytes_Negative_Reserve_Throws()
     {
@@ -266,6 +276,7 @@ public sealed class CudaStreamingWeightCacheTests
 
     // ── Round-trip: upload, op reads cached weight, evict, re-upload ───
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Upload_Then_Op_Reads_Cached_Weight_Without_Reuploading()
     {

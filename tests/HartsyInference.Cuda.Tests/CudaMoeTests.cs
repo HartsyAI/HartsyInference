@@ -21,6 +21,7 @@ public sealed unsafe class CudaMoeTests
     private static Tensor F2(int a, int b) { Tensor t = new(new TensorShape(a, b), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor X(int n, int h) { Tensor t = new(new TensorShape(1, n, h), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudaMoe_MatchesCpuMoe()
     {

@@ -20,6 +20,7 @@ public sealed class FusedGemvGroundTruthTests
     private readonly ITestOutputHelper _output;
     public FusedGemvGroundTruthTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("Q4_0", 128, 96)]
     [InlineData("Q5_K", 512, 32)]
@@ -119,6 +120,7 @@ public sealed class FusedGemvGroundTruthTests
     /// 16-bit-ROUNDED weight (what the kernel reads after bf16/f16→f32) against the F32 activation, so the only
     /// residual is F32 accumulation order → a tight tolerance. Covers a non-multiple-of-32 K to exercise the
     /// strided-lane tail. M≤8 so <see cref="CudaBackend.Linear"/> takes the fused GEMV branch.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("BF16", 3072, 128)]
     [InlineData("BF16", 100, 48)]
@@ -178,6 +180,7 @@ public sealed class FusedGemvGroundTruthTests
     /// 16-bit float ship the BIAS in the same dtype (Krea2's BF16 time-embed MLP), and the fused GEMV kernels
     /// take an F32 bias pointer — the dispatch must transiently cast a non-F32 bias, not pass it raw (which
     /// reinterprets two 16-bit halves as one float and explodes the output).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("BF16", 256, 96)]
     [InlineData("F16", 512, 64)]

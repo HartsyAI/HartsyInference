@@ -10,7 +10,6 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Residency, dedup, pinning, promotion and leak behaviour of <see cref="CudaExpertCache"/> on a real device.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaExpertCacheTests
 {
     private const int Elements = 300_000;
@@ -66,6 +65,7 @@ public sealed unsafe class CudaExpertCacheTests
         return true;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AcquireMissHitAndDedup_UploadOncePerExpertWithMatchingBytes()
     {
@@ -89,6 +89,7 @@ public sealed unsafe class CudaExpertCacheTests
         Assert.Equal(2, cache.Stats.ResidentExperts);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Prefetch_ThenAcquireSharesTheInFlightUpload()
     {
@@ -109,6 +110,7 @@ public sealed unsafe class CudaExpertCacheTests
         AssertResident(lease.Get(new(0, 3)), 30f);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void PinnedExpertsAreNeverEvicted_AndUnpinnedOnesAre()
     {
@@ -132,6 +134,7 @@ public sealed unsafe class CudaExpertCacheTests
         AssertResident(next.Get(new(0, 3)), 30f);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void EvictedExpertsAreNotAutoPromotedBackIntoTheWeightCache()
     {
@@ -165,6 +168,7 @@ public sealed unsafe class CudaExpertCacheTests
         Assert.Equal(GpuResidencyTier.Weight, GpuTransferHelper.CurrentState.TierOf(control));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ThousandAcquireReleaseCycles_AndAbandonedPrefetches_LeaveNothingResident()
     {
@@ -215,6 +219,7 @@ public sealed unsafe class CudaExpertCacheTests
         Assert.True(drift < 64L << 20, $"VRAM drifted by {drift >> 20} MB across 1,000 cycles and 40 abandoned caches");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ConfiguresTheStagingRingAndKeepsSourcePinningOff()
     {

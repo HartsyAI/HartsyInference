@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// (ids, permutations, top-k indices) must match exactly; the router's float weights differ from libm only by exp ulps,
 /// and combine, top-k values and dispatch are bit-identical by construction. Skips without CUDA.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
 {
     // exp is the only libm-dependent step (a few ulps), so weights agree to 5e-6 relative.
@@ -68,6 +67,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         yield return new object[] { "max-experts", new MoeRouteArgs(1024, 8, MoeRouteScoring.Softmax, Renormalize: true), 1024, true };
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(RouteCases))]
     public void MoeRoute_MatchesCpu(string name, MoeRouteArgs args, int experts, bool useBias)
@@ -91,6 +91,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         AssertWeightsClose(cpuW, gpuW, name);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MoeRoute_ExactTies_TakeTheLowestIndexLikeCpu()
     {
@@ -115,6 +116,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         Assert.Equal(new[] { 0, 1, 2, 3, 4, 5 }, first.Take(6));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MoeBuildDispatch_IsByteIdenticalToCpu_IncludingEmptyExpertsAndDroppedPairs()
     {
@@ -149,6 +151,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         return (ReadI32(counts), ReadI32(offsets), ReadI32(perm), ReadI32(slot));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -173,6 +176,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         AssertBitEqual(cpu, Run(cuda), "combine");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MoeCombine_SkipsSlotsBeyondTheExpertRowsInsteadOfReadingOutOfBounds()
     {
@@ -186,6 +190,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         Assert.Equal(new float[] { 20, 40, 5, 10 }, ReadF32(output));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Route_Dispatch_Combine_Chain_Stays_On_Device_And_Matches_Cpu()
     {
@@ -217,6 +222,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         Assert.True(maxDiff <= 1e-5, $"route->dispatch->combine chain diverges by {maxDiff:E3}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(5, 300, 8, false, false)]
     [InlineData(3, 4096, 64, true, false)]
@@ -243,6 +249,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TopKLastDim_HandlesNanNegativeZeroAndInfinities_LikeCpu()
     {
@@ -263,6 +270,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TopKLastDim_Rejects_K_Beyond_The_Kernel_Limit()
     {
@@ -281,6 +289,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
         return (ReadI32(indices), ReadF32(values));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Softplus_MatchesCpu_IncludingInPlace()
     {

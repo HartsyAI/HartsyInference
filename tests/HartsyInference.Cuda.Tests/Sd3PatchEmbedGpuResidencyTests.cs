@@ -26,6 +26,7 @@ public sealed unsafe class Sd3PatchEmbedGpuResidencyTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]

@@ -52,6 +52,7 @@ public sealed class VlmDecodeThroughputBenchmark
 
     private readonly record struct RunResult(double PrefillMs, double DecodeMs, int TokenCount);
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void VlmThroughput_ImagePlusPrompt_ReportsPrefillAndDecode()
     {
