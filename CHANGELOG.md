@@ -42,6 +42,28 @@ stable release will require. Dates are UTC.
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
 
+## alpha.280
+
+- **Changed: the DeepSeek-V4.1 host reference model keeps its weights in the checkpoint's own form.** Dense attention, shared-expert,
+  compressor, indexer, Engram, embedding, head and routed-expert weights (FP8 E4M3 with E8M0 block scales, MXFP4, BF16) stay as
+  mapped checkpoint bytes and are decoded one row window at a time inside each product (`DeepSeekV41Weight`,
+  `WeightDequantizer.ToF32Rows`), instead of being widened to F32 at load. Results are bit-identical to the widened path, which stays
+  available as `DeepSeekV41Residency.WidenedF32`. The Text path's resident set drops from about 31 GiB of dense F32 to the working set
+  below; three real layers ran in 3 GiB of RSS.
+- **Fixed: the RAM guard and the memory profile for a V4.1 load.** The guard now sizes the working set (sequence state, prefill
+  activations at the 16,384-token cap, small widened tensors, Engram row caches, decode windows) plus a 4 GiB margin, from the
+  config and headers alone (`DeepSeekV41WorkingMemory`), and `TextMemoryProfile` reports that figure as the phase's activation
+  bytes instead of zero. `DeepSeekV41HostModelLoader.Load` itself does not run the guard, so callers that bypass `TextService`
+  must size a load first.
+- **Added: `DeepSeekV41LoadOptions.Residency` and `MaxLayers`.** `MaxLayers` loads only the first layers of a checkpoint, for
+  checking real weights without the whole model.
+- **Added: real-weight tests, skipped unless the weights are present and failing instead under `HARTSY_REQUIRE_REAL_WEIGHTS=1`.**
+  Ten row windows of real tensors decode bit-identically to an independent torch decode
+  (`tests/python-reference/deepseek_v41/dump_real_slices.py`); three real layers (dense, Engram, compressor and indexer) give finite
+  hidden states and logits. Nothing is compared to upstream on the real weights yet, so no support-matrix row is Verified and the
+  catalog entry stays Structural.
+- **Changed: BF16 weights are widened in parallel by row** (a 129,280-row head window took 21 s single-threaded for one token).
+
 ## alpha.279
 
 - **Added: a DeepSeek-V4.1 checkpoint directory now loads and generates through `TextService`.** `HfTextDirectoryLoader` no longer

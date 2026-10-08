@@ -89,7 +89,7 @@ public sealed class DeepSeekV41RealWeightsTests
     {
         if (Environment.GetEnvironmentVariable("DSV41_FULL_RUN") != "1")
         {
-            _output.WriteLine("SKIPPED: set DSV41_FULL_RUN=1 for the full 43-layer run");
+            _output.WriteLine("SKIPPED: set DSV41_FULL_RUN=1 for the full 40-layer run");
             return;
         }
         if (!HaveWeights(out string dir)) return;

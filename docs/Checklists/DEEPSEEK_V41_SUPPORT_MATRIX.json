@@ -185,7 +185,7 @@
       "feature": "Block, CSA attention, compressor, indexer, mHC, sequence state",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
+        "CPU": "Implemented",
         "CUDA": "Unimplemented",
         "Vulkan": "Unimplemented"
       },
@@ -210,7 +210,8 @@
       ],
       "acceptanceTest": "DeepSeekV41SyntheticParityTests vs small-config dumps; chunked==one-shot; Truncate replay",
       "pr": 8,
-      "status": "Unimplemented"
+      "status": "InProgress",
+      "note": "CPU host reference only: DeepSeekV41Block, attention, compressor, indexer, mHC and sequence state match the unmodified upstream model.py on the small seeded config (float32, about 1e-5 per block, 1e-3 on logits). Three real layers (0 dense, 1 Engram, 2 compressor and indexer) run on the official weights with finite output (DeepSeekV41RealWeightsTests.ThreeLayers_*); no numerical comparison to upstream on the real weights yet, no full-depth run, no CUDA or Vulkan block, so not Verified"
     },
     {
       "id": "core.rope.interleaved",
@@ -272,7 +273,7 @@
       "acceptanceTest": "B=3 ragged batch == 3 single runs",
       "pr": 9,
       "status": "InProgress",
-      "note": "CPU host reference only: DeepSeekV41GenerationModel (IGenerationModel) over the F32 host model, driven by TextGenerationPipeline and TextService on the small upstream fixture checkpoint; prefill/decode logits match upstream to 1e-3 and a ragged B=2 decode equals the single runs; no scheduler chunked prefill, no CUDA or Vulkan path, nothing run on the real weights, so not Verified"
+      "note": "CPU host reference only: DeepSeekV41GenerationModel (IGenerationModel) over the host model, driven by TextGenerationPipeline and TextService on the small upstream fixture checkpoint; prefill/decode logits match upstream to 1e-3 and a ragged B=2 decode equals the single runs; weights stay in their stored form by default (DeepSeekV41Residency.Stored, bit-identical to the F32-widened path); no scheduler chunked prefill, no CUDA or Vulkan path, no full-depth run on the real weights, so not Verified"
     },
     {
       "id": "load.shards",
@@ -393,7 +394,34 @@
       "acceptanceTest": "codec vs the format's own reference decoder on sampled experts",
       "pr": 5,
       "status": "InProgress",
-      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM (PR 23/24). PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); PR 12 adds the CUDA BF16 dequant kernels (dequant_recipe_to_bf16) and a 2-slot CudaQuantWorkspace, bit-exact against the host codecs on synthetic block layouts on the RTX 3060 (incl. E8M0 0/255, E4M3 NaN, scale column offsets); IBackend.Linear does not use them yet. M1 matched the official dequant bit-exactly on the host codecs over 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); the device-path M1 test is written but was skipped (no populated shard here); not Verified until the staged shard runs it; PR 24b adds a Vulkan BF16 dequant shader (VulkanBackend.DequantRecipeToBf16, dequant_recipe_bf16), bit-identical to the host codecs on synthetic layouts (E8M0 0/255, E4M3 NaN, scale column offsets, odd byte sizes) on the RTX 3060; IBackend.Linear does not use it, so SupportsResidentQuant(Tensor) stays false on Vulkan; Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected"
+      "note": "FP8-act x FP8-w block GEMM; FP8-act x FP4-w GEMM (PR 23/24). PR 5 ships the host codecs (Fp8BlockE8M0Codec, Mxfp4E8M0Codec); PR 12 adds the CUDA BF16 dequant kernels (dequant_recipe_to_bf16) and a 2-slot CudaQuantWorkspace, bit-exact against the host codecs on synthetic block layouts on the RTX 3060 (incl. E8M0 0/255, E4M3 NaN, scale column offsets); IBackend.Linear does not use them yet. M1 matched the official dequant bit-exactly on the host codecs over 64-row windows of 20 layers.0 tensors of shard 3 (4 MB of real bytes, not the full shard); the device-path M1 test is written but was skipped (no populated shard here); not Verified until the staged shard runs it; PR 24b adds a Vulkan BF16 dequant shader (VulkanBackend.DequantRecipeToBf16, dequant_recipe_bf16), bit-identical to the host codecs on synthetic layouts (E8M0 0/255, E4M3 NaN, scale column offsets, odd byte sizes) on the RTX 3060; IBackend.Linear does not use it, so SupportsResidentQuant(Tensor) stays false on Vulkan; Vulkan parity is against the CPU reference on an NVIDIA RTX 3060 through Vulkan: plumbing evidence only, no AMD hardware evidence collected; CPU, 2026-10-07: ten row windows of real tensors from the pinned checkpoint (FP8 wkv, wo_a, wq_b, Engram wkv; MXFP4 expert 0 w1 and w2 and expert 383 w3; BF16 embed rows and a compressor wgate) decode bit-identically to an independent torch decode (DeepSeekV41RealWeightsTests.RealTensorSlices_*, tests/python-reference/deepseek_v41/dump_real_slices.py); not Verified until the full-model run records greedy-token agreement"
+    },
+    {
+      "id": "quant.official.resident",
+      "feature": "Quant-resident host weights: stored FP8 / MXFP4 / BF16 decoded by row window instead of widened to F32",
+      "format": "official",
+      "backends": {
+        "CPU": "Implemented",
+        "CUDA": "Unsupported",
+        "Vulkan": "Unsupported"
+      },
+      "placement": [
+        "resident"
+      ],
+      "hardware": [
+        "cpu"
+      ],
+      "consumer": [
+        "engine"
+      ],
+      "reference": "DeepSeekV41Weight over WeightDequantizer.ToF32Rows",
+      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/DeepSeekV41Weight.cs",
+      "dependsOn": [
+        "quant.official.dequant"
+      ],
+      "acceptanceTest": "stored product == widened product bit for bit; three real layers finite; memory estimate vs measured RSS",
+      "status": "InProgress",
+      "note": "Dense, shared-expert, embedding, head, Engram projection and routed-expert weights stay as mapped checkpoint bytes and are decoded one row window at a time; products equal the F32-widened path bit for bit (DeepSeekV41WeightTests, loader residency test). Measured on three real layers: 3 GiB RSS. The full-depth peak is not measured, and no GPU path uses it"
     },
     {
       "id": "quant.nvfp4.dequant",
