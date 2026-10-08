@@ -68,31 +68,13 @@ internal static class DeepSeekV41VisionFixture
         _root.GetProperty("ropeCases").EnumerateArray().Single(c => c.GetProperty("gridHeight").GetInt32() == gridHeight
             && c.GetProperty("gridWidth").GetInt32() == gridWidth && c.GetProperty("ropeDim").GetInt32() == ropeDim);
 
-    public static double RelL2(ReadOnlySpan<float> actual, ReadOnlySpan<float> expected)
-    {
-        double diff = 0, norm = 0;
-        for (int i = 0; i < expected.Length; i++)
-        {
-            double d = (double)actual[i] - expected[i];
-            diff += d * d;
-            norm += (double)expected[i] * expected[i];
-        }
-        return Math.Sqrt(diff / Math.Max(norm, 1e-30));
-    }
-
-    public static double MaxAbs(ReadOnlySpan<float> actual, ReadOnlySpan<float> expected)
-    {
-        double max = 0;
-        for (int i = 0; i < expected.Length; i++) max = Math.Max(max, Math.Abs((double)actual[i] - expected[i]));
-        return max;
-    }
-
     /// <summary>Requires <paramref name="actual"/> to match <paramref name="expected"/> within <see cref="RelL2Tolerance"/> overall and, element by element, within the same fraction of the stage's largest value.</summary>
     public static void AssertClose(ITestOutputHelper output, string what, float[] actual, float[] expected)
     {
         Assert.Equal(expected.Length, actual.Length);
         Assert.All(actual, static v => Assert.True(float.IsFinite(v)));
-        double rel = RelL2(actual, expected), abs = MaxAbs(actual, expected), scale = Math.Max(1.0, expected.Max(static v => Math.Abs((double)v)));
+        double rel = DeepSeekV41VisionMetrics.RelL2(actual, expected), abs = DeepSeekV41VisionMetrics.MaxAbsDiff(actual, expected);
+        double scale = Math.Max(1.0, DeepSeekV41VisionMetrics.MaxAbs(expected));
         output.WriteLine($"{what}: relL2 {rel:E2} maxAbs {abs:E2} (stage max {scale:F2})");
         Assert.True(rel <= RelL2Tolerance, $"{what}: relL2 {rel:E3} > {RelL2Tolerance:E1}");
         Assert.True(abs <= RelL2Tolerance * scale, $"{what}: maxAbs {abs:E3} > {RelL2Tolerance * scale:E3}");
