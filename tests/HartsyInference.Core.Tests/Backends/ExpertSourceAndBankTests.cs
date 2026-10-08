@@ -72,4 +72,17 @@ public sealed class ExpertSourceAndBankTests
         Assert.Throws<InvalidOperationException>(() =>
             cache.RegisterBank(ExpertBank.FromSource(new DelegateExpertSource(ExpertBacking.ResidentHost, Weights), 0, 4, bank: 1)));
     }
+
+    [Fact]
+    public void PublishedTwoArgumentForms_StillCompileAndMatchBankZero()
+    {
+        ExpertKey key = new(2, 5);
+        (int layer, int expert) = key;
+        Assert.Equal((2, 5), (layer, expert));
+        Assert.Equal(new ExpertKey(2, 5, 0), key);
+
+        ExpertBank bank = new(2, 3, Weights);
+        Assert.Equal(new ExpertLayerKey(0, 2), bank.LayerKey);
+        Assert.Equal(new ExpertKey(2, 1, 0), bank.Key(1));
+    }
 }

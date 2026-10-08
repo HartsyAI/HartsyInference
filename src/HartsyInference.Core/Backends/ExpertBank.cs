@@ -14,7 +14,7 @@ public sealed class ExpertBank
     /// <param name="count">Routed experts in the layer.</param>
     /// <param name="resolve">Produces one expert's weights.</param>
     /// <param name="bank">The bank this layer belongs to; 0 unless a model shares a cache with others.</param>
-    public ExpertBank(int layer, int count, Func<ExpertKey, ExpertWeights> resolve, ushort bank = 0)
+    public ExpertBank(int layer, int count, Func<ExpertKey, ExpertWeights> resolve, ushort bank)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(layer);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
@@ -24,6 +24,11 @@ public sealed class ExpertBank
         Count = count;
         _resolve = resolve;
         _created = new ExpertWeights?[count];
+    }
+
+    /// <summary>The published three-argument form; bank 0. Kept so existing callers still compile and link.</summary>
+    public ExpertBank(int layer, int count, Func<ExpertKey, ExpertWeights> resolve) : this(layer, count, resolve, 0)
+    {
     }
 
     /// <summary>Creates a bank whose experts come from an <see cref="IExpertSource"/>.</summary>
