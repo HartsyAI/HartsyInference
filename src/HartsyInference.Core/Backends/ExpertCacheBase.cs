@@ -6,7 +6,7 @@ namespace HartsyInference.Core.Backends;
 /// <remarks><para>Replacement scans probation before the protected segment, then colder layers before hotter ones, then oldest use first;
 /// pinned experts and the ones being requested are never victims. A prefetch also never evicts from the layers it targets or the layer last acquired;
 /// <see cref="Acquire"/> does not protect its own layer, since a layer's unpinned experts must be replaceable by that layer's next request. Every hook runs under the cache lock.</para></remarks>
-public abstract class ExpertCacheBase : IExpertCache
+public abstract class ExpertCacheBase : IResidencyAwareExpertCache
 {
     private const double ProtectedFraction = 0.8;
     private const long AgeEveryRequests = 4096;

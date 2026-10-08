@@ -90,7 +90,7 @@ policy. The bank resolves each expert once, and the cache copies from the bank; 
 
 ## Residency queries
 
-`IExpertCache.LookupResident` answers which experts are resident or already uploading, without changing any state.
-`IExpertCache.AcquireResident` pins only those experts and returns the rest as misses, and it never uploads or resolves.
+`IResidencyAwareExpertCache.LookupResident` answers which experts are resident or already uploading, without changing any state.
+`IResidencyAwareExpertCache.AcquireResident` pins only those experts and returns the rest as misses, and it never uploads or resolves.
 A runtime that splits a routed batch uses these to run resident experts on the device and misses elsewhere, without
 forcing every miss into the cache. The plain `Acquire` keeps its meaning: pin everything, uploading what is missing.
