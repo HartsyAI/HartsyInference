@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Telephony;
 using HartsyInference.Engine.Requests;
 
 namespace HartsyInference.Voice;
@@ -25,6 +26,13 @@ public sealed record VoiceAgentEvent
 
     /// <summary>The failure, for <see cref="VoiceAgentEventKind.Error"/>.</summary>
     public Exception? Error { get; init; }
+
+    /// <summary>The tone heard, for <see cref="VoiceAgentEventKind.InbandDtmfDetected"/>. Its sample offsets count the
+    /// inbound samples the session has processed (since the start of the call, or the last audio discontinuity).</summary>
+    public DtmfEvent? Dtmf { get; init; }
+
+    /// <summary>The finding, for <see cref="VoiceAgentEventKind.CallProgressDetected"/>. Offsets as for <see cref="Dtmf"/>.</summary>
+    public CallProgressEvent? CallProgress { get; init; }
 
     /// <summary>When it happened, in <c>MonotonicClock</c> nanoseconds.</summary>
     public long TimestampNs { get; init; }

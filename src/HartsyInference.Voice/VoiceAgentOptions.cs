@@ -109,6 +109,28 @@ public sealed record VoiceAgentOptions
     /// e.g. to isolate whether a regression is residency-related.</summary>
     public bool PreloadRedundantWeightSplits { get; init; }
 
+    /// <summary>Listen for DTMF tones in the inbound audio and raise <see cref="VoiceAgentEventKind.InbandDtmfDetected"/>
+    /// for each key. Default false: the audio thread then runs exactly the code it ran before this existed.</summary>
+    /// <remarks>Not <see cref="VoiceAgentSession.PushDtmf"/>. <c>PushDtmf</c> is the host reporting a key the caller
+    /// pressed, learned out of band (RFC 2833, SIP INFO); this option is the session hearing tones in the audio the far end
+    /// sends, as an IVR or a remote-access answering machine sends them. A host that gets keys out of band should leave this
+    /// off, and one that turns it on and also reports the same keys with <c>PushDtmf</c> tells the model twice. Costs about
+    /// 20 µs per 20 ms frame with no allocation.</remarks>
+    public bool DetectInbandDtmf { get; init; }
+
+    /// <summary>Classify what the far end is sending (ringing, busy, beep, recording, person, music, silence) and raise
+    /// <see cref="VoiceAgentEventKind.CallProgressDetected"/>. Default false. Tone cadences and beeps are reliable; whether
+    /// speech came from a person or a machine, and what counts as hold music, are heuristics reported with a confidence
+    /// (see <c>CallProgressClassifier</c>). Meant for outbound calls, where the first seconds decide who answered.</summary>
+    public bool DetectCallProgress { get; init; }
+
+    /// <summary>Also give each key <see cref="DetectInbandDtmf"/> hears to the model, as the user message
+    /// <c>[INBAND DTMF n]</c> (one turn per key, queued behind a turn in progress). The tag differs from the <c>[DTMF n]</c>
+    /// that <see cref="VoiceAgentSession.PushDtmf"/> produces on purpose: <c>[DTMF n]</c> says the caller pressed a key,
+    /// <c>[INBAND DTMF n]</c> says the far end played that tone. Default false: the event is raised and the model is not
+    /// asked. Requires <see cref="DetectInbandDtmf"/>.</summary>
+    public bool ForwardInbandDtmfToModel { get; init; }
+
     /// <summary>Throws when a field is out of range or asks for something this version cannot do.</summary>
     public void Validate()
     {
@@ -132,6 +154,10 @@ public sealed record VoiceAgentOptions
         Require(FirstSentenceMinChars >= 0, nameof(FirstSentenceMinChars), FirstSentenceMinChars, "must be non-negative");
         Require(MaxSentenceChars >= 1, nameof(MaxSentenceChars), MaxSentenceChars, "must be positive");
         Require(CpuThreadCap >= 0, nameof(CpuThreadCap), CpuThreadCap, "must be non-negative");
+        if (ForwardInbandDtmfToModel && !DetectInbandDtmf)
+        {
+            throw new ArgumentException("ForwardInbandDtmfToModel needs DetectInbandDtmf; there is nothing to forward otherwise.", nameof(ForwardInbandDtmfToModel));
+        }
         if (PartialTranscripts)
         {
             throw new NotSupportedException("Partial transcripts need a streaming recognizer, which the voice session does not have yet; set PartialTranscripts to false.");

@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Telephony;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Runtime;
@@ -182,6 +183,20 @@ internal sealed class VoiceAudioWorker : IDisposable
         if ((events & VoiceFrameEvents.UtteranceDiscarded) != 0)
         {
             _sink.OnUtteranceDiscarded(_frontend.UtteranceSamples);
+        }
+        if ((events & VoiceFrameEvents.InbandDtmf) != 0)
+        {
+            while (_frontend.TryTakeDtmf(out DtmfEvent tone))
+            {
+                _sink.OnInbandDtmf(tone, now);
+            }
+        }
+        if ((events & VoiceFrameEvents.CallProgress) != 0)
+        {
+            while (_frontend.TryTakeCallProgress(out CallProgressEvent finding))
+            {
+                _sink.OnCallProgress(finding, now);
+            }
         }
     }
 

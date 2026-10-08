@@ -1,4 +1,5 @@
 using System.Threading.Channels;
+using HartsyInference.Audio.Dsp.Telephony;
 using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Core.Logging;
@@ -236,8 +237,10 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
         return cancel.CanBeCanceled ? completion.Task.WaitAsync(cancel) : completion.Task;
     }
 
-    /// <summary>A key the caller pressed (0-9, *, #, A-D): answered as the user message <c>[DTMF n]</c>, queued behind
-    /// any turn in progress.</summary>
+    /// <summary>A key the caller pressed (0-9, *, #, A-D), as the host learned it out of band (RFC 2833, SIP INFO): answered
+    /// as the user message <c>[DTMF n]</c>, queued behind any turn in progress. Not the tones the session hears in the
+    /// audio itself; those are <see cref="VoiceAgentOptions.DetectInbandDtmf"/> and reach the model as
+    /// <c>[INBAND DTMF n]</c>.</summary>
     public void PushDtmf(char digit)
     {
         char key = char.ToUpperInvariant(digit);
@@ -391,6 +394,24 @@ public sealed partial class VoiceAgentSession : IAsyncDisposable
 
         public void OnBargeIn(int turnId, long detectNs) =>
             session.Emit(new VoiceAgentEvent { Kind = VoiceAgentEventKind.BargeIn, TurnId = turnId, TimestampNs = detectNs });
+
+        public void OnInbandDtmf(DtmfEvent tone, long detectNs)
+        {
+            session.Emit(new VoiceAgentEvent { Kind = VoiceAgentEventKind.InbandDtmfDetected, Text = tone.Digit.ToString(), Dtmf = tone, TimestampNs = detectNs });
+            if (session._options.ForwardInbandDtmfToModel && !session._inputs.Writer.TryWrite(VoiceTurnInput.InbandDtmf(tone.Digit, detectNs)))
+            {
+                Logs.Debug("[Voice] An in-band DTMF key arrived after the session ended; dropped.");
+            }
+        }
+
+        public void OnCallProgress(CallProgressEvent finding, long detectNs) =>
+            session.Emit(new VoiceAgentEvent
+            {
+                Kind = VoiceAgentEventKind.CallProgressDetected,
+                Text = finding.Kind.ToString(),
+                CallProgress = finding,
+                TimestampNs = detectNs,
+            });
 
         public void OnAudioFault(Exception error)
         {

@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+- **Added: in-band DTMF and call-progress detectors for the voice agent, optional and off by default.** New
+  `HartsyInference.Audio.Dsp.Telephony`: `DtmfDetector` (Goertzel, all 16 keys, twist/dominance/second-harmonic checks,
+  no false key in 614 s of speech, babble and noise) and `CallProgressClassifier` (ringback, busy, fast busy, SIT, dial
+  tone and beeps by cadence, plus heuristic machine/human/hold-music/silence signals with confidences). `VoiceAgentSession`
+  gains `DetectInbandDtmf`, `DetectCallProgress` and `ForwardInbandDtmfToModel` options and the
+  `InbandDtmfDetected`/`CallProgressDetected` events; forwarded keys reach the model as `[INBAND DTMF n]`, distinct from
+  the `[DTMF n]` of `PushDtmf`. With the options off the audio thread runs no new code; on, both detectors cost p99 48 us
+  per 20 ms frame with no allocation. Details and limits: `docs/Research/VOICE_AGENT_SESSION.md`.
 - **Added: `ToolRegistry` is thread-safe, supports `Remove`, and takes an optional tool timeout.** `Add`, `Remove`,
   lookup and `Definitions`/`Names` can run concurrently; `Definitions` is an immutable insertion-ordered snapshot, so
   a request in flight never sees it change. `Remove(name)` unregisters a tool. A per-tool timeout (new `Add` overloads)
