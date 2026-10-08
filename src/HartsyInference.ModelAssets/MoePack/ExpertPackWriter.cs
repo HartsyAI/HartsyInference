@@ -16,6 +16,9 @@ public sealed class ExpertPackWriter : IDisposable
     /// <summary>Current pack format version.</summary>
     public const int FormatVersion = 1;
 
+    /// <summary>Largest matrix a pack will quantize in one piece; keeps every element count an <c>int</c>.</summary>
+    public const long MaxMatrixElements = 1L << 28;
+
     /// <summary>Records start on this boundary so the reader can issue aligned reads.</summary>
     public const int RecordAlignment = 4096;
 
@@ -50,6 +53,11 @@ public sealed class ExpertPackWriter : IDisposable
         ArgumentNullException.ThrowIfNull(expectedExperts);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(hidden);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(intermediate);
+        // The same bounds the reader enforces, and element counts that cannot overflow the arithmetic that sizes a matrix.
+        if (hidden > ExpertPackReader.MaxDimension || intermediate > ExpertPackReader.MaxDimension)
+            throw new ArgumentOutOfRangeException(nameof(hidden), $"Dimensions must be at most {ExpertPackReader.MaxDimension}.");
+        if ((long)hidden * intermediate > MaxMatrixElements)
+            throw new ArgumentOutOfRangeException(nameof(intermediate), $"A {hidden} x {intermediate} matrix is too large to pack.");
         if (!ExpertPackDTypes.IsPackDType(dtype))
             throw new ArgumentException($"{dtype.Name} is not a pack dtype; packs store Q8_0, Q4_K, Q5_K or Q6_K.", nameof(dtype));
         if (hidden % dtype.BlockElementCount != 0 || intermediate % dtype.BlockElementCount != 0)

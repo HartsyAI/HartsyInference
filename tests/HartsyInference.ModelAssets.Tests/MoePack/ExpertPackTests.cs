@@ -273,4 +273,20 @@ public sealed class ExpertPackTests : IDisposable
 
         Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir, Fingerprint));
     }
+
+    [Fact]
+    public void Reader_DisposeIsIdempotentAndWriterRefusesOversizedMatrices()
+    {
+        string dir = Path.Combine(_root, "idempotent");
+        WritePack(dir, DType.Q8_0, experts: 1);
+        ExpertPackReader reader = ExpertPackReader.Open(dir, Fingerprint);
+        reader.Dispose();
+        reader.Dispose();
+
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ExpertPackWriter(Path.Combine(_root, "too-wide"), Fingerprint, ExpertPackReader.MaxDimension + 32, Intermediate,
+                DType.Q8_0, Keys(1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new ExpertPackWriter(Path.Combine(_root, "too-big"), Fingerprint, 1 << 20, 1 << 20, DType.Q8_0, Keys(1)));
+    }
 }

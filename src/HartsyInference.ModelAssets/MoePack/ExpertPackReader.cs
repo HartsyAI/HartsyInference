@@ -13,9 +13,10 @@ namespace HartsyInference.ModelAssets.MoePack;
 /// </summary>
 public sealed class ExpertPackReader : IExpertSource, IDisposable
 {
-    private readonly MemoryMappedFile _mapping;
-    private readonly MemoryMappedViewAccessor _view;
-    private readonly unsafe byte* _base;
+    private MemoryMappedFile? _mapping;
+    private MemoryMappedViewAccessor? _view;
+    private unsafe byte* _base;
+    private int _released;
     private readonly Dictionary<ExpertKey, ExpertPackRecord> _records = [];
     private readonly DType _dtype;
     private readonly bool _verifyChecksums;
@@ -140,13 +141,28 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
     /// <summary>
     /// Releases the mapping. Weights already resolved are views into it and must not be used afterwards; a reader that is
     /// garbage-collected while views exist stays rooted by them, so the mapping is never released under a live view.
+    /// Safe to call more than once; a finalizer releases the mapping if the caller never disposed the reader.
     /// </summary>
-    public unsafe void Dispose()
+    public void Dispose()
     {
-        if (_base is null) return;
-        _view.SafeMemoryMappedViewHandle.ReleasePointer();
-        _view.Dispose();
-        _mapping.Dispose();
+        Release();
+        GC.SuppressFinalize(this);
+    }
+
+    /// <summary>Releases the mapping once, whether called from <see cref="Dispose"/> or the finalizer.</summary>
+    ~ExpertPackReader() => Release();
+
+    private unsafe void Release()
+    {
+        // A constructor that threw never assigned the mapping, and the finalizer still runs on it, so every field is optional here.
+        if (Interlocked.Exchange(ref _released, 1) != 0) return;
+        if (_base is not null && _view is not null)
+        {
+            _view.SafeMemoryMappedViewHandle.ReleasePointer();
+            _base = null;
+        }
+        _view?.Dispose();
+        _mapping?.Dispose();
     }
 
 }
