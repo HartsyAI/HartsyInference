@@ -56,6 +56,36 @@ public sealed class DeepSeekV41MoeExecutorTests
     }
 
     [Fact]
+    public void Batched_Run_Matches_Token_By_Token_Run_Bit_For_Bit()
+    {
+        // 300 tokens cross the executor's 256-row batch, so both a full and a partial batch are exercised
+        const int dim = 16, inter = 12, experts = 5, k = 2, tokens = 300;
+        Random rng = new(7);
+        float[] Random(int n) => Enumerable.Range(0, n).Select(_ => (float)(rng.NextDouble() * 2 - 1)).ToArray();
+        DeepSeekV41SwigluWeights[] set = Enumerable.Range(0, experts)
+            .Select(_ => new DeepSeekV41SwigluWeights(dim, inter, Random(inter * dim), Random(dim * inter), Random(inter * dim))).ToArray();
+        ListSource source = new(set);
+        DeepSeekV41SwigluWeights shared = new(dim, inter, Random(inter * dim), Random(dim * inter), Random(inter * dim));
+        float[] x = Random(tokens * dim), weights = Random(tokens * k).Select(Math.Abs).ToArray();
+        int[] idx = new int[tokens * k];
+        for (int t = 0; t < tokens; t++)
+        {
+            int first = rng.Next(experts), second = (first + 1 + rng.Next(experts - 1)) % experts;
+            idx[t * k] = first;
+            idx[t * k + 1] = second;
+        }
+
+        float[] batched = new float[tokens * dim];
+        DeepSeekV41MoeExecutor.Run(x, tokens, idx, weights, k, experts, source, shared, 2f, batched);
+        for (int t = 0; t < tokens; t++)
+        {
+            float[] single = new float[dim];
+            DeepSeekV41MoeExecutor.Run(x.AsSpan(t * dim, dim), 1, idx.AsSpan(t * k, k), weights.AsSpan(t * k, k), k, experts, source, shared, 2f, single);
+            Assert.True(batched.AsSpan(t * dim, dim).SequenceEqual(single), $"token {t} differs between the batched and the single-token run");
+        }
+    }
+
+    [Fact]
     public void Only_Routed_Experts_Are_Requested_Once_Each()
     {
         JsonElement c = Fx.GetProperty("cases").EnumerateArray().Single(e => e.GetProperty("name").GetString() == "limit");
