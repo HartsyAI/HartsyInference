@@ -2,7 +2,7 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.ModelAssets.MoePack;
 
-/// <summary>The quantized dtypes an expert pack can store, resolved from the names in its manifest. F32 is not a pack dtype.</summary>
+/// <summary>The quantized dtypes an expert pack can store, resolved from the names in its manifest. F32 is not one.</summary>
 internal static class ExpertPackDTypes
 {
     /// <summary>True when a pack can store <paramref name="dtype"/>: exactly the dtypes <see cref="Resolve"/> reads and the quantizer writes.</summary>
