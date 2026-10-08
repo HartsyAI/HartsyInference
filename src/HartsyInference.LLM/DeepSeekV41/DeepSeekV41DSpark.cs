@@ -37,7 +37,7 @@ public sealed class DeepSeekV41DSpark
     /// <summary>Number of draft stages.</summary>
     public int StageCount => _stages.Length;
 
-    private DeepSeekV41DSpark(IBackend backend, int dim, int hc, int vocab, int rank, int blockSize, int noiseTokenId, float normEps,
+    internal DeepSeekV41DSpark(IBackend backend, int dim, int hc, int vocab, int rank, int blockSize, int noiseTokenId, float normEps,
         DeepSeekV41Weight mainProj, int mainIn, float[] mainNorm, DeepSeekV41Weight embed, DeepSeekV41Weight head, DeepSeekV41DSparkStage[] stages, float[] finalNorm,
         DeepSeekV41Weight markovEmbed, DeepSeekV41Weight markovHead, float[] confidence)
     {
@@ -95,6 +95,7 @@ public sealed class DeepSeekV41DSpark
         int dim = cfg.HiddenSize, hc = cfg.HcMult, vocab = cfg.VocabSize, rank = cfg.DsparkMarkovRank, heads = cfg.NumAttentionHeads, hd = cfg.HeadDim;
         int qLora = cfg.QLoraRank, targets = cfg.DsparkTargetLayerIds.Count, mix = (2 + hc) * hc;
         float normEps = (float)cfg.RmsNormEps;
+        if (embed.Elements != (long)vocab * dim || head.Elements != (long)vocab * dim) throw new ArgumentException("embed and head must each be [vocab, dim].");
         DeepSeekV41RopeTable rope = DeepSeekV41RopeTable.Build(cfg.QkRopeHeadDim, options.MaxTokens, cfg.RopeTheta, null);
 
         int experts = cfg.DsparkNRoutedExperts, topk = cfg.DsparkNumExpertsPerTok, inter = cfg.MoeIntermediateSize;
@@ -147,7 +148,8 @@ public sealed class DeepSeekV41DSpark
         return new DeepSeekV41DSparkState(stages);
     }
 
-    /// <summary>Seeds every stage's window from the target's hidden states of the prompt; <paramref name="mainHidden"/> is <c>[tokens, 3 x Dim]</c>.</summary>
+    /// <summary>Seeds every stage's window from the target's hidden states of the prompt; <paramref name="mainHidden"/> is <c>[tokens, 3 x Dim]</c>. The state must be fresh:
+    /// this writes the last <c>min(tokens, window)</c> positions and does not clear the rest.</summary>
     public void Seed(ReadOnlySpan<float> mainHidden, int tokens, DeepSeekV41DSparkState state)
     {
         ArgumentNullException.ThrowIfNull(state);
