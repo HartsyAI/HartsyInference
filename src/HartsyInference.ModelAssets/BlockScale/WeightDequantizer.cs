@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 
@@ -20,32 +21,91 @@ public static unsafe class WeightDequantizer
             if (quant is not null) throw new NotSupportedException($"Quantization format '{quant.Format}' carries no block-scale recipe; refusing to read it as plain values.");
             return UnquantizedToF32(weight);
         }
+        float[] dest = new float[checked((int)(recipe.LogicalRows * recipe.LogicalCols))];
+        ToF32Rows(weight, quant, 0, recipe.LogicalRows, dest);
+        return dest;
+    }
+
+    /// <summary>Decodes <paramref name="rowCount"/> rows from <paramref name="rowOffset"/> of a two-dimensional weight to F32, so a large matrix can be read through a small window.</summary>
+    /// <param name="weight">The stored tensor; borrowed, not retained.</param>
+    /// <param name="quant">The bound recipe, or null for an unquantized F32, BF16 or F16 matrix.</param>
+    /// <param name="rowOffset">First logical row.</param>
+    /// <param name="rowCount">Rows to decode.</param>
+    /// <param name="dest">Receives <c>rowCount * cols</c> floats.</param>
+    /// <exception cref="NotSupportedException">The encoding or element type has no host reader.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">The window leaves the matrix or <paramref name="dest"/> is the wrong size.</exception>
+    public static void ToF32Rows(Tensor weight, QuantWeightInfo? quant, long rowOffset, long rowCount, Span<float> dest)
+    {
+        ArgumentNullException.ThrowIfNull(weight);
+        QuantRecipe? recipe = quant?.Recipe;
+        if (recipe is null)
+        {
+            if (quant is not null) throw new NotSupportedException($"Quantization format '{quant.Format}' carries no block-scale recipe; refusing to read it as plain values.");
+            UnquantizedRows(weight, rowOffset, rowCount, dest);
+            return;
+        }
 
         long byteCount = weight.DType.ComputeByteCount(weight.ElementCount);
         ReadOnlySpan<byte> packed = new(weight.DataPointer, checked((int)byteCount));
-        float[] dest = new float[checked((int)(recipe.LogicalRows * recipe.LogicalCols))];
         switch (recipe.Encoding)
         {
             case QuantEncoding.Fp8E4M3BlockE8M0:
-                Fp8BlockE8M0Codec.DequantRows(packed, recipe, 0, recipe.LogicalRows, dest);
+                Fp8BlockE8M0Codec.DequantRows(packed, recipe, rowOffset, rowCount, dest);
                 break;
             case QuantEncoding.Mxfp4E8M0:
-                Mxfp4E8M0Codec.DequantRows(packed, recipe, 0, recipe.LogicalRows, dest);
+                Mxfp4E8M0Codec.DequantRows(packed, recipe, rowOffset, rowCount, dest);
                 break;
             case QuantEncoding.Nvfp4:
-                ModelOptNvfp4Codec.DequantRows(packed, recipe, 0, recipe.LogicalRows, dest);
+                ModelOptNvfp4Codec.DequantRows(packed, recipe, rowOffset, rowCount, dest);
                 break;
             case QuantEncoding.AffineInt4:
             case QuantEncoding.AffineInt8:
-                AffineIntCodec.DequantRows(packed, recipe, 0, recipe.LogicalRows, dest);
+                AffineIntCodec.DequantRows(packed, recipe, rowOffset, rowCount, dest);
                 break;
             case QuantEncoding.Exl3Trellis:
-                Exl3Codec.DequantRows(packed, recipe, 0, recipe.LogicalRows, dest);
+                Exl3Codec.DequantRows(packed, recipe, rowOffset, rowCount, dest);
                 break;
             default:
                 throw new NotSupportedException($"No host dequantizer is wired for {recipe.Encoding}.");
         }
-        return dest;
+    }
+
+    private static void UnquantizedRows(Tensor weight, long rowOffset, long rowCount, Span<float> dest)
+    {
+        if (weight.Shape.Rank != 2) throw new NotSupportedException($"An unquantized weight must be a matrix to be read by rows; this one has rank {weight.Shape.Rank}.");
+        long rows = weight.Shape[0], cols = weight.Shape[1];
+        if (rowOffset < 0 || rowCount < 0 || rowOffset + rowCount > rows)
+            throw new ArgumentOutOfRangeException(nameof(rowOffset), $"Rows [{rowOffset}, {rowOffset + rowCount}) leave a {rows}-row matrix.");
+        if (dest.Length != rowCount * cols) throw new ArgumentOutOfRangeException(nameof(dest), $"dest holds {dest.Length} values, expected {rowCount * cols}.");
+        long first = rowOffset * cols;
+        if (weight.DType == DType.F32)
+        {
+            weight.AsReadOnlySpan<float>().Slice(checked((int)first), dest.Length).CopyTo(dest);
+        }
+        else if (weight.DType == DType.BF16)
+        {
+            // a head or embedding window is hundreds of millions of values per token, so convert rows in parallel
+            ushort* bits = (ushort*)weight.DataPointer + first;
+            fixed (float* dst = dest)
+            {
+                nint src = (nint)bits, dstAddr = (nint)dst;
+                CpuParallel.For((int)rowCount, rowCount * cols, r =>
+                {
+                    ushort* rowSrc = (ushort*)src + r * cols;
+                    float* rowDst = (float*)dstAddr + r * cols;
+                    for (long c = 0; c < cols; c++) rowDst[c] = BitConverter.UInt32BitsToSingle((uint)rowSrc[c] << 16);
+                });
+            }
+        }
+        else if (weight.DType == DType.F16)
+        {
+            ReadOnlySpan<Half> halves = weight.AsReadOnlySpan<Half>().Slice(checked((int)first), dest.Length);
+            for (int i = 0; i < dest.Length; i++) dest[i] = (float)halves[i];
+        }
+        else
+        {
+            throw new NotSupportedException($"A {weight.DType} weight without a quantization recipe cannot be read as plain values.");
+        }
     }
 
     private static float[] UnquantizedToF32(Tensor weight)

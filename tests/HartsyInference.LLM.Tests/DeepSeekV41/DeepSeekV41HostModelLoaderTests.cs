@@ -51,6 +51,54 @@ public sealed class DeepSeekV41HostModelLoaderTests
     }
 
     [Fact]
+    public void Stored_And_Widened_Residency_Give_Identical_Hidden_States()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "dsv41-load-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            DeepSeekV41ModelFixtureCheckpoint.Write(dir);
+            using CpuBackend cpu = new();
+            float[][] results = new float[2][];
+            DeepSeekV41Residency[] modes = [DeepSeekV41Residency.Stored, DeepSeekV41Residency.WidenedF32];
+            for (int m = 0; m < modes.Length; m++)
+            {
+                using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(cpu, dir, new DeepSeekV41LoadOptions(MaxTokens: 64, ExpertCacheCapacity: 3, Residency: modes[m]));
+                DeepSeekV41HostModel model = loaded.Model;
+                DeepSeekV41SequenceState state = model.CreateState(64);
+                int[] ids = Ints(Fx.GetProperty("steps")[0].GetProperty("ids"));
+                float[] hidden = new float[ids.Length * model.Dim];
+                model.Forward(ids, state, hidden);
+                results[m] = [.. hidden, .. model.Logits(hidden.AsSpan((ids.Length - 1) * model.Dim, model.Dim))];
+            }
+            Assert.Equal(results[1], results[0]);
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
+    public void MaxLayers_Loads_Only_The_First_Layers()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "dsv41-load-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(dir);
+        try
+        {
+            DeepSeekV41ModelFixtureCheckpoint.Write(dir);
+            using CpuBackend cpu = new();
+            using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(cpu, dir, new DeepSeekV41LoadOptions(MaxTokens: 16, MaxLayers: 1));
+            Assert.Equal(1, loaded.Model.Layers);
+            Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41LoadOptions(8, MaxLayers: 0).Validate());
+        }
+        finally
+        {
+            Directory.Delete(dir, true);
+        }
+    }
+
+    [Fact]
     public void Options_Must_Be_Positive()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => new DeepSeekV41LoadOptions(0).Validate());

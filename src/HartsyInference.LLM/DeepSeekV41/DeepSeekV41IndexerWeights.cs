@@ -5,4 +5,4 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <param name="WeightsProj">Per-head score weights, <c>[indexHeads, dim]</c>.</param>
 /// <param name="Wk">Index key projection from the compressed latent, <c>[indexHeadDim, headDim]</c>; null when another layer owns the keys.</param>
 /// <param name="KNorm">Index key RMS norm weight, <c>[indexHeadDim]</c>; null with <paramref name="Wk"/>.</param>
-public sealed record DeepSeekV41IndexerWeights(float[] WqB, float[] WeightsProj, float[]? Wk, float[]? KNorm);
+public sealed record DeepSeekV41IndexerWeights(DeepSeekV41Weight WqB, DeepSeekV41Weight WeightsProj, DeepSeekV41Weight? Wk, float[]? KNorm);

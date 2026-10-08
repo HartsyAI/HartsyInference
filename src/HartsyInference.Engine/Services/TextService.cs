@@ -358,7 +358,7 @@ public sealed class TextService : ITextService, IDisposable
         Logs.Info($"[TextService] Loaded DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
     }
 
-    /// <summary>Refuses a V4.1 load that would not fit: the reference model widens every dense, embedding and head tensor to F32 on the host (at most 4x the stored bytes, for FP8), then adds working room for experts and activations.</summary>
+    /// <summary>Refuses a V4.1 load that would not fit: the weights stay as mapped checkpoint bytes the kernel can drop and re-read, so what must fit in RAM is the working set (sequence state, prefill activations, small widened tensors and Engram row caches) plus a fixed margin.</summary>
     private static void EnsureRamHeadroomForDeepSeekV41(string directory)
     {
         long availableKb = ReadAvailableMemoryKb();
@@ -366,14 +366,14 @@ public sealed class TextService : ITextService, IDisposable
             return;
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(directory);
         IReadOnlyDictionary<DeepSeekV41WeightClass, long> bytes = checkpoint.Weights.BytesByClass;
-        double requiredBytes = 4.0 * (bytes[DeepSeekV41WeightClass.Dense] + bytes[DeepSeekV41WeightClass.Embed] + bytes[DeepSeekV41WeightClass.Head])
-            + 4.0 * 1024 * 1024 * 1024;
+        long denseStored = bytes[DeepSeekV41WeightClass.Dense] + bytes[DeepSeekV41WeightClass.Embed] + bytes[DeepSeekV41WeightClass.Head];
+        double requiredBytes = DeepSeekV41WorkingMemory.AnonymousBytes(checkpoint.Config, denseStored, HfTextDirectoryLoader.LoadOptions) + 4.0 * 1024 * 1024 * 1024;
         double availableBytes = availableKb * 1024.0;
         if (availableBytes < requiredBytes)
         {
             throw new HartsyInferenceException(
                 $"Not enough free host RAM to safely load DeepSeek-V4.1 '{directory}': {availableBytes / 1024 / 1024 / 1024:0.0} GB free, "
-                + $"need ~{requiredBytes / 1024 / 1024 / 1024:0.0} GB for the F32 dense weights of the host reference model. "
+                + $"need ~{requiredBytes / 1024 / 1024 / 1024:0.0} GB of working memory (the {denseStored / 1024.0 / 1024 / 1024:0.0} GB of dense weights are read from the checkpoint files and also benefit from free page cache). "
                 + "Free RAM, then retry — loading anyway risks crashing the whole process.");
         }
     }

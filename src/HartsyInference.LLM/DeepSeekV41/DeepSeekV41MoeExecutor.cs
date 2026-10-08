@@ -60,15 +60,11 @@ public static class DeepSeekV41MoeExecutor
     internal static void Forward(DeepSeekV41SwigluWeights w, ReadOnlySpan<float> x, float weight, float limit, float[] hidden, Span<float> output)
     {
         int dim = w.Dim, inter = w.Inter;
+        // two sequential dots per hidden unit, exactly as a fused loop would compute them
+        float[] gates = w.W1.Linear(x, 1, dim, inter), ups = w.W3.Linear(x, 1, dim, inter);
         for (int i = 0; i < inter; i++)
         {
-            ReadOnlySpan<float> w1 = w.W1.AsSpan(i * dim, dim), w3 = w.W3.AsSpan(i * dim, dim);
-            float gate = 0f, up = 0f;
-            for (int d = 0; d < dim; d++)
-            {
-                gate += x[d] * w1[d];
-                up += x[d] * w3[d];
-            }
+            float gate = gates[i], up = ups[i];
             if (limit > 0f)
             {
                 up = Math.Clamp(up, -limit, limit);
@@ -76,12 +72,6 @@ public static class DeepSeekV41MoeExecutor
             }
             hidden[i] = weight * (gate / (1f + MathF.Exp(-gate)) * up);
         }
-        for (int d = 0; d < dim; d++)
-        {
-            ReadOnlySpan<float> w2 = w.W2.AsSpan(d * inter, inter);
-            float sum = 0f;
-            for (int i = 0; i < inter; i++) sum += hidden[i] * w2[i];
-            output[d] = sum;
-        }
+        w.W2.Linear(hidden.AsSpan(0, inter), 1, inter, dim).CopyTo(output);
     }
 }

@@ -26,4 +26,16 @@ public sealed record DeepSeekV41AttentionSettings(int Dim, int Heads, int HeadDi
 {
     /// <summary>Width of one head-group slice fed to <c>wo_a</c>.</summary>
     public int GroupDim => Heads * HeadDim / OGroups;
+
+    /// <summary>The attention settings of backbone layer <paramref name="layer"/>, as the loader builds them.</summary>
+    public static DeepSeekV41AttentionSettings ForLayer(DeepSeekV41Config cfg, int layer)
+    {
+        ArgumentNullException.ThrowIfNull(cfg);
+        DeepSeekV41LayerPlan plan = cfg.LayerPlans[layer];
+        int ratio = plan.CompressRatio, candidateLayer = cfg.CandidateSourceLayerId;
+        bool kvSource = plan.IsKvSource && ratio > 0, indexSource = plan.IsIndexSource && ratio > 0;
+        return new(cfg.HiddenSize, cfg.NumAttentionHeads, cfg.HeadDim, cfg.QkRopeHeadDim, cfg.QLoraRank, cfg.OGroups, cfg.OLoraRank, cfg.SlidingWindow, ratio, kvSource,
+            indexSource, layer == candidateLayer, candidateLayer >= 0 && candidateLayer < layer, cfg.IndexNHeads, cfg.IndexHeadDim, cfg.IndexTopk,
+            cfg.CandidateTopkBlocks, cfg.CandidateBlockSize, (float)cfg.RmsNormEps);
+    }
 }

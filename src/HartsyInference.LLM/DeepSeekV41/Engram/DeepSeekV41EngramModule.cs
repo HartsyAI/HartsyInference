@@ -10,7 +10,7 @@ public sealed class DeepSeekV41EngramModule
 
     private readonly EngramRowGather _gather;
     private readonly float _eps;
-    private readonly float[] _wkv;
+    private readonly DeepSeekV41Weight _wkv;
     private readonly float[] _product;
 
     /// <summary>Residual width.</summary>
@@ -34,7 +34,7 @@ public sealed class DeepSeekV41EngramModule
     /// <param name="qWeight"><c>[hcMult, dim]</c>; only ever used multiplied by <paramref name="kWeight"/>.</param>
     /// <param name="kWeight"><c>[hcMult, dim]</c>.</param>
     /// <param name="gather">Row lookup for this layer's table.</param>
-    public DeepSeekV41EngramModule(int dim, int hcMult, int columns, int headDim, float eps, float[] wkv, float[] qWeight, float[] kWeight,
+    public DeepSeekV41EngramModule(int dim, int hcMult, int columns, int headDim, float eps, DeepSeekV41Weight wkv, float[] qWeight, float[] kWeight,
         EngramRowGather gather)
     {
         ArgumentNullException.ThrowIfNull(wkv);
@@ -45,7 +45,7 @@ public sealed class DeepSeekV41EngramModule
         ArgumentOutOfRangeException.ThrowIfLessThan(hcMult, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(columns, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(headDim, 1);
-        if (wkv.Length != (long)dim * (hcMult + 1) * columns * headDim) throw new ArgumentException("wkv must be [dim * (hcMult + 1), columns * headDim].", nameof(wkv));
+        if (wkv.Elements != (long)dim * (hcMult + 1) * columns * headDim) throw new ArgumentException("wkv must be [dim * (hcMult + 1), columns * headDim].", nameof(wkv));
         if (qWeight.Length != hcMult * dim || kWeight.Length != qWeight.Length) throw new ArgumentException("q and k weights must each be [hcMult, dim].");
         Dim = dim;
         HcMult = hcMult;
@@ -77,13 +77,7 @@ public sealed class DeepSeekV41EngramModule
             if (!tokenMask.IsEmpty && !tokenMask[t]) continue;
             _gather(hashIds.Slice(t * Columns, Columns), bits);
             for (int i = 0; i < rowWidth; i++) rows[i] = BitConverter.UInt32BitsToSingle((uint)bits[i] << 16);
-            for (int o = 0; o < outWidth; o++)
-            {
-                ReadOnlySpan<float> w = _wkv.AsSpan(o * rowWidth, rowWidth);
-                float sum = 0f;
-                for (int i = 0; i < rowWidth; i++) sum += rows[i] * w[i];
-                kv[o] = sum;
-            }
+            _wkv.Linear(rows, 1, rowWidth, outWidth).CopyTo(kv, 0);
 
             ReadOnlySpan<float> value = kv.AsSpan(HcMult * Dim, Dim);
             for (int c = 0; c < HcMult; c++)

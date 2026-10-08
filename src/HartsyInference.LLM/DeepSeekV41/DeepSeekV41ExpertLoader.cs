@@ -4,7 +4,7 @@ using HartsyInference.ModelAssets.BlockScale;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
-/// <summary>Dequantizes one routed expert of a checkpoint to F32 and checks its three matrices against the layer's widths.</summary>
+/// <summary>Reads one routed expert of a checkpoint (widened to F32 or in its stored form) and checks its three matrices against the layer's widths.</summary>
 public static class DeepSeekV41ExpertLoader
 {
     /// <summary>Reads <paramref name="expert"/> from <paramref name="bank"/> as <see cref="DeepSeekV41SwigluWeights"/>.</summary>
@@ -13,11 +13,11 @@ public static class DeepSeekV41ExpertLoader
     /// <param name="dim">Hidden width (<c>hidden_size</c>).</param>
     /// <param name="inter">Intermediate width (<c>moe_intermediate_size</c>).</param>
     /// <exception cref="HartsyInferenceException">A projection's logical shape is not the expected <c>[inter, dim]</c> or <c>[dim, inter]</c>.</exception>
-    public static DeepSeekV41SwigluWeights Load(DeepSeekV41ExpertBank bank, int expert, int dim, int inter) =>
+    public static DeepSeekV41SwigluWeights Load(DeepSeekV41ExpertBank bank, int expert, int dim, int inter, DeepSeekV41Residency residency = DeepSeekV41Residency.Stored) =>
         new(dim, inter,
-            Read(bank, expert, DeepSeekV41ExpertProjection.W1, inter, dim),
-            Read(bank, expert, DeepSeekV41ExpertProjection.W2, dim, inter),
-            Read(bank, expert, DeepSeekV41ExpertProjection.W3, inter, dim));
+            Read(bank, expert, DeepSeekV41ExpertProjection.W1, inter, dim, residency),
+            Read(bank, expert, DeepSeekV41ExpertProjection.W2, dim, inter, residency),
+            Read(bank, expert, DeepSeekV41ExpertProjection.W3, inter, dim, residency));
 
     /// <summary>Dequantizes one matrix to F32 after checking its logical shape is <c>[rows, cols]</c>.</summary>
     /// <param name="key">Checkpoint key, named in the refusal.</param>
@@ -43,6 +43,11 @@ public static class DeepSeekV41ExpertLoader
         return WeightDequantizer.ToF32(weight, quant);
     }
 
-    private static float[] Read(DeepSeekV41ExpertBank bank, int expert, DeepSeekV41ExpertProjection projection, long rows, long cols) =>
-        ReadMatrix(bank.WeightKey(expert, projection), bank.Weight(expert, projection), bank.Quant(expert, projection), rows, cols);
+    private static DeepSeekV41Weight Read(DeepSeekV41ExpertBank bank, int expert, DeepSeekV41ExpertProjection projection, long rows, long cols, DeepSeekV41Residency residency)
+    {
+        string key = bank.WeightKey(expert, projection);
+        return residency == DeepSeekV41Residency.Stored
+            ? DeepSeekV41Weight.FromStored(key, bank.Weight(expert, projection), bank.Quant(expert, projection), rows, cols)
+            : DeepSeekV41Weight.FromF32(ReadMatrix(key, bank.Weight(expert, projection), bank.Quant(expert, projection), rows, cols));
+    }
 }
