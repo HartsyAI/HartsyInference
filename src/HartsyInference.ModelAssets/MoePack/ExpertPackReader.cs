@@ -92,6 +92,8 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
 
         long gateBytes = _dtype.ComputeByteCount((long)Intermediate * Hidden);
         long downBytes = _dtype.ComputeByteCount((long)Hidden * Intermediate);
+        if (record.Length != 2 * gateBytes + downBytes)
+            throw new InvalidDataException($"Record for {key} is {record.Length} bytes; its three projections need {2 * gateBytes + downBytes}.");
         Tensor gate = Load(bytes, 0, new TensorShape(Intermediate, Hidden), gateBytes);
         Tensor up = Load(bytes, gateBytes, new TensorShape(Intermediate, Hidden), gateBytes);
         Tensor down = Load(bytes, 2 * gateBytes, new TensorShape(Hidden, Intermediate), downBytes);

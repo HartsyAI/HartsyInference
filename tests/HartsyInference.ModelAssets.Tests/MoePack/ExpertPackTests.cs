@@ -168,4 +168,37 @@ public sealed class ExpertPackTests : IDisposable
     {
         Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "bad"), Fingerprint, 100, Intermediate, DType.Q4_K));
     }
+
+    [Fact]
+    public void TruncatedSourceArray_IsRejectedNotCountedAsChecked()
+    {
+        string dir = Path.Combine(_root, "truncated-source");
+        WritePack(dir, DType.Q8_0, experts: 2);
+        using ExpertPackReader reader = ExpertPackReader.Open(dir, Fingerprint);
+
+        Assert.Throws<ArgumentException>(() => ExpertPackVerifier.Verify(
+            reader, key => (Array.Empty<float>(), new float[Intermediate * Hidden], new float[Hidden * Intermediate]), reader.Keys));
+    }
+
+    [Fact]
+    public void RecordShorterThanItsProjections_IsRefusedBeforeAnyCopy()
+    {
+        string dir = Path.Combine(_root, "short-record");
+        WritePack(dir, DType.Q8_0, experts: 1);
+        string manifestPath = Path.Combine(dir, "manifest.json");
+        string manifest = File.ReadAllText(manifestPath);
+        int lengthAt = manifest.IndexOf("\"Length\":", StringComparison.Ordinal) + "\"Length\":".Length;
+        int end = manifest.IndexOf(',', lengthAt);
+        long realLength = long.Parse(manifest[lengthAt..end].Trim());
+        File.WriteAllText(manifestPath, manifest[..lengthAt] + " " + (realLength - 64) + manifest[end..]);
+
+        using ExpertPackReader reader = ExpertPackReader.Open(dir, Fingerprint, verifyChecksums: false);
+        Assert.Throws<InvalidDataException>(() => reader.Resolve(new ExpertKey(0, 0)));
+    }
+
+    [Fact]
+    public void F32_IsNotAPackDType()
+    {
+        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "f32"), Fingerprint, Hidden, Intermediate, DType.F32));
+    }
 }

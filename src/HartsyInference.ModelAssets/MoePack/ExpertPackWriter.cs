@@ -41,6 +41,7 @@ public sealed class ExpertPackWriter : IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         ArgumentException.ThrowIfNullOrWhiteSpace(topologyFingerprint);
+        if (!dtype.IsQuantized) throw new ArgumentException($"{dtype.Name} is not a quantized pack dtype; packs store quantized projections only.", nameof(dtype));
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(hidden);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(intermediate);
         if (hidden % dtype.BlockElementCount != 0 || intermediate % dtype.BlockElementCount != 0)

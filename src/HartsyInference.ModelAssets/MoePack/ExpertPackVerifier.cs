@@ -33,14 +33,32 @@ public static class ExpertPackVerifier
                 failures.Add(key);
                 continue;
             }
-            (float[] gate, float[] up, float[] down) = source(key);
-            Compare(weights.W1.Weight, gate, ref maxAbs, ref errorSquares, ref referenceSquares, ref values);
-            Compare(weights.W3.Weight, up, ref maxAbs, ref errorSquares, ref referenceSquares, ref values);
-            Compare(weights.W2.Weight, down, ref maxAbs, ref errorSquares, ref referenceSquares, ref values);
-            checkedCount++;
+            try
+            {
+                (float[] gate, float[] up, float[] down) = source(key);
+                int matrix = reader.Intermediate * reader.Hidden;
+                ValidateReference(gate, matrix, "gate", key);
+                ValidateReference(up, matrix, "up", key);
+                ValidateReference(down, matrix, "down", key);
+                Compare(weights.W1.Weight, gate, ref maxAbs, ref errorSquares, ref referenceSquares, ref values);
+                Compare(weights.W3.Weight, up, ref maxAbs, ref errorSquares, ref referenceSquares, ref values);
+                Compare(weights.W2.Weight, down, ref maxAbs, ref errorSquares, ref referenceSquares, ref values);
+                checkedCount++;
+            }
+            finally
+            {
+                foreach (Tensor tensor in weights.Tensors) tensor.Dispose();
+            }
         }
         double relative = referenceSquares == 0 ? 0 : Math.Sqrt(errorSquares / referenceSquares);
         return new ExpertPackVerification(checkedCount, maxAbs, relative, failures);
+    }
+
+    private static void ValidateReference(float[] reference, int expected, string role, ExpertKey key)
+    {
+        ArgumentNullException.ThrowIfNull(reference);
+        if (reference.Length != expected)
+            throw new ArgumentException($"The source {role} for {key} holds {reference.Length} values; the pack expects {expected}.");
     }
 
     private static void Compare(Tensor quantized, float[] reference, ref double maxAbs, ref double errorSquares,
