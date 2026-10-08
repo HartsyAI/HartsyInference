@@ -238,4 +238,20 @@ public sealed class MoeTopologyFactoryTests
         Assert.Throws<NotSupportedException>(() => MoeTopologyFactory.FromTransformer(config));
         Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid, GroupCount: 1, GroupsKept: 1).Validated());
     }
+
+    [Fact]
+    public void GroupedRouter_IsSigmoidEvenWhenTheConfigSaysSoftmax()
+    {
+        MoeConfig grouped = new()
+        {
+            NumExperts = 8, NumExpertsPerTok = 2, MoeIntermediateSize = 16, Scoring = MoeScoring.Softmax,
+            ExpertGroupCount = 2, ExpertGroupUsedCount = 1,
+        };
+        TransformerConfig config = new()
+        {
+            HiddenSize = 32, NumLayers = 1, NumHeads = 2, NumKvHeads = 2, HeadDim = 16, IntermediateSize = 64, VocabSize = 100, Moe = grouped,
+        };
+
+        Assert.Equal(MoeRouteScoring.Sigmoid, MoeTopologyFactory.FromTransformer(config).Layers[0].Moe!.Router.Scoring);
+    }
 }

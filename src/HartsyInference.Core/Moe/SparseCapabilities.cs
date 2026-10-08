@@ -13,7 +13,8 @@ namespace HartsyInference.Core.Moe;
 /// <param name="HasDenseLayers">At least one layer is dense.</param>
 /// <param name="HasMixedDenseAndSparseLayers">Dense and sparse layers both occur.</param>
 /// <param name="VariableExpertsPerLayer">Sparse layers do not all have the same routed-expert count.</param>
-/// <param name="HeterogeneousExpertShapes">Experts differ in intermediate width, dtype or layout, across routed and shared groups including overrides.</param>
+/// <param name="HeterogeneousExpertShapes">Experts differ in intermediate width, dtype or layout, across routed and
+/// shared groups including overrides.</param>
 /// <param name="VariableTopK">The decode or the prefill top-k differs between sparse layers.</param>
 /// <param name="PhaseDependentRouting">Some sparse layer keeps a different top-k in prefill than in decode.</param>
 /// <param name="HasGroupRouting">Some router applies node-limited group selection.</param>

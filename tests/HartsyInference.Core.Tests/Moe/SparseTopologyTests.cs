@@ -26,7 +26,8 @@ public sealed class SparseTopologyTests
             program ?? ExpertProgram.Swiglu).Validated();
 
     private static SparseModelTopology Uniform(int layers, Func<int, MoeLayerDescriptor?> moe, Func<int, SequenceStateKind>? state = null) =>
-        new(Hidden, Enumerable.Range(0, layers).Select(i => new SparseLayerDescriptor(i, moe(i), state?.Invoke(i) ?? SequenceStateKind.StandardKv)).ToList());
+        new(Hidden, Enumerable.Range(0, layers).Select(i => new SparseLayerDescriptor(i, moe(i),
+                state?.Invoke(i) ?? SequenceStateKind.StandardKv)).ToList());
 
     [Fact]
     public void MixtralStyle_AllLayersSparseSoftmaxUniform()
@@ -58,7 +59,8 @@ public sealed class SparseTopologyTests
                 shared: new ExpertGroupDescriptor(1, Expert()).Validated(), tokenKind: true,
                 program: ExpertProgram.SwigluClamped(10f)), SequenceStateKind.CompressedKv),
             new(2, Layer(experts: 16, topK: 2, scoring: MoeRouteScoring.Sigmoid, routed: new ExpertGroupDescriptor(16, Expert(32),
-                new Dictionary<int, ExpertDescriptor> { [3] = Expert(64, DType.F4E2M1) }).Validated()), SequenceStateKind.CompressedKv, IsDraft: true),
+                new Dictionary<int, ExpertDescriptor> { [3] = Expert(64,
+                        DType.F4E2M1) }).Validated()), SequenceStateKind.CompressedKv, IsDraft: true),
         };
         SparseModelTopology topology = new(Hidden, layers, "synthetic");
 
@@ -95,7 +97,8 @@ public sealed class SparseTopologyTests
         Assert.Throws<ArgumentException>(() => new RouterDescriptor(10, 2, 2, MoeRouteScoring.Softmax, GroupCount: 4, GroupsKept: 1).Validated());
         Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, GroupCount: 4, GroupsKept: 5).Validated());
         Assert.Throws<ArgumentException>(() => Layer(experts: 8, routed: new ExpertGroupDescriptor(7, Expert()).Validated()));
-        Assert.Throws<ArgumentException>(() => new ExpertGroupDescriptor(4, Expert(), new Dictionary<int, ExpertDescriptor> { [4] = Expert() }).Validated());
+        Assert.Throws<ArgumentException>(() => new ExpertGroupDescriptor(4, Expert(), new Dictionary<int,
+                ExpertDescriptor> { [4] = Expert() }).Validated());
     }
 
     [Fact]
@@ -159,7 +162,8 @@ public sealed class SparseTopologyTests
         // F4E2M1 packs two elements per byte.
         Assert.Equal(3L * Hidden * 32 / 2, Expert(32, DType.F4E2M1).PayloadBytes);
 
-        ExpertGroupDescriptor group = new ExpertGroupDescriptor(4, Expert(32), new Dictionary<int, ExpertDescriptor> { [2] = Expert(64) }).Validated();
+        ExpertGroupDescriptor group = new ExpertGroupDescriptor(4, Expert(32), new Dictionary<int,
+                ExpertDescriptor> { [2] = Expert(64) }).Validated();
         Assert.Equal(64, group.ExpertAt(2).IntermediateSize);
         Assert.Equal(32, group.ExpertAt(0).IntermediateSize);
         Assert.Equal(3 * Expert(32).PayloadBytes + Expert(64).PayloadBytes, group.PayloadBytes);
@@ -221,7 +225,8 @@ public sealed class SparseTopologyTests
     [Fact]
     public void ExpertProgram_RejectsNaNAndInvertedClampBounds()
     {
-        Assert.Throws<ArgumentException>(() => new ExpertProgram(ExpertActivation.Silu, float.NaN, float.NegativeInfinity, float.PositiveInfinity).Validated());
+        Assert.Throws<ArgumentException>(() => new ExpertProgram(ExpertActivation.Silu, float.NaN, float.NegativeInfinity,
+                float.PositiveInfinity).Validated());
         Assert.Throws<ArgumentException>(() => new ExpertProgram(ExpertActivation.Silu, float.PositiveInfinity, 3f, -3f).Validated());
         Assert.Throws<ArgumentException>(() => Uniform(1, _ => new MoeLayerDescriptor(
             new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax).Validated(),
@@ -266,10 +271,12 @@ public sealed class SparseTopologyTests
         Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid, GroupCount: 8, GroupsKept: 4).Validated());
         Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 5, 5, MoeRouteScoring.Sigmoid, GroupCount: 4, GroupsKept: 1).Validated());
         Assert.Throws<ArgumentOutOfRangeException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, Scale: float.NaN).Validated());
-        Assert.Throws<ArgumentOutOfRangeException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, Scale: float.PositiveInfinity).Validated());
+        Assert.Throws<ArgumentOutOfRangeException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax,
+                Scale: float.PositiveInfinity).Validated());
         Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, GroupCount: 2, GroupsKept: 1,
             BiasSpace: SelectionBiasSpace.Logit, HasSelectionBias: true).Validated());
-        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid, BiasSpace: SelectionBiasSpace.Logit).Validated());
+        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid,
+                BiasSpace: SelectionBiasSpace.Logit).Validated());
     }
 
     [Fact]
@@ -332,5 +339,24 @@ public sealed class SparseTopologyTests
             null, false, ExpertProgram.Swiglu).Validated());
 
         Assert.Equal(Build(Expert(32, DType.F32)).Fingerprint, Build(Expert(64, DType.F8E4M3)).Fingerprint);
+    }
+
+    [Fact]
+    public void Fingerprint_DistinguishesDTypesThatShareAName()
+    {
+        DType plain = new("CUSTOM", 2, false);
+        DType blocked = new("CUSTOM", 1, true, 18, 32);
+        Assert.NotEqual(Uniform(1, _ => Layer(4, 2, shared: null, routed: new ExpertGroupDescriptor(4, new ExpertDescriptor(Hidden, 32,
+                plain)).Validated())).Fingerprint,
+            Uniform(1, _ => Layer(4, 2, shared: null, routed: new ExpertGroupDescriptor(4, new ExpertDescriptor(Hidden, 32,
+                    blocked)).Validated())).Fingerprint);
+    }
+
+    [Fact]
+    public void SharedGateWithoutSharedExperts_IsRejected()
+    {
+        Assert.Throws<ArgumentException>(() => new MoeLayerDescriptor(
+            new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax).Validated(),
+            new ExpertGroupDescriptor(8, Expert()).Validated(), null, true, ExpertProgram.Swiglu).Validated());
     }
 }

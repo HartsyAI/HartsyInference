@@ -13,7 +13,8 @@ public static class MoeTopologyFactory
     /// </summary>
     /// <param name="config">Parsed transformer configuration.</param>
     /// <param name="expertDType">Storage type of the expert projections; F32 when the model is dequantized at load.</param>
-    /// <param name="sharedExpertGated">Shared output is scaled by a sigmoid gate (Qwen2-MoE). The caller knows whether the gate tensor was loaded.</param>
+    /// <param name="sharedExpertGated">Shared output is scaled by a sigmoid gate (Qwen2-MoE). The caller knows whether
+    /// the gate tensor was loaded.</param>
     /// <param name="stateKindForLayer">Sequence state per layer; standard KV when null.</param>
     /// <param name="family">Diagnostic label.</param>
     /// <param name="routerHasCorrectionBias">
@@ -31,7 +32,8 @@ public static class MoeTopologyFactory
         for (int i = 0; i < config.NumLayers; i++)
         {
             SequenceStateKind state = stateKindForLayer?.Invoke(i) ?? SequenceStateKind.StandardKv;
-            MoeLayerDescriptor? sparse = moe is null || i < moe.FirstDenseLayers ? null : BuildLayer(config, moe, dtype, sharedExpertGated, routerHasCorrectionBias);
+            MoeLayerDescriptor? sparse = moe is null || i < moe.FirstDenseLayers ? null : BuildLayer(config, moe, dtype, sharedExpertGated,
+                    routerHasCorrectionBias);
             layers.Add(new SparseLayerDescriptor(i, sparse, state));
         }
         return new SparseModelTopology(config.HiddenSize, layers, family);
@@ -43,7 +45,8 @@ public static class MoeTopologyFactory
     /// </summary>
     public static Func<int, SequenceStateKind> Qwen35States(int fullAttentionInterval, bool[]? recurrentOverride = null)
     {
-        if (fullAttentionInterval <= 0) throw new ArgumentOutOfRangeException(nameof(fullAttentionInterval), fullAttentionInterval, "The full-attention interval must be positive.");
+        if (fullAttentionInterval <= 0) throw new ArgumentOutOfRangeException(nameof(fullAttentionInterval), fullAttentionInterval,
+                "The full-attention interval must be positive.");
         return layer =>
         {
             if (layer < 0) throw new ArgumentOutOfRangeException(nameof(layer), layer, "Layer index must not be negative.");
@@ -54,7 +57,8 @@ public static class MoeTopologyFactory
         };
     }
 
-    private static MoeLayerDescriptor BuildLayer(TransformerConfig config, MoeConfig moe, DType dtype, bool sharedGated, bool? routerHasCorrectionBias)
+    private static MoeLayerDescriptor BuildLayer(TransformerConfig config, MoeConfig moe, DType dtype, bool sharedGated,
+            bool? routerHasCorrectionBias)
     {
         // Production takes the group-limited path for every positive group count, and a single group is that path with one group.
         bool groupLimited = moe.ExpertGroupCount > 0;
@@ -64,12 +68,14 @@ public static class MoeTopologyFactory
         int groupCount = moe.ExpertGroupCount > 1 ? moe.ExpertGroupCount : 0;
         int groupsKept = groupCount > 0 ? moe.ExpertGroupUsedCount : 0;
         // The bias exists in flat SigmoidLogitAdd always, and in group-limited routing when the checkpoint carries it.
-        bool hasBias = groupLimited ? (routerHasCorrectionBias ?? moe.Scoring == MoeScoring.SigmoidLogitAdd) : moe.Scoring == MoeScoring.SigmoidLogitAdd;
+        bool logitAdd = moe.Scoring == MoeScoring.SigmoidLogitAdd;
+        bool hasBias = groupLimited ? (routerHasCorrectionBias ?? logitAdd) : logitAdd;
         RouterDescriptor router = new RouterDescriptor(
             NumExperts: moe.NumExperts,
             TopKDecode: moe.NumExpertsPerTok,
             TopKPrefill: moe.NumExpertsPerTok,
-            Scoring: ToScoring(moe.Scoring),
+            // The group-limited path always scores with sigmoid, whatever the config's gating function says.
+            Scoring: groupLimited ? MoeRouteScoring.Sigmoid : ToScoring(moe.Scoring),
             GroupCount: groupCount,
             GroupsKept: groupsKept,
             Renormalize: moe.NormTopKProb,
@@ -79,11 +85,13 @@ public static class MoeTopologyFactory
             // Only the flat path biases the logit; the group-limited path biases the score.
             BiasSpace: moe.Scoring == MoeScoring.SigmoidLogitAdd && !groupLimited ? SelectionBiasSpace.Logit : SelectionBiasSpace.Score).Validated();
 
-        ExpertGroupDescriptor routed = new ExpertGroupDescriptor(moe.NumExperts, new ExpertDescriptor(config.HiddenSize, moe.MoeIntermediateSize, dtype)).Validated();
+        ExpertGroupDescriptor routed = new ExpertGroupDescriptor(moe.NumExperts, new ExpertDescriptor(config.HiddenSize,
+                moe.MoeIntermediateSize, dtype)).Validated();
         ExpertGroupDescriptor? shared = moe.SharedExpertIntermediateSize > 0
             ? new ExpertGroupDescriptor(1, new ExpertDescriptor(config.HiddenSize, moe.SharedExpertIntermediateSize, dtype)).Validated()
             : null;
-        ExpertProgram program = new ExpertProgram(ToActivation(moe.Activation), float.PositiveInfinity, float.NegativeInfinity, float.PositiveInfinity);
+        ExpertProgram program = new ExpertProgram(ToActivation(moe.Activation), float.PositiveInfinity, float.NegativeInfinity,
+                float.PositiveInfinity);
         return new MoeLayerDescriptor(router, routed, shared, shared is not null && sharedGated, program).Validated();
     }
 

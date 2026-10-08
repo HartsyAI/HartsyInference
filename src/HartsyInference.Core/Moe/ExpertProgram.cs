@@ -24,13 +24,16 @@ public sealed record ExpertProgram(ExpertActivation Activation, float GateMax, f
     public static ExpertProgram Swiglu { get; } = new(ExpertActivation.Silu, float.PositiveInfinity, float.NegativeInfinity, float.PositiveInfinity);
 
     /// <summary>GeGLU with no clamp.</summary>
-    public static ExpertProgram GeGlu { get; } = new(ExpertActivation.GeluTanh, float.PositiveInfinity, float.NegativeInfinity, float.PositiveInfinity);
+    public static ExpertProgram GeGlu { get; } = new(ExpertActivation.GeluTanh, float.PositiveInfinity, float.NegativeInfinity,
+            float.PositiveInfinity);
 
-    /// <summary>SwiGLU with the DeepSeek-V4.1 clamp: gate capped above at <paramref name="limit"/>, up clamped to ±<paramref name="limit"/>.</summary>
+    /// <summary>SwiGLU with the DeepSeek-V4.1 clamp: gate capped above at <paramref name="limit"/>, up clamped to
+    /// ±<paramref name="limit"/>.</summary>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="limit"/> is not positive and finite.</exception>
     public static ExpertProgram SwigluClamped(float limit)
     {
-        if (!(limit > 0f) || float.IsInfinity(limit)) throw new ArgumentOutOfRangeException(nameof(limit), limit, "The SwiGLU clamp limit must be positive and finite.");
+        if (!(limit > 0f) || float.IsInfinity(limit)) throw new ArgumentOutOfRangeException(nameof(limit), limit,
+                "The SwiGLU clamp limit must be positive and finite.");
         return new ExpertProgram(ExpertActivation.Silu, limit, -limit, limit);
     }
 

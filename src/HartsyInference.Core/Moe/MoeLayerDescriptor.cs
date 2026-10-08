@@ -6,7 +6,8 @@ namespace HartsyInference.Core.Moe;
 /// One sparse (MoE) feed-forward layer: a router selecting among routed experts, an optional shared expert group that
 /// always runs, and the expert program both groups execute.
 /// </summary>
-/// <param name="Router">Routing recipe; its <see cref="RouterDescriptor.NumExperts"/> must equal <see cref="Routed"/>.<see cref="ExpertGroupDescriptor.Count"/>.</param>
+/// <param name="Router">Routing recipe; its <see cref="RouterDescriptor.NumExperts"/> must equal <see
+/// cref="Routed"/>.<see cref="ExpertGroupDescriptor.Count"/>.</param>
 /// <param name="Routed">Routed experts.</param>
 /// <param name="Shared">Always-on shared experts, or null.</param>
 /// <param name="SharedIsGated">Shared output is scaled by a learned sigmoid gate (Qwen2-MoE).</param>
@@ -25,8 +26,10 @@ public sealed record MoeLayerDescriptor(
         Routed.Validated();
         Shared?.Validated();
         Program.Validated();
+        if (SharedIsGated && Shared is null) throw new ArgumentException("A shared-output gate needs a shared expert group.", nameof(SharedIsGated));
         if (Router.NumExperts != Routed.Count)
-            throw new ArgumentException($"Router selects among {Router.NumExperts} experts but the routed group holds {Routed.Count}.", nameof(Router));
+            throw new ArgumentException($"Router selects among {Router.NumExperts} experts but the routed group holds {Routed.Count}.",
+                    nameof(Router));
         return this;
     }
 

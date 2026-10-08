@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Moe;
 
@@ -56,7 +57,8 @@ public sealed class SparseModelTopology
     public int SparseLayerCount => Layers.Count(static layer => layer.IsSparse);
 
     /// <summary>Largest routed-expert count among sparse layers, or 0.</summary>
-    public int MaxExpertsPerLayer => Layers.Where(static layer => layer.Moe is not null).Select(static layer => layer.Moe!.ExpertCount).DefaultIfEmpty(0).Max();
+    public int MaxExpertsPerLayer =>
+        Layers.Where(static layer => layer.Moe is not null).Select(static layer => layer.Moe!.ExpertCount).DefaultIfEmpty(0).Max();
 
     /// <summary>Total payload bytes of every expert in every sparse layer.</summary>
     public long TotalExpertPayloadBytes => Layers.Sum(static layer => layer.Moe?.PayloadBytes ?? 0);
@@ -78,7 +80,8 @@ public sealed class SparseModelTopology
     private void ValidateGroupWidth(int layer, ExpertGroupDescriptor group, string role)
     {
         if (group.Shape.HiddenSize != HiddenSize)
-            throw new ArgumentException($"Layer {layer} {role} experts read width {group.Shape.HiddenSize}, the model is {HiddenSize}.", nameof(Layers));
+            throw new ArgumentException($"Layer {layer} {role} experts read width {group.Shape.HiddenSize}, the model is {HiddenSize}.",
+                    nameof(Layers));
         if (group.Overrides is null) return;
         foreach (KeyValuePair<int, ExpertDescriptor> pair in group.Overrides)
             if (pair.Value.HiddenSize != HiddenSize)
@@ -119,11 +122,12 @@ public sealed class SparseModelTopology
         bool fullyOverridden = group.Overrides is not null && group.Overrides.Count == group.Count;
         text.Append('|').Append(tag).Append(Num(group.Count));
         if (!fullyOverridden)
-            text.Append('x').Append(Num(group.Shape.IntermediateSize)).Append('x').Append(group.Shape.WeightDType.Name).Append('x').Append(group.Shape.Layout);
+            text.Append('x').Append(Num(group.Shape.IntermediateSize)).Append('x')
+                .Append(DTypeText(group.Shape.WeightDType)).Append('x').Append(group.Shape.Layout);
         if (group.Overrides is null) return;
         foreach (KeyValuePair<int, ExpertDescriptor> pair in group.Overrides.OrderBy(static p => p.Key))
             text.Append('[').Append(Num(pair.Key)).Append('=').Append(Num(pair.Value.IntermediateSize)).Append('x')
-                .Append(pair.Value.WeightDType.Name).Append('x').Append(pair.Value.Layout).Append(']');
+                .Append(DTypeText(pair.Value.WeightDType)).Append('x').Append(pair.Value.Layout).Append(']');
     }
 
     private static string Num(int value) => value.ToString(CultureInfo.InvariantCulture);
@@ -131,4 +135,8 @@ public sealed class SparseModelTopology
     private static string Num(float value) => value.ToString("R", CultureInfo.InvariantCulture);
 
     private static string Flag(bool value) => value ? "1" : "0";
+
+    /// <summary>Every field of the dtype, not only its name: two dtypes that share a name can still need different storage.</summary>
+    private static string DTypeText(DType dtype) =>
+        $"{dtype.Name}:{Num(dtype.SizeInBytes)}:{Flag(dtype.IsQuantized)}:{Num(dtype.BlockByteSize)}:{Num(dtype.BlockElementCount)}";
 }

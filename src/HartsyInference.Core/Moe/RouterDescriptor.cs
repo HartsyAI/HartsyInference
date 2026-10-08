@@ -30,15 +30,22 @@ public sealed record RouterDescriptor(
     public RouterDescriptor Validated()
     {
         if (NumExperts <= 0) throw new ArgumentException("A router needs at least one expert.", nameof(NumExperts));
-        if (TopKDecode <= 0 || TopKDecode > NumExperts) throw new ArgumentException($"Decode top-k {TopKDecode} must be in [1, {NumExperts}].", nameof(TopKDecode));
-        if (TopKPrefill <= 0 || TopKPrefill > NumExperts) throw new ArgumentException($"Prefill top-k {TopKPrefill} must be in [1, {NumExperts}].", nameof(TopKPrefill));
-        if (GroupCount == 1) throw new ArgumentException("One expert group is not a grouping; use GroupCount 0 for flat routing.", nameof(GroupCount));
+        if (TopKDecode <= 0 || TopKDecode > NumExperts)
+            throw new ArgumentException($"Decode top-k {TopKDecode} must be in [1, {NumExperts}].", nameof(TopKDecode));
+        if (TopKPrefill <= 0 || TopKPrefill > NumExperts)
+            throw new ArgumentException($"Prefill top-k {TopKPrefill} must be in [1, {NumExperts}].", nameof(TopKPrefill));
+        if (GroupCount == 1) throw new ArgumentException("One expert group is not a grouping; use GroupCount 0 for flat routing.",
+                nameof(GroupCount));
         if (GroupCount > 1)
         {
-            if (NumExperts % GroupCount != 0) throw new ArgumentException($"{GroupCount} groups do not divide {NumExperts} experts.", nameof(GroupCount));
+            if (NumExperts % GroupCount != 0) throw new ArgumentException($"{GroupCount} groups do not divide {NumExperts} experts.",
+                    nameof(GroupCount));
             int groupSize = NumExperts / GroupCount;
-            if (groupSize < 2) throw new ArgumentException($"Groups of {groupSize} expert(s) cannot be group-limited; the backend needs at least 2 per group.", nameof(GroupCount));
-            if (GroupsKept <= 0 || GroupsKept > GroupCount) throw new ArgumentException($"Groups kept {GroupsKept} must be in [1, {GroupCount}].", nameof(GroupsKept));
+            if (groupSize < 2)
+                throw new ArgumentException(
+                    $"Groups of {groupSize} expert(s) cannot be group-limited; the backend needs at least 2 per group.", nameof(GroupCount));
+            if (GroupsKept <= 0 || GroupsKept > GroupCount)
+                throw new ArgumentException($"Groups kept {GroupsKept} must be in [1, {GroupCount}].", nameof(GroupsKept));
             long eligible = (long)groupSize * GroupsKept;
             if (TopKDecode > eligible || TopKPrefill > eligible)
                 throw new ArgumentException($"Top-k cannot exceed the {eligible} experts in the kept groups.", nameof(TopKDecode));
@@ -65,7 +72,8 @@ public sealed record RouterDescriptor(
     /// <exception cref="InvalidOperationException">The router is wider than the backend kernel supports; routing stays on the host.</exception>
     public MoeRouteArgs ToRouteArgs(bool prefill)
     {
-        if (!CanLowerToBackend) throw new InvalidOperationException($"{NumExperts} experts exceed the backend router limit of {MoeRouteArgs.MaxExperts}.");
+        if (!CanLowerToBackend)
+            throw new InvalidOperationException($"{NumExperts} experts exceed the backend router limit of {MoeRouteArgs.MaxExperts}.");
         return new MoeRouteArgs(NumExperts, prefill ? TopKPrefill : TopKDecode, Scoring, GroupCount, GroupsKept,
             MaskedGroupValue: 0f, Renormalize: Renormalize, RenormEpsilon: RenormEpsilon, Scale: Scale, LogitDivisor: LogitDivisor);
     }

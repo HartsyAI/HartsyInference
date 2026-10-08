@@ -31,10 +31,12 @@ public static class DeepSeekV41Topology
         {
             DeepSeekV41LayerPlan plan = config.LayerPlans[i];
             // Every layer keeps the sliding-window ring; only KV-source layers also own compressed latents.
-            SequenceStateKind state = plan.IsKvSource
+            // A real compressed source needs a positive ratio; DeepSeekV41AttentionSettings.ForLayer uses the same rule.
+            SequenceStateKind state = plan.IsKvSource && plan.CompressRatio > 0
                 ? SequenceStateKind.SlidingWindowKv | SequenceStateKind.CompressedKv
                 : SequenceStateKind.SlidingWindowKv;
-            layers.Add(plan.IsDraft ? DraftLayer(i, config, scoring, dtype, program, state) : TargetLayer(i, config, scoring, dtype, shared, program, state));
+            layers.Add(plan.IsDraft ? DraftLayer(i, config, scoring, dtype, program, state) : TargetLayer(i, config, scoring, dtype,
+                    shared, program, state));
         }
         return new SparseModelTopology(config.HiddenSize, layers, "deepseek-v4.1");
     }
@@ -52,9 +54,12 @@ public static class DeepSeekV41Topology
             Scale: (float)config.RoutedScalingFactor,
             HasSelectionBias: true,
             HasTokenKindBias: config.Vision is not null).Validated();
-        ExpertGroupDescriptor routed = new ExpertGroupDescriptor(config.NRoutedExperts, new ExpertDescriptor(config.HiddenSize, config.MoeIntermediateSize, dtype)).Validated();
-        ExpertGroupDescriptor sharedGroup = new ExpertGroupDescriptor(config.NSharedExperts, new ExpertDescriptor(config.HiddenSize, config.MoeIntermediateSize, sharedDType)).Validated();
-        return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, sharedGroup, SharedIsGated: false, program).Validated(), state);
+        ExpertGroupDescriptor routed = new ExpertGroupDescriptor(config.NRoutedExperts, new ExpertDescriptor(config.HiddenSize,
+                config.MoeIntermediateSize, dtype)).Validated();
+        ExpertGroupDescriptor sharedGroup = new ExpertGroupDescriptor(config.NSharedExperts, new ExpertDescriptor(config.HiddenSize,
+                config.MoeIntermediateSize, sharedDType)).Validated();
+        return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, sharedGroup, SharedIsGated: false,
+                program).Validated(), state);
     }
 
     private static SparseLayerDescriptor DraftLayer(int index, DeepSeekV41Config config, MoeRouteScoring scoring, DType dtype,
@@ -68,8 +73,10 @@ public static class DeepSeekV41Topology
             Renormalize: config.NormTopkProb && config.DsparkNumExpertsPerTok > 1,
             RenormEpsilon: 1e-20f,
             Scale: (float)config.RoutedScalingFactor).Validated();
-        ExpertGroupDescriptor routed = new ExpertGroupDescriptor(config.DsparkNRoutedExperts, new ExpertDescriptor(config.HiddenSize, config.MoeIntermediateSize, dtype)).Validated();
-        return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, Shared: null, SharedIsGated: false, program).Validated(), state, IsDraft: true);
+        ExpertGroupDescriptor routed = new ExpertGroupDescriptor(config.DsparkNRoutedExperts, new ExpertDescriptor(config.HiddenSize,
+                config.MoeIntermediateSize, dtype)).Validated();
+        return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, Shared: null, SharedIsGated: false,
+                program).Validated(), state, IsDraft: true);
     }
 
     private static MoeRouteScoring ParseScoring(string name) => name switch

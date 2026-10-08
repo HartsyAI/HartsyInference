@@ -2,7 +2,8 @@ using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Moe;
 
-/// <summary>Shape and storage of one expert. Heterogeneous expert sizes are expressed by different descriptors, not by a uniform assumption.</summary>
+/// <summary>Shape and storage of one expert. Heterogeneous expert sizes are expressed by different descriptors, not by
+/// a uniform assumption.</summary>
 public sealed record ExpertDescriptor
 {
     /// <summary>Creates an expert shape.</summary>

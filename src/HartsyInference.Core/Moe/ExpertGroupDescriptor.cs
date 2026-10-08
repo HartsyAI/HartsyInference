@@ -27,7 +27,8 @@ public sealed record ExpertGroupDescriptor
         Dictionary<int, ExpertDescriptor> copy = new(overrides.Count);
         foreach (KeyValuePair<int, ExpertDescriptor> pair in overrides)
         {
-            if ((uint)pair.Key >= (uint)count) throw new ArgumentException($"Override index {pair.Key} is outside a group of {count}.", nameof(overrides));
+            if ((uint)pair.Key >= (uint)count) throw new ArgumentException($"Override index {pair.Key} is outside a group of {count}.",
+                    nameof(overrides));
             ArgumentNullException.ThrowIfNull(pair.Value);
             copy[pair.Key] = pair.Value;
         }
