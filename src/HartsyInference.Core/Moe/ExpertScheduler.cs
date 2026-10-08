@@ -21,16 +21,15 @@ public static class ExpertScheduler
     /// <param name="countScratch">At least <paramref name="expertCount"/> entries; overwritten.</param>
     /// <param name="residentScratch">At least the number of distinct routed experts; overwritten.</param>
     /// <param name="keyScratch">At least <paramref name="expertCount"/> entries; overwritten.</param>
-    /// <param name="output">Receives one assignment per routed expert; cleared first.</param>
+    /// <param name="output">Receives one assignment per routed expert. Must hold at least that many entries.</param>
     /// <returns>The number of assignments written.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">An id is outside the layer, or a scratch buffer is too small.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An id is outside the layer, or a scratch or output buffer is too small.</exception>
     public static int Plan(IResidencyAwareExpertCache cache, ReadOnlySpan<int> ids, int layer, ushort bank, int expertCount,
         IMissExecutionPolicy policy, Span<int> countScratch, Span<bool> residentScratch, Span<ExpertKey> keyScratch,
-        List<ExpertAssignment> output)
+        Span<ExpertAssignment> output)
     {
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(policy);
-        ArgumentNullException.ThrowIfNull(output);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expertCount);
         if (countScratch.Length < expertCount || keyScratch.Length < expertCount)
             throw new ArgumentOutOfRangeException(nameof(countScratch), "Scratch buffers must hold one entry per routed expert.");
@@ -49,14 +48,14 @@ public static class ExpertScheduler
             keyScratch[distinct++] = new ExpertKey(layer, expert, bank);
         }
         if (residentScratch.Length < distinct) throw new ArgumentOutOfRangeException(nameof(residentScratch), "Residency scratch is too small.");
+        if (output.Length < distinct) throw new ArgumentOutOfRangeException(nameof(output), "The output must hold one entry per routed expert.");
         cache.LookupResident(keyScratch[..distinct], residentScratch[..distinct]);
 
-        output.Clear();
         for (int i = 0; i < distinct; i++)
         {
             ExpertKey key = keyScratch[i];
             int rows = countScratch[key.Expert];
-            output.Add(new ExpertAssignment(key, policy.Place(key, residentScratch[i], rows), rows));
+            output[i] = new ExpertAssignment(key, policy.Place(key, residentScratch[i], rows), rows);
         }
         return distinct;
     }

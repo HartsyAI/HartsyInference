@@ -35,9 +35,9 @@ public sealed class ExpertSchedulerTests
         int[] counts = new int[8];
         bool[] resident = new bool[8];
         ExpertKey[] keys = new ExpertKey[8];
-        List<ExpertAssignment> output = [];
-        ExpertScheduler.Plan(cache, ids, layer: 0, bank, expertCount: 8, policy, counts, resident, keys, output);
-        return output;
+        ExpertAssignment[] output = new ExpertAssignment[8];
+        int written = ExpertScheduler.Plan(cache, ids, layer: 0, bank, expertCount: 8, policy, counts, resident, keys, output);
+        return output.Take(written).ToList();
     }
 
     [Fact]
@@ -122,11 +122,13 @@ public sealed class ExpertSchedulerTests
         int[] counts = new int[8];
         bool[] resident = new bool[8];
         ExpertKey[] keys = new ExpertKey[8];
-        List<ExpertAssignment> output = [];
+        ExpertAssignment[] output = new ExpertAssignment[8];
 
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ExpertScheduler.Plan(cache, [8], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, output));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ExpertScheduler.Plan(cache, [1], 0, 0, 8, ResidentFirstPolicy.Instance, new int[4], resident, keys, output));
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, new ExpertAssignment[1]));
     }
 }
