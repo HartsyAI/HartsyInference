@@ -134,13 +134,15 @@ class LazyRoutedExpert(nn.Module):
         self.layer = -1
         self.index = -1
 
-    def bind(self, source: SafetensorsDir, layer: int, index: int) -> None:
+    def bind(self, source: SafetensorsDir, layer, index: int) -> None:
+        """`layer` is a backbone layer number, or the checkpoint prefix of a DSpark stage such as "mtp.0"."""
+        base = layer if isinstance(layer, str) else f"layers.{layer}"
         for w in ("w1", "w2", "w3"):
             for part in ("weight", "scale"):
-                key = f"layers.{layer}.ffn.experts.{index}.{w}.{part}"
+                key = f"{base}.ffn.experts.{index}.{w}.{part}"
                 if not source.has(key):
                     raise KeyError(f"checkpoint has no {key}")
-        self.source, self.layer, self.index = source, layer, index
+        self.source, self.layer, self.index = source, base, index
 
     def _inner(self) -> nn.Module:
         key = (self.source.path, self.layer, self.index)
@@ -151,7 +153,7 @@ class LazyRoutedExpert(nn.Module):
         inner = self._build()
         for w in ("w1", "w2", "w3"):
             linear = getattr(inner, w)
-            base = f"layers.{self.layer}.ffn.experts.{self.index}.{w}"
+            base = f"{self.layer}.ffn.experts.{self.index}.{w}"
             weight = self.source.read(f"{base}.weight")
             linear.weight.data = weight.view(torch.float4_e2m1fn_x2) if weight.dtype == torch.int8 else weight
             linear.scale.data = self.source.read(f"{base}.scale")

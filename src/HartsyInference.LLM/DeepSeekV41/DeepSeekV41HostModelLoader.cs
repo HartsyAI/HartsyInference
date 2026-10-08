@@ -138,7 +138,7 @@ public static class DeepSeekV41HostModelLoader
     };
 
     // Reads canonical keys as F32, checking the logical shape named by the config.
-    private sealed class Reader(DeepSeekV41Checkpoint checkpoint, DeepSeekV41Residency residency)
+    internal sealed class Reader(DeepSeekV41Checkpoint checkpoint, DeepSeekV41Residency residency)
     {
         // Large projections follow the residency choice; the small float tensors always load as F32.
         public DeepSeekV41Weight Weight(string key, long rows, long cols) => residency == DeepSeekV41Residency.Stored
@@ -157,7 +157,7 @@ public static class DeepSeekV41HostModelLoader
     }
 
     // One layer's view of the shared expert cache; a cache key packs (layer, expert) and both directions live here.
-    private sealed class LayerExperts(DeepSeekV41ExpertCache cache, int layer, int experts) : IDeepSeekV41ExpertSource
+    internal sealed class LayerExperts(DeepSeekV41ExpertCache cache, int layer, int experts) : IDeepSeekV41ExpertSource
     {
         public static (int Layer, int Expert) Unpack(int key, int experts) => (key / experts, key % experts);
 
