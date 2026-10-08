@@ -6,21 +6,27 @@ namespace HartsyInference.Core.Backends;
 /// <remarks><para>Replacement scans probation before the protected segment, then colder layers before hotter ones, then oldest use first;
 /// pinned experts and the ones being requested are never victims. A prefetch also never evicts from the layers it targets or the layer last acquired;
 /// <see cref="Acquire"/> does not protect its own layer, since a layer's unpinned experts must be replaceable by that layer's next request. Every hook runs under the cache lock.</para></remarks>
-public abstract class ExpertCacheBase : IExpertCache
+public abstract class ExpertCacheBase : IResidencyAwareExpertCache
 {
     private const double ProtectedFraction = 0.8;
     private const long AgeEveryRequests = 4096;
 
     private readonly object _gate = new();
-    private readonly Dictionary<int, ExpertBank> _banks = [];
+
+    // Scratch for the residency path, reused under _gate so a per-layer call does not allocate.
+    private readonly List<ExpertKey> _scratchUnique = [];
+    private readonly HashSet<ExpertKey> _scratchSeen = [];
+    private readonly List<ExpertKey> _scratchResident = [];
+    private readonly List<ExpertKey> _scratchAbsent = [];
+    private readonly Dictionary<ExpertLayerKey, ExpertBank> _banks = [];
     private readonly Dictionary<ExpertKey, ExpertCacheEntry> _entries = [];
-    private readonly Dictionary<int, long> _layerFrequency = [];
+    private readonly Dictionary<ExpertLayerKey, long> _layerFrequency = [];
     private readonly HashSet<ExpertLease> _live = [];
     private long _tick;
     private long _requests;
     private long _residentBytes;
     private long _protectedBytes;
-    private int _currentLayer = -1;
+    private ExpertLayerKey? _currentLayer;
     private bool _disposed;
     private long _hits, _inFlightHits, _misses, _prefetches, _evictions, _bytesUploaded;
 
@@ -90,9 +96,9 @@ public abstract class ExpertCacheBase : IExpertCache
         ArgumentNullException.ThrowIfNull(bank);
         lock (_gate)
         {
-            if (_banks.TryGetValue(bank.Layer, out ExpertBank? existing) && !ReferenceEquals(existing, bank))
-                throw new InvalidOperationException($"Layer {bank.Layer} already has a different expert bank registered.");
-            _banks[bank.Layer] = bank;
+            if (_banks.TryGetValue(bank.LayerKey, out ExpertBank? existing) && !ReferenceEquals(existing, bank))
+                throw new InvalidOperationException($"Layer {bank.LayerKey} already has a different expert bank registered.");
+            _banks[bank.LayerKey] = bank;
         }
     }
 
@@ -108,7 +114,7 @@ public abstract class ExpertCacheBase : IExpertCache
             HashSet<ExpertKey> missingKeys = [];
             long missingBytes = 0;
             int hits = 0, inFlight = 0;
-            if (unique.Count > 0) _currentLayer = unique[0].Layer;
+            if (unique.Count > 0) _currentLayer = unique[0].LayerKey;
             foreach (ExpertKey key in unique)
             {
                 if (_entries.TryGetValue(key, out ExpertCacheEntry? entry))
@@ -126,27 +132,82 @@ public abstract class ExpertCacheBase : IExpertCache
             MakeRoom(missingBytes, requested, protectedLayers: null, mustSucceed: true);
             UploadMissing(missing, prefetch: false);
 
-            // Awaiting can throw; do it before any pin so a failure leaves nothing held.
-            ExpertWeights[] leased = new ExpertWeights[unique.Count];
-            for (int i = 0; i < unique.Count; i++)
+            return PinAndLease(unique, missingKeys, hits, inFlight);
+        }
+    }
+
+    /// <inheritdoc/>
+    public int LookupResident(ReadOnlySpan<ExpertKey> keys, Span<bool> resident)
+    {
+        if (resident.Length < keys.Length) throw new ArgumentException("The residency mask must hold one entry per key.", nameof(resident));
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            int count = 0;
+            for (int i = 0; i < keys.Length; i++)
             {
-                ExpertCacheEntry entry = _entries[unique[i]];
-                AwaitPending(entry);
-                leased[i] = entry.Weights;
+                bool present = _entries.ContainsKey(keys[i]);
+                resident[i] = present;
+                if (present) count++;
             }
-            foreach (ExpertKey key in unique)
+            return count;
+        }
+    }
+
+    /// <inheritdoc/>
+    public ExpertLease AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses)
+    {
+        ArgumentNullException.ThrowIfNull(misses);
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            DistinctInto(keys, _scratchUnique, _scratchSeen);
+            _scratchResident.Clear();
+            _scratchAbsent.Clear();
+            int inFlight = 0;
+            foreach (ExpertKey key in _scratchUnique)
             {
-                ExpertCacheEntry entry = _entries[key];
-                entry.PinCount++;
-                Touch(entry, resident: !missingKeys.Contains(key));
+                if (_entries.TryGetValue(key, out ExpertCacheEntry? entry))
+                {
+                    _scratchResident.Add(key);
+                    if (entry.Pending is not null) inFlight++;
+                }
+                else
+                {
+                    _scratchAbsent.Add(key);
+                }
             }
-            _hits += hits;
-            _inFlightHits += inFlight;
-            AgeFrequencies(unique.Count);
-            ExpertLease lease = new(this, leased);
-            _live.Add(lease);
+            if (_scratchUnique.Count > 0) _currentLayer = _scratchUnique[0].LayerKey;
+            // Only resident (or already uploading) experts are pinned; nothing is uploaded or resolved here.
+            ExpertLease lease = PinAndLease(_scratchResident, missingKeys: null, _scratchResident.Count, inFlight);
+            misses.AddRange(_scratchAbsent);
             return lease;
         }
+    }
+
+    /// <summary>Awaits in-flight uploads, pins every key in <paramref name="unique"/> and returns the lease. Caller holds the gate.</summary>
+    private ExpertLease PinAndLease(List<ExpertKey> unique, HashSet<ExpertKey>? missingKeys, int hits, int inFlight)
+    {
+        // Awaiting can throw; do it before any pin so a failure leaves nothing held.
+        ExpertWeights[] leased = new ExpertWeights[unique.Count];
+        for (int i = 0; i < unique.Count; i++)
+        {
+            ExpertCacheEntry entry = _entries[unique[i]];
+            AwaitPending(entry);
+            leased[i] = entry.Weights;
+        }
+        foreach (ExpertKey key in unique)
+        {
+            ExpertCacheEntry entry = _entries[key];
+            entry.PinCount++;
+            Touch(entry, resident: missingKeys is null || !missingKeys.Contains(key));
+        }
+        _hits += hits;
+        _inFlightHits += inFlight;
+        AgeFrequencies(unique.Count);
+        ExpertLease lease = new(this, leased);
+        _live.Add(lease);
+        return lease;
     }
 
     /// <inheritdoc/>
@@ -157,8 +218,8 @@ public abstract class ExpertCacheBase : IExpertCache
         {
             ThrowIfDisposed();
             HashSet<ExpertKey> requested = [.. unique];
-            HashSet<int> protectedLayers = [.. unique.Select(static key => key.Layer)];
-            if (_currentLayer >= 0) protectedLayers.Add(_currentLayer);
+            HashSet<ExpertLayerKey> protectedLayers = [.. unique.Select(static key => key.LayerKey)];
+            if (_currentLayer is { } current) protectedLayers.Add(current);
             int started = 0;
             foreach (ExpertKey key in unique)
             {
@@ -251,6 +312,16 @@ public abstract class ExpertCacheBase : IExpertCache
         if (failures is not null) throw new AggregateException("Expert cache teardown failed.", failures);
     }
 
+    private static void DistinctInto(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> unique, HashSet<ExpertKey> seen)
+    {
+        unique.Clear();
+        seen.Clear();
+        foreach (ExpertKey key in keys)
+        {
+            if (seen.Add(key)) unique.Add(key);
+        }
+    }
+
     private static List<ExpertKey> Distinct(ReadOnlySpan<ExpertKey> keys)
     {
         List<ExpertKey> unique = new(keys.Length);
@@ -266,8 +337,8 @@ public abstract class ExpertCacheBase : IExpertCache
 
     private ExpertWeights Resolve(ExpertKey key)
     {
-        if (!_banks.TryGetValue(key.Layer, out ExpertBank? bank))
-            throw new InvalidOperationException($"No expert bank is registered for layer {key.Layer}.");
+        if (!_banks.TryGetValue(key.LayerKey, out ExpertBank? bank))
+            throw new InvalidOperationException($"No expert bank is registered for layer {key.LayerKey}.");
         return bank.Get(key.Expert);
     }
 
@@ -293,7 +364,7 @@ public abstract class ExpertCacheBase : IExpertCache
     private void Touch(ExpertCacheEntry entry, bool resident)
     {
         entry.LastTick = ++_tick;
-        _layerFrequency[entry.Key.Layer] = _layerFrequency.GetValueOrDefault(entry.Key.Layer) + 1;
+        _layerFrequency[entry.Key.LayerKey] = _layerFrequency.GetValueOrDefault(entry.Key.LayerKey) + 1;
         if (!resident || entry.Protected) return;
         entry.Protected = true;
         _protectedBytes += entry.Bytes;
@@ -317,17 +388,17 @@ public abstract class ExpertCacheBase : IExpertCache
         long before = _requests / AgeEveryRequests;
         _requests += requests;
         if (_requests / AgeEveryRequests == before) return;
-        foreach (int layer in _layerFrequency.Keys.ToList()) _layerFrequency[layer] /= 2;
+        foreach (ExpertLayerKey layer in _layerFrequency.Keys.ToList()) _layerFrequency[layer] /= 2;
     }
 
-    private IEnumerable<ExpertCacheEntry> Candidates(HashSet<ExpertKey>? requested, HashSet<int>? protectedLayers)
+    private IEnumerable<ExpertCacheEntry> Candidates(HashSet<ExpertKey>? requested, HashSet<ExpertLayerKey>? protectedLayers)
     {
         List<(ExpertCacheEntry Entry, bool Fenced)> found = [];
         foreach (ExpertCacheEntry entry in _entries.Values)
         {
             if (entry.PinCount > 0) continue;
             if (requested is not null && requested.Contains(entry.Key)) continue;
-            if (protectedLayers is not null && protectedLayers.Contains(entry.Key.Layer)) continue;
+            if (protectedLayers is not null && protectedLayers.Contains(entry.Key.LayerKey)) continue;
             found.Add((entry, PurgeFences(entry)));
         }
         found.Sort((a, b) =>
@@ -336,7 +407,7 @@ public abstract class ExpertCacheBase : IExpertCache
             if (order != 0) return order;
             order = a.Entry.Protected.CompareTo(b.Entry.Protected);
             if (order != 0) return order;
-            order = _layerFrequency.GetValueOrDefault(a.Entry.Key.Layer).CompareTo(_layerFrequency.GetValueOrDefault(b.Entry.Key.Layer));
+            order = _layerFrequency.GetValueOrDefault(a.Entry.Key.LayerKey).CompareTo(_layerFrequency.GetValueOrDefault(b.Entry.Key.LayerKey));
             return order != 0 ? order : a.Entry.LastTick.CompareTo(b.Entry.LastTick);
         });
         return found.Select(static item => item.Entry);
@@ -360,7 +431,7 @@ public abstract class ExpertCacheBase : IExpertCache
         if (--fence.References == 0) DestroyFence(fence.Handle);
     }
 
-    private bool MakeRoom(long incomingBytes, HashSet<ExpertKey> requested, HashSet<int>? protectedLayers, bool mustSucceed)
+    private bool MakeRoom(long incomingBytes, HashSet<ExpertKey> requested, HashSet<ExpertLayerKey>? protectedLayers, bool mustSucceed)
     {
         long over = _residentBytes + incomingBytes - BudgetBytes;
         if (over <= 0) return true;

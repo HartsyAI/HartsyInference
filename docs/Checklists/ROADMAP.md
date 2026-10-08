@@ -10,7 +10,7 @@ Existing placement, layer/block sharding, CFG/context parallelism, tensor-parall
 collectives are described in [MULTI_GPU.md](../MULTI_GPU.md). Remaining work:
 
 - [ ] Tensor parallel: threaded driver and broader real-model/hardware verification; do not rebuild existing primitives.
-- [ ] Expert parallel: on-device MoE routing and per-device expert placement.
+- [ ] Expert parallel: on-device MoE routing and per-device expert placement. Topology contracts exist ([MOE_ARCHITECTURE](../MOE_ARCHITECTURE.md)); placement and execution are open.
 - [ ] Context parallel: >2 ranks, NCCL exchange, Ulysses/head parallelism, CP×CFG composition, broader video families.
 - [ ] Validate datacenter P2P/NVLink and ≥3 physical GPUs; same-device multi-rank tests do not establish that coverage.
 - [ ] Disaggregated prefill/decode serving.

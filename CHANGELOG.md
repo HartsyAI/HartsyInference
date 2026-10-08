@@ -10,6 +10,45 @@ stable release will require. Dates are UTC.
 
 - **Added: real-weight oracle for DeepSeek-V4.1-Flash layer 0, and a diagnostic probe on the host block.** `dump_real_layers.py` runs the unmodified upstream model on the real checkpoint's first layer; `RealLayers_MatchTheUpstreamModel` (gated on `DSV41_ORACLE_DIR`) compares the host reference against it, hidden relL2 4.3e-6 against the float32 oracle. `DeepSeekV41HostModel.SetProbe` / `DeepSeekV41Block.Probe` expose per-sublayer values for such comparisons and are off by default. No behaviour change.
 
+## alpha.284
+
+- **Added: residency queries and no-upload acquisition on the expert cache.** `IResidencyAwareExpertCache.LookupResident` reports which
+  experts are resident or uploading, without changing any state. `IResidencyAwareExpertCache.AcquireResident` pins only the resident
+  experts and returns the rest as misses, so a scheduler can run misses elsewhere without uploading them. Both live on the
+  new derived interface `IResidencyAwareExpertCache`; the published `IExpertCache` is unchanged, so its implementers are not
+  broken. `Acquire` shares its pin-and-lease tail with the new path, and its behavior is unchanged. The CUDA cache inherits the
+  behavior through `ExpertCacheBase`; its GPU tests are not run here.
+
+## alpha.283
+
+- **Added: expert identity with banks and a pluggable expert source.** `ExpertKey` gains a `Bank` (defaulted, so existing
+  two-argument keys are unchanged), and `ExpertLayerKey` is the cache's layer identity. Two models sharing one cache each
+  register their own bank, so the same layer number no longer collides; re-registering a different bank under one layer key
+  still throws. `IExpertSource` (with `ExpertBacking`: resident host, memory-mapped, pack, device) supplies expert weights on
+  demand, `DelegateExpertSource` adapts existing resolvers without copying them, and `ExpertBank.FromSource` builds a bank from
+  one. No model or runtime path changes behavior; the CUDA project builds against the new types, and its GPU tests are not
+  run here.
+
+## alpha.282
+
+- **Added: exact-contract reference path for routed sparse layers.** `Core.Moe.SparseFfnReference` runs a routed layer
+  from a `MoeLayerDescriptor` by composing the existing backend op contracts (`MoeReference.Route`, `BuildDispatch`,
+  `Combine`) with `ExpertProgramReference`, a scalar F32 execution of `ExpertProgram` (activation plus independent gate/up
+  clamps). It is the correctness oracle for later backend expert kernels. Shared experts are rejected explicitly until
+  they are covered. Parity against `MoeFeedForward` on identical weights holds within 1e-4 for softmax routing and for
+  grouped sigmoid routing with a selection bias. Production routing is unchanged.
+
+## alpha.281
+
+- **Added: generic sparse (MoE) topology contracts.** New `HartsyInference.Core.Moe` describes a model as layers (dense or
+  sparse), with a router (per-phase top-k, group limiting, scoring, token-kind bias), routed and shared expert groups with
+  per-index shape overrides, and an `ExpertProgram` (activation plus independent gate/up clamps) instead of a hard-coded
+  SwiGLU. `SparseCapabilities` is derived from the topology so runtime code checks capabilities, not model names;
+  `SparseModelTopology.Fingerprint` is a SHA-256 over shapes, routing and programs for profile and pack binding.
+  `MoeTopologyFactory` maps transformer MoE configs and `DeepSeekV41Topology` maps the official V4.1 config (routed
+  experts, clamped SwiGLU, draft layers). No runtime behavior changes. See `docs/MOE_ARCHITECTURE.md` and
+  `docs/Research/HETEROGENEOUS_MOE.md`.
+
 ## alpha.280
 
 Release cut. New in this release's source: the voice-agent call-audio detectors (#296). The `ToolRegistry`, Clef and CUDA
