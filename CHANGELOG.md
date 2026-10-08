@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.296
+
+- **Added: the DeepSeek-V4.1 DSpark draft head checked against the unmodified upstream on a synthetic model (CPU).** `dump_dspark_fixture.py` runs the upstream draft head on the host fixture's backbone, with seeded random draft weights, through an 11-token prefill and six decode steps, and records the drafts upstream's incremental window produces. The C# head, seeded afresh at each decode position from the committed rows (positions 11 to 16, past the 8-token window), reproduces the drafted ids exactly, with logits and confidences within 1e-3 relative. The target's taps for the three draft layers reproduce upstream's main hidden states at every position, and the same drafts come out when they are fed from the target's own taps. Acceptance rates are not measured on random weights. The embedding and head shared with the target are shape-checked. Plain decoding is unchanged.
+
 ## alpha.295
 
 - **Changed: the speculative scorer on the DeepSeek-V4.1 host model no longer replays a context the sequence already holds.** `DeepSeekV41GenerationState.SyncTo` rolls back only past the first token where the sequence and the context differ, and the state keeps the last committed token's hidden row, so a call whose context is already in place runs only its draft through the blocks, and a rejection replays the kept prefix once. The state can also record each committed position's DSpark target rows (opt-in), which a draft reads. Plain decoding and the speculative outputs are unchanged.
