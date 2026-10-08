@@ -10,17 +10,23 @@ public static class ExpertRouting
     /// <summary>Bytes the id readback moves for <paramref name="tokens"/> tokens at <paramref name="topK"/> experts each.</summary>
     public static long CompactBytes(long tokens, int topK) => tokens * topK * sizeof(int);
 
-    /// <summary>The distinct experts routed to, in ascending expert order, read from an I32 id tensor.</summary>
-    public static ExpertKey[] DistinctKeys(Tensor topkIdx, int layer, int expertCount)
+    /// <summary>The distinct experts routed to in bank 0, in ascending expert order, read from an I32 id tensor.</summary>
+    public static ExpertKey[] DistinctKeys(Tensor topkIdx, int layer, int expertCount) => DistinctKeys(topkIdx, layer, expertCount, 0);
+
+    /// <summary>The distinct experts routed to in <paramref name="bank"/>, in ascending expert order, read from an I32 id tensor.</summary>
+    public static ExpertKey[] DistinctKeys(Tensor topkIdx, int layer, int expertCount, ushort bank)
     {
         ArgumentNullException.ThrowIfNull(topkIdx);
         if (topkIdx.DType != DType.I32)
             throw new ArgumentException($"Routing ids must be I32; got {topkIdx.DType}.", nameof(topkIdx));
-        return DistinctKeys(topkIdx.AsSpan<int>(), layer, expertCount);
+        return DistinctKeys(topkIdx.AsSpan<int>(), layer, expertCount, bank);
     }
 
-    /// <summary>The distinct experts among <paramref name="ids"/>, in ascending expert order.</summary>
-    public static ExpertKey[] DistinctKeys(ReadOnlySpan<int> ids, int layer, int expertCount)
+    /// <summary>The distinct experts among <paramref name="ids"/> in bank 0, in ascending expert order.</summary>
+    public static ExpertKey[] DistinctKeys(ReadOnlySpan<int> ids, int layer, int expertCount) => DistinctKeys(ids, layer, expertCount, 0);
+
+    /// <summary>The distinct experts among <paramref name="ids"/> in <paramref name="bank"/>, in ascending expert order.</summary>
+    public static ExpertKey[] DistinctKeys(ReadOnlySpan<int> ids, int layer, int expertCount, ushort bank)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expertCount);
         bool[] seen = new bool[expertCount];
@@ -37,7 +43,7 @@ public static class ExpertRouting
         int next = 0;
         for (int expert = 0; expert < expertCount; expert++)
         {
-            if (seen[expert]) keys[next++] = new ExpertKey(layer, expert);
+            if (seen[expert]) keys[next++] = new ExpertKey(layer, expert, bank);
         }
         return keys;
     }

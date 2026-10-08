@@ -7,7 +7,7 @@ namespace HartsyInference.Core.Backends;
 public readonly record struct ExpertKey(int Layer, int Expert, ushort Bank)
 {
     /// <summary>The published two-argument form; bank 0.</summary>
-    public ExpertKey(int layer, int expert) : this(layer, expert, 0)
+    public ExpertKey(int Layer, int Expert) : this(Layer, Expert, 0)
     {
     }
 

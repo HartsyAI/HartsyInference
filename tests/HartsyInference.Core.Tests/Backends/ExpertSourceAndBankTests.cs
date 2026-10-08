@@ -76,6 +76,8 @@ public sealed class ExpertSourceAndBankTests
     [Fact]
     public void PublishedTwoArgumentForms_StillCompileAndMatchBankZero()
     {
+        ExpertKey named = new(Layer: 1, Expert: 2);
+        Assert.Equal(new ExpertKey(1, 2, 0), named);
         ExpertKey key = new(2, 5);
         (int layer, int expert) = key;
         Assert.Equal((2, 5), (layer, expert));
@@ -84,5 +86,30 @@ public sealed class ExpertSourceAndBankTests
         ExpertBank bank = new(2, 3, Weights);
         Assert.Equal(new ExpertLayerKey(0, 2), bank.LayerKey);
         Assert.Equal(new ExpertKey(2, 1, 0), bank.Key(1));
+    }
+
+    [Fact]
+    public void Bank_KeepsTheSourceBackingAndRoutingStaysInItsBank()
+    {
+        ExpertBank bank = ExpertBank.FromSource(new DelegateExpertSource(ExpertBacking.Pack, Weights), layer: 3, count: 4, bank: 2);
+        Assert.Equal(ExpertBacking.Pack, bank.Backing);
+
+        ExpertKey[] routed = ExpertRouting.DistinctKeys([3, 1], layer: 3, expertCount: 4, bank: 2);
+        Assert.All(routed, static key => Assert.Equal((ushort)2, key.Bank));
+        Assert.Equal([new ExpertKey(3, 1, 2), new ExpertKey(3, 3, 2)], routed);
+    }
+
+    [Fact]
+    public void Routing_IntoANonZeroBankAcquiresThatBanksExperts_NotBankZeros()
+    {
+        using FakeExpertCache cache = new(4 * ExpertBytes);
+        cache.RegisterBank(ExpertBank.FromSource(new DelegateExpertSource(ExpertBacking.ResidentHost, Weights), 0, 4, bank: 0));
+        cache.RegisterBank(ExpertBank.FromSource(new DelegateExpertSource(ExpertBacking.ResidentHost, Weights), 0, 4, bank: 1));
+
+        ExpertKey[] routed = ExpertRouting.DistinctKeys([2], layer: 0, expertCount: 4, bank: 1);
+        using ExpertLease lease = cache.Acquire(routed);
+
+        Assert.Equal(1, cache.Stats.ResidentExperts);
+        Assert.Same(lease.Get(new ExpertKey(0, 2, 1)), lease.Get(routed[0]));
     }
 }

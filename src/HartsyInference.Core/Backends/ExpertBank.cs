@@ -14,16 +14,23 @@ public sealed class ExpertBank
     /// <param name="count">Routed experts in the layer.</param>
     /// <param name="resolve">Produces one expert's weights.</param>
     /// <param name="bank">The bank this layer belongs to; 0 unless a model shares a cache with others.</param>
-    public ExpertBank(int layer, int count, Func<ExpertKey, ExpertWeights> resolve, ushort bank)
+    public ExpertBank(int layer, int count, Func<ExpertKey, ExpertWeights> resolve, ushort bank, ExpertBacking backing)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(layer);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(count);
         ArgumentNullException.ThrowIfNull(resolve);
         Layer = layer;
         Bank = bank;
+        Backing = backing;
         Count = count;
         _resolve = resolve;
         _created = new ExpertWeights?[count];
+    }
+
+    /// <summary>A bank in <paramref name="bank"/> whose experts are resident host memory.</summary>
+    public ExpertBank(int layer, int count, Func<ExpertKey, ExpertWeights> resolve, ushort bank)
+        : this(layer, count, resolve, bank, ExpertBacking.ResidentHost)
+    {
     }
 
     /// <summary>The published three-argument form; bank 0. Kept so existing callers still compile and link.</summary>
@@ -35,7 +42,7 @@ public sealed class ExpertBank
     public static ExpertBank FromSource(IExpertSource source, int layer, int count, ushort bank = 0)
     {
         ArgumentNullException.ThrowIfNull(source);
-        return new ExpertBank(layer, count, source.Resolve, bank);
+        return new ExpertBank(layer, count, source.Resolve, bank, source.Backing);
     }
 
     /// <summary>Layer number.</summary>
@@ -43,6 +50,9 @@ public sealed class ExpertBank
 
     /// <summary>The bank this layer belongs to.</summary>
     public ushort Bank { get; }
+
+    /// <summary>Where the authoritative bytes of these experts live, for policy choices; resident host unless built from a source.</summary>
+    public ExpertBacking Backing { get; }
 
     /// <summary>The cache identity of this layer.</summary>
     public ExpertLayerKey LayerKey => new(Bank, Layer);
