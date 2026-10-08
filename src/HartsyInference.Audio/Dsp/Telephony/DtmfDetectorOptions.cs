@@ -16,7 +16,7 @@ public sealed record DtmfDetectorOptions
 
     /// <summary>Share of the block's energy the two components must carry. Pure tones carry nearly all of it; speech
     /// carries a few percent.</summary>
-    public float MinTonalFraction { get; init; } = 0.4f;
+    public float MinTonalFraction { get; init; } = 0.6f;
 
     /// <summary>How far the strongest frequency of a group must stand above the next one, in dB.</summary>
     public float GroupDominanceDb { get; init; } = 6f;

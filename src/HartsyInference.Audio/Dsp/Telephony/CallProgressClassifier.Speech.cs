@@ -125,7 +125,8 @@ public sealed partial class CallProgressClassifier
             _soundRun = 0;
             _soundGap = 0;
         }
-        if (kind == BlockKind.Silent)
+        // The off part of a tone cadence (the 4 s between rings) is silence by design, not a quiet line.
+        if (kind == BlockKind.Silent && _burstTone == 0 && _lastTone == 0)
         {
             if (++_silentRun == _silenceBlocks)
             {

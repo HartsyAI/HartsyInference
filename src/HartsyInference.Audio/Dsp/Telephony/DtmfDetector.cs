@@ -79,9 +79,9 @@ public sealed class DtmfDetector
         _twistReverse = MathF.Pow(10f, options.MaxReverseTwistDb / 10f);
         _harmonicLow = options.MaxSecondHarmonicRatioLow;
         _harmonicHigh = options.MaxSecondHarmonicRatioHigh;
-        // The first of the blocks that carry a tone starts one block-length before the confirmation, so min-duration
-        // N ms needs enough blocks that the hop-spaced run spans it.
-        _minBlocks = Math.Max(2, (int)Math.Ceiling((options.MinToneMs * (SampleRate / 1000.0) - BlockSamples) / HopSamples) + 1);
+        // Blocks overlap a tone's edges, so a tone of D ms is seen by about (D + block) / hop blocks, the outermost ones
+        // only partly. Requiring a run whose block starts span MinToneMs keeps a clip shorter than that out.
+        _minBlocks = Math.Max(2, (int)Math.Ceiling(options.MinToneMs * (SampleRate / 1000.0) / HopSamples) + 1);
         _releaseBlocks = Math.Max(1, (int)Math.Ceiling(options.MinPauseMs * (SampleRate / 1000.0) / HopSamples));
     }
 
