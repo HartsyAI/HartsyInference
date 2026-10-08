@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.286
+
+- **Added: the placement planner for a routed layer.** `ExpertScheduler.Plan` reads the cache's residency and assigns each routed
+  expert to the GPU (resident) or the CPU (missing), through a replaceable `IMissExecutionPolicy`. Every routed (token, slot) pair
+  is counted once. Planning changes no cache state and uploads nothing. It is allocation-free: the caller owns the scratch and
+  the output. The GPU execution, the CPU kernels and the cross-device combine are not in this change and need the test rig.
+
 ## alpha.284
 
 - **Added: residency queries and no-upload acquisition on the expert cache.** `IResidencyAwareExpertCache.LookupResident` reports which
