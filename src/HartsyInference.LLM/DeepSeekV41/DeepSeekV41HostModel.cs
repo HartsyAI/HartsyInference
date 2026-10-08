@@ -173,7 +173,7 @@ public sealed class DeepSeekV41HostModel
             }
             else
             {
-                _blocks[i].Forward(stream, tokens, startPos, preMix, nextPreMix, state.Layers[i], state.Shared, hashIds, hashLayers, default, default);
+                _blocks[i].Forward(stream, tokens, startPos, preMix, nextPreMix, state.Layers[i], state.Shared, hashIds, hashLayers, default, default, default);
             }
             (preMix, nextPreMix) = (nextPreMix, preMix);
         }

@@ -80,11 +80,6 @@ public sealed class DeepSeekV41Block
     /// <summary>Collapses a stream into one input with already-derived coefficients; the model uses this for the final head.</summary>
     public void Collapse(ReadOnlySpan<float> x, ReadOnlySpan<float> pre, int tokens, Span<float> y) => _hcFfn.Collapse(x, pre, tokens, y);
 
-    /// <summary>Runs the block without the DSpark target tap; see the overload that takes <paramref name="streamMean"/>.</summary>
-    public void Forward(Span<float> x, int tokens, int startPos, ReadOnlySpan<float> preMix, Span<float> nextPreMix, DeepSeekV41AttentionState state,
-        DeepSeekV41SharedAttention shared, ReadOnlySpan<long> hashIds, int hashLayers, ReadOnlySpan<bool> tokenMask, ReadOnlySpan<byte> imageTokens)
-        => Forward(x, tokens, startPos, preMix, nextPreMix, state, shared, hashIds, hashLayers, tokenMask, imageTokens, default);
-
     /// <summary>Runs the block over <paramref name="tokens"/> positions, updating the stream in place.</summary>
     /// <param name="x">Residual stream, <c>[tokens, hc, dim]</c>; replaced by the block's output.</param>
     /// <param name="tokens">Position count.</param>

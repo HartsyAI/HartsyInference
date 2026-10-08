@@ -215,4 +215,84 @@ public sealed class DeepSeekV41HostModelTests
         Assert.Null(state.Shared.Candidates);
         Assert.Equal(0, state.Length);
     }
+
+    [Fact]
+    public void DSpark_Taps_Are_The_Hc_Mean_Of_Each_Target_Entry_Stream_And_Leave_The_Output_Unchanged()
+    {
+        JsonElement cfg = Fx.GetProperty("config");
+        int dim = cfg.GetProperty("dim").GetInt32(), hc = cfg.GetProperty("hc_mult").GetInt32(), layers = cfg.GetProperty("n_layers").GetInt32();
+        int vocab = cfg.GetProperty("vocab_size").GetInt32();
+        float eps = (float)cfg.GetProperty("norm_eps").GetDouble();
+        float[] embed = P("embed.weight");
+        using CpuBackend cpu = new();
+        DeepSeekV41Block[] blocks = Enumerable.Range(0, layers).Select(i => BuildBlock(cpu, i)).ToArray();
+        DeepSeekV41HostModel plain = new(dim, hc, vocab, eps, P("embed.weight"), blocks, P("norm.weight"), P("head.weight"));
+        DeepSeekV41HostModel tapped = new(dim, hc, vocab, eps, P("embed.weight"), blocks, P("norm.weight"), P("head.weight"), mainHiddenLayers: new[] { 0, layers - 1 });
+        Assert.Equal(2 * dim, tapped.MainHiddenWidth);
+
+        int[] ids = [1, 2, 1];
+        float[][] outputs = new float[layers][];
+        plain.SetProbe((layer, stage, values) => { if (stage == "out") outputs[layer] = values; });
+        float[] hidden = new float[ids.Length * dim];
+        plain.Forward(ids, plain.CreateState(16), hidden);
+        plain.SetProbe(null);
+
+        int width = tapped.MainHiddenWidth;
+        float[] tappedHidden = new float[ids.Length * dim], main = new float[ids.Length * width];
+        tapped.Forward(ids, tapped.CreateState(16), tappedHidden, main);
+        Assert.Equal(hidden, tappedHidden);
+
+        float[] first = new float[ids.Length * dim], last = new float[ids.Length * dim];
+        for (int t = 0; t < ids.Length; t++)
+            for (int d = 0; d < dim; d++)
+            {
+                first[t * dim + d] = main[t * width + d];
+                last[t * dim + d] = main[t * width + dim + d];
+            }
+
+        // block 0 reads the embedding copied into every hc stream, so the hc-mean of its entry stream is the embedding row
+        float[] expectedFirst = new float[ids.Length * dim];
+        for (int t = 0; t < ids.Length; t++) Array.Copy(embed, ids[t] * dim, expectedFirst, t * dim, dim);
+        AssertClose(expectedFirst, first, "first tap");
+
+        // the last tapped block reads the previous block's output, which the probe reports as [tokens, hc, dim]
+        float[] expectedLast = new float[ids.Length * dim];
+        for (int t = 0; t < ids.Length; t++)
+            for (int d = 0; d < dim; d++)
+            {
+                float sum = 0f;
+                for (int c = 0; c < hc; c++) sum += outputs[layers - 2][(t * hc + c) * dim + d];
+                expectedLast[t * dim + d] = sum / hc;
+            }
+        AssertClose(expectedLast, last, "last tap");
+    }
+
+    [Fact]
+    public void DSpark_Taps_Reject_Mismatched_Buffers_And_Split_A_Continuation_Per_Token()
+    {
+        JsonElement cfg = Fx.GetProperty("config");
+        int dim = cfg.GetProperty("dim").GetInt32(), hc = cfg.GetProperty("hc_mult").GetInt32(), layers = cfg.GetProperty("n_layers").GetInt32();
+        int vocab = cfg.GetProperty("vocab_size").GetInt32();
+        float eps = (float)cfg.GetProperty("norm_eps").GetDouble();
+        using CpuBackend cpu = new();
+        DeepSeekV41Block[] blocks = Enumerable.Range(0, layers).Select(i => BuildBlock(cpu, i)).ToArray();
+        DeepSeekV41HostModel plain = new(dim, hc, vocab, eps, P("embed.weight"), blocks, P("norm.weight"), P("head.weight"));
+        DeepSeekV41HostModel tapped = new(dim, hc, vocab, eps, P("embed.weight"), blocks, P("norm.weight"), P("head.weight"), mainHiddenLayers: new[] { 0, layers - 1 });
+        int width = tapped.MainHiddenWidth;
+
+        Assert.Throws<InvalidOperationException>(() => plain.Forward(new[] { 1 }, plain.CreateState(4), new float[dim], new float[width]));
+        Assert.Throws<ArgumentException>(() => tapped.Forward(new[] { 1, 2 }, tapped.CreateState(4), new float[2 * dim], new float[width]));
+
+        // a continuation on a non-empty state runs one token at a time, and the taps must follow that split
+        int[] ids = [1, 2, 1];
+        float[] whole = new float[ids.Length * width], stepped = new float[ids.Length * width];
+        float[] wholeHidden = new float[ids.Length * dim], steppedHidden = new float[ids.Length * dim];
+        DeepSeekV41SequenceState continued = tapped.CreateState(16), single = tapped.CreateState(16);
+        tapped.Forward(ids.AsSpan(0, 1), continued, wholeHidden.AsSpan(0, dim), whole.AsSpan(0, width));
+        tapped.Forward(ids.AsSpan(1), continued, wholeHidden.AsSpan(dim), whole.AsSpan(width));
+        for (int t = 0; t < ids.Length; t++)
+            tapped.Forward(ids.AsSpan(t, 1), single, steppedHidden.AsSpan(t * dim, dim), stepped.AsSpan(t * width, width));
+        Assert.Equal(stepped, whole);
+        Assert.Equal(steppedHidden, wholeHidden);
+    }
 }
