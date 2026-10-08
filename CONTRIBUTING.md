@@ -7,7 +7,7 @@ and sometimes checkpoints; libraries target net8.0/net10.0, tests net10.0.
 git clone https://github.com/HartsyAI/HartsyInference.git
 cd HartsyInference
 dotnet build
-dotnet test --filter "Category!=SyntheticSmoke&Category!=Integration&Category!=GpuIntegration&Category!=Slow&Network!=Real"
+dotnet test --filter "Category!=SyntheticSmoke&Category!=Integration&Category!=GpuIntegration&Category!=GpuBenchmark&Category!=Slow&Network!=Real"
 ```
 
 Read [AGENTS.md](AGENTS.md), [code style](docs/CODE_STYLE.md), and the matching
