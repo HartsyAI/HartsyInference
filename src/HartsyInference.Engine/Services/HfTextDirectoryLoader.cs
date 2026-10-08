@@ -11,12 +11,15 @@ internal static class HfTextDirectoryLoader
     /// <summary>Longest sequence (prompt plus generation) a loaded V4.1 model accepts. It sizes the rope tables and every sequence state; the checkpoint's own limit is far higher, but a host reference run does not need it.</summary>
     internal const int MaxSequenceTokens = 16384;
 
+    /// <summary>The options the Text path loads with; the RAM guard and the memory profile size against the same ones.</summary>
+    internal static DeepSeekV41LoadOptions LoadOptions { get; } = new(MaxSequenceTokens);
+
     /// <summary>Loads the directory onto <paramref name="backend"/> (the CPU backend: the reference model keeps its weights on the host).</summary>
     /// <exception cref="HartsyInferenceException">The directory's model_type is not supported, it has no usable tokenizer.json, or the checkpoint is invalid.</exception>
     internal static DeepSeekV41TextModel Load(HfCheckpointInfo info, IBackend backend)
     {
         RequireSupported(info);
-        return DeepSeekV41TextModel.Load(backend, info.Root, new DeepSeekV41LoadOptions(MaxSequenceTokens));
+        return DeepSeekV41TextModel.Load(backend, info.Root, LoadOptions);
     }
 
     /// <summary>Refuses a directory the Text path cannot run for a reason visible without opening a weight (an unsupported model_type, no tokenizer.json), so the caller can do it before it unloads anything.</summary>

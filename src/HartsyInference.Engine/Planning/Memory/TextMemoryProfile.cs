@@ -1,3 +1,4 @@
+using HartsyInference.Engine.Services;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.ModelAssets.Checkpoints;
 
@@ -26,10 +27,12 @@ internal static class TextMemoryProfile
             + bytes[DeepSeekV41WeightClass.Head];
         long streamFloor = bytes[DeepSeekV41WeightClass.Dense] + bytes[DeepSeekV41WeightClass.Embed]
             + bytes[DeepSeekV41WeightClass.Head];
+        // sequence state, prefill activations, small widened tensors and Engram row caches at the sequence length the Text path loads for
+        long workingBytes = DeepSeekV41WorkingMemory.AnonymousBytes(checkpoint.Config, 0, HfTextDirectoryLoader.LoadOptions);
         return new MemoryEstimate
         {
             FamilyId = DeepSeekV41Config.ModelType,
-            Phases = new[] { new MemoryPhase(MemoryComponent.LanguageModel, resident, 0, streamFloor, Streamable: true) },
+            Phases = new[] { new MemoryPhase(MemoryComponent.LanguageModel, resident, workingBytes, streamFloor, Streamable: true) },
             Accuracy = MemoryEstimateAccuracy.HeaderOnly,
             WeightBytesByClass = bytes.ToDictionary(pair => pair.Key.ToString(), pair => pair.Value),
         };

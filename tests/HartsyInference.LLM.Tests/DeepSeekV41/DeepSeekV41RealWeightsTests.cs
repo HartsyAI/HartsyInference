@@ -1,5 +1,8 @@
 using System.Diagnostics;
 using HartsyInference.Cpu;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Registry;
+using HartsyInference.Engine.Services;
 using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -9,9 +12,11 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.LLM.Tests.DeepSeekV41;
 
-/// <summary>The official DeepSeek-V4.1-Flash checkpoint through the CPU host reference. Needs ~48 GiB of RAM and the weights under
-/// <c>$HARTSYINFERENCE_MODELS_DIR/llm/deepseek-v4.1-flash</c>; a missing directory skips unless <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c>.
-/// <c>HARTSY_REQUIRE_REAL_WEIGHTS=1 HARTSYINFERENCE_MODELS_DIR=/mnt/model-storage/Models dotnet test tests/HartsyInference.LLM.Tests -c Release -f net10.0 --filter "FullyQualifiedName~DeepSeekV41RealWeightsTests"</c>.</summary>
+/// <summary>The official DeepSeek-V4.1-Flash checkpoint (pinned revision dba1be0a) through the CPU host reference. The weights are found through
+/// <see cref="ModelResolver"/> (the models root's <c>llm/deepseek-v4.1-flash</c>); a missing directory skips unless <c>HARTSY_REQUIRE_REAL_WEIGHTS=1</c>, which fails instead.
+/// Run alone, under a memory cap so a bad estimate cannot take the machine down:
+/// <c>systemd-run --user --scope -p MemoryMax=24G -p MemorySwapMax=0 env HARTSY_REQUIRE_REAL_WEIGHTS=1 HARTSYINFERENCE_MODELS_DIR=/mnt/model-storage/Models dotnet test tests/HartsyInference.LLM.Tests -c Release -f net10.0 --filter "FullyQualifiedName~DeepSeekV41RealWeightsTests"</c>.
+/// The full-depth run is further gated behind <c>DSV41_FULL_RUN=1</c>.</summary>
 [Trait("Category", "Integration")]
 [Trait("Category", "RealWeights")]
 public sealed class DeepSeekV41RealWeightsTests
@@ -21,13 +26,73 @@ public sealed class DeepSeekV41RealWeightsTests
     public DeepSeekV41RealWeightsTests(ITestOutputHelper output) => _output = output;
 
     private static string ModelDirectory() =>
-        Path.Combine(Environment.GetEnvironmentVariable("HARTSYINFERENCE_MODELS_DIR") ?? "", "llm", "deepseek-v4.1-flash");
+        ModelResolver.Resolve(DeepSeekV41Catalog.Id, null, Modality.Text).LocalPath
+        ?? Path.Combine(RepoPaths.ModelsRoot(), "llm", "deepseek-v4.1-flash");
+
+    private bool HaveWeights(out string dir)
+    {
+        dir = ModelDirectory();
+        return RealWeightGate.Require(_output.WriteLine, Path.Combine(dir, "config.json"), Path.Combine(dir, "model.safetensors.index.json"));
+    }
+
+    private static string Rss() => $"{Process.GetCurrentProcess().WorkingSet64 / (1L << 30)} GiB (peak {Process.GetCurrentProcess().PeakWorkingSet64 / (1L << 30)} GiB)";
 
     [Fact]
-    public void Smoke_PrefillGivesFiniteLogitsAndGreedyTokens()
+    public void WorkingMemoryEstimate_ForTheOfficialConfigIsReported()
     {
-        string dir = ModelDirectory();
-        if (!RealWeightGate.Require(_output.WriteLine, Path.Combine(dir, "config.json"), Path.Combine(dir, "model.safetensors.index.json"))) return;
+        if (!HaveWeights(out string dir)) return;
+        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(dir);
+        DeepSeekV41Config cfg = checkpoint.Config;
+        foreach (DeepSeekV41Residency residency in Enum.GetValues<DeepSeekV41Residency>())
+        {
+            DeepSeekV41LoadOptions options = new(HfTextDirectoryLoader.MaxSequenceTokens, Residency: residency);
+            long dense = checkpoint.Weights.BytesByClass[DeepSeekV41WeightClass.Dense] + checkpoint.Weights.BytesByClass[DeepSeekV41WeightClass.Embed] + checkpoint.Weights.BytesByClass[DeepSeekV41WeightClass.Head];
+            _output.WriteLine($"{residency}: anonymous {DeepSeekV41WorkingMemory.AnonymousBytes(cfg, dense, options) / (double)(1L << 30):F1} GiB "
+                + $"(state {DeepSeekV41WorkingMemory.SequenceStateBytes(cfg, options.MaxTokens) / (double)(1L << 30):F2}, activations {DeepSeekV41WorkingMemory.ActivationBytes(cfg, options.MaxTokens) / (double)(1L << 30):F2}, small {DeepSeekV41WorkingMemory.SmallTensorBytes(cfg) / (double)(1L << 30):F2} GiB)");
+        }
+    }
+
+    /// <summary>Layers 0 (dense), 1 (Engram) and 2 (compressor and indexer) with real weights: every decoder, the Engram gather and the sparse attention run, in a few GiB.</summary>
+    [Fact]
+    public void ThreeLayers_PrefillAndDecodeGiveFiniteStates()
+    {
+        if (!HaveWeights(out string dir)) return;
+        using CpuBackend backend = new();
+        Stopwatch sw = Stopwatch.StartNew();
+        using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(backend, dir, new DeepSeekV41LoadOptions(MaxTokens: 64, MaxLayers: 3));
+        _output.WriteLine($"load (3 layers) {sw.Elapsed.TotalSeconds:F1}s, RSS {Rss()}");
+        using FileStream tokStream = File.OpenRead(Path.Combine(dir, "tokenizer.json"));
+        ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokStream, bosToken: DeepSeekV41TextModel.BosLiteral, eosToken: DeepSeekV41TextModel.EosLiteral);
+
+        DeepSeekV41HostModel model = loaded.Model;
+        List<int> ids = [tokenizer.BosId!.Value, .. tokenizer.EncodeOrdinary("The capital of France is")];
+        DeepSeekV41SequenceState state = model.CreateState(64);
+        float[] hidden = new float[ids.Count * model.Dim];
+        sw.Restart();
+        model.Forward(ids.ToArray(), state, hidden);
+        _output.WriteLine($"prefill {ids.Count} tokens {sw.Elapsed.TotalSeconds:F1}s, RSS {Rss()}");
+        Assert.All(hidden, v => Assert.True(float.IsFinite(v)));
+        Assert.Contains(hidden, v => v != 0f);
+
+        float[] one = new float[model.Dim];
+        sw.Restart();
+        model.Forward([ids[^1]], state, one);
+        _output.WriteLine($"decode 1 token {sw.Elapsed.TotalSeconds:F1}s, RSS {Rss()}");
+        Assert.All(one, v => Assert.True(float.IsFinite(v)));
+        float[] logits = model.Logits(one);
+        Assert.All(logits, v => Assert.True(float.IsFinite(v)));
+        _output.WriteLine($"logits {sw.Elapsed.TotalSeconds:F1}s total, RSS {Rss()}");
+    }
+
+    [Fact]
+    public void FullDepth_PrefillGivesFiniteLogitsAndGreedyTokens()
+    {
+        if (Environment.GetEnvironmentVariable("DSV41_FULL_RUN") != "1")
+        {
+            _output.WriteLine("SKIPPED: set DSV41_FULL_RUN=1 for the full 43-layer run");
+            return;
+        }
+        if (!HaveWeights(out string dir)) return;
 
         using CpuBackend backend = new();
         Stopwatch sw = Stopwatch.StartNew();

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Core.Tensors.Quant;
 
@@ -83,8 +84,18 @@ public static unsafe class WeightDequantizer
         }
         else if (weight.DType == DType.BF16)
         {
-            ReadOnlySpan<ushort> bits = weight.AsReadOnlySpan<ushort>().Slice((int)first, dest.Length);
-            for (int i = 0; i < dest.Length; i++) dest[i] = BitConverter.UInt32BitsToSingle((uint)bits[i] << 16);
+            // a head or embedding window is hundreds of millions of values per token, so convert rows in parallel
+            ushort* bits = (ushort*)weight.DataPointer + first;
+            fixed (float* dst = dest)
+            {
+                nint src = (nint)bits, dstAddr = (nint)dst;
+                CpuParallel.For((int)rowCount, rowCount * cols, r =>
+                {
+                    ushort* rowSrc = (ushort*)src + r * cols;
+                    float* rowDst = (float*)dstAddr + r * cols;
+                    for (long c = 0; c < cols; c++) rowDst[c] = BitConverter.UInt32BitsToSingle((uint)rowSrc[c] << 16);
+                });
+            }
         }
         else if (weight.DType == DType.F16)
         {

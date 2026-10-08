@@ -1,4 +1,6 @@
+using HartsyInference.Cpu;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Services;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Registry;
@@ -41,7 +43,7 @@ public sealed class DeepSeekV41TextMemoryEstimateTests : IDisposable
         Assert.Equal(bytes["Dense"] + bytes["Embed"] + bytes["Head"], phase.StreamFloorWeightBytes);
         Assert.True(phase.Streamable);
         Assert.True(bytes["Vision"] > 0 && bytes["Draft"] > 0);
-        Assert.Equal(phase.WeightBytes, estimate.PeakResidentBytes);
+        Assert.Equal(phase.WeightBytes + phase.ActivationBytes, estimate.PeakResidentBytes);
     }
 
     [Fact]
@@ -63,6 +65,45 @@ public sealed class DeepSeekV41TextMemoryEstimateTests : IDisposable
         {
             Directory.Delete(other, recursive: true);
         }
+    }
+
+    [Fact]
+    public void WorkingMemoryIsReportedAndMatchesTheStaticEstimate()
+    {
+        TinyDeepSeekV41Checkpoint.Write(_directory);
+        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
+
+        MemoryPhase phase = Assert.Single(TextMemoryProfile.Estimate(_directory).Phases);
+
+        Assert.True(phase.ActivationBytes > 0);
+        Assert.Equal(DeepSeekV41WorkingMemory.AnonymousBytes(checkpoint.Config, 0, HfTextDirectoryLoader.LoadOptions), phase.ActivationBytes);
+    }
+
+    [Fact]
+    public void StaticSequenceStateBytesEqualTheLoadedModelsOwn()
+    {
+        DeepSeekV41ModelFixtureCheckpoint.Write(_directory);
+        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
+        using CpuBackend backend = new();
+        using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(backend, checkpoint, new DeepSeekV41LoadOptions(MaxTokens: 64));
+
+        foreach (int tokens in new[] { 1, 17, 64 })
+            Assert.Equal(loaded.Model.EstimateStateBytes(tokens), DeepSeekV41WorkingMemory.SequenceStateBytes(checkpoint.Config, tokens));
+    }
+
+    [Fact]
+    public void ActivationsGrowWithThePromptAndWideningAddsFourTimesTheStoredDenseBytes()
+    {
+        DeepSeekV41ModelFixtureCheckpoint.Write(_directory);
+        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
+        DeepSeekV41Config cfg = checkpoint.Config;
+        DeepSeekV41LoadOptions stored = new(MaxTokens: 128), widened = stored with { Residency = DeepSeekV41Residency.WidenedF32 };
+
+        Assert.True(DeepSeekV41WorkingMemory.ActivationBytes(cfg, 200) > DeepSeekV41WorkingMemory.ActivationBytes(cfg, 100));
+        Assert.Equal(4000L, DeepSeekV41WorkingMemory.AnonymousBytes(cfg, 1000, widened) - DeepSeekV41WorkingMemory.AnonymousBytes(cfg, 1000, stored)
+            - DeepSeekV41WorkingMemory.ExpertCacheBytes(cfg, widened));
+        Assert.Equal(0, DeepSeekV41WorkingMemory.ExpertCacheBytes(cfg, stored));
+        Assert.True(DeepSeekV41WorkingMemory.SmallTensorBytes(cfg) > 0);
     }
 
     [Fact]

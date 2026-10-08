@@ -83,9 +83,7 @@ public static class DeepSeekV41HostModelLoader
         float normEps = (float)cfg.RmsNormEps;
         string l = $"layers.{layer}.", a = l + "attn.", f = l + "ffn.";
 
-        DeepSeekV41AttentionSettings settings = new(dim, heads, hd, cfg.QkRopeHeadDim, qLora, cfg.OGroups, cfg.OLoraRank, cfg.SlidingWindow, ratio, kvSource,
-            indexSource, layer == candidateLayer, candidateLayer >= 0 && candidateLayer < layer, cfg.IndexNHeads, cfg.IndexHeadDim, cfg.IndexTopk,
-            cfg.CandidateTopkBlocks, cfg.CandidateBlockSize, normEps);
+        DeepSeekV41AttentionSettings settings = DeepSeekV41AttentionSettings.ForLayer(cfg, layer);
 
         DeepSeekV41CompressorWeights? compressor = kvSource
             ? new(read.Weight(a + "compressor.wkv.weight", hd, dim), ratio > 1 ? read.Weight(a + "compressor.wgate.weight", hd, dim) : null,
