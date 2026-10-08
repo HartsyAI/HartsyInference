@@ -5,16 +5,16 @@ lives here until a rig run replaces it with evidence.
 
 ## Verified on CPU (this machine, no GPU)
 
-CPU-lane baseline per test project, with the GPU and real-weight tests excluded. The baseline ran on `main` before the
-GPU-trait labelling in #307; that labelling takes CUDA to zero CPU-lane tests and clears the Diffusion and Video failures.
+CPU-lane results per test project, with the GPU and real-weight tests excluded. The first baseline ran before the GPU labels in
+#307 and #309; the table shows the results after them.
 
 | Project | Result |
 |---|---|
 | Sixteen others (API, Audio, Core, Cpu, LLM, ModelAssets, Vision, Voice, and eight more) | all passing |
-| Diffusion | 1869 passing, 4 GPU or real-weight failures (labelled in #307) |
-| Video | 115 passing, 3 GPU failures (labelled in #307) |
-| Cuda | 199 passing, 282 failing: the GPU tests ran in the CPU lane (labelled in #307) |
-| Vulkan | not summarized by the baseline runner; checked separately |
+| Diffusion | 1869 passing after the GPU methods were labelled (#307) |
+| Video | 114 passing after the GPU methods were labelled (#307) |
+| Cuda | 115 CPU-only methods passing, no GPU method in the CPU lane (#307) |
+| Vulkan | 12 passing, exit 0 after the device tests were labelled (#309); the run hung before |
 
 Subsystems with CPU tests in place:
 
