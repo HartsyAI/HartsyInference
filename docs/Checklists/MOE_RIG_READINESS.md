@@ -32,22 +32,22 @@ Pending, not verified in this checkout:
 
 Do not count #305 or #306 as verified until those changes land on the branch being run.
 
-## Blockers on this machine (fix before renting or on the rig)
+## This machine (checked)
 
-- **NVIDIA driver and library mismatch.** `nvidia-smi` reports "Driver/library version mismatch" (NVML library 595.99).
-  No CUDA test can run until the driver matches the library. A reboot or a matching reinstall is the usual fix; this is
-  a system change, so it was not made from here.
-- **Driver and PTX.** The rig loads the shipped PTX from disk; `nvcc` is not in that path. The constraints are the deployment
-  driver's PTX-ISA ceiling and the GPU's exact compute capability (`src/HartsyInference.Cuda/Kernels/README.md`). The
-  committed PTX targets `sm_70`, `sm_75`, `sm_80`, and one `sm_120a` file. 281 CUDA tests failed here with a PTX JIT error
-  ("SM version specified by .target is higher than default SM version"): that points at the driver on this machine, so check
-  the driver's PTX-ISA support against those targets on the rig before the first GPU run.
+- **GPU:** NVIDIA GeForce RTX 2060 SUPER, Turing (sm_75), 8 GB, driver 595.91.07. CUDA runs here: `CudaContext.IsAvailable()`
+  returns true. The `nvidia-smi` "driver/library version mismatch" message is an NVML tooling problem; it does not stop CUDA.
+- **The 281 CUDA failures here are PTX JIT errors** ("SM version specified by .target is higher than default SM version"). The
+  shipped PTX includes `sm_80` and `sm_120a` targets, which a sm_75 device cannot run. That is an architecture mismatch, not a
+  code defect, and it is consistent with the rig being a newer GPU. It is not yet confirmed per test: check each failing
+  test's PTX target on the rig, and confirm the rig's device covers the targets its suites load.
 - **Host memory.** 39 GB total. With the CPU lane running, 2 GB was free and 9 GB available. Check `free -g` before any
   large load (see the no-heavy-GPU-runs note).
+- **VRAM.** 8 GB limits what this card can run. Large-MoE and real-checkpoint validation needs the rented GPU.
 
 ## Rig run order
 
-1. `nvidia-smi` shows the GPU and a driver that matches the library. No mismatch message.
+1. Preflight: CUDA must be usable, or every GPU suite would pass without running. This test fails when it is not:
+   `dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.RigPreflightTests."`
 2. Real-weight assets, set before any GPU suite. With `HARTSY_REQUIRE_REAL_WEIGHTS=1` a missing asset fails the test
    instead of logging `SKIPPED`, so a run with missing assets is a failed run, not a green one:
    ```
@@ -61,12 +61,15 @@ Do not count #305 or #306 as verified until those changes land on the branch bei
    ```
    classes="CudaExpertCacheTests CudaExpertM1FixtureTests CudaMoePrimitiveTests"
    classes="$classes CudaMoeTests CudaQuantWorkspaceTests CudaStreamingWeightCacheTests"
+   set -euo pipefail
    for c in $classes; do
      dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.$c."
    done
    ```
-   `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter does not select
-   them; this explicit loop is the only way they run on the rig.
+   `set -euo pipefail` stops the run at the first failing class, so a later pass cannot hide an earlier failure. A class
+   whose tests return early without a device is caught by the preflight in step 1, not by a green count here.
+   `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry the GPU label from #307, so the category filter selects them in
+   step 4 too; this explicit loop is how they run first.
 4. The rest of the GPU category, excluding the classes already run in step 3. Run only from a checkout that includes #307,
    which applies the GPU labels this filter depends on. Build the filter in a variable so it has no embedded whitespace.
    Record failures by test name:
