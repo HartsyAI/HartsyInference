@@ -39,6 +39,7 @@ public sealed unsafe class SageSdpaMicroBench
     /// <summary>Crossover mapping vs the REAL incumbent for allowF16 callers (the cuDNN F16-cast fused
     /// branch): image-flagship seqlens bracketing Krea2/Flux/Qwen-Image joint-attention sizes. Sets the
     /// dispatch-preference Skv gate from data (measured: 0.93× at 1.3k, 1.18× at 16k — where's the flip?).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1, 24, 2048, 128)]
     [InlineData(1, 24, 3072, 128)]
@@ -109,6 +110,7 @@ public sealed unsafe class SageSdpaMicroBench
     /// <summary>The F16-NATIVE crossover: Sage F16-ingest (f16h prologues + f16io kernel) vs the cast-free
     /// cuDNN fused branch on native-F16 tensors — the Qwen-Image/Hunyuan/Kandinsky incumbent. Sets
     /// HARTSY_SAGE_F16_MIN_SKV from data.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1, 24, 4096, 128)]     // Qwen-Image-class joint seq
     [InlineData(1, 24, 8192, 128)]
@@ -180,6 +182,7 @@ public sealed unsafe class SageSdpaMicroBench
         _output.WriteLine($"sage vs cuDNN-native = {mc / ms:F3}×");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1, 24, 4096, 128)]     // Qwen/Flux-class image self-attn
     [InlineData(1, 24, 12288, 128)]    // video-DiT-class self-attn (Wan/LTX territory, 3060-sized)

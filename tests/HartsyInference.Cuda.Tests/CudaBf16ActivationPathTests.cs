@@ -62,6 +62,7 @@ public sealed unsafe class CudaBf16ActivationPathTests
 
     /// <summary>BF16 I/O RMSNorm vs the F32 kernel: both accumulate in F32 over the same row, so the gap is BF16
     /// I/O rounding only (~2^-8 relative). Rows here are the DiT shape (one block per token row).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RmsNormBf16_MatchesF32Twin()
     {
@@ -86,6 +87,7 @@ public sealed unsafe class CudaBf16ActivationPathTests
 
     /// <summary>BF16 gated-FFN epilogue vs the F32 kernel. Multi-row on purpose: the gate/up split is on the LAST
     /// dim, so a flat-midpoint split would pass at one row and garble the rest.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -111,6 +113,7 @@ public sealed unsafe class CudaBf16ActivationPathTests
     /// <summary>F16 gated-FFN epilogue vs the F32 kernel — the dtype the MiniMax-H3 MLP runs at. Multi-row for the
     /// last-dim split, and a second magnitude band because F16 (unlike BF16) can overflow on the stored product:
     /// act(g)·u leaves range once both factors reach ~256, long before BF16 would.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, 1f)]
     [InlineData(true, 1f)]
@@ -138,6 +141,7 @@ public sealed unsafe class CudaBf16ActivationPathTests
 
     /// <summary>The fused norm ops fall back to their unfused composition for dtypes their kernels don't cover.
     /// Regression for the recursive <c>((IBackend)this)</c> fallback: every call here took that branch.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FusedNormOps_Bf16_ComposeWithoutReentering()
     {
@@ -185,6 +189,7 @@ public sealed unsafe class CudaBf16ActivationPathTests
 
     /// <summary>Ops with no kernel for the requested dtype must say so. Before the fix each of these re-dispatched
     /// through the interface into itself and overflowed the stack instead of reporting anything.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void UnsupportedDtypes_ThrowNotSupported_InsteadOfRecursing()
     {

@@ -67,6 +67,7 @@ public sealed class TextDecodeThroughputBenchmark
         return n % 2 == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DecodeThroughput_GreedyGraphOffAndOn_ReportsMedianTgTps()
     {

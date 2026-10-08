@@ -49,6 +49,7 @@ public sealed unsafe class RopeSingleF16Tests
         return (cos, sin);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(0)]     // full rotary
     [InlineData(32)]    // partial rotary — the rest of each head passes through untouched
@@ -89,6 +90,7 @@ public sealed unsafe class RopeSingleF16Tests
         Assert.True(maxDiff < 2e-3f, $"F16 rope diverged from F32: maxDiff={maxDiff:E3}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRopeSingle_RejectsF16Table()
     {
@@ -111,6 +113,7 @@ public sealed unsafe class RopeSingleF16Tests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRopeSingle_RejectsNonRank4()
     {

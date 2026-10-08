@@ -10,7 +10,6 @@ namespace HartsyInference.Cuda.Tests;
 /// compute stream is invalidated by any use of the legacy stream in the same context, including another backend's
 /// synchronous copy, and a host-wide memory release can arrive while one is open.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class StepGraphCaptureRecoveryTests
 {
     private const int Dim = 64;
@@ -18,6 +17,7 @@ public sealed unsafe class StepGraphCaptureRecoveryTests
 
     public StepGraphCaptureRecoveryTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CaptureInvalidatedByALegacyStreamCall_ResetsCleanAndTheBackendRecaptures()
     {
@@ -59,6 +59,7 @@ public sealed unsafe class StepGraphCaptureRecoveryTests
 
     /// <summary>The engine's own synchronous transfers run on the calling backend's stream, so a second backend on the
     /// same GPU can upload, download, fill and allocate while the first captures, and both finish.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AnotherBackendsSynchronousTransfers_DuringACapture_NeitherFailNorInvalidateIt()
     {
@@ -103,6 +104,7 @@ public sealed unsafe class StepGraphCaptureRecoveryTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FreeAllDeviceMemory_WithACaptureOpen_ClosesItAndTheBackendRecaptures()
     {

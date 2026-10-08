@@ -59,6 +59,16 @@ public sealed class DeepSeekV41HostModel
     /// <summary>Host bytes one sequence of <paramref name="maxTokens"/> positions will hold across all layers.</summary>
     public long EstimateStateBytes(int maxTokens) => _blocks.Sum(b => DeepSeekV41AttentionState.EstimateBytes(b.AttentionSettings, maxTokens));
 
+    /// <summary>Installs a diagnostic tap on every block (block index, stage name, values); null removes it. See <see cref="DeepSeekV41Block.Probe"/>.</summary>
+    public void SetProbe(Action<int, string, float[]>? probe)
+    {
+        for (int i = 0; i < _blocks.Length; i++)
+        {
+            int layer = i;
+            _blocks[i].Probe = probe is null ? null : (stage, values) => probe(layer, stage, values);
+        }
+    }
+
     /// <summary>Creates empty per-sequence state for up to <paramref name="maxTokens"/> positions.</summary>
     public DeepSeekV41SequenceState CreateState(int maxTokens)
     {

@@ -77,6 +77,7 @@ public sealed unsafe class RopeHeadMajorTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Shapes))]
     [Trait("Category", "GpuIntegration")]
@@ -126,6 +127,7 @@ public sealed unsafe class RopeHeadMajorTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Shapes))]
     [Trait("Category", "GpuIntegration")]

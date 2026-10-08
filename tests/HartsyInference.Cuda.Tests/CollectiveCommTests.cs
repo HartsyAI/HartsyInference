@@ -34,6 +34,7 @@ public sealed class CollectiveCommTests
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public unsafe void Nccl_TwoGpus_AllReduceBitExact_AllGatherBlocksCorrect_WithBandwidth()
@@ -116,6 +117,7 @@ public sealed class CollectiveCommTests
     /// <summary>The universal fallback must be numerically correct on plain host tensors with no GPU at all,
     /// and the factory must pick it (with a logged reason) when ranks share one CUDA device — NCCL requires
     /// distinct devices, and silently picking it anyway would hand two threads one communicator device.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void HostStaged_Fallback_CorrectAndChosenForDuplicateOrdinals()
     {

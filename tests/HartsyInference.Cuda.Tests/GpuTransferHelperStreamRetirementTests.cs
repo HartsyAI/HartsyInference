@@ -22,7 +22,6 @@ namespace HartsyInference.Cuda.Tests;
 /// sibling finalizer-callback race (<c>State.Unregistered</c>'s own reason for existing); this covers the ordinary,
 /// non-finalizer op path that had no equivalent guard.</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class GpuTransferHelperStreamRetirementTests
 {
     private static string PtxDir()
@@ -35,6 +34,7 @@ public sealed class GpuTransferHelperStreamRetirementTests
 
     public GpuTransferHelperStreamRetirementTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void UploadAgainstAZeroedStreamHandle_ThrowsObjectDisposed_NotARawCudaInvalidValue()
     {

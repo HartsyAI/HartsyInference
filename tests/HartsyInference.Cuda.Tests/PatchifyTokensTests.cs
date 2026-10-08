@@ -51,6 +51,7 @@ public sealed unsafe class PatchifyTokensTests
         RunIndependentOracleCase(cpu, null, batch, channels, height, width, patch, innerChannelFastest);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Geometries))]
     [Trait("Category", "GpuIntegration")]
@@ -67,6 +68,7 @@ public sealed unsafe class PatchifyTokensTests
         RunIndependentOracleCase(cuda, cuda, batch, channels, height, width, patch, innerChannelFastest);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -96,6 +98,7 @@ public sealed unsafe class PatchifyTokensTests
         Assert.Equal(1, cuda.GetD2hSyncCount());
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, true)]
     [InlineData(false, false)]
@@ -117,6 +120,7 @@ public sealed unsafe class PatchifyTokensTests
         RunU16OracleAndRoundTrip(cuda, cuda, dtype, innerChannelFastest);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MalformedAndOverflowingContracts_AreRejectedBeforeDataAccessOrDispatch()
     {

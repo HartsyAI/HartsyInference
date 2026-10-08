@@ -28,6 +28,7 @@ public sealed class Nvfp4GemmReferenceTests
         return s == 1 ? -mag : mag;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
     [InlineData(200, 320, 256)]

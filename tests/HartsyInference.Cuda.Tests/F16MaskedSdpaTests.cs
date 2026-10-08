@@ -16,6 +16,7 @@ public sealed unsafe class F16MaskedSdpaTests
 
     public F16MaskedSdpaTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void NativeF16Sdpa_F32BatchMask_CudnnDisabled_MatchesHalfRoundedReference()
     {
@@ -97,6 +98,7 @@ public sealed unsafe class F16MaskedSdpaTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(3, false)] // B != H, rank-3 [H,Sq,Skv]
     [InlineData(2, true)]  // B == H, rank-4 [1,H,Sq,Skv] must not be mistaken for [B,1,...]

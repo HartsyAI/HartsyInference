@@ -53,6 +53,7 @@ public sealed unsafe class CudnnSdpaRetryTests
         Assert.Equal(4003, ex.Status);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TransientFailure_BacksOffThenRecovers()
     {
@@ -125,6 +126,7 @@ public sealed unsafe class CudnnSdpaRetryTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void PermanentFailure_NeverRetries()
     {

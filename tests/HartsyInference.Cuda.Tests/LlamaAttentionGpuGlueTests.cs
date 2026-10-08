@@ -59,6 +59,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         { "Synthetic-MHA",  2,  7, 7, 13,  64, false,    10_000f },
     };
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(ImageModelShapes))]
     [Trait("Category", "GpuIntegration")]
@@ -158,6 +159,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("F32", 2, 7, 7, 13, 64)]
     [InlineData("F16", 1, 28, 4, 17, 128)]
@@ -210,6 +212,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
     /// Production-level guard: a complete decoder block must not invoke any activation's lazy host-sync callback.
     /// Reading the returned final hidden state is the sole expected D2H.
     /// </summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void LlamaStyleEncoder_CudaForward_HasNoIntermediateD2h()
@@ -255,6 +258,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -298,6 +302,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1.0f)]
     [InlineData(11.313708f)] // sqrt(128): exercises the Gemma embedding-normalizer path.
@@ -335,6 +340,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void EncodeMultiLayer_UncachedEmbeddingTable_UsesHostGatherWithoutUploadingWholeVocabulary()
@@ -366,6 +372,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -419,6 +426,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void EncodeEmbedsMrope_TextOnly_MatchesStandardCpuEncodeAndStaysDeviceResident()
@@ -461,6 +469,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void EncodeEmbedsMrope_Deepstack_MatchesCpuAndStaysDeviceResident()
@@ -530,6 +539,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
             encoder.EncodeMultiLayer(cpu, [[1, config.VocabSize]], [1]));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRopeSingleHeadMajor_RejectsShortSineTableBeforeReadingIt()
     {
@@ -550,6 +560,7 @@ public sealed unsafe class LlamaAttentionGpuGlueTests
         Assert.Throws<HartsyInferenceException>(() => cuda.ApplyRopeSingleHeadMajor(x, cos, shortSin));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GatherRows_RejectsInvalidGeometryIndicesAndAliasing()
     {

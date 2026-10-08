@@ -66,6 +66,7 @@ public sealed unsafe class AnimaTransformerBoundaryTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Forward_CpuAndCudaMatch_OnBatchedRectangularGrid_WithoutIntermediateD2h()

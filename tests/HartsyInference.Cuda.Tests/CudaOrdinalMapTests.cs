@@ -13,6 +13,7 @@ public sealed class CudaOrdinalMapTests
     private readonly ITestOutputHelper _output;
     public CudaOrdinalMapTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void OrdinalMap_PrintsNameAndFreeVramPerDevice()

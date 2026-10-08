@@ -46,6 +46,7 @@ public sealed class PtxVariantResolutionTests
     }
 
     /// <summary>A copy of the shipped PTX with the baseline block_quant duplicated under this card's suffix: the kernel set must report it as the loaded variant, and only it. The duplicate is bit-identical to the baseline, so nothing else about the run changes.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TheRunningCardLoadsItsOwnVariant()
     {

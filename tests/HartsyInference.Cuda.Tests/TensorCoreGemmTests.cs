@@ -23,6 +23,7 @@ public sealed class TensorCoreGemmTests
         Assert.Equal(expected, TensorCoreGemm.IsAligned(m, n, k));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(16, 8, 16)]
     [InlineData(64, 64, 64)]
@@ -88,6 +89,7 @@ public sealed class TensorCoreGemmTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void TensorCore_UnalignedShape_FallsBackToCublas()
     {

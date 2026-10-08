@@ -9,7 +9,6 @@ namespace HartsyInference.Cuda.Tests;
 /// shapes where H != W and T > 1 so a transposed axis, a mis-strided frame or a wrong dropped-frame offset cannot pass.
 /// The op is a pure gather, so this is bit-equality. Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class WanVaeDupUp3dKernelTests
 {
     private static string PtxDir()
@@ -22,6 +21,7 @@ public sealed unsafe class WanVaeDupUp3dKernelTests
 
     /// <summary>The Wan 2.2 decoder's shortcut geometries: temporal+spatial with and without the first-chunk drop, and
     /// spatial-only; channel ratios both repeating (outC·factor > inC) and not.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(8, 4, 2, 1)]
     [InlineData(8, 4, 2, 0)]

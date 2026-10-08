@@ -26,6 +26,7 @@ public sealed unsafe class Wan22ResampleDownsampleResidencyTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Downsample2d_StaysDeviceResident_AndMatchesTheCpuReference()

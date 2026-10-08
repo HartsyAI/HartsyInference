@@ -42,6 +42,7 @@ public sealed unsafe class LlamaGqaAttentionMicroBench
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(16)]
     [InlineData(64)]

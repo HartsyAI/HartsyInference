@@ -64,6 +64,7 @@ public sealed unsafe class SplitKernelTests
         AssertStrictContract(cpu);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_AllSupportedDtypesRanksAndAxes_AreByteExact_Resident_AndPreserveInput()
@@ -79,6 +80,7 @@ public sealed unsafe class SplitKernelTests
             RunExactCase(cuda, cuda, splitCase);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_StrictContractRejectsMalformedGeometryAndOverlappingStorageBeforeDispatch()

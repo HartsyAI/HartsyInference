@@ -72,6 +72,7 @@ public sealed unsafe class RopeInterleavedPartialRotaryTests
         finally { x.Dispose(); cos.Dispose(); sin.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudaKernel_PartialRotary_RotatesInsideDimOnly_PassesThroughOutside()
     {
@@ -95,6 +96,7 @@ public sealed unsafe class RopeInterleavedPartialRotaryTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudaKernel_FullRotaryDefault_MatchesPreFixBehavior_AllPairsRotate()
     {

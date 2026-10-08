@@ -57,6 +57,7 @@ public sealed unsafe class W8A8LinearTests
         return Math.Sqrt(num / Math.Max(den, 1e-30));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(true)]   // F16 activations (DiT F16 loop)
     [InlineData(false)]  // F32 activations (classic path)
@@ -97,6 +98,7 @@ public sealed unsafe class W8A8LinearTests
     /// activation with a deliberate per-channel outlier structure (the pathology SmoothQuant targets) and
     /// confirms setting a matching smoothing scale reduces relL2 vs the EXACT F32 reference, not just vs
     /// the F16 baseline (so the comparison isn't contaminated by F16 rounding).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Linear_W8A8_SmoothingScale_ReducesErrorVsExactReference()
     {
@@ -191,6 +193,7 @@ public sealed unsafe class W8A8LinearTests
             $"SmoothQuant should reduce error on an outlier-channel activation: smoothed={relSmoothed:e3} >= unsmoothed={relUnsmoothed:e3}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Linear_W8A8_WeightCacheReused_And_Perf()
     {

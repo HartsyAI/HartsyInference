@@ -8,9 +8,9 @@ namespace HartsyInference.Cuda.Tests;
 /// against the nearest-neighbour rule directly (source row <c>oh / 2</c>). A pure gather, so bit-equality. Skips
 /// cleanly without CUDA.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class UpsampleNearestToSizeKernelTests
 {
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

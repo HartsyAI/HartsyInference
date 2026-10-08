@@ -37,6 +37,7 @@ public sealed unsafe class LuminaCfgNormalizedEulerTests
         { new TensorShape(9, 1), 0.0f, 0.125f },
     };
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Shapes))]
     [Trait("Category", "GpuIntegration")]
@@ -91,6 +92,7 @@ public sealed unsafe class LuminaCfgNormalizedEulerTests
         AssertClose(expected, actual, 4e-5f, "CUDA");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void ZeroPredictions_AndPredictionAlias_RemainFiniteAndResident()
@@ -117,6 +119,7 @@ public sealed unsafe class LuminaCfgNormalizedEulerTests
         AssertExact(initial, Snapshot(z), "zero/aliased prediction update");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void ZeroEps_WithAllZeroGuidedRow_DoesNotPoisonZWithNaN()
@@ -175,6 +178,7 @@ public sealed unsafe class LuminaCfgNormalizedEulerTests
         AssertClose(Snapshot(legacyOutput), Snapshot(fused), 3e-6f, "Lumina fused sign/scheduler equivalence");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MalformedContracts_AreRejectedBeforeDispatch()
     {

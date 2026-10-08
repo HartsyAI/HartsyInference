@@ -58,6 +58,7 @@ public sealed unsafe class AudioActivationKernelTests
         Assert.True(maxErr < tol, $"{name}: max_err {maxErr:E3} exceeds tol {tol:E0}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Sigmoid_Cpu_Vs_Cuda()
     {
@@ -74,6 +75,7 @@ public sealed unsafe class AudioActivationKernelTests
         AssertClose(cpuOut, cudaOut, 1e-5f, "Sigmoid");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Elu_Cpu_Vs_Cuda()
     {
@@ -90,6 +92,7 @@ public sealed unsafe class AudioActivationKernelTests
         AssertClose(cpuOut, cudaOut, 1e-5f, "Elu");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LeakyRelu_Cpu_Vs_Cuda()
     {
@@ -107,6 +110,7 @@ public sealed unsafe class AudioActivationKernelTests
         AssertClose(cpuOut, cudaOut, 1e-6f, "LeakyRelu");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LeakyRelu_InPlace_Cpu_Vs_Cuda()
     {
@@ -126,6 +130,7 @@ public sealed unsafe class AudioActivationKernelTests
         AssertClose(cpuBuf, cudaBuf, 1e-6f, "LeakyRelu[in-place]");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AdaInstanceNorm1d_Cpu_Vs_Cuda()
     {
@@ -150,6 +155,7 @@ public sealed unsafe class AudioActivationKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Snake_Cpu_Vs_Cuda()
     {

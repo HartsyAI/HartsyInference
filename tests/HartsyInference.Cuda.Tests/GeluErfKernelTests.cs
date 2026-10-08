@@ -22,6 +22,7 @@ public sealed unsafe class GeluErfKernelTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void GeluErf_Cuda_MatchesAnalytic()

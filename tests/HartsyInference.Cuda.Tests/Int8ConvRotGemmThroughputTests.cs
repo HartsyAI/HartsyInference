@@ -51,6 +51,7 @@ public sealed unsafe class Int8ConvRotGemmThroughputTests
         return cast;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     // The three shapes that carry LTX-2.5's DiT arithmetic at 768x512x97f (4992 video tokens):
     [InlineData(4992, 16384, 4096, "ffn_up")]
@@ -93,6 +94,7 @@ public sealed unsafe class Int8ConvRotGemmThroughputTests
     /// 4090's FP16 tensor rate with FP32 accumulate is ~165 TFLOPS (half its 330 FP16-accumulate rate, the
     /// GeForce Ada limiter); its dense INT8 rate is 2x the 330 = ~660 TOPS, NOT 330. Running both through the
     /// SAME Linear says whether the int8 chain is near ITS peak or merely near the F16 path's.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4992, 16384, 4096, "ffn_up_f16")]
     [InlineData(4992, 4096, 16384, "ffn_down_f16")]
@@ -125,6 +127,7 @@ public sealed unsafe class Int8ConvRotGemmThroughputTests
     /// <summary>The GELU folded into the int8 dequant epilogue must match a plain Linear followed by the
     /// engine's own <c>Gelu</c> — the two are compared on the same weights and input, so a wrong activation
     /// constant or a mis-plumbed actMode flag fails here rather than as slightly-off video.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LinearGelu_FusedEpilogue_MatchesLinearThenGelu()
     {

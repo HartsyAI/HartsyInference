@@ -28,6 +28,7 @@ public unsafe class CfgBranchParallelWanTests
     private readonly ITestOutputHelper _output;
     public CfgBranchParallelWanTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GenerateFromEmbeddings_CfgParallel_MatchesSequential_SameGpu()
     {

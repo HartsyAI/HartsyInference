@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// all sharing the thread pool, and any other CUDA library can rebind a thread too. These tests change the binding
 /// behind the backend's back the way such a neighbour does, then run an op.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaContextRebindTests
 {
     private const int Length = 4096;
@@ -27,6 +26,7 @@ public sealed unsafe class CudaContextRebindTests
     /// <summary>A neighbour that leaves its own context bound. A resident weight is allocated in whatever context is
     /// current, so one preloaded after the neighbour bound its context belonged to the neighbour's (on another
     /// device, another card's memory, which the backend's kernels then fault on) and died with it.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void WeightPreloadedAfterAnotherContextWasBound_BelongsToTheBackendsContext()
     {
@@ -62,6 +62,7 @@ public sealed unsafe class CudaContextRebindTests
     /// <summary>The production shape: a neighbour leaves ANOTHER device's context bound, so the op's allocations,
     /// copies and kernels, and the free-VRAM reading the audio switch check makes, would all land on the wrong card.
     /// Opt-in (<c>HARTSY_CUDA_REBIND_TWO_DEVICES=1</c>) because it creates a context on a second GPU.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void OpAfterAnotherDevicesContextWasBound_RunsOnItsOwnDevice()
     {
@@ -99,6 +100,7 @@ public sealed unsafe class CudaContextRebindTests
     /// the one for a weight the cache promoted on its own, which is the buffer that takes the synchronous path. Every
     /// tensor here is disposed after the thread has been rebound to the other device. Opt-in like the op test, for
     /// the same reason.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TensorsDisposedAfterAnotherDevicesContextWasBound_FreeIntoTheirOwnDevice()
     {

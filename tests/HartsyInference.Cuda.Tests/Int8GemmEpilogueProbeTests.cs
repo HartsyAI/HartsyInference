@@ -78,6 +78,7 @@ public sealed unsafe class Int8GemmEpilogueProbeTests
     /// (ConvRot pass + per-row quant + the int32 dequant epilogue), by timing the bare
     /// <see cref="Int8GemmExecutor"/> at the same shape. Without this split it is impossible to tell whether
     /// to attack the GEMM kernel or the surrounding passes.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [Trait("Category", "GpuIntegration")]
     [InlineData(4992, 16384, 4096, "ffn_up")]
@@ -119,6 +120,7 @@ public sealed unsafe class Int8GemmEpilogueProbeTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void WhichInt8OutputConfigsDoesCublasLtAccept()

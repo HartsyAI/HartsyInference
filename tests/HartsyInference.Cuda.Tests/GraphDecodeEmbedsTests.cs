@@ -29,6 +29,7 @@ public sealed unsafe class GraphDecodeEmbedsTests
 
     private static TensorShape LastShape(int h) => new(1, 1, h);
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GraphDecodeStepEmbeds_MatchesEagerDecode_DirectAndCaptured()
     {
