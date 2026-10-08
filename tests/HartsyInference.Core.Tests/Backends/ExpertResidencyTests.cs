@@ -152,4 +152,64 @@ public sealed class ExpertResidencyTests
         lease.Dispose();
         Assert.Equal(0, cache.Stats.PinnedExperts);
     }
+
+    [Fact]
+    public void RepeatedReleaseOfTheSameExperts_ReclaimsCompletedFences_InsteadOfGrowingThem()
+    {
+        using FakeExpertCache cache = CacheWithExpertsOneAndTwoResident(out _);
+        ExpertKey[] keys = [new ExpertKey(0, 1), new ExpertKey(0, 2)];
+        List<ExpertKey> misses = [];
+        ExpertLease lease = new();
+
+        for (int i = 0; i < 1000; i++)
+        {
+            misses.Clear();
+            cache.AcquireResident(keys, misses, lease);
+            lease.Dispose();
+        }
+
+        // Each release records one device fence; completed ones must be reclaimed on the release path, not kept until eviction.
+        Assert.True(cache.LiveFences <= 2, $"Expected at most two live fences, found {cache.LiveFences}.");
+    }
+
+    [Fact]
+    public void ExternalImplementer_WrittenAgainstTheOldInterface_StillCompilesAndWorks()
+    {
+        using FakeExpertCache inner = CacheWithExpertsOneAndTwoResident(out _);
+        IResidencyAwareExpertCache external = new LegacyResidencyCache(inner);
+        bool[] mask = new bool[2];
+
+        Assert.Equal(2, external.LookupResident([new ExpertKey(0, 1), new ExpertKey(0, 2)], mask));
+        Assert.Equal([true, true], mask);
+
+        List<ExpertKey> misses = [];
+        using (ExpertLease lease = external.AcquireResident([new ExpertKey(0, 1), new ExpertKey(0, 5)], misses))
+        {
+            Assert.Equal([new ExpertKey(0, 5)], misses);
+            Assert.Single(lease.Weights);
+        }
+
+        using (ExpertLease acquired = external.Acquire([new ExpertKey(0, 2)]))
+        {
+            Assert.Single(acquired.Weights);
+        }
+
+        // The caller-owned overload is not implemented by this implementer, so it reports that instead of failing silently.
+        Assert.Throws<NotSupportedException>(() => external.AcquireResident([new ExpertKey(0, 1)], misses, new ExpertLease()));
+    }
+
+    /// <summary>An implementer compiled against the published interface: it has no caller-owned lease overload.</summary>
+    private sealed class LegacyResidencyCache(ExpertCacheBase inner) : IResidencyAwareExpertCache
+    {
+        public long BudgetBytes => inner.BudgetBytes;
+        public ExpertCacheStats Stats => inner.Stats;
+        public void RegisterBank(ExpertBank bank) => inner.RegisterBank(bank);
+        public ExpertLease Acquire(ReadOnlySpan<ExpertKey> keys) => inner.Acquire(keys);
+        public int Prefetch(ReadOnlySpan<ExpertKey> keys) => inner.Prefetch(keys);
+        public void Release(ExpertLease lease) => inner.Release(lease);
+        public long Trim(long targetResidentBytes) => inner.Trim(targetResidentBytes);
+        public int LookupResident(ReadOnlySpan<ExpertKey> keys, Span<bool> resident) => inner.LookupResident(keys, resident);
+        public ExpertLease AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses) => inner.AcquireResident(keys, misses);
+        public void Dispose() => inner.Dispose();
+    }
 }

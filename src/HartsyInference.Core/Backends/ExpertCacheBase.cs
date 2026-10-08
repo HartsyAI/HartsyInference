@@ -261,6 +261,12 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
                 lease.ClearWeights();
                 return;
             }
+            // Reclaim fences the device has already passed before adding one, so repeated release of the same experts reuses
+            // holders from the pool instead of growing each entry's fence list and the device event count.
+            for (int i = 0; i < lease.Count; i++)
+            {
+                if (_entries.TryGetValue(lease[i].Key, out ExpertCacheEntry? done)) PurgeFences(done);
+            }
             // Recorded before the lease is marked or any pin drops, so a failure leaves it releasable again.
             ExpertFence fence = RentFence(RecordFence());
             lease.TryMarkReleased();
