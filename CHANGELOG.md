@@ -8,13 +8,23 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.286
+## alpha.287
 
 - **Added: CPU reference for the DeepSeek-V4.1-Flash vision tower and aligner.** `DeepSeekV41VisionLoader.Load` reads the 266 `vision.*`, `aligner.*` and `image_*` tensors (BF16 in the official shards 1 and 2) as F32 and returns a
   `DeepSeekV41VisionModel`. `Encode(patches, gridHeight, gridWidth)` runs the tower (patch embedding, 32 pre-norm blocks of full attention with a 2D half-split rotary and a SwiGLU MLP, final RMSNorm) and the aligner (zero-padded 3x3 fold,
   exact GELU, two projections) on existing backend ops, and `ImageStart`, `ImageEnd` and `ImageNewline` expose the learned span embeddings. `DeepSeekV41VisionConfig` gains `RopeTheta` (default 10000, read from `rope_theta` or
   `vision_rope_theta`) and the derived widths. Against the unmodified upstream `vision.py` in float32 the stages agree to 1e-6 relative on a small seeded fixture and to 7e-6 on the real weights (aligner output correlation 1.000000, relL2 2.8e-6 on a
   28x28 patch grid and 1.8e-6 on 17x23). Nothing calls it yet: image preprocessing, the splice into the language model and the GPU path are not built.
+
+## alpha.286
+
+- **Added: expert packs, a quantized on-disk store for routed experts.** `ExpertPackWriter` quantizes each expert's gate, up and
+  down projections with the existing GGUF codecs (Q8_0, Q4_K, Q5_K, Q6_K) into 4 KiB-aligned records, with a manifest that
+  names the topology fingerprint and a SHA-256 per record. Nothing is visible until the pack completes; `ExpertPackReader` is an
+  `IExpertSource` that refuses incomplete packs, other versions and other topologies, and checks each record on read.
+  `ExpertPackVerifier` compares the dequantized values with the F32 source. Measured on random weights: Q8_0 3.76x smaller
+  than F32 at 0.38% relative RMSE, Q4_K 7.1x smaller at 6.1%. Real checkpoints are not yet packed or verified. See
+  `docs/MOE_PACK.md`.
 
 ## alpha.285
 

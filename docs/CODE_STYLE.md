@@ -82,7 +82,7 @@ model-runs-at-all tests. Real-weight verification evidence still belongs in the 
 
 Traits classify tests; they do not automatically filter dotnet test. Run the CPU lane explicitly:
 
-    dotnet test --filter "Category!=SyntheticSmoke&Category!=Integration&Category!=GpuIntegration&Category!=Slow&Network!=Real"
+    dotnet test --filter "Category!=SyntheticSmoke&Category!=Integration&Category!=GpuIntegration&Category!=GpuBenchmark&Category!=Slow&Network!=Real"
 
 CI runs only part of this: cpu-lints.yml runs TestTierLintTests, KnobRegistryTests and EnvReadAllowlistTests on every
 pull request that touches src or tests; the rest of the CPU lane, and every GPU lane, is run by hand. TestTierLintTests
