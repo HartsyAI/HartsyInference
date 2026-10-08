@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.293
+
+- **Added: the DeepSeek-V4.1 target exposes the rows its DSpark draft reads, and the draft chained from them matches the upstream oracle.** `DeepSeekV41HostModel.Forward` can write `main_hidden` for the layers in `dspark_target_layer_ids`: the hc-mean of each target block's entry stream, taken after its Engram step and before its sublayers, in upstream's layer order. The tap is off unless a caller passes the output span, so the default path is unchanged. On the real checkpoint (structural mode, the oracle's 6-token prompt and one decode step), the tapped rows agree with upstream at relL2 5.1e-7 (prefill) and 4.8e-6 (decode), and the draft built from the C# target's own taps reproduces the upstream ids exactly, with logits at relL2 2.2e-6 and confidences within 2.3e-5.
+
 ## alpha.292
 
 - **Added: the DSpark draft forward for DeepSeek-V4.1-Flash on the CPU host reference.** `DeepSeekV41DSpark` loads the three `mtp` stages (draft attention over the target's sliding window with the block's own latents, a 128-expert feed-forward, hyper-connections) with the Markov and confidence heads, and drafts a block greedily. Against the unmodified upstream `forward_spec` on the real checkpoint (structural mode, one decode step): every stage agrees at relL2 at most 5e-6, the draft ids match exactly. The backbone's rotary moved to a shared helper with no change in output. No change to the generation path.

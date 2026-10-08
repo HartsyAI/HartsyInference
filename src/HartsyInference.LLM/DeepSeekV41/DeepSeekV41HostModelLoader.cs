@@ -60,8 +60,11 @@ public static class DeepSeekV41HostModelLoader
             for (int layer = 0; layer < blocks.Length; layer++)
                 blocks[layer] = BuildBlock(backend, checkpoint, read, cfg, layer, plainRope, compressRope, expertCache, options, stores);
 
+            // a layer-limited load (MaxLayers) keeps only the target layers it has, so MainHiddenWidth can be narrower than the config's list;
+            // a DSpark draft must check that the counts match before it uses the taps. A negative id still fails in the constructor.
             DeepSeekV41HostModel model = new(dim, hc, cfg.VocabSize, normEps, read.Weight("embed.weight", cfg.VocabSize, dim), blocks,
-                read.Vector("norm.weight", dim), read.Weight("head.weight", cfg.VocabSize, dim));
+                read.Vector("norm.weight", dim), read.Weight("head.weight", cfg.VocabSize, dim),
+                mainHiddenLayers: cfg.DsparkTargetLayerIds.Where(layer => layer < blocks.Length).ToArray());
             return new DeepSeekV41LoadedModel(model, checkpoint, ownsCheckpoint, stores, options.MaxTokens);
         }
         catch
