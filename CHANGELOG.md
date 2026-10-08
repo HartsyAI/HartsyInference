@@ -8,6 +8,15 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.284
+
+- **Added: residency queries and no-upload acquisition on the expert cache.** `IResidencyAwareExpertCache.LookupResident` reports which
+  experts are resident or uploading, without changing any state. `IResidencyAwareExpertCache.AcquireResident` pins only the resident
+  experts and returns the rest as misses, so a scheduler can run misses elsewhere without uploading them. Both live on the
+  new derived interface `IResidencyAwareExpertCache`; the published `IExpertCache` is unchanged, so its implementers are not
+  broken. `Acquire` shares its pin-and-lease tail with the new path, and its behavior is unchanged. The CUDA cache inherits the
+  behavior through `ExpertCacheBase`; its GPU tests are not run here.
+
 ## alpha.283
 
 - **Added: expert identity with banks and a pluggable expert source.** `ExpertKey` gains a `Bank` (defaulted, so existing

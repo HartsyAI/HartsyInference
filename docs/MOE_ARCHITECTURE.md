@@ -87,3 +87,10 @@ others gets its own bank, so the same layer number in two models is two layers. 
 is unchanged. The cache counts, protects and evicts by `ExpertLayerKey` (bank and layer). A model describes where its experts
 come from through `IExpertSource`, whose `ExpertBacking` (resident host, memory-mapped, pack, device) lets the runtime choose
 policy. The bank resolves each expert once, and the cache copies from the bank; the model never sees device slots.
+
+## Residency queries
+
+`IResidencyAwareExpertCache.LookupResident` answers which experts are resident or already uploading, without changing any state.
+`IResidencyAwareExpertCache.AcquireResident` pins only those experts and returns the rest as misses, and it never uploads or resolves.
+A runtime that splits a routed batch uses these to run resident experts on the device and misses elsewhere, without
+forcing every miss into the cache. The plain `Acquire` keeps its meaning: pin everything, uploading what is missing.
