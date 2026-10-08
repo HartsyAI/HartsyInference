@@ -107,7 +107,8 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
                 $"The manifest declares dimensions {manifest.Hidden} x {manifest.Intermediate}; both must be in [1, {MaxDimension}].");
         if ((long)manifest.Hidden * manifest.Intermediate > ExpertPackWriter.MaxMatrixElements)
             throw new InvalidDataException(
-                $"The manifest declares a {manifest.Hidden} x {manifest.Intermediate} matrix; the pack limit is {ExpertPackWriter.MaxMatrixElements} elements.");
+                
+                        $"The manifest declares a {manifest.Hidden} x {manifest.Intermediate} matrix; the pack limit is {ExpertPackWriter.MaxMatrixElements} elements.");
         if (manifest.Records.Count != manifest.ExpertCount)
             throw new InvalidDataException($"The manifest lists {manifest.Records.Count} experts; it declares {manifest.ExpertCount}.");
         return new ExpertPackReader(directory, manifest, verifyChecksums);
