@@ -15,7 +15,7 @@ public sealed class DeepSeekV41AttentionTests
 
     private static int[] Ints(JsonElement e) => e.EnumerateArray().Select(v => v.GetInt32()).ToArray();
 
-    private static DeepSeekV41Attention BuildLayer(CpuBackend cpu, int layer, out DeepSeekV41AttentionSettings settings)
+    private static DeepSeekV41Attention BuildLayer(CpuBackend cpu, int layer, out DeepSeekV41AttentionSettings settings, bool quantizeLatents = true)
     {
         JsonElement cfg = Fx.GetProperty("config");
         int ratio = Ints(cfg.GetProperty("compress_ratios"))[layer];
@@ -28,7 +28,7 @@ public sealed class DeepSeekV41AttentionTests
             ratio, kvSource && ratio > 0, indexSource && ratio > 0, layer == candidateLayer, candidateLayer >= 0 && candidateLayer < layer,
             cfg.GetProperty("index_n_heads").GetInt32(), cfg.GetProperty("index_head_dim").GetInt32(), cfg.GetProperty("index_topk").GetInt32(),
             cfg.GetProperty("candidate_topk_blocks").GetInt32(), cfg.GetProperty("candidate_block_size").GetInt32(),
-            (float)cfg.GetProperty("norm_eps").GetDouble());
+            (float)cfg.GetProperty("norm_eps").GetDouble(), quantizeLatents);
 
         JsonElement p = Fx.GetProperty("layers")[layer];
         float[] P(string name) => Floats(p.GetProperty(name));
@@ -51,6 +51,37 @@ public sealed class DeepSeekV41AttentionTests
 
     // The fixture runs upstream with an exact-softmax sparse_attn, so what remains is float32 accumulation order; the real kernel's bf16 probabilities are not modelled.
     private const float Tolerance = 1e-3f;
+
+    [Fact]
+    public void QuantizeLatents_Off_Skips_The_Cache_Round_Trip_And_Moves_The_Output_Only_Slightly()
+    {
+        using CpuBackend cpu = new();
+        int layer = Enumerable.Range(0, Fx.GetProperty("layers").GetArrayLength()).First(i =>
+        {
+            BuildLayer(cpu, i, out DeepSeekV41AttentionSettings s);
+            return s.CompressRatio > 0 && s.IsKvSource && s.IsIndexSource;
+        });
+        JsonElement step = Fx.GetProperty("steps")[0];
+        int len = step.GetProperty("len").GetInt32();
+        float[] x = Floats(step.GetProperty("x")[layer]);
+
+        float[] Run(bool quantize)
+        {
+            DeepSeekV41Attention attention = BuildLayer(cpu, layer, out DeepSeekV41AttentionSettings settings, quantize);
+            Assert.Equal(quantize, settings.QuantizeLatents);
+            float[] y = new float[x.Length];
+            attention.Forward(x, len, 0, new DeepSeekV41AttentionState(settings, 64), new DeepSeekV41SharedAttention(), y);
+            return y;
+        }
+
+        float[] on = Run(true), off = Run(false);
+        Assert.All(off, v => Assert.True(float.IsFinite(v)));
+        double diff = 0, norm = 0;
+        for (int i = 0; i < on.Length; i++) { diff += Math.Pow(on[i] - off[i], 2); norm += Math.Pow(on[i], 2); }
+        double rel = Math.Sqrt(diff / norm);
+        Assert.True(rel > 0, "switching the round trip off changed nothing, so it was never applied");
+        Assert.True(rel < 0.1, $"switching the round trip off moved the output by {rel:E2}");
+    }
 
     [Fact]
     public void Layer_Stack_Matches_Upstream_Through_Prefill_And_Decode()

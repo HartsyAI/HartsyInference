@@ -46,6 +46,9 @@ public sealed class DeepSeekV41MoeLayer
         _swigluLimit = swigluLimit;
     }
 
+    /// <summary>Diagnostic tap: receives the chosen expert ids, <c>[tokens, k]</c> row-major, after routing. Null in normal use.</summary>
+    public Action<int[]>? RouteProbe { get; set; }
+
     /// <summary>Runs the layer over <paramref name="tokens"/> rows of <paramref name="x"/> and writes F32 results to <paramref name="y"/>.</summary>
     /// <param name="x">Normalized hidden states, <c>[tokens, dim]</c>.</param>
     /// <param name="tokens">Row count.</param>
@@ -74,6 +77,7 @@ public sealed class DeepSeekV41MoeLayer
         using Tensor? altBias = _gateBiasVl is null || imageTokens.IsEmpty ? null : F32(_gateBiasVl);
         using Tensor? kinds = altBias is null ? null : Kinds(imageTokens);
         _backend.MoeRoute(idx, weights, logits, _route, bias, altBias, kinds);
+        RouteProbe?.Invoke(idx.AsReadOnlySpan<int>().ToArray());
 
         DeepSeekV41MoeExecutor.Run(x, tokens, idx.AsReadOnlySpan<int>(), weights.AsReadOnlySpan<float>(), k, experts, _experts, _shared,
             _swigluLimit, y);
