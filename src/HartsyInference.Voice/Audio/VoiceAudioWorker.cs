@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Telephony;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Runtime;
@@ -183,6 +184,20 @@ internal sealed class VoiceAudioWorker : IDisposable
         {
             _sink.OnUtteranceDiscarded(_frontend.UtteranceSamples);
         }
+        if ((events & VoiceFrameEvents.InbandDtmf) != 0)
+        {
+            while (_frontend.TryTakeDtmf(out DtmfEvent tone))
+            {
+                _sink.OnInbandDtmf(tone, now);
+            }
+        }
+        if ((events & VoiceFrameEvents.CallProgress) != 0)
+        {
+            while (_frontend.TryTakeCallProgress(out CallProgressEvent finding))
+            {
+                _sink.OnCallProgress(finding, now);
+            }
+        }
     }
 
     private void TrimBacklog()
@@ -203,7 +218,8 @@ internal sealed class VoiceAudioWorker : IDisposable
             dropped += read;
         }
         // The partial frame and the model state belong to audio that is gone; resume clean on the fresh audio. The
-        // turn loop reports the drop, so this thread does no logging.
+        // turn loop reports the drop, so this thread does no logging. The call-audio detectors reset with it, so a key held
+        // across the trim is reported again and detector offsets restart at 0.
         _frameFill = 0;
         _frontend.Reset();
         Volatile.Write(ref _droppedOldest, _droppedOldest + dropped);

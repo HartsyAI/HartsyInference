@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Telephony;
 using HartsyInference.Voice.Turns;
 
 namespace HartsyInference.Voice.Audio;
@@ -14,6 +15,16 @@ internal interface IVoiceAudioSink
 
     /// <summary>The caller barged in on <paramref name="turnId"/>; the flush and cancellation are already requested.</summary>
     void OnBargeIn(int turnId, long detectNs);
+
+    /// <summary>A DTMF tone was heard in the audio. Default: ignored, so a sink that does not care keeps compiling.</summary>
+    void OnInbandDtmf(DtmfEvent tone, long detectNs)
+    {
+    }
+
+    /// <summary>The far end's audio was classified. Default: ignored.</summary>
+    void OnCallProgress(CallProgressEvent finding, long detectNs)
+    {
+    }
 
     /// <summary>The audio thread failed and has stopped.</summary>
     void OnAudioFault(Exception error);

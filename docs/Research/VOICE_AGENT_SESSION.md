@@ -160,6 +160,62 @@ keeps listening.
 | `FirstSentenceMinChars`, `MaxSentenceChars` | 12, 180 | session |
 | `CpuThreadCap` | 0 | model set; sets `numerics.cpuThreads` while loaded and restores the previous value on dispose |
 | `PartialTranscripts` | false | `true` is rejected until a streaming recognizer is wired |
+| `DetectInbandDtmf`, `DetectCallProgress`, `ForwardInbandDtmfToModel` | false, false, false | session; the [call-audio detectors](#call-audio-detectors). Off, the audio thread runs no detector code; forwarding needs `DetectInbandDtmf` and is rejected without it |
+
+## Call-audio detectors
+
+Optional, default off, for calls where the far end is a machine or a phone menu (outbound errands). They are plain DSP in
+`HartsyInference.Audio.Dsp.Telephony` (`DtmfDetector`, `CallProgressClassifier`, usable without the session) and the
+session runs them on the audio thread over the **raw** inbound frame, ahead of RNNoise (a noise suppressor attenuates
+tones). Each enabled detector adds one branch per frame; disabled, the field is null and the frame path is unchanged
+(`VoiceCallAudioDetectionTests` compares every other front-end decision with and without them).
+
+**Two kinds of DTMF, named so they cannot be mistaken.** `PushDtmf(char)` is the *host* reporting a key the caller pressed,
+learned out of band (RFC 2833, SIP INFO); the model sees `[DTMF n]`. `DetectInbandDtmf` is the *session hearing* tones in the
+audio the far end sends, as an IVR or an answering machine's remote-access menu does; it raises
+`InbandDtmfDetected` (`Dtmf` has the key and sample offsets) and, only with `ForwardInbandDtmfToModel`, tells the model
+`[INBAND DTMF n]`, one turn per key. A host that gets keys out of band should leave detection off; one that reports the same
+key both ways tells the model twice. The agent's own outbound digits are not echo-suppressed here; sending them out of band
+(`send_dtmf` over SIP) means none arrive in the inbound audio.
+
+**`DtmfDetector`.** Goertzel at the eight DTMF frequencies and the second harmonic of each (16 bins, SIMD lanes) on 20 ms
+blocks every 10 ms. A block votes for a key when both components exceed 0.002 amplitude, carry at least 60 % of the block's
+energy, stand 6 dB above the next frequency of their group, have forward twist at most 8 dB and reverse twist at most 4 dB,
+and their second harmonics stay under 25 % (low group) and 10 % (high group) of the tone. A key is reported once it has lasted
+`MinToneMs` (40 ms nominal; in practice 50 ms and longer is reliable and a 25 ms clip is rejected), is held until it has been
+absent 40 ms, and a dropout shorter than that does not split it. Verified on synthetic audio: all 16 keys including A-D,
+white noise down to 3 dB SNR, 45 dB-down keys over a noise floor, twist at the limits, keys under speech, truncated tones.
+**Talk-off:** no false key in 614 s of the repo's two speech clips (at three levels), synthetic voiced babble whose partials
+sweep every DTMF frequency, and white noise. That is a smoke-level check, not a Bellcore run: the real-speech part is 14.6 s,
+and an earlier threshold (40 % tonal fraction) did let the synthetic babble through 15 times, which is why the default is 60 %.
+Telephone codecs, echo and real IVR level plans are not modeled.
+
+**`CallProgressClassifier`.** 40 ms Hann-windowed blocks: Goertzel at 350/425/440/480/620 Hz and a 25 Hz grid over
+700-2200 Hz for beeps, plus the host's speech probability (the session passes Silero's) and whether the agent is speaking.
+A burst state machine turns tone blocks into cadence. Raised as `CallProgressDetected` signals with a confidence, and the
+same kind can repeat with a higher confidence as evidence accumulates:
+
+| Kind | Evidence | Reliability |
+|---|---|---|
+| `RingbackTone` | 440+480 Hz 2 s / 4 s (0.6 after 0.9 s, 0.85 on the first cycle), 425 Hz 1 s / 4 s | tone: reliable |
+| `BusyTone`, `FastBusyTone` | 480+620 Hz or 425 Hz at 0.5 s or 0.25 s / 0.2 s cadence; 0.75 after one cycle, 0.9 after two | tone: reliable |
+| `DialTone` | 350+440 Hz for 1 s, 425 Hz for 3 s | tone: reliable |
+| `SitTone` | three ascending tones (about 900-1050, 1300-1500, 1700-1850 Hz) | reliable when all three are heard; the first also raises `Beep` |
+| `Beep` | single tone 700-2200 Hz, 120 ms to 2 s, with its frequency | the tone is reliable, its meaning is not |
+| `MachineGreeting` | a beep within 4 s of 3 s or more of far-end speech: 0.9; 6 s of uninterrupted far-end speech: 0.55, 12 s: 0.7 | beep after greeting: strong; the speech-only form is a heuristic |
+| `HumanSpeech` | speech that follows the agent's within 5 s and is under 8 s: 0.7; an utterance under 4 s then 1.2 s of waiting: 0.55 | heuristic |
+| `HoldMusic` | 4 s of non-speech sound above the silence floor (quiet gaps under 0.3 s allowed): 0.5 | heuristic: cannot tell music from noise |
+| `PromptSilence` | 3 s of silence outside a tone cadence's off time | reliable at the threshold; the threshold is a line noise floor of -50 dBFS |
+
+Machine against human from audio alone is a guess. These signals are timing evidence, never above 0.7 without a beep, and are
+meant for the host or the model to weigh (`MachineGreeting` plus no reply to our hello is what voicemail looks like; a
+person who happens to read a long message also looks like it). Far-end speech while the agent is speaking, or for the
+hold-off after it, is excluded from every speech heuristic. Not covered: fax and modem tones, non-North-American/European
+cadences (UK 400+450 Hz), and spectral hold-music detection beyond "sustained sound that is not speech".
+
+**Cost.** Both detectors together, one core, release build, 5000 frames of mixed speech/keys/busy/ringback/beep
+(`CallAudioCostTests`): p50 18 us, p99 48 us per 20 ms frame (gate 200 us), 0 bytes allocated. Offsets in the events count
+raw inbound samples since the start of the call or the last audio discontinuity (a backlog trim resets them).
 
 ## Metrics
 

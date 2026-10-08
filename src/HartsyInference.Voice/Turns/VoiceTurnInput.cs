@@ -40,6 +40,10 @@ internal sealed class VoiceTurnInput
     public static VoiceTurnInput Dtmf(char digit, long receivedNs) =>
         new(VoiceTurnKind.Dtmf, receivedNs) { Text = "[DTMF " + digit + "]" };
 
+    /// <summary>A key heard in the audio, carried to the model as the user message <c>[INBAND DTMF n]</c>.</summary>
+    public static VoiceTurnInput InbandDtmf(char digit, long receivedNs) =>
+        new(VoiceTurnKind.Dtmf, receivedNs) { Text = "[INBAND DTMF " + digit + "]" };
+
     /// <summary>Text the agent says without asking the model.</summary>
     public static VoiceTurnInput Speak(string text, TaskCompletionSource completion, long receivedNs) =>
         new(VoiceTurnKind.Speak, receivedNs) { Text = text, Completion = completion };

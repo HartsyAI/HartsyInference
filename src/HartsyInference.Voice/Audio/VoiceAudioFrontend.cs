@@ -1,3 +1,4 @@
+using HartsyInference.Audio.Dsp.Telephony;
 using HartsyInference.Audio.Models.Denoise;
 using HartsyInference.Audio.Models.Wake;
 using HartsyInference.Core.Backends;
@@ -50,6 +51,8 @@ internal sealed class VoiceAudioFrontend : IDisposable
     private readonly float[] _scaled;
     private readonly float[] _denoised;
     private readonly float[] _capture;
+    private readonly DtmfDetector? _dtmf;
+    private readonly CallProgressClassifier? _progress;
     private readonly LatencyHistogram _frameTimes = new();
     private readonly bool _bargeInEnabled;
     private readonly float _bargeInProbability;
@@ -97,6 +100,8 @@ internal sealed class VoiceAudioFrontend : IDisposable
         _bargeInMinSamples = (long)options.BargeInMinMs * SamplesPerMs;
         _bargeInHoldoffSamples = (long)options.BargeInHoldoffMs * SamplesPerMs;
         _maxUtteranceSamples = (long)options.MaxUtteranceMs * SamplesPerMs;
+        _dtmf = options.DetectInbandDtmf ? new DtmfDetector() : null;
+        _progress = options.DetectCallProgress ? new CallProgressClassifier() : null;
     }
 
     /// <summary>Samples pushed through the VAD since the last <see cref="Reset"/>: the front-end's clock.</summary>
@@ -167,8 +172,35 @@ internal sealed class VoiceAudioFrontend : IDisposable
                 events |= PushWindow();
             }
         }
+        if (_dtmf is not null || _progress is not null)
+        {
+            events |= ScanCallAudio(frame);
+        }
         _frameTimes.Record(MonotonicClock.NowNs() - started);
         return events;
+    }
+
+    /// <summary>Takes the oldest DTMF key the detector queued. Its offsets count raw inbound samples (before the
+    /// denoiser), from the start of the call or the last <see cref="Reset"/>.</summary>
+    public bool TryTakeDtmf(out DtmfEvent tone)
+    {
+        if (_dtmf is null)
+        {
+            tone = default;
+            return false;
+        }
+        return _dtmf.TryDequeue(out tone);
+    }
+
+    /// <summary>Takes the oldest call-progress finding the classifier queued; offsets as for <see cref="TryTakeDtmf"/>.</summary>
+    public bool TryTakeCallProgress(out CallProgressEvent finding)
+    {
+        if (_progress is null)
+        {
+            finding = default;
+            return false;
+        }
+        return _progress.TryDequeue(out finding);
     }
 
     /// <summary>Copies the utterance the last endpoint closed; <paramref name="destination"/> holds exactly
@@ -204,6 +236,8 @@ internal sealed class VoiceAudioFrontend : IDisposable
     {
         _vad.Reset();
         _denoiser?.Reset();
+        _dtmf?.Reset();
+        _progress?.Reset();
         _windowFill = 0;
         _wasInSpeech = false;
         _replyAudibleUntil = -1;
@@ -216,6 +250,26 @@ internal sealed class VoiceAudioFrontend : IDisposable
         _utterance = default;
         _hangover = 0;
         _frameTimes.Reset();
+    }
+
+    // The raw frame, not the denoised one: RNNoise exists to suppress what is not speech, which includes tones. Runs after
+    // the VAD has seen the frame, so the speech probability it passes on is current to within one VAD window.
+    private VoiceFrameEvents ScanCallAudio(ReadOnlySpan<float> frame)
+    {
+        VoiceFrameEvents events = VoiceFrameEvents.None;
+        if (_dtmf is not null && _dtmf.Process(frame) > 0)
+        {
+            events |= VoiceFrameEvents.InbandDtmf;
+        }
+        if (_progress is not null)
+        {
+            bool local = _signals.SpeakingTurn != 0 || _vad.ConsumedSamples < _replyAudibleUntil;
+            if (_progress.Process(frame, _vad.LastProbability, local) > 0)
+            {
+                events |= VoiceFrameEvents.CallProgress;
+            }
+        }
+        return events;
     }
 
     private VoiceFrameEvents PushWindow()

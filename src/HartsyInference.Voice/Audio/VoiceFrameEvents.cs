@@ -18,4 +18,10 @@ internal enum VoiceFrameEvents
 
     /// <summary>The caller spoke over the reply of turn <see cref="VoiceAudioFrontend.BargeInTurn"/> long enough to stop it.</summary>
     BargeIn = 8,
+
+    /// <summary>The DTMF detector queued a key; take it with <see cref="VoiceAudioFrontend.TryTakeDtmf"/>.</summary>
+    InbandDtmf = 16,
+
+    /// <summary>The call-progress classifier queued a finding; take it with <see cref="VoiceAudioFrontend.TryTakeCallProgress"/>.</summary>
+    CallProgress = 32,
 }

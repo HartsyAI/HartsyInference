@@ -32,4 +32,14 @@ public enum VoiceAgentEventKind
     /// <summary>Something failed (<see cref="VoiceAgentEvent.Text"/>, <see cref="VoiceAgentEvent.Error"/>); the session
     /// keeps listening unless the audio thread itself failed, which ends it.</summary>
     Error,
+
+    /// <summary>A DTMF tone was heard in the far end's audio (<see cref="VoiceAgentEvent.Dtmf"/>, the key also in
+    /// <see cref="VoiceAgentEvent.Text"/>). Only raised when <see cref="VoiceAgentOptions.DetectInbandDtmf"/> is on. This is
+    /// audio the session listened to, unlike <see cref="VoiceAgentSession.PushDtmf"/>, where the host reports a key.</summary>
+    InbandDtmfDetected,
+
+    /// <summary>The far end's audio looks like ringing, a busy signal, a beep, a recording, a person, music or silence
+    /// (<see cref="VoiceAgentEvent.CallProgress"/>, its kind also in <see cref="VoiceAgentEvent.Text"/>). A signal with a
+    /// confidence, not a verdict. Only raised when <see cref="VoiceAgentOptions.DetectCallProgress"/> is on.</summary>
+    CallProgressDetected,
 }
