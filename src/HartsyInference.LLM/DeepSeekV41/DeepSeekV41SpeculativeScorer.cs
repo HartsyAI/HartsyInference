@@ -38,7 +38,17 @@ internal sealed class DeepSeekV41SpeculativeScorer : ISpeculativeScorer
         IReadOnlyList<int> held = _state.Tokens;
         int limit = Math.Min(held.Count, context.Length - 1), common = 0;
         while (common < limit && held[common] == context[common]) common++;
-        if (common < _state.Length) _state.Truncate(common);
+        // a context that diverges inside the prompt chunk is prefilled afresh, as plain decoding of that context would prefill it; past the prompt, rolling back
+        // replays the kept tokens with the same structure they were built with
+        if (common < Math.Min(_state.PrefillLength, held.Count))
+        {
+            _state.Truncate(0);
+            common = 0;
+        }
+        else if (common < _state.Length)
+        {
+            _state.Truncate(common);
+        }
 
         int dim = _model.Dim;
         float[] contextHidden = new float[(context.Length - common) * dim];

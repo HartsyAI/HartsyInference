@@ -94,7 +94,7 @@ public sealed class DeepSeekV41SpeculativeScorerTests
         using CpuBackend cpu = new();
         DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
         int[] ids = FixtureIds();
-        foreach (int length in new[] { 1, 2, 6, 11 })
+        foreach (int length in Enumerable.Range(1, 11))
             for (int draftLength = 1; draftLength <= 4; draftLength++)
             {
                 int[] context = ids[..length], draft = ids[length..(length + draftLength)];
@@ -139,6 +139,74 @@ public sealed class DeepSeekV41SpeculativeScorerTests
             }
         }
     }
+
+    [Fact]
+    public void Rejected_Calls_Leave_The_Sequence_Unchanged()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
+        DeepSeekV41GenerationState state = new(model, Capacity);
+        DeepSeekV41SpeculativeScorer scorer = new(model, state);
+        scorer.Score(Prompt, [13], Rows(model, 2));
+        int[] before = state.Tokens.ToArray();
+
+        // the draft does not fit the sequence: the check runs before any rollback or append
+        Assert.Throws<InvalidOperationException>(() => scorer.Score(Prompt, new int[Capacity], Rows(model, Capacity + 1)));
+        // one row is one logit short
+        Assert.Throws<ArgumentException>(() => scorer.Score(Prompt, [13], new[] { new float[model.VocabSize], new float[model.VocabSize - 1] }));
+        Assert.Equal(before, state.Tokens);
+        Assert.Equal(before.Length, state.Length);
+    }
+
+    [Fact]
+    public void A_Context_That_Diverges_Inside_The_Prompt_Is_Prefilled_Afresh()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
+        DeepSeekV41GenerationState state = new(model, Capacity);
+        DeepSeekV41SpeculativeScorer scorer = new(model, state);
+        scorer.Score(Prompt, [13, 1], Rows(model, 3));
+
+        // shares two tokens with the prompt, then diverges inside the prompt's chunk
+        int[] other = [5, 13, 9, 9, 9, 1];
+        int[] draft = [27, 29];
+        float[][] rows = Rows(model, draft.Length + 1);
+        scorer.Score(other, draft, rows);
+
+        // plain decoding of that context: a fresh prefill of it, then the draft one token at a time
+        DeepSeekV41GenerationState plain = new(model, Capacity);
+        float[] hidden = new float[other.Length * model.Dim];
+        plain.Append(other, hidden);
+        Assert.Equal(model.Logits(hidden.AsSpan((other.Length - 1) * model.Dim, model.Dim)), rows[0]);
+        for (int j = 0; j < draft.Length; j++)
+        {
+            float[] step = new float[model.Dim];
+            plain.Append([draft[j]], step);
+            Assert.Equal(model.Logits(step), rows[j + 1]);
+        }
+    }
+
+    [Fact]
+    public void Truncating_Into_The_Prompt_Replays_A_Shorter_Prefill()
+    {
+        // documents the one rollback whose arithmetic is not the original's: the kept prefix is prefilled again as its own chunk
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
+        DeepSeekV41GenerationState state = new(model, Capacity);
+        state.Append(Prompt, new float[Prompt.Length * model.Dim]);
+        state.Append([13], new float[model.Dim]);
+        state.Truncate(5);
+
+        float[] next = new float[model.Dim];
+        state.Append([1], next);
+        DeepSeekV41GenerationState fresh = new(model, Capacity);
+        fresh.Append(Prompt[..5], new float[5 * model.Dim]);
+        float[] expected = new float[model.Dim];
+        fresh.Append([1], expected);
+        Assert.Equal(expected, next);
+    }
+
+    private static float[][] Rows(DeepSeekV41HostModel model, int count) => Enumerable.Range(0, count).Select(_ => new float[model.VocabSize]).ToArray();
 
     /// <summary>Plain greedy decoding: the prompt as one prefill, then one token at a time.</summary>
     private static List<int> PlainGreedy(DeepSeekV41HostModel model, int[] prompt, int count)
