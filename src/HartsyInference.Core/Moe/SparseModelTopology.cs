@@ -25,7 +25,7 @@ public sealed class SparseModelTopology
         ArgumentNullException.ThrowIfNull(layers);
         if (layers.Count == 0) throw new ArgumentException("A topology needs at least one layer.", nameof(layers));
         HiddenSize = hiddenSize;
-        Layers = layers.ToArray();
+        Layers = Array.AsReadOnly(layers.ToArray());
         Family = family;
         Validate();
         Capabilities = SparseCapabilities.From(this);
@@ -35,7 +35,7 @@ public sealed class SparseModelTopology
     /// <summary>Model width H.</summary>
     public int HiddenSize { get; }
 
-    /// <summary>Layers in execution order (target backbone first, draft layers after it).</summary>
+    /// <summary>Layers in execution order (target backbone first, draft layers after it). A read-only view of a private copy.</summary>
     public IReadOnlyList<SparseLayerDescriptor> Layers { get; }
 
     /// <summary>Diagnostic label; not used for dispatch.</summary>

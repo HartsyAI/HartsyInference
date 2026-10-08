@@ -63,7 +63,8 @@ public sealed record SparseCapabilities(
             scoring.Add(moe.Router.Scoring);
             foreach (ExpertGroupDescriptor group in moe.Shared is null ? [moe.Routed] : new[] { moe.Routed, moe.Shared })
             {
-                AddShape(group.Shape);
+                // The default shape describes an expert only if some index is not overridden.
+                if (group.Overrides is null || group.Overrides.Count < group.Count) AddShape(group.Shape);
                 if (group.Overrides is not null)
                     foreach (KeyValuePair<int, ExpertDescriptor> pair in group.Overrides) AddShape(pair.Value);
             }

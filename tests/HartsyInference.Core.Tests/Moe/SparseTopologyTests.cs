@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
 using System.Globalization;
@@ -296,5 +297,27 @@ public sealed class SparseTopologyTests
         SparseModelTopology topology = Uniform(1, _ => new MoeLayerDescriptor(
             logit, new ExpertGroupDescriptor(8, Expert()).Validated(), null, false, ExpertProgram.Swiglu).Validated());
         Assert.True(topology.Capabilities.RequiresHostRouting);
+    }
+
+    [Fact]
+    public void FullyOverriddenGroup_DoesNotCountItsDefaultShape()
+    {
+        ExpertDescriptor wide = new(Hidden, 32, DType.F16);
+        SparseModelTopology topology = Uniform(1, _ => new MoeLayerDescriptor(
+            new RouterDescriptor(2, 1, 1, MoeRouteScoring.Softmax).Validated(),
+            new ExpertGroupDescriptor(2, Expert(32, DType.F32), new Dictionary<int, ExpertDescriptor> { [0] = wide, [1] = wide }).Validated(),
+            null, false, ExpertProgram.Swiglu).Validated());
+
+        Assert.DoesNotContain(DType.F32, topology.Capabilities.ExpertDTypes);
+        Assert.False(topology.Capabilities.HeterogeneousExpertShapes);
+    }
+
+    [Fact]
+    public void Layers_CannotBeRecoveredAsAMutableArray()
+    {
+        SparseModelTopology topology = Uniform(2, _ => null);
+
+        Assert.False(topology.Layers is SparseLayerDescriptor[]);
+        Assert.Throws<NotSupportedException>(() => ((IList<SparseLayerDescriptor>)topology.Layers).Add(null!));
     }
 }
