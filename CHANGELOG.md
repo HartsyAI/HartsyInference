@@ -8,13 +8,23 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.286
+## alpha.287
 
 - **Added: the placement planner for a routed layer.** `ExpertScheduler.Plan` reads the cache's residency and assigns each routed
   expert to the GPU (resident) or the CPU (missing), through a replaceable `IMissExecutionPolicy`. Planning pins the resident
   experts it plans on, returned as a lease, so they cannot be evicted before the layer runs; it uploads nothing, and a policy may
   not place a missing expert on the GPU. Every routed (token, slot) pair is counted once. It is allocation-free once warm: the caller owns
   the scratch, the output, the miss list and a reusable lease, and `AcquireResident` binds that lease without allocating. The GPU execution, the CPU kernels and the cross-device combine are not in this change and need the test rig.
+
+## alpha.286
+
+- **Added: expert packs, a quantized on-disk store for routed experts.** `ExpertPackWriter` quantizes each expert's gate, up and
+  down projections with the existing GGUF codecs (Q8_0, Q4_K, Q5_K, Q6_K) into 4 KiB-aligned records, with a manifest that
+  names the topology fingerprint and a SHA-256 per record. Nothing is visible until the pack completes; `ExpertPackReader` is an
+  `IExpertSource` that refuses incomplete packs, other versions and other topologies, and checks each record on read.
+  `ExpertPackVerifier` compares the dequantized values with the F32 source. Measured on random weights: Q8_0 3.76x smaller
+  than F32 at 0.38% relative RMSE, Q4_K 7.1x smaller at 6.1%. Real checkpoints are not yet packed or verified. See
+  `docs/MOE_PACK.md`.
 
 ## alpha.285
 
