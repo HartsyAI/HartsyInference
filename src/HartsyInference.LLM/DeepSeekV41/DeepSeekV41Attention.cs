@@ -267,6 +267,7 @@ public sealed class DeepSeekV41Attention
 
     private void RoundTrip(float[] data, int width, LatentEncoding encoding)
     {
+        if (!_s.QuantizeLatents) return;
         using Tensor x = DeepSeekV41HostMath.Tensor(data, data.Length / width, width);
         _backend.ActQuantDequantInPlace(x, encoding);
         x.AsReadOnlySpan<float>().CopyTo(data);

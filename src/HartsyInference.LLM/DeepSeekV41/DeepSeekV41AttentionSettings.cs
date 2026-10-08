@@ -20,9 +20,10 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <param name="CandidateTopkBlocks">Blocks kept at level one.</param>
 /// <param name="CandidateBlockSize">Positions per candidate block.</param>
 /// <param name="NormEps">RMS norm epsilon.</param>
+/// <param name="QuantizeLatents">Whether the window KV, compressed latents and indexer queries and keys take upstream's FP8/FP4 cache round trip (default). Off is a diagnostic: it removes the quantization boundaries that make a float-noise difference flip an element, so two implementations can be compared in continuous arithmetic.</param>
 public sealed record DeepSeekV41AttentionSettings(int Dim, int Heads, int HeadDim, int RopeDim, int QLoraRank, int OGroups, int OLoraRank, int Window,
     int CompressRatio, bool IsKvSource, bool IsIndexSource, bool IsCandidateSource, bool UsesCandidates, int IndexHeads, int IndexHeadDim,
-    int IndexTopk, int CandidateTopkBlocks, int CandidateBlockSize, float NormEps)
+    int IndexTopk, int CandidateTopkBlocks, int CandidateBlockSize, float NormEps, bool QuantizeLatents = true)
 {
     /// <summary>Width of one head-group slice fed to <c>wo_a</c>.</summary>
     public int GroupDim => Heads * HeadDim / OGroups;
