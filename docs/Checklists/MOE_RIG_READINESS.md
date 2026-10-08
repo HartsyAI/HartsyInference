@@ -30,7 +30,11 @@ Subsystems with CPU tests in place:
 - **NVIDIA driver and library mismatch.** `nvidia-smi` reports "Driver/library version mismatch" (NVML library 595.99).
   No CUDA test can run until the driver matches the library. A reboot or a matching reinstall is the usual fix; this is
   a system change, so it was not made from here.
-- **Toolkit.** `nvcc` here is CUDA 11.5. The repo's committed PTX targets `sm_70`, `sm_75`, `sm_80`, and one `sm_120a`
+- **Driver and PTX.** The rig loads the shipped PTX from disk; `nvcc` is not in that path. The constraints are the deployment
+  driver's PTX-ISA ceiling and the GPU's exact compute capability (`src/HartsyInference.Cuda/Kernels/README.md`). The
+  committed PTX targets `sm_70`, `sm_75`, `sm_80`, and one `sm_120a` file. 281 CUDA tests failed here with a PTX JIT error
+  ("SM version specified by .target is higher than default SM version"): that points at the driver on this machine, so check
+  the driver's PTX-ISA support against those targets on the rig before the first GPU run.
   file. 281 CUDA tests fail with a PTX JIT error ("SM version specified by .target is higher than default SM version"),
   which points at the toolchain as much as the driver. Confirm the toolkit the rig uses against the PTX targets before the
   first GPU run.
@@ -41,10 +45,12 @@ Subsystems with CPU tests in place:
 
 1. `nvidia-smi` shows the GPU and a driver that matches the library. No mismatch message.
 2. GPU lane, one suite at a time, never alongside another run:
-   `dotnet test tests/HartsyInference.Cuda.Tests --filter "Category=GpuIntegration"`. Record failures by test name.
+   `dotnet test tests/HartsyInference.Cuda.Tests --filter "Category=GpuIntegration"`. Record failures by test name. The GPU
+   labels that this filter depends on land with #307; run the suites only from a checkout that includes it.
    The expert-cache suites are the first to run: `CudaExpertCacheTests`, `CudaExpertM1FixtureTests`,
    `CudaMoePrimitiveTests`, `CudaMoeTests`, `CudaQuantWorkspaceTests`, `CudaStreamingWeightCacheTests`.
-3. Refactor A/B for the cache changes: `tests/regression-ab.sh --expect identical --backend cuda` on a generation case.
+3. Refactor A/B for the cache changes: `tests/regression-ab.sh --fresh --expect identical --backend cuda` on a generation case.
+   `--fresh` rebuilds both arms with their PTX; without it the script reuses cached builds and results.
    The cache refactor (#304) must leave generations identical.
 4. Vulkan: `Category=GpuIntegration` for the Vulkan MoE primitives (`VulkanMoePrimitiveTests`).
 
