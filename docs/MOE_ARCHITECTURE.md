@@ -62,6 +62,16 @@ therefore greedy output. Validation therefore requires, in order of strictness:
 4. Identical greedy tokens only for configurations that are deterministic by construction (fixed placement, fixed
    split, frozen cache state).
 
+## Reference path
+
+`Core.Moe.SparseFfnReference` executes a routed layer on the host in F32 from its descriptor. It composes the backend
+op contracts (`MoeReference.Route`, `BuildDispatch`, `Combine`) and runs each expert through `ExpertProgramReference`,
+a scalar implementation of the program. Backend expert kernels are to be checked against it; no backend kernel check
+exists yet. Parity with the production `MoeFeedForward` is covered for softmax routing and for grouped sigmoid routing
+with a selection bias. Token-kind routing is supported through the alternate bias. Shared experts, flat logit-space
+selection (production `SigmoidLogitAdd`), and routers wider than `MoeRouteArgs.MaxExperts` are rejected explicitly
+until covered.
+
 ## Open items at this layer
 
 - Draft (MTP/DSpark) layers: gate-bias and shared-expert layout is not loaded yet, so their topology carries no selection

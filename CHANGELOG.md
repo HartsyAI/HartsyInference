@@ -8,6 +8,15 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.282
+
+- **Added: exact-contract reference path for routed sparse layers.** `Core.Moe.SparseFfnReference` runs a routed layer
+  from a `MoeLayerDescriptor` by composing the existing backend op contracts (`MoeReference.Route`, `BuildDispatch`,
+  `Combine`) with `ExpertProgramReference`, a scalar F32 execution of `ExpertProgram` (activation plus independent gate/up
+  clamps). It is the correctness oracle for later backend expert kernels. Shared experts are rejected explicitly until
+  they are covered. Parity against `MoeFeedForward` on identical weights holds within 1e-4 for softmax routing and for
+  grouped sigmoid routing with a selection bias. Production routing is unchanged.
+
 ## alpha.281
 
 - **Added: generic sparse (MoE) topology contracts.** New `HartsyInference.Core.Moe` describes a model as layers (dense or
