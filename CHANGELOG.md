@@ -8,6 +8,17 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.281
+
+- **Added: generic sparse (MoE) topology contracts.** New `HartsyInference.Core.Moe` describes a model as layers (dense or
+  sparse), with a router (per-phase top-k, group limiting, scoring, token-kind bias), routed and shared expert groups with
+  per-index shape overrides, and an `ExpertProgram` (activation plus independent gate/up clamps) instead of a hard-coded
+  SwiGLU. `SparseCapabilities` is derived from the topology so runtime code checks capabilities, not model names;
+  `SparseModelTopology.Fingerprint` is a SHA-256 over shapes, routing and programs for profile and pack binding.
+  `MoeTopologyFactory` maps transformer MoE configs and `DeepSeekV41Topology` maps the official V4.1 config (routed
+  experts, clamped SwiGLU, draft layers). No runtime behavior changes. See `docs/MOE_ARCHITECTURE.md` and
+  `docs/Research/HETEROGENEOUS_MOE.md`.
+
 ## alpha.280
 
 Release cut. New in this release's source: the voice-agent call-audio detectors (#296). The `ToolRegistry`, Clef and CUDA
