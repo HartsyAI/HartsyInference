@@ -22,8 +22,15 @@ Subsystems with CPU tests in place:
 - Scalar reference path with parity against `MoeFeedForward` on softmax and grouped sigmoid routing (#300).
 - Expert identity with banks; cache keyed by (bank, layer) (#303).
 - Residency queries and no-upload acquisition; allocation-free per call (#304).
-- Expert pack: exact payload sizes, round trips, refusals and corruption checks (#305).
-- Placement planner: residency decides placement, every routed pair counted once, planning changes no state (#306).
+
+Pending, not verified in this checkout:
+
+- Expert pack (#305): exact payload sizes, round trips, refusals and corruption checks. No `ExpertPack` code or tests
+  exist in this checkout.
+- Placement planner (#306): residency decides placement, every routed pair counted once, planning changes no state. No
+  planner code or tests exist in this checkout.
+
+Do not count #305 or #306 as verified until those changes land on the branch being run.
 
 ## Blockers on this machine (fix before renting or on the rig)
 
@@ -35,24 +42,44 @@ Subsystems with CPU tests in place:
   committed PTX targets `sm_70`, `sm_75`, `sm_80`, and one `sm_120a` file. 281 CUDA tests failed here with a PTX JIT error
   ("SM version specified by .target is higher than default SM version"): that points at the driver on this machine, so check
   the driver's PTX-ISA support against those targets on the rig before the first GPU run.
-  file. 281 CUDA tests fail with a PTX JIT error ("SM version specified by .target is higher than default SM version"),
-  which points at the toolchain as much as the driver. Confirm the toolkit the rig uses against the PTX targets before the
-  first GPU run.
 - **Host memory.** 39 GB total. With the CPU lane running, 2 GB was free and 9 GB available. Check `free -g` before any
   large load (see the no-heavy-GPU-runs note).
 
 ## Rig run order
 
 1. `nvidia-smi` shows the GPU and a driver that matches the library. No mismatch message.
-2. GPU lane, one suite at a time, never alongside another run:
-   `dotnet test tests/HartsyInference.Cuda.Tests --filter "Category=GpuIntegration"`. Record failures by test name. The GPU
-   labels that this filter depends on land with #307; run the suites only from a checkout that includes it.
-   The expert-cache suites are the first to run: `CudaExpertCacheTests`, `CudaExpertM1FixtureTests`,
-   `CudaMoePrimitiveTests`, `CudaMoeTests`, `CudaQuantWorkspaceTests`, `CudaStreamingWeightCacheTests`.
-3. Refactor A/B for the cache changes: `tests/regression-ab.sh --fresh --expect identical --backend cuda` on a generation case.
-   `--fresh` rebuilds both arms with their PTX; without it the script reuses cached builds and results.
-   The cache refactor (#304) must leave generations identical.
-4. Vulkan: `Category=GpuIntegration` for the Vulkan MoE primitives (`VulkanMoePrimitiveTests`).
+2. Real-weight assets, set before any GPU suite. With `HARTSY_REQUIRE_REAL_WEIGHTS=1` a missing asset fails the test
+   instead of logging `SKIPPED`, so a run with missing assets is a failed run, not a green one:
+   ```
+   export HARTSY_REQUIRE_REAL_WEIGHTS=1
+   export HARTSY_DSV41_FLASH_DIR=<dir holding model-00003-of-00048.safetensors>
+   export HARTSY_DSV41_SHARD3_FIXTURES=<dir holding manifest.tsv>   # default: ~/dsv41-ref/shard3_fixtures
+   ```
+   Confirm both paths exist before starting. `CudaExpertM1FixtureTests` is the only suite that reads them.
+3. Expert-cache suites first, one class per invocation, one at a time. xUnit does not run classes in a caller-chosen
+   order, so the category filter cannot put these first. The trailing dot makes each filter match one class exactly:
+   ```
+   for c in CudaExpertCacheTests CudaExpertM1FixtureTests CudaMoePrimitiveTests CudaMoeTests \
+            CudaQuantWorkspaceTests CudaStreamingWeightCacheTests; do
+     dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.$c."
+   done
+   ```
+   `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter does not select
+   them; this explicit loop is the only way they run on the rig.
+4. The rest of the GPU category, excluding the classes already run in step 3. Run only from a checkout that includes #307,
+   which applies the GPU labels this filter depends on. Record failures by test name:
+   ```
+   dotnet test tests/HartsyInference.Cuda.Tests --filter "Category=GpuIntegration&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaExpertCacheTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaExpertM1FixtureTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaMoePrimitiveTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaQuantWorkspaceTests."
+   ```
+5. **Deferred: refactor A/B for the cache changes.** Do not run `tests/regression-ab.sh` as evidence for #304 yet. No
+   production path constructs `CudaExpertCache` (only the class and its tests do), and no core regression case drives it,
+   so both arms would bypass the changed cache and could report identical output vacuously. The requirement that
+   generations stay identical stays open. Evidence for the cache refactor on the rig is step 3. Reopen this step once an
+   executor or a dedicated harness acquires and evicts experts through the cache; then run
+   `tests/regression-ab.sh --fresh --expect identical --backend cuda` on that case.
+6. Vulkan MoE primitives, after the CUDA lane has finished, with no other GPU run in progress:
+   `dotnet test tests/HartsyInference.Vulkan.Tests --filter "FullyQualifiedName~HartsyInference.Vulkan.Tests.VulkanMoePrimitiveTests."`.
+   This suite needs a local Vulkan device and no fixtures.
 
 ## Not yet possible, and what is missing
 
@@ -68,3 +95,4 @@ Subsystems with CPU tests in place:
 
 - Stop if a GPU failure does not reproduce on a second run. Nondeterminism is a finding, not a pass.
 - Stop if the driver mismatch returns. Do not measure through it.
+- Stop if any real-weight suite reports `SKIPPED` while `HARTSY_REQUIRE_REAL_WEIGHTS=1` is set, or if its assets are missing.
