@@ -183,6 +183,11 @@ public sealed class DeepSeekV41RealWeightsTests
     private const int QuantizedTop10Overlap = 8;
     // a different argmax is tolerated only when the host picked the oracle's runner-up and the oracle's two best logits were closer than this
     private const double NearTieLogitGap = 0.05;
+    // Structural mode, amended after the first 1300-token run (which failed the cache gate): with that many tokens a routing near-tie is expected, where the 6th and
+    // 7th biased gate scores of a token are within float noise and two correct implementations pick different experts. The oracle records that gap per token and
+    // layer. Parity stays strict up to the first layer holding a near-tie; at that layer every token WITHOUT a near-tie must still match strictly (its input and its
+    // attention are clean), the tie tokens are reported, and deeper layers and the final outputs get the flip-aware gates above.
+    private const double NearTieMargin = 1e-5;
 
     private static readonly string[] SublayerStages = ["attn_in", "attn_out", "ffn_in", "ffn_out"];
 
@@ -229,10 +234,12 @@ public sealed class DeepSeekV41RealWeightsTests
         DeepSeekV41HostModel model = loaded.Model;
         DeepSeekV41SequenceState state = model.CreateState(maxTokens);
         Dictionary<(int Layer, string Stage), float[]> seen = [];
+        // Tie and divergence state carries across calls: a near-tie in the prefill makes the caches of every later decode step depend on it.
+        int historyTieLayer = -1;
+        int historyDivergedPos = int.MaxValue;
         List<string> failures = [];
         bool strict = mode == "structural" || (mode == "exact" && layers == 1);
         bool quantizedDeep = mode == "exact" && layers > 1;
-        double blockGate = strict ? ExactBlockRelL2 : QuantizedBlockRelL2;
         model.SetProbe((layer, stage, values) => seen[(layer, stage)] = values);
         try
         {
@@ -268,34 +275,78 @@ public sealed class DeepSeekV41RealWeightsTests
                 File.WriteAllBytes(Path.Combine(dumpDir, "logits.f32"), ToBytes(logits));
             }
 
+            int positions = hidden.Length / model.Dim;
+            int callStart = state.Length - positions;
+            int callTieLayer = -1;
+            bool[] callTie = new bool[positions];
+            List<string> tieNotes = [];
+            if (mode == "structural")
+                for (int layer = 0; layer < layers; layer++)
+                {
+                    string marginPath = Path.Combine(callDir, $"route_margin{layer}.f32");
+                    if (!File.Exists(marginPath)) continue;
+                    float[] margins = ReadF32(marginPath, positions);
+                    int[] low = Enumerable.Range(0, positions).Where(t => margins[t] < NearTieMargin).ToArray();
+                    if (low.Length == 0) continue;
+                    tieNotes.Add($"layer {layer}: " + string.Join(", ", low.Take(6).Select(t => $"token {t} margin {margins[t]:E1}")) + (low.Length > 6 ? $" (+{low.Length - 6} more)" : ""));
+                    if (callTieLayer >= 0) continue;
+                    callTieLayer = layer;
+                    foreach (int t in low) callTie[t] = true;
+                }
+            if (callTieLayer >= 0) historyTieLayer = historyTieLayer < 0 ? callTieLayer : Math.Min(historyTieLayer, callTieLayer);
+            int tieLayer = historyTieLayer;
+            // only this call's own tie tokens are excluded, and only at the layer where this call's ties sit
+            bool[] tie = callTieLayer == tieLayer ? callTie : new bool[positions];
+            bool flipAware = quantizedDeep || tieLayer >= 0;
+            _output.WriteLine($"[{mode}] {call}: routing near-ties (margin < {NearTieMargin:E0}): " + (tieNotes.Count == 0 ? "none" : string.Join("; ", tieNotes)));
+
+            // allowed relL2 for one stage of one layer, and whether the near-tie tokens are left out (only the stages that depend on the layer's own routing)
+            (double Gate, bool SkipTies) StageGate(int layer, string stage)
+            {
+                if (quantizedDeep) return (QuantizedBlockRelL2, false);
+                if (!strict && mode != "structural") return (double.PositiveInfinity, false);
+                if (tieLayer < 0 || layer < tieLayer) return (ExactBlockRelL2, false);
+                if (layer > tieLayer) return (QuantizedBlockRelL2, false);
+                return (ExactBlockRelL2, stage is "out" or "ffn_out");
+            }
+
             double worstBlock = 0, worstStage = 0;
             string firstOver = "none";
             List<string> perLayer = [];
             for (int layer = 0; layer < layers; layer++)
             {
                 Assert.True(seen.TryGetValue((layer, "out"), out float[]? blockOut), $"{call}: no block output captured for layer {layer}");
-                double blockRel = RelL2(blockOut!, ReadF32(Path.Combine(callDir, $"block{layer}.f32"), blockOut!.Length));
+                float[] refBlock = ReadF32(Path.Combine(callDir, $"block{layer}.f32"), blockOut!.Length);
+                double blockRel = RelL2(blockOut, refBlock);
+                (double blockGate, bool skipTies) = StageGate(layer, "out");
+                double gated = skipTies ? RelL2Rows(blockOut, refBlock, positions, tie) : blockRel;
                 perLayer.Add($"{blockRel:E0}");
                 worstBlock = Math.Max(worstBlock, blockRel);
-                if ((strict || quantizedDeep) && blockRel > blockGate && firstOver == "none") firstOver = $"layer {layer} block {blockRel:E2}";
+                if (gated > blockGate && firstOver == "none") firstOver = $"layer {layer} block {gated:E2}" + (skipTies ? " (tie tokens excluded)" : "");
                 if (!stageTaps) continue;
                 foreach (string stage in SublayerStages)
                 {
                     float[] values = seen[(layer, stage)];
-                    double rel = RelL2(values, ReadF32(Path.Combine(callDir, $"{stage}{layer}.f32"), values.Length));
+                    float[] refValues = ReadF32(Path.Combine(callDir, $"{stage}{layer}.f32"), values.Length);
+                    double rel = RelL2(values, refValues);
+                    (double stageGate, bool skip) = StageGate(layer, stage);
+                    double stageGated = skip ? RelL2Rows(values, refValues, positions, tie) : rel;
                     worstStage = Math.Max(worstStage, rel);
-                    if ((strict || quantizedDeep) && rel > blockGate && firstOver == "none") firstOver = $"layer {layer} {stage} {rel:E2}";
+                    if (stageGated > stageGate && firstOver == "none") firstOver = $"layer {layer} {stage} {stageGated:E2}" + (skip ? " (tie tokens excluded)" : "");
                 }
             }
 
-            double worstWindow = 0, worstCompress = 0;
+            // a layer's caches are built from its own input, so they are clean up to and including the first tie layer
+            double worstWindow = 0, worstCompress = 0, gatedCache = 0;
             string cacheNote = "";
             for (int layer = 0; layer < layers; layer++)
             {
+                bool cacheClean = tieLayer < 0 || layer <= tieLayer;
                 DeepSeekV41AttentionState layerState = state.Layers[layer];
                 float[] refWindow = ReadF32(Path.Combine(callDir, $"cache_window{layer}.f32"), layerState.Window.Length);
                 double windowRel = RelL2(layerState.Window, refWindow);
                 worstWindow = Math.Max(worstWindow, windowRel);
+                if (cacheClean) gatedCache = Math.Max(gatedCache, windowRel);
                 string compressPath = Path.Combine(callDir, $"cache_compress{layer}.f32");
                 if (!File.Exists(compressPath)) continue;
                 float[] refCompress = ReadF32(compressPath, (int)(new FileInfo(compressPath).Length / 4));
@@ -304,6 +355,7 @@ public sealed class DeepSeekV41RealWeightsTests
                 int differing = 0;
                 for (int i = 0; i < refCompress.Length; i++) if (hostCompress[i] != refCompress[i]) differing++;
                 worstCompress = Math.Max(worstCompress, compressRel);
+                if (cacheClean) gatedCache = Math.Max(gatedCache, compressRel);
                 cacheNote += $" L{layer}:{refCompress.Length / 512}rows relL2 {compressRel:E1} differing {differing}/{refCompress.Length}";
                 if (dumpDir is not null) File.WriteAllBytes(Path.Combine(dumpDir, $"cache_compress{layer}.f32"), ToBytes(hostCompress));
             }
@@ -311,6 +363,42 @@ public sealed class DeepSeekV41RealWeightsTests
                 for (int layer = 0; layer < layers; layer++)
                     File.WriteAllBytes(Path.Combine(dumpDir, $"cache_window{layer}.f32"), ToBytes(state.Layers[layer].Window));
             _output.WriteLine($"[{mode}] {call}: cache window worst relL2 {worstWindow:E1}; compressed{cacheNote}");
+
+            // expert selection itself, token by token. Token t at layer L depends only on positions <= t at earlier layers, so before any layer has diverged
+            // every disagreement must sit at a token whose oracle routing margin is inside float noise. After a divergence at position p, tokens >= p may
+            // legitimately flip through attention, so only disagreements before that are held to the margin rule.
+            int routeLayers = 0, nearTie = 0, propagated = 0;
+            double largestNearTie = 0;
+            List<string> unexplained = [];
+            for (int layer = 0; layer < layers; layer++)
+            {
+                string idxPath = Path.Combine(callDir, $"route_idx{layer}.f32");
+                if (!File.Exists(idxPath) || !seen.TryGetValue((layer, "route"), out float[]? hostRoute)) continue;
+                routeLayers++;
+                float[] oracleRoute = ReadF32(idxPath, hostRoute.Length);
+                float[] margin = ReadF32(Path.Combine(callDir, $"route_margin{layer}.f32"), positions);
+                int k = hostRoute.Length / positions, layerFirst = int.MaxValue;
+                for (int t = 0; t < positions; t++)
+                {
+                    HashSet<int> host = [], oracleSet = [];
+                    for (int j = 0; j < k; j++)
+                    {
+                        host.Add((int)hostRoute[t * k + j]);
+                        oracleSet.Add((int)oracleRoute[t * k + j]);
+                    }
+                    if (host.SetEquals(oracleSet)) continue;
+                    int global = callStart + t;
+                    if (global >= historyDivergedPos) { propagated++; continue; }
+                    if (margin[t] < NearTieMargin) { nearTie++; largestNearTie = Math.Max(largestNearTie, margin[t]); }
+                    else if (unexplained.Count < 6) unexplained.Add($"layer {layer} position {global} margin {margin[t]:E2} host [{string.Join(",", host)}] oracle [{string.Join(",", oracleSet)}]");
+                    layerFirst = Math.Min(layerFirst, global);
+                }
+                historyDivergedPos = Math.Min(historyDivergedPos, layerFirst);
+            }
+            if (routeLayers > 0)
+                _output.WriteLine($"[{mode}] {call}: expert selection: {nearTie} near-tie disagreements (largest margin {largestNearTie:E1}), {propagated} downstream of an earlier divergence, {unexplained.Count} unexplained");
+            if (mode == "structural" && unexplained.Count > 0)
+                failures.Add($"{call}: expert selection differs at a token with a clear routing margin and no earlier divergence: {string.Join("; ", unexplained)}");
 
             float[] refHidden = ReadF32(Path.Combine(callDir, "final.f32"), hidden.Length);
             float[] refLogits = ReadF32(Path.Combine(callDir, "logits.f32"), logits.Length);
@@ -324,20 +412,17 @@ public sealed class DeepSeekV41RealWeightsTests
 
             Assert.All(hidden, v => Assert.True(float.IsFinite(v)));
             Assert.All(logits, v => Assert.True(float.IsFinite(v)));
-            if (strict)
+            if (firstOver != "none") failures.Add($"{call}: first block or sublayer over its gate: {firstOver}");
+            if (strict && !flipAware)
             {
-                if (firstOver != "none") failures.Add($"{call}: first block or sublayer over {ExactBlockRelL2:E0}: {firstOver}");
                 if (hiddenRel > ExactHiddenRelL2) failures.Add($"{call}: final hidden relL2 {hiddenRel:E3} > {ExactHiddenRelL2:E1}");
                 if (logitsCos < ExactLogitsCosine) failures.Add($"{call}: logits cosine {logitsCos:F6} < {ExactLogitsCosine}");
                 if (logitsRel > ExactLogitsRelL2) failures.Add($"{call}: logits relL2 {logitsRel:E3} > {ExactLogitsRelL2:E1}");
                 if (hostTop != refTop) failures.Add($"{call}: argmax host {hostTop} != oracle {refTop}");
                 if (overlap < ExactTop10Overlap) failures.Add($"{call}: top-10 overlap {overlap}/10 < {ExactTop10Overlap}");
-                if (mode == "structural" && Math.Max(worstWindow, worstCompress) > ExactBlockRelL2)
-                    failures.Add($"{call}: structural cache state differs (window {worstWindow:E2}, compressed {worstCompress:E2})");
             }
-            else if (quantizedDeep)
+            else if (flipAware)
             {
-                if (firstOver != "none") failures.Add($"{call}: first block or sublayer over {QuantizedBlockRelL2:E0}: {firstOver}");
                 if (hiddenRel > QuantizedHiddenRelL2) failures.Add($"{call}: final hidden relL2 {hiddenRel:E3} > {QuantizedHiddenRelL2:E1}");
                 if (logitsCos < QuantizedLogitsCosine) failures.Add($"{call}: logits cosine {logitsCos:F6} < {QuantizedLogitsCosine}");
                 if (overlap < QuantizedTop10Overlap) failures.Add($"{call}: top-10 overlap {overlap}/10 < {QuantizedTop10Overlap}");
@@ -357,6 +442,8 @@ public sealed class DeepSeekV41RealWeightsTests
                 if (hiddenCos < PortsCosineFloor || logitsCos < PortsCosineFloor)
                     failures.Add($"{call}: ports cosine below {PortsCosineFloor} (hidden {hiddenCos:F6}, logits {logitsCos:F6})");
             }
+            if (mode == "structural" && gatedCache > ExactBlockRelL2)
+                failures.Add($"{call}: structural cache state differs up to the first tie layer (worst {gatedCache:E2} > {ExactBlockRelL2:E0})");
             seen.Clear();
         }
     }
@@ -376,6 +463,18 @@ public sealed class DeepSeekV41RealWeightsTests
     {
         double diff = 0, norm = 0;
         for (int i = 0; i < a.Length; i++) { double d = (double)a[i] - b[i]; diff += d * d; norm += (double)b[i] * b[i]; }
+        return Math.Sqrt(diff / Math.Max(norm, 1e-30));
+    }
+
+    private static double RelL2Rows(float[] a, float[] b, int rows, bool[] skip)
+    {
+        int width = a.Length / rows;
+        double diff = 0, norm = 0;
+        for (int r = 0; r < rows; r++)
+        {
+            if (skip[r]) continue;
+            for (int i = r * width; i < (r + 1) * width; i++) { double d = (double)a[i] - b[i]; diff += d * d; norm += (double)b[i] * b[i]; }
+        }
         return Math.Sqrt(diff / Math.Max(norm, 1e-30));
     }
 

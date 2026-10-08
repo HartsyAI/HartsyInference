@@ -210,6 +210,22 @@ def main() -> None:
                 blk.engram.register_forward_hook(tap("engram_out", layer))
     model.norm.register_forward_hook(tap("final", -1))
 
+    def margin_hook(layer: int):
+        # gap between the k-th and (k+1)-th biased gate score of each token: when it is within float noise, two correct implementations
+        # can pick different experts for that token, which is a legitimate source of isolated per-token differences
+        def hook(module, inputs, _out):
+            scores = F.linear(inputs[0].float(), module.weight.float()) / module.gate_temp
+            scores = scores.softmax(-1) if module.score_func == "softmax" else scores.sigmoid() if module.score_func == "sigmoid" else F.softplus(scores).sqrt()
+            biased = scores + module.bias
+            values = biased.topk(module.topk + 1, dim=-1).values
+            taps[("route_margin", layer)] = values[:, module.topk - 1] - values[:, module.topk]
+            # the selection exactly as upstream's Gate makes it, so the host's expert ids can be compared with these
+            taps[("route_idx", layer)] = biased.topk(module.topk, dim=-1).indices.float()
+        return hook
+
+    for blk in model.layers:
+        blk.ffn.gate.register_forward_hook(margin_hook(blk.layer_id))
+
     os.makedirs(a.out, exist_ok=True)
     timings, generated = [], []
 
@@ -233,7 +249,10 @@ def main() -> None:
                 rows = (start_pos + len(token_ids)) // attn.compress_ratio
                 write_f32(os.path.join(directory, f"cache_compress{blk.layer_id}.f32"), attn.compress_kv_cache[0, :rows])
         token = int(torch.argmax(logits[0]))
-        log(f"{name}: {len(token_ids)} token(s) in {timings[-1]['seconds']}s, argmax {token}")
+        margins = torch.stack([taps[("route_margin", blk.layer_id)] for blk in model.layers])
+        low = int(torch.argmin(margins.flatten()))
+        log(f"{name}: {len(token_ids)} token(s) in {timings[-1]['seconds']}s, argmax {token}; smallest routing margin {margins.flatten()[low].item():.2e} "
+            f"(layer {low // margins.size(1)}, token {low % margins.size(1)})")
         return token
 
     generated.append(run("prefill", ids, 0))
