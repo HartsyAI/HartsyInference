@@ -166,6 +166,9 @@ public sealed class DeepSeekV41RealWeightsTests
     // uniform rescale of the head, so the logits' magnitude is gated too, at the hidden tolerance (logits are one linear map of the hidden state).
     private const int ExactTop10Overlap = 9;
     private const double ExactLogitsRelL2 = 2e-3;
+    // the final RMS norm is scale-invariant, so the hidden and logits checks cannot see a uniformly rescaled residual stream; the raw output of the
+    // last block, which is what the next layer receives, is gated separately (measured 3e-6)
+    private const double ExactBlockRelL2 = 2e-3;
 
     /// <summary>The first N layers of the real checkpoint through the host reference against the UNMODIFIED upstream model on the same real weights, dumped by
     /// <c>tests/python-reference/deepseek_v41/dump_real_layers.py</c> (set <c>DSV41_ORACLE_DIR</c> to its output directory; its <c>meta.json</c> names the layers, mode and ids).</summary>
@@ -197,11 +200,13 @@ public sealed class DeepSeekV41RealWeightsTests
         DeepSeekV41SequenceState state = model.CreateState(64);
         float[] hidden = new float[ids.Length * model.Dim];
         Stopwatch sw = Stopwatch.StartNew();
-        if (hostDump is not null)
+        if (hostDump is not null) Directory.CreateDirectory(hostDump);
+        float[]? blockOut = null;
+        model.SetProbe((layer, stage, values) =>
         {
-            Directory.CreateDirectory(hostDump);
-            model.SetProbe((_, stage, values) => File.WriteAllBytes(Path.Combine(hostDump, $"{stage}.f32"), ToBytes(values)));
-        }
+            if (stage == "out" && layer == layers - 1) blockOut = values;
+            if (hostDump is not null) File.WriteAllBytes(Path.Combine(hostDump, $"{stage}.f32"), ToBytes(values));
+        });
         try { model.Forward(ids, state, hidden); }
         finally { model.SetProbe(null); }
         float[] logits = model.Logits(hidden.AsSpan((ids.Length - 1) * model.Dim, model.Dim));
@@ -213,17 +218,21 @@ public sealed class DeepSeekV41RealWeightsTests
             File.WriteAllBytes(Path.Combine(hostDump, "logits.f32"), ToBytes(logits));
         }
 
+        Assert.NotNull(blockOut);
+        float[] refBlock = ReadF32(Path.Combine(oracle!, $"block{layers - 1}.f32"), blockOut.Length);
+        double blockRel = RelL2(blockOut, refBlock), blockCos = Cosine(blockOut, refBlock);
         float[] refHidden = ReadF32(Path.Combine(oracle!, "final.f32"), hidden.Length);
         float[] refLogits = ReadF32(Path.Combine(oracle!, "logits.f32"), logits.Length);
         double hiddenRel = RelL2(hidden, refHidden), logitsRel = RelL2(logits, refLogits);
         double hiddenCos = Cosine(hidden, refHidden), logitsCos = Cosine(logits, refLogits);
         int hostTop = ArgMax(logits), refTop = ArgMax(refLogits);
         int overlap = TopK(logits, 10).Intersect(TopK(refLogits, 10)).Count();
-        _output.WriteLine($"[{mode}] hidden relL2 {hiddenRel:E3} cos {hiddenCos:F6}; logits relL2 {logitsRel:E3} cos {logitsCos:F6}; "
+        _output.WriteLine($"[{mode}] block-out relL2 {blockRel:E3} cos {blockCos:F6}; hidden relL2 {hiddenRel:E3} cos {hiddenCos:F6}; logits relL2 {logitsRel:E3} cos {logitsCos:F6}; "
             + $"argmax host {hostTop} oracle {refTop}; top-10 overlap {overlap}/10; max|dlogit| {MaxAbsDiff(logits, refLogits):E3}");
 
         if (mode == "exact")
         {
+            Assert.True(blockRel <= ExactBlockRelL2, $"block output relL2 {blockRel:E3} > {ExactBlockRelL2:E1}");
             Assert.True(hiddenRel <= ExactHiddenRelL2, $"hidden relL2 {hiddenRel:E3} > {ExactHiddenRelL2:E1}");
             Assert.True(logitsCos >= ExactLogitsCosine, $"logits cosine {logitsCos:F6} < {ExactLogitsCosine}");
             Assert.True(logitsRel <= ExactLogitsRelL2, $"logits relL2 {logitsRel:E3} > {ExactLogitsRelL2:E1}");
@@ -232,6 +241,7 @@ public sealed class DeepSeekV41RealWeightsTests
         }
         else
         {
+            Assert.True(blockCos >= PortsCosineFloor, $"block output cosine {blockCos:F6} < {PortsCosineFloor}");
             Assert.True(hiddenCos >= PortsCosineFloor, $"hidden cosine {hiddenCos:F6} < {PortsCosineFloor}");
             Assert.True(logitsCos >= PortsCosineFloor, $"logits cosine {logitsCos:F6} < {PortsCosineFloor}");
         }
