@@ -23,7 +23,10 @@ crash before `COMPLETE` leaves nothing a reader will open. A completed pack is n
 - Every read checks the record's SHA-256. A mismatch raises `InvalidDataException` and never returns weights.
 - Dimensions must be multiples of the dtype's block size (256 for Q4_K, 32 for Q8_0).
 - The dtype must be one of Q8_0, Q4_K, Q5_K or Q6_K; F32 and other quant types are refused.
-- The reader checks that the manifest lists the number of experts it declares.
+- The reader checks that the manifest lists the number of experts it declares, that every record lies inside the file, and
+  that the declared dimensions are in range before any size arithmetic.
+- The reader serves each expert as views into a memory map of `experts.bin`: no copy is made, and the OS can reclaim the
+  pages. Weights resolved from a reader are valid only while the reader is open.
 
 ## Measured on random weights (not real checkpoints)
 

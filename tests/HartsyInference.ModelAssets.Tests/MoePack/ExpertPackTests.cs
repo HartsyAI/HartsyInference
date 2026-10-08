@@ -248,4 +248,29 @@ public sealed class ExpertPackTests : IDisposable
         Assert.False(File.Exists(Path.Combine(dir, "COMPLETE")));
         Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir));
     }
+
+    [Fact]
+    public void OversizedManifestDimension_IsRefusedBeforeAnySizeArithmetic()
+    {
+        string dir = Path.Combine(_root, "huge-dims");
+        WritePack(dir, DType.Q8_0, experts: 1);
+        string manifestPath = Path.Combine(dir, "manifest.json");
+        File.WriteAllText(manifestPath, File.ReadAllText(manifestPath).Replace("\"Hidden\": 256", "\"Hidden\": 2000000000"));
+
+        Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir, Fingerprint));
+    }
+
+    [Fact]
+    public void RecordOutsideTheFile_IsRefusedAtOpen()
+    {
+        string dir = Path.Combine(_root, "outside-file");
+        WritePack(dir, DType.Q8_0, experts: 1);
+        string manifestPath = Path.Combine(dir, "manifest.json");
+        string manifest = File.ReadAllText(manifestPath);
+        int at = manifest.IndexOf("\"Offset\":", StringComparison.Ordinal) + "\"Offset\":".Length;
+        int end = manifest.IndexOf(',', at);
+        File.WriteAllText(manifestPath, manifest[..at] + " 900000000" + manifest[end..]);
+
+        Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(dir, Fingerprint));
+    }
 }

@@ -2,7 +2,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Tensors;
-using Microsoft.Win32.SafeHandles;
+using System.IO.MemoryMappedFiles;
 
 namespace HartsyInference.ModelAssets.MoePack;
 
@@ -13,14 +13,16 @@ namespace HartsyInference.ModelAssets.MoePack;
 /// </summary>
 public sealed class ExpertPackReader : IExpertSource, IDisposable
 {
-    private readonly SafeFileHandle _handle;
+    private readonly MemoryMappedFile _mapping;
+    private readonly MemoryMappedViewAccessor _view;
+    private readonly unsafe byte* _base;
     private readonly Dictionary<ExpertKey, ExpertPackRecord> _records = [];
     private readonly DType _dtype;
     private readonly bool _verifyChecksums;
     private readonly long _gateBytes;
     private readonly long _downBytes;
 
-    private ExpertPackReader(string directory, ExpertPackManifest manifest, bool verifyChecksums)
+    private unsafe ExpertPackReader(string directory, ExpertPackManifest manifest, bool verifyChecksums)
     {
         Directory = directory;
         TopologyFingerprint = manifest.TopologyFingerprint;
@@ -31,16 +33,24 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
         _gateBytes = _dtype.ComputeByteCount((long)Intermediate * Hidden);
         _downBytes = _dtype.ComputeByteCount((long)Hidden * Intermediate);
         long expectedLength = 2 * _gateBytes + _downBytes;
+        long fileLength = new FileInfo(Path.Combine(directory, "experts.bin")).Length;
         foreach (ExpertPackRecord record in manifest.Records)
         {
             ExpertKey recordKey = new(record.Layer, record.Expert, record.Bank);
             if (record.Length != expectedLength)
                 throw new InvalidDataException(
                     $"Record for {recordKey} is {record.Length} bytes; its three projections need {expectedLength}.");
+            if (record.Offset < 0 || record.Offset > fileLength - record.Length)
+                throw new InvalidDataException($"Record for {recordKey} lies outside experts.bin.");
             if (!_records.TryAdd(recordKey, record))
                 throw new InvalidDataException($"The manifest lists {recordKey} twice.");
         }
-        _handle = File.OpenHandle(Path.Combine(directory, "experts.bin"), FileMode.Open, FileAccess.Read, FileShare.Read);
+        _mapping = MemoryMappedFile.CreateFromFile(Path.Combine(directory, "experts.bin"), FileMode.Open, null, 0,
+            MemoryMappedFileAccess.Read);
+        _view = _mapping.CreateViewAccessor(0, 0, MemoryMappedFileAccess.Read);
+        byte* pointer = null;
+        _view.SafeMemoryMappedViewHandle.AcquirePointer(ref pointer);
+        _base = pointer;
     }
 
     /// <summary>The directory the pack was opened from.</summary>
@@ -70,6 +80,9 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
     /// <inheritdoc/>
     public ExpertBacking Backing => ExpertBacking.Pack;
 
+    /// <summary>Largest width a manifest may declare; far above any real expert and keeps the size arithmetic safe.</summary>
+    public const int MaxDimension = 1 << 20;
+
     /// <summary>Opens a completed pack.</summary>
     /// <param name="directory">The pack directory.</param>
     /// <param name="expectedFingerprint">When set, the pack must have been built for this topology fingerprint.</param>
@@ -88,6 +101,9 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
             throw new InvalidDataException($"Expert pack format {manifest.Format} is not version {ExpertPackWriter.FormatVersion}.");
         if (expectedFingerprint is not null && manifest.TopologyFingerprint != expectedFingerprint)
             throw new InvalidDataException("The expert pack was built for a different topology fingerprint.");
+        if (manifest.Hidden <= 0 || manifest.Intermediate <= 0 || manifest.Hidden > MaxDimension || manifest.Intermediate > MaxDimension)
+            throw new InvalidDataException(
+                $"The manifest declares dimensions {manifest.Hidden} x {manifest.Intermediate}; both must be in [1, {MaxDimension}].");
         if (manifest.Records.Count != manifest.ExpertCount)
             throw new InvalidDataException($"The manifest lists {manifest.Records.Count} experts; it declares {manifest.ExpertCount}.");
         return new ExpertPackReader(directory, manifest, verifyChecksums);
@@ -96,39 +112,41 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
     /// <inheritdoc/>
     /// <exception cref="KeyNotFoundException">The pack has no record for <paramref name="key"/>.</exception>
     /// <exception cref="InvalidDataException">The record's checksum does not match its bytes.</exception>
-    public ExpertWeights Resolve(ExpertKey key)
+    public unsafe ExpertWeights Resolve(ExpertKey key)
     {
         if (!_records.TryGetValue(key, out ExpertPackRecord? record)) throw new KeyNotFoundException($"The expert pack has no record for {key}.");
-        Tensor gate = new(new TensorShape(Intermediate, Hidden), _dtype);
-        Tensor up = new(new TensorShape(Intermediate, Hidden), _dtype);
-        Tensor down = new(new TensorShape(Hidden, Intermediate), _dtype);
-        try
+        byte* start = _base + record.Offset;
+        if (_verifyChecksums)
         {
-            using IncrementalHash? hash = _verifyChecksums ? IncrementalHash.CreateHash(HashAlgorithmName.SHA256) : null;
-            ReadProjection(record.Offset, gate, _gateBytes, hash, key);
-            ReadProjection(record.Offset + _gateBytes, up, _gateBytes, hash, key);
-            ReadProjection(record.Offset + 2 * _gateBytes, down, _downBytes, hash, key);
-            if (hash is not null && Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant() != record.Sha256)
+            using IncrementalHash hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            hash.AppendData(new ReadOnlySpan<byte>(start, checked((int)record.Length)));
+            if (Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant() != record.Sha256)
                 throw new InvalidDataException($"Checksum mismatch for {key}; the pack is corrupt.");
         }
-        catch
-        {
-            gate.Dispose();
-            up.Dispose();
-            down.Dispose();
-            throw;
-        }
+        Tensor gate = Borrow(start, new TensorShape(Intermediate, Hidden));
+        Tensor up = Borrow(start + _gateBytes, new TensorShape(Intermediate, Hidden));
+        Tensor down = Borrow(start + 2 * _gateBytes, new TensorShape(Hidden, Intermediate));
         return new ExpertWeights(key, new ExpertMatrix(gate), new ExpertMatrix(down), new ExpertMatrix(up));
     }
 
-    /// <inheritdoc/>
-    public void Dispose() => _handle.Dispose();
-
-    private unsafe void ReadProjection(long offset, Tensor destination, long length, IncrementalHash? hash, ExpertKey key)
+    /// <summary>Views of the mapping stay valid only while the reader is alive; each view keeps the reader rooted.</summary>
+    private unsafe Tensor Borrow(byte* pointer, TensorShape shape)
     {
-        Span<byte> span = new((void*)destination.DataPointer, checked((int)length));
-        int read = RandomAccess.Read(_handle, span, offset);
-        if (read != span.Length) throw new InvalidDataException($"Short read for {key}: {read} of {span.Length} bytes.");
-        hash?.AppendData(span);
+        Tensor view = new(pointer, shape, _dtype);
+        view.SetKeepAlive(this);
+        return view;
     }
+
+    /// <summary>
+    /// Releases the mapping. Weights already resolved are views into it and must not be used afterwards; a reader that is
+    /// garbage-collected while views exist stays rooted by them, so the mapping is never released under a live view.
+    /// </summary>
+    public unsafe void Dispose()
+    {
+        if (_base is null) return;
+        _view.SafeMemoryMappedViewHandle.ReleasePointer();
+        _view.Dispose();
+        _mapping.Dispose();
+    }
+
 }
