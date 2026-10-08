@@ -298,13 +298,13 @@ public sealed record DeepSeekV41Config
         {
             return new DeepSeekV41VisionConfig(nested.Int("num_hidden_layers"), nested.Int("hidden_size"),
                 nested.Int("num_attention_heads"), nested.Int("intermediate_size"), nested.Int("patch_size"),
-                nested.Int("downsample_ratio"));
+                nested.Int("downsample_ratio"), nested.Double("rope_theta", DeepSeekV41VisionConfig.DefaultRopeTheta));
         }
         if (!top.Has("vision_num_layers"))
             return null;
         return new DeepSeekV41VisionConfig(top.Int("vision_num_layers"), top.Int("vision_hidden_size"),
             top.Int("vision_num_heads"), top.Int("vision_intermediate_size"), top.Int("vision_patch_size"),
-            top.Int("vision_downsample_ratio"));
+            top.Int("vision_downsample_ratio"), top.Double("vision_rope_theta", DeepSeekV41VisionConfig.DefaultRopeTheta));
     }
 
     private void Validate()
