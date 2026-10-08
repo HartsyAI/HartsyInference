@@ -56,6 +56,87 @@ public sealed class DeepSeekV41MoeExecutorTests
     }
 
     [Fact]
+    public void Batched_Run_Matches_Token_By_Token_Run_Bit_For_Bit()
+    {
+        // 300 tokens cross the executor's 256-row batch, so both a full and a partial batch are exercised
+        const int dim = 16, inter = 12, experts = 5, k = 2, tokens = 300;
+        Random rng = new(7);
+        float[] Random(int n) => Enumerable.Range(0, n).Select(_ => (float)(rng.NextDouble() * 2 - 1)).ToArray();
+        DeepSeekV41SwigluWeights[] set = Enumerable.Range(0, experts)
+            .Select(_ => new DeepSeekV41SwigluWeights(dim, inter, Random(inter * dim), Random(dim * inter), Random(inter * dim))).ToArray();
+        ListSource source = new(set);
+        DeepSeekV41SwigluWeights shared = new(dim, inter, Random(inter * dim), Random(dim * inter), Random(inter * dim));
+        float[] x = Random(tokens * dim), weights = Random(tokens * k).Select(Math.Abs).ToArray();
+        int[] idx = new int[tokens * k];
+        for (int t = 0; t < tokens; t++)
+        {
+            int first = rng.Next(experts), second = (first + 1 + rng.Next(experts - 1)) % experts;
+            idx[t * k] = first;
+            idx[t * k + 1] = second;
+        }
+
+        float[] batched = new float[tokens * dim];
+        DeepSeekV41MoeExecutor.Run(x, tokens, idx, weights, k, experts, source, shared, 2f, batched);
+        for (int t = 0; t < tokens; t++)
+        {
+            float[] single = new float[dim];
+            DeepSeekV41MoeExecutor.Run(x.AsSpan(t * dim, dim), 1, idx.AsSpan(t * k, k), weights.AsSpan(t * k, k), k, experts, source, shared, 2f, single);
+            Assert.True(batched.AsSpan(t * dim, dim).SequenceEqual(single), $"token {t} differs between the batched and the single-token run");
+        }
+    }
+
+    [Fact]
+    public void Batched_Run_Matches_The_Original_Per_Token_Loop_Bit_For_Bit()
+    {
+        // The per-token loop this executor replaced, kept here as the independent reference: each token runs its routed experts in
+        // expert-index order, then the shared expert, with the same scalar arithmetic.
+        const int dim = 16, inter = 12, experts = 5, k = 2, tokens = 300;
+        Random rng = new(11);
+        float[] Random(int n) => Enumerable.Range(0, n).Select(_ => (float)(rng.NextDouble() * 2 - 1)).ToArray();
+        DeepSeekV41SwigluWeights[] set = Enumerable.Range(0, experts)
+            .Select(_ => new DeepSeekV41SwigluWeights(dim, inter, Random(inter * dim), Random(dim * inter), Random(inter * dim))).ToArray();
+        ListSource source = new(set);
+        DeepSeekV41SwigluWeights shared = new(dim, inter, Random(inter * dim), Random(dim * inter), Random(inter * dim));
+        float[] x = Random(tokens * dim), weights = Random(tokens * k).Select(Math.Abs).ToArray();
+        int[] idx = new int[tokens * k];
+        for (int t = 0; t < tokens; t++)
+        {
+            int first = rng.Next(experts), second = (first + 1 + rng.Next(experts - 1)) % experts;
+            idx[t * k] = first;
+            idx[t * k + 1] = second;
+        }
+        const float limit = 2f;
+
+        float[] reference = new float[tokens * dim];
+        for (int e = 0; e < experts; e++)
+            for (int t = 0; t < tokens; t++)
+                for (int j = 0; j < k; j++)
+                {
+                    if (idx[t * k + j] != e) continue;
+                    AddExpertOnToken(set[e], x.AsSpan(t * dim, dim), weights[t * k + j], limit, reference.AsSpan(t * dim, dim));
+                }
+        for (int t = 0; t < tokens; t++) AddExpertOnToken(shared, x.AsSpan(t * dim, dim), 1f, limit, reference.AsSpan(t * dim, dim));
+
+        float[] batched = new float[tokens * dim];
+        DeepSeekV41MoeExecutor.Run(x, tokens, idx, weights, k, experts, source, shared, limit, batched);
+        Assert.True(batched.AsSpan().SequenceEqual(reference), "the batched executor differs from the original per-token loop");
+    }
+
+    private static void AddExpertOnToken(DeepSeekV41SwigluWeights w, ReadOnlySpan<float> token, float weight, float limit, Span<float> accumulate)
+    {
+        float[] gates = w.W1.Linear(token, 1, w.Dim, w.Inter), ups = w.W3.Linear(token, 1, w.Dim, w.Inter), hidden = new float[w.Inter];
+        for (int i = 0; i < w.Inter; i++)
+        {
+            float gate = gates[i], up = ups[i];
+            up = Math.Clamp(up, -limit, limit);
+            gate = MathF.Min(gate, limit);
+            hidden[i] = weight * (gate / (1f + MathF.Exp(-gate)) * up);
+        }
+        float[] output = w.W2.Linear(hidden, 1, w.Inter, w.Dim);
+        for (int d = 0; d < w.Dim; d++) accumulate[d] += output[d];
+    }
+
+    [Fact]
     public void Only_Routed_Experts_Are_Requested_Once_Each()
     {
         JsonElement c = Fx.GetProperty("cases").EnumerateArray().Single(e => e.GetProperty("name").GetString() == "limit");

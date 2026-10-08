@@ -8,6 +8,13 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.289
+
+- **Changed: the V4.1 host reference runs each routed expert once per batch of tokens, not once per token.** `DeepSeekV41MoeExecutor.Run`
+  gathers the tokens routed to an expert and runs them together, so a stored-form expert is decoded once per call instead of once per token.
+  Every output element is the same sequential dot product, so the results are bit-identical to the token-by-token path
+  (`DeepSeekV41MoeExecutorTests.Batched_Run_Matches_Token_By_Token_Run_Bit_For_Bit`, which crosses the 256-row batch cap).
+
 ## alpha.288
 
 - **Added: CPU reference for the DeepSeek-V4.1-Flash vision tower and aligner.** `DeepSeekV41VisionLoader.Load` reads the 266 `vision.*`, `aligner.*` and `image_*` tensors (BF16 in the official shards 1 and 2) as F32 and returns a
