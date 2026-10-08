@@ -13,7 +13,7 @@ CPU-lane results per test project, with the GPU and real-weight tests excluded. 
 | Sixteen others (API, Audio, Core, Cpu, LLM, ModelAssets, Vision, Voice, and eight more) | all passing |
 | Diffusion | 1869 passing after the GPU methods were labelled (#307) |
 | Video | 114 passing after the GPU methods were labelled (#307) |
-| Cuda | 115 CPU-only methods passing, no GPU method in the CPU lane (#307) |
+| Cuda | 157 CPU-only tests passing, none failing; GPU methods labelled (#307) |
 | Vulkan | 12 passing, exit 0 after the device tests were labelled (#309); the run hung before |
 
 Subsystems with CPU tests in place:
