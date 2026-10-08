@@ -5,9 +5,10 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <param name="ExpertCacheCapacity">Dequantized routed experts kept across all layers (each is three F32 matrices, roughly 140 MB on the official checkpoint).</param>
 /// <param name="EngramBudgetBytes">Host memory each Engram table may use for cached rows; the tables themselves stay on disk.</param>
 /// <param name="Residency">How dense, embedding, head and expert weights are held: in their stored form (default) or widened to F32.</param>
+/// <param name="QuantizeLatents">Diagnostic; leave on. Off skips the FP8/FP4 cache round trips (window KV, compressed latents, indexer queries and keys) so a comparison against another implementation is free of quantization-boundary flips.</param>
 /// <param name="MaxLayers">Loads only the first this-many backbone layers (a diagnostic for checking one layer of a huge checkpoint; the logits of a truncated model mean nothing); null loads all.</param>
 public sealed record DeepSeekV41LoadOptions(int MaxTokens, int ExpertCacheCapacity = 16, long EngramBudgetBytes = 1L << 30,
-    DeepSeekV41Residency Residency = DeepSeekV41Residency.Stored, int? MaxLayers = null)
+    DeepSeekV41Residency Residency = DeepSeekV41Residency.Stored, int? MaxLayers = null, bool QuantizeLatents = true)
 {
     /// <summary>Checks every field is usable.</summary>
     public void Validate()

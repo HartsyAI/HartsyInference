@@ -132,6 +132,39 @@ public sealed class SamplerChain
         return last >= 0 ? last : Argmax(logits);
     }
 
+    /// <summary>The distribution <see cref="Next"/> draws from, written to <paramref name="probs"/>. The steps are applied to <paramref name="logits"/> in place,
+    /// then softmax; when greedy, or when every entry is excluded, the result is a one-hot at the argmax. Consumes no randomness.</summary>
+    public void Distribution(Span<float> logits, IReadOnlyList<int> history, Span<float> probs)
+    {
+        if (logits.Length == 0)
+        {
+            throw new ArgumentException("Logits span must be non-empty.", nameof(logits));
+        }
+        if (probs.Length != logits.Length)
+        {
+            throw new ArgumentException("Probability span must match the logits span.", nameof(probs));
+        }
+        for (int i = 0; i < _steps.Count; i++)
+        {
+            _steps[i].Apply(logits, history);
+        }
+        if (!_greedy)
+        {
+            SamplerMath.Softmax(logits, probs);
+            float sum = 0.0f;
+            for (int i = 0; i < probs.Length; i++)
+            {
+                sum += probs[i];
+            }
+            if (sum > 0.0f)
+            {
+                return;
+            }
+        }
+        probs.Clear();
+        probs[Argmax(logits)] = 1.0f;
+    }
+
     private static int Argmax(ReadOnlySpan<float> logits)
     {
         int best = 0;

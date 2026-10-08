@@ -63,8 +63,19 @@ public sealed class DeepSeekV41Block
         _engramSlot = engramSlot;
     }
 
-    /// <summary>Diagnostic tap for oracle comparisons: called with a stage name (<c>attn_in</c>, <c>attn_out</c>, <c>ffn_in</c>, <c>ffn_out</c>, <c>out</c>) and a copy of that stage's <c>[tokens, dim]</c> or stream values. Null in normal use.</summary>
-    public Action<string, float[]>? Probe { get; set; }
+    private Action<string, float[]>? _probe;
+
+    /// <summary>Diagnostic tap for oracle comparisons: called with a stage name (<c>attn_in</c>, <c>attn_out</c>, <c>ffn_in</c>, <c>ffn_out</c>, <c>out</c>, and <c>route</c> with the chosen expert ids as values) and a copy of that stage's values. Null in normal use.</summary>
+    /// <remarks>Setting a probe replaces any earlier one. The routing stage reports through this block's MoE layer, which holds one probe.</remarks>
+    public Action<string, float[]>? Probe
+    {
+        get => _probe;
+        set
+        {
+            _probe = value;
+            _ffn.RouteProbe = value is null ? null : ids => value("route", Array.ConvertAll(ids, id => (float)id));
+        }
+    }
 
     /// <summary>Collapses a stream into one input with already-derived coefficients; the model uses this for the final head.</summary>
     public void Collapse(ReadOnlySpan<float> x, ReadOnlySpan<float> pre, int tokens, Span<float> y) => _hcFfn.Collapse(x, pre, tokens, y);

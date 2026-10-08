@@ -137,7 +137,7 @@ public sealed class SparseTopologyTests
         const float limit = 10f;
         ExpertProgram program = ExpertProgram.SwigluClamped(limit);
 
-        // Reference from DeepSeekV41MoeExecutor.Forward: gate capped above only, up clamped to +-limit.
+        // Reference from DeepSeekV41MoeExecutor.ForwardBatch: gate capped above only, up clamped to +-limit.
         foreach ((float gate, float up) in new[] { (3f, 4f), (12f, -15f), (-30f, 2f), (50f, 50f), (-50f, -50f) })
         {
             float refGate = gate, refUp = up;
