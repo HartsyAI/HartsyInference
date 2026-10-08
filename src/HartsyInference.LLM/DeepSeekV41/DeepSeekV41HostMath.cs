@@ -8,12 +8,22 @@ internal static class DeepSeekV41HostMath
 {
     /// <summary><c>y[t,o] = sum_i x[t,i] * w[o,i]</c> for <paramref name="rows"/> rows.</summary>
     /// <remarks>Each output element is one sequential dot product, so running them across cores changes the speed and nothing else.</remarks>
-    public static unsafe float[] Linear(ReadOnlySpan<float> x, ReadOnlySpan<float> w, int rows, int inDim, int outDim)
+    public static float[] Linear(ReadOnlySpan<float> x, ReadOnlySpan<float> w, int rows, int inDim, int outDim)
     {
         if (x.Length != (long)rows * inDim || w.Length != (long)outDim * inDim) throw new ArgumentException("Linear operands do not match the stated shape.");
         float[] y = new float[checked(rows * outDim)];
+        LinearInto(x, w, rows, inDim, outDim, y, outDim, 0);
+        return y;
+    }
+
+    /// <summary>The same product for <paramref name="chunkRows"/> weight rows only, written to columns <c>[firstRow, firstRow + chunkRows)</c> of each <paramref name="y"/> row of width <paramref name="outDim"/>.</summary>
+    /// <remarks>Lets a weight be streamed through a small window; every element is the same sequential dot, so the result equals the whole-matrix product bit for bit.</remarks>
+    public static unsafe void LinearInto(ReadOnlySpan<float> x, ReadOnlySpan<float> w, int rows, int inDim, int chunkRows, float[] y, int outDim, int firstRow)
+    {
+        if (x.Length != (long)rows * inDim || w.Length != (long)chunkRows * inDim) throw new ArgumentException("Linear operands do not match the stated shape.");
+        if (firstRow < 0 || firstRow + chunkRows > outDim || y.Length != (long)rows * outDim) throw new ArgumentException("The weight window does not fit the output.");
         const int Block = 32;
-        int total = y.Length, blocks = (total + Block - 1) / Block;
+        int total = rows * chunkRows, blocks = (total + Block - 1) / Block;
         fixed (float* xp = x)
         fixed (float* wp = w)
         fixed (float* yp = y)
@@ -25,14 +35,14 @@ internal static class DeepSeekV41HostMath
                 int end = Math.Min(total, (block + 1) * Block);
                 for (int index = block * Block; index < end; index++)
                 {
-                    float* xr = xs + (long)(index / outDim) * inDim, wr = ws + (long)(index % outDim) * inDim;
+                    int t = index / chunkRows, o = index % chunkRows;
+                    float* xr = xs + (long)t * inDim, wr = ws + (long)o * inDim;
                     float sum = 0f;
                     for (int i = 0; i < inDim; i++) sum += xr[i] * wr[i];
-                    ys[index] = sum;
+                    ys[(long)t * outDim + firstRow + o] = sum;
                 }
             });
         }
-        return y;
     }
 
     /// <summary>In-place RMS norm per row of width <paramref name="dim"/>: <c>w * x * rsqrt(mean(x^2) + eps)</c>.</summary>

@@ -8,7 +8,7 @@ namespace HartsyInference.LLM.Tests.DeepSeekV41;
 
 public sealed class DeepSeekV41ExpertCacheTests
 {
-    private static DeepSeekV41SwigluWeights Tiny() => new(1, 1, [1f], [1f], [1f]);
+    private static DeepSeekV41SwigluWeights Tiny() => new(1, 1, new[] { 1f }, new[] { 1f }, new[] { 1f });
 
     [Fact]
     public void Hits_Are_Served_Without_Reloading_And_The_Least_Recently_Used_Expert_Is_Evicted()

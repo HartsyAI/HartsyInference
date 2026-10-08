@@ -11,5 +11,5 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <param name="Sink">Per-head attention sink logit, <c>[heads]</c>.</param>
 /// <param name="Compressor">Present only on a layer that compresses its own KV.</param>
 /// <param name="Indexer">Present only on an index-source layer.</param>
-public sealed record DeepSeekV41AttentionWeights(float[] WqA, float[] QNorm, float[] WqB, float[] Wkv, float[] KvNorm, float[] WoA, float[] WoB,
+public sealed record DeepSeekV41AttentionWeights(DeepSeekV41Weight WqA, float[] QNorm, DeepSeekV41Weight WqB, DeepSeekV41Weight Wkv, float[] KvNorm, DeepSeekV41Weight WoA, DeepSeekV41Weight WoB,
     float[] Sink, DeepSeekV41CompressorWeights? Compressor, DeepSeekV41IndexerWeights? Indexer);

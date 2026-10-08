@@ -30,4 +30,43 @@ public static class DeepSeekV41GroupedProjection
                 }
             }
     }
+
+    /// <summary>The same projection with the weight held as a <see cref="DeepSeekV41Weight"/>, decoded one group (or less) at a time so a stored weight is never widened whole.</summary>
+    public static void Apply(ReadOnlySpan<float> x, DeepSeekV41Weight weight, int tokens, int groups, int rank, int groupDim, Span<float> dest)
+    {
+        if (weight.IsWidened)
+        {
+            Apply(x, weight.ToF32(), tokens, groups, rank, groupDim, dest);
+            return;
+        }
+        if (x.Length != (long)tokens * groups * groupDim) throw new ArgumentException("x must hold tokens x groups x groupDim values.", nameof(x));
+        if (weight.Rows != (long)groups * rank || weight.Cols != groupDim) throw new ArgumentException("weight must be [groups * rank, groupDim].", nameof(weight));
+        if (dest.Length != (long)tokens * groups * rank) throw new ArgumentException("dest must hold tokens x groups x rank values.", nameof(dest));
+        int window = DeepSeekV41Weight.WindowRows(groupDim, groups * rank);
+        float[] scratch = System.Buffers.ArrayPool<float>.Shared.Rent(window * groupDim);
+        try
+        {
+            for (int row = 0; row < groups * rank; row += window)
+            {
+                int count = Math.Min(window, groups * rank - row);
+                ReadOnlySpan<float> w = weight.ReadRows(row, count, groupDim, scratch);
+                for (int r = 0; r < count; r++)
+                {
+                    int g = (row + r) / rank, o = (row + r) % rank;
+                    ReadOnlySpan<float> wr = w.Slice(r * groupDim, groupDim);
+                    for (int t = 0; t < tokens; t++)
+                    {
+                        ReadOnlySpan<float> xv = x.Slice((t * groups + g) * groupDim, groupDim);
+                        float sum = 0f;
+                        for (int d = 0; d < groupDim; d++) sum += xv[d] * wr[d];
+                        dest[(t * groups + g) * rank + o] = sum;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            System.Buffers.ArrayPool<float>.Shared.Return(scratch);
+        }
+    }
 }

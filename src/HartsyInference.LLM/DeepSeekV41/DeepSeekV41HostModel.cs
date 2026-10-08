@@ -11,10 +11,10 @@ public sealed class DeepSeekV41HostModel
     private readonly int _hc;
     private readonly int _vocab;
     private readonly float _normEps;
-    private readonly float[] _embed;
+    private readonly DeepSeekV41Weight _embed;
     private readonly DeepSeekV41Block[] _blocks;
     private readonly float[] _finalNorm;
-    private readonly float[] _head;
+    private readonly DeepSeekV41Weight _head;
     private readonly EngramConstants? _engramConstants;
 
     /// <summary>Hidden width.</summary>
@@ -35,7 +35,7 @@ public sealed class DeepSeekV41HostModel
     /// <param name="finalNorm">Norm weight after the final collapse, <c>[dim]</c>.</param>
     /// <param name="head">Output projection, <c>[vocab, dim]</c>.</param>
     /// <param name="engramConstants">Hash constants when any block has Engram, else null; null selects the shipped defaults for such a model.</param>
-    public DeepSeekV41HostModel(int dim, int hc, int vocab, float normEps, float[] embed, DeepSeekV41Block[] blocks, float[] finalNorm, float[] head,
+    public DeepSeekV41HostModel(int dim, int hc, int vocab, float normEps, DeepSeekV41Weight embed, DeepSeekV41Block[] blocks, float[] finalNorm, DeepSeekV41Weight head,
         EngramConstants? engramConstants = null)
     {
         ArgumentNullException.ThrowIfNull(embed);
@@ -43,7 +43,7 @@ public sealed class DeepSeekV41HostModel
         ArgumentNullException.ThrowIfNull(finalNorm);
         ArgumentNullException.ThrowIfNull(head);
         if (blocks.Length == 0) throw new ArgumentException("A model needs at least one block.", nameof(blocks));
-        if (embed.Length != (long)vocab * dim || head.Length != (long)vocab * dim) throw new ArgumentException("embed and head must each be [vocab, dim].");
+        if (embed.Elements != (long)vocab * dim || head.Elements != (long)vocab * dim) throw new ArgumentException("embed and head must each be [vocab, dim].");
         if (finalNorm.Length != dim) throw new ArgumentException("finalNorm must hold dim values.", nameof(finalNorm));
         _dim = dim;
         _hc = hc;
@@ -90,7 +90,7 @@ public sealed class DeepSeekV41HostModel
     }
 
     /// <summary>The output logits of one hidden row, <c>[VocabSize]</c>.</summary>
-    public float[] Logits(ReadOnlySpan<float> hiddenRow) => DeepSeekV41HostMath.Linear(hiddenRow, _head, 1, _dim, _vocab);
+    public float[] Logits(ReadOnlySpan<float> hiddenRow) => _head.Linear(hiddenRow, 1, _dim, _vocab);
 
     private void Chunk(ReadOnlySpan<int> ids, DeepSeekV41SequenceState state, Span<float> hidden)
     {
@@ -98,8 +98,9 @@ public sealed class DeepSeekV41HostModel
         float[] stream = new float[checked(tokens * _hc * _dim)];
         for (int t = 0; t < tokens; t++)
         {
-            int row = checked(ids[t] * _dim);
-            for (int c = 0; c < _hc; c++) _embed.AsSpan(row, _dim).CopyTo(stream.AsSpan((t * _hc + c) * _dim, _dim));
+            Span<float> first = stream.AsSpan(t * _hc * _dim, _dim);
+            _embed.CopyRow(ids[t], first);
+            for (int c = 1; c < _hc; c++) first.CopyTo(stream.AsSpan((t * _hc + c) * _dim, _dim));
         }
 
         long[] hashIds = [];

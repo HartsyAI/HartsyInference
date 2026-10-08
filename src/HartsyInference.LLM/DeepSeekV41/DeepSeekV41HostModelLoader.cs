@@ -6,8 +6,8 @@ using HartsyInference.ModelAssets.BlockScale;
 
 namespace HartsyInference.LLM.DeepSeekV41;
 
-/// <summary>Builds a <see cref="DeepSeekV41HostModel"/> from an opened DeepSeek-V4.1 checkpoint: dense weights dequantized to F32, routed experts read lazily, Engram rows read from disk.</summary>
-/// <remarks>This is the reference path, so dense weights are held as F32 (about 30 GiB of host memory for the official checkpoint). Draft, vision and DSpark tensors are not read.</remarks>
+/// <summary>Builds a <see cref="DeepSeekV41HostModel"/> from an opened DeepSeek-V4.1 checkpoint: dense weights kept in their stored form (or widened to F32 on request), routed experts read lazily, Engram rows read from disk.</summary>
+/// <remarks>With <see cref="DeepSeekV41Residency.Stored"/> dense, embedding and head weights stay as mapped checkpoint bytes (about 10 GiB for the official checkpoint); <see cref="DeepSeekV41Residency.WidenedF32"/> widens them (about 31 GiB). Draft, vision and DSpark tensors are not read.</remarks>
 public static class DeepSeekV41HostModelLoader
 {
     /// <summary>Opens <paramref name="directory"/> and loads it; the returned object owns the checkpoint.</summary>
@@ -40,7 +40,7 @@ public static class DeepSeekV41HostModelLoader
         List<EngramTableStore> stores = [];
         try
         {
-            Reader read = new(checkpoint);
+            Reader read = new(checkpoint, options.Residency);
             int dim = cfg.HiddenSize, hc = cfg.HcMult, rd = cfg.QkRopeHeadDim;
             float normEps = (float)cfg.RmsNormEps;
 
@@ -53,15 +53,15 @@ public static class DeepSeekV41HostModelLoader
             DeepSeekV41ExpertCache expertCache = new(key =>
             {
                 (int cachedLayer, int cachedExpert) = LayerExperts.Unpack(key, experts);
-                return DeepSeekV41ExpertLoader.Load(checkpoint.ExpertBank(cachedLayer), cachedExpert, dim, cfg.MoeIntermediateSize);
+                return DeepSeekV41ExpertLoader.Load(checkpoint.ExpertBank(cachedLayer), cachedExpert, dim, cfg.MoeIntermediateSize, options.Residency);
             }, options.ExpertCacheCapacity);
 
-            DeepSeekV41Block[] blocks = new DeepSeekV41Block[cfg.NumHiddenLayers];
+            DeepSeekV41Block[] blocks = new DeepSeekV41Block[Math.Min(cfg.NumHiddenLayers, options.MaxLayers ?? int.MaxValue)];
             for (int layer = 0; layer < blocks.Length; layer++)
                 blocks[layer] = BuildBlock(backend, checkpoint, read, cfg, layer, plainRope, compressRope, expertCache, options, stores);
 
-            DeepSeekV41HostModel model = new(dim, hc, cfg.VocabSize, normEps, read.Matrix("embed.weight", cfg.VocabSize, dim), blocks,
-                read.Vector("norm.weight", dim), read.Matrix("head.weight", cfg.VocabSize, dim));
+            DeepSeekV41HostModel model = new(dim, hc, cfg.VocabSize, normEps, read.Weight("embed.weight", cfg.VocabSize, dim), blocks,
+                read.Vector("norm.weight", dim), read.Weight("head.weight", cfg.VocabSize, dim));
             return new DeepSeekV41LoadedModel(model, checkpoint, ownsCheckpoint, stores, options.MaxTokens);
         }
         catch
@@ -88,22 +88,22 @@ public static class DeepSeekV41HostModelLoader
             cfg.CandidateTopkBlocks, cfg.CandidateBlockSize, normEps);
 
         DeepSeekV41CompressorWeights? compressor = kvSource
-            ? new(read.Matrix(a + "compressor.wkv.weight", hd, dim), ratio > 1 ? read.Matrix(a + "compressor.wgate.weight", hd, dim) : null,
+            ? new(read.Weight(a + "compressor.wkv.weight", hd, dim), ratio > 1 ? read.Weight(a + "compressor.wgate.weight", hd, dim) : null,
                 read.Vector(a + "compressor.norm.weight", hd))
             : null;
         DeepSeekV41IndexerWeights? indexer = indexSource
-            ? new(read.Matrix(a + "indexer.wq_b.weight", cfg.IndexNHeads * cfg.IndexHeadDim, qLora), read.Matrix(a + "indexer.weights_proj.weight", cfg.IndexNHeads, dim),
-                kvSource ? read.Matrix(a + "indexer.wk.weight", cfg.IndexHeadDim, hd) : null, kvSource ? read.Vector(a + "indexer.k_norm.weight", cfg.IndexHeadDim) : null)
+            ? new(read.Weight(a + "indexer.wq_b.weight", cfg.IndexNHeads * cfg.IndexHeadDim, qLora), read.Weight(a + "indexer.weights_proj.weight", cfg.IndexNHeads, dim),
+                kvSource ? read.Weight(a + "indexer.wk.weight", cfg.IndexHeadDim, hd) : null, kvSource ? read.Vector(a + "indexer.k_norm.weight", cfg.IndexHeadDim) : null)
             : null;
-        DeepSeekV41AttentionWeights weights = new(read.Matrix(a + "wq_a.weight", qLora, dim), read.Vector(a + "q_norm.weight", qLora),
-            read.Matrix(a + "wq_b.weight", heads * hd, qLora), read.Matrix(a + "wkv.weight", hd, dim), read.Vector(a + "kv_norm.weight", hd),
-            read.Matrix(a + "wo_a.weight", cfg.OGroups * cfg.OLoraRank, heads * hd / cfg.OGroups), read.Matrix(a + "wo_b.weight", dim, cfg.OGroups * cfg.OLoraRank),
+        DeepSeekV41AttentionWeights weights = new(read.Weight(a + "wq_a.weight", qLora, dim), read.Vector(a + "q_norm.weight", qLora),
+            read.Weight(a + "wq_b.weight", heads * hd, qLora), read.Weight(a + "wkv.weight", hd, dim), read.Vector(a + "kv_norm.weight", hd),
+            read.Weight(a + "wo_a.weight", cfg.OGroups * cfg.OLoraRank, heads * hd / cfg.OGroups), read.Weight(a + "wo_b.weight", dim, cfg.OGroups * cfg.OLoraRank),
             read.Vector(a + "attn_sink", heads), compressor, indexer);
         DeepSeekV41Attention attention = new(backend, settings, weights, ratio > 0 ? compressRope : plainRope);
 
         int experts = cfg.NRoutedExperts, inter = cfg.MoeIntermediateSize;
-        DeepSeekV41SwigluWeights shared = new(dim, inter, read.Matrix(f + "shared_experts.w1.weight", inter, dim), read.Matrix(f + "shared_experts.w2.weight", dim, inter),
-            read.Matrix(f + "shared_experts.w3.weight", inter, dim));
+        DeepSeekV41SwigluWeights shared = new(dim, inter, read.Weight(f + "shared_experts.w1.weight", inter, dim), read.Weight(f + "shared_experts.w2.weight", dim, inter),
+            read.Weight(f + "shared_experts.w3.weight", inter, dim));
         MoeRouteArgs route = new(experts, cfg.NumExpertsPerTok, ParseScoring(cfg.ScoringFunc), Renormalize: cfg.NormTopkProb && cfg.NumExpertsPerTok > 1,
             RenormEpsilon: 1e-20f, Scale: (float)cfg.RoutedScalingFactor);
         DeepSeekV41MoeLayer ffn = new(backend, read.Matrix(f + "gate.weight", experts, dim), read.Vector(f + "gate.bias", experts), null, route,
@@ -123,7 +123,7 @@ public static class DeepSeekV41HostModelLoader
                 throw new HartsyInferenceException($"Engram needs {EngramConstants.ColumnsPerLayer} hash columns per layer; the config gives {columns}.");
             EngramTableStore store = EngramTableStores.Open(checkpoint.EngramTable(layer), EngramBacking.Storage, options.EngramBudgetBytes);
             stores.Add(store);
-            engram = new DeepSeekV41EngramModule(dim, hc, columns, headDim, normEps, read.Matrix(l + "engram.wkv.weight", dim * (hc + 1), columns * headDim),
+            engram = new DeepSeekV41EngramModule(dim, hc, columns, headDim, normEps, read.Weight(l + "engram.wkv.weight", dim * (hc + 1), columns * headDim),
                 read.Matrix(l + "engram.q_weight", hc, dim), read.Matrix(l + "engram.k_weight", hc, dim), store.Gather);
             return new DeepSeekV41Block(dim, hc, normEps, hcAttn, hcFfn, read.Vector(l + "attn_norm.weight", dim), read.Vector(l + "ffn_norm.weight", dim), attention, ffn,
                 engram, slot);
@@ -140,8 +140,13 @@ public static class DeepSeekV41HostModelLoader
     };
 
     // Reads canonical keys as F32, checking the logical shape named by the config.
-    private sealed class Reader(DeepSeekV41Checkpoint checkpoint)
+    private sealed class Reader(DeepSeekV41Checkpoint checkpoint, DeepSeekV41Residency residency)
     {
+        // Large projections follow the residency choice; the small float tensors always load as F32.
+        public DeepSeekV41Weight Weight(string key, long rows, long cols) => residency == DeepSeekV41Residency.Stored
+            ? DeepSeekV41Weight.FromStored(key, checkpoint.GetWeight(key), checkpoint.GetQuant(key), rows, cols)
+            : DeepSeekV41Weight.FromF32(Matrix(key, rows, cols));
+
         public float[] Matrix(string key, long rows, long cols) =>
             DeepSeekV41ExpertLoader.ReadMatrix(key, checkpoint.GetWeight(key), checkpoint.GetQuant(key), rows, cols);
 

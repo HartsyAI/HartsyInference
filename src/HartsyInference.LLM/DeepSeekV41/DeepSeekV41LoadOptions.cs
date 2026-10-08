@@ -4,7 +4,10 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <param name="MaxTokens">Longest sequence the model will be asked to hold; sizes the rope tables and every sequence state.</param>
 /// <param name="ExpertCacheCapacity">Dequantized routed experts kept across all layers (each is three F32 matrices, roughly 140 MB on the official checkpoint).</param>
 /// <param name="EngramBudgetBytes">Host memory each Engram table may use for cached rows; the tables themselves stay on disk.</param>
-public sealed record DeepSeekV41LoadOptions(int MaxTokens, int ExpertCacheCapacity = 16, long EngramBudgetBytes = 1L << 30)
+/// <param name="Residency">How dense, embedding, head and expert weights are held: in their stored form (default) or widened to F32.</param>
+/// <param name="MaxLayers">Loads only the first this-many backbone layers (a diagnostic for checking one layer of a huge checkpoint; the logits of a truncated model mean nothing); null loads all.</param>
+public sealed record DeepSeekV41LoadOptions(int MaxTokens, int ExpertCacheCapacity = 16, long EngramBudgetBytes = 1L << 30,
+    DeepSeekV41Residency Residency = DeepSeekV41Residency.Stored, int? MaxLayers = null)
 {
     /// <summary>Checks every field is usable.</summary>
     public void Validate()
@@ -12,5 +15,6 @@ public sealed record DeepSeekV41LoadOptions(int MaxTokens, int ExpertCacheCapaci
         ArgumentOutOfRangeException.ThrowIfLessThan(MaxTokens, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(ExpertCacheCapacity, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(EngramBudgetBytes, 1L);
+        if (MaxLayers is { } layers) ArgumentOutOfRangeException.ThrowIfLessThan(layers, 1);
     }
 }

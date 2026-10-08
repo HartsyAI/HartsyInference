@@ -63,13 +63,13 @@ public sealed class DeepSeekV41Attention
             throw new InvalidOperationException("The compressed cache is full; allocate state for a longer sequence.");
         if (startPos == 0) state.Reset();
 
-        float[] qr = DeepSeekV41HostMath.Linear(x, _w.WqA, tokens, s.Dim, s.QLoraRank);
+        float[] qr = _w.WqA.Linear(x, tokens, s.Dim, s.QLoraRank);
         DeepSeekV41HostMath.RmsNormRows(qr, _w.QNorm, s.QLoraRank, s.NormEps);
-        float[] q = DeepSeekV41HostMath.Linear(qr, _w.WqB, tokens, s.QLoraRank, heads * hd);
+        float[] q = _w.WqB.Linear(qr, tokens, s.QLoraRank, heads * hd);
         int[] positions = Range(startPos, tokens);
         Rotate(q, [1, tokens, heads, hd], positions, hd - rd, inverse: false);
 
-        float[] kv = DeepSeekV41HostMath.Linear(x, _w.Wkv, tokens, s.Dim, hd);
+        float[] kv = _w.Wkv.Linear(x, tokens, s.Dim, hd);
         DeepSeekV41HostMath.RmsNormRows(kv, _w.KvNorm, hd, s.NormEps);
         Rotate(kv, [1, tokens, hd], positions, hd - rd, inverse: false);
         RoundTrip(kv, hd, LatentEncoding.Fp8E4M3Ue8m0x32);
@@ -140,7 +140,7 @@ public sealed class DeepSeekV41Attention
             Rotate(o, [1, tokens, heads, hd], positions, hd - rd, inverse: true);
             float[] grouped = new float[tokens * s.OGroups * s.OLoraRank];
             DeepSeekV41GroupedProjection.Apply(o, _w.WoA, tokens, s.OGroups, s.OLoraRank, s.GroupDim, grouped);
-            DeepSeekV41HostMath.Linear(grouped, _w.WoB, tokens, s.OGroups * s.OLoraRank, s.Dim).CopyTo(y);
+            _w.WoB.Linear(grouped, tokens, s.OGroups * s.OLoraRank, s.Dim).CopyTo(y);
         }
         finally
         {
@@ -152,13 +152,13 @@ public sealed class DeepSeekV41Attention
     {
         DeepSeekV41CompressorWeights c = _w.Compressor!;
         int hd = _s.HeadDim, ratio = _s.CompressRatio;
-        float[] kv = DeepSeekV41HostMath.Linear(x, c.Wkv, tokens, _s.Dim, hd);
+        float[] kv = c.Wkv.Linear(x, tokens, _s.Dim, hd);
         if (ratio == 1)
         {
             DeepSeekV41HostMath.RmsNormRows(kv, c.Norm, hd, _s.NormEps);
             return (kv, tokens);
         }
-        float[] score = DeepSeekV41HostMath.Linear(x, c.Wgate!, tokens, _s.Dim, hd);
+        float[] score = c.Wgate!.Linear(x, tokens, _s.Dim, hd);
         DeepSeekV41CompressorState pool = state.Compressor ?? throw new InvalidOperationException("A pooling layer needs compressor state.");
         float[] pooled = new float[pool.MaxRows(startPos, tokens) * hd];
         int rows = pool.Pool(kv, score, tokens, startPos, pooled);
@@ -187,7 +187,7 @@ public sealed class DeepSeekV41Attention
         if (_s.IsKvSource && latent is not null)
         {
             int first = startPos / ratio;
-            float[] k = DeepSeekV41HostMath.Linear(latent, ix.Wk!, latentRows, _s.HeadDim, ihd);
+            float[] k = ix.Wk!.Linear(latent, latentRows, _s.HeadDim, ihd);
             DeepSeekV41HostMath.RmsNormRows(k, ix.KNorm!, ihd, _s.NormEps);
             Rotate(k, [1, latentRows, ihd], GroupPositions(first, latentRows, ratio), ihd - rd, inverse: false);
             RoundTrip(k, ihd, LatentEncoding.Fp4E2M1E8M0x32);
@@ -195,13 +195,13 @@ public sealed class DeepSeekV41Attention
             shared.IndexKeys = state.IndexKeys;
         }
 
-        float[] q = DeepSeekV41HostMath.Linear(qr, ix.WqB, tokens, _s.QLoraRank, nh * ihd);
+        float[] q = ix.WqB.Linear(qr, tokens, _s.QLoraRank, nh * ihd);
         Rotate(q, [1, tokens, nh, ihd], Range(startPos, tokens), ihd - rd, inverse: false);
         RoundTrip(q, ihd, LatentEncoding.Fp4E2M1E8M0x32);
 
         int keyRows = endPos / ratio;
         float[] keys = shared.IndexKeys ?? throw new InvalidOperationException("No index keys are available to this layer.");
-        float[] weights = DeepSeekV41HostMath.Linear(x, ix.WeightsProj, tokens, _s.Dim, nh);
+        float[] weights = ix.WeightsProj.Linear(x, tokens, _s.Dim, nh);
         float weightScale = 1f / MathF.Sqrt(ihd) / MathF.Sqrt(nh);
         for (int i = 0; i < weights.Length; i++) weights[i] *= weightScale;
 
