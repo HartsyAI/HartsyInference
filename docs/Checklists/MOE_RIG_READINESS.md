@@ -10,7 +10,7 @@ GPU-trait labelling in #307; that labelling takes CUDA to zero CPU-lane tests an
 
 | Project | Result |
 |---|---|
-| Sixteen others: API, Audio, Phonemizer, BenchmarkRunner, Cli, Core, Cpu, Gpu, LLM, ModelAssets, Tokenizers, ThreeD, Tools, Vision, Voice, World | all passing |
+| Sixteen others (API, Audio, Core, Cpu, LLM, ModelAssets, Vision, Voice, and eight more) | all passing |
 | Diffusion | 1869 passing, 4 GPU or real-weight failures (labelled in #307) |
 | Video | 115 passing, 3 GPU failures (labelled in #307) |
 | Cuda | 199 passing, 282 failing: the GPU tests ran in the CPU lane (labelled in #307) |
