@@ -37,8 +37,10 @@ public sealed class ExpertPackWriter : IDisposable
     /// <param name="hidden">Model width H; the quantized row length of gate and up.</param>
     /// <param name="intermediate">Expert inner width I; the quantized row length of down.</param>
     /// <param name="dtype">Quant dtype of every projection: Q8_0, Q4_K, Q5_K or Q6_K.</param>
-    /// <param name="expectedExperts">The exact experts the pack must hold. Only these can be added, and <see cref="Finish"/> publishes only when all are present.</param>
-    /// <exception cref="ArgumentException">The dtype is not a pack dtype, a dimension is not a multiple of its block size, or the expected set is empty.</exception>
+    /// <param name="expectedExperts">The exact experts the pack must hold. Only these can be added, and <see
+    /// cref="Finish"/> publishes only when all are present.</param>
+    /// <exception cref="ArgumentException">The dtype is not a pack dtype, a dimension is not a multiple of its block
+    /// size, or the expected set is empty.</exception>
     /// <exception cref="InvalidOperationException">The directory already holds a completed pack.</exception>
     public ExpertPackWriter(string directory, string topologyFingerprint, int hidden, int intermediate, DType dtype,
         IEnumerable<ExpertKey> expectedExperts)
@@ -51,7 +53,8 @@ public sealed class ExpertPackWriter : IDisposable
         if (!ExpertPackDTypes.IsPackDType(dtype))
             throw new ArgumentException($"{dtype.Name} is not a pack dtype; packs store Q8_0, Q4_K, Q5_K or Q6_K.", nameof(dtype));
         if (hidden % dtype.BlockElementCount != 0 || intermediate % dtype.BlockElementCount != 0)
-            throw new ArgumentException($"Hidden {hidden} and intermediate {intermediate} must be multiples of {dtype.Name}'s block size {dtype.BlockElementCount}.");
+            throw new ArgumentException(
+                    $"Hidden {hidden} and intermediate {intermediate} must be multiples of {dtype.Name}'s block size {dtype.BlockElementCount}.");
         _expected = [.. expectedExperts];
         if (_expected.Count == 0) throw new ArgumentException("A pack needs at least one expected expert.", nameof(expectedExperts));
         _directory = directory;
@@ -67,7 +70,8 @@ public sealed class ExpertPackWriter : IDisposable
 
     /// <summary>Quantizes and appends one expert. Gate and up are <c>[I, H]</c> row-major; down is <c>[H, I]</c>.</summary>
     /// <remarks>A call that throws leaves the expert unwritten, so the caller can retry it with corrected input.</remarks>
-    /// <exception cref="ArgumentException">The expert is not in the expected set, is already written, or an array does not hold its matrix.</exception>
+    /// <exception cref="ArgumentException">The expert is not in the expected set, is already written, or an array does
+    /// not hold its matrix.</exception>
     public ExpertPackRecord AddExpert(int layer, int expert, float[] gate, float[] up, float[] down, ushort bank = 0)
     {
         ObjectDisposedException.ThrowIf(_finished, this);

@@ -33,10 +33,12 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
         long expectedLength = 2 * _gateBytes + _downBytes;
         foreach (ExpertPackRecord record in manifest.Records)
         {
+            ExpertKey recordKey = new(record.Layer, record.Expert, record.Bank);
             if (record.Length != expectedLength)
-                throw new InvalidDataException($"Record for {new ExpertKey(record.Layer, record.Expert, record.Bank)} is {record.Length} bytes; its three projections need {expectedLength}.");
-            if (!_records.TryAdd(new ExpertKey(record.Layer, record.Expert, record.Bank), record))
-                throw new InvalidDataException($"The manifest lists {new ExpertKey(record.Layer, record.Expert, record.Bank)} twice.");
+                throw new InvalidDataException(
+                    $"Record for {recordKey} is {record.Length} bytes; its three projections need {expectedLength}.");
+            if (!_records.TryAdd(recordKey, record))
+                throw new InvalidDataException($"The manifest lists {recordKey} twice.");
         }
         _handle = File.OpenHandle(Path.Combine(directory, "experts.bin"), FileMode.Open, FileAccess.Read, FileShare.Read);
     }
@@ -72,7 +74,8 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
     /// <param name="directory">The pack directory.</param>
     /// <param name="expectedFingerprint">When set, the pack must have been built for this topology fingerprint.</param>
     /// <param name="verifyChecksums">Check each record's SHA-256 as it is read.</param>
-    /// <exception cref="InvalidDataException">The pack is incomplete, another version, built for a different topology, or has a malformed record.</exception>
+    /// <exception cref="InvalidDataException">The pack is incomplete, another version, built for a different topology,
+    /// or has a malformed record.</exception>
     public static ExpertPackReader Open(string directory, string? expectedFingerprint = null, bool verifyChecksums = true)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);

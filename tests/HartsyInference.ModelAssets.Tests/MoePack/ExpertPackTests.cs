@@ -229,8 +229,10 @@ public sealed class ExpertPackTests : IDisposable
     [Fact]
     public void F32_IsNotAPackDType()
     {
-        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "f32"), Fingerprint, Hidden, Intermediate, DType.F32, Keys(1)));
-        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "q2k"), Fingerprint, Hidden, Intermediate, DType.Q2_K, Keys(1)));
+        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "f32"), Fingerprint, Hidden, Intermediate,
+                DType.F32, Keys(1)));
+        Assert.Throws<ArgumentException>(() => new ExpertPackWriter(Path.Combine(_root, "q2k"), Fingerprint, Hidden, Intermediate,
+                DType.Q2_K, Keys(1)));
     }
 
     [Fact]
