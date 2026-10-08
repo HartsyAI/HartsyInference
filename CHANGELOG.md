@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.288
+
+- **Added: heterogeneous expert execution on the CPU side.** `HeterogeneousExpertExecutor` runs a layer's planned experts: GPU assignments through `IExpertDeviceRunner`, CPU assignments through the F32 reference, with the same rows and output layout either way. Tests show the same plan gives identical output under all-CPU, all-GPU and mixed placements, using a reference device. The CUDA device runner and the asynchronous handoff are not built yet; `docs/HETEROGENEOUS_EXECUTION.md` sets the protocol they must meet.
+
 ## alpha.287
 
 - **Added: the placement planner for a routed layer.** `ExpertScheduler.Plan` reads the cache's residency and assigns each routed
