@@ -8,15 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.291
-
-- **Added: the speculation contract (CPU, synthetic evidence).** `SamplerChain.Distribution` exposes the distribution the sampler draws from, without consuming randomness. `RejectionSampler.Verify` is exact speculative sampling: a drafted token is accepted with probability min(1, p/q), and a rejection draws from the normalized residual max(0, p - q), so the emitted tokens follow the target distribution whatever the proposer does. `PromptLookupProposer` drafts from n-gram matches, and `SpeculativeLoop` runs draft, one scoring pass and verification over a stateless scorer. Greedy speculation reproduces plain greedy decoding; the statistical tests (chi-square at 1e6 trials, and a two-sample test against the plain sampler) and two deliberately broken samplers back the claim. No change to the existing pipeline's speculative path.
-
-## alpha.290
-
-- **Added: a structural oracle for the DeepSeek-V4.1 host reference, at full depth, on the real checkpoint (diagnostics, off by default).** `dump_real_layers.py` runs the unmodified upstream model through lazy weight shims, so any depth fits in RAM. `RealLayers_MatchTheUpstreamModel` compares the host layer by layer, token by token and decode step by decode step, including the expert ids each token was routed to. Diagnostic switches: `DeepSeekV41LoadOptions.QuantizeLatents` and `DeepSeekV41AttentionSettings.QuantizeLatents` (off skips the FP8/FP4 cache round trip), `DeepSeekV41Block.Probe` now also reports `route`, and `DeepSeekV41MoeLayer.RouteProbe`. No change to normal output.
-
-## alpha.289
+## alpha.292
 
 - **Changed: the V4.1 host reference runs each routed expert once per batch of tokens, not once per token.** `DeepSeekV41MoeExecutor.Run`
   gathers the tokens routed to an expert and runs them together, so a stored-form expert is decoded once per call instead of once per token.
@@ -30,6 +22,18 @@ stable release will require. Dates are UTC.
   exact GELU, two projections) on existing backend ops, and `ImageStart`, `ImageEnd` and `ImageNewline` expose the learned span embeddings. `DeepSeekV41VisionConfig` gains `RopeTheta` (default 10000, read from `rope_theta` or
   `vision_rope_theta`) and the derived widths. Against the unmodified upstream `vision.py` in float32 the stages agree to 1e-6 relative on a small seeded fixture and to 7e-6 on the real weights (aligner output correlation 1.000000, relL2 2.8e-6 on a
   28x28 patch grid and 1.8e-6 on 17x23). Nothing calls it yet: image preprocessing, the splice into the language model and the GPU path are not built.
+
+## alpha.289
+
+- **Added: `hartsy moe pack` and `hartsy moe verify`, reading GGUF expert tensors.** Packing reads a checkpoint's stacked expert tensors one expert at a time, in separate or fused gate/up form, and writes a quantized pack. Verify reads the pack back, checks each checksum, and compares values with the checkpoint. The pack's fingerprint is provisional until the runtime binds packs to topologies. Tested on synthetic GGUFs only; see `docs/MOE_PACK.md`.
+
+## alpha.291
+
+- **Added: the speculation contract (CPU, synthetic evidence).** `SamplerChain.Distribution` exposes the distribution the sampler draws from, without consuming randomness. `RejectionSampler.Verify` is exact speculative sampling: a drafted token is accepted with probability min(1, p/q), and a rejection draws from the normalized residual max(0, p - q), so the emitted tokens follow the target distribution whatever the proposer does. `PromptLookupProposer` drafts from n-gram matches, and `SpeculativeLoop` runs draft, one scoring pass and verification over a stateless scorer. Greedy speculation reproduces plain greedy decoding; the statistical tests (chi-square at 1e6 trials, and a two-sample test against the plain sampler) and two deliberately broken samplers back the claim. No change to the existing pipeline's speculative path.
+
+## alpha.290
+
+- **Added: a structural oracle for the DeepSeek-V4.1 host reference, at full depth, on the real checkpoint (diagnostics, off by default).** `dump_real_layers.py` runs the unmodified upstream model through lazy weight shims, so any depth fits in RAM. `RealLayers_MatchTheUpstreamModel` compares the host layer by layer, token by token and decode step by decode step, including the expert ids each token was routed to. Diagnostic switches: `DeepSeekV41LoadOptions.QuantizeLatents` and `DeepSeekV41AttentionSettings.QuantizeLatents` (off skips the FP8/FP4 cache round trip), `DeepSeekV41Block.Probe` now also reports `route`, and `DeepSeekV41MoeLayer.RouteProbe`. No change to normal output.
 
 ## alpha.287
 
