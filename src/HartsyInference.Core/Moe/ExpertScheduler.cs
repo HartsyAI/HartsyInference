@@ -9,27 +9,33 @@ namespace HartsyInference.Core.Moe;
 public static class ExpertScheduler
 {
     /// <summary>
-    /// Plans one layer. Every routed expert appears once in <paramref name="output"/>, in ascending expert order, with the
-    /// number of (token, slot) pairs it serves.
+    /// Plans one layer and pins the experts it will run on the GPU. Every routed expert appears once in
+    /// <paramref name="output"/>, in ascending expert order, with the number of (token, slot) pairs it serves. The resident
+    /// experts are pinned through <paramref name="lease"/>, so the cache cannot evict them before execution; the caller disposes
+    /// the lease when the layer has run. Misses are never uploaded here.
     /// </summary>
-    /// <param name="cache">The residency-aware cache; only its read-only lookup is used.</param>
+    /// <param name="cache">The residency-aware cache.</param>
     /// <param name="ids">Flattened router ids, <c>tokens × k</c>, each in <c>[0, expertCount)</c>.</param>
     /// <param name="layer">Layer of the experts.</param>
     /// <param name="bank">Bank of the layer.</param>
     /// <param name="expertCount">Routed experts in the layer.</param>
-    /// <param name="policy">Placement policy.</param>
+    /// <param name="policy">Placement policy. It may not place a non-resident expert on the GPU.</param>
     /// <param name="countScratch">At least <paramref name="expertCount"/> entries; overwritten.</param>
     /// <param name="residentScratch">At least the number of distinct routed experts; overwritten.</param>
     /// <param name="keyScratch">At least <paramref name="expertCount"/> entries; overwritten.</param>
     /// <param name="output">Receives one assignment per routed expert. Must hold at least that many entries.</param>
+    /// <param name="missScratch">Receives the experts that are not resident; cleared first.</param>
+    /// <param name="lease">The pin on the resident experts. Dispose it after the layer runs.</param>
     /// <returns>The number of assignments written.</returns>
-    /// <exception cref="ArgumentOutOfRangeException">An id is outside the layer, or a scratch or output buffer is too small.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An id is outside the layer, or a buffer is too small.</exception>
+    /// <exception cref="InvalidOperationException">The policy placed a non-resident expert on the GPU.</exception>
     public static int Plan(IResidencyAwareExpertCache cache, ReadOnlySpan<int> ids, int layer, ushort bank, int expertCount,
         IMissExecutionPolicy policy, Span<int> countScratch, Span<bool> residentScratch, Span<ExpertKey> keyScratch,
-        Span<ExpertAssignment> output)
+        Span<ExpertAssignment> output, List<ExpertKey> missScratch, out ExpertLease lease)
     {
         ArgumentNullException.ThrowIfNull(cache);
         ArgumentNullException.ThrowIfNull(policy);
+        ArgumentNullException.ThrowIfNull(missScratch);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(expertCount);
         if (countScratch.Length < expertCount || keyScratch.Length < expertCount)
             throw new ArgumentOutOfRangeException(nameof(countScratch), "Scratch buffers must hold one entry per routed expert.");
@@ -49,14 +55,29 @@ public static class ExpertScheduler
         }
         if (residentScratch.Length < distinct) throw new ArgumentOutOfRangeException(nameof(residentScratch), "Residency scratch is too small.");
         if (output.Length < distinct) throw new ArgumentOutOfRangeException(nameof(output), "The output must hold one entry per routed expert.");
-        cache.LookupResident(keyScratch[..distinct], residentScratch[..distinct]);
 
-        for (int i = 0; i < distinct; i++)
+        // Pinning is what makes the plan safe: the resident experts cannot be evicted between planning and execution.
+        missScratch.Clear();
+        lease = cache.AcquireResident(keyScratch[..distinct], missScratch);
+        try
         {
-            ExpertKey key = keyScratch[i];
-            int rows = countScratch[key.Expert];
-            output[i] = new ExpertAssignment(key, policy.Place(key, residentScratch[i], rows), rows);
+            for (int i = 0; i < distinct; i++)
+            {
+                ExpertKey key = keyScratch[i];
+                bool resident = !missScratch.Contains(key);
+                residentScratch[i] = resident;
+                int rows = countScratch[key.Expert];
+                ExpertPlacement placement = policy.Place(key, resident, rows);
+                if (placement == ExpertPlacement.Gpu && !resident)
+                    throw new InvalidOperationException($"{key} is not resident; it cannot run on the GPU without an upload.");
+                output[i] = new ExpertAssignment(key, placement, rows);
+            }
+            return distinct;
         }
-        return distinct;
+        catch
+        {
+            lease.Dispose();
+            throw;
+        }
     }
 }

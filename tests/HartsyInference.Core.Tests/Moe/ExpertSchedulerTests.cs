@@ -6,7 +6,7 @@ using Xunit;
 
 namespace HartsyInference.Core.Tests.Moe;
 
-/// <summary>Placement planning: residency decides where experts run, every routed pair is counted, and planning changes nothing.</summary>
+/// <summary>Placement planning: residency decides where experts run, every routed pair is counted, and planning pins what it plans.</summary>
 public sealed class ExpertSchedulerTests
 {
     private const int MatrixElements = 256;
@@ -30,14 +30,22 @@ public sealed class ExpertSchedulerTests
         return cache;
     }
 
-    private static List<ExpertAssignment> Plan(FakeExpertCache cache, int[] ids, IMissExecutionPolicy policy, ushort bank = 0)
+    private static ExpertAssignment[] Run(FakeExpertCache cache, int[] ids, IMissExecutionPolicy policy, out ExpertLease lease, ushort bank = 0)
     {
         int[] counts = new int[8];
         bool[] resident = new bool[8];
         ExpertKey[] keys = new ExpertKey[8];
         ExpertAssignment[] output = new ExpertAssignment[8];
-        int written = ExpertScheduler.Plan(cache, ids, layer: 0, bank, expertCount: 8, policy, counts, resident, keys, output);
-        return output.Take(written).ToList();
+        List<ExpertKey> misses = [];
+        int written = ExpertScheduler.Plan(cache, ids, layer: 0, bank, expertCount: 8, policy, counts, resident, keys, output, misses, out lease);
+        return output[..written];
+    }
+
+    private static ExpertAssignment[] Plan(FakeExpertCache cache, int[] ids, IMissExecutionPolicy policy, ushort bank = 0)
+    {
+        ExpertAssignment[] assignments = Run(cache, ids, policy, out ExpertLease lease, bank);
+        lease.Dispose();
+        return assignments;
     }
 
     [Fact]
@@ -45,7 +53,7 @@ public sealed class ExpertSchedulerTests
     {
         using FakeExpertCache cache = CacheWithResident((0, 1), (0, 2));
 
-        List<ExpertAssignment> plan = Plan(cache, [1, 1, 3, 2, 0], ResidentFirstPolicy.Instance);
+        ExpertAssignment[] plan = Plan(cache, [1, 1, 3, 2, 0], ResidentFirstPolicy.Instance);
 
         Assert.Equal(
             [
@@ -63,43 +71,66 @@ public sealed class ExpertSchedulerTests
         using FakeExpertCache cache = CacheWithResident((0, 4));
         int[] ids = [4, 4, 4, 0, 7, 0, 2];
 
-        List<ExpertAssignment> plan = Plan(cache, ids, ResidentFirstPolicy.Instance);
+        ExpertAssignment[] plan = Plan(cache, ids, ResidentFirstPolicy.Instance);
 
         Assert.Equal(ids.Length, plan.Sum(static assignment => assignment.Rows));
-        Assert.Equal(plan.Count, plan.Select(static assignment => assignment.Key).Distinct().Count());
+        Assert.Equal(plan.Length, plan.Select(static assignment => assignment.Key).Distinct().Count());
     }
 
     [Fact]
-    public void Planning_ReadsResidencyAndChangesNothing()
-    {
-        using FakeExpertCache cache = CacheWithResident((0, 1));
-        ExpertCacheStats before = cache.Stats;
-        int eventsBefore = cache.Events.Count;
-
-        Plan(cache, [1, 2, 3], ResidentFirstPolicy.Instance);
-
-        Assert.Equal(eventsBefore, cache.Events.Count);
-        Assert.Equal(before.Hits, cache.Stats.Hits);
-        Assert.Equal(before.Misses, cache.Stats.Misses);
-        Assert.Equal(before.ResidentExperts, cache.Stats.ResidentExperts);
-    }
-
-    [Fact]
-    public void ForcedPolicies_PlaceEveryExpertRegardlessOfResidency()
+    public void Planning_PinsTheResidentExpertsAndUploadsNothing()
     {
         using FakeExpertCache cache = CacheWithResident((0, 1), (0, 2));
-        int[] ids = [0, 1, 2, 3];
+        int uploadsBefore = cache.Events.Count(static e => e.StartsWith("upload"));
+
+        ExpertAssignment[] plan = Run(cache, [1, 2, 3], ResidentFirstPolicy.Instance, out ExpertLease lease);
+
+        Assert.Equal(2, cache.Stats.PinnedExperts);
+        Assert.Equal(uploadsBefore, cache.Events.Count(static e => e.StartsWith("upload")));
+        Assert.Equal(3, plan.Length);
+        lease.Dispose();
+        Assert.Equal(0, cache.Stats.PinnedExperts);
+    }
+
+    [Fact]
+    public void ExpertsPlannedForTheGpu_CannotBeEvictedWhileThePlanIsHeld()
+    {
+        using FakeExpertCache cache = CacheWithResident((0, 1));
+        Run(cache, [1], ResidentFirstPolicy.Instance, out ExpertLease lease);
+
+        cache.Trim(0);
+
+        Assert.Equal(1, cache.Stats.ResidentExperts);
+        lease.Dispose();
+        cache.Trim(0);
+        Assert.Equal(0, cache.Stats.ResidentExperts);
+    }
+
+    [Fact]
+    public void Policy_CannotPlaceAMissOnTheGpu()
+    {
+        using FakeExpertCache cache = CacheWithResident((0, 1));
+        ForcedPlacementPolicy allGpu = new(static _ => ExpertPlacement.Gpu);
+
+        Assert.Throws<InvalidOperationException>(() => Run(cache, [1, 2], allGpu, out _));
+        Assert.Equal(0, cache.Stats.PinnedExperts);
+    }
+
+    [Fact]
+    public void ForcedPolicies_PlaceResidentExpertsAsRequested()
+    {
+        using FakeExpertCache cache = CacheWithResident((0, 1), (0, 2));
+        int[] ids = [1, 2];
 
         Assert.All(Plan(cache, ids, new ForcedPlacementPolicy(_ => ExpertPlacement.Cpu)), static a => Assert.Equal(ExpertPlacement.Cpu, a.Placement));
         Assert.All(Plan(cache, ids, new ForcedPlacementPolicy(_ => ExpertPlacement.Gpu)), static a => Assert.Equal(ExpertPlacement.Gpu, a.Placement));
 
-        // A deterministic half by expert parity: the same split on every call.
-        ForcedPlacementPolicy half = new(static key => key.Expert % 2 == 0 ? ExpertPlacement.Gpu : ExpertPlacement.Cpu);
-        List<ExpertAssignment> first = Plan(cache, ids, half);
-        List<ExpertAssignment> second = Plan(cache, ids, half);
+        ForcedPlacementPolicy half = new(static key => key.Expert == 1 ? ExpertPlacement.Gpu : ExpertPlacement.Cpu);
+        ExpertAssignment[] first = Plan(cache, ids, half);
+        ExpertAssignment[] second = Plan(cache, ids, half);
         Assert.Equal(first, second);
-        Assert.Equal(ExpertPlacement.Gpu, first.Single(static a => a.Key.Expert == 0).Placement);
-        Assert.Equal(ExpertPlacement.Cpu, first.Single(static a => a.Key.Expert == 1).Placement);
+        Assert.Equal(ExpertPlacement.Gpu, first.Single(static a => a.Key.Expert == 1).Placement);
+        Assert.Equal(ExpertPlacement.Cpu, first.Single(static a => a.Key.Expert == 2).Placement);
     }
 
     [Fact]
@@ -107,8 +138,8 @@ public sealed class ExpertSchedulerTests
     {
         using FakeExpertCache cache = CacheWithResident((3, 2));
 
-        List<ExpertAssignment> inBank3 = Plan(cache, [2], ResidentFirstPolicy.Instance, bank: 3);
-        List<ExpertAssignment> inBank0 = Plan(cache, [2], ResidentFirstPolicy.Instance, bank: 0);
+        ExpertAssignment[] inBank3 = Plan(cache, [2], ResidentFirstPolicy.Instance, bank: 3);
+        ExpertAssignment[] inBank0 = Plan(cache, [2], ResidentFirstPolicy.Instance, bank: 0);
 
         Assert.Equal(new ExpertKey(0, 2, 3), inBank3.Single().Key);
         Assert.Equal(ExpertPlacement.Gpu, inBank3.Single().Placement);
@@ -123,12 +154,13 @@ public sealed class ExpertSchedulerTests
         bool[] resident = new bool[8];
         ExpertKey[] keys = new ExpertKey[8];
         ExpertAssignment[] output = new ExpertAssignment[8];
+        List<ExpertKey> misses = [];
 
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [8], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, output));
+            ExpertScheduler.Plan(cache, [8], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, output, misses, out _));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [1], 0, 0, 8, ResidentFirstPolicy.Instance, new int[4], resident, keys, output));
+            ExpertScheduler.Plan(cache, [1], 0, 0, 8, ResidentFirstPolicy.Instance, new int[4], resident, keys, output, misses, out _));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, new ExpertAssignment[1]));
+            ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, new ExpertAssignment[1], misses, out _));
     }
 }

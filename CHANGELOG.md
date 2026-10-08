@@ -11,9 +11,10 @@ stable release will require. Dates are UTC.
 ## alpha.286
 
 - **Added: the placement planner for a routed layer.** `ExpertScheduler.Plan` reads the cache's residency and assigns each routed
-  expert to the GPU (resident) or the CPU (missing), through a replaceable `IMissExecutionPolicy`. Every routed (token, slot) pair
-  is counted once. Planning changes no cache state and uploads nothing. It is allocation-free: the caller owns the scratch and
-  the output. The GPU execution, the CPU kernels and the cross-device combine are not in this change and need the test rig.
+  expert to the GPU (resident) or the CPU (missing), through a replaceable `IMissExecutionPolicy`. Planning pins the resident
+  experts it plans on, returned as a lease, so they cannot be evicted before the layer runs; it uploads nothing, and a policy may
+  not place a missing expert on the GPU. Every routed (token, slot) pair is counted once. It is allocation-free: the caller owns
+  the scratch and the output. The GPU execution, the CPU kernels and the cross-device combine are not in this change and need the test rig.
 
 ## alpha.284
 
