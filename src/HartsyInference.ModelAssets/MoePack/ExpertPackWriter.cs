@@ -75,17 +75,27 @@ public sealed class ExpertPackWriter : IDisposable
         Directory.CreateDirectory(directory);
         if (File.Exists(Path.Combine(directory, "COMPLETE")))
             throw new InvalidOperationException($"'{directory}' already holds a completed expert pack.");
-        // One writer per directory: the lock is created atomically and removed when this writer publishes or is disposed.
+        // One writer per directory. Ownership is the open handle, not the file's existence: FileShare.None makes a second
+        // open fail while a writer is alive, and a WRITING file left by a crashed writer (no handle) opens and is taken over.
         _lockPath = Path.Combine(directory, "WRITING");
         try
         {
-            _lock = new FileStream(_lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            _lock = new FileStream(_lockPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
         }
         catch (IOException)
         {
             throw new InvalidOperationException($"'{directory}' is already being written; a second writer would replace the pack.");
         }
-        _stream = new FileStream(Path.Combine(directory, "experts.bin.partial"), FileMode.Create, FileAccess.Write, FileShare.None);
+        try
+        {
+            _stream = new FileStream(Path.Combine(directory, "experts.bin.partial"), FileMode.Create, FileAccess.Write, FileShare.None);
+        }
+        catch
+        {
+            // Setup failed after the lock was taken; release it so a later writer is not refused by a stale marker.
+            ReleaseLock();
+            throw;
+        }
     }
 
     /// <summary>Quantizes and appends one expert. Gate and up are <c>[I, H]</c> row-major; down is <c>[H, I]</c>.</summary>

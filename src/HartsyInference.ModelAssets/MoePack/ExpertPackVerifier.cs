@@ -17,6 +17,8 @@ public static class ExpertPackVerifier
         ArgumentNullException.ThrowIfNull(reader);
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(keys);
+        // Without checksums a corrupt record could pass the numeric tolerance unseen, and the verifier gates source deletion.
+        if (!reader.VerifiesChecksums) throw new ArgumentException("Verification needs a reader opened with checksums enabled.", nameof(reader));
         List<ExpertKey> failures = [];
         int checkedCount = 0;
         double maxAbs = 0, errorSquares = 0, referenceSquares = 0;

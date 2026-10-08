@@ -66,6 +66,9 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
     /// <summary>Expert inner width I.</summary>
     public int Intermediate { get; }
 
+    /// <summary>True when each <see cref="Resolve"/> checks the record's SHA-256 before handing out its bytes.</summary>
+    public bool VerifiesChecksums => _verifyChecksums;
+
     /// <summary>Number of experts in the pack.</summary>
     public int Count => _records.Count;
 
@@ -107,8 +110,7 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
                 $"The manifest declares dimensions {manifest.Hidden} x {manifest.Intermediate}; both must be in [1, {MaxDimension}].");
         if ((long)manifest.Hidden * manifest.Intermediate > ExpertPackWriter.MaxMatrixElements)
             throw new InvalidDataException(
-                
-                        $"The manifest declares a {manifest.Hidden} x {manifest.Intermediate} matrix; " +
+                $"The manifest declares a {manifest.Hidden} x {manifest.Intermediate} matrix; " +
                 $"the pack limit is {ExpertPackWriter.MaxMatrixElements} elements.");
         if (manifest.Records.Count != manifest.ExpertCount)
             throw new InvalidDataException($"The manifest lists {manifest.Records.Count} experts; it declares {manifest.ExpertCount}.");
@@ -120,6 +122,7 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
     /// <exception cref="InvalidDataException">The record's checksum does not match its bytes.</exception>
     public unsafe ExpertWeights Resolve(ExpertKey key)
     {
+        ObjectDisposedException.ThrowIf(_released != 0, this);
         if (!_records.TryGetValue(key, out ExpertPackRecord? record)) throw new KeyNotFoundException($"The expert pack has no record for {key}.");
         byte* start = _base + record.Offset;
         if (_verifyChecksums)

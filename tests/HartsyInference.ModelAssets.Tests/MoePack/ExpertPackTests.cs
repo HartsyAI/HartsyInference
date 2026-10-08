@@ -306,6 +306,39 @@ public sealed class ExpertPackTests : IDisposable
     }
 
     [Fact]
+    public void StaleWritingMarker_FromACrashedWriter_IsTakenOver()
+    {
+        string dir = Path.Combine(_root, "stale-lock");
+        Directory.CreateDirectory(dir);
+        File.WriteAllText(Path.Combine(dir, "WRITING"), "left behind");
+
+        using ExpertPackWriter writer = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, Keys(1));
+        (float[] Gate, float[] Up, float[] Down) source = Expert();
+        writer.AddExpert(0, 0, source.Gate, source.Up, source.Down);
+        writer.Finish();
+        Assert.False(File.Exists(Path.Combine(dir, "WRITING")));
+    }
+
+    [Fact]
+    public void Resolve_AfterDispose_IsRefused()
+    {
+        string dir = Path.Combine(_root, "disposed");
+        WritePack(dir, DType.Q8_0, 1);
+        ExpertPackReader reader = ExpertPackReader.Open(dir);
+        reader.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => reader.Resolve(new ExpertKey(0, 0)));
+    }
+
+    [Fact]
+    public void Verifier_RefusesAReaderThatSkipsChecksums()
+    {
+        string dir = Path.Combine(_root, "no-checksum");
+        WritePack(dir, DType.Q8_0, 1, Fingerprint);
+        using ExpertPackReader reader = ExpertPackReader.Open(dir, verifyChecksums: false);
+        Assert.Throws<ArgumentException>(() => ExpertPackVerifier.Verify(reader, _ => Expert(), reader.Keys));
+    }
+
+    [Fact]
     public void Verifier_ReportsNonzeroErrorAgainstAZeroSourceAsFailure()
     {
         string dir = Path.Combine(_root, "zero-source");
