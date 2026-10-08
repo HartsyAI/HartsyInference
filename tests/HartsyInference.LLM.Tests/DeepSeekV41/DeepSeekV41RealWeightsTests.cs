@@ -153,4 +153,103 @@ public sealed class DeepSeekV41RealWeightsTests
             Assert.Equal(0.0, maxDiff);
         }
     }
+
+    // Gates fixed before the first comparison ran. exact: the upstream model in float32 with activation quantization removed and an exact
+    // softmax, so the F32 host reference should agree to rounding; a miss is a structural difference. ports: the unmodified pure-torch ports
+    // with FP8 activation quantization, which the host reference does not model; the numbers are a precision envelope and only guard
+    // against gross divergence.
+    private const double ExactHiddenRelL2 = 2e-3;
+    private const double ExactLogitsCosine = 0.9999;
+    private const double PortsCosineFloor = 0.95;
+
+    /// <summary>The first N layers of the real checkpoint through the host reference against the UNMODIFIED upstream model on the same real weights, dumped by
+    /// <c>tests/python-reference/deepseek_v41/dump_real_layers.py</c> (set <c>DSV41_ORACLE_DIR</c> to its output directory; its <c>meta.json</c> names the layers, mode and ids).</summary>
+    [Fact]
+    public void RealLayers_MatchTheUpstreamModel()
+    {
+        string dir = ModelDirectory();
+        string? oracle = Environment.GetEnvironmentVariable("DSV41_ORACLE_DIR");
+        if (!RealWeightGate.Require(_output.WriteLine, Path.Combine(dir, "config.json"), oracle is null ? "DSV41_ORACLE_DIR-unset" : Path.Combine(oracle, "meta.json"))) return;
+
+        using System.Text.Json.JsonDocument meta = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(oracle!, "meta.json")));
+        int layers = meta.RootElement.GetProperty("layers").GetInt32();
+        string mode = meta.RootElement.GetProperty("mode").GetString()!;
+        int[] ids = meta.RootElement.GetProperty("ids").EnumerateArray().Select(e => e.GetInt32()).ToArray();
+
+        using CpuBackend backend = new();
+        using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(backend, dir, new DeepSeekV41LoadOptions(MaxTokens: 64, MaxLayers: layers));
+        using FileStream tokStream = File.OpenRead(Path.Combine(dir, "tokenizer.json"));
+        ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokStream, bosToken: DeepSeekV41TextModel.BosLiteral, eosToken: DeepSeekV41TextModel.EosLiteral);
+        int[] hostIds = [tokenizer.BosId!.Value, .. tokenizer.EncodeOrdinary("The capital of France is")];
+        _output.WriteLine($"host ids [{string.Join(",", hostIds)}] oracle ids [{string.Join(",", ids)}]");
+        Assert.Equal(ids, hostIds);
+
+        DeepSeekV41HostModel model = loaded.Model;
+        DeepSeekV41SequenceState state = model.CreateState(64);
+        float[] hidden = new float[ids.Length * model.Dim];
+        Stopwatch sw = Stopwatch.StartNew();
+        model.Forward(ids, state, hidden);
+        float[] logits = model.Logits(hidden.AsSpan((ids.Length - 1) * model.Dim, model.Dim));
+        _output.WriteLine($"host {layers}-layer forward {sw.Elapsed.TotalSeconds:F1}s, RSS {Rss()}");
+
+        float[] refHidden = ReadF32(Path.Combine(oracle!, "final.f32"), hidden.Length);
+        float[] refLogits = ReadF32(Path.Combine(oracle!, "logits.f32"), logits.Length);
+        double hiddenRel = RelL2(hidden, refHidden), logitsRel = RelL2(logits, refLogits);
+        double hiddenCos = Cosine(hidden, refHidden), logitsCos = Cosine(logits, refLogits);
+        int hostTop = ArgMax(logits), refTop = ArgMax(refLogits);
+        int overlap = TopK(logits, 10).Intersect(TopK(refLogits, 10)).Count();
+        _output.WriteLine($"[{mode}] hidden relL2 {hiddenRel:E3} cos {hiddenCos:F6}; logits relL2 {logitsRel:E3} cos {logitsCos:F6}; "
+            + $"argmax host {hostTop} oracle {refTop}; top-10 overlap {overlap}/10; max|dlogit| {MaxAbsDiff(logits, refLogits):E3}");
+
+        if (mode == "exact")
+        {
+            Assert.True(hiddenRel <= ExactHiddenRelL2, $"hidden relL2 {hiddenRel:E3} > {ExactHiddenRelL2:E1}");
+            Assert.True(logitsCos >= ExactLogitsCosine, $"logits cosine {logitsCos:F6} < {ExactLogitsCosine}");
+            Assert.Equal(refTop, hostTop);
+        }
+        else
+        {
+            Assert.True(hiddenCos >= PortsCosineFloor, $"hidden cosine {hiddenCos:F6} < {PortsCosineFloor}");
+            Assert.True(logitsCos >= PortsCosineFloor, $"logits cosine {logitsCos:F6} < {PortsCosineFloor}");
+        }
+    }
+
+    private static float[] ReadF32(string path, int expected)
+    {
+        byte[] bytes = File.ReadAllBytes(path);
+        Assert.Equal(expected * 4, bytes.Length);
+        float[] values = new float[expected];
+        Buffer.BlockCopy(bytes, 0, values, 0, bytes.Length);
+        return values;
+    }
+
+    private static double RelL2(float[] a, float[] b)
+    {
+        double diff = 0, norm = 0;
+        for (int i = 0; i < a.Length; i++) { double d = (double)a[i] - b[i]; diff += d * d; norm += (double)b[i] * b[i]; }
+        return Math.Sqrt(diff / Math.Max(norm, 1e-30));
+    }
+
+    private static double Cosine(float[] a, float[] b)
+    {
+        double dot = 0, na = 0, nb = 0;
+        for (int i = 0; i < a.Length; i++) { dot += (double)a[i] * b[i]; na += (double)a[i] * a[i]; nb += (double)b[i] * b[i]; }
+        return dot / Math.Max(Math.Sqrt(na * nb), 1e-30);
+    }
+
+    private static double MaxAbsDiff(float[] a, float[] b)
+    {
+        double max = 0;
+        for (int i = 0; i < a.Length; i++) max = Math.Max(max, Math.Abs((double)a[i] - b[i]));
+        return max;
+    }
+
+    private static int ArgMax(float[] v)
+    {
+        int best = 0;
+        for (int i = 1; i < v.Length; i++) if (v[i] > v[best]) best = i;
+        return best;
+    }
+
+    private static int[] TopK(float[] v, int k) => Enumerable.Range(0, v.Length).OrderByDescending(i => v[i]).Take(k).ToArray();
 }
