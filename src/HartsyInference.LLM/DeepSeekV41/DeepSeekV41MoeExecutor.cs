@@ -3,6 +3,10 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <summary>Host reference for upstream <c>MoE.forward</c> after routing: routed SwiGLU experts plus the shared expert, accumulated in F32.</summary>
 public static class DeepSeekV41MoeExecutor
 {
+    // Tokens run through one expert together. A stored-form weight is decoded once per call, so batching decodes each expert once per forward instead of once
+    // per token; the cap only bounds the scratch arrays. Every output element is the same sequential dot whatever the batch, so results are bit-identical.
+    private const int BatchRows = 256;
+
     /// <summary>Computes <c>y[t] = sum_j w[t,j] * expert_{idx[t,j]}(x[t]) + shared(x[t])</c>.</summary>
     /// <param name="x">Tokens, <c>[tokens, dim]</c>.</param>
     /// <param name="tokens">Row count.</param>
@@ -32,7 +36,6 @@ public static class DeepSeekV41MoeExecutor
                 (routed[e] ??= []).Add((t, topkWeight[t * k + j]));
             }
 
-        float[] scratch = new float[dim], hidden = new float[shared.Inter];
         for (int e = 0; e < numExperts; e++)
         {
             if (routed[e] is not { Count: > 0 } rows) continue;
@@ -40,38 +43,53 @@ public static class DeepSeekV41MoeExecutor
             w.Validate();
             if (w.Dim != dim || w.Inter != shared.Inter)
                 throw new InvalidOperationException($"Expert {e} is {w.Dim} x {w.Inter}, expected {dim} x {shared.Inter}.");
-            foreach ((int token, float weight) in rows)
+            for (int start = 0; start < rows.Count; start += BatchRows)
             {
-                Forward(w, x.Slice(token * dim, dim), weight, swigluLimit, hidden, scratch);
-                Span<float> row = y.Slice(token * dim, dim);
-                for (int d = 0; d < dim; d++) row[d] += scratch[d];
+                int n = Math.Min(BatchRows, rows.Count - start);
+                float[] batch = new float[n * dim], weights = new float[n];
+                for (int i = 0; i < n; i++)
+                {
+                    (int token, float weight) = rows[start + i];
+                    x.Slice(token * dim, dim).CopyTo(batch.AsSpan(i * dim, dim));
+                    weights[i] = weight;
+                }
+                float[] outputs = ForwardBatch(w, batch, n, weights, swigluLimit);
+                for (int i = 0; i < n; i++)
+                {
+                    Span<float> row = y.Slice(rows[start + i].Token * dim, dim);
+                    ReadOnlySpan<float> o = outputs.AsSpan(i * dim, dim);
+                    for (int d = 0; d < dim; d++) row[d] += o[d];
+                }
             }
         }
 
-        for (int t = 0; t < tokens; t++)
+        float[] ones = new float[Math.Min(BatchRows, tokens)];
+        Array.Fill(ones, 1f);
+        for (int start = 0; start < tokens; start += BatchRows)
         {
-            Forward(shared, x.Slice(t * dim, dim), 1f, swigluLimit, hidden, scratch);
-            Span<float> row = y.Slice(t * dim, dim);
-            for (int d = 0; d < dim; d++) row[d] += scratch[d];
+            int n = Math.Min(BatchRows, tokens - start);
+            float[] outputs = ForwardBatch(shared, x.Slice(start * dim, n * dim).ToArray(), n, ones, swigluLimit);
+            Span<float> rows = y.Slice(start * dim, n * dim);
+            for (int i = 0; i < rows.Length; i++) rows[i] += outputs[i];
         }
     }
 
-    /// <summary>One expert on one token: clamp, <c>silu(gate) * up</c>, scale by <paramref name="weight"/>, then the down projection.</summary>
-    internal static void Forward(DeepSeekV41SwigluWeights w, ReadOnlySpan<float> x, float weight, float limit, float[] hidden, Span<float> output)
+    /// <summary>One SwiGLU expert over <paramref name="n"/> tokens: <c>x</c> is <c>[n, dim]</c>, <c>weights[i]</c> scales token i, the result is <c>[n, dim]</c>.</summary>
+    internal static float[] ForwardBatch(DeepSeekV41SwigluWeights w, float[] x, int n, float[] weights, float limit)
     {
         int dim = w.Dim, inter = w.Inter;
-        // two sequential dots per hidden unit, exactly as a fused loop would compute them
-        float[] gates = w.W1.Linear(x, 1, dim, inter), ups = w.W3.Linear(x, 1, dim, inter);
-        for (int i = 0; i < inter; i++)
-        {
-            float gate = gates[i], up = ups[i];
-            if (limit > 0f)
+        float[] gates = w.W1.Linear(x, n, dim, inter), ups = w.W3.Linear(x, n, dim, inter), hidden = new float[n * inter];
+        for (int t = 0; t < n; t++)
+            for (int i = 0; i < inter; i++)
             {
-                up = Math.Clamp(up, -limit, limit);
-                gate = MathF.Min(gate, limit);
+                float gate = gates[t * inter + i], up = ups[t * inter + i];
+                if (limit > 0f)
+                {
+                    up = Math.Clamp(up, -limit, limit);
+                    gate = MathF.Min(gate, limit);
+                }
+                hidden[t * inter + i] = weights[t] * (gate / (1f + MathF.Exp(-gate)) * up);
             }
-            hidden[i] = weight * (gate / (1f + MathF.Exp(-gate)) * up);
-        }
-        w.W2.Linear(hidden.AsSpan(0, inter), 1, inter, dim).CopyTo(output);
+        return w.W2.Linear(hidden, n, inter, dim);
     }
 }

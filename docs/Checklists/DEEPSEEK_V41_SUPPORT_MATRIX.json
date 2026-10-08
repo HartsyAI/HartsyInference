@@ -737,7 +737,7 @@
       "feature": "ViT + aligner + preprocessing + span splice",
       "format": "official",
       "backends": {
-        "CPU": "Unimplemented",
+        "CPU": "Implemented",
         "CUDA": "Unimplemented",
         "Vulkan": "Unimplemented"
       },
@@ -753,14 +753,14 @@
         "llmassistant"
       ],
       "reference": "deepseek-ai/DeepSeek-V4.1-Flash@dba1be0a vision.py, image_processor.py",
-      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/DeepSeekVit*.cs",
+      "plannedLocation": "src/HartsyInference.LLM/DeepSeekV41/DeepSeekV41Vision*.cs, DeepSeekV41Aligner*.cs",
       "dependsOn": [
         "core.model"
       ],
       "acceptanceTest": "tower parity corr >= 0.9999; span layout; late image in long prompt",
       "pr": 15,
-      "status": "Unimplemented",
-      "note": "aligner, tower and preprocessing are Python-reference only until PR 15"
+      "status": "InProgress",
+      "note": "CPU F32 host reference of the tower (patch embedding, 32 pre-norm blocks with a 2D half-split rotary, SwiGLU MLP, final norm) and the aligner (zero-padded 3x3 fold, exact GELU), loaded from the official BF16 shards 1-2 by DeepSeekV41VisionLoader together with image_start/end/newline. Evidence: a small seeded fixture and the real weights, both against the unmodified upstream vision.py in float32. Real weights, random patches on 28x28 and 17x23 grids: aligner output correlation and cosine 1.000000, relL2 2.8e-6 / 1.8e-6, every stage <= 7.1e-6 relL2, image_start/end/newline bit-exact (PARITY_VERIFICATION.md). Not done: image preprocessing (image_processor.py), splicing the embeddings into the language model, bias_vl routing, Engram dead tokens, patches from a real image, bf16 production numerics, GPU and Vulkan paths"
     },
     {
       "id": "protocol.encoder",

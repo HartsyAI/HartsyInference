@@ -18,6 +18,9 @@ internal readonly struct DeepSeekV41ConfigReader(JsonElement element, string sco
     public double Double(string name) =>
         Find(name) is { ValueKind: JsonValueKind.Number } n ? n.GetDouble() : throw Missing(name, "a number");
 
+    public double Double(string name, double fallback) =>
+        Find(name) is { ValueKind: JsonValueKind.Number } n ? n.GetDouble() : fallback;
+
     public bool Bool(string name, bool fallback) =>
         Find(name) is { ValueKind: JsonValueKind.True or JsonValueKind.False } b ? b.GetBoolean() : fallback;
 

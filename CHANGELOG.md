@@ -8,9 +8,33 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.289
+## alpha.290
 
 - **Added: a structural oracle for the DeepSeek-V4.1 host reference, at full depth, on the real checkpoint (diagnostics, off by default).** `dump_real_layers.py` runs the unmodified upstream model through lazy weight shims, so any depth fits in RAM. `RealLayers_MatchTheUpstreamModel` compares the host layer by layer, token by token and decode step by decode step, including the expert ids each token was routed to. Diagnostic switches: `DeepSeekV41LoadOptions.QuantizeLatents` and `DeepSeekV41AttentionSettings.QuantizeLatents` (off skips the FP8/FP4 cache round trip), `DeepSeekV41Block.Probe` now also reports `route`, and `DeepSeekV41MoeLayer.RouteProbe`. No change to normal output.
+
+## alpha.289
+
+- **Changed: the V4.1 host reference runs each routed expert once per batch of tokens, not once per token.** `DeepSeekV41MoeExecutor.Run`
+  gathers the tokens routed to an expert and runs them together, so a stored-form expert is decoded once per call instead of once per token.
+  Every output element is the same sequential dot product, so the results are bit-identical to the token-by-token path
+  (`DeepSeekV41MoeExecutorTests.Batched_Run_Matches_Token_By_Token_Run_Bit_For_Bit`, which crosses the 256-row batch cap).
+
+## alpha.288
+
+- **Added: CPU reference for the DeepSeek-V4.1-Flash vision tower and aligner.** `DeepSeekV41VisionLoader.Load` reads the 266 `vision.*`, `aligner.*` and `image_*` tensors (BF16 in the official shards 1 and 2) as F32 and returns a
+  `DeepSeekV41VisionModel`. `Encode(patches, gridHeight, gridWidth)` runs the tower (patch embedding, 32 pre-norm blocks of full attention with a 2D half-split rotary and a SwiGLU MLP, final RMSNorm) and the aligner (zero-padded 3x3 fold,
+  exact GELU, two projections) on existing backend ops, and `ImageStart`, `ImageEnd` and `ImageNewline` expose the learned span embeddings. `DeepSeekV41VisionConfig` gains `RopeTheta` (default 10000, read from `rope_theta` or
+  `vision_rope_theta`) and the derived widths. Against the unmodified upstream `vision.py` in float32 the stages agree to 1e-6 relative on a small seeded fixture and to 7e-6 on the real weights (aligner output correlation 1.000000, relL2 2.8e-6 on a
+  28x28 patch grid and 1.8e-6 on 17x23). Nothing calls it yet: image preprocessing, the splice into the language model and the GPU path are not built.
+
+## alpha.287
+
+- **Added: the placement planner for a routed layer.** `ExpertScheduler.Plan` reads the cache's residency and assigns each routed
+  expert to the GPU (resident) or the CPU (missing), through a replaceable `IMissExecutionPolicy`. Planning pins the resident
+  experts it plans on, returned as a lease, so they cannot be evicted before the layer runs; it uploads nothing, and a policy may
+  not place a missing expert on the GPU. Every routed (token, slot) pair is counted once. It is allocation-free once warm: the caller owns
+  the scratch, the output, the miss list and a reusable lease, and `AcquireResident` binds that lease without allocating. The GPU execution, the CPU kernels and the cross-device combine are not in this change and need the test rig.
+
 
 ## alpha.286
 
