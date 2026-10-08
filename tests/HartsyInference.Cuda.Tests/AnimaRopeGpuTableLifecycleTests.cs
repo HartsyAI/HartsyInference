@@ -15,7 +15,6 @@ namespace HartsyInference.Cuda.Tests;
 /// self-attention block and must stay device-resident until the transformer phase boundary.
 /// </summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class AnimaRopeGpuTableLifecycleTests
 {
     private const int Frames = 1;
@@ -30,6 +29,7 @@ public sealed unsafe class AnimaRopeGpuTableLifecycleTests
 
     public AnimaRopeGpuTableLifecycleTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void GetOrCreateTables_ReusesOneUpload_AndApplyRopeMatchesCpuWithoutD2h()
@@ -112,6 +112,7 @@ public sealed unsafe class AnimaRopeGpuTableLifecycleTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void ReleaseDeviceCache_EvictsAndRecreatesEquivalentTables_IdempotentlyWithoutD2h()

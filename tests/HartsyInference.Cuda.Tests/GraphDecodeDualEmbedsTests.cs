@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// is invisible until a CUDA run throws. Both projection branches are exercised: fused QKV (QkNorm off) and
 /// composed (QkNorm on, which is what Qwen3 backbones take).</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class GraphDecodeDualEmbedsTests
 {
     private readonly ITestOutputHelper _output;
@@ -28,10 +27,12 @@ public sealed unsafe class GraphDecodeDualEmbedsTests
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
     private static Tensor Embeds(int t, int h) => Fill(new Tensor(new TensorShape(1, t, h), DType.F32));
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DualGraphDecodeStepEmbeds_FusedQkv_MatchesTwoEagerStreams()
         => RunConfig(qkNorm: false);
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DualGraphDecodeStepEmbeds_ComposedQkNorm_MatchesTwoEagerStreams()
         => RunConfig(qkNorm: true);

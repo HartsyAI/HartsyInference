@@ -10,7 +10,6 @@ namespace HartsyInference.Cuda.Tests;
 /// CPU-only lifecycle tests for Anima's backend-keyed RoPE table cache. The proxy records the exact
 /// host tensors handed to a backend and can inject failures without constructing a device backend.
 /// </summary>
-[Trait("Category", "GpuIntegration")]
 public sealed class AnimaRopeGpuTableCacheTests
 {
     private const int Frames = 1;
@@ -18,6 +17,7 @@ public sealed class AnimaRopeGpuTableCacheTests
     private const int GridWidth = 5;
     private const int HeadDim = 12;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Cache_GeometryReplacement_EvictsOldPairBeforePublishingNewPair()
     {
@@ -52,6 +52,7 @@ public sealed class AnimaRopeGpuTableCacheTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Cache_TwoBackends_IsolatesIdentityReuseAndRelease()
     {
@@ -109,6 +110,7 @@ public sealed class AnimaRopeGpuTableCacheTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Cache_PreloadFailure_RollsBackPartialResidencyWithoutPublication()
     {
@@ -145,6 +147,7 @@ public sealed class AnimaRopeGpuTableCacheTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Cache_FreeFailure_RetainsPublishedEntryForRetry()
     {
@@ -187,6 +190,7 @@ public sealed class AnimaRopeGpuTableCacheTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public async Task Cache_ConcurrentSameKeyCallers_PublishExactlyOnePair()
     {

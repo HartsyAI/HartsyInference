@@ -9,13 +9,13 @@ namespace HartsyInference.Cuda.Tests;
 /// <summary>Guards the phase-boundary operation that releases fused-attention plans/workspaces while preserving
 /// resident model weights. Z-Image uses this before a same-device Qwen prompt-cache miss.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class AttentionExecutionCacheReleaseTests
 {
     private readonly ITestOutputHelper _output;
 
     public AttentionExecutionCacheReleaseTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void ReleaseAttentionExecutionCache_PreservesWeights_AndRecreatesCudnnSession()

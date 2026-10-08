@@ -11,7 +11,6 @@ namespace HartsyInference.Cuda.Tests;
 /// resident expert GEMMs — by checking <see cref="MoeFeedForward"/> on CUDA matches the same block on the CPU
 /// backend (which the LLM suite proves against a pure-math reference).</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaMoeTests
 {
     private readonly ITestOutputHelper _output;
@@ -22,6 +21,7 @@ public sealed unsafe class CudaMoeTests
     private static Tensor F2(int a, int b) { Tensor t = new(new TensorShape(a, b), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
     private static Tensor X(int n, int h) { Tensor t = new(new TensorShape(1, n, h), DType.F32); float* p = (float*)t.DataPointer; for (long i = 0; i < t.ElementCount; i++) p[i] = Rand(); return t; }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudaMoe_MatchesCpuMoe()
     {

@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// Mul), not to a second copy of themselves, so a shared mistake cannot pass. Shapes are deliberately non-square
 /// (seq != heads != headDim) so a transposed axis or a wrong head stride cannot survive.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx2FusedAttentionGlueTests
 {
     private const float Eps = 1e-6f;
@@ -53,6 +52,7 @@ public sealed unsafe class Ltx2FusedAttentionGlueTests
         Assert.True(maxErr <= tol, $"{what}: max abs err {maxErr} > {tol}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, 2e-5f)]
     [InlineData(true, 4e-3f)]
@@ -82,6 +82,7 @@ public sealed unsafe class Ltx2FusedAttentionGlueTests
     }
 
     /// <summary>Text cross-attention passes no RoPE, so the null-cos path has to reduce to norm + head-major.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void QkNormRopeHeadMajor_WithoutRope_IsNormThenHeadMajor()
     {
@@ -103,6 +104,7 @@ public sealed unsafe class Ltx2FusedAttentionGlueTests
         AssertClose(expected, actual, 2e-5f, "fused QK path, no rope");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, 2e-6f)]
     [InlineData(true, 3e-3f)]
@@ -135,6 +137,7 @@ public sealed unsafe class Ltx2FusedAttentionGlueTests
 
     /// <summary>The gate mutates in place, so the managed default and the CUDA kernel must agree on a shape the
     /// CPU backend can also serve — this is what catches an in-place op whose result never left the device cache.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void HeadGate_CudaMatchesManagedDefault()
     {

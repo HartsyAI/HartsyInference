@@ -19,7 +19,6 @@ namespace HartsyInference.Cuda.Tests;
 /// toolchain that produced them. All three are reported through <see cref="ITestOutputHelper"/> so an inconclusive
 /// run does not read as a pass.</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class CudaKernelDriftTests
 {
     private readonly ITestOutputHelper _out;
@@ -34,6 +33,7 @@ public sealed class CudaKernelDriftTests
         "mul_mat_vec_q6k_q8_1",
     };
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CommittedPtx_MatchesFreshRebuildFromSource()
     {

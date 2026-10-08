@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// 2x and faults, which is how an earlier attempt at this crashed; the fix was not a new kernel but keeping the
 /// table F32. These tests pin both halves of that contract so it cannot be relaxed by accident.</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class RopeSingleF16Tests
 {
     private readonly ITestOutputHelper _out;
@@ -50,6 +49,7 @@ public sealed unsafe class RopeSingleF16Tests
         return (cos, sin);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(0)]     // full rotary
     [InlineData(32)]    // partial rotary — the rest of each head passes through untouched
@@ -90,6 +90,7 @@ public sealed unsafe class RopeSingleF16Tests
         Assert.True(maxDiff < 2e-3f, $"F16 rope diverged from F32: maxDiff={maxDiff:E3}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRopeSingle_RejectsF16Table()
     {
@@ -112,6 +113,7 @@ public sealed unsafe class RopeSingleF16Tests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRopeSingle_RejectsNonRank4()
     {

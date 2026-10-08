@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// two new CUDA kernels (<c>lm_kv_append_f16</c>, <c>lm_flash_attn_f16kv_f32</c>) in isolation before trusting
 /// the real-weight Llama-3.2-1B token comparison.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class KvF16StorageTests
 {
     private readonly ITestOutputHelper _output;
@@ -45,6 +44,7 @@ public sealed unsafe class KvF16StorageTests
     /// <summary>KvCacheAppend into an F16-typed buffer round-trips through F16 rounding (not bit-identical to
     /// the F32 source — that's expected and the whole point) and lands at the correct offset/addressing, same
     /// as the F32 kernel's layout.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void KvCacheAppend_F16Dest_RoundTripsWithinF16Rounding()
     {
@@ -95,6 +95,7 @@ public sealed unsafe class KvF16StorageTests
     /// decimal digits) — NOT bit-identical, that bar doesn't apply here (unlike CFG-parallel's same-GPU tests,
     /// which changed dispatch, not numerics). Exercises the monolithic kernel directly; the split-K and
     /// graph-decode paths are asserted OFF for F16 KV separately below.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(true)]   // prefill
     [InlineData(false)]  // decode
@@ -152,6 +153,7 @@ public sealed unsafe class KvF16StorageTests
     /// does not read F16 data through F32 pointer arithmetic, which would corrupt output rather than merely slow
     /// it. The tolerance here is wide enough to pass on either kernel, so it is a smoke test — the real
     /// split-vs-monolithic gate at decode geometry is <see cref="KvF16SplitDecodeTests"/>.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FlashAttention_F16Kv_SplitForceEnv_StillMatchesMonolithicF32Kv()
     {

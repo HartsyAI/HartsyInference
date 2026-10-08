@@ -15,7 +15,6 @@ namespace HartsyInference.Cuda.Tests;
 /// CUDA is compared at KERNEL.md's 1e-5 F32 tolerance because nvcc contracts <c>x*s + shift</c> into a
 /// single FMA that the two-step CPU path does not. Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class DitRowIndexedKernelTests
 {
     private const int Seq = 37, Hidden = 64, ModRows = 6;
@@ -166,6 +165,7 @@ public sealed unsafe class DitRowIndexedKernelTests
         AssertBitExact(unfused, fused, "GatedResidual");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RowIndexedKernels_Cuda_MatchUnfusedCpuReference()
     {
@@ -204,6 +204,7 @@ public sealed unsafe class DitRowIndexedKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RowIndexedKernels_F16AndBf16_MatchF32Twins()
     {
@@ -253,6 +254,7 @@ public sealed unsafe class DitRowIndexedKernelTests
 
     /// <summary>The BF16 twins of the non-row-indexed adaLN pair, which a BF16 DiT body still needs where the
     /// modulation is one broadcast row per call (a final layer's per-segment head) rather than one per token.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LastDimKernels_Bf16_MatchF32Twins()
     {

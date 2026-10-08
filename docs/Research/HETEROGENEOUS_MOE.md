@@ -22,6 +22,10 @@ them one at a time.
 | Multi-GPU helpers | Each expert has one owner; results return through pinned host buffers; no P2P in this mode | Generic (placement) |
 | Peer tier | `cudaDeviceEnablePeerAccess` second adaptive tier | Generic (placement), hardware-gated |
 
+Pinned upstream limits, kept here because the table rows are short: the adaptive tier swaps at most 96 experts per round, and
+publishes its residency one window late; prefill streams in chunks of up to 8,192 tokens. A later implementation that
+differs from these must say so.
+
 ## What is fundamental and what is specific
 
 Fundamental (keep in generic code): a logical expert identity; a residency map separate from storage; policy objects

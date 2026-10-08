@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// math), and the full attention is compared to the head-major branch of the very same <c>Forward</c>. Shapes are
 /// non-square (seq != heads != headDim) so a swapped axis or a wrong head stride cannot survive.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx2TokenMajorAttentionTests
 {
     private const float Eps = 1e-6f;
@@ -52,6 +51,7 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
 
     /// <summary>The token-major kernel must be the head-major kernel's output re-indexed, element for element:
     /// <c>headMajor[(h*seq + s)*headDim + d] == tokenMajor[s*heads*headDim + h*headDim + d]</c>.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(37, 8, 64, false)]
     [InlineData(37, 8, 64, true)]
@@ -77,6 +77,7 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
     }
 
     /// <summary>Text cross-attention passes no RoPE, so the null-cos path has to agree too.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -100,6 +101,7 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
 
     /// <summary>Token-major SDPA must match the head-major dispatch it wraps, on a cross-attention shape (Sq != Sk)
     /// so a Q/K sequence-stride mixup cannot pass.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -134,6 +136,7 @@ public sealed unsafe class Ltx2TokenMajorAttentionTests
 
     /// <summary>The whole attention, both routes, through the SAME <c>Forward</c> — the head-major branch is the
     /// explicit reference, reached by flipping the route's kill switch rather than by re-deriving it here.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, 1e-4f)]
     [InlineData(true, 2e-2f)]

@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// difference is an addressing bug, not rounding). Covers the CPU host impl (Unit tier) and the CUDA F32
 /// kernel; the GPU cases skip cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class RopeHeadMajorTests
 {
     private readonly ITestOutputHelper _output;
@@ -78,6 +77,7 @@ public sealed unsafe class RopeHeadMajorTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Shapes))]
     [Trait("Category", "GpuIntegration")]
@@ -127,6 +127,7 @@ public sealed unsafe class RopeHeadMajorTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Shapes))]
     [Trait("Category", "GpuIntegration")]

@@ -10,7 +10,6 @@ namespace HartsyInference.Cuda.Tests;
 /// <summary>Validates the cuDNN fused flash-attention SDPA fast path (HARTSY_SDPA_CUDNN) against a CPU
 /// reference at the Krea2-style head dim (D=128, no mask, MHA). fp16 I/O so tolerance is fp16-scale.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudnnSdpaTests
 {
     private readonly ITestOutputHelper _output;
@@ -28,6 +27,7 @@ public sealed unsafe class CudnnSdpaTests
         return false;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64)]
     [InlineData(128)]
@@ -99,6 +99,7 @@ public sealed unsafe class CudnnSdpaTests
     /// (0 kept / -1e30 masked, a padded-text span strictly inside the sequence) rides the graph as an fp32 bias
     /// score-modifier. Kept-query rows are compared against the CPU reference; masked-query rows are
     /// uniform-softmax garbage by convention in BOTH paths and are skipped.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64)]
     [InlineData(128)]
@@ -176,6 +177,7 @@ public sealed unsafe class CudnnSdpaTests
     }
 
     /// <summary>Plans with identical shapes but different scales must not share the device scale scalar.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudnnSdpa_SameShapeDifferentScale_MatchesEachReference()
     {

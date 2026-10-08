@@ -5,7 +5,6 @@ using HartsyInference.Cuda;
 namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Tensor helpers and PTX lookup shared by the CUDA MoE primitive tests.</summary>
-[Trait("Category", "GpuIntegration")]
 internal static unsafe class MoePrimitiveTestData
 {
     public static string PtxDir()

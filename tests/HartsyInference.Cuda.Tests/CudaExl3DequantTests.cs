@@ -11,7 +11,6 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Device EXL3 2-bit MCG trellis decode against the host <see cref="Exl3Codec"/>: BF16 must equal the host F32 result rounded once, bit for bit.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class CudaExl3DequantTests
 {
     private readonly ITestOutputHelper _output;
@@ -95,9 +94,11 @@ public sealed class CudaExl3DequantTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Fixture_DeviceBf16_EqualsHostF32RoundedOnce() => AssertDeviceMatchesHost("fixture 256x384", FixtureMatrix());
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(128, 128)]
     [InlineData(384, 256)]
@@ -105,6 +106,7 @@ public sealed class CudaExl3DequantTests
     public void RandomTrellis_DeviceBf16_EqualsHostF32RoundedOnce(int inDim, int outDim) =>
         AssertDeviceMatchesHost($"random {inDim}x{outDim}", Random(inDim, outDim, 11), Random(inDim, outDim, 12), Random(inDim, outDim, 13));
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Fixture_DeviceBf16_GapToUpstreamFusedFp16_IsReported()
     {

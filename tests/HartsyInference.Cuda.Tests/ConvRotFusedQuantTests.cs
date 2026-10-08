@@ -24,6 +24,7 @@ public sealed unsafe class ConvRotFusedQuantTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(37, 4096, 256)]      // LTX video width, ragged row count
     [InlineData(129, 2048, 256)]     // LTX audio width
@@ -85,6 +86,7 @@ public sealed unsafe class ConvRotFusedQuantTests
 
     /// <summary>Same contract for the wide (f16-staged) variant, which serves the row widths the f32-staged
     /// kernel above refuses. 16384 is LTX-2.5's FFN-down activation width — the shape this kernel exists for.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(37, 16384, 64)]
     [InlineData(11, 12288, 256)]

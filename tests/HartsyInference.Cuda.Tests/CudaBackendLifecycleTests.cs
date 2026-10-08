@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// backend-owned persistent side caches. These are CUDA-serial because every test deliberately creates multiple
 /// backends on device zero and inspects the process-wide transfer-state registry.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaBackendLifecycleTests
 {
     private const int LifecycleActive = 0;
@@ -22,6 +21,7 @@ public sealed unsafe class CudaBackendLifecycleTests
 
     public CudaBackendLifecycleTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AbandonedSameDeviceBackend_ReaperReclaimsOnlyAbandonedState_AndFreshBackendWorks()
     {
@@ -121,6 +121,7 @@ public sealed unsafe class CudaBackendLifecycleTests
         fresh.FreeWeights([weightA]);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ConcurrentDispose_ExecutesCleanupExactlyOnce_WithoutExceptions()
     {
@@ -184,6 +185,7 @@ public sealed unsafe class CudaBackendLifecycleTests
         Assert.Equal(1, backend.CleanupExecutionCount);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DisposeWithOpenStepGraphCapture_AbortsPurgesAndLeavesDeviceReusable()
     {
@@ -233,6 +235,7 @@ public sealed unsafe class CudaBackendLifecycleTests
         Assert.Equal(4.5f, ((float*)freshOutput.DataPointer)[0]);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ThreeSameDeviceRegistrations_RemovingNewestRepointsAmbientlessFallback()
     {
@@ -271,6 +274,7 @@ public sealed unsafe class CudaBackendLifecycleTests
         Assert.Equal(registryBaseline, GpuTransferHelper.RegisteredStateCount);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RetiringAmbient_ThrowsInsteadOfFallingThroughToSameContextSibling()
     {
@@ -330,6 +334,7 @@ public sealed unsafe class CudaBackendLifecycleTests
         Assert.Equal(registryBaseline, GpuTransferHelper.RegisteredStateCount);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudaKernels_LateConstructorFailure_RollsBackAllAdoptedModulesSynchronously()
     {
@@ -380,6 +385,7 @@ public sealed unsafe class CudaBackendLifecycleTests
         Assert.Equal(liveBaseline, CudaModule.LiveHandleCountForTests);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Fp8InputScaleCache_ConcurrentEnsureIsSingleFlight_AndFreeWeightsEvictsSelectively()
     {
@@ -472,6 +478,7 @@ public sealed unsafe class CudaBackendLifecycleTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Fp8InputScaleCache_AllBulkEvictionBoundariesFreeExactlyOnce()
     {

@@ -15,7 +15,6 @@ namespace HartsyInference.Cuda.Tests;
 /// otherwise, same pattern as <see cref="SchedulerGraphDecodeTests"/>.</summary>
 [Trait("Category", "Slow")]
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class TextDecodeThroughputBenchmark
 {
     private readonly ITestOutputHelper _output;
@@ -68,6 +67,7 @@ public sealed class TextDecodeThroughputBenchmark
         return n % 2 == 1 ? sorted[n / 2] : (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DecodeThroughput_GreedyGraphOffAndOn_ReportsMedianTgTps()
     {

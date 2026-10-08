@@ -5,12 +5,12 @@ using Xunit.Abstractions;
 namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Arch-specific PTX is chosen for the device's exact compute capability and for nothing else. The unit rows need no GPU; the last test loads a real kernel set with a variant present and checks the card picked it.</summary>
-[Trait("Category", "GpuIntegration")]
 public sealed class PtxVariantResolutionTests
 {
     private readonly ITestOutputHelper _output;
     public PtxVariantResolutionTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(89, "foo.sm89.ptx")]   // the card the variant was built for
     [InlineData(86, "foo.ptx")]        // another card: the baseline, never a foreign variant
@@ -31,6 +31,7 @@ public sealed class PtxVariantResolutionTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void WithoutAVariantTheBaselineIsUsedEvenForThatCard()
     {
@@ -47,6 +48,7 @@ public sealed class PtxVariantResolutionTests
     }
 
     /// <summary>A copy of the shipped PTX with the baseline block_quant duplicated under this card's suffix: the kernel set must report it as the loaded variant, and only it. The duplicate is bit-identical to the baseline, so nothing else about the run changes.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TheRunningCardLoadsItsOwnVariant()
     {

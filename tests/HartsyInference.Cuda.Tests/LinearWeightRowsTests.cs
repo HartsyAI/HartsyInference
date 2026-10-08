@@ -85,6 +85,7 @@ public sealed unsafe class LinearWeightRowsTests
     /// <param name="preload">preloading is what makes the dtype-cast cache eligible, so it changes which pointer the
     /// row offset is applied to</param>
     /// <param name="withBias">bias slices by element, not by row — a separate offset with its own failure mode</param>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("F32", false, false)]
     [InlineData("F32", true, true)]
@@ -149,6 +150,7 @@ public sealed unsafe class LinearWeightRowsTests
     /// all — so refusing a row range on a block-quantized weight is what made a GGUF H3 unreachable, not merely slower.
     /// The reference here is the same rows as their own tensor: a distinct identity, so it uploads and dequantizes
     /// independently of the resident weight the range is offsetting into.</remarks>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("Q8_0", 96)]
     [InlineData("Q8_0", 256)]
@@ -184,6 +186,7 @@ public sealed unsafe class LinearWeightRowsTests
     /// it can hold Q8_0 packed, so asking it alone leaves the weight packed — and a DiT shard or context-parallel rank
     /// on a device without that kernel is then handed something it cannot read and dies in its first Linear. Two real
     /// backends rather than stubs, because the whole point is that the capability answers are the real ones.</remarks>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void QuantPolicyIntersectsEveryBackendThatRunsTheBlocks()
     {

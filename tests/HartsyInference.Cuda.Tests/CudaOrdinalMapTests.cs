@@ -8,12 +8,12 @@ namespace HartsyInference.Cuda.Tests;
 /// dev 4090+3060 pair) — <c>tests/run-multigpu-campaign.sh</c> runs this first and parses the ORDINAL lines so
 /// every later log can name cards instead of guessing ordinals.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class CudaOrdinalMapTests
 {
     private readonly ITestOutputHelper _output;
     public CudaOrdinalMapTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void OrdinalMap_PrintsNameAndFreeVramPerDevice()

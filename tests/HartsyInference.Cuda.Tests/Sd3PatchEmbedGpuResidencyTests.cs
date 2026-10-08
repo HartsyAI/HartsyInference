@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// Independent scalar-parity, device-residency, contract, and derived-weight ownership gates for SD3 PatchEmbed.
 /// </summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Sd3PatchEmbedGpuResidencyTests
 {
     private readonly ITestOutputHelper _output;
@@ -27,6 +26,7 @@ public sealed unsafe class Sd3PatchEmbedGpuResidencyTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]

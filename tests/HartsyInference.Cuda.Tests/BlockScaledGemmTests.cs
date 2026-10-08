@@ -10,12 +10,12 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Bring-up gate for the native block-scaled GEMM: on Blackwell, a resident nvfp4 weight multiplied through <see cref="BlockScaledGemmExecutor"/> (W4A4, the activation block-quantized on the stream) against the same weight through the unpack path (W4A16). The difference is the activation's own e2m1 error. The largest shape also reports both paths' time per Linear, which is the number that says whether native FP4 beats the unpack on the card. Skips below Blackwell — this hardware has no block-scaled tensor cores and the unpack is the only correct path.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class BlockScaledGemmTests
 {
     private readonly ITestOutputHelper _output;
     public BlockScaledGemmTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
     [InlineData(200, 320, 256)]
@@ -90,6 +90,7 @@ public sealed class BlockScaledGemmTests
         _output.WriteLine($"TIMING {m}x{n}x{k}: native {nativeMs:F3} ms/Linear, unpack {unpackMs:F3} ms/Linear ({unpackMs / nativeMs:F2}x)");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
     [InlineData(200, 320, 256)]

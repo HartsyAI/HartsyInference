@@ -17,7 +17,6 @@ namespace HartsyInference.Cuda.Tests;
 /// is wired to the wrong axis, dropped, or applied to the wrong key range, the bias stops matching and these
 /// fail — the vector form producing SOMETHING is not the property under test.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class KeyOnlySdpaBiasTests
 {
     private readonly ITestOutputHelper _output;
@@ -149,6 +148,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
 
     /// <summary>The materialized GEMM path indexes the mask per query row, so it rebuilds the duplicate. Small
     /// shapes still reach it (the tiled branch only takes over when the score matrix stops fitting).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MaterializedPath_KeyOnlyBias_MatchesTheDuplicate()
     {
@@ -179,6 +179,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
     /// head silently got head 0's row. Ground truth is the full non-broadcast duplicate ([1,heads,Sq,Skv], each
     /// head's own row repeated over every query) run through the ordinary materialized path, which indexes the
     /// mask per query row and was never at risk of this bug.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TiledPath_PerHeadBias_SelectsTheOwningHeadsRow()
     {
@@ -220,6 +221,7 @@ public sealed unsafe class KeyOnlySdpaBiasTests
     /// <summary>A VRAM shortfall inside the fused path must never disable it permanently. The fallback it demotes
     /// to allocates the whole <c>[heads, Sq, Skv]</c> score matrix — strictly MORE memory than the allocation that
     /// just failed — so treating an OOM as structural guarantees the next call fails harder.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void OutOfVram_IsTransient_NotAStructuralKill()
     {

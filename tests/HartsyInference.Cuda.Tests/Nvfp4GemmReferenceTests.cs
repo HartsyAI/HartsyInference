@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// host — so the only remaining difference is the GEMM. A small error means the kernel is right and the other test's
 /// budget was written too tight; a large one means the kernel is wrong.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class Nvfp4GemmReferenceTests
 {
     private readonly ITestOutputHelper _output;
@@ -29,6 +28,7 @@ public sealed class Nvfp4GemmReferenceTests
         return s == 1 ? -mag : mag;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
     [InlineData(200, 320, 256)]

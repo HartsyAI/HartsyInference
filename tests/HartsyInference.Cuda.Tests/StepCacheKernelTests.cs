@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// order nondeterminism is inside those tolerances). Also asserts the optional-module plumbing —
 /// <see cref="CudaBackend.SupportsDeviceStepCacheGate"/> is true once stepcache.ptx ships.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class StepCacheKernelTests
 {
     private readonly ITestOutputHelper _output;
@@ -46,6 +45,7 @@ public sealed unsafe class StepCacheKernelTests
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SupportsDeviceStepCacheGate_TrueWithPtxPresent()
     {
@@ -61,6 +61,7 @@ public sealed unsafe class StepCacheKernelTests
         Assert.True(cuda.SupportsDeviceStepCacheGate);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RelativeL1Distance_MatchesHostDefault_F32()
     {
@@ -90,6 +91,7 @@ public sealed unsafe class StepCacheKernelTests
             $"F32 rel err {Math.Abs(host - device) / host:E3} exceeds 1e-5 (host={host:G9}, device={device:G9})");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RelativeL1Distance_MatchesHostDefault_F16()
     {
@@ -119,6 +121,7 @@ public sealed unsafe class StepCacheKernelTests
             $"F16 rel err {Math.Abs(host - device) / host:E3} exceeds 1e-3 (host={host:G9}, device={device:G9})");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RelativeL1Distance_IdenticalTensors_ReturnsZero()
     {
@@ -137,6 +140,7 @@ public sealed unsafe class StepCacheKernelTests
         Assert.Equal(0f, device, 3);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RelativeL1Distance_NonzeroCurrentAgainstZeroReference_ReturnsInfinity()
     {
@@ -162,6 +166,7 @@ public sealed unsafe class StepCacheKernelTests
         Assert.True(float.IsPositiveInfinity(device));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RelativeL1Distance_NonfiniteReference_ReturnsNaN()
     {

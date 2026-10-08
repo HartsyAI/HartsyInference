@@ -4,7 +4,6 @@ using Xunit;
 
 namespace HartsyInference.Cuda.Tests;
 
-[Trait("Category", "GpuIntegration")]
 public sealed class Fp8GemmExecutorTests
 {
     [Theory]

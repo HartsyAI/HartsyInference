@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// shape operation and must never canonicalize them.
 /// </summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class SplitKernelTests
 {
     private sealed record SplitCase(
@@ -65,6 +64,7 @@ public sealed unsafe class SplitKernelTests
         AssertStrictContract(cpu);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_AllSupportedDtypesRanksAndAxes_AreByteExact_Resident_AndPreserveInput()
@@ -80,6 +80,7 @@ public sealed unsafe class SplitKernelTests
             RunExactCase(cuda, cuda, splitCase);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_StrictContractRejectsMalformedGeometryAndOverlappingStorageBeforeDispatch()

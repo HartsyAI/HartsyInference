@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// round-trips per stage per chunk, which at 480x800/61f was 27 s of the Wan-Animate-2 VAE encode phase and showed
 /// up in no op's profile because none of it was an op.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Wan22ResampleDownsampleResidencyTests
 {
     private readonly ITestOutputHelper _output;
@@ -27,6 +26,7 @@ public sealed unsafe class Wan22ResampleDownsampleResidencyTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Downsample2d_StaysDeviceResident_AndMatchesTheCpuReference()

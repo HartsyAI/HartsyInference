@@ -11,7 +11,6 @@ namespace HartsyInference.Cuda.Tests;
 /// precision difference between those shapes lands directly on <c>GraphDecodeDualEmbedsTests</c>. cuBLAS selects
 /// per shape and per architecture, which is exactly the kind of difference that shows on one card and not another.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class BatchedGemmPrecisionProbe
 {
     private readonly ITestOutputHelper _output;
@@ -40,6 +39,7 @@ public sealed unsafe class BatchedGemmPrecisionProbe
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(32, 32, false)]      // GraphDecodeDualEmbedsTests' geometry
     [InlineData(4096, 4096, false)]  // MiniMax Music 3's real projection width

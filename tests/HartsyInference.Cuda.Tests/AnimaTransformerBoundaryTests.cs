@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// round-trip inside attention or MLP work.
 /// </summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class AnimaTransformerBoundaryTests
 {
     private const int Batch = 2;
@@ -67,6 +66,7 @@ public sealed unsafe class AnimaTransformerBoundaryTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Forward_CpuAndCudaMatch_OnBatchedRectangularGrid_WithoutIntermediateD2h()

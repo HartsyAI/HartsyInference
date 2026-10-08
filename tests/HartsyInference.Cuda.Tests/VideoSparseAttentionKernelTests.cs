@@ -7,7 +7,6 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>SM86/SM89 parity and residency gates for MiniMax-H3's persistent CUDA VSA session.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class VideoSparseAttentionKernelTests
 {
     private readonly ITestOutputHelper _output;
@@ -17,6 +16,7 @@ public sealed unsafe class VideoSparseAttentionKernelTests
 
     /// <summary>Both published 64-token routing profiles match the deterministic eager oracle and do not read
     /// device tensors back while executing a layer.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(0, VideoSparseAttentionProfileKind.ComfySol64V1)]
     [InlineData(0, VideoSparseAttentionProfileKind.FastVideoVsa64V1)]
@@ -74,6 +74,7 @@ public sealed unsafe class VideoSparseAttentionKernelTests
     }
 
     /// <summary>The CUDA backend does not advertise VSA without the dedicated PTX artifact.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Capability_IsFalseWhenKernelArtifactIsAbsent()
     {

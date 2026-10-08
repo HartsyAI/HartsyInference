@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// kernel being intrinsically slower than the monolithic F32 one. Buffers rotate every call — a fixed pair
 /// sits in L2 and flatters both arms unequally.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class KvF16DecodeAttentionBench
 {
     private readonly ITestOutputHelper _output;
@@ -43,6 +42,7 @@ public sealed unsafe class KvF16DecodeAttentionBench
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Bench_F16Kv_Vs_F32Kv_DecodeShape()
     {

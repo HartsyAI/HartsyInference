@@ -9,7 +9,6 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Validates floating-point dtype routing and shape contracts for CUDA activation and KV-repeat operations.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaDtypeDispatchTests
 {
     private readonly ITestOutputHelper _output;
@@ -72,6 +71,7 @@ public sealed unsafe class CudaDtypeDispatchTests
     }
 
     /// <summary>GELU and Clamp use their typed launchers for non-block-aligned F16 and BF16 tensors.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("F16")]
     [InlineData("BF16")]
@@ -109,6 +109,7 @@ public sealed unsafe class CudaDtypeDispatchTests
     }
 
     /// <summary>GEGLU preserves the logical last-dimension split across multiple rows for F16 and BF16.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("F16")]
     [InlineData("BF16")]
@@ -141,6 +142,7 @@ public sealed unsafe class CudaDtypeDispatchTests
     }
 
     /// <summary>KV repetition is a bit-preserving gather for both supported 16-bit floating-point formats.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("F16")]
     [InlineData("BF16")]
@@ -194,6 +196,7 @@ public sealed unsafe class CudaDtypeDispatchTests
     }
 
     /// <summary>Unary activation contracts reject shape, dtype, unsupported-format, and bound mismatches before launch.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void UnaryContracts_RejectInvalidPairs()
@@ -222,6 +225,7 @@ public sealed unsafe class CudaDtypeDispatchTests
     }
 
     /// <summary>GEGLU rejects odd splits, wrong output geometry, mixed dtypes, and unsupported storage.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void GeGluContracts_RejectInvalidGeometryAndDtypes()
@@ -251,6 +255,7 @@ public sealed unsafe class CudaDtypeDispatchTests
     }
 
     /// <summary>KV repetition rejects malformed rank, geometry, grouping, dtype, and output shape contracts.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void RepeatKvContracts_RejectInvalidGeometryAndDtypes()

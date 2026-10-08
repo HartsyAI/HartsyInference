@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// assumed: on this box libnccl resolves from the standard probe dirs, so a silent fall-back to host-staged
 /// is a FAILURE here (it would still be numerically correct — the assert exists to catch a broken resolver).</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class CollectiveCommTests
 {
     private readonly ITestOutputHelper _output;
@@ -35,6 +34,7 @@ public sealed class CollectiveCommTests
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public unsafe void Nccl_TwoGpus_AllReduceBitExact_AllGatherBlocksCorrect_WithBandwidth()
@@ -117,6 +117,7 @@ public sealed class CollectiveCommTests
     /// <summary>The universal fallback must be numerically correct on plain host tensors with no GPU at all,
     /// and the factory must pick it (with a logged reason) when ranks share one CUDA device — NCCL requires
     /// distinct devices, and silently picking it anyway would hand two threads one communicator device.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void HostStaged_Fallback_CorrectAndChosenForDuplicateOrdinals()
     {

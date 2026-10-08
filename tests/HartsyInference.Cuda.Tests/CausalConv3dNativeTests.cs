@@ -10,9 +10,9 @@ namespace HartsyInference.Cuda.Tests;
 /// against the same layer's per-tap 2-D decomposition on the same backend. Covers a streaming cache prepend, temporal
 /// stride 2, odd spatial sizes and both compute dtypes; both routes accumulate in F32, so they agree to rounding.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CausalConv3dNativeTests(ITestOutputHelper output)
 {
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, 1, false)]
     [InlineData(false, 1, true)]

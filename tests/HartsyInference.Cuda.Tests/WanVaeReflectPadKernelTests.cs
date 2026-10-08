@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// CUDA against the managed default at a non-cubic shape where a H/W transposition would be visible.
 /// Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class WanVaeReflectPadKernelTests
 {
     private static string PtxDir()
@@ -33,6 +32,7 @@ public sealed unsafe class WanVaeReflectPadKernelTests
 
     /// <summary>PyTorch <c>F.pad(mode="reflect")</c> does not repeat the border pixel: the padded row above the
     /// top is source row 1, not row 0. Asserted on a 1x1x1x3x4 ramp where every expected value is stated here.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ReflectPad_BorderRowsMirrorWithoutRepeatingTheEdge()
     {

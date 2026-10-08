@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// decode (raw unpenalized argmax). Gated on <c>HARTSY_TEST_GGUF_MODELS</c> (needs a real checkpoint) and CUDA
 /// availability; skips cleanly otherwise.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class GraphDecodeRepetitionPenaltyTests
 {
     private readonly ITestOutputHelper _output;
@@ -31,6 +30,7 @@ public sealed class GraphDecodeRepetitionPenaltyTests
             .Where(File.Exists)];
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GraphDecode_WithRepetitionPenalty_MatchesEagerPath()
     {

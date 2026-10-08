@@ -15,12 +15,12 @@ namespace HartsyInference.Cuda.Tests;
 /// <para>Runs only on Ada+ (SM 8.9+, where <see cref="Fp8GemmExecutor.IsSupported"/>); SKIPS on Ampere
 /// (e.g. the RTX 3060) — that hardware has no native FP8 GEMM and the fallback is the only correct path.</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class Fp8NativeGemmTests
 {
     private readonly ITestOutputHelper _output;
     public Fp8NativeGemmTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128)]
     [InlineData(256, 512, 512)]
@@ -92,6 +92,7 @@ public sealed class Fp8NativeGemmTests
     /// <summary>Validates the activation-quantization kernels feeding the native path: per-tensor absmax →
     /// dequant scale (amax/448) + e4m3 quantized bytes. Pure compute kernels, so this runs on ANY CUDA GPU
     /// (Ampere included) — no fp8 GEMM involved.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Fp8QuantKernels_DynamicQuant_MatchesHostReference()
     {
@@ -151,6 +152,7 @@ public sealed class Fp8NativeGemmTests
     /// <summary>The full new wiring on Ada: F32 activation → dynamic e4m3 quantization (device-side scale via
     /// B_SCALE_POINTER) → native fp8 GEMM → F32/F16 output, diffed against the default cast-to-F16 fallback on
     /// the same F32 input. Tolerance is dominated by activation quantization (e4m3 ≈ 2 decimal digits).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 256, 128, false)]
     [InlineData(256, 512, 512, false)]

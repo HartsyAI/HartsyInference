@@ -10,7 +10,6 @@ namespace HartsyInference.Cuda.Tests;
 /// step time — but cos/sin live in [-1,1] where F16 carries ~3 decimal digits, so the gate is a relative-error
 /// bound, not bit-identity. Shapes are non-square (seq != heads != headDim) so a wrong lane stride cannot survive.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx2RopeF16TableTests
 {
     private const float Eps = 1e-6f;
@@ -89,6 +88,7 @@ public sealed unsafe class Ltx2RopeF16TableTests
         return (maxAbs, Math.Sqrt(sumSqDiff / sumSqRef), maxRel);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(37, 8, 64)]
     [InlineData(512, 32, 128)]
@@ -118,6 +118,7 @@ public sealed unsafe class Ltx2RopeF16TableTests
 
     /// <summary>Head-major twin of the token-major gate — the other layout shares the kernel body, so a table-load
     /// mistake that only the scattered store exposes still fails here.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void HeadMajor_F16Tables_MatchF32Tables()
     {
@@ -146,6 +147,7 @@ public sealed unsafe class Ltx2RopeF16TableTests
     /// <summary>Times the kernel itself at LTX-2.5's video shape — raw device buffers, null stream, no per-call
     /// upload/alloc — because the delta being measured is ~50 µs and the backend op's bookkeeping would drown it.
     /// Diagnostic, not a gate: it asserts only that both variants ran.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TokenMajor_TableDtype_Throughput()
     {

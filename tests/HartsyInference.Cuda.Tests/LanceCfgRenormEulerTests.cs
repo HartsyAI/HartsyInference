@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// The CUDA assertion is made before any result is inspected, so a hidden host fallback cannot pass on numerics.
 /// </summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class LanceCfgRenormEulerTests
 {
     private readonly ITestOutputHelper _output;
@@ -43,6 +42,7 @@ public sealed unsafe class LanceCfgRenormEulerTests
         { 196_608, 6.0f, -0.02000f, 0.35f },
     };
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(TailAndClampCases))]
     [Trait("Category", "GpuIntegration")]
@@ -100,6 +100,7 @@ public sealed unsafe class LanceCfgRenormEulerTests
         _output.WriteLine($"N={count}, guidance={guidance}, renormMin={renormMin}, reference scale={scale:G9}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void AllZeroPredictions_LeaveLatentFiniteAndUnchanged()
@@ -128,6 +129,7 @@ public sealed unsafe class LanceCfgRenormEulerTests
         AssertExact(initial, Snapshot(z), "all-zero prediction update");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void RepeatedCalls_DoNotReadBackOrRetainScratch()
@@ -177,6 +179,7 @@ public sealed unsafe class LanceCfgRenormEulerTests
         _output.WriteLine($"{repeats} calls: cached bytes {cachedBefore}->{cachedAfter}, free bytes {freeBefore}->{freeAfter}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void CfgEulerStep_PinnedLatentSurvivesPerStepActivationSweeps_WithoutReadback()
@@ -232,6 +235,7 @@ public sealed unsafe class LanceCfgRenormEulerTests
         AssertClose(expected, actual, 2e-5f, "pinned CfgEuler latent");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void CfgEulerStep_WithGpuResidentPredictions_MatchesHostCfgAndFlowReference()
@@ -288,6 +292,7 @@ public sealed unsafe class LanceCfgRenormEulerTests
         AssertClose(Snapshot(expected), actual, 2e-5f, "legacy CFG+scheduler vs resident CfgEuler");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MalformedContracts_AreRejectedBeforeDispatch()
     {

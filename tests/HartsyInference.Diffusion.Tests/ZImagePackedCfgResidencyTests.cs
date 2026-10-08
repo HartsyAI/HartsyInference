@@ -21,7 +21,6 @@ namespace HartsyInference.Diffusion.Tests;
 
 /// <summary>Regression coverage for Z-Image-Base's packed two-pass CFG loop and its two-caption refiner cache.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class ZImagePackedCfgResidencyTests
 {
     private readonly ITestOutputHelper _output;
@@ -416,6 +415,7 @@ public sealed unsafe class ZImagePackedCfgResidencyTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "Cuda")]
     public void WarmPackedCfgPairAndEuler_HasNoIntermediateD2h()

@@ -5,7 +5,6 @@ using Xunit;
 namespace HartsyInference.Cuda.Tests;
 
 /// <summary>A recipe's Format string must never select the Blackwell cuBLASLt block-scaled path meant for Comfy formats.</summary>
-[Trait("Category", "GpuIntegration")]
 public sealed class QuantRecipeFormatRoutingTests
 {
     [Fact]

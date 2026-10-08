@@ -17,7 +17,6 @@ namespace HartsyInference.Cuda.Tests;
 /// <para>Needs no device and no registered backend. Every pointer here is zero, which each free path treats as
 /// "nothing to free" before it reaches the driver, so what is left to check is the bookkeeping: that the release
 /// reached the sidecars at all.</para></summary>
-[Trait("Category", "GpuIntegration")]
 public sealed class GpuTransferHelperFreeAllCachedTests
 {
     private const int Width = 32;
@@ -41,6 +40,7 @@ public sealed class GpuTransferHelperFreeAllCachedTests
         AssertReleasesEverything(state => new ResidencyOnlyBackend(state).FreeAllDeviceMemory());
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void The_Residency_Interface_Leaves_No_Sidecar_Behind()
     {
@@ -49,6 +49,7 @@ public sealed class GpuTransferHelperFreeAllCachedTests
 
     /// <summary>The control: the entry point that already ran the wrapper, and must keep running the same
     /// cleanup as the other two.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void The_Static_Entry_Point_Leaves_No_Sidecar_Behind()
     {

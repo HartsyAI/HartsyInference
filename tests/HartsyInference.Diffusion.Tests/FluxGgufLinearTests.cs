@@ -13,12 +13,12 @@ namespace HartsyInference.Diffusion.Tests;
 ///
 /// <para>Supplements the synthetic <see cref="HartsyInference.Cuda.Tests.CudaLinearQuantTests"/> with a real ggml-quantized weight, confirming the codecs read on-disk city96 layouts correctly (not just hand-built test data).</para></summary>
 [Trait("Category", "Integration")]
-[Trait("Category", "GpuIntegration")]
 public sealed class FluxGgufLinearTests
 {
     private readonly ITestOutputHelper _output;
     public FluxGgufLinearTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Linear_RealQ4_K_FromCity96Gguf_ProducesSaneOutput()
     {

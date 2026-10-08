@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// (Category=W8A8Bench, excluded from sweeps; CVD=1 lands on the 3060 — the IMMA target class.)</summary>
 [Collection("CudaSerial")]
 [Trait("Category", "W8A8Bench")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class W8A8ImmaGemmTests
 {
     private readonly ITestOutputHelper _output;
@@ -35,6 +34,7 @@ public sealed unsafe class W8A8ImmaGemmTests
         return d;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Int8Gemm_MatchesCpuInt32Reference()
     {
@@ -94,6 +94,7 @@ public sealed unsafe class W8A8ImmaGemmTests
     /// applies the exact same scale-then-quantize formula host-side. Also runs with invScale=0 (the
     /// existing no-smoothing path) to confirm the null-pointer branch is unaffected — this is the
     /// regression half of the gate.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false, 8, 64)]  // no smoothing (invScale=0): must exactly match the pre-existing behavior
     [InlineData(true, 8, 64)]   // smoothing applied
@@ -171,6 +172,7 @@ public sealed unsafe class W8A8ImmaGemmTests
     /// GEMM with fused bias: accuracy on Gaussian-ish activations and per-channel-quantized weights, plus
     /// interleaved wall-time A/B. Accuracy expectation: per-row+per-channel INT8 keeps relL2 in the ~1e-2
     /// class (the ViDiT-Q W8A8 regime); the perf number is the HONEST chain speedup, prologue+epilogue paid.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4608, 3072, 3072)]
     [InlineData(4608, 12288, 3072)]
@@ -290,6 +292,7 @@ public sealed unsafe class W8A8ImmaGemmTests
 
     /// <summary>Raw IMMA-vs-F16 GEMM upper-bound A/B at DiT shapes (Chroma/Flux class: hidden 3072,
     /// S=4608 joint 1024² sequence).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4608, 3072, 3072)]     // per-projection qkv/out
     [InlineData(4608, 9216, 3072)]     // fused qkv

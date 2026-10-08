@@ -7,7 +7,6 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Validation harness for the hand-written tensor-core HGEMM (<c>hgemm_mma_sm80.ptx</c>). The kernel's PTX fragment layout is authored from documentation and unverified on hardware, so these tests are the gate: they diff the <c>EnableTensorCoreGemm</c> path against the cuBLAS reference through the exact same <see cref="CudaBackend.Linear"/> call. A passing run on an SM 8.0+ GPU is what makes the kernel trustworthy. CPU-only static-logic tests always run.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class TensorCoreGemmTests
 {
     private readonly ITestOutputHelper _output;
@@ -24,6 +23,7 @@ public sealed class TensorCoreGemmTests
         Assert.Equal(expected, TensorCoreGemm.IsAligned(m, n, k));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(16, 8, 16)]
     [InlineData(64, 64, 64)]
@@ -89,6 +89,7 @@ public sealed class TensorCoreGemmTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void TensorCore_UnalignedShape_FallsBackToCublas()
     {

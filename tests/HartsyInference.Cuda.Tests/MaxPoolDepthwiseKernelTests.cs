@@ -11,7 +11,6 @@ namespace HartsyInference.Cuda.Tests;
 /// (k=5,s=1,p=2), a strided pool, and a YOLO11-class depthwise conv with and without bias. F32 within
 /// 1e-5, F16 within 1e-3 per the kernel tolerance table.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class MaxPoolDepthwiseKernelTests
 {
     private readonly ITestOutputHelper _output;
@@ -55,6 +54,7 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
         return maxErr;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MaxPool2D_MatchesCpu_F32()
     {
@@ -92,6 +92,7 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MaxPool2D_DistinguishesNegativeInfinityFromEmptyPadding()
     {
@@ -132,6 +133,7 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MaxPool2D_RejectsIncorrectOutputGeometry()
     {
@@ -147,6 +149,7 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
         Assert.Throws<ArgumentException>(() => cuda.MaxPool2D(output, input, 3, 3, 1, 1, 1, 1));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Conv2dDepthwise_MatchesCpu_F32()
     {
@@ -182,6 +185,7 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Conv2dDepthwise_Strided_MatchesCpu_F32()
     {
@@ -234,6 +238,7 @@ public sealed unsafe class MaxPoolDepthwiseKernelTests
         return maxErr;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MaxPool2D_And_Depthwise_F16_MatchCpuReference()
     {

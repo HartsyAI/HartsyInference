@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// table's actual GPU-resident values are exactly <c>embed * EmbeddingScale</c>, while the ordinary <c>_embed</c>
 /// table (and <see cref="GenericTransformer.EmbedLookup"/>'s own host path) stays unscaled.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class GraphDecodeEmbeddingScaleTests
 {
     private static uint _rng = 0xE4BED5u;
@@ -23,6 +22,7 @@ public sealed unsafe class GraphDecodeEmbeddingScaleTests
     private static Tensor F2(int a, int b) => Fill(new Tensor(new TensorShape(a, b), DType.F32));
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GraniteLikeEmbeddingScale_IsGraphDecodeEligible_AndScalesTableCorrectly()
     {

@@ -15,7 +15,6 @@ namespace HartsyInference.Cuda.Tests;
 /// Gated on <c>HARTSY_TEST_GGUF_MODELS</c> + CUDA availability, same pattern as
 /// <see cref="GraphDecodeRepetitionPenaltyTests"/>; skips cleanly otherwise.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class SchedulerGraphDecodeTests
 {
     private readonly ITestOutputHelper _output;
@@ -42,6 +41,7 @@ public sealed class SchedulerGraphDecodeTests
     /// warm-up doc for the root cause and fix. This is exactly the realistic "first request after a server
     /// just loaded a model" scenario, and neither of this file's other two tests actually exercised it (both
     /// incidentally warm up the shared backend via an earlier eager call before their own capture attempt).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public async Task SoloAdmission_SucceedsColdWithNoPriorEagerWarmup()
     {
@@ -67,6 +67,7 @@ public sealed class SchedulerGraphDecodeTests
         Assert.True(failures.Count == 0, string.Join("\n", failures));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public async Task SoloSchedulerRequest_MatchesTextGenerationPipeline_WithGraphDecodeOn()
     {
@@ -104,6 +105,7 @@ public sealed class SchedulerGraphDecodeTests
         Assert.True(failures.Count == 0, string.Join("\n", failures));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public async Task SoloSchedulerRequest_SameOutput_GraphDecodeOnOrOff()
     {
@@ -142,6 +144,7 @@ public sealed class SchedulerGraphDecodeTests
         Assert.True(failures.Count == 0, string.Join("\n", failures));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public async Task Transition_SoloThenCrowded_BothSequencesCorrect_ARetirementDoesNotCorruptOutput()
     {

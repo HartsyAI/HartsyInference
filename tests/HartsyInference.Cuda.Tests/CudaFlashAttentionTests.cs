@@ -10,7 +10,6 @@ namespace HartsyInference.Cuda.Tests;
 /// <summary>Validates the CUDA FlashAttention kernel against the reference (replicated K/V + causal mask +
 /// SDPA), for both prefill and decode shapes and a GQA head ratio.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaFlashAttentionTests
 {
     private readonly ITestOutputHelper _output;
@@ -26,6 +25,7 @@ public sealed unsafe class CudaFlashAttentionTests
     /// mask) is the very thing that path uses, which would make it circular. This compares against
     /// <see cref="AttentionReference"/> instead and asserts cuDNN actually engaged, because a gate that silently
     /// falls back would otherwise pass every assertion without running the new code.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(512, 8, 2, 64, 0, 0)]      // GQA, fresh prefill
     [InlineData(512, 8, 8, 64, 0, 0)]      // MHA (no head widening)
@@ -72,6 +72,7 @@ public sealed unsafe class CudaFlashAttentionTests
             "check the gate in CudaBackend.FlashAttention (size budget, head dim eligibility, tight K/V buffer).");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(true)]   // prefill
     [InlineData(false)]  // decode
@@ -119,6 +120,7 @@ public sealed unsafe class CudaFlashAttentionTests
     /// <summary>Vision-tower regime: non-power-of-two head_dim (SigLIP/Gemma-3 = 72) and bidirectional
     /// (non-causal) attention over many patch tokens. Exercises the block-padding path that the decode tests
     /// (d=64, causal) never hit. Compared against SDPA with an all-visible mask.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(72, 16, 64)]   // Gemma-3 SigLIP: head_dim 72, 16 heads
     [InlineData(80, 4, 33)]    // another non-pow2 head_dim, odd key count
@@ -158,6 +160,7 @@ public sealed unsafe class CudaFlashAttentionTests
     /// <summary>FixedKvCache case: the K/V buffer's seq stride (maxSeq) exceeds the valid key count, and the
     /// head config matches Llama-3.2 (Hq=32, Hkv=8, group=4, headDim=64). Flash must read only the first kvLen
     /// keys at the buffer stride. Compared against an inline online-softmax reference.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Flash_StridedBuffer_LlamaGqa_MatchesReference()
     {
@@ -216,6 +219,7 @@ public sealed unsafe class CudaFlashAttentionTests
     /// mirror the models that motivated the change: gemma3-1b decode (4 query heads, head_dim 256, window
     /// smaller AND larger than kvLen) and a soft-capped gemma2-style case. The window/softcap math is
     /// identical per key, so only float accumulation order differs.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4, 1, 256, 200, 64, 0f)]     // gemma3-ish decode, window well inside kvLen
     [InlineData(4, 1, 256, 200, 512, 0f)]    // window larger than kvLen (degenerates to full causal)
@@ -263,6 +267,7 @@ public sealed unsafe class CudaFlashAttentionTests
     }
 
     /// <summary>Head dimensions below one warp are padded to 32 threads so the full-mask shuffle stays valid.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Flash_SmallHeadDim_MatchesReference()
     {
@@ -297,6 +302,7 @@ public sealed unsafe class CudaFlashAttentionTests
     }
 
     /// <summary>The v2 K/V WMMA staging buffer must be zero-filled for the final partial 16-key tile.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1)]
     [InlineData(15)]

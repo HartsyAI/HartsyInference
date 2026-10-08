@@ -26,7 +26,6 @@ namespace HartsyInference.Cuda.Tests;
 /// model is swapped through it — and that one is where a backend whose <c>FreeAllDeviceMemory</c> does nothing
 /// shows up, rather than in any single generation.</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class ModelSwapSoakTests
 {
     private const string Prompt = "Write one sentence about a lighthouse.";
@@ -123,6 +122,7 @@ public sealed class ModelSwapSoakTests
         return key;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SwappingModels_RetiresEveryStateAndKeepsGenerating()
     {
@@ -196,6 +196,7 @@ public sealed class ModelSwapSoakTests
     /// <para>Free VRAM is read from the SAME backend throughout. A fresh probe instance would report a Vulkan
     /// device as entirely free whatever the previous one was holding, since that figure is the total minus what
     /// the asking allocator has taken.</para></remarks>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
     public void SwappingModelsThroughOneBackend_ReturnsItsDeviceMemory(string kind)

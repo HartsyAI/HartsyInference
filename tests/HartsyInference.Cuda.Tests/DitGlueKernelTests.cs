@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// then compares element-wise. FP32 PTX-vs-CPU tolerance per KERNEL.md is 1e-5; reductions get 1e-4.
 /// Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class DitGlueKernelTests
 {
     private readonly ITestOutputHelper _output;
@@ -64,6 +63,7 @@ public sealed unsafe class DitGlueKernelTests
         Assert.True(maxErr < tol, $"{name}: max_err {maxErr:E3} exceeds tol {tol:E0}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void RmsNorm_Cpu_Vs_Cuda()
     {
@@ -86,6 +86,7 @@ public sealed unsafe class DitGlueKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Tanh_Cpu_Vs_Cuda()
     {
@@ -103,6 +104,7 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(cpuOut, cudaOut, 1e-5f, "Tanh");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AffineBroadcastLastDim_Cpu_Vs_Cuda()
     {
@@ -128,6 +130,7 @@ public sealed unsafe class DitGlueKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GatedResidualLastDim_Cpu_Vs_Cuda()
     {
@@ -148,6 +151,7 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(cpuOut, cudaOut, 1e-5f, "GatedResidual");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ModulationSplit4_Cpu_Vs_Cuda()
     {
@@ -180,6 +184,7 @@ public sealed unsafe class DitGlueKernelTests
         foreach (Tensor t in cudaO) t.Dispose();
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CfgEulerStep_Cpu_Vs_Cuda()
     {
@@ -201,6 +206,7 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(zCpu, zCuda, 1e-5f, "CfgEulerStep");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRope_Cpu_Vs_Cuda()
     {
@@ -236,6 +242,7 @@ public sealed unsafe class DitGlueKernelTests
     /// buffer (an out-of-bounds device access) whenever K had fewer heads -- this never fired before Dia's
     /// resident attention because every prior caller was MHA (q/k same head count). CPU-vs-CUDA parity under a
     /// GQA shape, same pattern as <see cref="ApplyRope_Cpu_Vs_Cuda"/>.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRope_Gqa_Cpu_Vs_Cuda()
     {
@@ -269,6 +276,7 @@ public sealed unsafe class DitGlueKernelTests
     /// <summary>The combined overload on a GQA shape must equal calling the per-tensor <c>ApplyRopeSingle</c>
     /// twice -- the exact fix applied (<see cref="DiaAttention.SelfForwardFlash"/> now does the latter directly;
     /// this proves the former, used by every OTHER existing caller, now reduces to the same thing).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRope_Gqa_Cuda_MatchesApplyRopeSingleTwice()
     {
@@ -303,6 +311,7 @@ public sealed unsafe class DitGlueKernelTests
     /// <summary>q/k must agree on batch, seqLen and headDim (only head COUNT may differ, for GQA) -- the
     /// out-of-bounds launch this guards against should throw loudly instead of silently corrupting memory.
     /// Shape validation runs in managed code before any kernel launch, so this doesn't need CUDA hardware.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ApplyRope_MismatchedHeadDim_Throws()
     {
@@ -326,6 +335,7 @@ public sealed unsafe class DitGlueKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SliceLastDim_Cpu_Vs_Cuda()
     {
@@ -349,6 +359,7 @@ public sealed unsafe class DitGlueKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MaskRows_Cpu_Vs_Cuda()
     {
@@ -368,6 +379,7 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(cpuOut, cudaOut, 1e-6f, "MaskRows");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AddScalar_Cpu_Vs_Cuda()
     {
@@ -383,6 +395,7 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(cpuOut, cudaOut, 1e-6f, "AddScalar");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void LayerNormNoAffine_Cpu_Vs_Cuda()
     {
@@ -401,6 +414,7 @@ public sealed unsafe class DitGlueKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void IndexAddRows_Cpu_Vs_Cuda()
     {
@@ -424,6 +438,7 @@ public sealed unsafe class DitGlueKernelTests
         AssertClose(hCpu, hCuda, 1e-6f, "IndexAddRows");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ScatterAndSliceRows_Cpu_Vs_Cuda()
     {
@@ -449,6 +464,7 @@ public sealed unsafe class DitGlueKernelTests
     }
 
     /// <summary>SliceRowsGeneric on F32 must agree with SliceRows (same result, different implementation path).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SliceRowsGeneric_F32_Cpu_Vs_Cuda_MatchesSliceRows()
     {
@@ -475,6 +491,7 @@ public sealed unsafe class DitGlueKernelTests
     /// <summary>The trap: a sliced fp8 chunk that loses its parent's per-tensor <see cref="Tensor.Fp8ScaleFactor"/>
     /// silently mis-scales every downstream fp8 GEMM with correct-looking output and no failing test elsewhere —
     /// so this asserts the scale survives explicitly, on both backends, in addition to the sliced bytes.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void SliceRowsGeneric_Fp8_CarriesScaleFactor_Cpu_Vs_Cuda()
     {
@@ -508,6 +525,7 @@ public sealed unsafe class DitGlueKernelTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ArgMaxLastDim_Cpu_Vs_Cuda()
     {

@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// everywhere); the retry/backoff/diagnostics behavior needs <see cref="CudaBackend.TestCudnnSdpaFaultInjector"/>
 /// and so is gated on CUDA availability like every other GPU-touching test in this file's siblings.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudnnSdpaRetryTests
 {
     private readonly ITestOutputHelper _output;
@@ -54,6 +53,7 @@ public sealed unsafe class CudnnSdpaRetryTests
         Assert.Equal(4003, ex.Status);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TransientFailure_BacksOffThenRecovers()
     {
@@ -126,6 +126,7 @@ public sealed unsafe class CudnnSdpaRetryTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void PermanentFailure_NeverRetries()
     {

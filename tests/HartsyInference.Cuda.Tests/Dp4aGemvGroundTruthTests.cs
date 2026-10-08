@@ -18,12 +18,12 @@ namespace HartsyInference.Cuda.Tests;
 /// bound rather than a guessed tolerance. Also asserts the dp4a branch actually engaged (its output must
 /// differ from the float kernel's — if bit-identical, the env-flag dispatch silently fell through).</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class Dp4aGemvGroundTruthTests
 {
     private readonly ITestOutputHelper _output;
     public Dp4aGemvGroundTruthTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("Q4_K", 256, 64, 1, false)]
     [InlineData("Q4_K", 2560, 320, 1, false)]   // Qwen3-4B hidden size (real production K)

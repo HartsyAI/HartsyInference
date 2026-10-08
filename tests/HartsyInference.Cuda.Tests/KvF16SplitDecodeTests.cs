@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// which is wide enough to pass whichever kernel runs — so it cannot tell the split path from the monolithic one.
 /// These compare the two paths against each other on identical inputs.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class KvF16SplitDecodeTests
 {
     private readonly ITestOutputHelper _output;
@@ -45,6 +44,7 @@ public sealed unsafe class KvF16SplitDecodeTests
     /// <summary>The split kernel and the monolithic kernel must agree over an F16 cache. Both read the same F16
     /// bytes, so the only difference is how the key axis is partitioned and merged — a floating-point
     /// re-association, nothing more. Cache lengths span the split-eligibility threshold upward.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(375)]    // 15 s of MiniMax Music 3 at 25 Hz
     [InlineData(1500)]   // a minute of it, and a routine chat context
@@ -111,6 +111,7 @@ public sealed unsafe class KvF16SplitDecodeTests
     /// <summary>Split-K over an F16 cache must land as close to the F32-cache answer as the monolithic F16 kernel
     /// does. Catches a split path that reads the F16 bytes correctly but merges chunks wrongly — which would stay
     /// invisible above if both paths shared the same merge defect.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SplitOverF16Cache_TracksF32Cache_AsCloselyAsMonolithic()
     {

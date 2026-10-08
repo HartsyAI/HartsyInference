@@ -12,11 +12,11 @@ namespace HartsyInference.Cuda.Tests;
 /// exercised; one case puts the largest scores in the last key tile, so the running max rises mid-row and the O
 /// rescale has to be right. Skips cleanly without CUDA or without the PTX.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class FlashAttnF16Tests(ITestOutputHelper output)
 {
     private const int D = 256;
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(1, 2, 100, 77, false)]
     [InlineData(2, 3, 64, 160, false)]
@@ -37,6 +37,7 @@ public sealed unsafe class FlashAttnF16Tests(ITestOutputHelper output)
         AssertClose(expected, ToFloat(ot), $"B={batch} H={heads} Sq={sq} Skv={skv} risingMax={risingMax}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -62,6 +63,7 @@ public sealed unsafe class FlashAttnF16Tests(ITestOutputHelper output)
         AssertClose(expected, actual, $"token-major rank{(rank4 ? 4 : 2)}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void KnobOff_LeavesTheCallToCudnn()
     {
@@ -84,6 +86,7 @@ public sealed unsafe class FlashAttnF16Tests(ITestOutputHelper output)
     }
 
     /// <summary>Ideogram 4's attention shape, flash kernel against cuDNN. Prints both; asserts only agreement.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "Slow")]
     public void IdeogramShape_TimesAgainstCudnn()

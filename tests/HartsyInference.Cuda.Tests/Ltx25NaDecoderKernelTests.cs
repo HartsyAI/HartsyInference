@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// would pass a kernel that is wrong on every border, which is exactly where a window kernel diverges from the
 /// naive loop.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx25NaDecoderKernelTests
 {
     private readonly ITestOutputHelper _output;
@@ -62,6 +61,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
 
     /// <summary>Every case has at least one axis where the kernel exceeds or equals the axis length (so the window
     /// collapses to the whole axis) and at least one where it does not (so the window really slides).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(5, 4, 7, 2, 8, 3, 3, 3)]      // interior + all six faces slide
     [InlineData(2, 6, 3, 3, 16, 3, 5, 5)]     // T shorter than its kernel, W equal to its kernel
@@ -93,6 +93,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     /// volume wide enough to tile, a corner NONE of the cases above reach. Every case here is asserted to have taken
     /// it. Shapes are chosen so H and W are each sometimes an exact multiple of the tile and sometimes not: a partial
     /// tile at the volume edge is an edge condition the untiled kernel never had.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(3, 16, 24, 2, 3, 3, 3)]      // exact tiles on both axes
     [InlineData(3, 9, 13, 2, 3, 3, 3)]       // partial tile on both axes
@@ -125,6 +126,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     /// <summary>The tiled kernel's faces, on a volume whose extents are not multiples of the tile: such a query sits
     /// at the edge of both its window and its tile, and draws its scores from a union that is mostly other queries'
     /// neighbourhoods.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Na3dTiledMatchesTheReferenceOnEveryFaceOfTheVolume()
     {
@@ -168,6 +170,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     /// <summary>Both kernels on the same volume, so the tiling is isolated from every other variable. They must agree
     /// numerically but NOT bit for bit — the tiled path reorders the softmax, so identical bits would mean the
     /// <c>HARTSY_LTX25_NA3D_TILED</c> kill switch never actually switched anything and this test proves nothing.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Na3dTiledAgreesWithTheUntiledKernelOnTheShippedWindow()
     {
@@ -207,6 +210,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
 
     /// <summary>The border is where a window kernel most easily diverges, so this asserts on the faces directly:
     /// every query whose window had to slide inward must still match the reference.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Na3dMatchesTheReferenceOnEveryFaceOfTheVolume()
     {
@@ -248,6 +252,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
 
     /// <summary>A kernel covering every axis degenerates to dense attention over the whole grid, computed here
     /// independently of both implementations so a shared mistake cannot pass.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Na3dSpanningTheGridEqualsDenseAttention()
     {
@@ -291,6 +296,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     /// <summary>The rope rotates three per-axis chunks by three different coordinates. The splits here are uneven
     /// (16/24/24 is the shipped head_dim-64 split) so a kernel that assumed equal thirds, or that indexed the H
     /// table with the W coordinate, cannot pass.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(5, 4, 7, 3, 64, 16, 24)]
     [InlineData(2, 6, 3, 2, 32, 8, 12)]
@@ -321,6 +327,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
 
     /// <summary>A zero rotation (cos=1, sin=0) must leave the tensor untouched, which catches a kernel that writes
     /// to the wrong chunk offset — the sort of error a random-table comparison can mask if both paths share it.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Rope3dWithIdentityTablesIsAnExactNoOp()
     {
@@ -361,6 +368,7 @@ public sealed unsafe class Ltx25NaDecoderKernelTests
     /// <c>start &gt; 0</c> must land its frames in the right place without disturbing the first chunk's. Production
     /// geometries currently leave this pass un-chunked, so <c>start &gt; 0</c> is reachable only here. Strides are
     /// distinct per axis and <c>dropped=1</c> is on, which is the case whose off-by-one silently shifts the clip.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Ltx25PixelShuffleMatchesTheReferenceAcrossAChunkBoundary()
     {

@@ -24,7 +24,6 @@ namespace HartsyInference.Cuda.Tests;
 /// "textGguf|mmprojGguf" pairs) + CUDA availability; skips cleanly otherwise.</summary>
 [Trait("Category", "Slow")]
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class VlmDecodeThroughputBenchmark
 {
     private readonly ITestOutputHelper _output;
@@ -53,6 +52,7 @@ public sealed class VlmDecodeThroughputBenchmark
 
     private readonly record struct RunResult(double PrefillMs, double DecodeMs, int TokenCount);
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void VlmThroughput_ImagePlusPrompt_ReportsPrefillAndDecode()
     {

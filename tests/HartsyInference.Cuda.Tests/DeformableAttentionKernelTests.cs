@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// coords=4 with one ref shared across levels (RT-DETR / GDINO decoder). F32 within 1e-4 per the
 /// kernel tolerance table (softmax + bilinear compound the rounding slightly above pure-GEMM 1e-5).</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class DeformableAttentionKernelTests
 {
     private readonly ITestOutputHelper _output;
@@ -96,6 +95,7 @@ public sealed unsafe class DeformableAttentionKernelTests
     }
 
     /// <summary>Grounding DINO encoder self-attention: per-level reference points (2 coords each).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DeformableAttention_Coords2_PerLevelRef_MatchesCpu()
     {
@@ -104,6 +104,7 @@ public sealed unsafe class DeformableAttentionKernelTests
     }
 
     /// <summary>RT-DETR / GDINO decoder cross-attention: one 4-coord reference shared across all levels.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DeformableAttention_Coords4_SharedRef_MatchesCpu()
     {
@@ -111,6 +112,7 @@ public sealed unsafe class DeformableAttentionKernelTests
         RunParity(coords, refQueryStride: coords, refLevelStride: 0, refSeed: 202, refLen: nq * coords);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DeformableAttention_VeryNegativeFiniteLogit_RemainsFinite()
     {
@@ -145,6 +147,7 @@ public sealed unsafe class DeformableAttentionKernelTests
         Assert.Equal(3.25f, actual, 5);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DeformableAttention_RejectsInvalidContractsBeforeLaunch()
     {
@@ -175,6 +178,7 @@ public sealed unsafe class DeformableAttentionKernelTests
     /// <summary>Grounding-DINO encoder-scale workload (17821 queries over the real 4-level pyramid) — the
     /// host loop that took ≈11 min/6-layer-encoder on CPU. Confirms GPU parity at scale and logs the
     /// single-op speedup so the win is on the record.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "PerformanceGate")]
     public void DeformableAttention_EncoderScale_MatchesCpu_AndIsFaster()

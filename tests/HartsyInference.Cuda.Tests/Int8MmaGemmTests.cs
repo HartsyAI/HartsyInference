@@ -43,6 +43,7 @@ public sealed unsafe class Int8MmaGemmTests
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     // N must be a whole multiple of the 256-wide block tile (only M is predicated), so these shapes changed with
     // the tile: 384 is no longer expressible.
@@ -157,6 +158,7 @@ public sealed unsafe class Int8MmaGemmTests
 
     /// <summary>Head-to-head at LTX-2.5's real shapes: fused kernel vs the cuBLASLt GEMM + dequant pair it
     /// would replace, both timed end-to-end. Diagnostic — it prints, it does not gate.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4992, 16384, 4096, "ffn_up")]
     [InlineData(4992, 4096, 16384, "ffn_down")]

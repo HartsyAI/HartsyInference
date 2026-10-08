@@ -11,7 +11,6 @@ namespace HartsyInference.Cuda.Tests;
 /// <remarks>Reports rather than asserts a threshold: absolute driver-call latency is machine- and driver-specific,
 /// so a hard bound here would be a flake. The number it prints is the input to the decision.</remarks>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class Int8ResidentHostCostTests
 {
     private readonly ITestOutputHelper _output;
@@ -25,6 +24,7 @@ public sealed class Int8ResidentHostCostTests
         return dir;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ReportPerCallDriverCosts()
     {

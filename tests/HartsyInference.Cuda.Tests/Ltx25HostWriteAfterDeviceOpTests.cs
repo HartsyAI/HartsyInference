@@ -11,7 +11,6 @@ namespace HartsyInference.Cuda.Tests;
 /// observed downstream, or silently discarded because the activation cache still holds the pre-write device
 /// buffer — the failure mode would be AdaLN modulation never reaching attention or the MLP.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx25HostWriteAfterDeviceOpTests
 {
     private readonly ITestOutputHelper _output;
@@ -33,6 +32,7 @@ public sealed unsafe class Ltx25HostWriteAfterDeviceOpTests
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void HostWriteBetweenTwoDeviceOpsIsVisibleToTheSecond()
     {

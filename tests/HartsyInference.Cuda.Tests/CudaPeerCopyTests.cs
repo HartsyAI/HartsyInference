@@ -12,7 +12,6 @@ namespace HartsyInference.Cuda.Tests;
 /// mismatched consumer pair typically reports no P2P, which exercises the staging path; boxes with NVLink/P2P
 /// exercise the direct path and bump <see cref="IBackend.GetPeerCopyCount"/>.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaPeerCopyTests
 {
     private readonly ITestOutputHelper _output;
@@ -57,6 +56,7 @@ public sealed unsafe class CudaPeerCopyTests
         return (activation, (float)acc);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CrossDevice_BoundaryCopy_LandsIntact_AndSourceStaysResident()
     {
@@ -95,6 +95,7 @@ public sealed unsafe class CudaPeerCopyTests
 
     /// <summary>Same-device sibling backends never report P2P (same ordinal), so the staging path must carry the
     /// handoff — runnable on a one-GPU box.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SameDevice_BoundaryCopy_StagesThroughDestinationHostBuffer()
     {
@@ -122,6 +123,7 @@ public sealed unsafe class CudaPeerCopyTests
     }
 
     /// <summary>A source with no device shadow (host-only data) rides the plain host fallback.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void HostOnlySource_FallsBackToPlainCopy()
     {

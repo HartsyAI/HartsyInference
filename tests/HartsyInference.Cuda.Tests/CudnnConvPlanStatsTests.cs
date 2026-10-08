@@ -11,7 +11,6 @@ namespace HartsyInference.Cuda.Tests;
 /// one engine choice per (family, power-of-two length bucket), made by the heuristic at the bucket's own length so the
 /// audio a length produces does not depend on which length came first. The GPU tests skip when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudnnConvPlanStatsTests
 {
     private const int InChannels = 8;
@@ -44,6 +43,7 @@ public sealed unsafe class CudnnConvPlanStatsTests
         Assert.Equal(bucket, CudnnConv.LengthBucket(Math.Max(reference, bucket / 2 + 1)));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AudioConv1d_PlansEachLengthFromItsBucket()
     {
@@ -80,6 +80,7 @@ public sealed unsafe class CudnnConvPlanStatsTests
         });
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AudioConv1d_WithoutBuckets_RunsTheHeuristicPerLength()
     {
@@ -106,6 +107,7 @@ public sealed unsafe class CudnnConvPlanStatsTests
 
     /// <summary>Two backends see the same two lengths of one bucket in opposite orders and produce the same bytes for each
     /// length: the bucket's engine comes from its reference length, not from whichever length arrived first.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AudioConv1d_OutputDoesNotDependOnLengthOrder()
     {
@@ -137,6 +139,7 @@ public sealed unsafe class CudnnConvPlanStatsTests
 
     /// <summary>A bucket's choice computes the same convolution as each length's own heuristic: TF32-close, and byte-equal
     /// whenever the heuristic would have picked the same engine and knobs (reported, not asserted).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

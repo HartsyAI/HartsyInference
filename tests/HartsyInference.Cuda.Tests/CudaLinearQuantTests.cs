@@ -9,12 +9,12 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>End-to-end <see cref="CudaBackend.Linear"/> tests with a quantized weight. Verifies the wiring is complete: <see cref="GpuTransferHelper.ByteSize"/> reports the right bytes for Q*_K, GpuTransferHelper uploads quantized bytes correctly, <see cref="CudaBackend.Linear"/> resolves the GEMM dtype to F16, <see cref="CudaBackend.CastIfNeeded"/> dispatches the GPU dequant kernel, and the cuBLAS GEMM produces an answer comparable to the same operation with the dequantized F16 weight.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class CudaLinearQuantTests
 {
     private readonly ITestOutputHelper _output;
     public CudaLinearQuantTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Linear_Q8_0_Weight_MatchesF16Reference()
     {
@@ -22,6 +22,7 @@ public sealed class CudaLinearQuantTests
         RunLinearQuantTest(DType.Q8_0, tolerance: 0.05f, batch: 4, inDim: 64, outDim: 128);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Linear_Q4_K_Weight_MatchesF16Reference()
     {
@@ -29,6 +30,7 @@ public sealed class CudaLinearQuantTests
         RunLinearQuantTest(DType.Q4_K, tolerance: 0.5f, batch: 4, inDim: 256, outDim: 256);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Linear_Q6_K_Weight_MatchesF16Reference()
     {
