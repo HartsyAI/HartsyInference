@@ -69,7 +69,8 @@ Do not count #305 or #306 as verified until those changes land on the branch bei
 4. The rest of the GPU category, excluding the classes already run in step 3. Run only from a checkout that includes #307,
    which applies the GPU labels this filter depends on. Record failures by test name:
    ```
-   dotnet test tests/HartsyInference.Cuda.Tests --filter "Category=GpuIntegration&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaExpertCacheTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaExpertM1FixtureTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaMoePrimitiveTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaQuantWorkspaceTests."
+   dotnet test tests/HartsyInference.Cuda.Tests --filter \
+       "Category=GpuIntegration&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaExpertCacheTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaExpertM1FixtureTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaMoePrimitiveTests.&FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaQuantWorkspaceTests."
    ```
 5. **Deferred: refactor A/B for the cache changes.** Do not run `tests/regression-ab.sh` as evidence for #304 yet. No
    production path constructs `CudaExpertCache` (only the class and its tests do), and no core regression case drives it,
