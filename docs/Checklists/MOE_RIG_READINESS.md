@@ -64,8 +64,8 @@ Do not count #305 or #306 as verified until those changes land on the branch bei
      dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.$c."
    done
    ```
-   `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter does not select
-   them; this explicit loop is the only way they run on the rig.
+   Before #307 lands, `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter
+   does not select them; this explicit loop is how they run on the rig either way.
 4. The rest of the GPU category, excluding the classes already run in step 3. Run only from a checkout that includes #307,
    which applies the GPU labels this filter depends on. Record failures by test name:
    ```
