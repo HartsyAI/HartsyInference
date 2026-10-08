@@ -68,6 +68,17 @@ No code change beyond the version.
 - **Changed: BF16 weights are widened in parallel by row** (a 129,280-row head window took 21 s single-threaded for one token).
 
 
+## alpha.280
+
+- **Added: generic sparse (MoE) topology contracts.** New `HartsyInference.Core.Moe` describes a model as layers (dense or
+  sparse), with a router (per-phase top-k, group limiting, scoring, token-kind bias), routed and shared expert groups with
+  per-index shape overrides, and an `ExpertProgram` (activation plus independent gate/up clamps) instead of a hard-coded
+  SwiGLU. `SparseCapabilities` is derived from the topology so runtime code checks capabilities, not model names;
+  `SparseModelTopology.Fingerprint` is a SHA-256 over shapes, routing and programs for profile and pack binding.
+  `MoeTopologyFactory` maps transformer MoE configs and `DeepSeekV41Topology` maps the official V4.1 config (routed
+  experts, clamped SwiGLU, draft layers). No runtime behavior changes. See `docs/MOE_ARCHITECTURE.md` and
+  `docs/Research/HETEROGENEOUS_MOE.md`.
+
 ## alpha.279
 
 - **Added: a DeepSeek-V4.1 checkpoint directory now loads and generates through `TextService`.** `HfTextDirectoryLoader` no longer
