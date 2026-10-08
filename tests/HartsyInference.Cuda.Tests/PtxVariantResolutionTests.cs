@@ -10,7 +10,6 @@ public sealed class PtxVariantResolutionTests
     private readonly ITestOutputHelper _output;
     public PtxVariantResolutionTests(ITestOutputHelper output) => _output = output;
 
-    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(89, "foo.sm89.ptx")]   // the card the variant was built for
     [InlineData(86, "foo.ptx")]        // another card: the baseline, never a foreign variant
@@ -31,7 +30,6 @@ public sealed class PtxVariantResolutionTests
         }
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void WithoutAVariantTheBaselineIsUsedEvenForThatCard()
     {

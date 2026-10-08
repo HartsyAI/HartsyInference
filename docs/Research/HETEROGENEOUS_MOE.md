@@ -23,7 +23,8 @@ them one at a time.
 | Peer tier | `cudaDeviceEnablePeerAccess` second adaptive tier | Generic (placement), hardware-gated |
 
 Pinned upstream limits, kept here because the table rows are short: the adaptive tier swaps at most 96 experts per round, and
-publishes its residency one window late; prefill streams in chunks of up to 8,192 tokens. A later implementation that
+publishes its residency one window late; prefill streams in chunks of up to 8,192 tokens. Two mechanisms are model-specific
+data, not shared policy: the shipped expert ranking is per model, and the KV layout is per model. A later implementation that
 differs from these must say so.
 
 ## What is fundamental and what is specific

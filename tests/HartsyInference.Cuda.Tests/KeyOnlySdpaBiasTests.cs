@@ -221,7 +221,6 @@ public sealed unsafe class KeyOnlySdpaBiasTests
     /// <summary>A VRAM shortfall inside the fused path must never disable it permanently. The fallback it demotes
     /// to allocates the whole <c>[heads, Sq, Skv]</c> score matrix — strictly MORE memory than the allocation that
     /// just failed — so treating an OOM as structural guarantees the next call fails harder.</summary>
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void OutOfVram_IsTransient_NotAStructuralKill()
     {

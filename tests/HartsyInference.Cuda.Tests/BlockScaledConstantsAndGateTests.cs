@@ -15,7 +15,6 @@ namespace HartsyInference.Cuda.Tests;
 /// re-derive from the headers rather than from this file if they ever disagree.</para></summary>
 public sealed class BlockScaledConstantsAndGateTests
 {
-    [Trait("Category", "GpuIntegration")]
     [Theory]
     // cudaDataType, library_types.h
     [InlineData("CUDA_R_4F_E2M1", 33)]
@@ -115,7 +114,6 @@ public sealed class BlockScaledConstantsAndGateTests
     /// <summary>The one arch predicate every gate reads. SM 10.x sits between the "major >= 12" the cuBLAS warning
     /// used to test and the "major >= 10" the FP4 executor tested, which is how one Blackwell tier could pass a gate
     /// the other failed.</summary>
-    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(8, 6, false, false)]   // Ampere — this box's 3060
     [InlineData(8, 9, true, false)]    // Ada — this box's 4090

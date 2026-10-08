@@ -33,7 +33,6 @@ public sealed class CudaKernelDriftTests
         "mul_mat_vec_q6k_q8_1",
     };
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CommittedPtx_MatchesFreshRebuildFromSource()
     {

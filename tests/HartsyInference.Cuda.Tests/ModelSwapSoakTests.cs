@@ -122,7 +122,6 @@ public sealed class ModelSwapSoakTests
         return key;
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SwappingModels_RetiresEveryStateAndKeepsGenerating()
     {
@@ -196,7 +195,6 @@ public sealed class ModelSwapSoakTests
     /// <para>Free VRAM is read from the SAME backend throughout. A fresh probe instance would report a Vulkan
     /// device as entirely free whatever the previous one was holding, since that figure is the total minus what
     /// the asking allocator has taken.</para></remarks>
-    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(BackendGate.GpuKinds), MemberType = typeof(BackendGate))]
     public void SwappingModelsThroughOneBackend_ReturnsItsDeviceMemory(string kind)

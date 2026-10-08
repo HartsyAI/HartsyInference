@@ -17,7 +17,6 @@ public sealed class AnimaRopeGpuTableCacheTests
     private const int GridWidth = 5;
     private const int HeadDim = 12;
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Cache_GeometryReplacement_EvictsOldPairBeforePublishingNewPair()
     {
@@ -52,7 +51,6 @@ public sealed class AnimaRopeGpuTableCacheTests
         }
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Cache_TwoBackends_IsolatesIdentityReuseAndRelease()
     {
@@ -110,7 +108,6 @@ public sealed class AnimaRopeGpuTableCacheTests
         }
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Cache_PreloadFailure_RollsBackPartialResidencyWithoutPublication()
     {
@@ -147,7 +144,6 @@ public sealed class AnimaRopeGpuTableCacheTests
         }
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Cache_FreeFailure_RetainsPublishedEntryForRetry()
     {
@@ -190,7 +186,6 @@ public sealed class AnimaRopeGpuTableCacheTests
         }
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public async Task Cache_ConcurrentSameKeyCallers_PublishExactlyOnePair()
     {

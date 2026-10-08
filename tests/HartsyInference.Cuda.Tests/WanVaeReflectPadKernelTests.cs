@@ -32,7 +32,6 @@ public sealed unsafe class WanVaeReflectPadKernelTests
 
     /// <summary>PyTorch <c>F.pad(mode="reflect")</c> does not repeat the border pixel: the padded row above the
     /// top is source row 1, not row 0. Asserted on a 1x1x1x3x4 ramp where every expected value is stated here.</summary>
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ReflectPad_BorderRowsMirrorWithoutRepeatingTheEdge()
     {

@@ -18,7 +18,6 @@ public sealed class AttentionDispatchContractTests
     }
 
     /// <summary>F32 Sage dispatch requires both the feature opt-in and the explicit unsafe V-narrowing opt-in.</summary>
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SageF32Dispatch_RequiresTwoExplicitOptIns()
     {
@@ -42,7 +41,6 @@ public sealed class AttentionDispatchContractTests
     }
 
     /// <summary>FlashAttention-v2 accepts only exact F32 MHA shapes with complete query tiles on TF32 hardware.</summary>
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FlashV2Contract_RejectsMixedDtypesAndPartialTiles()
     {
@@ -76,7 +74,6 @@ public sealed class AttentionDispatchContractTests
             output, query, key, value, null, Scale, tf32Available: false));
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(65_535, 1, true)]
     [InlineData(1, 65_535, true)]
@@ -89,7 +86,6 @@ public sealed class AttentionDispatchContractTests
         Assert.Equal(expected, CudaBackend.FlashAttentionV2GridDimensionsSupported(batch, heads));
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SdpaContract_RejectsMismatchedBuffersAndMaskAxes()
     {
@@ -114,7 +110,6 @@ public sealed class AttentionDispatchContractTests
             CudaBackend.ValidateScaledDotProductAttentionContract(output, query, key, value, invalidMask, 0.125f));
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FlashContract_RejectsInvalidCapacityGqaAndAuxiliaryLengths()
     {

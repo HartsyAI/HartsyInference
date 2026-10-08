@@ -40,7 +40,6 @@ public sealed class GpuTransferHelperFreeAllCachedTests
         AssertReleasesEverything(state => new ResidencyOnlyBackend(state).FreeAllDeviceMemory());
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void The_Residency_Interface_Leaves_No_Sidecar_Behind()
     {
@@ -49,7 +48,6 @@ public sealed class GpuTransferHelperFreeAllCachedTests
 
     /// <summary>The control: the entry point that already ran the wrapper, and must keep running the same
     /// cleanup as the other two.</summary>
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void The_Static_Entry_Point_Leaves_No_Sidecar_Behind()
     {

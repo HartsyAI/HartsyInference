@@ -64,7 +64,6 @@ public sealed unsafe class CudnnSdpaStridedLayoutTests
         return (hm, tm);
     }
 
-    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(4, 64, 64)]
     [InlineData(32, 512, 128)]
@@ -118,7 +117,6 @@ public sealed unsafe class CudnnSdpaStridedLayoutTests
 
     /// <summary>LTX-2.5's real self-attention shape. If the strided descriptors push cuDNN off the fused
     /// flash engine onto a generic kernel, the saved permutes would be paid back with interest here.</summary>
-    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void StridedTokenMajor_ThroughputAtLtxShape()
     {
