@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using HartsyInference.Cpu;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Registry;
@@ -161,6 +162,8 @@ public sealed class DeepSeekV41RealWeightsTests
     private const double ExactHiddenRelL2 = 2e-3;
     private const double ExactLogitsCosine = 0.9999;
     private const double PortsCosineFloor = 0.95;
+    // added after the first run as a regression guard, not a pre-set gate; the measured overlap is 10
+    private const int ExactTop10Overlap = 9;
 
     /// <summary>The first N layers of the real checkpoint through the host reference against the UNMODIFIED upstream model on the same real weights, dumped by
     /// <c>tests/python-reference/deepseek_v41/dump_real_layers.py</c> (set <c>DSV41_ORACLE_DIR</c> to its output directory; its <c>meta.json</c> names the layers, mode and ids).</summary>
@@ -174,6 +177,10 @@ public sealed class DeepSeekV41RealWeightsTests
         using System.Text.Json.JsonDocument meta = System.Text.Json.JsonDocument.Parse(File.ReadAllText(Path.Combine(oracle!, "meta.json")));
         int layers = meta.RootElement.GetProperty("layers").GetInt32();
         string mode = meta.RootElement.GetProperty("mode").GetString()!;
+        Assert.True(mode is "exact" or "ports", $"unknown oracle mode '{mode}' in meta.json");
+        string? hostDump = Environment.GetEnvironmentVariable("DSV41_HOST_DUMP");
+        if (string.IsNullOrEmpty(hostDump)) hostDump = null;
+        Assert.True(hostDump is null || layers == 1, "DSV41_HOST_DUMP writes one file per stage and supports a single layer");
         int[] ids = meta.RootElement.GetProperty("ids").EnumerateArray().Select(e => e.GetInt32()).ToArray();
 
         using CpuBackend backend = new();
@@ -188,22 +195,20 @@ public sealed class DeepSeekV41RealWeightsTests
         DeepSeekV41SequenceState state = model.CreateState(64);
         float[] hidden = new float[ids.Length * model.Dim];
         Stopwatch sw = Stopwatch.StartNew();
-        string? hostDumpDir = Environment.GetEnvironmentVariable("DSV41_HOST_DUMP");
-        if (hostDumpDir is { Length: > 0 } && layers == 1)
+        if (hostDump is not null)
         {
-            Directory.CreateDirectory(hostDumpDir);
-            model.SetProbe((layer, stage, values) => File.WriteAllBytes(Path.Combine(hostDumpDir, $"{stage}.f32"), MemoryMarshalBytes(values)));
+            Directory.CreateDirectory(hostDump);
+            model.SetProbe((_, stage, values) => File.WriteAllBytes(Path.Combine(hostDump, $"{stage}.f32"), ToBytes(values)));
         }
-        model.Forward(ids, state, hidden);
-        model.SetProbe(null);
+        try { model.Forward(ids, state, hidden); }
+        finally { model.SetProbe(null); }
         float[] logits = model.Logits(hidden.AsSpan((ids.Length - 1) * model.Dim, model.Dim));
         _output.WriteLine($"host {layers}-layer forward {sw.Elapsed.TotalSeconds:F1}s, RSS {Rss()}");
 
-        if (Environment.GetEnvironmentVariable("DSV41_HOST_DUMP") is { Length: > 0 } hostDump)
+        if (hostDump is not null)
         {
-            Directory.CreateDirectory(hostDump);
-            File.WriteAllBytes(Path.Combine(hostDump, "final.f32"), MemoryMarshalBytes(hidden));
-            File.WriteAllBytes(Path.Combine(hostDump, "logits.f32"), MemoryMarshalBytes(logits));
+            File.WriteAllBytes(Path.Combine(hostDump, "final.f32"), ToBytes(hidden));
+            File.WriteAllBytes(Path.Combine(hostDump, "logits.f32"), ToBytes(logits));
         }
 
         float[] refHidden = ReadF32(Path.Combine(oracle!, "final.f32"), hidden.Length);
@@ -220,6 +225,7 @@ public sealed class DeepSeekV41RealWeightsTests
             Assert.True(hiddenRel <= ExactHiddenRelL2, $"hidden relL2 {hiddenRel:E3} > {ExactHiddenRelL2:E1}");
             Assert.True(logitsCos >= ExactLogitsCosine, $"logits cosine {logitsCos:F6} < {ExactLogitsCosine}");
             Assert.Equal(refTop, hostTop);
+            Assert.True(overlap >= ExactTop10Overlap, $"top-10 overlap {overlap}/10 < {ExactTop10Overlap}");
         }
         else
         {
@@ -228,12 +234,7 @@ public sealed class DeepSeekV41RealWeightsTests
         }
     }
 
-    private static byte[] MemoryMarshalBytes(float[] values)
-    {
-        byte[] bytes = new byte[values.Length * 4];
-        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
-        return bytes;
-    }
+    private static byte[] ToBytes(float[] values) => MemoryMarshal.AsBytes(values.AsSpan()).ToArray();
 
     private static float[] ReadF32(string path, int expected)
     {

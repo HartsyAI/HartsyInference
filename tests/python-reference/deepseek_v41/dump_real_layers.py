@@ -2,7 +2,7 @@
 
 Loads embed, layers.0..N-1, norm and head by name from the sharded checkpoint, runs one prefill, and writes the input ids, every
 block's output stream, the final normed hidden state of every position and the last position's logits as raw little-endian float32
-plus meta.json. The C# side (DeepSeekV41RealLayerOracleTests) loads the same layers with MaxLayers=N and compares.
+plus meta.json. The C# side (DeepSeekV41RealWeightsTests.RealLayers_MatchTheUpstreamModel) loads the same layers with MaxLayers=N and compares.
 
 Modes
   exact  float32 compute, GEMM-input activation quantization removed, exact-softmax sparse_attn. The in-place FP8/FP4 latent (KV cache)
@@ -135,12 +135,20 @@ def main() -> None:
 
     blocks, finals = [], []
     taps: dict = {}
+
+    def tap(stage: str):
+        def hook(_m, _i, out):
+            if stage in taps:
+                raise RuntimeError(f"tap {stage} fired twice; per-layer taps are not implemented")
+            taps[stage] = out
+        return hook
+
     for blk in model.layers:
         blk.register_forward_hook(lambda _m, _i, out: blocks.append(out[0]))
-        blk.attn_norm.register_forward_hook(lambda _m, _i, out: taps.setdefault("attn_in", out))
-        blk.attn.register_forward_hook(lambda _m, _i, out: taps.setdefault("attn_out", out))
-        blk.ffn_norm.register_forward_hook(lambda _m, _i, out: taps.setdefault("ffn_in", out))
-        blk.ffn.register_forward_hook(lambda _m, _i, out: taps.setdefault("ffn_out", out))
+        blk.attn_norm.register_forward_hook(tap("attn_in"))
+        blk.attn.register_forward_hook(tap("attn_out"))
+        blk.ffn_norm.register_forward_hook(tap("ffn_in"))
+        blk.ffn.register_forward_hook(tap("ffn_out"))
     model.norm.register_forward_hook(lambda _m, _i, out: finals.append(out))
 
     ids = [int(v) for v in a.ids.split(",")]
