@@ -65,6 +65,7 @@ internal sealed class DeepSeekV41DSparkStage
         float[] sublayerIn = new float[block * _dim], sublayerOut = new float[block * _dim], mid = new float[x.Length];
 
         _hcAttn.Mixes(x, block, aPre, aPost, aComb);
+        // as in the backbone block, the feed-forward layer collapses with the attention coefficients, and the next stage takes the feed-forward ones (upstream's deferred hc_pre)
         _hcAttn.Collapse(x, preMix, block, sublayerIn);
         DeepSeekV41HostMath.RmsNormRows(sublayerIn, _attnNorm, _dim, _normEps);
         _attention.Draft(sublayerIn, block, mainX, startPos, state, sublayerOut);

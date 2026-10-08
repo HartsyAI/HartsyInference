@@ -6,7 +6,9 @@ namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>The DSpark draft head of V4.1 (upstream <c>mtp.0-2</c> with <c>DSparkBlock</c>): three stages that draft a block of tokens from the target's hidden states,
 /// then a Markov head that adds each drafted token's bias to the next position, and a confidence head.</summary>
-/// <remarks>Greedy drafting only: each draft token is the argmax, which is what upstream does at temperature 0. The embedding and head are the target model's.</remarks>
+/// <remarks>Greedy drafting only: each draft token is the argmax, which is what upstream does at temperature 0. The embedding and head are the target model's.
+/// <see cref="Draft"/> writes the current target latent into its window slot, so a caller that rolls the target back must also restore the window slots that later positions
+/// overwrote; the proposer loop owns that. <see cref="Seed"/> expects a fresh state.</remarks>
 public sealed class DeepSeekV41DSpark
 {
     private readonly IBackend _backend;
@@ -59,22 +61,34 @@ public sealed class DeepSeekV41DSpark
         _confidence = confidence;
     }
 
-    /// <summary>Loads the draft stages and their heads from the <c>mtp.*</c> keys of the checkpoint, sharing the target's embedding and head.</summary>
+    /// <summary>Loads the draft stages and their heads from the <c>mtp.*</c> keys of the checkpoint, reading the target's embedding and head from it too.</summary>
     public static DeepSeekV41DSpark Load(IBackend backend, DeepSeekV41Checkpoint checkpoint, DeepSeekV41LoadOptions options)
     {
-        ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(checkpoint);
         ArgumentNullException.ThrowIfNull(options);
-        options.Validate();
         DeepSeekV41HostModelLoader.Reader read = new(checkpoint, options.Residency);
         DeepSeekV41Config config = checkpoint.Config;
         return Load(backend, checkpoint, options, read, read.Weight("embed.weight", config.VocabSize, config.HiddenSize),
             read.Weight("head.weight", config.VocabSize, config.HiddenSize));
     }
 
+    /// <summary>Loads the draft stages and their heads, sharing the target model's <paramref name="embed"/> and <paramref name="head"/> instead of reading them again.</summary>
+    public static DeepSeekV41DSpark Load(IBackend backend, DeepSeekV41Checkpoint checkpoint, DeepSeekV41LoadOptions options, DeepSeekV41Weight embed, DeepSeekV41Weight head)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        ArgumentNullException.ThrowIfNull(embed);
+        ArgumentNullException.ThrowIfNull(head);
+        ArgumentNullException.ThrowIfNull(options);
+        return Load(backend, checkpoint, options, new DeepSeekV41HostModelLoader.Reader(checkpoint, options.Residency), embed, head);
+    }
+
     private static DeepSeekV41DSpark Load(IBackend backend, DeepSeekV41Checkpoint checkpoint, DeepSeekV41LoadOptions options, DeepSeekV41HostModelLoader.Reader read,
         DeepSeekV41Weight embed, DeepSeekV41Weight head)
     {
+        ArgumentNullException.ThrowIfNull(backend);
+        ArgumentNullException.ThrowIfNull(checkpoint);
+        ArgumentNullException.ThrowIfNull(options);
+        options.Validate();
         DeepSeekV41Config cfg = checkpoint.Config;
         if (cfg.DsparkBlockSize < 1) throw new HartsyInferenceException("This checkpoint has no DSpark block size.");
         if (cfg.NumNextnPredictLayers < 1) throw new HartsyInferenceException("This checkpoint has no draft layers.");

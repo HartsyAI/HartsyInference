@@ -31,7 +31,8 @@ internal sealed class DeepSeekV41DSparkAttention
     /// <summary>The attention settings this stage was built with, used to size its window.</summary>
     public DeepSeekV41AttentionSettings Settings => _settings;
 
-    /// <summary>Writes the target's latents of positions <c>0 .. tokens-1</c> into the window; <paramref name="mainX"/> is <c>[tokens, Dim]</c>.</summary>
+    /// <summary>Writes the target's latents of positions <c>0 .. tokens-1</c> into the window; <paramref name="mainX"/> is <c>[tokens, Dim]</c>. Expects a fresh state:
+    /// slots that this call does not write keep whatever an earlier use left, and <see cref="Draft"/> hides them only by position.</summary>
     public void Seed(ReadOnlySpan<float> mainX, int tokens, DeepSeekV41AttentionState state)
     {
         ArgumentNullException.ThrowIfNull(state);
