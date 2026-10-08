@@ -74,12 +74,12 @@ public sealed class DeepSeekV41HostModelTests
         return new DeepSeekV41Block(dim, hc, normEps, hcAttn, hcFfn, P(l + "attn_norm.weight"), P(l + "ffn_norm.weight"), attention, ffn, engram, engramSlot);
     }
 
-    internal static DeepSeekV41HostModel BuildModel(CpuBackend cpu)
+    internal static DeepSeekV41HostModel BuildModel(CpuBackend cpu, IReadOnlyList<int>? mainHiddenLayers = null)
     {
         JsonElement cfg = Fx.GetProperty("config");
         DeepSeekV41Block[] blocks = Enumerable.Range(0, cfg.GetProperty("n_layers").GetInt32()).Select(i => BuildBlock(cpu, i)).ToArray();
         return new DeepSeekV41HostModel(cfg.GetProperty("dim").GetInt32(), cfg.GetProperty("hc_mult").GetInt32(), cfg.GetProperty("vocab_size").GetInt32(),
-            (float)cfg.GetProperty("norm_eps").GetDouble(), P("embed.weight"), blocks, P("norm.weight"), P("head.weight"));
+            (float)cfg.GetProperty("norm_eps").GetDouble(), P("embed.weight"), blocks, P("norm.weight"), P("head.weight"), mainHiddenLayers: mainHiddenLayers);
     }
 
     // The fixture runs upstream with an exact-softmax sparse_attn, so what remains is float32 accumulation order; the real kernel's bf16 probabilities are not modelled.
