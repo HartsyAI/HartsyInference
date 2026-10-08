@@ -78,7 +78,9 @@ public sealed class ExpertPackWriter : IDisposable
         _lockPath = Path.Combine(directory, "WRITING");
         try
         {
-            _lock = new FileStream(_lockPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None);
+            // Windows removes the marker when the handle closes (a pending delete). Unix unlinks it while still holding the lock.
+            FileOptions options = OperatingSystem.IsWindows() ? FileOptions.DeleteOnClose : FileOptions.None;
+            _lock = new FileStream(_lockPath, FileMode.OpenOrCreate, FileAccess.Write, FileShare.None, 1, options);
         }
         catch (IOException)
         {
@@ -162,8 +164,10 @@ public sealed class ExpertPackWriter : IDisposable
 
     private void ReleaseLock()
     {
+        // Unlinking by path after closing the handle could remove a marker a second writer created in between, so on Unix the
+        // path is removed while this writer still holds the exclusive lock on its own inode.
+        if (!OperatingSystem.IsWindows()) File.Delete(_lockPath);
         _lock.Dispose();
-        File.Delete(_lockPath);
     }
 
     private byte[] Quantize(float[] values, int rows, int cols)

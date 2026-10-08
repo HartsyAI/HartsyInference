@@ -84,6 +84,9 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
     /// <inheritdoc/>
     public ExpertBacking Backing => ExpertBacking.Pack;
 
+    /// <summary>Largest manifest the reader will read into memory; a record is a few hundred bytes of JSON.</summary>
+    public const long MaxManifestBytes = 256L << 20;
+
     /// <summary>Largest width a manifest may declare; far above any real expert and keeps the size arithmetic safe.</summary>
     public const int MaxDimension = 1 << 20;
 
@@ -98,8 +101,12 @@ public sealed class ExpertPackReader : IExpertSource, IDisposable
         ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         if (!File.Exists(Path.Combine(directory, "COMPLETE")))
             throw new InvalidDataException($"'{directory}' is not a completed expert pack (no COMPLETE marker).");
+        string manifestPath = Path.Combine(directory, "manifest.json");
+        // Bound the size before reading: a tampered manifest must not be materialized in full to find out it is invalid.
+        if (new FileInfo(manifestPath).Length > MaxManifestBytes)
+            throw new InvalidDataException($"The pack manifest exceeds {MaxManifestBytes} bytes.");
         ExpertPackManifest manifest = JsonSerializer.Deserialize(
-            File.ReadAllText(Path.Combine(directory, "manifest.json")), ExpertPackJsonContext.Default.ExpertPackManifest)
+            File.ReadAllText(manifestPath), ExpertPackJsonContext.Default.ExpertPackManifest)
             ?? throw new InvalidDataException("The pack manifest is empty.");
         if (manifest.Format != ExpertPackWriter.FormatVersion)
             throw new InvalidDataException($"Expert pack format {manifest.Format} is not version {ExpertPackWriter.FormatVersion}.");
