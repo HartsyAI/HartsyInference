@@ -35,6 +35,21 @@ public sealed class DeepSeekV41WeightTests : IDisposable
         return (weight, new QuantWeightInfo { Format = recipe.FormatName, Recipe = recipe });
     }
 
+    // random nibbles with in-range E8M0 scales, laid out like a V4.1 routed expert: I8 [rows, cols / 2], one scale per 32 inputs of each row
+    private (Tensor Weight, QuantWeightInfo Quant) Mxfp4(int rows, int cols, int seed)
+    {
+        Random rng = new(seed);
+        Tensor weight = new(new TensorShape(rows, cols / 2), DType.I8);
+        rng.NextBytes(weight.AsSpan<byte>());
+        Tensor scale = new(new TensorShape(rows, cols / 32), DType.F8E8M0);
+        Span<byte> scales = scale.AsSpan<byte>();
+        for (int i = 0; i < scales.Length; i++) scales[i] = (byte)rng.Next(110, 130);
+        _owned.Add(weight);
+        _owned.Add(scale);
+        QuantRecipe recipe = new() { Encoding = QuantEncoding.Mxfp4E8M0, Geometry = new BlockGeometry(1, 32), ScaleDType = scale.DType, LogicalRows = rows, LogicalCols = cols, Scale = scale };
+        return (weight, new QuantWeightInfo { Format = recipe.FormatName, Recipe = recipe });
+    }
+
     private static float[] Input(int count, int seed)
     {
         Random rng = new(seed);
@@ -56,6 +71,21 @@ public sealed class DeepSeekV41WeightTests : IDisposable
         Assert.False(stored.IsWidened);
         Assert.Equal(widened.Linear(x, tokens, cols, rows), stored.Linear(x, tokens, cols, rows));
         Assert.True(stored.ResidentBytes < widened.ResidentBytes / 3);
+    }
+
+    [Theory]
+    [InlineData(40, 96, 2)]
+    [InlineData(1100, 4096, 1)] // windows of 1024 rows: the second starts at row 1024
+    [InlineData(1100, 8192, 2)] // windows of 512 rows: later windows start at rows 512 and 1024
+    public void StoredMxfp4_LinearEqualsTheWidenedProductBitForBit(int rows, int cols, int tokens)
+    {
+        (Tensor weight, QuantWeightInfo quant) = Mxfp4(rows, cols, 21);
+        float[] x = Input(tokens * cols, 22);
+        DeepSeekV41Weight stored = DeepSeekV41Weight.FromStored("w", weight, quant, rows, cols);
+        DeepSeekV41Weight widened = DeepSeekV41Weight.FromF32(WeightDequantizer.ToF32(weight, quant));
+
+        Assert.Equal(widened.Linear(x, tokens, cols, rows), stored.Linear(x, tokens, cols, rows));
+        Assert.True(stored.ResidentBytes < widened.ResidentBytes / 6);
     }
 
     [Fact]

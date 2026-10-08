@@ -41,9 +41,6 @@ stable release will require. Dates are UTC.
   around the wrapper: every sidecar alive at a model-swap boundary stayed on the card. The wrapper's body is now
   `GpuTransferHelper.State.FreeAllCached()`, so every route to the sweep runs it, and the static entry point delegates
   to it. Teardown and `EvictGpuCache` behave as before.
-
-## alpha.280
-
 - **Changed: the DeepSeek-V4.1 host reference model keeps its weights in the checkpoint's own form.** Dense attention, shared-expert,
   compressor, indexer, Engram, embedding, head and routed-expert weights (FP8 E4M3 with E8M0 block scales, MXFP4, BF16) stay as
   mapped checkpoint bytes and are decoded one row window at a time inside each product (`DeepSeekV41Weight`,
@@ -63,6 +60,7 @@ stable release will require. Dates are UTC.
   hidden states and logits. Nothing is compared to upstream on the real weights yet, so no support-matrix row is Verified and the
   catalog entry stays Structural.
 - **Changed: BF16 weights are widened in parallel by row** (a 129,280-row head window took 21 s single-threaded for one token).
+
 
 ## alpha.279
 

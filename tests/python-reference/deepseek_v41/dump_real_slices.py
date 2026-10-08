@@ -1,6 +1,14 @@
+"""Dequantizes row windows of real DeepSeek-V4.1 tensors with torch, reading the shards by offset (no mmap of the 100 GB files),
+and writes them with a manifest for DeepSeekV41RealWeightsTests.RealTensorSlices_*. Needs torch with float8 dtypes.
+Usage: dump_real_slices.py <checkpoint dir> <output dir>, then set DSV41_REAL_SLICES=<output dir> for the test."""
 import json, torch, numpy as np
 import struct
-D='/mnt/model-storage/Models/llm/deepseek-v4.1-flash/'
+import sys, os
+if len(sys.argv) != 3:
+    sys.exit('usage: dump_real_slices.py <checkpoint dir> <output dir>')
+D = os.path.join(sys.argv[1], '')
+OUT = sys.argv[2]
+os.makedirs(OUT, exist_ok=True)
 idx=json.load(open(D+'model.safetensors.index.json'))['weight_map']
 FP4=torch.tensor([0,.5,1,1.5,2,3,4,6,0,-.5,-1,-1.5,-2,-3,-4,-6],dtype=torch.float32)
 DT={'F8_E4M3':torch.float8_e4m3fn,'F8_E8M0':torch.float8_e8m0fnu,'BF16':torch.bfloat16,'I8':torch.int8,'F32':torch.float32}
@@ -17,8 +25,7 @@ def sl(key,r0,r1):
     return torch.frombuffer(buf,dtype=dt).reshape(r1-r0,*shape[1:])
 def fp8(key,r0,r1):
     w=sl(key,r0,r1).float(); s=sl(key.replace('.weight','.scale'),r0//32,(r1+31)//32).float()
-    s=s.repeat_interleave(32,0).repeat_interleave(32,1)[:r1-r0-0 if False else None]
-    s=s[:w.shape[0],:w.shape[1]]
+    s=s.repeat_interleave(32,0).repeat_interleave(32,1)[:w.shape[0],:w.shape[1]]
     return w*s
 def fp4(key,r0,r1):
     b=sl(key,r0,r1).view(torch.uint8); s=sl(key.replace('.weight','.scale'),r0,r1).float()
@@ -33,7 +40,7 @@ jobs=[('fp8','layers.0.attn.wkv.weight',0,64),('fp8','layers.0.attn.wo_a.weight'
 man=[]
 for kind,key,r0,r1 in jobs:
     t={'fp8':fp8,'fp4':fp4,'bf16':bf16}[kind](key,r0,r1).contiguous()
-    n=f"{len(man)}.f32"; t.numpy().astype('<f4').tofile('/'.join(['REAL',n]).replace('REAL',__import__('sys').argv[1]))
+    n=f"{len(man)}.f32"; t.numpy().astype('<f4').tofile(os.path.join(OUT, n))
     man.append(dict(kind=kind,key=key,r0=r0,r1=r1,cols=t.shape[1],file=n,sum=float(t.double().sum()),absmax=float(t.abs().max())))
-json.dump(man,open(__import__('sys').argv[1]+'/manifest.json','w'),indent=1)
+json.dump(man, open(os.path.join(OUT, 'manifest.json'), 'w'), indent=1)
 print(json.dumps(man)[:600])

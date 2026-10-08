@@ -13,7 +13,7 @@ public static class DeepSeekV41ExpertLoader
     /// <param name="dim">Hidden width (<c>hidden_size</c>).</param>
     /// <param name="inter">Intermediate width (<c>moe_intermediate_size</c>).</param>
     /// <exception cref="HartsyInferenceException">A projection's logical shape is not the expected <c>[inter, dim]</c> or <c>[dim, inter]</c>.</exception>
-    public static DeepSeekV41SwigluWeights Load(DeepSeekV41ExpertBank bank, int expert, int dim, int inter, DeepSeekV41Residency residency = DeepSeekV41Residency.WidenedF32) =>
+    public static DeepSeekV41SwigluWeights Load(DeepSeekV41ExpertBank bank, int expert, int dim, int inter, DeepSeekV41Residency residency = DeepSeekV41Residency.Stored) =>
         new(dim, inter,
             Read(bank, expert, DeepSeekV41ExpertProjection.W1, inter, dim, residency),
             Read(bank, expert, DeepSeekV41ExpertProjection.W2, dim, inter, residency),

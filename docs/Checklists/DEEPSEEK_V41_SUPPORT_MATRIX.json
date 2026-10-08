@@ -420,6 +420,7 @@
         "quant.official.dequant"
       ],
       "acceptanceTest": "stored product == widened product bit for bit; three real layers finite; memory estimate vs measured RSS",
+      "pr": 297,
       "status": "InProgress",
       "note": "Dense, shared-expert, embedding, head, Engram projection and routed-expert weights stay as mapped checkpoint bytes and are decoded one row window at a time; products equal the F32-widened path bit for bit (DeepSeekV41WeightTests, loader residency test). Measured on three real layers: 3 GiB RSS. The full-depth peak is not measured, and no GPU path uses it"
     },
