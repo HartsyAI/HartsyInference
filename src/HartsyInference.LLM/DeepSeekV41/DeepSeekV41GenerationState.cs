@@ -6,7 +6,8 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <remarks>The compressor's partial group and the sliding-window ring cannot be truncated in place, so <see cref="Truncate"/> resets and replays the kept
 /// prefix. The replay follows how the history was built: the first append runs as one prefill chunk and every later token runs one at a time. Those two
 /// modes are not arithmetically equivalent (the sparse attention's selection can differ between them), so a single-chunk replay of a decoded tail would
-/// not restore the state that decoding built.</remarks>
+/// not restore the state that decoding built. A rollback into the first chunk is the exception: it replays a shorter chunk, which is not the original chunk's
+/// arithmetic. The speculative scorer never does that, because every context starts with the prompt.</remarks>
 public sealed class DeepSeekV41GenerationState : ISequenceState
 {
     private readonly DeepSeekV41HostModel _model;
