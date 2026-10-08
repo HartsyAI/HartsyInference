@@ -218,7 +218,8 @@ internal sealed class VoiceAudioWorker : IDisposable
             dropped += read;
         }
         // The partial frame and the model state belong to audio that is gone; resume clean on the fresh audio. The
-        // turn loop reports the drop, so this thread does no logging.
+        // turn loop reports the drop, so this thread does no logging. The call-audio detectors reset with it, so a key held
+        // across the trim is reported again and detector offsets restart at 0.
         _frameFill = 0;
         _frontend.Reset();
         Volatile.Write(ref _droppedOldest, _droppedOldest + dropped);

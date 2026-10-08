@@ -134,7 +134,8 @@ public sealed class DtmfDetector
         return true;
     }
 
-    /// <summary>Clears all state and the sample counter.</summary>
+    /// <summary>Clears the tone state, the queue and the sample counter (the <see cref="DroppedEvents"/> total survives). A key
+    /// still sounding is reported again as a new event if it continues after the reset.</summary>
     public void Reset()
     {
         _fill = 0;
