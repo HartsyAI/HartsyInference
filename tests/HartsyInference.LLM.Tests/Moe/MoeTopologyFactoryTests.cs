@@ -205,4 +205,37 @@ public sealed class MoeTopologyFactoryTests
 
         Assert.Equal(SelectionBiasSpace.Score, MoeTopologyFactory.FromTransformer(config).Layers[0].Moe!.Router.BiasSpace);
     }
+
+    [Fact]
+    public void FlatPlainSigmoid_NeverAdvertisesACorrectionBias()
+    {
+        MoeConfig flat = new()
+        {
+            NumExperts = 8, NumExpertsPerTok = 2, MoeIntermediateSize = 16, Scoring = MoeScoring.Sigmoid,
+        };
+        TransformerConfig config = new()
+        {
+            HiddenSize = 32, NumLayers = 1, NumHeads = 2, NumKvHeads = 2, HeadDim = 16, IntermediateSize = 64, VocabSize = 100, Moe = flat,
+        };
+
+        RouterDescriptor router = MoeTopologyFactory.FromTransformer(config, routerHasCorrectionBias: true).Layers[0].Moe!.Router;
+        Assert.False(router.HasSelectionBias);
+    }
+
+    [Fact]
+    public void SingleGroupThatKeepsNothing_IsRejected_AndRouterRejectsOneGroup()
+    {
+        MoeConfig degenerate = new()
+        {
+            NumExperts = 8, NumExpertsPerTok = 2, MoeIntermediateSize = 16, Scoring = MoeScoring.Sigmoid,
+            ExpertGroupCount = 1, ExpertGroupUsedCount = 0,
+        };
+        TransformerConfig config = new()
+        {
+            HiddenSize = 32, NumLayers = 1, NumHeads = 2, NumKvHeads = 2, HeadDim = 16, IntermediateSize = 64, VocabSize = 100, Moe = degenerate,
+        };
+
+        Assert.Throws<NotSupportedException>(() => MoeTopologyFactory.FromTransformer(config));
+        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid, GroupCount: 1, GroupsKept: 1).Validated());
+    }
 }

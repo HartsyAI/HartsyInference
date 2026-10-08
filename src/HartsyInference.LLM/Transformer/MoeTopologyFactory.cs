@@ -56,23 +56,28 @@ public static class MoeTopologyFactory
 
     private static MoeLayerDescriptor BuildLayer(TransformerConfig config, MoeConfig moe, DType dtype, bool sharedGated, bool? routerHasCorrectionBias)
     {
-        bool grouped = moe.ExpertGroupCount > 1;
-        bool hasBias = routerHasCorrectionBias ?? moe.Scoring == MoeScoring.SigmoidLogitAdd;
+        // Production takes the group-limited path for every positive group count, and a single group is that path with one group.
+        bool groupLimited = moe.ExpertGroupCount > 0;
+        if (moe.ExpertGroupCount == 1 && moe.ExpertGroupUsedCount != 1)
+            throw new NotSupportedException($"A single expert group must keep that group; the config keeps {moe.ExpertGroupUsedCount}.");
+        // A group count of 1 is not a grouping for the router: it is represented as the flat router, with the group-path bias space.
+        int groupCount = moe.ExpertGroupCount > 1 ? moe.ExpertGroupCount : 0;
+        int groupsKept = groupCount > 0 ? moe.ExpertGroupUsedCount : 0;
+        // The bias exists in flat SigmoidLogitAdd always, and in group-limited routing when the checkpoint carries it.
+        bool hasBias = groupLimited ? (routerHasCorrectionBias ?? moe.Scoring == MoeScoring.SigmoidLogitAdd) : moe.Scoring == MoeScoring.SigmoidLogitAdd;
         RouterDescriptor router = new RouterDescriptor(
             NumExperts: moe.NumExperts,
             TopKDecode: moe.NumExpertsPerTok,
             TopKPrefill: moe.NumExpertsPerTok,
             Scoring: ToScoring(moe.Scoring),
-            GroupCount: moe.ExpertGroupCount,
-            GroupsKept: moe.ExpertGroupUsedCount,
+            GroupCount: groupCount,
+            GroupsKept: groupsKept,
             Renormalize: moe.NormTopKProb,
-            RenormEpsilon: grouped ? 1e-20f : 0f,
+            RenormEpsilon: groupLimited ? 1e-20f : 0f,
             Scale: moe.RoutedScalingFactor,
-            // SigmoidLogitAdd scores by sigmoid but adds e_score_correction_bias to the logit for selection only.
             HasSelectionBias: hasBias,
-            // Production flat sigmoid routing biases the logit before scoring; grouped routing biases the score.
-            // Production enters group-limited selection for every positive group count, and only the flat path biases the logit.
-            BiasSpace: moe.Scoring == MoeScoring.SigmoidLogitAdd && moe.ExpertGroupCount <= 0 ? SelectionBiasSpace.Logit : SelectionBiasSpace.Score).Validated();
+            // Only the flat path biases the logit; the group-limited path biases the score.
+            BiasSpace: moe.Scoring == MoeScoring.SigmoidLogitAdd && !groupLimited ? SelectionBiasSpace.Logit : SelectionBiasSpace.Score).Validated();
 
         ExpertGroupDescriptor routed = new ExpertGroupDescriptor(moe.NumExperts, new ExpertDescriptor(config.HiddenSize, moe.MoeIntermediateSize, dtype)).Validated();
         ExpertGroupDescriptor? shared = moe.SharedExpertIntermediateSize > 0

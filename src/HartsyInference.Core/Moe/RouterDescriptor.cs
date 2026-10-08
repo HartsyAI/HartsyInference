@@ -32,6 +32,7 @@ public sealed record RouterDescriptor(
         if (NumExperts <= 0) throw new ArgumentException("A router needs at least one expert.", nameof(NumExperts));
         if (TopKDecode <= 0 || TopKDecode > NumExperts) throw new ArgumentException($"Decode top-k {TopKDecode} must be in [1, {NumExperts}].", nameof(TopKDecode));
         if (TopKPrefill <= 0 || TopKPrefill > NumExperts) throw new ArgumentException($"Prefill top-k {TopKPrefill} must be in [1, {NumExperts}].", nameof(TopKPrefill));
+        if (GroupCount == 1) throw new ArgumentException("One expert group is not a grouping; use GroupCount 0 for flat routing.", nameof(GroupCount));
         if (GroupCount > 1)
         {
             if (NumExperts % GroupCount != 0) throw new ArgumentException($"{GroupCount} groups do not divide {NumExperts} experts.", nameof(GroupCount));
