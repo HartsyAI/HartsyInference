@@ -19,14 +19,15 @@ public sealed class DeepSeekV41Aligner : IDisposable
     /// <param name="config">Vision tower dimensions (feature width and downsample ratio).</param>
     /// <param name="outputDim">The language model's hidden width, which the aligner emits.</param>
     /// <param name="weights">F32 weights shaped by <paramref name="config"/> and <paramref name="outputDim"/>; the aligner takes ownership.</param>
-    /// <exception cref="HartsyInferenceException">The config is not runnable or a weight is missing, not F32 or mis-shaped.</exception>
+    /// <exception cref="HartsyInferenceException">A weight is missing, not F32 or mis-shaped.</exception>
     public DeepSeekV41Aligner(IBackend backend, DeepSeekV41VisionConfig config, int outputDim, DeepSeekV41AlignerWeights weights)
     {
         ArgumentNullException.ThrowIfNull(backend);
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(weights);
         ArgumentOutOfRangeException.ThrowIfLessThan(outputDim, 1);
-        config.Validate();
+        ArgumentOutOfRangeException.ThrowIfLessThan(config.HiddenSize, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(config.DownsampleRatio, 1);
         weights.Validate(config, outputDim);
         _backend = backend;
         _weights = weights;

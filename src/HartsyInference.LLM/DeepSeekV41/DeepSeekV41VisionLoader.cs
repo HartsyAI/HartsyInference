@@ -7,7 +7,7 @@ namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>Builds a <see cref="DeepSeekV41VisionModel"/> from an opened DeepSeek-V4.1 checkpoint, widening the <c>vision.*</c>, <c>aligner.*</c> and <c>image_*</c> tensors to F32.</summary>
 /// <remarks>The official checkpoint stores all 266 of these as BF16 without quantization companions (about 1 GB in its first two shards), so widening is exact. The returned model owns copies, not views, and does not need
-/// <paramref name="checkpoint"/> afterwards.</remarks>
+/// the checkpoint afterwards.</remarks>
 public static class DeepSeekV41VisionLoader
 {
     /// <summary>Loads the vision tower, aligner and image-span embeddings of <paramref name="checkpoint"/>.</summary>
@@ -19,26 +19,22 @@ public static class DeepSeekV41VisionLoader
         DeepSeekV41VisionConfig config = checkpoint.Config.Vision
             ?? throw new HartsyInferenceException($"The config at {checkpoint.Info.ConfigPath} declares no vision tower.");
         config.Validate();
-        int dim = config.HiddenSize, inter = config.IntermediateSize, outDim = checkpoint.Config.HiddenSize;
+        long dim = config.HiddenSize, outDim = checkpoint.Config.HiddenSize;
 
         Reader read = new(checkpoint);
         try
         {
             DeepSeekV41VisionBlockWeights[] blocks = new DeepSeekV41VisionBlockWeights[config.NumLayers];
-            for (int i = 0; i < blocks.Length; i++)
-            {
-                string b = $"vision.blocks.{i}.";
-                blocks[i] = new DeepSeekV41VisionBlockWeights(read.Vector(b + "norm1.weight", dim), read.Matrix(b + "attn.wqkv.weight", 3L * dim, dim),
-                    read.Vector(b + "attn.wqkv.bias", 3L * dim), read.Matrix(b + "attn.wo.weight", dim, dim), read.Vector(b + "attn.wo.bias", dim),
-                    read.Vector(b + "norm2.weight", dim), read.Matrix(b + "mlp.w1.weight", 2L * inter, dim), read.Matrix(b + "mlp.w2.weight", dim, inter));
-            }
-            DeepSeekV41VisionWeights tower = new(read.Matrix("vision.patch_embed.proj.weight", dim, config.PatchInputDim),
+            for (int i = 0; i < blocks.Length; i++) blocks[i] = ReadBlock(read, config, i);
+            DeepSeekV41VisionWeights towerWeights = new(read.Matrix("vision.patch_embed.proj.weight", dim, config.PatchInputDim),
                 read.Vector("vision.patch_embed.proj.bias", dim), blocks, read.Vector("vision.norm.weight", dim));
-            DeepSeekV41AlignerWeights aligner = new(read.Matrix("aligner.w1.weight", outDim, config.AlignerInputDim), read.Vector("aligner.w1.bias", outDim),
-                read.Matrix("aligner.w2.weight", outDim, outDim), read.Vector("aligner.w2.bias", outDim));
-            float[] imageStart = read.Values("image_start", outDim), imageEnd = read.Values("image_end", outDim), imageNewline = read.Values("image_newline", outDim);
-            DeepSeekV41VisionModel model = new(new DeepSeekV41VisionTower(backend, config, tower), new DeepSeekV41Aligner(backend, config, outDim, aligner),
-                imageStart, imageEnd, imageNewline);
+            DeepSeekV41AlignerWeights alignerWeights = new(read.Matrix("aligner.w1.weight", outDim, config.AlignerInputDim),
+                read.Vector("aligner.w1.bias", outDim), read.Matrix("aligner.w2.weight", outDim, outDim), read.Vector("aligner.w2.bias", outDim));
+            float[] imageStart = read.Values("image_start", outDim);
+            float[] imageEnd = read.Values("image_end", outDim);
+            float[] imageNewline = read.Values("image_newline", outDim);
+            DeepSeekV41VisionModel model = new(new DeepSeekV41VisionTower(backend, config, towerWeights),
+                new DeepSeekV41Aligner(backend, config, (int)outDim, alignerWeights), imageStart, imageEnd, imageNewline);
             read.Release();
             return model;
         }
@@ -46,6 +42,16 @@ public static class DeepSeekV41VisionLoader
         {
             read.DisposeUnreleased();
         }
+    }
+
+    private static DeepSeekV41VisionBlockWeights ReadBlock(Reader read, DeepSeekV41VisionConfig config, int index)
+    {
+        long dim = config.HiddenSize, inter = config.IntermediateSize;
+        string b = $"vision.blocks.{index}.";
+        return new DeepSeekV41VisionBlockWeights(
+            read.Vector(b + "norm1.weight", dim), read.Matrix(b + "attn.wqkv.weight", 3 * dim, dim), read.Vector(b + "attn.wqkv.bias", 3 * dim),
+            read.Matrix(b + "attn.wo.weight", dim, dim), read.Vector(b + "attn.wo.bias", dim), read.Vector(b + "norm2.weight", dim),
+            read.Matrix(b + "mlp.w1.weight", 2 * inter, dim), read.Matrix(b + "mlp.w2.weight", dim, inter));
     }
 
     // Reads canonical keys as F32 tensors, remembering them so a failed load frees what it had read.
@@ -88,7 +94,8 @@ public static class DeepSeekV41VisionLoader
 
         private void Require(string key)
         {
-            if (!checkpoint.HasWeight(key)) throw new HartsyInferenceException($"The checkpoint at {checkpoint.Info.Root} has no '{key}', which the vision tower needs.");
+            if (!checkpoint.HasWeight(key))
+                throw new HartsyInferenceException($"The checkpoint at {checkpoint.Info.Root} has no '{key}', which the vision tower needs.");
         }
     }
 }

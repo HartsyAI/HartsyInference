@@ -8,7 +8,8 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <param name="PatchBias">Its bias, <c>[dim]</c>.</param>
 /// <param name="Blocks">The blocks in order.</param>
 /// <param name="FinalNorm">RMSNorm weight after the last block, <c>[dim]</c>.</param>
-public sealed record DeepSeekV41VisionWeights(Tensor PatchProj, Tensor PatchBias, IReadOnlyList<DeepSeekV41VisionBlockWeights> Blocks, Tensor FinalNorm)
+public sealed record DeepSeekV41VisionWeights(
+    Tensor PatchProj, Tensor PatchBias, IReadOnlyList<DeepSeekV41VisionBlockWeights> Blocks, Tensor FinalNorm)
 {
     /// <summary>Checks every tensor against <paramref name="config"/>.</summary>
     /// <exception cref="HartsyInferenceException">A tensor is missing, not F32 or has the wrong shape, or the block count differs from the config.</exception>

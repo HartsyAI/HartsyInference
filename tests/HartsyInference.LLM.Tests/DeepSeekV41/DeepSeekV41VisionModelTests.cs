@@ -4,6 +4,7 @@ using HartsyInference.Cpu;
 using HartsyInference.LLM.DeepSeekV41;
 using Xunit;
 using Xunit.Abstractions;
+using VisionFixture = HartsyInference.LLM.Tests.DeepSeekV41.DeepSeekV41VisionFixture;
 
 namespace HartsyInference.LLM.Tests.DeepSeekV41;
 
@@ -12,11 +13,12 @@ public sealed class DeepSeekV41VisionModelTests(ITestOutputHelper output)
 {
     private static DeepSeekV41VisionModel Build(CpuBackend backend, float[]? imageEnd = null)
     {
-        DeepSeekV41VisionConfig config = DeepSeekV41VisionFixture.Config();
-        int outDim = DeepSeekV41VisionFixture.OutputDim;
-        return new DeepSeekV41VisionModel(new DeepSeekV41VisionTower(backend, config, DeepSeekV41VisionFixture.TowerWeights()),
-            new DeepSeekV41Aligner(backend, config, outDim, DeepSeekV41VisionFixture.AlignerWeights()),
-            Enumerable.Range(0, outDim).Select(static i => 1f + i).ToArray(), imageEnd ?? new float[outDim], Enumerable.Range(0, outDim).Select(static i => -1f - i).ToArray());
+        DeepSeekV41VisionConfig config = VisionFixture.Config();
+        int outDim = VisionFixture.OutputDim;
+        return new DeepSeekV41VisionModel(new DeepSeekV41VisionTower(backend, config, VisionFixture.TowerWeights()),
+            new DeepSeekV41Aligner(backend, config, outDim, VisionFixture.AlignerWeights()),
+            Enumerable.Range(0, outDim).Select(static i => 1f + i).ToArray(), imageEnd ?? new float[outDim],
+            Enumerable.Range(0, outDim).Select(static i => -1f - i).ToArray());
     }
 
     [Theory]
@@ -25,13 +27,13 @@ public sealed class DeepSeekV41VisionModelTests(ITestOutputHelper output)
     [InlineData(1, 4)]
     public void Encode_MatchesTheUpstreamImageEncoder(int gridHeight, int gridWidth)
     {
-        JsonElement testCase = DeepSeekV41VisionFixture.TowerCase(gridHeight, gridWidth);
+        JsonElement testCase = VisionFixture.TowerCase(gridHeight, gridWidth);
         using CpuBackend backend = new();
         using DeepSeekV41VisionModel model = Build(backend);
 
-        float[] embeddings = model.Encode(DeepSeekV41VisionFixture.Floats(testCase.GetProperty("patches")), gridHeight, gridWidth);
+        float[] embeddings = model.Encode(VisionFixture.Floats(testCase.GetProperty("patches")), gridHeight, gridWidth);
 
-        DeepSeekV41VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} encode", embeddings, DeepSeekV41VisionFixture.Floats(testCase.GetProperty("output")));
+        VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} encode", embeddings, VisionFixture.Floats(testCase.GetProperty("output")));
         (int tokenHeight, int tokenWidth) = model.TokenGrid(gridHeight, gridWidth);
         Assert.Equal(tokenHeight * tokenWidth * model.OutputDim, embeddings.Length);
     }
@@ -42,7 +44,7 @@ public sealed class DeepSeekV41VisionModelTests(ITestOutputHelper output)
         using CpuBackend backend = new();
         using DeepSeekV41VisionModel model = Build(backend);
 
-        Assert.Equal(DeepSeekV41VisionFixture.OutputDim, model.OutputDim);
+        Assert.Equal(VisionFixture.OutputDim, model.OutputDim);
         Assert.Equal(1f, model.ImageStart[0]);
         Assert.Equal(0f, model.ImageEnd[^1]);
         Assert.Equal(-1f - (model.OutputDim - 1), model.ImageNewline[^1]);
@@ -63,11 +65,11 @@ public sealed class DeepSeekV41VisionModelTests(ITestOutputHelper output)
     {
         using CpuBackend backend = new();
         DeepSeekV41VisionModel model = Build(backend);
-        float[] patches = new float[DeepSeekV41VisionFixture.Config().PatchInputDim];
+        float[] patches = new float[VisionFixture.Config().PatchInputDim];
 
         model.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => model.Tower.Forward(patches, 1, 1));
-        Assert.Throws<ObjectDisposedException>(() => model.Aligner.Forward(new float[DeepSeekV41VisionFixture.Config().HiddenSize], 1, 1));
+        Assert.Throws<ObjectDisposedException>(() => model.Aligner.Forward(new float[VisionFixture.Config().HiddenSize], 1, 1));
     }
 }

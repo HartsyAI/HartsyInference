@@ -66,7 +66,8 @@ internal static class DeepSeekV41VisionFixtureCheckpoint
     /// <summary>The pinned official config with the language width and the vision tower shrunk to the fixture's.</summary>
     public static string ConfigJson(bool withVisionConfig)
     {
-        JsonObject root = JsonNode.Parse(DeepSeekV41Fixtures.OfficialConfig(text => text["hidden_size"] = DeepSeekV41VisionFixture.OutputDim))!.AsObject();
+        string official = DeepSeekV41Fixtures.OfficialConfig(text => text["hidden_size"] = DeepSeekV41VisionFixture.OutputDim);
+        JsonObject root = JsonNode.Parse(official)!.AsObject();
         JsonElement c = DeepSeekV41VisionFixture.Root.GetProperty("config");
         if (!withVisionConfig)
         {

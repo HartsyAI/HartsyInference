@@ -4,6 +4,8 @@ using HartsyInference.Cpu;
 using HartsyInference.LLM.DeepSeekV41;
 using Xunit;
 using Xunit.Abstractions;
+using VisionFixture = HartsyInference.LLM.Tests.DeepSeekV41.DeepSeekV41VisionFixture;
+using VisionCheckpoint = HartsyInference.LLM.Tests.DeepSeekV41.DeepSeekV41VisionFixtureCheckpoint;
 
 namespace HartsyInference.LLM.Tests.DeepSeekV41;
 
@@ -14,29 +16,32 @@ public sealed class DeepSeekV41VisionLoaderTests(ITestOutputHelper output) : IDi
 
     public void Dispose() => Directory.Delete(_directory, recursive: true);
 
+    private static float[] Written(string key, int width) =>
+        Enumerable.Range(0, width).Select(i => VisionCheckpoint.EmbeddingValue(key, i)).ToArray();
+
     [Fact]
     public void AnF32Checkpoint_EncodesLikeTheUpstreamModel()
     {
-        DeepSeekV41VisionFixtureCheckpoint.Write(_directory);
-        JsonElement testCase = DeepSeekV41VisionFixture.TowerCase(5, 7);
+        VisionCheckpoint.Write(_directory);
+        JsonElement testCase = VisionFixture.TowerCase(5, 7);
         using CpuBackend backend = new();
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
 
         using DeepSeekV41VisionModel model = DeepSeekV41VisionLoader.Load(backend, checkpoint);
 
-        DeepSeekV41VisionFixture.AssertClose(output, "loaded encode 5x7", model.Encode(DeepSeekV41VisionFixture.Floats(testCase.GetProperty("patches")), 5, 7),
-            DeepSeekV41VisionFixture.Floats(testCase.GetProperty("output")));
-        Assert.Equal(DeepSeekV41VisionFixture.OutputDim, model.OutputDim);
-        Assert.Equal(Enumerable.Range(0, model.OutputDim).Select(static i => DeepSeekV41VisionFixtureCheckpoint.EmbeddingValue("image_start", i)), model.ImageStart.ToArray());
-        Assert.Equal(Enumerable.Range(0, model.OutputDim).Select(static i => DeepSeekV41VisionFixtureCheckpoint.EmbeddingValue("image_end", i)), model.ImageEnd.ToArray());
-        Assert.Equal(Enumerable.Range(0, model.OutputDim).Select(static i => DeepSeekV41VisionFixtureCheckpoint.EmbeddingValue("image_newline", i)), model.ImageNewline.ToArray());
+        VisionFixture.AssertClose(output, "loaded encode 5x7", model.Encode(VisionFixture.Floats(testCase.GetProperty("patches")), 5, 7),
+            VisionFixture.Floats(testCase.GetProperty("output")));
+        Assert.Equal(VisionFixture.OutputDim, model.OutputDim);
+        Assert.Equal(Written("image_start", model.OutputDim), model.ImageStart.ToArray());
+        Assert.Equal(Written("image_end", model.OutputDim), model.ImageEnd.ToArray());
+        Assert.Equal(Written("image_newline", model.OutputDim), model.ImageNewline.ToArray());
     }
 
     [Fact]
     public void ABf16Checkpoint_WidensExactly_AndTheModelOutlivesTheCheckpoint()
     {
-        DeepSeekV41VisionFixtureCheckpoint.Write(_directory, bf16: true);
-        float[] patches = DeepSeekV41VisionFixture.Floats(DeepSeekV41VisionFixture.TowerCase(4, 3).GetProperty("patches"));
+        VisionCheckpoint.Write(_directory, bf16: true);
+        float[] patches = VisionFixture.Floats(VisionFixture.TowerCase(4, 3).GetProperty("patches"));
         using CpuBackend backend = new();
         float[] viaDisk;
         DeepSeekV41VisionModel loaded;
@@ -47,22 +52,22 @@ public sealed class DeepSeekV41VisionLoaderTests(ITestOutputHelper output) : IDi
         }
 
         // the same forward on weights that went through bf16 in memory: any load-path difference would show as a nonzero gap
-        DeepSeekV41VisionConfig config = DeepSeekV41VisionFixture.Config();
-        Func<string, float[]> bf16Values = key => DeepSeekV41VisionFixture.Param(key).Select(DeepSeekV41VisionFixtureCheckpoint.ThroughBf16).ToArray();
-        using DeepSeekV41VisionTower tower = new(backend, config, DeepSeekV41VisionFixture.TowerWeights(bf16Values));
-        using DeepSeekV41Aligner aligner = new(backend, config, DeepSeekV41VisionFixture.OutputDim, DeepSeekV41VisionFixture.AlignerWeights(bf16Values));
+        DeepSeekV41VisionConfig config = VisionFixture.Config();
+        Func<string, float[]> bf16Values = key => VisionFixture.Param(key).Select(VisionCheckpoint.ThroughBf16).ToArray();
+        using DeepSeekV41VisionTower tower = new(backend, config, VisionFixture.TowerWeights(bf16Values));
+        using DeepSeekV41Aligner aligner = new(backend, config, VisionFixture.OutputDim, VisionFixture.AlignerWeights(bf16Values));
         float[] direct = aligner.Forward(tower.Forward(patches, 4, 3), 4, 3);
 
         Assert.Equal(direct, viaDisk);
         Assert.Equal(viaDisk, loaded.Encode(patches, 4, 3));
-        Assert.Equal(DeepSeekV41VisionFixtureCheckpoint.ThroughBf16(DeepSeekV41VisionFixtureCheckpoint.EmbeddingValue("image_start", 3)), loaded.ImageStart[3]);
+        Assert.Equal(VisionCheckpoint.ThroughBf16(VisionCheckpoint.EmbeddingValue("image_start", 3)), loaded.ImageStart[3]);
         loaded.Dispose();
     }
 
     [Fact]
     public void AMissingTensor_IsNamed()
     {
-        DeepSeekV41VisionFixtureCheckpoint.Write(_directory, omit: "vision.blocks.1.attn.wo.bias");
+        VisionCheckpoint.Write(_directory, omit: "vision.blocks.1.attn.wo.bias");
         using CpuBackend backend = new();
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
 
@@ -74,7 +79,7 @@ public sealed class DeepSeekV41VisionLoaderTests(ITestOutputHelper output) : IDi
     [Fact]
     public void AMissingImageEmbedding_IsNamed()
     {
-        DeepSeekV41VisionFixtureCheckpoint.Write(_directory, omit: "image_newline");
+        VisionCheckpoint.Write(_directory, omit: "image_newline");
         using CpuBackend backend = new();
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
 
@@ -84,7 +89,7 @@ public sealed class DeepSeekV41VisionLoaderTests(ITestOutputHelper output) : IDi
     [Fact]
     public void AMisshapenTensor_IsRefusedByName()
     {
-        DeepSeekV41VisionFixtureCheckpoint.Write(_directory, reshape: "vision.blocks.0.mlp.w2.weight");
+        VisionCheckpoint.Write(_directory, reshape: "vision.blocks.0.mlp.w2.weight");
         using CpuBackend backend = new();
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
 
@@ -96,7 +101,7 @@ public sealed class DeepSeekV41VisionLoaderTests(ITestOutputHelper output) : IDi
     [Fact]
     public void AConfigWithoutAVisionTower_IsRefused()
     {
-        DeepSeekV41VisionFixtureCheckpoint.Write(_directory, withVisionConfig: false);
+        VisionCheckpoint.Write(_directory, withVisionConfig: false);
         using CpuBackend backend = new();
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(_directory);
 

@@ -4,6 +4,7 @@ using HartsyInference.Cpu;
 using HartsyInference.LLM.DeepSeekV41;
 using Xunit;
 using Xunit.Abstractions;
+using VisionFixture = HartsyInference.LLM.Tests.DeepSeekV41.DeepSeekV41VisionFixture;
 
 namespace HartsyInference.LLM.Tests.DeepSeekV41;
 
@@ -17,20 +18,20 @@ public sealed class DeepSeekV41AlignerTests(ITestOutputHelper output)
     [InlineData(3, 6)]
     public void EveryStage_MatchesTheUpstreamAligner(int gridHeight, int gridWidth)
     {
-        JsonElement testCase = DeepSeekV41VisionFixture.AlignerCase(gridHeight, gridWidth);
+        JsonElement testCase = VisionFixture.AlignerCase(gridHeight, gridWidth);
         using CpuBackend backend = new();
-        using DeepSeekV41Aligner aligner = new(backend, DeepSeekV41VisionFixture.Config(), DeepSeekV41VisionFixture.OutputDim, DeepSeekV41VisionFixture.AlignerWeights());
+        using DeepSeekV41Aligner aligner = new(backend, VisionFixture.Config(), VisionFixture.OutputDim, VisionFixture.AlignerWeights());
         Dictionary<string, float[]> taps = [];
         aligner.Probe = (stage, values) => taps.Add(stage, values);
 
-        float[] aligned = aligner.Forward(DeepSeekV41VisionFixture.Floats(testCase.GetProperty("features")), gridHeight, gridWidth);
+        float[] aligned = aligner.Forward(VisionFixture.Floats(testCase.GetProperty("features")), gridHeight, gridWidth);
 
         Assert.Equal(["unfold", "hidden"], taps.Keys);
-        DeepSeekV41VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} unfold", taps["unfold"], DeepSeekV41VisionFixture.Floats(testCase.GetProperty("unfold")));
-        DeepSeekV41VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} hidden", taps["hidden"], DeepSeekV41VisionFixture.Floats(testCase.GetProperty("hidden")));
-        DeepSeekV41VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} output", aligned, DeepSeekV41VisionFixture.Floats(testCase.GetProperty("output")));
+        VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} unfold", taps["unfold"], VisionFixture.Floats(testCase.GetProperty("unfold")));
+        VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} hidden", taps["hidden"], VisionFixture.Floats(testCase.GetProperty("hidden")));
+        VisionFixture.AssertClose(output, $"{gridHeight}x{gridWidth} output", aligned, VisionFixture.Floats(testCase.GetProperty("output")));
         (int tokenHeight, int tokenWidth) = DeepSeekV41Aligner.TokenGrid(gridHeight, gridWidth, 3);
-        Assert.Equal(tokenHeight * tokenWidth * DeepSeekV41VisionFixture.OutputDim, aligned.Length);
+        Assert.Equal(tokenHeight * tokenWidth * VisionFixture.OutputDim, aligned.Length);
     }
 
     [Fact]
@@ -77,8 +78,8 @@ public sealed class DeepSeekV41AlignerTests(ITestOutputHelper output)
     public void Forward_RejectsAFeatureCountThatIsNotTheGrid()
     {
         using CpuBackend backend = new();
-        DeepSeekV41VisionConfig config = DeepSeekV41VisionFixture.Config();
-        using DeepSeekV41Aligner aligner = new(backend, config, DeepSeekV41VisionFixture.OutputDim, DeepSeekV41VisionFixture.AlignerWeights());
+        DeepSeekV41VisionConfig config = VisionFixture.Config();
+        using DeepSeekV41Aligner aligner = new(backend, config, VisionFixture.OutputDim, VisionFixture.AlignerWeights());
 
         Assert.Throws<ArgumentException>(() => aligner.Forward(new float[5 * config.HiddenSize], 2, 3));
         Assert.Throws<ArgumentOutOfRangeException>(() => aligner.Forward(new float[config.HiddenSize], 0, 1));
@@ -88,12 +89,12 @@ public sealed class DeepSeekV41AlignerTests(ITestOutputHelper output)
     public void Constructor_NamesAMisshapenWeight()
     {
         using CpuBackend backend = new();
-        DeepSeekV41VisionConfig config = DeepSeekV41VisionFixture.Config();
-        DeepSeekV41AlignerWeights good = DeepSeekV41VisionFixture.AlignerWeights();
+        DeepSeekV41VisionConfig config = VisionFixture.Config();
+        DeepSeekV41AlignerWeights good = VisionFixture.AlignerWeights();
 
         // the second projection is square in the language width; one too wide a bias is a mismatch the constructor must catch
         HartsyInferenceException error = Assert.Throws<HartsyInferenceException>(
-            () => new DeepSeekV41Aligner(backend, config, DeepSeekV41VisionFixture.OutputDim + 1, good));
+            () => new DeepSeekV41Aligner(backend, config, VisionFixture.OutputDim + 1, good));
 
         Assert.Contains("aligner.w1.weight", error.Message);
     }

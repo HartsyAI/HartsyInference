@@ -48,7 +48,10 @@ public sealed class DeepSeekV41VisionTower : IDisposable
         ArgumentOutOfRangeException.ThrowIfLessThan(gridWidth, 1);
         int n = checked(gridHeight * gridWidth);
         if (patches.Length != (long)n * Config.PatchInputDim)
-            throw new ArgumentException($"Expected {n} patches of {Config.PatchInputDim} values ({(long)n * Config.PatchInputDim}), got {patches.Length}.", nameof(patches));
+        {
+            throw new ArgumentException(
+                $"Expected {n} patches of {Config.PatchInputDim} values ({(long)n * Config.PatchInputDim}), got {patches.Length}.", nameof(patches));
+        }
         int dim = Config.HiddenSize, heads = Config.NumHeads, headDim = Config.HeadDim, inter = Config.IntermediateSize;
 
         DeepSeekV41VisionRopeTable rope = DeepSeekV41VisionRopeTable.Build(gridHeight, gridWidth, headDim, Config.RopeTheta);

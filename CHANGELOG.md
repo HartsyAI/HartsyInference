@@ -8,6 +8,14 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.286
+
+- **Added: CPU reference for the DeepSeek-V4.1-Flash vision tower and aligner.** `DeepSeekV41VisionLoader.Load` reads the 266 `vision.*`, `aligner.*` and `image_*` tensors (BF16 in the official shards 1 and 2) as F32 and returns a
+  `DeepSeekV41VisionModel`. `Encode(patches, gridHeight, gridWidth)` runs the tower (patch embedding, 32 pre-norm blocks of full attention with a 2D half-split rotary and a SwiGLU MLP, final RMSNorm) and the aligner (zero-padded 3x3 fold,
+  exact GELU, two projections) on existing backend ops, and `ImageStart`, `ImageEnd` and `ImageNewline` expose the learned span embeddings. `DeepSeekV41VisionConfig` gains `RopeTheta` (default 10000, read from `rope_theta` or
+  `vision_rope_theta`) and the derived widths. Against the unmodified upstream `vision.py` in float32 the stages agree to 1e-6 relative on a small seeded fixture and to 7e-6 on the real weights (aligner output cosine 1.000000, relL2 2.8e-6 on a
+  28x28 patch grid and 1.8e-6 on 17x23). Nothing calls it yet: image preprocessing, the splice into the language model and the GPU path are not built.
+
 ## alpha.285
 
 - **Added: real-weight oracle for DeepSeek-V4.1-Flash layer 0, and a diagnostic probe on the host block.** `dump_real_layers.py` runs the unmodified upstream model on the real checkpoint's first layer; `RealLayers_MatchTheUpstreamModel` (gated on `DSV41_ORACLE_DIR`) compares the host reference against it, hidden relL2 4.3e-6 against the float32 oracle. `DeepSeekV41HostModel.SetProbe` / `DeepSeekV41Block.Probe` expose per-sublayer values for such comparisons and are off by default. No behaviour change.

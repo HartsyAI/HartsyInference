@@ -18,9 +18,10 @@ namespace HartsyInference.LLM.Tests.DeepSeekV41;
 [Trait("Category", "RealWeights")]
 public sealed class DeepSeekV41VisionRealWeightsTests
 {
-    // Gates fixed before the first comparison ran. Both sides are float32 on BF16 weights widened exactly, so a miss is a structural difference, not rounding.
-    // The project plan's bar is correlation >= 0.9999 at the aligner output; every stage is additionally held to a relative L2 and, element by element, to a
-    // fraction of the stage's largest value, so a localized error in a stage the norm would hide still fails.
+    // Gates fixed before the first comparison ran. Both sides are float32 on BF16 weights widened exactly, so a miss is a structural
+    // difference, not rounding. The project plan's bar is correlation >= 0.9999 at the aligner output; every stage is additionally held
+    // to a relative L2 and, element by element, to a fraction of the stage's largest value, so a localized error that a norm would hide
+    // still fails.
     private const double OutputCosineFloor = 0.9999;
     private const double StageRelL2 = 1e-3;
     private const double StageMaxAbsFraction = 1e-3;
@@ -33,14 +34,19 @@ public sealed class DeepSeekV41VisionRealWeightsTests
         ModelResolver.Resolve(DeepSeekV41Catalog.Id, null, Modality.Text).LocalPath
         ?? Path.Combine(RepoPaths.ModelsRoot(), "llm", "deepseek-v4.1-flash");
 
-    private static string Rss() => $"{Process.GetCurrentProcess().WorkingSet64 / (1L << 30)} GiB (peak {Process.GetCurrentProcess().PeakWorkingSet64 / (1L << 30)} GiB)";
+    private static string Rss()
+    {
+        using Process process = Process.GetCurrentProcess();
+        return $"{process.WorkingSet64 / (1L << 30)} GiB (peak {process.PeakWorkingSet64 / (1L << 30)} GiB)";
+    }
 
     [Fact]
     public void RealTowerAndAligner_MatchTheUpstreamModules()
     {
         string dir = ModelDirectory();
         string? oracle = Environment.GetEnvironmentVariable("DSV41_VISION_ORACLE");
-        if (!RealWeightGate.Require(_output.WriteLine, Path.Combine(dir, "config.json"), oracle is null ? "DSV41_VISION_ORACLE-unset" : Path.Combine(oracle, "meta.json"))) return;
+        string metaPath = oracle is null ? "DSV41_VISION_ORACLE-unset" : Path.Combine(oracle, "meta.json");
+        if (!RealWeightGate.Require(_output.WriteLine, Path.Combine(dir, "config.json"), metaPath)) return;
 
         using JsonDocument meta = JsonDocument.Parse(File.ReadAllText(Path.Combine(oracle!, "meta.json")));
         Assert.Equal("float32", meta.RootElement.GetProperty("dtype").GetString());
@@ -54,7 +60,8 @@ public sealed class DeepSeekV41VisionRealWeightsTests
         _output.WriteLine($"load (266 tensors, BF16 to F32) {sw.Elapsed.TotalSeconds:F1}s, RSS {Rss()}");
         Assert.Equal(checkpoint.Config.HiddenSize, model.OutputDim);
 
-        (string Name, float[] Values)[] embeddings = [("image_start", model.ImageStart.ToArray()), ("image_end", model.ImageEnd.ToArray()), ("image_newline", model.ImageNewline.ToArray())];
+        (string Name, float[] Values)[] embeddings =
+            [("image_start", model.ImageStart.ToArray()), ("image_end", model.ImageEnd.ToArray()), ("image_newline", model.ImageNewline.ToArray())];
         foreach ((string name, float[] actual) in embeddings)
         {
             float[] expected = ReadF32(Path.Combine(oracle!, name + ".f32"), model.OutputDim);

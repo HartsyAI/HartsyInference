@@ -16,7 +16,8 @@ public sealed class DeepSeekV41VisionModel : IDisposable
     /// <param name="imageEnd">Learned embedding of the closing position.</param>
     /// <param name="imageNewline">Learned embedding that ends each token row.</param>
     /// <exception cref="HartsyInferenceException">The tower and aligner disagree on the feature width, or an embedding is not as wide as the aligner's output.</exception>
-    public DeepSeekV41VisionModel(DeepSeekV41VisionTower tower, DeepSeekV41Aligner aligner, float[] imageStart, float[] imageEnd, float[] imageNewline)
+    public DeepSeekV41VisionModel(
+        DeepSeekV41VisionTower tower, DeepSeekV41Aligner aligner, float[] imageStart, float[] imageEnd, float[] imageNewline)
     {
         ArgumentNullException.ThrowIfNull(tower);
         ArgumentNullException.ThrowIfNull(aligner);

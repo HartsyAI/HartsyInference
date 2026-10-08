@@ -5,6 +5,7 @@ using HartsyInference.Cpu;
 using HartsyInference.LLM.DeepSeekV41;
 using Xunit;
 using Xunit.Abstractions;
+using VisionFixture = HartsyInference.LLM.Tests.DeepSeekV41.DeepSeekV41VisionFixture;
 
 namespace HartsyInference.LLM.Tests.DeepSeekV41;
 
@@ -20,8 +21,8 @@ public sealed class DeepSeekV41VisionRopeTableTests(ITestOutputHelper output)
     [InlineData(4, 1, 8)]
     public void Table_MatchesUpstreamAndRepeatsTheRotatedHalf(int gridHeight, int gridWidth, int ropeDim)
     {
-        JsonElement c = DeepSeekV41VisionFixture.RopeCase(gridHeight, gridWidth, ropeDim);
-        float[] cos = DeepSeekV41VisionFixture.Floats(c.GetProperty("cos")), sin = DeepSeekV41VisionFixture.Floats(c.GetProperty("sin"));
+        JsonElement c = VisionFixture.RopeCase(gridHeight, gridWidth, ropeDim);
+        float[] cos = VisionFixture.Floats(c.GetProperty("cos")), sin = VisionFixture.Floats(c.GetProperty("sin"));
 
         DeepSeekV41VisionRopeTable table = DeepSeekV41VisionRopeTable.Build(gridHeight, gridWidth, 2 * ropeDim, c.GetProperty("theta").GetDouble());
 
@@ -32,7 +33,9 @@ public sealed class DeepSeekV41VisionRopeTableTests(ITestOutputHelper output)
             for (int j = 0; j < ropeDim; j++)
             {
                 int row = patch * 2 * ropeDim;
-                worst = Math.Max(worst, Math.Max(Math.Abs(table.Cos[row + j] - cos[patch * ropeDim + j]), Math.Abs(table.Sin[row + j] - sin[patch * ropeDim + j])));
+                double cosDiff = Math.Abs(table.Cos[row + j] - cos[patch * ropeDim + j]);
+                double sinDiff = Math.Abs(table.Sin[row + j] - sin[patch * ropeDim + j]);
+                worst = Math.Max(worst, Math.Max(cosDiff, sinDiff));
                 Assert.Equal(table.Cos[row + j], table.Cos[row + ropeDim + j]);
                 Assert.Equal(table.Sin[row + j], table.Sin[row + ropeDim + j]);
             }
@@ -66,19 +69,19 @@ public sealed class DeepSeekV41VisionRopeTableTests(ITestOutputHelper output)
     [InlineData(4, 1, 8)]
     public void HalfSplitRotation_MatchesUpstreamApplyRotary(int gridHeight, int gridWidth, int ropeDim)
     {
-        JsonElement c = DeepSeekV41VisionFixture.RopeCase(gridHeight, gridWidth, ropeDim);
+        JsonElement c = VisionFixture.RopeCase(gridHeight, gridWidth, ropeDim);
         int heads = c.GetProperty("heads").GetInt32(), headDim = 2 * ropeDim, patches = gridHeight * gridWidth;
         DeepSeekV41VisionRopeTable table = DeepSeekV41VisionRopeTable.Build(gridHeight, gridWidth, headDim, c.GetProperty("theta").GetDouble());
         using CpuBackend cpu = new();
         IBackend backend = cpu;
-        using Tensor x = DeepSeekV41HostMath.Tensor(DeepSeekV41VisionFixture.Floats(c.GetProperty("x")), 1, patches, heads, headDim);
+        using Tensor x = DeepSeekV41HostMath.Tensor(VisionFixture.Floats(c.GetProperty("x")), 1, patches, heads, headDim);
         using Tensor cos = DeepSeekV41HostMath.Tensor(table.Cos, 1, patches, headDim);
         using Tensor sin = DeepSeekV41HostMath.Tensor(table.Sin, 1, patches, headDim);
 
         backend.ApplyRopeSingle(x, cos, sin);
 
-        DeepSeekV41VisionFixture.AssertClose(output, $"rotated {gridHeight}x{gridWidth} ropeDim {ropeDim}", x.AsReadOnlySpan<float>().ToArray(),
-            DeepSeekV41VisionFixture.Floats(c.GetProperty("rotated")));
+        VisionFixture.AssertClose(output, $"rotated {gridHeight}x{gridWidth} ropeDim {ropeDim}", x.AsReadOnlySpan<float>().ToArray(),
+            VisionFixture.Floats(c.GetProperty("rotated")));
     }
 
     [Theory]

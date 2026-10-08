@@ -35,7 +35,8 @@ internal static class DeepSeekV41VisionFixture
 
     public static float[] Param(string key) => Floats(_root.GetProperty("params").GetProperty(key));
 
-    public static long[] Shape(string key) => _root.GetProperty("shapes").GetProperty(key).EnumerateArray().Select(static v => v.GetInt64()).ToArray();
+    public static long[] Shape(string key) =>
+        _root.GetProperty("shapes").GetProperty(key).EnumerateArray().Select(static v => v.GetInt64()).ToArray();
 
     public static Tensor ParamTensor(string key, Func<string, float[]>? source = null) =>
         DeepSeekV41HostMath.Tensor((source ?? Param)(key), Shape(key));
@@ -52,8 +53,8 @@ internal static class DeepSeekV41VisionFixture
                 ParamTensor(b + "attn.wqkv.bias", source), ParamTensor(b + "attn.wo.weight", source), ParamTensor(b + "attn.wo.bias", source),
                 ParamTensor(b + "norm2.weight", source), ParamTensor(b + "mlp.w1.weight", source), ParamTensor(b + "mlp.w2.weight", source)));
         }
-        return new DeepSeekV41VisionWeights(ParamTensor("vision.patch_embed.proj.weight", source), ParamTensor("vision.patch_embed.proj.bias", source),
-            blocks, ParamTensor("vision.norm.weight", source));
+        return new DeepSeekV41VisionWeights(ParamTensor("vision.patch_embed.proj.weight", source),
+            ParamTensor("vision.patch_embed.proj.bias", source), blocks, ParamTensor("vision.norm.weight", source));
     }
 
     public static DeepSeekV41AlignerWeights AlignerWeights(Func<string, float[]>? source = null) =>
@@ -81,5 +82,6 @@ internal static class DeepSeekV41VisionFixture
     }
 
     private static JsonElement Case(string list, int gridHeight, int gridWidth) =>
-        _root.GetProperty(list).EnumerateArray().Single(c => c.GetProperty("gridHeight").GetInt32() == gridHeight && c.GetProperty("gridWidth").GetInt32() == gridWidth);
+        _root.GetProperty(list).EnumerateArray().Single(c =>
+            c.GetProperty("gridHeight").GetInt32() == gridHeight && c.GetProperty("gridWidth").GetInt32() == gridWidth);
 }
