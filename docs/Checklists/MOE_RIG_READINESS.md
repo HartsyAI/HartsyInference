@@ -59,24 +59,21 @@ Do not count #305 or #306 as verified until those changes land on the branch bei
 3. Expert-cache suites first, one class per invocation, one at a time. xUnit does not run classes in a caller-chosen
    order, so the category filter cannot put these first. The trailing dot makes each filter match one class exactly:
    ```
-   for c in CudaExpertCacheTests CudaExpertM1FixtureTests CudaMoePrimitiveTests CudaMoeTests \
-            CudaQuantWorkspaceTests CudaStreamingWeightCacheTests; do
+   classes="CudaExpertCacheTests CudaExpertM1FixtureTests CudaMoePrimitiveTests"
+   classes="$classes CudaMoeTests CudaQuantWorkspaceTests CudaStreamingWeightCacheTests"
+   for c in $classes; do
      dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.$c."
    done
    ```
-   Before #307 lands, `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter
-   does not select them; this explicit loop is how they run on the rig either way.
+   `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter does not select
+   them; this explicit loop is the only way they run on the rig.
 4. The rest of the GPU category, excluding the classes already run in step 3. Run only from a checkout that includes #307,
-   which applies the GPU labels this filter depends on. Record failures by test name:
+   which applies the GPU labels this filter depends on. Build the filter in a variable so it has no embedded whitespace.
+   Record failures by test name:
    ```
-   dotnet test tests/HartsyInference.Cuda.Tests --filter \
-       "Category=GpuIntegration&\
-           FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaExpertCacheTests.&\
-           FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaExpertM1FixtureTests.&\
-           FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaMoePrimitiveTests.&\
-           FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaMoeTests.&\
-           FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaQuantWorkspaceTests.&\
-           FullyQualifiedName!~HartsyInference.Cuda.Tests.CudaStreamingWeightCacheTests."
+   filter="Category=GpuIntegration"
+   for c in $classes; do filter="$filter&FullyQualifiedName!~HartsyInference.Cuda.Tests.$c."; done
+   dotnet test tests/HartsyInference.Cuda.Tests --filter "$filter"
    ```
 5. **Deferred: refactor A/B for the cache changes.** Do not run `tests/regression-ab.sh` as evidence for #304 yet. No
    production path constructs `CudaExpertCache` (only the class and its tests do), and no core regression case drives it,
@@ -85,7 +82,8 @@ Do not count #305 or #306 as verified until those changes land on the branch bei
    executor or a dedicated harness acquires and evicts experts through the cache; then run
    `tests/regression-ab.sh --fresh --expect identical --backend cuda` on that case.
 6. Vulkan MoE primitives, after the CUDA lane has finished, with no other GPU run in progress:
-   `dotnet test tests/HartsyInference.Vulkan.Tests --filter "FullyQualifiedName~HartsyInference.Vulkan.Tests.VulkanMoePrimitiveTests."`.
+   `dotnet test tests/HartsyInference.Vulkan.Tests --filter "FullyQualifiedName~HartsyInference.Vulkan.Tests.VulkanMoePrimitiveTests."`
+   (the trailing dot matches this class only).
    This suite needs a local Vulkan device and no fixtures.
 
 ## Not yet possible, and what is missing
