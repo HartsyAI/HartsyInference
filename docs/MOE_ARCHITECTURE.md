@@ -79,7 +79,6 @@ until covered.
   to drafts. Confirm both against the checkpoint before running draft experts.
 - Engram hash tables (DeepSeek-V4.1) are not MoE experts and are not in the topology yet; they belong to the auxiliary
   storage tier (see the placement milestone).
-- `ExpertKey` is still `(Layer, Expert)` with no bank identity; it changes when the expert source milestone lands.
 
 ## Expert identity and sources
 
