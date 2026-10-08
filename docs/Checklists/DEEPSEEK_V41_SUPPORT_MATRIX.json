@@ -273,7 +273,7 @@
       "acceptanceTest": "B=3 ragged batch == 3 single runs",
       "pr": 9,
       "status": "InProgress",
-      "note": "CPU host reference only: DeepSeekV41GenerationModel (IGenerationModel) over the host model, driven by TextGenerationPipeline and TextService on the small upstream fixture checkpoint; prefill/decode logits match upstream to 1e-3 and a ragged B=2 decode equals the single runs; weights stay in their stored form by default (DeepSeekV41Residency.Stored, bit-identical to the F32-widened path); no scheduler chunked prefill, no CUDA or Vulkan path, no full-depth run on the real weights, so not Verified"
+      "note": "CPU host reference only: DeepSeekV41GenerationModel (IGenerationModel) over the host model, driven by TextGenerationPipeline and TextService on the small upstream fixture checkpoint; prefill/decode logits match upstream to 1e-3 and a ragged B=2 decode equals the single runs; weights stay in their stored form by default (DeepSeekV41Residency.Stored, bit-identical to the F32-widened path); no scheduler chunked prefill, no CUDA or Vulkan path, a full-depth run on the real weights has only a plausibility smoke (see below), so not Verified; CPU, 2026-10-08: full 40-layer real-weight smoke run (stored residency, 20 GB cap) loads in 7.9 s, prefills 6 tokens in 693 s and decodes 8 greedy tokens at 44-168 s/token with finite logits and the continuation ' Paris. In the course of history,' for 'The capital of France is' (DeepSeekV41RealWeightsTests.FullDepth_*, DSV41_FULL_RUN=1); plausibility on one prompt only, not Verified until greedy-token and logits agreement with the upstream reference is recorded"
     },
     {
       "id": "load.shards",
