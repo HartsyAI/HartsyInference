@@ -17,25 +17,30 @@ public static class DeepSeekV41Topology
     /// <summary>Builds the topology for <paramref name="config"/>.</summary>
     /// <param name="config">Parsed V4.1 configuration.</param>
     /// <param name="expertDType">Storage type of routed experts; the official checkpoint ships MXFP4 (E2M1 with E8M0 block scales).</param>
+    /// <param name="sharedDType">Storage type of the shared expert; the official checkpoint ships FP8 E4M3.</param>
     /// <exception cref="ArgumentException">The config's scoring function is not one the router knows.</exception>
-    public static SparseModelTopology Build(DeepSeekV41Config config, DType? expertDType = null)
+    public static SparseModelTopology Build(DeepSeekV41Config config, DType? expertDType = null, DType? sharedDType = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         DType dtype = expertDType ?? DType.F4E2M1;
+        DType shared = sharedDType ?? DType.F8E4M3;
         MoeRouteScoring scoring = ParseScoring(config.ScoringFunc);
         ExpertProgram program = config.SwigluLimit > 0 ? ExpertProgram.SwigluClamped((float)config.SwigluLimit) : ExpertProgram.Swiglu;
         List<SparseLayerDescriptor> layers = new List<SparseLayerDescriptor>(config.TotalLayerCount);
         for (int i = 0; i < config.TotalLayerCount; i++)
         {
             DeepSeekV41LayerPlan plan = config.LayerPlans[i];
-            SequenceStateKind state = plan.CompressRatio > 0 ? SequenceStateKind.CompressedKv : SequenceStateKind.SlidingWindowKv;
-            layers.Add(plan.IsDraft ? DraftLayer(i, config, scoring, dtype, program, state) : TargetLayer(i, config, scoring, dtype, program, state));
+            // Every layer keeps the sliding-window ring; only KV-source layers also own compressed latents.
+            SequenceStateKind state = plan.IsKvSource
+                ? SequenceStateKind.SlidingWindowKv | SequenceStateKind.CompressedKv
+                : SequenceStateKind.SlidingWindowKv;
+            layers.Add(plan.IsDraft ? DraftLayer(i, config, scoring, dtype, program, state) : TargetLayer(i, config, scoring, dtype, shared, program, state));
         }
         return new SparseModelTopology(config.HiddenSize, layers, "deepseek-v4.1");
     }
 
     private static SparseLayerDescriptor TargetLayer(int index, DeepSeekV41Config config, MoeRouteScoring scoring, DType dtype,
-        ExpertProgram program, SequenceStateKind state)
+        DType sharedDType, ExpertProgram program, SequenceStateKind state)
     {
         RouterDescriptor router = new RouterDescriptor(
             NumExperts: config.NRoutedExperts,
@@ -48,8 +53,8 @@ public static class DeepSeekV41Topology
             HasSelectionBias: true,
             HasTokenKindBias: config.Vision is not null).Validated();
         ExpertGroupDescriptor routed = new ExpertGroupDescriptor(config.NRoutedExperts, new ExpertDescriptor(config.HiddenSize, config.MoeIntermediateSize, dtype)).Validated();
-        ExpertGroupDescriptor shared = new ExpertGroupDescriptor(config.NSharedExperts, new ExpertDescriptor(config.HiddenSize, config.MoeIntermediateSize, dtype)).Validated();
-        return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, shared, SharedIsGated: false, program).Validated(), state);
+        ExpertGroupDescriptor sharedGroup = new ExpertGroupDescriptor(config.NSharedExperts, new ExpertDescriptor(config.HiddenSize, config.MoeIntermediateSize, sharedDType)).Validated();
+        return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, sharedGroup, SharedIsGated: false, program).Validated(), state);
     }
 
     private static SparseLayerDescriptor DraftLayer(int index, DeepSeekV41Config config, MoeRouteScoring scoring, DType dtype,

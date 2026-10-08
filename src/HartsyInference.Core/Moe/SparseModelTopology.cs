@@ -100,7 +100,7 @@ public sealed class SparseModelTopology
                     .Append('/').Append(r.Scoring).Append('/').Append(Num(r.GroupCount)).Append('/').Append(Num(r.GroupsKept))
                     .Append('/').Append(Flag(r.Renormalize)).Append('/').Append(Num(r.RenormEpsilon)).Append('/')
                     .Append(Num(r.Scale)).Append('/').Append(Num(r.LogitDivisor)).Append('/')
-                    .Append(Flag(r.HasSelectionBias)).Append('/').Append(Flag(r.HasTokenKindBias));
+                    .Append(Flag(r.HasSelectionBias)).Append('/').Append(Flag(r.HasTokenKindBias)).Append('/').Append(r.BiasSpace);
                 AppendGroup(text, "E", moe.Routed);
                 if (moe.Shared is not null) AppendGroup(text, "S", moe.Shared);
                 text.Append("|G").Append(Flag(moe.SharedIsGated)).Append('|').Append(moe.Program.Activation)
@@ -120,7 +120,7 @@ public sealed class SparseModelTopology
         if (group.Overrides is null) return;
         foreach (KeyValuePair<int, ExpertDescriptor> pair in group.Overrides.OrderBy(static p => p.Key))
             text.Append('[').Append(Num(pair.Key)).Append('=').Append(Num(pair.Value.IntermediateSize)).Append('x')
-                .Append(pair.Value.WeightDType.Name).Append(']');
+                .Append(pair.Value.WeightDType.Name).Append('x').Append(pair.Value.Layout).Append(']');
     }
 
     private static string Num(int value) => value.ToString(CultureInfo.InvariantCulture);

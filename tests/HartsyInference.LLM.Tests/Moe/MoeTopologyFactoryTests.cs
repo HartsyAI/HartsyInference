@@ -124,9 +124,32 @@ public sealed class MoeTopologyFactoryTests
         Assert.True(caps.HasTokenKindRouting == (config.Vision is not null));
         Assert.False(caps.RequiresHostRouting);
         Assert.Contains(DType.F4E2M1, caps.ExpertDTypes);
+        Assert.Contains(DType.F8E4M3, caps.ExpertDTypes);
+        Assert.Equal(DType.F8E4M3, topology.Layers[0].Moe!.Shared!.Shape.WeightDType);
         Assert.True(caps.StateKinds.Contains(SequenceStateKind.CompressedKv));
         Assert.True(caps.StateKinds.Contains(SequenceStateKind.SlidingWindowKv));
         Assert.True(topology.TotalExpertPayloadBytes > 0);
+    }
+
+    [Fact]
+    public void FlatSigmoidLogitAdd_BiasesTheLogitWhileGroupedBiasesTheScore()
+    {
+        MoeConfig flat = new()
+        {
+            NumExperts = 8, NumExpertsPerTok = 2, MoeIntermediateSize = 16, Scoring = MoeScoring.SigmoidLogitAdd,
+        };
+        MoeConfig grouped = new()
+        {
+            NumExperts = 8, NumExpertsPerTok = 2, MoeIntermediateSize = 16, Scoring = MoeScoring.SigmoidLogitAdd,
+            ExpertGroupCount = 2, ExpertGroupUsedCount = 1,
+        };
+        TransformerConfig Wrap(MoeConfig m) => new()
+        {
+            HiddenSize = 32, NumLayers = 1, NumHeads = 2, NumKvHeads = 2, HeadDim = 16, IntermediateSize = 64, VocabSize = 100, Moe = m,
+        };
+
+        Assert.Equal(SelectionBiasSpace.Logit, MoeTopologyFactory.FromTransformer(Wrap(flat)).Layers[0].Moe!.Router.BiasSpace);
+        Assert.Equal(SelectionBiasSpace.Score, MoeTopologyFactory.FromTransformer(Wrap(grouped)).Layers[0].Moe!.Router.BiasSpace);
     }
 
     [Fact]

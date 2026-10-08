@@ -51,7 +51,10 @@ public sealed record SparseCapabilities(
         bool anySparse = sparse.Count > 0;
         bool anyDense = layers.Any(static l => l.Moe is null);
 
-        HashSet<SequenceStateKind> states = new(layers.Select(static l => l.StateKind));
+        HashSet<SequenceStateKind> states = new();
+        foreach (SparseLayerDescriptor layer in layers)
+            foreach (SequenceStateKind kind in Enum.GetValues<SequenceStateKind>())
+                if (kind != SequenceStateKind.None && layer.StateKind.HasFlag(kind)) states.Add(kind);
         HashSet<DType> dtypes = new();
         HashSet<MoeRouteScoring> scoring = new();
         HashSet<(int Intermediate, DType DType, ExpertWeightLayout Layout)> shapeSignatures = new();

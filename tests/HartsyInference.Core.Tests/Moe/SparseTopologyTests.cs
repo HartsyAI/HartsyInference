@@ -245,4 +245,41 @@ public sealed class SparseTopologyTests
         Assert.True(prefillOnly.Capabilities.VariableTopK);
         Assert.True(prefillOnly.Capabilities.PhaseDependentRouting);
     }
+
+    [Fact]
+    public void Fingerprint_CoversOverrideLayout()
+    {
+        ExpertDescriptor split = new(Hidden, 32, DType.F32, ExpertWeightLayout.SplitGateUp);
+        ExpertDescriptor fused = new(Hidden, 32, DType.F32, ExpertWeightLayout.FusedGateUp);
+        SparseModelTopology Build(ExpertDescriptor over) => Uniform(1, _ => new MoeLayerDescriptor(
+            new RouterDescriptor(4, 2, 2, MoeRouteScoring.Softmax).Validated(),
+            new ExpertGroupDescriptor(4, Expert(32), new Dictionary<int, ExpertDescriptor> { [1] = over }).Validated(),
+            null, false, ExpertProgram.Swiglu).Validated());
+
+        Assert.NotEqual(Build(split).Fingerprint, Build(fused).Fingerprint);
+    }
+
+    [Fact]
+    public void GroupedRouter_RejectsSingletonGroupsOverfullTopKAndNonFiniteScale()
+    {
+        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid, GroupCount: 8, GroupsKept: 4).Validated());
+        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 5, 5, MoeRouteScoring.Sigmoid, GroupCount: 4, GroupsKept: 1).Validated());
+        Assert.Throws<ArgumentOutOfRangeException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, Scale: float.NaN).Validated());
+        Assert.Throws<ArgumentOutOfRangeException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, Scale: float.PositiveInfinity).Validated());
+        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax, GroupCount: 2, GroupsKept: 1,
+            BiasSpace: SelectionBiasSpace.Logit, HasSelectionBias: true).Validated());
+        Assert.Throws<ArgumentException>(() => new RouterDescriptor(8, 2, 2, MoeRouteScoring.Sigmoid, BiasSpace: SelectionBiasSpace.Logit).Validated());
+    }
+
+    [Fact]
+    public void StateKinds_CombinedFlagsContributeEveryKind()
+    {
+        SparseModelTopology topology = Uniform(2, _ => null, i => i == 0
+            ? SequenceStateKind.SlidingWindowKv | SequenceStateKind.CompressedKv
+            : SequenceStateKind.SlidingWindowKv);
+
+        Assert.Equal(
+            new HashSet<SequenceStateKind> { SequenceStateKind.SlidingWindowKv, SequenceStateKind.CompressedKv },
+            topology.Capabilities.StateKinds.ToHashSet());
+    }
 }

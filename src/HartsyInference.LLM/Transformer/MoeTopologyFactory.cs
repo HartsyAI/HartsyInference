@@ -63,7 +63,9 @@ public static class MoeTopologyFactory
             RenormEpsilon: grouped ? 1e-20f : 0f,
             Scale: moe.RoutedScalingFactor,
             // SigmoidLogitAdd scores by sigmoid but adds e_score_correction_bias to the logit for selection only.
-            HasSelectionBias: moe.Scoring == MoeScoring.SigmoidLogitAdd).Validated();
+            HasSelectionBias: moe.Scoring == MoeScoring.SigmoidLogitAdd,
+            // Production flat sigmoid routing biases the logit before scoring; grouped routing biases the score.
+            BiasSpace: moe.Scoring == MoeScoring.SigmoidLogitAdd && !grouped ? SelectionBiasSpace.Logit : SelectionBiasSpace.Score).Validated();
 
         ExpertGroupDescriptor routed = new ExpertGroupDescriptor(moe.NumExperts, new ExpertDescriptor(config.HiddenSize, moe.MoeIntermediateSize, dtype)).Validated();
         ExpertGroupDescriptor? shared = moe.SharedExpertIntermediateSize > 0
