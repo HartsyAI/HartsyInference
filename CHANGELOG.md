@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.295
+
+- **Changed: the speculative scorer on the DeepSeek-V4.1 host model no longer replays a context the sequence already holds.** `DeepSeekV41GenerationState.SyncTo` rolls back only past the first token where the sequence and the context differ, and the state keeps the last committed token's hidden row, so a call whose context is already in place runs only its draft through the blocks, and a rejection replays the kept prefix once. The state can also record each committed position's DSpark target rows (opt-in), which a draft reads. Plain decoding and the speculative outputs are unchanged.
+
 ## alpha.294
 
 - **Added: speculative decoding on the DeepSeek-V4.1 host model, exact under greedy decoding (CPU, synthetic evidence).** `DeepSeekV41SpeculativeScorer` scores a draft over the model's own sequence state: it rolls back to the part of the context the state already holds, appends the rest of the context and the draft, and reads the logits after the context and after each drafted token. A rollback replays the committed history the way it was built: the first append as one prefill chunk, every later token one at a time. That matters because the reference's chunked prefill and its per-token decode are not arithmetically equivalent on every length (upstream differs from itself on the synthetic fixture), so a single-chunk replay changed the state and the greedy output. On the synthetic V4.1 model the scored rows equal the per-token logits for prompts of 1 to 11 tokens and drafts of 1 to 4, and greedy speculation with the prompt-lookup proposer reproduces plain greedy decoding token for token through the rejections, for prompts of 6, 9 and 11 tokens and draft limits up to 6. Plain decoding is unchanged.

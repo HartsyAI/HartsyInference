@@ -6,9 +6,9 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// read after the last context token and after each drafted token.</summary>
 /// <remarks>The host runs a sequence's first append as one prefill chunk and every later append of more than one token one token at a time, so the draft and an
 /// accepted tail are computed exactly as plain decoding computes them. Only the prompt is a chunk.
-/// The state keeps the draft after the call, so the next call usually rolls back only the rejected part. That rollback is
-/// <see cref="DeepSeekV41GenerationState.Truncate"/>, which replays the kept prefix: a prefill of the prompt, then one decode per token after it, so a rejection
-/// costs time proportional to the context.</remarks>
+/// The state keeps the draft after the call, so the next call rolls back only the rejected part, which <see cref="DeepSeekV41GenerationState.SyncTo"/> replays:
+/// a prefill of the prompt, then one decode per token after it. A call whose context the state already holds replays nothing and runs only its draft.
+/// A failed append resets the state, so the next call prefills the context again.</remarks>
 internal sealed class DeepSeekV41SpeculativeScorer : ISpeculativeScorer
 {
     private readonly DeepSeekV41HostModel _model;
@@ -34,29 +34,12 @@ internal sealed class DeepSeekV41SpeculativeScorer : ISpeculativeScorer
         foreach (float[] row in rows)
             if (row.Length != _model.VocabSize) throw new ArgumentException("Every row must hold one logit per vocabulary entry.", nameof(rows));
 
-        // roll back to the longest prefix of the context the state already holds; the last context token is always appended, so its logits can be read
-        IReadOnlyList<int> held = _state.Tokens;
-        int limit = Math.Min(held.Count, context.Length - 1), common = 0;
-        while (common < limit && held[common] == context[common]) common++;
-        // a context that diverges inside the prompt chunk is prefilled afresh, as plain decoding of that context would prefill it; past the prompt, rolling back
-        // replays the kept tokens with the same structure they were built with
-        if (common < Math.Min(_state.PrefillLength, held.Count))
-        {
-            _state.Truncate(0);
-            common = 0;
-        }
-        else if (common < _state.Length)
-        {
-            _state.Truncate(common);
-        }
+        _state.SyncTo(context);
+        Read(_state.LastHidden, rows[0]);   // read before the draft moves the last row
 
         int dim = _model.Dim;
-        float[] contextHidden = new float[(context.Length - common) * dim];
-        _state.Append(context[common..], contextHidden);
         float[] draftHidden = new float[draft.Length * dim];
         if (!draft.IsEmpty) _state.Append(draft, draftHidden);
-
-        Read(contextHidden.AsSpan((context.Length - common - 1) * dim, dim), rows[0]);
         for (int j = 0; j < draft.Length; j++) Read(draftHidden.AsSpan(j * dim, dim), rows[j + 1]);
     }
 

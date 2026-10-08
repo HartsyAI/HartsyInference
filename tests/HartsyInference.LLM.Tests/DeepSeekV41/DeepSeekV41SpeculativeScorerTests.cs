@@ -206,6 +206,60 @@ public sealed class DeepSeekV41SpeculativeScorerTests
         Assert.Equal(expected, next);
     }
 
+    [Fact]
+    public void Scoring_A_Synced_Context_Runs_Only_The_Draft_Through_The_Blocks()
+    {
+        // counts layer 0's block passes: one per call that reaches the block, so a drafted token decoded on its own is one pass
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu);
+        DeepSeekV41SpeculativeScorer scorer = new(model, new DeepSeekV41GenerationState(model, Capacity));
+        int passes = 0;
+        model.SetProbe((layer, stage, _) => { if (layer == 0 && stage == "out") passes++; });
+        try
+        {
+            scorer.Score(Prompt, [13, 1], Rows(model, 3));
+            Assert.Equal(1 + 2, passes);   // the prompt chunk, then the two drafted tokens one at a time
+            passes = 0;
+
+            // the state holds the prompt and [13, 1]: a context equal to that replays nothing, so only the draft runs
+            scorer.Score([.. Prompt, 13, 1], [27], Rows(model, 2));
+            Assert.Equal(1, passes);
+            passes = 0;
+
+            // the state holds [.. Prompt, 13, 1, 27]; the context diverges at index 12, so the kept 12 tokens are replayed (the prompt chunk and one
+            // decode), then the new token, then the draft
+            scorer.Score([.. Prompt, 13, 9], [1], Rows(model, 2));
+            Assert.Equal(2 + 1 + 1, passes);
+        }
+        finally
+        {
+            model.SetProbe(null);
+        }
+    }
+
+    [Fact]
+    public void Recorded_Main_Rows_Match_A_Direct_Tap_Before_And_After_A_Rollback()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, new[] { 2, 5 });
+        int width = model.MainHiddenWidth, dim = model.Dim;
+        int[] ids = FixtureIds();
+        DeepSeekV41GenerationState state = new(model, Capacity, recordMainRows: true);
+        state.Append(ids[..8], new float[8 * dim]);
+        state.Append(ids[8..11], new float[3 * dim]);
+        state.Truncate(9);
+        state.Append(ids[9..12], new float[3 * dim]);
+
+        // the same history through the host directly: the prompt as one chunk, then one token at a time
+        DeepSeekV41SequenceState raw = model.CreateState(Capacity);
+        float[] direct = new float[12 * width];
+        model.Forward(ids[..8], raw, new float[8 * dim], direct.AsSpan(0, 8 * width));
+        for (int p = 8; p < 12; p++) model.Forward(ids[p..(p + 1)], raw, new float[dim], direct.AsSpan(p * width, width));
+
+        Assert.Equal(width, state.MainRow(0).Length);
+        for (int p = 0; p < 12; p++) Assert.Equal(direct.AsSpan(p * width, width).ToArray(), state.MainRow(p).ToArray());
+    }
+
     private static float[][] Rows(DeepSeekV41HostModel model, int count) => Enumerable.Range(0, count).Select(_ => new float[model.VocabSize]).ToArray();
 
     /// <summary>Plain greedy decoding: the prompt as one prefill, then one token at a time.</summary>
