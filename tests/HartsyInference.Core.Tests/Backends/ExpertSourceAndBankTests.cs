@@ -80,6 +80,8 @@ public sealed class ExpertSourceAndBankTests
         Assert.Equal(new ExpertKey(1, 2, 0), named);
         ExpertKey key = new(2, 5);
         (int layer, int expert) = key;
+        key.Deconstruct(Layer: out int namedLayer, Expert: out int namedExpert);
+        Assert.Equal((2, 5), (namedLayer, namedExpert));
         Assert.Equal((2, 5), (layer, expert));
         Assert.Equal(new ExpertKey(2, 5, 0), key);
 

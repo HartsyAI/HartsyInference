@@ -15,10 +15,10 @@ public readonly record struct ExpertKey(int Layer, int Expert, ushort Bank)
     public ExpertLayerKey LayerKey => new(Bank, Layer);
 
     /// <summary>The published two-output deconstruction, kept so existing callers still compile and link.</summary>
-    public void Deconstruct(out int layer, out int expert)
+    public void Deconstruct(out int Layer, out int Expert)
     {
-        layer = Layer;
-        expert = Expert;
+        Layer = this.Layer;
+        Expert = this.Expert;
     }
 
     /// <inheritdoc/>
