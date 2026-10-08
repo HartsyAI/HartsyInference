@@ -43,6 +43,10 @@ public sealed record RouterDescriptor(
     /// <summary>True when the backend routing kernel can run this router (its width fits the fused kernel).</summary>
     public bool CanLowerToBackend => NumExperts <= MoeRouteArgs.MaxExperts;
 
+    /// <remarks>
+    /// Every scoring function produces non-negative scores (softmax, sigmoid, sqrt-softplus), so the masked-group value
+    /// of 0 always ranks below a kept group. A future scoring function that can go negative must revisit this.
+    /// </remarks>
     /// <summary>Backend routing arguments for the given phase.</summary>
     /// <exception cref="InvalidOperationException">The router is wider than the backend kernel supports; routing stays on the host.</exception>
     public MoeRouteArgs ToRouteArgs(bool prefill)

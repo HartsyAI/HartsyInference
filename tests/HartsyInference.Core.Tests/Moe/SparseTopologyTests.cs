@@ -1,5 +1,6 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
+using System.Globalization;
 using HartsyInference.Core.Tensors;
 using Xunit;
 
@@ -176,5 +177,72 @@ public sealed class SparseTopologyTests
         Assert.NotEqual(a.Fingerprint, differentTopK.Fingerprint);
         Assert.NotEqual(a.Fingerprint, differentClamp.Fingerprint);
         Assert.Matches("^[0-9a-f]{64}$", a.Fingerprint);
+    }
+
+    [Fact]
+    public void Fingerprint_IsIdenticalUnderAFractionalDecimalCulture()
+    {
+        SparseModelTopology Build() => Uniform(2, _ => Layer(experts: 8, topK: 2, program: ExpertProgram.SwigluClamped(7.5f)));
+
+        string invariant = Build().Fingerprint;
+        CultureInfo previous = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("de-DE");
+            Assert.Equal(invariant, Build().Fingerprint);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previous;
+        }
+    }
+
+    [Fact]
+    public void Overrides_MustReadTheModelWidth_AndAreCopiedAtConstruction()
+    {
+        Dictionary<int, ExpertDescriptor> source = new() { [1] = Expert(32) };
+        ExpertGroupDescriptor group = new(4, Expert(32), source);
+        source[1] = Expert(64);
+        source[2] = Expert(16);
+
+        Assert.Equal(32, group.ExpertAt(1).IntermediateSize);
+        Assert.Equal(32, group.ExpertAt(2).IntermediateSize);
+
+        ExpertDescriptor wideOverride = new(Hidden * 2, 32, DType.F32);
+        ExpertGroupDescriptor bad = new(4, Expert(32), new Dictionary<int, ExpertDescriptor> { [0] = wideOverride });
+        Assert.Throws<ArgumentException>(() => new SparseModelTopology(Hidden, new[]
+        {
+            new SparseLayerDescriptor(0, new MoeLayerDescriptor(
+                new RouterDescriptor(4, 2, 2, MoeRouteScoring.Softmax).Validated(), bad, null, false, ExpertProgram.Swiglu).Validated()),
+        }));
+    }
+
+    [Fact]
+    public void ExpertProgram_RejectsNaNAndInvertedClampBounds()
+    {
+        Assert.Throws<ArgumentException>(() => new ExpertProgram(ExpertActivation.Silu, float.NaN, float.NegativeInfinity, float.PositiveInfinity).Validated());
+        Assert.Throws<ArgumentException>(() => new ExpertProgram(ExpertActivation.Silu, float.PositiveInfinity, 3f, -3f).Validated());
+        Assert.Throws<ArgumentException>(() => Uniform(1, _ => new MoeLayerDescriptor(
+            new RouterDescriptor(8, 2, 2, MoeRouteScoring.Softmax).Validated(),
+            new ExpertGroupDescriptor(8, Expert()).Validated(), null, false, new ExpertProgram(ExpertActivation.Silu, 1f, 2f, 1f)).Validated()));
+    }
+
+    [Fact]
+    public void Heterogeneity_IsDetectedFromSharedGroupsAlone()
+    {
+        MoeLayerDescriptor shared = Layer(experts: 8, topK: 2, shared: new ExpertGroupDescriptor(1, Expert(64)).Validated());
+        SparseModelTopology topology = Uniform(1, _ => shared);
+
+        Assert.True(topology.Capabilities.HeterogeneousExpertShapes);
+        Assert.False(Uniform(1, _ => Layer(experts: 8, topK: 2)).Capabilities.HeterogeneousExpertShapes);
+    }
+
+    [Fact]
+    public void VariableTopK_IsSetByPrefillAsWellAsDecodeDifferences()
+    {
+        SparseModelTopology prefillOnly = Uniform(2, i => Layer(experts: 8, topK: 2, topKPrefill: i == 0 ? 2 : 4));
+
+        Assert.True(prefillOnly.Capabilities.VariableTopK);
+        Assert.True(prefillOnly.Capabilities.PhaseDependentRouting);
     }
 }

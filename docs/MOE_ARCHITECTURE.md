@@ -65,7 +65,8 @@ therefore greedy output. Validation therefore requires, in order of strictness:
 ## Open items at this layer
 
 - Draft (MTP/DSpark) layers: gate-bias and shared-expert layout is not loaded yet, so their topology carries no selection
-  bias and no shared expert. Confirm against the checkpoint before running draft experts.
+  bias and no shared expert. They do carry the backbone's clamped SwiGLU, which assumes the model-wide `swiglu_limit` applies
+  to drafts. Confirm both against the checkpoint before running draft experts.
 - Engram hash tables (DeepSeek-V4.1) are not MoE experts and are not in the topology yet; they belong to the auxiliary
   storage tier (see the placement milestone).
 - `ExpertKey` is still `(Layer, Expert)` with no bank identity; it changes when the expert source milestone lands.

@@ -111,6 +111,7 @@ public sealed class MoeTopologyFactoryTests
             Assert.Equal(config.DsparkNRoutedExperts, layer.Moe!.ExpertCount);
             Assert.Equal(config.DsparkNumExpertsPerTok, layer.Moe.Router.TopKDecode);
             Assert.Null(layer.Moe.Shared);
+            Assert.Equal(config.SwigluLimit > 0, layer.Moe.Program.IsClamped);
         }
 
         SparseCapabilities caps = topology.Capabilities;
@@ -135,4 +136,15 @@ public sealed class MoeTopologyFactoryTests
 
         Assert.Equal(DeepSeekV41Topology.Build(config).Fingerprint, DeepSeekV41Topology.Build(config).Fingerprint);
     }
+
+    [Fact]
+    public void Qwen35States_RejectsBadArgumentsWithClearErrors()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => MoeTopologyFactory.Qwen35States(0));
+        Func<int, SequenceStateKind> shortList = MoeTopologyFactory.Qwen35States(4, [false, true]);
+        Assert.Equal(SequenceStateKind.RecurrentState, shortList(1));
+        Assert.Throws<ArgumentOutOfRangeException>(() => shortList(2));
+        Assert.Throws<ArgumentOutOfRangeException>(() => shortList(-1));
+    }
 }
+

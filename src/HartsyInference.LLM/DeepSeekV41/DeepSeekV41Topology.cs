@@ -8,8 +8,9 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// <remarks>
 /// Target backbone layers are verified against the host loader: every layer routes through a gate with a required
 /// <c>gate.bias</c>, one shared expert of width <c>moe_intermediate_size</c>, and the clamped SwiGLU. Draft (MTP/DSpark)
-/// layers are described from their expert counts only; their gate-bias and shared-expert layout is not loaded yet, so
-/// they carry no selection bias and no shared expert until the draft path is verified.
+/// layers are described from their expert counts only. Their gate-bias and shared-expert layout is not loaded yet, so they
+/// carry no selection bias and no shared expert. They do carry the backbone's clamped SwiGLU: <c>swiglu_limit</c> is a
+/// model-wide config key, but the draft path is not verified yet and must be checked when it lands.
 /// </remarks>
 public static class DeepSeekV41Topology
 {
@@ -28,7 +29,7 @@ public static class DeepSeekV41Topology
         {
             DeepSeekV41LayerPlan plan = config.LayerPlans[i];
             SequenceStateKind state = plan.CompressRatio > 0 ? SequenceStateKind.CompressedKv : SequenceStateKind.SlidingWindowKv;
-            layers.Add(plan.IsDraft ? DraftLayer(i, config, scoring, dtype, state) : TargetLayer(i, config, scoring, dtype, program, state));
+            layers.Add(plan.IsDraft ? DraftLayer(i, config, scoring, dtype, program, state) : TargetLayer(i, config, scoring, dtype, program, state));
         }
         return new SparseModelTopology(config.HiddenSize, layers, "deepseek-v4.1");
     }
@@ -51,7 +52,8 @@ public static class DeepSeekV41Topology
         return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, shared, SharedIsGated: false, program).Validated(), state);
     }
 
-    private static SparseLayerDescriptor DraftLayer(int index, DeepSeekV41Config config, MoeRouteScoring scoring, DType dtype, SequenceStateKind state)
+    private static SparseLayerDescriptor DraftLayer(int index, DeepSeekV41Config config, MoeRouteScoring scoring, DType dtype,
+        ExpertProgram program, SequenceStateKind state)
     {
         RouterDescriptor router = new RouterDescriptor(
             NumExperts: config.DsparkNRoutedExperts,
@@ -62,7 +64,7 @@ public static class DeepSeekV41Topology
             RenormEpsilon: 1e-20f,
             Scale: (float)config.RoutedScalingFactor).Validated();
         ExpertGroupDescriptor routed = new ExpertGroupDescriptor(config.DsparkNRoutedExperts, new ExpertDescriptor(config.HiddenSize, config.MoeIntermediateSize, dtype)).Validated();
-        return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, Shared: null, SharedIsGated: false, ExpertProgram.Swiglu).Validated(), state, IsDraft: true);
+        return new SparseLayerDescriptor(index, new MoeLayerDescriptor(router, routed, Shared: null, SharedIsGated: false, program).Validated(), state, IsDraft: true);
     }
 
     private static MoeRouteScoring ParseScoring(string name) => name switch

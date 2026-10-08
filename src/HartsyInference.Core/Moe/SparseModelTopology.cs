@@ -1,7 +1,7 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using HartsyInference.Core.Backends;
-using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Core.Moe;
 
@@ -11,6 +11,9 @@ namespace HartsyInference.Core.Moe;
 /// </summary>
 public sealed class SparseModelTopology
 {
+    /// <summary>Version tag of the fingerprint text. Bump it when the canonical form changes.</summary>
+    private const string FingerprintVersion = "v1";
+
     /// <summary>Creates and validates a topology.</summary>
     /// <param name="hiddenSize">Model width H.</param>
     /// <param name="layers">Layers in execution order; each <see cref="SparseLayerDescriptor.Index"/> must equal its position.</param>
@@ -43,7 +46,9 @@ public sealed class SparseModelTopology
 
     /// <summary>
     /// Stable content hash of the topology's shapes, routing and programs. Profiles and packs record it so they are not
-    /// applied to an incompatible architecture. Excludes <see cref="Family"/>.
+    /// applied to an incompatible architecture. Excludes <see cref="Family"/>. Numbers are written with the invariant
+    /// culture. Enum member names are part of the canonical text: renaming a member changes the fingerprint, so such a
+    /// rename must bump <see cref="FingerprintVersion"/>.
     /// </summary>
     public string Fingerprint { get; }
 
@@ -64,33 +69,43 @@ public sealed class SparseModelTopology
             if (layer.Index != i) throw new ArgumentException($"Layer at position {i} declares index {layer.Index}.", nameof(Layers));
             if (layer.Moe is null) continue;
             layer.Moe.Validated();
-            if (layer.Moe.Routed.Shape.HiddenSize != HiddenSize)
-                throw new ArgumentException($"Layer {i} experts read width {layer.Moe.Routed.Shape.HiddenSize}, the model is {HiddenSize}.", nameof(Layers));
-            if (layer.Moe.Shared is not null && layer.Moe.Shared.Shape.HiddenSize != HiddenSize)
-                throw new ArgumentException($"Layer {i} shared experts read width {layer.Moe.Shared.Shape.HiddenSize}, the model is {HiddenSize}.", nameof(Layers));
+            ValidateGroupWidth(i, layer.Moe.Routed, "routed");
+            if (layer.Moe.Shared is not null) ValidateGroupWidth(i, layer.Moe.Shared, "shared");
         }
+    }
+
+    /// <summary>Every expert in the group, including per-index overrides, must read the model width.</summary>
+    private void ValidateGroupWidth(int layer, ExpertGroupDescriptor group, string role)
+    {
+        if (group.Shape.HiddenSize != HiddenSize)
+            throw new ArgumentException($"Layer {layer} {role} experts read width {group.Shape.HiddenSize}, the model is {HiddenSize}.", nameof(Layers));
+        if (group.Overrides is null) return;
+        foreach (KeyValuePair<int, ExpertDescriptor> pair in group.Overrides)
+            if (pair.Value.HiddenSize != HiddenSize)
+                throw new ArgumentException(
+                    $"Layer {layer} {role} expert {pair.Key} reads width {pair.Value.HiddenSize}, the model is {HiddenSize}.", nameof(Layers));
     }
 
     private string ComputeFingerprint()
     {
         StringBuilder text = new();
-        text.Append("H=").Append(HiddenSize).Append(';');
+        text.Append(FingerprintVersion).Append(";H=").Append(Num(HiddenSize)).Append(';');
         foreach (SparseLayerDescriptor layer in Layers)
         {
-            text.Append(layer.Index).Append(':').Append(layer.StateKind).Append(layer.IsDraft ? ":draft" : "");
+            text.Append(Num(layer.Index)).Append(':').Append(layer.StateKind).Append(layer.IsDraft ? ":draft" : "");
             if (layer.Moe is MoeLayerDescriptor moe)
             {
                 RouterDescriptor r = moe.Router;
-                text.Append("|R").Append(r.NumExperts).Append('/').Append(r.TopKDecode).Append('/').Append(r.TopKPrefill)
-                    .Append('/').Append(r.Scoring).Append('/').Append(r.GroupCount).Append('/').Append(r.GroupsKept)
-                    .Append('/').Append(r.Renormalize).Append('/').Append(r.RenormEpsilon.ToString("R")).Append('/')
-                    .Append(r.Scale.ToString("R")).Append('/').Append(r.LogitDivisor.ToString("R")).Append('/')
-                    .Append(r.HasSelectionBias).Append('/').Append(r.HasTokenKindBias);
+                text.Append("|R").Append(Num(r.NumExperts)).Append('/').Append(Num(r.TopKDecode)).Append('/').Append(Num(r.TopKPrefill))
+                    .Append('/').Append(r.Scoring).Append('/').Append(Num(r.GroupCount)).Append('/').Append(Num(r.GroupsKept))
+                    .Append('/').Append(Flag(r.Renormalize)).Append('/').Append(Num(r.RenormEpsilon)).Append('/')
+                    .Append(Num(r.Scale)).Append('/').Append(Num(r.LogitDivisor)).Append('/')
+                    .Append(Flag(r.HasSelectionBias)).Append('/').Append(Flag(r.HasTokenKindBias));
                 AppendGroup(text, "E", moe.Routed);
                 if (moe.Shared is not null) AppendGroup(text, "S", moe.Shared);
-                text.Append("|G").Append(moe.SharedIsGated).Append('|').Append(moe.Program.Activation)
-                    .Append('/').Append(moe.Program.GateMax.ToString("R")).Append('/').Append(moe.Program.UpMin.ToString("R"))
-                    .Append('/').Append(moe.Program.UpMax.ToString("R"));
+                text.Append("|G").Append(Flag(moe.SharedIsGated)).Append('|').Append(moe.Program.Activation)
+                    .Append('/').Append(Num(moe.Program.GateMax)).Append('/').Append(Num(moe.Program.UpMin))
+                    .Append('/').Append(Num(moe.Program.UpMax));
             }
             text.Append(';');
         }
@@ -100,10 +115,17 @@ public sealed class SparseModelTopology
 
     private static void AppendGroup(StringBuilder text, string tag, ExpertGroupDescriptor group)
     {
-        text.Append('|').Append(tag).Append(group.Count).Append('x').Append(group.Shape.IntermediateSize)
+        text.Append('|').Append(tag).Append(Num(group.Count)).Append('x').Append(Num(group.Shape.IntermediateSize))
             .Append('x').Append(group.Shape.WeightDType.Name).Append('x').Append(group.Shape.Layout);
         if (group.Overrides is null) return;
         foreach (KeyValuePair<int, ExpertDescriptor> pair in group.Overrides.OrderBy(static p => p.Key))
-            text.Append('[').Append(pair.Key).Append('=').Append(pair.Value.IntermediateSize).Append('x').Append(pair.Value.WeightDType.Name).Append(']');
+            text.Append('[').Append(Num(pair.Key)).Append('=').Append(Num(pair.Value.IntermediateSize)).Append('x')
+                .Append(pair.Value.WeightDType.Name).Append(']');
     }
+
+    private static string Num(int value) => value.ToString(CultureInfo.InvariantCulture);
+
+    private static string Num(float value) => value.ToString("R", CultureInfo.InvariantCulture);
+
+    private static string Flag(bool value) => value ? "1" : "0";
 }

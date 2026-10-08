@@ -36,11 +36,18 @@ public static class MoeTopologyFactory
     /// Qwen3.5 hybrid rule: every <paramref name="fullAttentionInterval"/>-th layer is full attention (standard KV), the rest are
     /// Gated DeltaNet (recurrent state). <paramref name="recurrentOverride"/> wins when the GGUF carries an explicit list.
     /// </summary>
-    public static Func<int, SequenceStateKind> Qwen35States(int fullAttentionInterval, bool[]? recurrentOverride = null) => layer =>
+    public static Func<int, SequenceStateKind> Qwen35States(int fullAttentionInterval, bool[]? recurrentOverride = null)
     {
-        bool recurrent = recurrentOverride is { Length: > 0 } ? recurrentOverride[layer] : (layer + 1) % fullAttentionInterval != 0;
-        return recurrent ? SequenceStateKind.RecurrentState : SequenceStateKind.StandardKv;
-    };
+        if (fullAttentionInterval <= 0) throw new ArgumentOutOfRangeException(nameof(fullAttentionInterval), fullAttentionInterval, "The full-attention interval must be positive.");
+        return layer =>
+        {
+            if (layer < 0) throw new ArgumentOutOfRangeException(nameof(layer), layer, "Layer index must not be negative.");
+            if (recurrentOverride is not null && layer >= recurrentOverride.Length)
+                throw new ArgumentOutOfRangeException(nameof(layer), layer, $"The recurrent-layer list covers {recurrentOverride.Length} layers.");
+            bool recurrent = recurrentOverride is { Length: > 0 } ? recurrentOverride[layer] : (layer + 1) % fullAttentionInterval != 0;
+            return recurrent ? SequenceStateKind.RecurrentState : SequenceStateKind.StandardKv;
+        };
+    }
 
     private static MoeLayerDescriptor BuildLayer(TransformerConfig config, MoeConfig moe, DType dtype, bool sharedGated)
     {

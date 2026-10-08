@@ -11,6 +11,15 @@ namespace HartsyInference.Core.Moe;
 /// <param name="UpMax">Upper bound on the up branch; <see cref="float.PositiveInfinity"/> disables it.</param>
 public sealed record ExpertProgram(ExpertActivation Activation, float GateMax, float UpMin, float UpMax)
 {
+    /// <summary>Rejects NaN bounds and an inverted up range, which would make <see cref="Clamp"/> throw.</summary>
+    /// <exception cref="ArgumentException">A bound is NaN or <see cref="UpMin"/> exceeds <see cref="UpMax"/>.</exception>
+    public ExpertProgram Validated()
+    {
+        if (float.IsNaN(GateMax) || float.IsNaN(UpMin) || float.IsNaN(UpMax)) throw new ArgumentException("Clamp bounds must not be NaN.");
+        if (UpMin > UpMax) throw new ArgumentException($"Up clamp range is inverted: min {UpMin} exceeds max {UpMax}.");
+        return this;
+    }
+
     /// <summary>Plain SwiGLU with no clamp.</summary>
     public static ExpertProgram Swiglu { get; } = new(ExpertActivation.Silu, float.PositiveInfinity, float.NegativeInfinity, float.PositiveInfinity);
 
