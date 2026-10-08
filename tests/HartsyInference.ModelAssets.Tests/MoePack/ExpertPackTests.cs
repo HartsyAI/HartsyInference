@@ -289,4 +289,32 @@ public sealed class ExpertPackTests : IDisposable
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             new ExpertPackWriter(Path.Combine(_root, "too-big"), Fingerprint, 1 << 20, 1 << 20, DType.Q8_0, Keys(1)));
     }
+
+    [Fact]
+    public void ConcurrentWriter_IsRefused_AndAnAbandonedWriterReleasesTheDirectory()
+    {
+        string dir = Path.Combine(_root, "one-writer");
+        ExpertPackWriter first = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, Keys(1));
+        Assert.Throws<InvalidOperationException>(() => new ExpertPackWriter(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, Keys(1)));
+        first.Dispose();
+
+        using ExpertPackWriter second = new(dir, Fingerprint, Hidden, Intermediate, DType.Q8_0, Keys(1));
+        (float[] Gate, float[] Up, float[] Down) source = Expert();
+        second.AddExpert(0, 0, source.Gate, source.Up, source.Down);
+        second.Finish();
+        Assert.False(File.Exists(Path.Combine(dir, "WRITING")));
+    }
+
+    [Fact]
+    public void Verifier_ReportsNonzeroErrorAgainstAZeroSourceAsFailure()
+    {
+        string dir = Path.Combine(_root, "zero-source");
+        WritePack(dir, DType.Q8_0, experts: 1);
+        using ExpertPackReader reader = ExpertPackReader.Open(dir, Fingerprint);
+
+        ExpertPackVerification report = ExpertPackVerifier.Verify(reader,
+            _ => (new float[Intermediate * Hidden], new float[Intermediate * Hidden], new float[Hidden * Intermediate]), reader.Keys);
+
+        Assert.True(double.IsPositiveInfinity(report.RelativeRmse));
+    }
 }

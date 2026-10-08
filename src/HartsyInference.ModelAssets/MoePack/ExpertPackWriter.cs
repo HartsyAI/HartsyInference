@@ -29,6 +29,8 @@ public sealed class ExpertPackWriter : IDisposable
     private readonly DType _dtype;
     private readonly HashSet<ExpertKey> _expected;
     private readonly FileStream _stream;
+    private readonly FileStream _lock;
+    private readonly string _lockPath;
     private readonly List<ExpertPackRecord> _records = [];
     private readonly HashSet<ExpertKey> _written = [];
     private long _position;
@@ -73,6 +75,16 @@ public sealed class ExpertPackWriter : IDisposable
         Directory.CreateDirectory(directory);
         if (File.Exists(Path.Combine(directory, "COMPLETE")))
             throw new InvalidOperationException($"'{directory}' already holds a completed expert pack.");
+        // One writer per directory: the lock is created atomically and removed when this writer publishes or is disposed.
+        _lockPath = Path.Combine(directory, "WRITING");
+        try
+        {
+            _lock = new FileStream(_lockPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        }
+        catch (IOException)
+        {
+            throw new InvalidOperationException($"'{directory}' is already being written; a second writer would replace the pack.");
+        }
         _stream = new FileStream(Path.Combine(directory, "experts.bin.partial"), FileMode.Create, FileAccess.Write, FileShare.None);
     }
 
@@ -126,12 +138,21 @@ public sealed class ExpertPackWriter : IDisposable
 
         File.WriteAllText(Path.Combine(_directory, "COMPLETE"), FormatVersion.ToString());
         _finished = true;
+        ReleaseLock();
     }
 
     /// <inheritdoc/>
     public void Dispose()
     {
-        if (!_finished) _stream.Dispose();
+        if (_finished) return;
+        _stream.Dispose();
+        ReleaseLock();
+    }
+
+    private void ReleaseLock()
+    {
+        _lock.Dispose();
+        File.Delete(_lockPath);
     }
 
     private byte[] Quantize(float[] values, int rows, int cols)

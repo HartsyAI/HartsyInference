@@ -50,7 +50,10 @@ public static class ExpertPackVerifier
                 foreach (Tensor tensor in weights.Tensors) tensor.Dispose();
             }
         }
-        double relative = referenceSquares == 0 ? 0 : Math.Sqrt(errorSquares / referenceSquares);
+        // An all-zero source with any nonzero decoded value is a failure, not a perfect match.
+        double relative = referenceSquares == 0
+            ? (errorSquares == 0 ? 0 : double.PositiveInfinity)
+            : Math.Sqrt(errorSquares / referenceSquares);
         return new ExpertPackVerification(checkedCount, maxAbs, relative, failures);
     }
 
