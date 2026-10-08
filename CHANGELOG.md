@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.291
+
+- **Added: the speculation contract (CPU, synthetic evidence).** `SamplerChain.Distribution` exposes the distribution the sampler draws from, without consuming randomness. `RejectionSampler.Verify` is exact speculative sampling: a drafted token is accepted with probability min(1, p/q), and a rejection draws from the normalized residual max(0, p - q), so the emitted tokens follow the target distribution whatever the proposer does. `PromptLookupProposer` drafts from n-gram matches, and `SpeculativeLoop` runs draft, one scoring pass and verification over a stateless scorer. Greedy speculation reproduces plain greedy decoding; the statistical tests (chi-square at 1e6 trials, and a two-sample test against the plain sampler) and two deliberately broken samplers back the claim. No change to the existing pipeline's speculative path.
+
 ## alpha.290
 
 - **Added: a structural oracle for the DeepSeek-V4.1 host reference, at full depth, on the real checkpoint (diagnostics, off by default).** `dump_real_layers.py` runs the unmodified upstream model through lazy weight shims, so any depth fits in RAM. `RealLayers_MatchTheUpstreamModel` compares the host layer by layer, token by token and decode step by decode step, including the expert ids each token was routed to. Diagnostic switches: `DeepSeekV41LoadOptions.QuantizeLatents` and `DeepSeekV41AttentionSettings.QuantizeLatents` (off skips the FP8/FP4 cache round trip), `DeepSeekV41Block.Probe` now also reports `route`, and `DeepSeekV41MoeLayer.RouteProbe`. No change to normal output.
