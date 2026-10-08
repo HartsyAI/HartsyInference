@@ -57,6 +57,8 @@ class SafetensorsDir:
             os.close(fd)
         self._fds.clear()
         self._headers.clear()
+        for key in [k for k in LazyRoutedExpert.cache if k[0] == self.path]:
+            del LazyRoutedExpert.cache[key]
 
     def __enter__(self):
         return self
@@ -67,8 +69,18 @@ class SafetensorsDir:
     def _shard(self, shard: str):
         if shard not in self._headers:
             fd = os.open(os.path.join(self.path, shard), os.O_RDONLY)
-            (n,) = struct.unpack("<Q", os.pread(fd, 8, 0))
-            header = json.loads(os.pread(fd, n, 8))
+            try:
+                prefix = os.pread(fd, 8, 0)
+                if len(prefix) != 8:
+                    raise EOFError(f"{shard}: file ends inside the 8-byte header length")
+                (n,) = struct.unpack("<Q", prefix)
+                raw = os.pread(fd, n, 8)
+                if len(raw) != n:
+                    raise EOFError(f"{shard}: file ends inside its {n}-byte header")
+                header = json.loads(raw)
+            except BaseException:
+                os.close(fd)
+                raise
             header.pop("__metadata__", None)
             self._fds[shard] = fd
             self._headers[shard] = (8 + n, header)

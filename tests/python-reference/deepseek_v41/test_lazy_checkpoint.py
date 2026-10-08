@@ -75,6 +75,17 @@ class SafetensorsDirTests(unittest.TestCase):
                 src.read_rows("b.fp8", [9])
             src.close()
 
+    def test_truncated_header_fails_with_a_clear_error(self):
+        g = torch.Generator().manual_seed(8)
+        tensor = (torch.randn(2, 8, generator=g)).to(torch.bfloat16)
+        with tempfile.TemporaryDirectory() as root:
+            write_checkpoint(root, {"s.safetensors": {"x": tensor}})
+            os.truncate(os.path.join(root, "s.safetensors"), 5)
+            src = lc.SafetensorsDir(root)
+            with self.assertRaises(EOFError):
+                src.info("x")
+            src.close()
+
     def test_short_row_read_fails_instead_of_shifting_rows(self):
         g = torch.Generator().manual_seed(7)
         tensor = (torch.randn(4, 64, generator=g) * 3).to(torch.float8_e4m3fn)
