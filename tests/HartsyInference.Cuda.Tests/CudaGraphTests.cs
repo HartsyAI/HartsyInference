@@ -27,6 +27,7 @@ public sealed class CudaGraphTests
 
     /// <summary>Capture a 4-op elementwise chain (x=1 → ·2 → ·2 → ·2 → ·2 = 16) and replay it; the replayed result
     /// must equal both the direct-execution result and the analytic answer.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void CudaGraph_CaptureReplay_Scale_MatchesDirect()
     {
@@ -77,6 +78,7 @@ public sealed class CudaGraphTests
     /// (stable addresses) and have the ops write into them, so the captured graph is pure kernel launches. This test
     /// pins the CURRENT behaviour — it should start failing (and be rewritten to assert stable repeats) once that
     /// persistent-buffer capture path exists.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void CudaGraph_RepeatedReplay_WithPerOpAlloc_ThrowsOnSecondLaunch()
     {
@@ -112,6 +114,7 @@ public sealed class CudaGraphTests
     /// <summary>THE FIX for the loop case: instantiating with <c>AUTO_FREE_ON_LAUNCH</c> makes the graph free its
     /// previous launch's allocations before relaunching, so capturing the backend's per-op-allocating ops replays
     /// correctly N times — no allocator rewrite needed. Each replay of the (3 → ·2 → ·2 = 12) chain must give 12.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void CudaGraph_RepeatedReplay_AutoFreeOnLaunch_IsStable()
     {

@@ -41,6 +41,7 @@ public sealed unsafe class ActivationOffloadTests
         return output;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void OffloadActivation_MaterializesHostDataAndReleasesDevice()
     {
@@ -68,6 +69,7 @@ public sealed unsafe class ActivationOffloadTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void OffloadedActivation_ReloadsWithIdenticalBytes()
     {
@@ -93,6 +95,7 @@ public sealed unsafe class ActivationOffloadTests
     /// <param name="bulk">the bulk path blocks auto-promotion; the per-tensor path deliberately does not (it is the
     /// named spelling of the cross-step-cache idiom, which relies on promotion) — so this doubles as the positive
     /// control proving the assertion can observe a promotion at all</param>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
@@ -127,6 +130,7 @@ public sealed unsafe class ActivationOffloadTests
         Assert.Equal(!bulk, promoted);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void OffloadActivations_ReportsBytesFreedAndStopsAtTarget()
     {
@@ -163,6 +167,7 @@ public sealed unsafe class ActivationOffloadTests
     /// page-out ran (the pin is cleared by the D2H); the residual must still reconstruct the block-stack output,
     /// which is what makes paging it survivable. Also exercises the pinned-first tie-break — at the
     /// <c>StoreResidual</c> call the residual shares its size class with the scratch negated input.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void StepCacheCrossStepState_PagesToHostAndStillReconstructs()
     {

@@ -27,6 +27,7 @@ public sealed unsafe class CudnnSdpaTests
         return false;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64)]
     [InlineData(128)]
@@ -98,6 +99,7 @@ public sealed unsafe class CudnnSdpaTests
     /// (0 kept / -1e30 masked, a padded-text span strictly inside the sequence) rides the graph as an fp32 bias
     /// score-modifier. Kept-query rows are compared against the CPU reference; masked-query rows are
     /// uniform-softmax garbage by convention in BOTH paths and are skipped.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64)]
     [InlineData(128)]
@@ -175,6 +177,7 @@ public sealed unsafe class CudnnSdpaTests
     }
 
     /// <summary>Plans with identical shapes but different scales must not share the device scale scalar.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CudnnSdpa_SameShapeDifferentScale_MatchesEachReference()
     {

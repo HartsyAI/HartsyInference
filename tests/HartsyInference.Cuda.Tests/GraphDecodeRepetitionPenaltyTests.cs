@@ -30,6 +30,7 @@ public sealed class GraphDecodeRepetitionPenaltyTests
             .Where(File.Exists)];
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void GraphDecode_WithRepetitionPenalty_MatchesEagerPath()
     {

@@ -210,6 +210,7 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
         AssertBitExact(vRef, vHm, $"cpu v[{b},{heads},{seq},{headDim}]");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Shapes))]
     [Trait("Category", "GpuIntegration")]
@@ -219,6 +220,7 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
         RunCudaCase(b, heads, seq, headDim, DType.F32);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [MemberData(nameof(Shapes))]
     [Trait("Category", "GpuIntegration")]
@@ -228,6 +230,7 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
         RunCudaCase(b, heads, seq, headDim, DType.F16);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_RejectsInvalidDtypesAndShapesBeforeLaunch()
@@ -255,6 +258,7 @@ public sealed unsafe class QkvSplitNormHeadMajorTests
         Assert.Throws<HartsyInferenceException>(() => cuda.QkvSplitNorm(q, k, v, qkv, qWeight, kWeight, 0f));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void Cuda_RejectsInvalidHeadMajorLayoutBeforeLaunch()

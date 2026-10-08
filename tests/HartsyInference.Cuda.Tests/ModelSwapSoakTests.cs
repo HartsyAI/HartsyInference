@@ -26,7 +26,6 @@ namespace HartsyInference.Cuda.Tests;
 /// model is swapped through it — and that one is where a backend whose <c>FreeAllDeviceMemory</c> does nothing
 /// shows up, rather than in any single generation.</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class ModelSwapSoakTests
 {
     private const string Prompt = "Write one sentence about a lighthouse.";

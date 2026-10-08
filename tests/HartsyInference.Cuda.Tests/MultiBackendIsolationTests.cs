@@ -51,6 +51,7 @@ public sealed unsafe class MultiBackendIsolationTests
         return ((float*)output.DataPointer)[0]; // lazy sync fires here, on this backend's stream/context
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TwoBackends_InterleavedOps_NoCrossContextCorruption()
     {
@@ -148,6 +149,7 @@ public sealed unsafe class MultiBackendIsolationTests
     /// thread mutated it → intermittent leak / throw / illegal-address. Requires 2 physical GPUs so the kernels
     /// genuinely execute concurrently; the same-device analogue (still serialized by the engine's DeviceGate until
     /// the concurrency milestone) is <see cref="SameDevice_TwoBackends_InterleavedOps_IndependentStreamsAndCaches"/>.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void TwoBackends_ConcurrentThreads_NoFinalizerDrainRace()
     {
@@ -220,6 +222,7 @@ public sealed unsafe class MultiBackendIsolationTests
     /// distinct StateKeys, per-backend weight caches, and correct interleaved results. This was the broken case the
     /// per-backend StateKey + ambient refactor exists for — context-handle keying collapsed both backends into one
     /// State with last-registered-wins stream bindings. Runs on any box with one CUDA GPU.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SameDevice_TwoBackends_InterleavedOps_IndependentStreamsAndCaches()
     {
@@ -276,6 +279,7 @@ public sealed unsafe class MultiBackendIsolationTests
     /// <summary>Disposing one same-device backend must not free the sibling's live weights or unbind its stream.
     /// Before the per-backend split, B's Dispose ran EvictAll on the SHARED per-context State (wiping A's resident
     /// weights → dangling device pointers) and removed the compute-stream binding A still allocates through.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SameDevice_DisposeOne_SiblingWeightsSurvive()
     {
@@ -325,6 +329,7 @@ public sealed unsafe class MultiBackendIsolationTests
 
     /// <summary>Pin/unpin must bind the receiver's transfer state even when another backend was the last one used
     /// on the thread; otherwise sharded exception cleanup can leave the primary backend's carried latent pinned.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void PinAndUnpin_RebindOwningBackendAfterAnotherBackendWasCurrent()
     {
@@ -352,6 +357,7 @@ public sealed unsafe class MultiBackendIsolationTests
     /// <summary>One tensor carrying activation bindings from TWO backends must keep BOTH: with the old single-slot
     /// callbacks, backend B re-binding a tensor backend A had cached silently overwrote A's dispose hook, so A's
     /// device buffer (and cache entry) leaked forever. Multi-slot keyed bindings free both on Dispose.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SameDevice_ActivationReboundOnSecondBackend_BothBuffersFreed()
     {
@@ -402,6 +408,7 @@ public sealed unsafe class MultiBackendIsolationTests
     /// <summary>While backend A has a graph-capture arena active, backend B's allocations must NOT bump-allocate
     /// out of A's arena — the arena scalars live on each backend's own State now (they were single-valued on the
     /// shared per-context State, so B's allocations landed inside A's arena and died with it).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SameDevice_GraphArena_Isolation()
     {
@@ -448,6 +455,7 @@ public sealed unsafe class MultiBackendIsolationTests
     /// backend A's in-flight window, and any of A's allocations issued while B's window happened to be open got
     /// folded into B's leak-detection report. Now lives on <see cref="GpuTransferHelper.State"/> — per backend,
     /// including two backends sharing one GPU.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SameDevice_StepGraphCaptureWindow_IsolatedPerBackend()
     {
@@ -498,6 +506,7 @@ public sealed unsafe class MultiBackendIsolationTests
     /// StepGraphBegin/EndAndLaunch cycle with actual captured work (a Linear), interleaved, and each must produce
     /// correct output — the isolated tracker from the test above is what makes this safe, but this exercises the
     /// path an inference pipeline actually calls.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SameDevice_TwoBackends_InterleavedStepGraphCapture_ProducesCorrectResults()
     {

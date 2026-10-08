@@ -15,6 +15,7 @@ public sealed unsafe class ZImageRopeGpuTableLifecycleTests
 
     public ZImageRopeGpuTableLifecycleTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void ReleaseGpuTables_EvictsBothWeights_AndApplyGpuReuploadsEquivalentTables()

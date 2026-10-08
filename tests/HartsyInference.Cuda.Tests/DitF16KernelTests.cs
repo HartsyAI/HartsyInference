@@ -52,6 +52,7 @@ public sealed unsafe class DitF16KernelTests
         Assert.True(maxDiff <= tol, $"{name}: maxDiff {maxDiff:E3} > tol {tol:E1} at index {maxIdx}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DitF16Kernels_MatchF32Twins()
     {

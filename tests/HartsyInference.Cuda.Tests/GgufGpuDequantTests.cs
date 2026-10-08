@@ -17,6 +17,7 @@ public sealed class GgufGpuDequantTests
     private readonly ITestOutputHelper _output;
     public GgufGpuDequantTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Q8_0_GpuDequant_MatchesCpu()
     {
@@ -34,6 +35,7 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Q4_0_GpuDequant_MatchesCpu()
     {
@@ -51,6 +53,7 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Q5_0_GpuDequant_MatchesCpu()
     {
@@ -71,6 +74,7 @@ public sealed class GgufGpuDequantTests
     /// <summary>Q2_K is the smallest K-quant, and the reason it is worth a kernel: a 6.7 GB MiniMax-H3 build against
     /// 21 GB at Q8_0. Widened on the host instead it expands roughly sixfold, which puts a model that would fit a
     /// 12 GB card out of reach of a 24 GB one.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Q2_K_GpuDequant_MatchesCpu()
     {
@@ -93,6 +97,7 @@ public sealed class GgufGpuDequantTests
 
     /// <summary>Q3_K's high bit is stored INVERTED — a set mask bit means "do not subtract 4" — which is the single
     /// easiest thing to get backwards in this layout, and a sign error there is not visibly wrong, just wrong.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Q3_K_GpuDequant_MatchesCpu()
     {
@@ -111,6 +116,7 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Q4_K_GpuDequant_MatchesCpu()
     {
@@ -128,6 +134,7 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void IQ4_XS_GpuDequant_MatchesCpu()
     {
@@ -154,6 +161,7 @@ public sealed class GgufGpuDequantTests
     }
 
     /// <summary>The i-quant family: random block bytes with the FP16 super-scale pinned to [0.25, 2) (IQ1_M spreads it over its scale words' top nibbles), decoded by the kernel and the host codec.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("IQ2_XXS")]
     [InlineData("IQ2_XS")]
@@ -199,6 +207,7 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void IQ4_NL_GpuDequant_MatchesCpu()
     {
@@ -224,6 +233,7 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Q5_K_GpuDequant_MatchesCpu()
     {
@@ -241,6 +251,7 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Q6_K_GpuDequant_MatchesCpu()
     {
@@ -258,6 +269,7 @@ public sealed class GgufGpuDequantTests
         finally { src.Dispose(); }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void EndToEnd_QuantizeOnCpu_GpuDequant_MatchesOriginal()
     {

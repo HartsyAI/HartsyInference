@@ -11,7 +11,6 @@ namespace HartsyInference.Cuda.Tests;
 /// undamp (fused) — and compares INTERMEDIATES (the fused GEMM's halves vs the split GEMMs) so the first
 /// diverging op is identified, not just the end-to-end mismatch.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class FusedFfnF16BisectTests
 {
     private readonly ITestOutputHelper _output;
@@ -67,6 +66,7 @@ public sealed unsafe class FusedFfnF16BisectTests
         return m;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FusedW13_F16Damped_HalvesMatchSplitGemms()
     {

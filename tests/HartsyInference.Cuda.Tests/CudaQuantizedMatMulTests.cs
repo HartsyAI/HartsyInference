@@ -17,6 +17,7 @@ public sealed class CudaQuantizedMatMulTests
     private readonly ITestOutputHelper _output;
     public CudaQuantizedMatMulTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData("Q8_0", 64, 128)]
     [InlineData("Q4_K", 256, 256)]

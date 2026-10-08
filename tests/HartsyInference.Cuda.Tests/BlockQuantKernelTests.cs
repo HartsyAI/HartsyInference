@@ -28,6 +28,7 @@ public sealed class BlockQuantKernelTests
             : Path.Combine(HartsyInference.Tests.Common.RepoRoot.Path, "src", "HartsyInference.Cuda", "Ptx");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(3, 64, false)]
     [InlineData(200, 320, false)]
@@ -97,6 +98,7 @@ public sealed class BlockQuantKernelTests
     /// reader of that layout — the resident unpack behind <c>backend.Linear</c> — decodes. A K×K identity activation
     /// makes the F32 output the dequantized weight transposed, so the comparison is against the host decode
     /// through the same kernel every nvfp4 checkpoint takes.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void QuantizedActivationIsWhatTheResidentNvfp4PathReads()
     {
@@ -149,6 +151,7 @@ public sealed class BlockQuantKernelTests
     /// <summary>MXFP8 activations: a UE8M0 exponent per 32 elements and e4m3 values, decoded on the host through
     /// <see cref="Mxfp8ResidentCodec"/> — the same codec the resident-weight unpack is measured against. fp8 keeps
     /// three mantissa bits, so the round trip correlates far above nvfp4's.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(5, 64, false)]
     [InlineData(200, 320, true)]

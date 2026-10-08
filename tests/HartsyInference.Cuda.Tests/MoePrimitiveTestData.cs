@@ -1,3 +1,4 @@
+using Xunit;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 

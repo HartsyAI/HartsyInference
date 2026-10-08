@@ -21,7 +21,6 @@ namespace HartsyInference.Cuda.Tests;
 /// the SAME small number of misses per decode step. A regression that makes misses scale with layer count
 /// again (the original bug) fails this immediately; a regression that makes the per-call upload itself
 /// disappear would be a correctness bug elsewhere, not something this test is positioned to catch.</summary>
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class RopeAndEmbedResidencyRegressionTests
 {
     /// <summary>The 3060 with every card visible; a runner pinning one card (CUDA_VISIBLE_DEVICES) leaves only 0.</summary>
@@ -89,6 +88,7 @@ public sealed unsafe class RopeAndEmbedResidencyRegressionTests
         return w;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(2)]
     [InlineData(8)]

@@ -42,6 +42,7 @@ public sealed unsafe class KvF16DecodeAttentionBench
         return t;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Bench_F16Kv_Vs_F32Kv_DecodeShape()
     {

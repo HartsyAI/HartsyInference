@@ -15,6 +15,7 @@ public sealed unsafe class AttentionExecutionCacheReleaseTests
 
     public AttentionExecutionCacheReleaseTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void ReleaseAttentionExecutionCache_PreservesWeights_AndRecreatesCudnnSession()

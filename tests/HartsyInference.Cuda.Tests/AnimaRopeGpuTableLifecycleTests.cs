@@ -29,6 +29,7 @@ public sealed unsafe class AnimaRopeGpuTableLifecycleTests
 
     public AnimaRopeGpuTableLifecycleTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void GetOrCreateTables_ReusesOneUpload_AndApplyRopeMatchesCpuWithoutD2h()
@@ -111,6 +112,7 @@ public sealed unsafe class AnimaRopeGpuTableLifecycleTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     [Trait("Category", "GpuIntegration")]
     public void ReleaseDeviceCache_EvictsAndRecreatesEquivalentTables_IdempotentlyWithoutD2h()

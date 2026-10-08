@@ -56,6 +56,7 @@ public sealed unsafe class CudaPeerCopyTests
         return (activation, (float)acc);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CrossDevice_BoundaryCopy_LandsIntact_AndSourceStaysResident()
     {
@@ -94,6 +95,7 @@ public sealed unsafe class CudaPeerCopyTests
 
     /// <summary>Same-device sibling backends never report P2P (same ordinal), so the staging path must carry the
     /// handoff — runnable on a one-GPU box.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SameDevice_BoundaryCopy_StagesThroughDestinationHostBuffer()
     {
@@ -121,6 +123,7 @@ public sealed unsafe class CudaPeerCopyTests
     }
 
     /// <summary>A source with no device shadow (host-only data) rides the plain host fallback.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void HostOnlySource_FallsBackToPlainCopy()
     {

@@ -19,7 +19,6 @@ namespace HartsyInference.Cuda.Tests;
 /// toolchain that produced them. All three are reported through <see cref="ITestOutputHelper"/> so an inconclusive
 /// run does not read as a pass.</para></summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed class CudaKernelDriftTests
 {
     private readonly ITestOutputHelper _out;

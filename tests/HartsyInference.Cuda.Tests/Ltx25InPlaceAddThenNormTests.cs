@@ -51,6 +51,7 @@ public sealed unsafe class Ltx25InPlaceAddThenNormTests
         return normed2;
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(160, false)]
     [InlineData(160, true)]

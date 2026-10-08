@@ -12,11 +12,13 @@ namespace HartsyInference.Diffusion.Tests;
 /// <summary>Real-world validation of the Phase D wiring: takes a single Q4_K weight from the actual `city96/FLUX.1-schnell-gguf` checkpoint, runs <see cref="CudaBackend.Linear"/> with it, and verifies output sanity (no NaN/Inf, reasonable magnitudes). Exercises the full path: GGUF mmap → Tensor with Q4_K dtype → GpuTransferHelper.CopyToDevice → Linear's CastIfNeeded → GPU dequant kernel → cuBLAS GEMM.
 ///
 /// <para>Supplements the synthetic <see cref="HartsyInference.Cuda.Tests.CudaLinearQuantTests"/> with a real ggml-quantized weight, confirming the codecs read on-disk city96 layouts correctly (not just hand-built test data).</para></summary>
+[Trait("Category", "Integration")]
 public sealed class FluxGgufLinearTests
 {
     private readonly ITestOutputHelper _output;
     public FluxGgufLinearTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public unsafe void Linear_RealQ4_K_FromCity96Gguf_ProducesSaneOutput()
     {

@@ -14,7 +14,6 @@ namespace HartsyInference.Cuda.Tests;
 /// SageAttentionReferenceTests). Budget: ≤1e-2 max error at unit activation scale (the threshold at which
 /// SageAttention reports metric-neutral e2e results), plus bit-exact run-to-run determinism.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class SageAttnKernelTests
 {
     private readonly ITestOutputHelper _output;
@@ -67,6 +66,7 @@ public sealed unsafe class SageAttnKernelTests
         return (maxErr, sum / n);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(128, 256, 1024)]
     [InlineData(128, 256, 1025)]   // Skv tail (curBC < BC on the last step)
@@ -135,6 +135,7 @@ public sealed unsafe class SageAttnKernelTests
     /// inside F16 range with the pre-scale, catastrophically outside without it. Expected output is
     /// exactly v (uniform average of constant V); NaN/Inf or drift means the headroom fix failed.
     /// Runs the f16acc path explicitly regardless of ambient env.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SageAttention_F16AccPv_UniformAttention_LargeSkv_NoOverflow()
     {
@@ -196,6 +197,7 @@ public sealed unsafe class SageAttnKernelTests
     /// kernel vs the CPU F32 reference on the SAME real values (F16 inputs constructed by rounding the F32
     /// randoms — both paths see identical data up to the F16 encode). Budget stays 2e-2 (input rounding
     /// adds ~1e-3-class error on top of the INT8 path's 4e-4). Covers the branch-1 dispatch contract.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(128, 256, 250)]
     [InlineData(64, 512, 512)]
@@ -259,6 +261,7 @@ public sealed unsafe class SageAttnKernelTests
 
     /// <summary>The refutation control for the smoothing claim at kernel level: WITHOUT outliers the budget
     /// must also hold (smoothing must not hurt the clean case).</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void SageAttention_CleanInputs_WithinBudget()
     {

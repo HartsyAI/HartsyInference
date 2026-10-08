@@ -10,7 +10,6 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Device dequant of MXFP4-E8M0 and FP8-block-E8M0 expert matrices against the host codecs, through the expert cache upload path.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaQuantWorkspaceTests
 {
     private readonly ITestOutputHelper _output;
@@ -101,6 +100,7 @@ public sealed unsafe class CudaQuantWorkspaceTests
     private static ExpertBank BankOf(ExpertMatrix w1, ExpertMatrix w2, ExpertMatrix w3) =>
         new(0, 1, key => new ExpertWeights(key, w1, w2, w3));
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 8, 96, 0)]
     [InlineData(QuantEncoding.Mxfp4E8M0, 1, 32, 4, 64, 3)]
@@ -129,6 +129,7 @@ public sealed unsafe class CudaQuantWorkspaceTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Workspace_IsABoundedRingOfTwoAndRefusesOversizeMatrices()
     {
@@ -163,6 +164,7 @@ public sealed unsafe class CudaQuantWorkspaceTests
         Assert.Throws<NotSupportedException>(() => backend.QuantWorkspace.Dequantize(bigLease.Get(new ExpertKey(0, 0)).W1));
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Dequantize_RefusesMatricesThatAreNotResidentOrHaveNoRecipe()
     {

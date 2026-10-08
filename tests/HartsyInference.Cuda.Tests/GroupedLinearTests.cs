@@ -13,7 +13,6 @@ namespace HartsyInference.Cuda.Tests;
 /// drift means the shared buffer is being read wrong (a stale row chunk, a mis-sized accumulator, a row-scale
 /// pointer crossed between targets), which as video would be invisible.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class GroupedLinearTests
 {
     private readonly ITestOutputHelper _output;
@@ -73,6 +72,7 @@ public sealed unsafe class GroupedLinearTests
     /// <summary>The LTX-2.5 self-attention shape: gate (n=32) + q/k/v (n=4096) all projecting one [rows, 4096]
     /// activation, which is exactly the four-way redundancy the grouping exists to remove. <paramref name="rows"/>
     /// spans both sides of the 32-row cuBLASLt padding granularity.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(97, 4096, 256)]
     [InlineData(37, 2048, 256)]
@@ -130,6 +130,7 @@ public sealed unsafe class GroupedLinearTests
     /// <summary>A group the resident chain cannot serve whole: an F16 weight and a mismatched ConvRot group sit
     /// beside eligible int8 weights. Both must fall out to an ordinary Linear and still land correct — a group is
     /// partitioned, never refused, and never silently quantized against the wrong rotation.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void MixedGroupPartitionsInsteadOfRefusing()
     {
@@ -173,6 +174,7 @@ public sealed unsafe class GroupedLinearTests
     /// chunking, or the scale/bias plumbing around it silently breaking.</summary>
     /// <remarks>Shape chosen to clear every bound in <c>UseFusedMmaGemm</c>: rows ≥ 1024, n a multiple of 256,
     /// k ≤ 2n, F16 out. The kernel is bit-exact against the cuBLASLt pair, so the two routes must agree EXACTLY.</remarks>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FusedMmaPathMatchesCublasLtPairThroughLinear()
     {
@@ -203,6 +205,7 @@ public sealed unsafe class GroupedLinearTests
     /// it replaces. The fused kernel reproduces the separate pass's f16 store and its <c>(x·2)·sig</c> multiply
     /// association deliberately, so the bar is BYTE-IDENTICAL — an algebraically-equal-but-differently-rounded
     /// gate would silently change every attention output in the model.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void FusedHeadGateMatchesSeparateGatePass()
     {
@@ -241,6 +244,7 @@ public sealed unsafe class GroupedLinearTests
 
     /// <summary>The kill switch has to be a real seam: with it off, LinearMulti must degrade to the per-op loop and
     /// still produce the same bytes, so a bisect can turn the feature off and trust the result.</summary>
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void KillSwitchFallsBackToPerOp()
     {

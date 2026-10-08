@@ -27,10 +27,12 @@ public sealed unsafe class GraphDecodeDualEmbedsTests
     private static Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
     private static Tensor Embeds(int t, int h) => Fill(new Tensor(new TensorShape(1, t, h), DType.F32));
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DualGraphDecodeStepEmbeds_FusedQkv_MatchesTwoEagerStreams()
         => RunConfig(qkNorm: false);
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void DualGraphDecodeStepEmbeds_ComposedQkNorm_MatchesTwoEagerStreams()
         => RunConfig(qkNorm: true);

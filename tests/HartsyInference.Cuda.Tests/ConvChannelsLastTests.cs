@@ -10,9 +10,9 @@ namespace HartsyInference.Cuda.Tests;
 /// same inputs, at a size above <see cref="CudaBackend.ChannelsLastMinElements"/>, plus the tiled transpose it rests on.
 /// Skips cleanly without CUDA.</summary>
 [Collection("CudaSerial")]
-[Trait("Category", "GpuIntegration")]
 public sealed unsafe class ConvChannelsLastTests(ITestOutputHelper output)
 {
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(64, 96, 1, 1)]
     [InlineData(64, 48, 2, 1)]   // stride 2
@@ -38,6 +38,7 @@ public sealed unsafe class ConvChannelsLastTests(ITestOutputHelper output)
         Assert.True(maxDiff <= 1e-2 * Math.Max(1, maxAbs), $"channels-last diverges from NCHW by {maxDiff:E3}");
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Theory]
     [InlineData(2, 3, 77, 45)]
     [InlineData(4, 1, 33, 1000)]

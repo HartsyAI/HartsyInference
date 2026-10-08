@@ -20,6 +20,7 @@ public sealed class LtGemmPlanCacheTests
 
     public LtGemmPlanCacheTests(ITestOutputHelper output) => _output = output;
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void HighPrecisionPolicy_IsForwardedExactlyToLtPlan()
     {
@@ -61,6 +62,7 @@ public sealed class LtGemmPlanCacheTests
         AssertLinearMatchesCpu(result, input, weight, bias, tolerance: 1e-3f);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void F32EnvironmentPolicies_ForwardFastTf32_NoTf32_AndFastF16Exactly()
     {
@@ -110,6 +112,7 @@ public sealed class LtGemmPlanCacheTests
         }
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CachedPlan_PatchesDifferentBiasPointer_WithoutRequery()
     {
@@ -168,6 +171,7 @@ public sealed class LtGemmPlanCacheTests
         Assert.Equal(0, diagnostics.Fallbacks);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void HotShape_QueriesOnce_ThenOnlyHitsThePlanCache()
     {
@@ -217,6 +221,7 @@ public sealed class LtGemmPlanCacheTests
         Assert.Equal(0, diagnostics.Fallbacks);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CachedPlan_CapturesAndReplaysWithoutRequery_AndReadsLiveBiasData()
     {
@@ -280,6 +285,7 @@ public sealed class LtGemmPlanCacheTests
         Assert.Equal(0, diagnostics.Fallbacks);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void ForcedNoAlgorithm_FallsBackToGemmEx_AndNegativeCachesTheContract()
     {
@@ -327,6 +333,7 @@ public sealed class LtGemmPlanCacheTests
         Assert.Equal(CublasApi.CUBLAS_COMPUTE_32F, diagnostics.LastComputeType);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void CapacityTwo_UsesTrueLru_AndDisposeReleasesAllLivePlans()
     {
@@ -399,6 +406,7 @@ public sealed class LtGemmPlanCacheTests
         Assert.Equal(leaseBaseline, LtGemmExecutor.LiveContextLeaseCountForTests);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void StandaloneExecutor_DisposesAfterBorrowedStreamAndContext_AcrossItsRetainedLease()
     {
@@ -467,6 +475,7 @@ public sealed class LtGemmPlanCacheTests
         Assert.Equal(leaseBaseline, LtGemmExecutor.LiveContextLeaseCountForTests);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public async Task ConcurrentSameStreamCalls_KeepPerCallBiasPointersIsolated()
     {
@@ -549,6 +558,7 @@ public sealed class LtGemmPlanCacheTests
         Assert.Equal(0, diagnostics.Fallbacks);
     }
 
+    [Trait("Category", "GpuIntegration")]
     [Fact]
     public void AbandonedBackend_WithPopulatedLtPlan_ReaperRestoresPlanAndRegistryBaselines()
     {
