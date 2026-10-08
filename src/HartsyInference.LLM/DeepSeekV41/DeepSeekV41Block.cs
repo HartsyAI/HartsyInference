@@ -80,6 +80,11 @@ public sealed class DeepSeekV41Block
     /// <summary>Collapses a stream into one input with already-derived coefficients; the model uses this for the final head.</summary>
     public void Collapse(ReadOnlySpan<float> x, ReadOnlySpan<float> pre, int tokens, Span<float> y) => _hcFfn.Collapse(x, pre, tokens, y);
 
+    /// <summary>Runs the block without the DSpark target tap; see the overload that takes <paramref name="streamMean"/>.</summary>
+    public void Forward(Span<float> x, int tokens, int startPos, ReadOnlySpan<float> preMix, Span<float> nextPreMix, DeepSeekV41AttentionState state,
+        DeepSeekV41SharedAttention shared, ReadOnlySpan<long> hashIds, int hashLayers, ReadOnlySpan<bool> tokenMask, ReadOnlySpan<byte> imageTokens)
+        => Forward(x, tokens, startPos, preMix, nextPreMix, state, shared, hashIds, hashLayers, tokenMask, imageTokens, default);
+
     /// <summary>Runs the block over <paramref name="tokens"/> positions, updating the stream in place.</summary>
     /// <param name="x">Residual stream, <c>[tokens, hc, dim]</c>; replaced by the block's output.</param>
     /// <param name="tokens">Position count.</param>
@@ -92,8 +97,10 @@ public sealed class DeepSeekV41Block
     /// <param name="hashLayers">Engram layers in <paramref name="hashIds"/>.</param>
     /// <param name="tokenMask">False shuts the Engram gate for that position; empty means every position is live.</param>
     /// <param name="imageTokens">Nonzero inside an image span, selecting the vision routing bias; empty when none.</param>
+    /// <param name="streamMean">Receives the hc-mean of <paramref name="x"/>, <c>[tokens, dim]</c>, taken after this block's Engram step and before its sublayers, which is where the
+    /// DSpark draft reads its target layers; empty when not wanted.</param>
     public void Forward(Span<float> x, int tokens, int startPos, ReadOnlySpan<float> preMix, Span<float> nextPreMix, DeepSeekV41AttentionState state,
-        DeepSeekV41SharedAttention shared, ReadOnlySpan<long> hashIds, int hashLayers, ReadOnlySpan<bool> tokenMask, ReadOnlySpan<byte> imageTokens)
+        DeepSeekV41SharedAttention shared, ReadOnlySpan<long> hashIds, int hashLayers, ReadOnlySpan<bool> tokenMask, ReadOnlySpan<byte> imageTokens, Span<float> streamMean)
     {
         if (x.Length != (long)tokens * _hc * _dim) throw new ArgumentException("x must hold tokens x hc x dim values.", nameof(x));
         if (preMix.Length != tokens * _hc || nextPreMix.Length != tokens * _hc) throw new ArgumentException("Pre-mix arrays must hold tokens x hc values.");
@@ -106,6 +113,21 @@ public sealed class DeepSeekV41Block
             long[] mine = new long[tokens * columns];
             for (int t = 0; t < tokens; t++) hashIds.Slice((t * hashLayers + _engramSlot) * columns, columns).CopyTo(mine.AsSpan(t * columns, columns));
             _engram.Apply(x, tokens, mine, tokenMask);
+        }
+
+        if (!streamMean.IsEmpty)
+        {
+            if (streamMean.Length != tokens * _dim) throw new ArgumentException("streamMean must hold tokens x dim values.", nameof(streamMean));
+            // upstream takes h.mean(dim=2) of the stream entering the layer, after Engram and before any sublayer
+            for (int t = 0; t < tokens; t++)
+            {
+                for (int d = 0; d < _dim; d++)
+                {
+                    float sum = 0f;
+                    for (int c = 0; c < _hc; c++) sum += x[(t * _hc + c) * _dim + d];
+                    streamMean[t * _dim + d] = sum / _hc;
+                }
+            }
         }
 
         float[] aPre = new float[tokens * _hc], aPost = new float[tokens * _hc], aComb = new float[tokens * _hc * _hc];

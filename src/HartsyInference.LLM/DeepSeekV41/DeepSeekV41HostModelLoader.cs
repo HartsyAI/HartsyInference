@@ -61,7 +61,8 @@ public static class DeepSeekV41HostModelLoader
                 blocks[layer] = BuildBlock(backend, checkpoint, read, cfg, layer, plainRope, compressRope, expertCache, options, stores);
 
             DeepSeekV41HostModel model = new(dim, hc, cfg.VocabSize, normEps, read.Weight("embed.weight", cfg.VocabSize, dim), blocks,
-                read.Vector("norm.weight", dim), read.Weight("head.weight", cfg.VocabSize, dim));
+                read.Vector("norm.weight", dim), read.Weight("head.weight", cfg.VocabSize, dim),
+                mainHiddenLayers: cfg.DsparkTargetLayerIds.Where(layer => layer < blocks.Length).ToArray());
             return new DeepSeekV41LoadedModel(model, checkpoint, ownsCheckpoint, stores, options.MaxTokens);
         }
         catch
