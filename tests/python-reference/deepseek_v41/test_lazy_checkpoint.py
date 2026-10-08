@@ -73,6 +73,19 @@ class SafetensorsDirTests(unittest.TestCase):
             self.assertTrue(torch.equal(raw(got), raw(tensors["b.fp8"][rows])))
             with self.assertRaises(IndexError):
                 src.read_rows("b.fp8", [9])
+            src.close()
+
+    def test_short_row_read_fails_instead_of_shifting_rows(self):
+        g = torch.Generator().manual_seed(7)
+        tensor = (torch.randn(4, 64, generator=g) * 3).to(torch.float8_e4m3fn)
+        with tempfile.TemporaryDirectory() as root:
+            write_checkpoint(root, {"s.safetensors": {"x.fp8": tensor}})
+            src = lc.SafetensorsDir(root)
+            shard, dtype, shape, offset, nbytes = src.info("x.fp8")
+            os.truncate(os.path.join(root, shard), offset + 2 * 64 + 10)
+            with self.assertRaises(EOFError):
+                src.read_rows("x.fp8", [1, 3])
+            src.close()
 
 
 class LazyShimTests(unittest.TestCase):

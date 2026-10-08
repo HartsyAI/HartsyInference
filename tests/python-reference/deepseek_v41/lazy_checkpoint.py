@@ -52,6 +52,18 @@ class SafetensorsDir:
         self._headers: dict = {}
         self._fds: dict = {}
 
+    def close(self) -> None:
+        for fd in self._fds.values():
+            os.close(fd)
+        self._fds.clear()
+        self._headers.clear()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
     def _shard(self, shard: str):
         if shard not in self._headers:
             fd = os.open(os.path.join(self.path, shard), os.O_RDONLY)
@@ -89,7 +101,11 @@ class SafetensorsDir:
         for i, r in enumerate(rows):
             if not 0 <= r < shape[0]:
                 raise IndexError(f"{name}: row {r} outside [0, {shape[0]})")
-            buf[i * row_bytes:(i + 1) * row_bytes] = os.pread(fd, row_bytes, offset + r * row_bytes)
+            piece = os.pread(fd, row_bytes, offset + r * row_bytes)
+            # a short read would shift every later row in the buffer, so it must fail here
+            if len(piece) != row_bytes:
+                raise EOFError(f"{name}: row {r} read {len(piece)} of {row_bytes} bytes")
+            buf[i * row_bytes:(i + 1) * row_bytes] = piece
         return torch.frombuffer(buf, dtype=torch.uint8).view(DTYPES[dtype]).reshape(len(rows), *shape[1:])
 
 
@@ -115,7 +131,7 @@ class LazyRoutedExpert(nn.Module):
         self.source, self.layer, self.index = source, layer, index
 
     def _inner(self) -> nn.Module:
-        key = (id(self.source), self.layer, self.index)
+        key = (self.source.path, self.layer, self.index)
         inner = LazyRoutedExpert.cache.get(key)
         if inner is not None:
             LazyRoutedExpert.cache.move_to_end(key)
