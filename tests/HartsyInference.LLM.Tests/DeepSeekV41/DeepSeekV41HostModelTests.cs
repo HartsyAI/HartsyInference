@@ -74,7 +74,7 @@ public sealed class DeepSeekV41HostModelTests
         return new DeepSeekV41Block(dim, hc, normEps, hcAttn, hcFfn, P(l + "attn_norm.weight"), P(l + "ffn_norm.weight"), attention, ffn, engram, engramSlot);
     }
 
-    private static DeepSeekV41HostModel BuildModel(CpuBackend cpu)
+    internal static DeepSeekV41HostModel BuildModel(CpuBackend cpu)
     {
         JsonElement cfg = Fx.GetProperty("config");
         DeepSeekV41Block[] blocks = Enumerable.Range(0, cfg.GetProperty("n_layers").GetInt32()).Select(i => BuildBlock(cpu, i)).ToArray();

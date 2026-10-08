@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.294
+
+- **Added: speculative decoding on the DeepSeek-V4.1 host model, exact under greedy decoding (CPU, synthetic evidence).** `DeepSeekV41SpeculativeScorer` scores a draft over the model's own sequence state: it rolls back to the part of the context the state already holds, appends the rest of the context and the draft, and reads the logits after the context and after each drafted token. A rollback replays the committed history the way it was built: the first append as one prefill chunk, every later token one at a time. That matters because the reference's chunked prefill and its per-token decode are not arithmetically equivalent on every length (upstream differs from itself on the synthetic fixture), so a single-chunk replay changed the state and the greedy output. On the synthetic V4.1 model the scored rows equal the per-token logits for prompts of 1 to 11 tokens and drafts of 1 to 4, and greedy speculation with the prompt-lookup proposer reproduces plain greedy decoding token for token through the rejections, for prompts of 6, 9 and 11 tokens and draft limits up to 6. Plain decoding is unchanged.
+
 ## alpha.293
 
 - **Added: the DeepSeek-V4.1 target exposes the rows its DSpark draft reads, and the draft chained from them matches the upstream oracle.** `DeepSeekV41HostModel.Forward` can write `main_hidden` for the layers in `dspark_target_layer_ids`: the hc-mean of each target block's entry stream, taken after its Engram step and before its sublayers, in upstream's layer order. The tap is off unless a caller passes the output span, so the default path is unchanged. On the real checkpoint (structural mode, the oracle's 6-token prompt and one decode step), the tapped rows agree with upstream at relL2 5.1e-7 (prefill) and 4.8e-6 (decode), and the draft built from the C# target's own taps reproduces the upstream ids exactly, with logits at relL2 2.2e-6 and confidences within 2.3e-5.
