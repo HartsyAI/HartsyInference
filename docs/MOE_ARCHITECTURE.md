@@ -79,4 +79,11 @@ until covered.
   to drafts. Confirm both against the checkpoint before running draft experts.
 - Engram hash tables (DeepSeek-V4.1) are not MoE experts and are not in the topology yet; they belong to the auxiliary
   storage tier (see the placement milestone).
-- `ExpertKey` is still `(Layer, Expert)` with no bank identity; it changes when the expert source milestone lands.
+
+## Expert identity and sources
+
+An expert is identified by `ExpertKey(Layer, Expert, Bank)`. The bank is cache-scoped: a model that shares a cache with
+others gets its own bank, so the same layer number in two models is two layers. `Bank` defaults to 0, so single-model code
+is unchanged. The cache counts, protects and evicts by `ExpertLayerKey` (bank and layer). A model describes where its experts
+come from through `IExpertSource`, whose `ExpertBacking` (resident host, memory-mapped, pack, device) lets the runtime choose
+policy. The bank resolves each expert once, and the cache copies from the bank; the model never sees device slots.

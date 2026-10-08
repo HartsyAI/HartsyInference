@@ -8,6 +8,16 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.283
+
+- **Added: expert identity with banks and a pluggable expert source.** `ExpertKey` gains a `Bank` (defaulted, so existing
+  two-argument keys are unchanged), and `ExpertLayerKey` is the cache's layer identity. Two models sharing one cache each
+  register their own bank, so the same layer number no longer collides; re-registering a different bank under one layer key
+  still throws. `IExpertSource` (with `ExpertBacking`: resident host, memory-mapped, pack, device) supplies expert weights on
+  demand, `DelegateExpertSource` adapts existing resolvers without copying them, and `ExpertBank.FromSource` builds a bank from
+  one. No model or runtime path changes behavior; the CUDA project builds against the new types, and its GPU tests are not
+  run here.
+
 ## alpha.282
 
 - **Added: exact-contract reference path for routed sparse layers.** `Core.Moe.SparseFfnReference` runs a routed layer
