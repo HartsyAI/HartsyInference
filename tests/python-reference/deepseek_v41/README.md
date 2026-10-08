@@ -34,6 +34,7 @@ Re-check without downloading: `python fetch_upstream.py --verify-only`.
 | `dump_hyper_connection_fixture.py` | Writes `fixtures/hyper_connection.json`: `Block.hc_mixes` / `hc_pre` / `hc_post` called unbound |
 | `dump_attention_fixture.py` | Writes `fixtures/attention_stack.json` (with an exact-softmax `sparse_attn`, see below): six upstream `Attention` layers (every mode) through prefill and decode, with the indices each index-source layer chose |
 | `dump_model_fixture.py` | Writes `fixtures/model_forward.json`: a small upstream `Transformer` (all layer modes, float32, no Engram/vision/draft) with every parameter and its shape, each block's output stream, the final normed hidden states and last-position logits through prefill and decode |
+| `dump_real_layers.py` | Runs the unmodified upstream `Transformer` on the first N layers of the REAL checkpoint (N=1: Engram layers need a 98 GB table) in `exact` (float32, GEMM-input activation quantization removed) or `ports` mode and dumps ids, per-sublayer taps, final hidden and logits; `DeepSeekV41RealWeightsTests.RealLayers_MatchTheUpstreamModel` compares the host reference to it (`DSV41_ORACLE_DIR`) |
 | `dump_derivative_quant_fixtures.py` | Writes `fixtures/derivative_quant_codecs.json`: independent numpy decoders for ModelOpt NVFP4 and Quark MXFP4, and `mx.quantize`/`mx.dequantize` for MLX affine 4/8-bit gs64 (needs `pip install mlx[cpu]`, used only by this script) |
 
 ## Commands
