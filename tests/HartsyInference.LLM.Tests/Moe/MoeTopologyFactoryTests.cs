@@ -153,6 +153,26 @@ public sealed class MoeTopologyFactoryTests
     }
 
     [Fact]
+    public void GroupedSigmoid_CarriesTheCorrectionBiasOnlyWhenTheCheckpointHasIt()
+    {
+        MoeConfig grouped = new()
+        {
+            NumExperts = 8, NumExpertsPerTok = 2, MoeIntermediateSize = 16, Scoring = MoeScoring.Sigmoid,
+            ExpertGroupCount = 2, ExpertGroupUsedCount = 1,
+        };
+        TransformerConfig config = new()
+        {
+            HiddenSize = 32, NumLayers = 1, NumHeads = 2, NumKvHeads = 2, HeadDim = 16, IntermediateSize = 64, VocabSize = 100, Moe = grouped,
+        };
+
+        RouterDescriptor Router(bool? hasBias) => MoeTopologyFactory.FromTransformer(config, routerHasCorrectionBias: hasBias).Layers[0].Moe!.Router;
+
+        Assert.False(Router(null).HasSelectionBias);
+        Assert.True(Router(true).HasSelectionBias);
+        Assert.Equal(SelectionBiasSpace.Score, Router(true).BiasSpace);
+    }
+
+    [Fact]
     public void OfficialDeepSeekV41Config_FingerprintIsStableAcrossBuilds()
     {
         DeepSeekV41Config config = DeepSeekV41Config.Parse(DeepSeekV41Fixtures.Read("official_config.json"));

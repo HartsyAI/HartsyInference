@@ -60,8 +60,11 @@ public sealed record RouterDescriptor(
         return this;
     }
 
-    /// <summary>True when the backend routing kernel can run this router (its width fits the fused kernel).</summary>
-    public bool CanLowerToBackend => NumExperts <= MoeRouteArgs.MaxExperts;
+    /// <summary>
+    /// True when the backend routing kernel can run this router: its width fits the fused kernel and selection happens on
+    /// the score. Logit-space selection has no backend form yet, so such a router stays on the host.
+    /// </summary>
+    public bool CanLowerToBackend => NumExperts <= MoeRouteArgs.MaxExperts && BiasSpace == SelectionBiasSpace.Score;
 
     /// <remarks>
     /// Every scoring function produces non-negative scores (softmax, sigmoid, sqrt-softplus), so the masked-group value

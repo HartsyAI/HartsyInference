@@ -282,4 +282,19 @@ public sealed class SparseTopologyTests
             new HashSet<SequenceStateKind> { SequenceStateKind.SlidingWindowKv, SequenceStateKind.CompressedKv },
             topology.Capabilities.StateKinds.ToHashSet());
     }
+
+    [Fact]
+    public void LogitSpaceRouter_StaysOffTheBackendFastPath()
+    {
+        RouterDescriptor logit = new(8, 2, 2, MoeRouteScoring.Sigmoid, HasSelectionBias: true, BiasSpace: SelectionBiasSpace.Logit);
+        RouterDescriptor score = new(8, 2, 2, MoeRouteScoring.Sigmoid, HasSelectionBias: true);
+
+        Assert.False(logit.Validated().CanLowerToBackend);
+        Assert.True(score.Validated().CanLowerToBackend);
+        Assert.Throws<InvalidOperationException>(() => logit.ToRouteArgs(prefill: false));
+
+        SparseModelTopology topology = Uniform(1, _ => new MoeLayerDescriptor(
+            logit, new ExpertGroupDescriptor(8, Expert()).Validated(), null, false, ExpertProgram.Swiglu).Validated());
+        Assert.True(topology.Capabilities.RequiresHostRouting);
+    }
 }

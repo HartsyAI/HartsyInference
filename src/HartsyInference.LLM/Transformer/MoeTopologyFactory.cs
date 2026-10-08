@@ -16,8 +16,13 @@ public static class MoeTopologyFactory
     /// <param name="sharedExpertGated">Shared output is scaled by a sigmoid gate (Qwen2-MoE). The caller knows whether the gate tensor was loaded.</param>
     /// <param name="stateKindForLayer">Sequence state per layer; standard KV when null.</param>
     /// <param name="family">Diagnostic label.</param>
+    /// <param name="routerHasCorrectionBias">
+    /// Whether the checkpoint carries <c>e_score_correction_bias</c>. Production uses it when present, and a config cannot say
+    /// whether the tensor exists, so the caller that loaded the weights states it. Null uses the convention that
+    /// <see cref="MoeScoring.SigmoidLogitAdd"/> always has one.
+    /// </param>
     public static SparseModelTopology FromTransformer(TransformerConfig config, DType? expertDType = null, bool sharedExpertGated = false,
-        Func<int, SequenceStateKind>? stateKindForLayer = null, string family = "transformer")
+        Func<int, SequenceStateKind>? stateKindForLayer = null, string family = "transformer", bool? routerHasCorrectionBias = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         DType dtype = expertDType ?? DType.F32;
@@ -26,7 +31,7 @@ public static class MoeTopologyFactory
         for (int i = 0; i < config.NumLayers; i++)
         {
             SequenceStateKind state = stateKindForLayer?.Invoke(i) ?? SequenceStateKind.StandardKv;
-            MoeLayerDescriptor? sparse = moe is null || i < moe.FirstDenseLayers ? null : BuildLayer(config, moe, dtype, sharedExpertGated);
+            MoeLayerDescriptor? sparse = moe is null || i < moe.FirstDenseLayers ? null : BuildLayer(config, moe, dtype, sharedExpertGated, routerHasCorrectionBias);
             layers.Add(new SparseLayerDescriptor(i, sparse, state));
         }
         return new SparseModelTopology(config.HiddenSize, layers, family);
@@ -49,9 +54,10 @@ public static class MoeTopologyFactory
         };
     }
 
-    private static MoeLayerDescriptor BuildLayer(TransformerConfig config, MoeConfig moe, DType dtype, bool sharedGated)
+    private static MoeLayerDescriptor BuildLayer(TransformerConfig config, MoeConfig moe, DType dtype, bool sharedGated, bool? routerHasCorrectionBias)
     {
         bool grouped = moe.ExpertGroupCount > 1;
+        bool hasBias = routerHasCorrectionBias ?? moe.Scoring == MoeScoring.SigmoidLogitAdd;
         RouterDescriptor router = new RouterDescriptor(
             NumExperts: moe.NumExperts,
             TopKDecode: moe.NumExpertsPerTok,
@@ -63,7 +69,7 @@ public static class MoeTopologyFactory
             RenormEpsilon: grouped ? 1e-20f : 0f,
             Scale: moe.RoutedScalingFactor,
             // SigmoidLogitAdd scores by sigmoid but adds e_score_correction_bias to the logit for selection only.
-            HasSelectionBias: moe.Scoring == MoeScoring.SigmoidLogitAdd,
+            HasSelectionBias: hasBias,
             // Production flat sigmoid routing biases the logit before scoring; grouped routing biases the score.
             BiasSpace: moe.Scoring == MoeScoring.SigmoidLogitAdd && !grouped ? SelectionBiasSpace.Logit : SelectionBiasSpace.Score).Validated();
 
