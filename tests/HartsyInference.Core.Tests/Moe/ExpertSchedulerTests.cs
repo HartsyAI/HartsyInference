@@ -161,6 +161,7 @@ public sealed class ExpertSchedulerTests
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ExpertScheduler.Plan(cache, [1], 0, 0, 8, ResidentFirstPolicy.Instance, new int[4], resident, keys, output, misses, out _));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, new ExpertAssignment[1], misses, out _));
+            ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys,
+                new ExpertAssignment[1], misses, out _));
     }
 }
