@@ -15,6 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// checks that two entry points sharing the same fused-path code agree with each other), this
 /// compares against an independently-computed reference.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class FusedGemvGroundTruthTests
 {
     private readonly ITestOutputHelper _output;

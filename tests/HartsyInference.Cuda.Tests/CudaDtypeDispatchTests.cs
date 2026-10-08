@@ -9,6 +9,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Validates floating-point dtype routing and shape contracts for CUDA activation and KV-repeat operations.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaDtypeDispatchTests
 {
     private readonly ITestOutputHelper _output;

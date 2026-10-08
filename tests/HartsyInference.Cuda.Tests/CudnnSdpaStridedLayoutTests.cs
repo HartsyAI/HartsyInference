@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 /// directly would remove a permute on both the input and the output side; this asserts the strided plan is
 /// buildable, numerically identical, and not slower than the contiguous one.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudnnSdpaStridedLayoutTests
 {
     private readonly ITestOutputHelper _output;

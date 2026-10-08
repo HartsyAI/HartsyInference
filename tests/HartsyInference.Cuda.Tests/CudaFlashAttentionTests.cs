@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 /// <summary>Validates the CUDA FlashAttention kernel against the reference (replicated K/V + causal mask +
 /// SDPA), for both prefill and decode shapes and a GQA head ratio.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaFlashAttentionTests
 {
     private readonly ITestOutputHelper _output;

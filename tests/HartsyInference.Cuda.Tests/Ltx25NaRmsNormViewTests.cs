@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// write-back, so it works on <see cref="CpuBackend"/> and silently drops on CUDA. This pins whether the parent
 /// actually observes an in-place op performed on a view of it.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx25NaRmsNormViewTests
 {
     private readonly ITestOutputHelper _output;

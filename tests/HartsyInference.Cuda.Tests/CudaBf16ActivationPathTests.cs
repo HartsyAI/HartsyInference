@@ -15,6 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// uncatchable in-process, which is why these tests assert on values/exceptions rather than <c>Assert.Throws</c> on
 /// the overflow: if the recursion returns, the run aborts instead of failing one test. Skips when CUDA is absent.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaBf16ActivationPathTests
 {
     private readonly ITestOutputHelper _output;

@@ -11,6 +11,7 @@ namespace HartsyInference.Cuda.Tests;
 /// precision difference between those shapes lands directly on <c>GraphDecodeDualEmbedsTests</c>. cuBLAS selects
 /// per shape and per architecture, which is exactly the kind of difference that shows on one card and not another.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class BatchedGemmPrecisionProbe
 {
     private readonly ITestOutputHelper _output;

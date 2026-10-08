@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// difference is QuantizedMatMul keeps the weight compressed and frees the dequant transiently rather than
 /// caching an F16 copy). Output should be bit-for-bit equal.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class CudaQuantizedMatMulTests
 {
     private readonly ITestOutputHelper _output;

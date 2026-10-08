@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// <c>dotnet test --filter Category=ConvBench</c>. Skips cleanly if CUDA or cuDNN is unavailable.</summary>
 [Collection("CudaSerial")]
 [Trait("Category", "ConvBench")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudnnConvBenchmark
 {
     private readonly ITestOutputHelper _output;

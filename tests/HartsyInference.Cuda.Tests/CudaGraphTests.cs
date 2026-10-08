@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// survive capture as graph-memory nodes with addresses stable across replays (so the tensor→dptr cache set at capture
 /// time still reads valid data after a replay). If these hold, wiring the graph into a resident denoise loop is viable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class CudaGraphTests
 {
     private readonly ITestOutputHelper _output;

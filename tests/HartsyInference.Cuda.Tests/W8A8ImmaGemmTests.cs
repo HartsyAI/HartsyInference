@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// (Category=W8A8Bench, excluded from sweeps; CVD=1 lands on the 3060 — the IMMA target class.)</summary>
 [Collection("CudaSerial")]
 [Trait("Category", "W8A8Bench")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class W8A8ImmaGemmTests
 {
     private readonly ITestOutputHelper _output;

@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// <summary>Independent parity, contract, input-preservation, and residency gates for Lumina-2's
 /// last-dimension-normalized CFG plus flow-match Euler update.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class LuminaCfgNormalizedEulerTests
 {
     private readonly ITestOutputHelper _output;

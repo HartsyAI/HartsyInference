@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// reports. The block's shape is: norm → (attention) → in-place `Add(x, x, y)` → norm(x). This reproduces that
 /// sequence minimally on both backends.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx25InPlaceAddThenNormTests
 {
     private readonly ITestOutputHelper _output;

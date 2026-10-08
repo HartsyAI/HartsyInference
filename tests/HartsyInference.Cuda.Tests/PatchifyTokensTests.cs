@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// Values are compared as raw F32/F16/BF16 payload bits because patchify/unpatchify must perform no arithmetic.
 /// </summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class PatchifyTokensTests
 {
     private readonly ITestOutputHelper _output;

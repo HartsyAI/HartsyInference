@@ -16,6 +16,7 @@ namespace HartsyInference.Cuda.Tests;
 /// collapsed into one State (primary contexts are one-per-device). States are now keyed per backend and resolved
 /// via the EnterOp thread ambient, so the SameDevice_* tests below are first-class contract, not a fallback.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class MultiBackendIsolationTests
 {
     private readonly ITestOutputHelper _output;

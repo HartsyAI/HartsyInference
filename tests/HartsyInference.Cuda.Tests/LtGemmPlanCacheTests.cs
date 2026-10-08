@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 /// both native-plan diagnostics and numerical results: a cache hit is not useful if it reuses a stale dynamic
 /// bias pointer, and a clean fallback counter is not useful if the GemmEx path was never actually run.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class LtGemmPlanCacheTests
 {
     private const int M = 16;

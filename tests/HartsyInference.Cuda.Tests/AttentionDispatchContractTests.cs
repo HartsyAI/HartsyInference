@@ -6,6 +6,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Unit coverage for attention fast-path contracts that must be enforced before any CUDA launch.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class AttentionDispatchContractTests
 {
     [Theory]

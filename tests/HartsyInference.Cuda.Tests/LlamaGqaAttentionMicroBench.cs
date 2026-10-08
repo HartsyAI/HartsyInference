@@ -21,6 +21,7 @@ namespace HartsyInference.Cuda.Tests;
 /// </remarks>
 [Collection("CudaSerial")]
 [Trait("Category", "LlamaAttentionBench")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class LlamaGqaAttentionMicroBench
 {
     private const int Batch = 1;

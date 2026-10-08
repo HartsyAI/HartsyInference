@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// harness exercising fragmentation, page reuse, and the exhaustion (reject) policy — per the production
 /// plan's explicit ask not to defer dynamic-load validation to the batching phase.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class PagedKvCacheTests
 {
     private readonly ITestOutputHelper _output;

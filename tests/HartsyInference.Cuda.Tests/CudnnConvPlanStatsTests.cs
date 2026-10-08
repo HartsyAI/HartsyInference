@@ -11,6 +11,7 @@ namespace HartsyInference.Cuda.Tests;
 /// one engine choice per (family, power-of-two length bucket), made by the heuristic at the bucket's own length so the
 /// audio a length produces does not depend on which length came first. The GPU tests skip when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudnnConvPlanStatsTests
 {
     private const int InChannels = 8;

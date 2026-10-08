@@ -9,6 +9,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Guards the Z-Image phase-boundary contract for its two explicitly preloaded RoPE tables.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class ZImageRopeGpuTableLifecycleTests
 {
     private readonly ITestOutputHelper _output;

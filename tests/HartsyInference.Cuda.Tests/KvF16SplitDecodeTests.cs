@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// which is wide enough to pass whichever kernel runs — so it cannot tell the split path from the monolithic one.
 /// These compare the two paths against each other on identical inputs.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class KvF16SplitDecodeTests
 {
     private readonly ITestOutputHelper _output;

@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// fallback (<see cref="IBackend"/> default) and the real CUDA kernel: (a) dims inside <c>[0, rotaryDim)</c>
 /// rotate correctly, (b) dims outside are byte-identical to the un-rotated input, and (c) the default
 /// <c>rotaryDim=0</c> (full rotary — Kyutai Moshi / Dia's usage) is unchanged from the pre-fix behavior.</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class RopeInterleavedPartialRotaryTests
 {
     private static Tensor F32(int a, int b, int c, int d)

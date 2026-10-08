@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 ///
 /// <para>Tests skip cleanly when CUDA is unavailable. Each test creates its own <see cref="CudaBackend"/> + <see cref="CudaKernels"/> — running them in a separate xunit collection forces serial execution to avoid context contention with other CUDA test classes.</para></summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class GgufGpuDequantTests
 {
     private readonly ITestOutputHelper _output;

@@ -15,6 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// Gated on <c>HARTSY_TEST_GGUF_MODELS</c> + CUDA availability, same pattern as
 /// <see cref="GraphDecodeRepetitionPenaltyTests"/>; skips cleanly otherwise.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class SchedulerGraphDecodeTests
 {
     private readonly ITestOutputHelper _output;

@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// math), and the full attention is compared to the head-major branch of the very same <c>Forward</c>. Shapes are
 /// non-square (seq != heads != headDim) so a swapped axis or a wrong head stride cannot survive.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx2TokenMajorAttentionTests
 {
     private const float Eps = 1e-6f;

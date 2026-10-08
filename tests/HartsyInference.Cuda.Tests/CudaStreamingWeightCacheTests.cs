@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// is satisfied — confirming the cuEventRecord / cuStreamWaitEvent sync actually
 /// makes the upload visible to subsequent ops.
 /// </summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class CudaStreamingWeightCacheTests
 {
     private readonly ITestOutputHelper _output;

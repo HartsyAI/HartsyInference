@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// is invisible until a CUDA run throws. Both projection branches are exercised: fused QKV (QkNorm off) and
 /// composed (QkNorm on, which is what Qwen3 backbones take).</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class GraphDecodeDualEmbedsTests
 {
     private readonly ITestOutputHelper _output;

@@ -15,6 +15,7 @@ namespace HartsyInference.Diffusion.Tests;
 ///   dotnet test --filter "FullyQualifiedName~ChromaFusedQkvMicroBench" (Category=ChromaBench, excluded from sweeps)</summary>
 [Collection("CudaSerial")]
 [Trait("Category", "ChromaBench")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class ChromaFusedQkvMicroBench
 {
     private const int Hidden = 3072;

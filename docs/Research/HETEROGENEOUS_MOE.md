@@ -11,12 +11,12 @@ them one at a time.
 
 | Mechanism | What it does | Generic or model-specific |
 |---|---|---|
-| Initial VRAM placement | Fills expert slots in profile order from a shipped ranking; no eviction in the base mode | Generic (policy); the shipped ranking is per model |
-| Adaptive residency tier | Usage counts decay ×0.7 per round; a swap happens inside one layer when a candidate exceeds the victim by 1.5; at most 96 swaps per round; residency publishes one window late | Generic (policy) |
+| Initial VRAM placement | Fills slots in profile order from a shipped ranking; no eviction in base mode | Generic (policy) |
+| Adaptive residency tier | Usage decays ×0.7 per round; in-layer swaps when a candidate beats its victim by 1.5 | Generic (policy) |
 | Miss execution | Misses run on the CPU concurrently with GPU hits; the GPU graph spin-waits on mapped-host flags | Generic (policy + protocol) |
 | PCIe promotion | A `--pcie-frac` share of distinct misses is DMA'd into a 16-blob staging buffer and computed on the GPU | Generic (policy) |
-| Prefill expert streaming | Non-resident experts of the next layer stream through a pinned ring while attention runs; chunks up to 8,192 tokens | Generic (strategy) |
-| KV streaming | Attention K/V authoritative in pinned mapped host memory; VRAM holds 4-cell pages picked by CLOCK | Generic (state tier), KV layout per model |
+| Prefill expert streaming | Next layer's non-resident experts stream through a pinned ring during attention | Generic (strategy) |
+| KV streaming | K/V authoritative in pinned mapped host memory; VRAM holds 4-cell pages chosen by CLOCK | Generic (state tier) |
 | MTP drafter | The model's own next-token head with its experts resident | Model-native |
 | Suffix drafter | Trigram hash with 4 ways, up to 5 draft tokens | Generic (draft provider) |
 | Multi-GPU helpers | Each expert has one owner; results return through pinned host buffers; no P2P in this mode | Generic (placement) |

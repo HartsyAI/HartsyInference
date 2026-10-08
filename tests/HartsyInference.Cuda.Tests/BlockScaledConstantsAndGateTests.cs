@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 ///
 /// <para>Unit tier: no GPU, no CUDA runtime. Values below are the enum members, not a second opinion about them;
 /// re-derive from the headers rather than from this file if they ever disagree.</para></summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class BlockScaledConstantsAndGateTests
 {
     [Theory]

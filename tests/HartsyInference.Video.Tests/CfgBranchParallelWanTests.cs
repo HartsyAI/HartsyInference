@@ -23,6 +23,7 @@ namespace HartsyInference.Video.Tests;
 /// proves the output matched, not that every op bound its ambient correctly — a missed <c>EnterOp</c> on a
 /// same-GPU (shared-context) setup could still silently resolve to the wrong backend's state and, worst case,
 /// coincidentally still produce matching bytes since both backends share one physical device.</para></summary>
+[Trait("Category", "GpuIntegration")]
 public unsafe class CfgBranchParallelWanTests
 {
     private readonly ITestOutputHelper _output;

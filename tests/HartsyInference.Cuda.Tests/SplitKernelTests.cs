@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// shape operation and must never canonicalize them.
 /// </summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class SplitKernelTests
 {
     private sealed record SplitCase(

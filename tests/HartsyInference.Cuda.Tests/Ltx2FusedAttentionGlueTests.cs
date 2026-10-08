@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// Mul), not to a second copy of themselves, so a shared mistake cannot pass. Shapes are deliberately non-square
 /// (seq != heads != headDim) so a transposed axis or a wrong head stride cannot survive.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx2FusedAttentionGlueTests
 {
     private const float Eps = 1e-6f;

@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 /// step time — but cos/sin live in [-1,1] where F16 carries ~3 decimal digits, so the gate is a relative-error
 /// bound, not bit-identity. Shapes are non-square (seq != heads != headDim) so a wrong lane stride cannot survive.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx2RopeF16TableTests
 {
     private const float Eps = 1e-6f;

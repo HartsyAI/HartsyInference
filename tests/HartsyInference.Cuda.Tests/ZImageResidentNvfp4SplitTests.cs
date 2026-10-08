@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// falls through to the generic GGUF dequant table. Runs on any CUDA card: the unpack path, not the native GEMM, is
 /// what a split weight has to survive.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class ZImageResidentNvfp4SplitTests
 {
     private readonly ITestOutputHelper _output;

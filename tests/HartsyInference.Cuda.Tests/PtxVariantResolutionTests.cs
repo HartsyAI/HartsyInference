@@ -5,6 +5,7 @@ using Xunit.Abstractions;
 namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Arch-specific PTX is chosen for the device's exact compute capability and for nothing else. The unit rows need no GPU; the last test loads a real kernel set with a variant present and checks the card picked it.</summary>
+[Trait("Category", "GpuIntegration")]
 public sealed class PtxVariantResolutionTests
 {
     private readonly ITestOutputHelper _output;

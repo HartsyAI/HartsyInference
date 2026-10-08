@@ -9,6 +9,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>End-to-end <see cref="CudaBackend.Linear"/> tests with a quantized weight. Verifies the wiring is complete: <see cref="GpuTransferHelper.ByteSize"/> reports the right bytes for Q*_K, GpuTransferHelper uploads quantized bytes correctly, <see cref="CudaBackend.Linear"/> resolves the GEMM dtype to F16, <see cref="CudaBackend.CastIfNeeded"/> dispatches the GPU dequant kernel, and the cuBLAS GEMM produces an answer comparable to the same operation with the dequantized F16 weight.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class CudaLinearQuantTests
 {
     private readonly ITestOutputHelper _output;

@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// by hardcoding the production-common 2x2 patch area.
 /// </summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class MixPrimitivesTests
 {
     private readonly ITestOutputHelper _output;

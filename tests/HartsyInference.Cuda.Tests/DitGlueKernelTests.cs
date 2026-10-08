@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// then compares element-wise. FP32 PTX-vs-CPU tolerance per KERNEL.md is 1e-5; reductions get 1e-4.
 /// Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class DitGlueKernelTests
 {
     private readonly ITestOutputHelper _output;

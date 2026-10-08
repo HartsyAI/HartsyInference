@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// two new CUDA kernels (<c>lm_kv_append_f16</c>, <c>lm_flash_attn_f16kv_f32</c>) in isolation before trusting
 /// the real-weight Llama-3.2-1B token comparison.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class KvF16StorageTests
 {
     private readonly ITestOutputHelper _output;

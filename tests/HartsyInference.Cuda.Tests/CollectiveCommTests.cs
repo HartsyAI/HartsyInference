@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// assumed: on this box libnccl resolves from the standard probe dirs, so a silent fall-back to host-staged
 /// is a FAILURE here (it would still be numerically correct — the assert exists to catch a broken resolver).</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class CollectiveCommTests
 {
     private readonly ITestOutputHelper _output;

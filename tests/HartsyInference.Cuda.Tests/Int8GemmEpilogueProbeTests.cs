@@ -17,6 +17,7 @@ namespace HartsyInference.Cuda.Tests;
 /// cuBLASLt's alpha-per-row indexes N = the output channel). Diagnostic: it asserts nothing about speed,
 /// it prints what the driver allows.</para></summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Int8GemmEpilogueProbeTests
 {
     private readonly ITestOutputHelper _output;

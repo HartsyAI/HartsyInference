@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// backend-owned persistent side caches. These are CUDA-serial because every test deliberately creates multiple
 /// backends on device zero and inspects the process-wide transfer-state registry.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaBackendLifecycleTests
 {
     private const int LifecycleActive = 0;

@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// 2x and faults, which is how an earlier attempt at this crashed; the fix was not a new kernel but keeping the
 /// table F32. These tests pin both halves of that contract so it cannot be relaxed by accident.</para></summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class RopeSingleF16Tests
 {
     private readonly ITestOutputHelper _out;

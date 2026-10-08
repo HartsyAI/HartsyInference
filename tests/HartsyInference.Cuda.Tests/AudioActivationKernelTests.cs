@@ -11,6 +11,7 @@ namespace HartsyInference.Cuda.Tests;
 /// Each runs on the CPU reference and the CUDA backend, then compares element-wise. Skips when CUDA
 /// is unavailable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class AudioActivationKernelTests
 {
     private readonly ITestOutputHelper _output;

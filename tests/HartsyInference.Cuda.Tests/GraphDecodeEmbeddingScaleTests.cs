@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// table's actual GPU-resident values are exactly <c>embed * EmbeddingScale</c>, while the ordinary <c>_embed</c>
 /// table (and <see cref="GenericTransformer.EmbedLookup"/>'s own host path) stays unscaled.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class GraphDecodeEmbeddingScaleTests
 {
     private static uint _rng = 0xE4BED5u;

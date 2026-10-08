@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// the kernel directly with the weight cached resident across iterations. Opt-in: <c>dotnet test --filter Category=Q8Bench</c>.</summary>
 [Collection("CudaSerial")]
 [Trait("Category", "Q8Bench")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Q8GemvMicroBench
 {
     private readonly ITestOutputHelper _output;

@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// The CUDA assertion is made before any result is inspected, so a hidden host fallback cannot pass on numerics.
 /// </summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class LanceCfgRenormEulerTests
 {
     private readonly ITestOutputHelper _output;

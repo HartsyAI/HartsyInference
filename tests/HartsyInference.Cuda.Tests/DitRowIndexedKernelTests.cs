@@ -15,6 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// CUDA is compared at KERNEL.md's 1e-5 F32 tolerance because nvcc contracts <c>x*s + shift</c> into a
 /// single FMA that the two-step CPU path does not. Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class DitRowIndexedKernelTests
 {
     private const int Seq = 37, Hidden = 64, ModRows = 6;

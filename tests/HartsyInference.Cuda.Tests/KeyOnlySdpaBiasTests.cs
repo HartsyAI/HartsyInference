@@ -17,6 +17,7 @@ namespace HartsyInference.Cuda.Tests;
 /// is wired to the wrong axis, dropped, or applied to the wrong key range, the bias stops matching and these
 /// fail — the vector form producing SOMETHING is not the property under test.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class KeyOnlySdpaBiasTests
 {
     private readonly ITestOutputHelper _output;

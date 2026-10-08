@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Checks QKV split/norm layouts and numerics against an independent scalar RMSNorm oracle.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class QkvSplitNormHeadMajorTests
 {
     private readonly ITestOutputHelper _output;

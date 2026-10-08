@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>The block-scaled activation quantizer feeding <see cref="BlockScaledGemmExecutor"/>, checked on any CUDA card: the packed e2m1 bytes, the E4M3 block scales in cuBLASLt's blocked layout and the per-tensor scalars must decode back to the input, and the layout must be the one the engine's existing consumer of it — the resident nvfp4 unpack — already reads.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class BlockQuantKernelTests
 {
     private readonly ITestOutputHelper _output;

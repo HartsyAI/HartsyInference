@@ -15,6 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// <para>Runs only on Ada+ (SM 8.9+, where <see cref="Fp8GemmExecutor.IsSupported"/>); SKIPS on Ampere
 /// (e.g. the RTX 3060) — that hardware has no native FP8 GEMM and the fallback is the only correct path.</para></summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class Fp8NativeGemmTests
 {
     private readonly ITestOutputHelper _output;

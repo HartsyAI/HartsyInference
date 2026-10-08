@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// CUDA against the managed default at a non-cubic shape where a H/W transposition would be visible.
 /// Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class WanVaeReflectPadKernelTests
 {
     private static string PtxDir()

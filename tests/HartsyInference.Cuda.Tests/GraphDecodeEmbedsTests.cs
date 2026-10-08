@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// matches eager decode, and (b) a captured graph replayed across advancing positions stays byte-close to eager —
 /// i.e. one capture is valid for every frame.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class GraphDecodeEmbedsTests
 {
     private readonly ITestOutputHelper _output;

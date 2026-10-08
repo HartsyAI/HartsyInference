@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// would pass a kernel that is wrong on every border, which is exactly where a window kernel diverges from the
 /// naive loop.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Ltx25NaDecoderKernelTests
 {
     private readonly ITestOutputHelper _output;

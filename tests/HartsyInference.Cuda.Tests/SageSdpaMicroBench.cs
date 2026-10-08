@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 ///   dotnet test --filter "FullyQualifiedName~SageSdpaMicroBench" (Category=SageBench, excluded from sweeps)</summary>
 [Collection("CudaSerial")]
 [Trait("Category", "SageBench")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class SageSdpaMicroBench
 {
     private readonly ITestOutputHelper _output;

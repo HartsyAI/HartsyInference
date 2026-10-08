@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// mismatched consumer pair typically reports no P2P, which exercises the staging path; boxes with NVLink/P2P
 /// exercise the direct path and bump <see cref="IBackend.GetPeerCopyCount"/>.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaPeerCopyTests
 {
     private readonly ITestOutputHelper _output;

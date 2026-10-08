@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 /// <summary>Validates the cuDNN fused flash-attention SDPA fast path (HARTSY_SDPA_CUDNN) against a CPU
 /// reference at the Krea2-style head dim (D=128, no mask, MHA). fp16 I/O so tolerance is fp16-scale.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudnnSdpaTests
 {
     private readonly ITestOutputHelper _output;

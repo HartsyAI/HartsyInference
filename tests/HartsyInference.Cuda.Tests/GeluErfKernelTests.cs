@@ -9,6 +9,7 @@ namespace HartsyInference.Cuda.Tests;
 /// <summary>Backend parity for the exact-erf GELU PTX kernel (<c>gelu_erf_f32</c>) against the IBackend
 /// host fallback and the analytic value. Skips when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class GeluErfKernelTests
 {
     private readonly ITestOutputHelper _output;

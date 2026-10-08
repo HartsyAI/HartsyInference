@@ -20,6 +20,7 @@ namespace HartsyInference.Video.Tests;
 /// pipeline's fork/gather/unpatchify path. The CP math is the identical kernels over identical values (the
 /// exchange is pure copies), so the transformer-level bar is a tiny max|diff| (GEMM row-tiling can differ at
 /// M=Sr vs M=S) and the pipeline-level bar is the CFG-parallel test's frame comparison.</summary>
+[Trait("Category", "GpuIntegration")]
 public unsafe class ContextParallelWanTests
 {
     private readonly ITestOutputHelper _output;

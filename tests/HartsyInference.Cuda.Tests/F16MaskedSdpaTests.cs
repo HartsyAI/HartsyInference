@@ -10,6 +10,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Regression coverage for native-F16 SDPA's materialized fallback with an F32 additive mask.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class F16MaskedSdpaTests
 {
     private readonly ITestOutputHelper _output;

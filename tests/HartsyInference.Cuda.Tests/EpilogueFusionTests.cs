@@ -7,6 +7,7 @@ namespace HartsyInference.Cuda.Tests;
 
 /// <summary>Validates that the cuBLASLt epilogue bias-fusion path in <see cref="CudaBackend.Linear"/> (<see cref="CudaBackend.EnableEpilogueFusion"/>) produces the same result as the unfused <c>cublasGemmEx</c> + separate <c>BiasAdd</c> path.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class EpilogueFusionTests
 {
     private readonly ITestOutputHelper _output;

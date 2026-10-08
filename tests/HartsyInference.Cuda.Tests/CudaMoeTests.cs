@@ -11,6 +11,7 @@ namespace HartsyInference.Cuda.Tests;
 /// resident expert GEMMs — by checking <see cref="MoeFeedForward"/> on CUDA matches the same block on the CPU
 /// backend (which the LLM suite proves against a pure-math reference).</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudaMoeTests
 {
     private readonly ITestOutputHelper _output;

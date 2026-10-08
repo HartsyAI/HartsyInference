@@ -15,6 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// self-attention block and must stay device-resident until the transformer phase boundary.
 /// </summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class AnimaRopeGpuTableLifecycleTests
 {
     private const int Frames = 1;

@@ -13,6 +13,7 @@ namespace HartsyInference.Cuda.Tests;
 /// codec/TTS cases that matter: stride, dilation, groups, asymmetric (causal) padding, and bias/no-bias.
 /// Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class Conv1dKernelTests
 {
     private readonly ITestOutputHelper _output;

@@ -12,6 +12,7 @@ namespace HartsyInference.Cuda.Tests;
 /// data cast to F16, comparing at F16 tolerance (inputs bounded [-1,1]; kernels accumulate in F32, so
 /// error is I/O rounding only). Skips cleanly when CUDA is unavailable.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class DitF16KernelTests
 {
     private readonly ITestOutputHelper _output;

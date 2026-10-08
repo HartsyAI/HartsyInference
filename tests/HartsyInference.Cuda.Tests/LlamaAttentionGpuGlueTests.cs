@@ -21,6 +21,7 @@ namespace HartsyInference.Cuda.Tests;
 /// the bit-preserving layout and repeat primitives so a later mixed-precision encoder does not regress them.
 /// </remarks>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class LlamaAttentionGpuGlueTests
 {
     private readonly ITestOutputHelper _output;

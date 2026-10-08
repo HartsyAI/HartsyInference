@@ -11,6 +11,7 @@ namespace HartsyInference.Cuda.Tests;
 /// on the same backend inputs — SDXL-UNet-style F16 3×3/1×1 convs and a stride-2 downsample, plus a BF16
 /// (VAE-style) case. Both routes accumulate in F32 from 16-bit operands, so tolerance is fp16-scale.</summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class CudnnConvTests
 {
     private readonly ITestOutputHelper _output;

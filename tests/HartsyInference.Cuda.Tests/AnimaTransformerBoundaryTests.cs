@@ -14,6 +14,7 @@ namespace HartsyInference.Cuda.Tests;
 /// round-trip inside attention or MLP work.
 /// </summary>
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed unsafe class AnimaTransformerBoundaryTests
 {
     private const int Batch = 2;

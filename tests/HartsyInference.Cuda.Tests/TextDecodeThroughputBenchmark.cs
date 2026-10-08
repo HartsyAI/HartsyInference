@@ -15,6 +15,7 @@ namespace HartsyInference.Cuda.Tests;
 /// otherwise, same pattern as <see cref="SchedulerGraphDecodeTests"/>.</summary>
 [Trait("Category", "Slow")]
 [Collection("CudaSerial")]
+[Trait("Category", "GpuIntegration")]
 public sealed class TextDecodeThroughputBenchmark
 {
     private readonly ITestOutputHelper _output;
