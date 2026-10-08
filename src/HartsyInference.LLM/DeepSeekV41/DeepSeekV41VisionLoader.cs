@@ -40,6 +40,7 @@ public static class DeepSeekV41VisionLoader
         }
         finally
         {
+            // Tensor.Dispose is idempotent, so tensors a half-built tower or aligner already holds are safe to free here
             read.DisposeUnreleased();
         }
     }

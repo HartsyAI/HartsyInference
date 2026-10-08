@@ -61,7 +61,8 @@ public sealed class DeepSeekV41Aligner : IDisposable
         (int tokenHeight, int tokenWidth) = TokenGrid(gridHeight, gridWidth, _ratio);
         if (features.Length != (long)gridHeight * gridWidth * _dim)
             throw new ArgumentException($"Expected {gridHeight} x {gridWidth} features of {_dim} values, got {features.Length}.", nameof(features));
-        int tokens = tokenHeight * tokenWidth, rowWidth = _dim * _ratio * _ratio;
+        int tokens = checked(tokenHeight * tokenWidth), rowWidth = checked(_dim * _ratio * _ratio);
+        _ = checked(tokens * rowWidth); // the folded rows are addressed with int offsets
 
         using Tensor folded = new(new TensorShape(tokens, rowWidth), DType.F32);
         Unfold(features, gridHeight, gridWidth, tokenHeight, tokenWidth, folded.AsSpan<float>());
