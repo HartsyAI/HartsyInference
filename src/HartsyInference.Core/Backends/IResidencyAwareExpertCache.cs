@@ -17,4 +17,11 @@ public interface IResidencyAwareExpertCache : IExpertCache
     /// are appended to <paramref name="misses"/> (only when the call succeeds), so the caller can run them elsewhere.
     /// </summary>
     ExpertLease AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses);
+
+    /// <summary>
+    /// The allocation-free form of <see cref="AcquireResident(ReadOnlySpan{ExpertKey}, List{ExpertKey})"/>: binds <paramref name="lease"/>,
+    /// which must be unbound or released, to the resident experts. Misses are appended only when the call succeeds.
+    /// </summary>
+    /// <exception cref="InvalidOperationException">The lease is still pinned.</exception>
+    void AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses, ExpertLease lease);
 }

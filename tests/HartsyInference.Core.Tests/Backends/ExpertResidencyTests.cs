@@ -96,35 +96,60 @@ public sealed class ExpertResidencyTests
     }
 
     [Fact]
-    public void ResidencyPath_DoesNotAllocatePerCallBeyondTheLease()
+    public void ResidencyPath_DoesNotAllocatePerCallWithAReusedLease()
     {
         using FakeExpertCache cache = CacheWithExpertsOneAndTwoResident(out _);
         ExpertKey[] keys = [new ExpertKey(0, 1), new ExpertKey(0, 2)];
         bool[] mask = new bool[keys.Length];
         List<ExpertKey> misses = new(keys.Length);
+        ExpertLease lease = new();
 
-        // Warm up so scratch capacity and the lease bookkeeping have settled before measuring.
+        // Warm up so scratch capacity and the lease's slots have settled before measuring.
         for (int i = 0; i < 4; i++)
         {
             cache.LookupResident(keys, mask);
             misses.Clear();
-            cache.AcquireResident(keys, misses).Dispose();
+            cache.AcquireResident(keys, misses, lease);
+            lease.Dispose();
         }
 
         long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < 100; i++) cache.LookupResident(keys, mask);
         long lookupBytes = GC.GetAllocatedBytesForCurrentThread() - before;
 
-        before = GC.GetAllocatedBytesForCurrentThread();
+        long acquireBytes = 0;
         for (int i = 0; i < 100; i++)
         {
             misses.Clear();
-            cache.AcquireResident(keys, misses).Dispose();
+            before = GC.GetAllocatedBytesForCurrentThread();
+            cache.AcquireResident(keys, misses, lease);
+            acquireBytes += GC.GetAllocatedBytesForCurrentThread() - before;
+            lease.Dispose();
         }
-        long acquireBytes = GC.GetAllocatedBytesForCurrentThread() - before;
 
         Assert.Equal(0, lookupBytes);
-        // Each acquire necessarily allocates its lease and the weights array it returns; nothing else may grow per call.
-        Assert.True(acquireBytes / 100 <= 256, $"AcquireResident allocated {acquireBytes / 100} bytes per call.");
+        Assert.Equal(0, acquireBytes);
+    }
+
+    [Fact]
+    public void AcquireResident_OntoAPinnedLease_Throws_AndRebindingAfterReleaseReplacesTheExperts()
+    {
+        using FakeExpertCache cache = CacheWithExpertsOneAndTwoResident(out _);
+        List<ExpertKey> misses = [];
+        ExpertLease lease = new();
+        cache.AcquireResident([new ExpertKey(0, 1), new ExpertKey(0, 2)], misses, lease);
+
+        Assert.Throws<InvalidOperationException>(() => cache.AcquireResident([new ExpertKey(0, 1)], misses, lease));
+        Assert.Equal(2, lease.Count);
+
+        lease.Dispose();
+        cache.AcquireResident([new ExpertKey(0, 2)], misses, lease);
+
+        Assert.Single(lease);
+        Assert.Equal(new ExpertKey(0, 2), lease[0].Key);
+        Assert.Throws<KeyNotFoundException>(() => lease.Get(new ExpertKey(0, 1)));
+        Assert.Throws<ArgumentOutOfRangeException>(() => lease[1]);
+        lease.Dispose();
+        Assert.Equal(0, cache.Stats.PinnedExperts);
     }
 }

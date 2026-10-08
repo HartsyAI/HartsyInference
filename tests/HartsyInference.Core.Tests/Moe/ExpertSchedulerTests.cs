@@ -30,22 +30,21 @@ public sealed class ExpertSchedulerTests
         return cache;
     }
 
-    private static ExpertAssignment[] Run(FakeExpertCache cache, int[] ids, IMissExecutionPolicy policy, out ExpertLease lease, ushort bank = 0)
+    private static ExpertAssignment[] Run(FakeExpertCache cache, int[] ids, IMissExecutionPolicy policy, ExpertLease lease, ushort bank = 0)
     {
         int[] counts = new int[8];
         bool[] resident = new bool[8];
         ExpertKey[] keys = new ExpertKey[8];
         ExpertAssignment[] output = new ExpertAssignment[8];
-        List<ExpertKey> misses = [];
-        int written = ExpertScheduler.Plan(cache, ids, layer: 0, bank, expertCount: 8, policy, counts, resident, keys, output, misses, out lease);
+        List<ExpertKey> misses = new(8);
+        int written = ExpertScheduler.Plan(cache, ids, layer: 0, bank, expertCount: 8, policy, counts, resident, keys, output, misses, lease);
         return output[..written];
     }
 
     private static ExpertAssignment[] Plan(FakeExpertCache cache, int[] ids, IMissExecutionPolicy policy, ushort bank = 0)
     {
-        ExpertAssignment[] assignments = Run(cache, ids, policy, out ExpertLease lease, bank);
-        lease.Dispose();
-        return assignments;
+        using ExpertLease lease = new();
+        return Run(cache, ids, policy, lease, bank);
     }
 
     [Fact]
@@ -83,7 +82,8 @@ public sealed class ExpertSchedulerTests
         using FakeExpertCache cache = CacheWithResident((0, 1), (0, 2));
         int uploadsBefore = cache.Events.Count(static e => e.StartsWith("upload"));
 
-        ExpertAssignment[] plan = Run(cache, [1, 2, 3], ResidentFirstPolicy.Instance, out ExpertLease lease);
+        using ExpertLease lease = new();
+        ExpertAssignment[] plan = Run(cache, [1, 2, 3], ResidentFirstPolicy.Instance, lease);
 
         Assert.Equal(2, cache.Stats.PinnedExperts);
         Assert.Equal(uploadsBefore, cache.Events.Count(static e => e.StartsWith("upload")));
@@ -96,7 +96,8 @@ public sealed class ExpertSchedulerTests
     public void ExpertsPlannedForTheGpu_CannotBeEvictedWhileThePlanIsHeld()
     {
         using FakeExpertCache cache = CacheWithResident((0, 1));
-        Run(cache, [1], ResidentFirstPolicy.Instance, out ExpertLease lease);
+        using ExpertLease lease = new();
+        Run(cache, [1], ResidentFirstPolicy.Instance, lease);
 
         cache.Trim(0);
 
@@ -112,7 +113,7 @@ public sealed class ExpertSchedulerTests
         using FakeExpertCache cache = CacheWithResident((0, 1));
         ForcedPlacementPolicy allGpu = new(static _ => ExpertPlacement.Gpu);
 
-        Assert.Throws<InvalidOperationException>(() => Run(cache, [1, 2], allGpu, out _));
+        Assert.Throws<InvalidOperationException>(() => Run(cache, [1, 2], allGpu, new ExpertLease()));
         Assert.Equal(0, cache.Stats.PinnedExperts);
     }
 
@@ -154,14 +155,63 @@ public sealed class ExpertSchedulerTests
         bool[] resident = new bool[8];
         ExpertKey[] keys = new ExpertKey[8];
         ExpertAssignment[] output = new ExpertAssignment[8];
-        List<ExpertKey> misses = [];
+        List<ExpertKey> misses = new(8);
+        ExpertLease lease = new();
 
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [8], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, output, misses, out _));
+            ExpertScheduler.Plan(cache, [8], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, output, misses, lease));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
-            ExpertScheduler.Plan(cache, [1], 0, 0, 8, ResidentFirstPolicy.Instance, new int[4], resident, keys, output, misses, out _));
+            ExpertScheduler.Plan(cache, [1], 0, 0, 8, ResidentFirstPolicy.Instance, new int[4], resident, keys, output, misses, lease));
         Assert.Throws<ArgumentOutOfRangeException>(() =>
             ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys,
-                new ExpertAssignment[1], misses, out _));
+                new ExpertAssignment[1], misses, lease));
+    }
+
+    [Fact]
+    public void UndersizedMissList_IsRefusedInsteadOfGrown()
+    {
+        using FakeExpertCache cache = CacheWithResident((0, 1));
+        List<ExpertKey> misses = new(0);
+        ExpertAssignment[] output = new ExpertAssignment[8];
+
+        ArgumentOutOfRangeException error = Assert.Throws<ArgumentOutOfRangeException>(() =>
+            ExpertScheduler.Plan(cache, [1, 2], 0, 0, 8, ResidentFirstPolicy.Instance, new int[8], new bool[8], new ExpertKey[8], output,
+                misses, new ExpertLease()));
+        Assert.Equal("missScratch", error.ParamName);
+        Assert.Equal(0, cache.Stats.PinnedExperts);
+    }
+
+    [Fact]
+    public void ReusedLease_PlansAllocateNothingAfterWarmup()
+    {
+        using FakeExpertCache cache = CacheWithResident((0, 1), (0, 2));
+        int[] counts = new int[8];
+        bool[] resident = new bool[8];
+        ExpertKey[] keys = new ExpertKey[8];
+        ExpertAssignment[] output = new ExpertAssignment[8];
+        List<ExpertKey> misses = new(8);
+        ExpertLease lease = new();
+        int[] ids = [1, 2, 3];
+
+        // Warm up so the lease, the cache's scratch and the pools have settled before measuring.
+        for (int i = 0; i < 4; i++)
+        {
+            misses.Clear();
+            ExpertScheduler.Plan(cache, ids, 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, output, misses, lease);
+            lease.Dispose();
+        }
+
+        long allocated = 0;
+        for (int i = 0; i < 100; i++)
+        {
+            misses.Clear();
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            ExpertScheduler.Plan(cache, ids, 0, 0, 8, ResidentFirstPolicy.Instance, counts, resident, keys, output, misses, lease);
+            allocated += GC.GetAllocatedBytesForCurrentThread() - before;
+            lease.Dispose();
+        }
+
+        Assert.Equal(0, allocated);
+        Assert.Equal(0, cache.Stats.PinnedExperts);
     }
 }

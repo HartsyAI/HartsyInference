@@ -22,6 +22,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
     private readonly Dictionary<ExpertKey, ExpertCacheEntry> _entries = [];
     private readonly Dictionary<ExpertLayerKey, long> _layerFrequency = [];
     private readonly HashSet<ExpertLease> _live = [];
+    private readonly Stack<ExpertFence> _freeFences = [];
     private long _tick;
     private long _requests;
     private long _residentBytes;
@@ -132,7 +133,9 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
             MakeRoom(missingBytes, requested, protectedLayers: null, mustSucceed: true);
             UploadMissing(missing, prefetch: false);
 
-            return PinAndLease(unique, missingKeys, hits, inFlight);
+            ExpertLease lease = new();
+            PinInto(lease, unique, missingKeys, hits, inFlight);
+            return lease;
         }
     }
 
@@ -157,10 +160,20 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
     /// <inheritdoc/>
     public ExpertLease AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses)
     {
+        ExpertLease lease = new();
+        AcquireResident(keys, misses, lease);
+        return lease;
+    }
+
+    /// <inheritdoc/>
+    public void AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses, ExpertLease lease)
+    {
         ArgumentNullException.ThrowIfNull(misses);
+        ArgumentNullException.ThrowIfNull(lease);
         lock (_gate)
         {
             ThrowIfDisposed();
+            if (!lease.IsReleased) throw new InvalidOperationException("The lease is still pinned; release it before binding it again.");
             DistinctInto(keys, _scratchUnique, _scratchSeen);
             _scratchResident.Clear();
             _scratchAbsent.Clear();
@@ -179,23 +192,18 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
             }
             if (_scratchUnique.Count > 0) _currentLayer = _scratchUnique[0].LayerKey;
             // Only resident (or already uploading) experts are pinned; nothing is uploaded or resolved here.
-            ExpertLease lease = PinAndLease(_scratchResident, missingKeys: null, _scratchResident.Count, inFlight);
+            PinInto(lease, _scratchResident, missingKeys: null, _scratchResident.Count, inFlight);
             misses.AddRange(_scratchAbsent);
-            return lease;
         }
     }
 
-    /// <summary>Awaits in-flight uploads, pins every key in <paramref name="unique"/> and returns the lease. Caller holds the gate.</summary>
-    private ExpertLease PinAndLease(List<ExpertKey> unique, HashSet<ExpertKey>? missingKeys, int hits, int inFlight)
+    /// <summary>Awaits in-flight uploads, then binds <paramref name="lease"/> to and pins every key in <paramref name="unique"/>. Caller holds the gate.</summary>
+    private void PinInto(ExpertLease lease, List<ExpertKey> unique, HashSet<ExpertKey>? missingKeys, int hits, int inFlight)
     {
-        // Awaiting can throw; do it before any pin so a failure leaves nothing held.
-        ExpertWeights[] leased = new ExpertWeights[unique.Count];
-        for (int i = 0; i < unique.Count; i++)
-        {
-            ExpertCacheEntry entry = _entries[unique[i]];
-            AwaitPending(entry);
-            leased[i] = entry.Weights;
-        }
+        // Awaiting can throw; do it before any pin or bind so a failure leaves the lease and the cache untouched.
+        foreach (ExpertKey key in unique) AwaitPending(_entries[key]);
+        ExpertWeights[] slots = lease.Bind(this, unique.Count);
+        for (int i = 0; i < unique.Count; i++) slots[i] = _entries[unique[i]].Weights;
         foreach (ExpertKey key in unique)
         {
             ExpertCacheEntry entry = _entries[key];
@@ -205,9 +213,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
         _hits += hits;
         _inFlightHits += inFlight;
         AgeFrequencies(unique.Count);
-        ExpertLease lease = new(this, leased);
         _live.Add(lease);
-        return lease;
     }
 
     /// <inheritdoc/>
@@ -252,20 +258,22 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
             {
                 lease.TryMarkReleased();
                 _live.Remove(lease);
+                lease.ClearWeights();
                 return;
             }
             // Recorded before the lease is marked or any pin drops, so a failure leaves it releasable again.
-            ExpertFence fence = new(RecordFence(), 0);
+            ExpertFence fence = RentFence(RecordFence());
             lease.TryMarkReleased();
             _live.Remove(lease);
-            foreach (ExpertWeights weights in lease.Weights)
+            for (int i = 0; i < lease.Count; i++)
             {
-                if (!_entries.TryGetValue(weights.Key, out ExpertCacheEntry? entry)) continue;
+                if (!_entries.TryGetValue(lease[i].Key, out ExpertCacheEntry? entry)) continue;
                 entry.PinCount--;
                 fence.References++;
                 entry.Fences.Add(fence);
             }
-            if (fence.References == 0) DestroyFence(fence.Handle);
+            if (fence.References == 0) ReturnFence(fence);
+            lease.ClearWeights();
         }
     }
 
@@ -428,7 +436,23 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
 
     private void ReleaseFenceReference(ExpertFence fence)
     {
-        if (--fence.References == 0) DestroyFence(fence.Handle);
+        if (--fence.References == 0) ReturnFence(fence);
+    }
+
+    private ExpertFence RentFence(object handle)
+    {
+        ExpertFence fence = _freeFences.Count > 0 ? _freeFences.Pop() : new ExpertFence();
+        fence.Handle = handle;
+        fence.References = 0;
+        return fence;
+    }
+
+    /// <summary>Destroys a fence that no entry references any more, and keeps its holder for the next lease.</summary>
+    private void ReturnFence(ExpertFence fence)
+    {
+        DestroyFence(fence.Handle);
+        fence.Handle = null!;
+        _freeFences.Push(fence);
     }
 
     private bool MakeRoom(long incomingBytes, HashSet<ExpertKey> requested, HashSet<ExpertLayerKey>? protectedLayers, bool mustSucceed)
