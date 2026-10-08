@@ -126,27 +126,82 @@ public abstract class ExpertCacheBase : IExpertCache
             MakeRoom(missingBytes, requested, protectedLayers: null, mustSucceed: true);
             UploadMissing(missing, prefetch: false);
 
-            // Awaiting can throw; do it before any pin so a failure leaves nothing held.
-            ExpertWeights[] leased = new ExpertWeights[unique.Count];
-            for (int i = 0; i < unique.Count; i++)
+            return PinAndLease(unique, missingKeys, hits, inFlight);
+        }
+    }
+
+    /// <inheritdoc/>
+    public int LookupResident(ReadOnlySpan<ExpertKey> keys, Span<bool> resident)
+    {
+        if (resident.Length < keys.Length) throw new ArgumentException("The residency mask must hold one entry per key.", nameof(resident));
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            int count = 0;
+            for (int i = 0; i < keys.Length; i++)
             {
-                ExpertCacheEntry entry = _entries[unique[i]];
-                AwaitPending(entry);
-                leased[i] = entry.Weights;
+                bool present = _entries.ContainsKey(keys[i]);
+                resident[i] = present;
+                if (present) count++;
             }
+            return count;
+        }
+    }
+
+    /// <inheritdoc/>
+    public ExpertLease AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses)
+    {
+        ArgumentNullException.ThrowIfNull(misses);
+        List<ExpertKey> unique = Distinct(keys);
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            List<ExpertKey> resident = [];
+            List<ExpertKey> absent = [];
+            int inFlight = 0;
             foreach (ExpertKey key in unique)
             {
-                ExpertCacheEntry entry = _entries[key];
-                entry.PinCount++;
-                Touch(entry, resident: !missingKeys.Contains(key));
+                if (_entries.TryGetValue(key, out ExpertCacheEntry? entry))
+                {
+                    resident.Add(key);
+                    if (entry.Pending is not null) inFlight++;
+                }
+                else
+                {
+                    absent.Add(key);
+                }
             }
-            _hits += hits;
-            _inFlightHits += inFlight;
-            AgeFrequencies(unique.Count);
-            ExpertLease lease = new(this, leased);
-            _live.Add(lease);
+            if (unique.Count > 0) _currentLayer = unique[0].LayerKey;
+            // Only resident (or already uploading) experts are pinned; nothing is uploaded or resolved here.
+            ExpertLease lease = PinAndLease(resident, [], resident.Count, inFlight);
+            misses.AddRange(absent);
             return lease;
         }
+    }
+
+    /// <summary>Awaits in-flight uploads, pins every key in <paramref name="unique"/> and returns the lease. Caller holds the gate.</summary>
+    private ExpertLease PinAndLease(List<ExpertKey> unique, HashSet<ExpertKey> missingKeys, int hits, int inFlight)
+    {
+        // Awaiting can throw; do it before any pin so a failure leaves nothing held.
+        ExpertWeights[] leased = new ExpertWeights[unique.Count];
+        for (int i = 0; i < unique.Count; i++)
+        {
+            ExpertCacheEntry entry = _entries[unique[i]];
+            AwaitPending(entry);
+            leased[i] = entry.Weights;
+        }
+        foreach (ExpertKey key in unique)
+        {
+            ExpertCacheEntry entry = _entries[key];
+            entry.PinCount++;
+            Touch(entry, resident: !missingKeys.Contains(key));
+        }
+        _hits += hits;
+        _inFlightHits += inFlight;
+        AgeFrequencies(unique.Count);
+        ExpertLease lease = new(this, leased);
+        _live.Add(lease);
+        return lease;
     }
 
     /// <inheritdoc/>

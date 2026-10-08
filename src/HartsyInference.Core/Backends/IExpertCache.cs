@@ -16,6 +16,18 @@ public interface IExpertCache : IDisposable
     /// <exception cref="Exceptions.OutOfVramException">The pinned set cannot fit the budget.</exception>
     ExpertLease Acquire(ReadOnlySpan<ExpertKey> keys);
 
+    /// <summary>
+    /// Reports which keys are resident or already uploading, without changing any state. Returns how many are.
+    /// <paramref name="resident"/> must hold one entry per key.
+    /// </summary>
+    int LookupResident(ReadOnlySpan<ExpertKey> keys, Span<bool> resident);
+
+    /// <summary>
+    /// Pins only the experts already resident or uploading, and never uploads or resolves anything. Keys that are not resident
+    /// are appended to <paramref name="misses"/> (only when the call succeeds), so the caller can run them elsewhere.
+    /// </summary>
+    ExpertLease AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses);
+
     /// <summary>Starts uploading experts nobody has asked for yet, best effort within the budget; returns how many uploads started.</summary>
     int Prefetch(ReadOnlySpan<ExpertKey> keys);
 
