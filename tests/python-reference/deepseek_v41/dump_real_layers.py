@@ -13,6 +13,7 @@ Modes
 
 Engram layers (1 and 14) need a 98 GB table that upstream allocates whole, so only N == 1 is supported until a row-lazy table exists.
 Usage: python dump_real_layers.py <checkpoint dir> <out dir> [--layers 1] [--mode exact|ports] [--ids 0,671,...] [--threads 8]
+--ids replaces the default [BOS] + "The capital of France is"; meta.json then records no prompt and the C# tokenizer cross-check is skipped.
 """
 import argparse
 import dataclasses
@@ -31,7 +32,8 @@ import kernel_ports  # noqa: E402
 
 sys.modules["kernel"] = kernel_ports
 
-DEFAULT_IDS: str = "0,671,6102,294,8760,344"  # [BOS] + "The capital of France is", checked against tokenizers 0.23.2
+DEFAULT_PROMPT: str = "The capital of France is"
+DEFAULT_IDS: str = "0,671,6102,294,8760,344"  # [BOS] + DEFAULT_PROMPT, checked against tokenizers 0.23.2
 
 
 def exact_act_quant(x, block_size=128, scale_fmt=None, scale_dtype=torch.float32, inplace=False):
@@ -157,7 +159,8 @@ def main() -> None:
     run_s = time.time() - t1
 
     os.makedirs(a.out, exist_ok=True)
-    meta = {"mode": a.mode, "layers": a.layers, "ids": ids, "torch": torch.__version__, "default_dtype": str(torch.get_default_dtype()),
+    # the test cross-checks its tokenizer against the recorded text; custom ids carry none, so that check is skipped for them
+    meta = {"mode": a.mode, "layers": a.layers, "ids": ids, "prompt": DEFAULT_PROMPT if a.ids == DEFAULT_IDS else None, "torch": torch.__version__, "default_dtype": str(torch.get_default_dtype()),
             "load_seconds": round(load_s, 1), "forward_seconds": round(run_s, 1), "files": {}}
     meta["files"]["final.f32"] = write_f32(os.path.join(a.out, "final.f32"), finals[0])
     meta["files"]["logits.f32"] = write_f32(os.path.join(a.out, "logits.f32"), logits)

@@ -169,6 +169,8 @@ public sealed class DeepSeekV41RealWeightsTests
     // the final RMS norm is scale-invariant, so the hidden and logits checks cannot see a uniformly rescaled residual stream; the raw output of the
     // last block, which is what the next layer receives, is gated separately (measured 3e-6)
     private const double ExactBlockRelL2 = 2e-3;
+    // ports is an envelope, so its magnitude bound is deliberately wide: about 10x the measured 2e-2, enough to catch a scale or gross error and not a precision regression
+    private const double PortsRelL2Ceiling = 0.2;
 
     /// <summary>The first N layers of the real checkpoint through the host reference against the UNMODIFIED upstream model on the same real weights, dumped by
     /// <c>tests/python-reference/deepseek_v41/dump_real_layers.py</c> (set <c>DSV41_ORACLE_DIR</c> to its output directory; its <c>meta.json</c> names the layers, mode and ids).</summary>
@@ -190,11 +192,16 @@ public sealed class DeepSeekV41RealWeightsTests
 
         using CpuBackend backend = new();
         using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(backend, dir, new DeepSeekV41LoadOptions(MaxTokens: 64, MaxLayers: layers));
-        using FileStream tokStream = File.OpenRead(Path.Combine(dir, "tokenizer.json"));
-        ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokStream, bosToken: DeepSeekV41TextModel.BosLiteral, eosToken: DeepSeekV41TextModel.EosLiteral);
-        int[] hostIds = [tokenizer.BosId!.Value, .. tokenizer.EncodeOrdinary("The capital of France is")];
-        _output.WriteLine($"host ids [{string.Join(",", hostIds)}] oracle ids [{string.Join(",", ids)}]");
-        Assert.Equal(ids, hostIds);
+        // both sides run the ids the oracle recorded; the tokenizer is cross-checked only when the oracle says which text they came from
+        if (meta.RootElement.TryGetProperty("prompt", out System.Text.Json.JsonElement promptElement) && promptElement.ValueKind == System.Text.Json.JsonValueKind.String)
+        {
+            using FileStream tokStream = File.OpenRead(Path.Combine(dir, "tokenizer.json"));
+            ILlmTokenizer tokenizer = HfTokenizerJson.LoadByteLevelBpe(tokStream, bosToken: DeepSeekV41TextModel.BosLiteral, eosToken: DeepSeekV41TextModel.EosLiteral);
+            int[] hostIds = [tokenizer.BosId!.Value, .. tokenizer.EncodeOrdinary(promptElement.GetString()!)];
+            _output.WriteLine($"host ids [{string.Join(",", hostIds)}] oracle ids [{string.Join(",", ids)}]");
+            Assert.Equal(ids, hostIds);
+        }
+        else _output.WriteLine($"custom oracle ids [{string.Join(",", ids)}]; tokenizer not cross-checked");
 
         DeepSeekV41HostModel model = loaded.Model;
         DeepSeekV41SequenceState state = model.CreateState(64);
@@ -241,6 +248,9 @@ public sealed class DeepSeekV41RealWeightsTests
         }
         else
         {
+            Assert.True(blockRel <= PortsRelL2Ceiling, $"block output relL2 {blockRel:E3} > {PortsRelL2Ceiling}");
+            Assert.True(hiddenRel <= PortsRelL2Ceiling, $"hidden relL2 {hiddenRel:E3} > {PortsRelL2Ceiling}");
+            Assert.True(logitsRel <= PortsRelL2Ceiling, $"logits relL2 {logitsRel:E3} > {PortsRelL2Ceiling}");
             Assert.True(blockCos >= PortsCosineFloor, $"block output cosine {blockCos:F6} < {PortsCosineFloor}");
             Assert.True(hiddenCos >= PortsCosineFloor, $"hidden cosine {hiddenCos:F6} < {PortsCosineFloor}");
             Assert.True(logitsCos >= PortsCosineFloor, $"logits cosine {logitsCos:F6} < {PortsCosineFloor}");
