@@ -188,9 +188,23 @@ public sealed class DeepSeekV41RealWeightsTests
         DeepSeekV41SequenceState state = model.CreateState(64);
         float[] hidden = new float[ids.Length * model.Dim];
         Stopwatch sw = Stopwatch.StartNew();
+        string? hostDumpDir = Environment.GetEnvironmentVariable("DSV41_HOST_DUMP");
+        if (hostDumpDir is { Length: > 0 } && layers == 1)
+        {
+            Directory.CreateDirectory(hostDumpDir);
+            model.SetProbe((layer, stage, values) => File.WriteAllBytes(Path.Combine(hostDumpDir, $"{stage}.f32"), MemoryMarshalBytes(values)));
+        }
         model.Forward(ids, state, hidden);
+        model.SetProbe(null);
         float[] logits = model.Logits(hidden.AsSpan((ids.Length - 1) * model.Dim, model.Dim));
         _output.WriteLine($"host {layers}-layer forward {sw.Elapsed.TotalSeconds:F1}s, RSS {Rss()}");
+
+        if (Environment.GetEnvironmentVariable("DSV41_HOST_DUMP") is { Length: > 0 } hostDump)
+        {
+            Directory.CreateDirectory(hostDump);
+            File.WriteAllBytes(Path.Combine(hostDump, "final.f32"), MemoryMarshalBytes(hidden));
+            File.WriteAllBytes(Path.Combine(hostDump, "logits.f32"), MemoryMarshalBytes(logits));
+        }
 
         float[] refHidden = ReadF32(Path.Combine(oracle!, "final.f32"), hidden.Length);
         float[] refLogits = ReadF32(Path.Combine(oracle!, "logits.f32"), logits.Length);
@@ -212,6 +226,13 @@ public sealed class DeepSeekV41RealWeightsTests
             Assert.True(hiddenCos >= PortsCosineFloor, $"hidden cosine {hiddenCos:F6} < {PortsCosineFloor}");
             Assert.True(logitsCos >= PortsCosineFloor, $"logits cosine {logitsCos:F6} < {PortsCosineFloor}");
         }
+    }
+
+    private static byte[] MemoryMarshalBytes(float[] values)
+    {
+        byte[] bytes = new byte[values.Length * 4];
+        Buffer.BlockCopy(values, 0, bytes, 0, bytes.Length);
+        return bytes;
     }
 
     private static float[] ReadF32(string path, int expected)

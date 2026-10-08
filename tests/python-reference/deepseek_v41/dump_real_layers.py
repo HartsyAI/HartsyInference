@@ -5,8 +5,9 @@ block's output stream, the final normed hidden state of every position and the l
 plus meta.json. The C# side (DeepSeekV41RealLayerOracleTests) loads the same layers with MaxLayers=N and compares.
 
 Modes
-  exact  float32 compute, activation quantization removed, exact-softmax sparse_attn. Weights still decode from the stored FP8/MXFP4
-         bytes. This is the mode the F32 host reference should match tightly; a gap here is a structural difference.
+  exact  float32 compute, GEMM-input activation quantization removed, exact-softmax sparse_attn. The in-place FP8/FP4 latent (KV cache)
+         quantization stays, because it is part of the cache format and the host reference models it. Weights decode from the stored
+         FP8/MXFP4 bytes. This is the mode the F32 host reference should match tightly; a gap here is a structural difference.
   ports  bf16 default dtype and the pure-torch ports exactly as the unmodified model calls them, FP8 activation quantization included.
          The gap between the host reference and this mode is the precision envelope of the missing activation quantization, not a defect.
 
@@ -34,7 +35,11 @@ DEFAULT_IDS: str = "0,671,6102,294,8760,344"  # [BOS] + "The capital of France i
 
 
 def exact_act_quant(x, block_size=128, scale_fmt=None, scale_dtype=torch.float32, inplace=False):
-    return x if inplace else (x, None)
+    # GEMM-input quantization is dropped (the host reference does not model it); the in-place KV latent quantization is part of the
+    # model's cache format and the host reference models it, so it stays
+    if inplace:
+        return kernel_ports.act_quant(x, block_size, scale_fmt, scale_dtype, True)
+    return x, None
 
 
 def exact_fp8_gemm(a, a_s, b, b_s, scale_dtype=torch.float32, block_size=128):
@@ -43,10 +48,6 @@ def exact_fp8_gemm(a, a_s, b, b_s, scale_dtype=torch.float32, block_size=128):
 
 def exact_fp4_gemm(a, a_s, b, b_s, scale_dtype=torch.float32, act_block_size=128):
     return F.linear(a.to(torch.float32), kernel_ports.dequant_mxfp4(b, b_s)).to(torch.get_default_dtype())
-
-
-def exact_fp4_act_quant(x, *args, **kwargs):
-    return x
 
 
 def write_f32(path: str, t: torch.Tensor) -> list:
@@ -84,7 +85,6 @@ def main() -> None:
         mod.act_quant = exact_act_quant
         mod.fp8_gemm = exact_fp8_gemm
         mod.fp4_gemm = exact_fp4_gemm
-        mod.fp4_act_quant = exact_fp4_act_quant
         mod.sparse_attn = kernel_ports.sparse_attn_exact
         torch.set_default_dtype(torch.float32)
     else:
@@ -122,8 +122,10 @@ def main() -> None:
                     prm.data = t.to(prm.dtype)
     expected = {k for k in weight_map if k in ("embed.weight", "head.weight", "norm.weight")
                 or any(k.startswith(f"layers.{i}.") for i in range(a.layers))}
-    if expected - consumed:
-        sys.exit(f"checkpoint tensors the model did not consume: {sorted(expected - consumed)[:10]}")
+    # bias_vl is the vision-language routing bias; upstream selects it only for image tokens (image_mask), never for text
+    unused = {k for k in expected - consumed if not k.endswith(".bias_vl")}
+    if unused:
+        sys.exit(f"checkpoint tensors the model did not consume: {sorted(unused)[:10]}")
     if a.mode == "exact":
         for prm in model.parameters():
             if prm.dtype == torch.bfloat16:
@@ -132,8 +134,13 @@ def main() -> None:
     load_s = time.time() - t0
 
     blocks, finals = [], []
+    taps: dict = {}
     for blk in model.layers:
         blk.register_forward_hook(lambda _m, _i, out: blocks.append(out[0]))
+        blk.attn_norm.register_forward_hook(lambda _m, _i, out: taps.setdefault("attn_in", out))
+        blk.attn.register_forward_hook(lambda _m, _i, out: taps.setdefault("attn_out", out))
+        blk.ffn_norm.register_forward_hook(lambda _m, _i, out: taps.setdefault("ffn_in", out))
+        blk.ffn.register_forward_hook(lambda _m, _i, out: taps.setdefault("ffn_out", out))
     model.norm.register_forward_hook(lambda _m, _i, out: finals.append(out))
 
     ids = [int(v) for v in a.ids.split(",")]
@@ -146,6 +153,8 @@ def main() -> None:
             "load_seconds": round(load_s, 1), "forward_seconds": round(run_s, 1), "files": {}}
     meta["files"]["final.f32"] = write_f32(os.path.join(a.out, "final.f32"), finals[0])
     meta["files"]["logits.f32"] = write_f32(os.path.join(a.out, "logits.f32"), logits)
+    for stage, t in taps.items():
+        meta["files"][f"{stage}.f32"] = write_f32(os.path.join(a.out, f"{stage}.f32"), t)
     for i, b in enumerate(blocks):
         meta["files"][f"block{i}.f32"] = write_f32(os.path.join(a.out, f"block{i}.f32"), b)
     with open(os.path.join(a.out, "meta.json"), "w") as fh:
