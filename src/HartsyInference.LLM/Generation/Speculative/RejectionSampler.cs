@@ -6,6 +6,7 @@ namespace HartsyInference.LLM.Generation.Speculative;
 public readonly record struct SpeculativeOutcome(int Accepted, int NextToken);
 
 /// <summary>Exact speculative sampling (Leviathan et al. 2023; Chen et al. 2023): accepts a drafted token with probability min(1, p/q) and, on rejection, draws from the normalized residual max(0, p - q). The emitted tokens follow the target distribution exactly, whatever the proposer does.</summary>
+/// <remarks>The distributions are float and the acceptance ratio and residual are computed in double, so exactness holds up to the rounding already in the inputs.</remarks>
 public static class RejectionSampler
 {
     /// <summary>Verifies <paramref name="draft"/> against the target distributions.</summary>
@@ -24,6 +25,7 @@ public static class RejectionSampler
         {
             int x = draft[i];
             float[] p = target[i];
+            if ((uint)x >= (uint)p.Length) throw new ArgumentOutOfRangeException(nameof(draft), x, "A drafted token is outside the vocabulary.");
             double px = p[x];
             double qx = proposal is null ? 1.0 : proposal[i][x];
             double ratio = qx > 0.0 ? px / qx : (px > 0.0 ? double.PositiveInfinity : 0.0);

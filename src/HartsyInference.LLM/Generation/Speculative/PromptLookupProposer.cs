@@ -21,8 +21,8 @@ public sealed class PromptLookupProposer : IDraftProposer
             for (int start = suffix - 1; start >= 0; start--)
             {
                 if (!context.Slice(start, n).SequenceEqual(context.Slice(suffix, n))) continue;
+                // start < suffix, so the continuation starts inside the context and is never empty
                 int from = start + n, count = Math.Min(maxTokens, context.Length - from);
-                if (count <= 0) continue;
                 return new DraftBlock(context.Slice(from, count).ToArray(), null);
             }
         }
