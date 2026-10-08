@@ -37,6 +37,9 @@ public sealed class DeepSeekV41DSpark
     /// <summary>Number of draft stages.</summary>
     public int StageCount => _stages.Length;
 
+    /// <summary>Width of one target row the head reads: one <c>dim</c> per draft layer, <c>DsparkTargetLayerIds.Count x dim</c>.</summary>
+    internal int InputWidth => _mainIn;
+
     internal DeepSeekV41DSpark(IBackend backend, int dim, int hc, int vocab, int rank, int blockSize, int noiseTokenId, float normEps,
         DeepSeekV41Weight mainProj, int mainIn, float[] mainNorm, DeepSeekV41Weight embed, DeepSeekV41Weight head, DeepSeekV41DSparkStage[] stages, float[] finalNorm,
         DeepSeekV41Weight markovEmbed, DeepSeekV41Weight markovHead, float[] confidence)
@@ -95,7 +98,9 @@ public sealed class DeepSeekV41DSpark
         int dim = cfg.HiddenSize, hc = cfg.HcMult, vocab = cfg.VocabSize, rank = cfg.DsparkMarkovRank, heads = cfg.NumAttentionHeads, hd = cfg.HeadDim;
         int qLora = cfg.QLoraRank, targets = cfg.DsparkTargetLayerIds.Count, mix = (2 + hc) * hc;
         float normEps = (float)cfg.RmsNormEps;
-        if (embed.Elements != (long)vocab * dim || head.Elements != (long)vocab * dim) throw new ArgumentException("embed and head must each be [vocab, dim].");
+        long embedding = (long)vocab * dim;
+        if (embed.Elements != embedding) throw new ArgumentException($"embed holds {embed.Elements} values; the config's [vocab, dim] needs {embedding}.", nameof(embed));
+        if (head.Elements != embedding) throw new ArgumentException($"head holds {head.Elements} values; the config's [vocab, dim] needs {embedding}.", nameof(head));
         DeepSeekV41RopeTable rope = DeepSeekV41RopeTable.Build(cfg.QkRopeHeadDim, options.MaxTokens, cfg.RopeTheta, null);
 
         int experts = cfg.DsparkNRoutedExperts, topk = cfg.DsparkNumExpertsPerTok, inter = cfg.MoeIntermediateSize;
