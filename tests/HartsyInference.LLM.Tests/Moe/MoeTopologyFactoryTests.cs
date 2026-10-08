@@ -189,5 +189,20 @@ public sealed class MoeTopologyFactoryTests
         Assert.Throws<ArgumentOutOfRangeException>(() => shortList(2));
         Assert.Throws<ArgumentOutOfRangeException>(() => shortList(-1));
     }
-}
 
+    [Fact]
+    public void SigmoidLogitAdd_WithOneGroup_FollowsTheGroupedProductionPath()
+    {
+        MoeConfig oneGroup = new()
+        {
+            NumExperts = 8, NumExpertsPerTok = 2, MoeIntermediateSize = 16, Scoring = MoeScoring.SigmoidLogitAdd,
+            ExpertGroupCount = 1, ExpertGroupUsedCount = 1,
+        };
+        TransformerConfig config = new()
+        {
+            HiddenSize = 32, NumLayers = 1, NumHeads = 2, NumKvHeads = 2, HeadDim = 16, IntermediateSize = 64, VocabSize = 100, Moe = oneGroup,
+        };
+
+        Assert.Equal(SelectionBiasSpace.Score, MoeTopologyFactory.FromTransformer(config).Layers[0].Moe!.Router.BiasSpace);
+    }
+}

@@ -71,7 +71,8 @@ public static class MoeTopologyFactory
             // SigmoidLogitAdd scores by sigmoid but adds e_score_correction_bias to the logit for selection only.
             HasSelectionBias: hasBias,
             // Production flat sigmoid routing biases the logit before scoring; grouped routing biases the score.
-            BiasSpace: moe.Scoring == MoeScoring.SigmoidLogitAdd && !grouped ? SelectionBiasSpace.Logit : SelectionBiasSpace.Score).Validated();
+            // Production enters group-limited selection for every positive group count, and only the flat path biases the logit.
+            BiasSpace: moe.Scoring == MoeScoring.SigmoidLogitAdd && moe.ExpertGroupCount <= 0 ? SelectionBiasSpace.Logit : SelectionBiasSpace.Score).Validated();
 
         ExpertGroupDescriptor routed = new ExpertGroupDescriptor(moe.NumExperts, new ExpertDescriptor(config.HiddenSize, moe.MoeIntermediateSize, dtype)).Validated();
         ExpertGroupDescriptor? shared = moe.SharedExpertIntermediateSize > 0

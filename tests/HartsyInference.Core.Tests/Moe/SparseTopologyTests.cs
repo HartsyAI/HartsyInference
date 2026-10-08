@@ -320,4 +320,17 @@ public sealed class SparseTopologyTests
         Assert.False(topology.Layers is SparseLayerDescriptor[]);
         Assert.Throws<NotSupportedException>(() => ((IList<SparseLayerDescriptor>)topology.Layers).Add(null!));
     }
+
+    [Fact]
+    public void Fingerprint_IgnoresTheUnusedDefaultOfAFullyOverriddenGroup()
+    {
+        ExpertDescriptor wide = new(Hidden, 32, DType.F16);
+        Dictionary<int, ExpertDescriptor> overrides = new() { [0] = wide, [1] = wide };
+        SparseModelTopology Build(ExpertDescriptor unusedDefault) => Uniform(1, _ => new MoeLayerDescriptor(
+            new RouterDescriptor(2, 1, 1, MoeRouteScoring.Softmax).Validated(),
+            new ExpertGroupDescriptor(2, unusedDefault, overrides).Validated(),
+            null, false, ExpertProgram.Swiglu).Validated());
+
+        Assert.Equal(Build(Expert(32, DType.F32)).Fingerprint, Build(Expert(64, DType.F8E4M3)).Fingerprint);
+    }
 }

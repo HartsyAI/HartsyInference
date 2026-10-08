@@ -115,8 +115,11 @@ public sealed class SparseModelTopology
 
     private static void AppendGroup(StringBuilder text, string tag, ExpertGroupDescriptor group)
     {
-        text.Append('|').Append(tag).Append(Num(group.Count)).Append('x').Append(Num(group.Shape.IntermediateSize))
-            .Append('x').Append(group.Shape.WeightDType.Name).Append('x').Append(group.Shape.Layout);
+        // A fully overridden group is canonicalized from its actual experts: the unused default is not serialized.
+        bool fullyOverridden = group.Overrides is not null && group.Overrides.Count == group.Count;
+        text.Append('|').Append(tag).Append(Num(group.Count));
+        if (!fullyOverridden)
+            text.Append('x').Append(Num(group.Shape.IntermediateSize)).Append('x').Append(group.Shape.WeightDType.Name).Append('x').Append(group.Shape.Layout);
         if (group.Overrides is null) return;
         foreach (KeyValuePair<int, ExpertDescriptor> pair in group.Overrides.OrderBy(static p => p.Key))
             text.Append('[').Append(Num(pair.Key)).Append('=').Append(Num(pair.Value.IntermediateSize)).Append('x')
