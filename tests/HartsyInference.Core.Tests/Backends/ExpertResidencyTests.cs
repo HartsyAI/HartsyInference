@@ -94,4 +94,37 @@ public sealed class ExpertResidencyTests
         Assert.ThrowsAny<Exception>(() => cache.AcquireResident([new ExpertKey(0, 4)], misses));
         Assert.Empty(misses);
     }
+
+    [Fact]
+    public void ResidencyPath_DoesNotAllocatePerCallBeyondTheLease()
+    {
+        using FakeExpertCache cache = CacheWithExpertsOneAndTwoResident(out _);
+        ExpertKey[] keys = [new ExpertKey(0, 1), new ExpertKey(0, 2)];
+        bool[] mask = new bool[keys.Length];
+        List<ExpertKey> misses = new(keys.Length);
+
+        // Warm up so scratch capacity and the lease bookkeeping have settled before measuring.
+        for (int i = 0; i < 4; i++)
+        {
+            cache.LookupResident(keys, mask);
+            misses.Clear();
+            cache.AcquireResident(keys, misses).Dispose();
+        }
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 100; i++) cache.LookupResident(keys, mask);
+        long lookupBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 100; i++)
+        {
+            misses.Clear();
+            cache.AcquireResident(keys, misses).Dispose();
+        }
+        long acquireBytes = GC.GetAllocatedBytesForCurrentThread() - before;
+
+        Assert.Equal(0, lookupBytes);
+        // Each acquire necessarily allocates its lease and the weights array it returns; nothing else may grow per call.
+        Assert.True(acquireBytes / 100 <= 256, $"AcquireResident allocated {acquireBytes / 100} bytes per call.");
+    }
 }

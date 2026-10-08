@@ -12,6 +12,12 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
     private const long AgeEveryRequests = 4096;
 
     private readonly object _gate = new();
+
+    // Scratch for the residency path, reused under _gate so a per-layer call does not allocate.
+    private readonly List<ExpertKey> _scratchUnique = [];
+    private readonly HashSet<ExpertKey> _scratchSeen = [];
+    private readonly List<ExpertKey> _scratchResident = [];
+    private readonly List<ExpertKey> _scratchAbsent = [];
     private readonly Dictionary<ExpertLayerKey, ExpertBank> _banks = [];
     private readonly Dictionary<ExpertKey, ExpertCacheEntry> _entries = [];
     private readonly Dictionary<ExpertLayerKey, long> _layerFrequency = [];
@@ -152,35 +158,35 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
     public ExpertLease AcquireResident(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> misses)
     {
         ArgumentNullException.ThrowIfNull(misses);
-        List<ExpertKey> unique = Distinct(keys);
         lock (_gate)
         {
             ThrowIfDisposed();
-            List<ExpertKey> resident = [];
-            List<ExpertKey> absent = [];
+            DistinctInto(keys, _scratchUnique, _scratchSeen);
+            _scratchResident.Clear();
+            _scratchAbsent.Clear();
             int inFlight = 0;
-            foreach (ExpertKey key in unique)
+            foreach (ExpertKey key in _scratchUnique)
             {
                 if (_entries.TryGetValue(key, out ExpertCacheEntry? entry))
                 {
-                    resident.Add(key);
+                    _scratchResident.Add(key);
                     if (entry.Pending is not null) inFlight++;
                 }
                 else
                 {
-                    absent.Add(key);
+                    _scratchAbsent.Add(key);
                 }
             }
-            if (unique.Count > 0) _currentLayer = unique[0].LayerKey;
+            if (_scratchUnique.Count > 0) _currentLayer = _scratchUnique[0].LayerKey;
             // Only resident (or already uploading) experts are pinned; nothing is uploaded or resolved here.
-            ExpertLease lease = PinAndLease(resident, [], resident.Count, inFlight);
-            misses.AddRange(absent);
+            ExpertLease lease = PinAndLease(_scratchResident, missingKeys: null, _scratchResident.Count, inFlight);
+            misses.AddRange(_scratchAbsent);
             return lease;
         }
     }
 
     /// <summary>Awaits in-flight uploads, pins every key in <paramref name="unique"/> and returns the lease. Caller holds the gate.</summary>
-    private ExpertLease PinAndLease(List<ExpertKey> unique, HashSet<ExpertKey> missingKeys, int hits, int inFlight)
+    private ExpertLease PinAndLease(List<ExpertKey> unique, HashSet<ExpertKey>? missingKeys, int hits, int inFlight)
     {
         // Awaiting can throw; do it before any pin so a failure leaves nothing held.
         ExpertWeights[] leased = new ExpertWeights[unique.Count];
@@ -194,7 +200,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
         {
             ExpertCacheEntry entry = _entries[key];
             entry.PinCount++;
-            Touch(entry, resident: !missingKeys.Contains(key));
+            Touch(entry, resident: missingKeys is null || !missingKeys.Contains(key));
         }
         _hits += hits;
         _inFlightHits += inFlight;
@@ -304,6 +310,16 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
             catch (Exception error) { (failures ??= []).Add(error); }
         }
         if (failures is not null) throw new AggregateException("Expert cache teardown failed.", failures);
+    }
+
+    private static void DistinctInto(ReadOnlySpan<ExpertKey> keys, List<ExpertKey> unique, HashSet<ExpertKey> seen)
+    {
+        unique.Clear();
+        seen.Clear();
+        foreach (ExpertKey key in keys)
+        {
+            if (seen.Add(key)) unique.Add(key);
+        }
     }
 
     private static List<ExpertKey> Distinct(ReadOnlySpan<ExpertKey> keys)
