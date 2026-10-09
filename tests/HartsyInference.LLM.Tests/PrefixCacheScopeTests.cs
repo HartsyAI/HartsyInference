@@ -39,26 +39,31 @@ public sealed class PrefixCacheScopeTests
     {
         TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();
         Dictionary<string, Tensor> w = DynamicBatchSchedulerTests.Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = new(cfg);
-        model.LoadWeights(w, "model");
-        GenericTransformerModel adapter = new(model, backend);
-        using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 16);
-        using RetainedSequenceStore store = new(4, 1L << 30);
+        try
+        {
+            using CpuBackend backend = new();
+            using GenericTransformer model = new(cfg);
+            model.LoadWeights(w, "model");
+            GenericTransformerModel adapter = new(model, backend);
+            using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 16);
+            using RetainedSequenceStore store = new(4, 1L << 30);
 
-        // A live cache under alice's key: the store keeps only entries that hold one.
-        RetainedSequence sequence = new();
-        sequence.Update(adapter.CreateSequenceState(new SequenceStateOptions(8, pool)), [1, 2], bytes: 64);
-        string alices = PrefixCacheScope.Key("alice", "model", "chat-1");
-        string bobs = PrefixCacheScope.Key("bob", "model", "chat-1");
-        store.CheckIn(alices, sequence);
+            // A live cache under alice's key: the store keeps only entries that hold one.
+            RetainedSequence sequence = new();
+            sequence.Update(adapter.CreateSequenceState(new SequenceStateOptions(8, pool)), [1, 2], bytes: 64);
+            string alices = PrefixCacheScope.Key("alice", "model", "chat-1");
+            string bobs = PrefixCacheScope.Key("bob", "model", "chat-1");
+            store.CheckIn(alices, sequence);
 
-        Assert.Null(store.Checkout(bobs));
-        RetainedSequence? back = store.Checkout(alices);
-        Assert.NotNull(back);
-        Assert.Equal(new[] { 1, 2 }, back.TokenIds);
-        back.Dispose();
-        foreach (Tensor t in w.Values) t.Dispose();
+            Assert.Null(store.Checkout(bobs));
+            using RetainedSequence? back = store.Checkout(alices);
+            Assert.NotNull(back);
+            Assert.Equal(new[] { 1, 2 }, back.TokenIds);
+        }
+        finally
+        {
+            foreach (Tensor t in w.Values) t.Dispose();
+        }
     }
 
     [Fact]
