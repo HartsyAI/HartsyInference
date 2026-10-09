@@ -92,7 +92,7 @@ public sealed class TextService : ITextService, IDisposable
             if (IsLatest(record, attempt))
             {
                 // A load that replaces the device's model waits for scheduled requests on it first, as a request does (see PrepareSlot).
-                if (slot.HasLeases && !string.Equals(slot.LoadedPath, request.Model.LocalPath, StringComparison.OrdinalIgnoreCase)
+                if (slot.HasLeases && ReplacesLoadedModel(slot, request.Model.LocalPath)
                     && !slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
                 {
                     throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the deployment.");
