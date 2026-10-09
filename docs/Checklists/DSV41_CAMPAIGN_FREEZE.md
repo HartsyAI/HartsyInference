@@ -96,3 +96,6 @@ From `DeepSeekV41DSparkTests.cs` and `DeepSeekV41DSparkChainTests.cs`:
 ## Changes
 
 - 2026-10-09: frozen, first version.
+- 2026-10-09: the tokenizer tests, the CUDA availability guards and the positive-control VRAM guard returned without a line, so a
+  run would have counted them as passed. They now write a SKIPPED line first. That fails the class in a certification run and
+  changes nothing in normal runs. No gate value changed.

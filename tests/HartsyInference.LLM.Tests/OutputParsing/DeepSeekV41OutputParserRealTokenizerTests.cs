@@ -30,7 +30,7 @@ public sealed class DeepSeekV41OutputParserRealTokenizerTests
     public void PinnedControlTokenIdsAreSingleTokens()
     {
         GgufTokenizer? tok = LoadTokenizer();
-        if (tok is null) return;
+        if (tok is null) { _output.WriteLine("SKIPPED: tokenizer did not load"); return; }
         Assert.Equal(0, tok.SpecialId(PieceTokenizer.Bos));
         Assert.Equal(1, tok.SpecialId(PieceTokenizer.Eos));
         Assert.Equal(128821, tok.SpecialId(PieceTokenizer.Think));
@@ -44,7 +44,7 @@ public sealed class DeepSeekV41OutputParserRealTokenizerTests
     public void EveryReferenceCompletionParsesToTheReferenceOnRealBpeTokens()
     {
         GgufTokenizer? tok = LoadTokenizer();
-        if (tok is null) return;
+        if (tok is null) { _output.WriteLine("SKIPPED: tokenizer did not load"); return; }
         int checkedCases = 0;
         foreach (ParserCase c in ParserCase.All.Where(x => x.Ok))
         {
@@ -62,7 +62,7 @@ public sealed class DeepSeekV41OutputParserRealTokenizerTests
     public void MalformedReferenceCompletionsAreFlaggedOnRealBpeTokens()
     {
         GgufTokenizer? tok = LoadTokenizer();
-        if (tok is null) return;
+        if (tok is null) { _output.WriteLine("SKIPPED: tokenizer did not load"); return; }
         foreach (ParserCase c in ParserCase.All.Where(x => !x.Ok))
         {
             DeepSeekV41OutputParser parser = new(tok, c.Thinking ? OutputParserState.Reasoning : OutputParserState.Content);

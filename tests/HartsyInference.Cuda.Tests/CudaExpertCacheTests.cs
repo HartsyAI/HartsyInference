@@ -158,7 +158,7 @@ public sealed unsafe class CudaExpertCacheTests
         Assert.NotEqual(GpuResidencyTier.Weight, GpuTransferHelper.CurrentState.TierOf(evicted.W1.Weight));
 
         // Positive control: a tensor the cache never saw is promoted by the same sequence, so the assertion can fail.
-        if (CudaDriverApi.cuMemGetInfo(out nuint free, out _) != 0 || (long)free < (1536L + 64L) << 20) return;
+        if (CudaDriverApi.cuMemGetInfo(out nuint free, out _) != 0 || (long)free < (1536L + 64L) << 20) { _output.WriteLine("SKIPPED: not enough free VRAM for the positive control"); return; }
         using Tensor control = Filled(5f);
         for (int i = 0; i < 4; i++)
         {
