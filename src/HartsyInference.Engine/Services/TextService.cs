@@ -1076,6 +1076,7 @@ public sealed class TextService : ITextService, IDisposable
             // Checked under the slot lock, so no load can replace the model between this check and the free.
             if (!HoldsDevice(deploymentId, slot))
                 return DeploymentUnloadOutcome.AlreadyGone;
+            // HoldsDevice already required a loaded model, so the slot has something to free: `freed` is not needed here.
             return TryFreeHeldSlot(slot, out _) ? DeploymentUnloadOutcome.Unloaded : DeploymentUnloadOutcome.TimedOut;
         }
         finally
