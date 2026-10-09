@@ -523,8 +523,11 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
     }
 
     /// <summary>
-    /// Picks victims one at a time until <paramref name="over"/> bytes are covered. Each pick asks the policy among the evictable
-    /// residents that are not in flight; a pick the policy does not name, or names outside that set, falls back to the built-in order.
+    /// Picks victims one at a time until <paramref name="over"/> bytes are covered. Each pick asks the policy among the resident,
+    /// unpinned candidates that are not loading. A pick the policy does not name, or names outside that set, falls back to the
+    /// first remaining candidate in the built-in order. That fallback can be an entry still loading, exactly as it can with no policy.
+    /// Cost: each pick scans the remaining candidates, so a pass that evicts k of n entries is O(n·k). The cache is small enough
+    /// that this has not mattered; revisit before the cache holds thousands of experts.
     /// Returns the bytes covered. Caller holds the gate.
     /// </summary>
     private long ChoosePolicyVictims(
