@@ -1,5 +1,6 @@
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Engine;
+using HartsyInference.LLM.Generation;
 
 namespace HartsyInference.API.Endpoints;
 
@@ -9,6 +10,8 @@ internal static class GenerationErrors
     public static IResult Map(Exception ex) => ex switch
     {
         QueueFullException => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status429TooManyRequests, ex.Message, "rate_limit_error"),
+        // The scheduler stopped (the model was unloaded or reloaded) while this request was queued or running: retryable, not a server fault.
+        SchedulerStoppedException => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status503ServiceUnavailable, ex.Message, "server_error"),
         // No checkpoint resolved for the requested model — a client input problem, not a server fault. The image
         // path throws FileNotFoundException for this; the text path throws HartsyInferenceException for the same
         // condition (see TextService.LoadInto) — both are "you asked for a model with no resolvable checkpoint".

@@ -6,13 +6,14 @@ using HartsyInference.LLM.Transformer;
 namespace HartsyInference.LLM.DeepSeekV41;
 
 /// <summary>Adapts a loaded V4.1 host reference model to <see cref="IGenerationModel"/> so the shared pipeline can drive it.</summary>
-/// <remarks>Owns the <see cref="DeepSeekV41LoadedModel"/>: disposing this releases the checkpoint and row stores. Text only (no image embeds), one token per decode step,
+/// <remarks>Built from a <see cref="DeepSeekV41LoadedModel"/>, it owns that model: disposing this releases the checkpoint and row stores. Text only (no image embeds), one token per decode step,
 /// no speculation. A prefill must start at the sequence's committed length; the host model runs a later multi-token chunk a token at a time. A refused call changes no sequence. Not thread-safe: run one sequence at a time.</remarks>
 public sealed class DeepSeekV41GenerationModel : IGenerationModel
 {
-    private readonly DeepSeekV41LoadedModel _loaded;
+    private readonly DeepSeekV41LoadedModel? _loaded;
     private readonly IBackend _backend;
     private readonly DeepSeekV41HostModel _model;
+    private readonly int _maxTokens;
 
     /// <inheritdoc />
     public GenerationModelInfo Info { get; }
@@ -32,14 +33,29 @@ public sealed class DeepSeekV41GenerationModel : IGenerationModel
         _loaded = loaded;
         _backend = outputBackend;
         _model = loaded.Model;
-        Info = new GenerationModelInfo("DeepSeekV41", _model.VocabSize, _model.Dim, _model.Layers, loaded.MaxTokens);
+        _maxTokens = loaded.MaxTokens;
+        Info = new GenerationModelInfo("DeepSeekV41", _model.VocabSize, _model.Dim, _model.Layers, _maxTokens);
+    }
+
+    /// <summary>Adapts a host model whose owner outlives this adapter; disposing this releases nothing.</summary>
+    /// <param name="model">The host model. This adapter does not own it.</param>
+    /// <param name="maxTokens">The longest sequence the model was loaded for.</param>
+    /// <param name="outputBackend">Backend that hosts the returned hidden and logits tensors (the CPU backend).</param>
+    internal DeepSeekV41GenerationModel(DeepSeekV41HostModel model, int maxTokens, IBackend outputBackend)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        ArgumentNullException.ThrowIfNull(outputBackend);
+        _backend = outputBackend;
+        _model = model;
+        _maxTokens = maxTokens;
+        Info = new GenerationModelInfo("DeepSeekV41", model.VocabSize, model.Dim, model.Layers, maxTokens);
     }
 
     /// <inheritdoc />
     public ISequenceState CreateSequenceState(SequenceStateOptions options)
     {
-        if (options.MaxSequenceTokens > _loaded.MaxTokens)
-            throw new ArgumentOutOfRangeException(nameof(options), options.MaxSequenceTokens, $"The model was loaded for sequences of up to {_loaded.MaxTokens} tokens.");
+        if (options.MaxSequenceTokens > _maxTokens)
+            throw new ArgumentOutOfRangeException(nameof(options), options.MaxSequenceTokens, $"The model was loaded for sequences of up to {_maxTokens} tokens.");
         return new DeepSeekV41GenerationState(_model, options.MaxSequenceTokens);
     }
 
@@ -112,7 +128,7 @@ public sealed class DeepSeekV41GenerationModel : IGenerationModel
     }
 
     /// <inheritdoc />
-    public void Dispose() => _loaded.Dispose();
+    public void Dispose() => _loaded?.Dispose();
 
     private Tensor Hidden(ReadOnlySpan<float> values, int rows)
     {

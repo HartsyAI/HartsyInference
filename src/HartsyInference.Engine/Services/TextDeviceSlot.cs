@@ -46,6 +46,52 @@ internal sealed class TextDeviceSlot
     /// <summary>The loaded DeepSeek-V4.1 host reference model, or null. Its <see cref="Pipeline"/> is built over the model's own generation adapter; the slot's <see cref="Backend"/> is a CPU backend.</summary>
     public DeepSeekV41TextModel? DeepSeekV41 { get; set; }
 
+    /// <summary>The continuous-batching scheduler serving the loaded model, or null when its requests run through <see cref="Pipeline"/>. Owned by the slot: disposed (with <see cref="SchedulerPool"/>) before the model it drives.</summary>
+    public DynamicBatchScheduler? Scheduler { get; set; }
+
+    /// <summary>The KV pool <see cref="Scheduler"/> draws from, or null when the model keeps its own sequence storage.</summary>
+    public PagedKvPool? SchedulerPool { get; set; }
+
+    private readonly object _leaseGate = new();
+    private int _leases;
+
+    /// <summary>Whether a scheduled request is running on this slot without holding <see cref="Lock"/>.</summary>
+    public bool HasLeases
+    {
+        get { lock (_leaseGate) return _leases > 0; }
+    }
+
+    /// <summary>Admits one scheduled request. Caller holds <see cref="Lock"/>; the lease is released with <see cref="ExitLease"/> once the request ends.</summary>
+    public void EnterLease()
+    {
+        lock (_leaseGate) _leases++;
+    }
+
+    /// <summary>Releases a lease taken by <see cref="EnterLease"/>.</summary>
+    public void ExitLease()
+    {
+        lock (_leaseGate)
+        {
+            if (--_leases == 0) Monitor.PulseAll(_leaseGate);
+        }
+    }
+
+    /// <summary>Waits until no scheduled request holds a lease, for up to <paramref name="timeout"/>. Returns whether the slot is free.</summary>
+    public bool WaitForLeases(TimeSpan timeout)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        lock (_leaseGate)
+        {
+            while (_leases > 0)
+            {
+                TimeSpan remaining = deadline - DateTime.UtcNow;
+                if (remaining <= TimeSpan.Zero) return false;
+                Monitor.Wait(_leaseGate, remaining);
+            }
+            return true;
+        }
+    }
+
     /// <summary>Full path of the currently-loaded model (a GGUF file or a Hugging Face directory), or null if nothing is loaded.</summary>
     public string? LoadedPath { get; set; }
 

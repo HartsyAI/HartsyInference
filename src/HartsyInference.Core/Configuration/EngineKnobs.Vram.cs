@@ -32,6 +32,13 @@ public static partial class EngineKnobs
             "Spare KV tokens a retained prefix-cache sequence keeps past its length; larger allocations shrink to this.",
             v => Math.Max(0, v));
 
+    /// <summary>Routes a batch-capable model's chat requests through the continuous-batching scheduler, so concurrent requests join one shared decode round, instead of the per-slot pipeline that runs one request at a time. Read when a model loads, so a change applies from that model's next load. Off by default: the device-backed path has no real-generation A/B yet (AGENTS.md "Shipping a change" step 3), and V4.1 host sequences are bounded neither by KV pages nor by a count until the admission control of PR 18b lands.</summary>
+    public static readonly Knob<bool> ContinuousBatching =
+        Bool("vram.continuousBatching", false, KnobScope.Runtime, KnobDomain.Vram,
+            "Routes a batch-capable model's chat requests through the continuous-batching scheduler (concurrent requests share one decode round) instead of the per-slot pipeline. "
+            + "Read when a model loads, so a change applies on its next load. A scheduled request holds its device's lease for its whole run, so a reload or a pipeline "
+            + "request on that device waits, up to the reload timeout, for it. V4.1 host sequences are not bounded by KV pages, or at all, until PR 18b's admission control lands.");
+
     /// <summary>Most retained sequences (<c>TextRequest.PrefixCacheKey</c>) one device slot's prefix-KV store keeps at once; least-recently-used entries are evicted first past this.</summary>
     public static readonly Knob<int> PrefixCacheMaxEntries =
         Int("vram.prefixCacheMaxEntries", 4, KnobScope.Runtime, KnobDomain.Vram, "Most retained prefix-KV sequences one device slot's store keeps at once (LRU past this).");

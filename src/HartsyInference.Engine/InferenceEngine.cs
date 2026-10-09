@@ -214,6 +214,11 @@ public sealed class InferenceEngine : IInferenceEngine
     /// <summary>This engine's multi-device placement. <see cref="PlacementConfig.Single"/> unless configured.</summary>
     public PlacementConfig Placement => _placement;
 
+    /// <summary>The options this engine was built with, or the defaults when none were given. Services read the per-model sizing they need (the KV pool budget) from here.</summary>
+    internal EngineOptions Options => _options ?? DefaultOptions;
+
+    private static readonly EngineOptions DefaultOptions = new();
+
     /// <summary>Replaces the placement and drops loaded pipelines (their weights live on the old devices).
     /// The all-defaults config restores exact single-device behavior.</summary>
     public void SetPlacement(PlacementConfig placement)
