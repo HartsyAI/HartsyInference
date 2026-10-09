@@ -37,7 +37,8 @@ public static class HartsyInferenceServiceExtensions
         InferenceQueue fastQueue = new(options.MaxConcurrency, options.MaxQueueDepth);
         services.AddSingleton<IInferenceEngine>(_ => new InferenceEngine(options.Backend)
         {
-            GpuRoundGate = work => fastQueue.EnqueueAsync(async () => { work(); return 0; }, CancellationToken.None),
+            // A device round belongs to a request the scheduler already admitted, so the depth bound must not refuse it (see EnqueueAdmittedAsync).
+            GpuRoundGate = work => fastQueue.EnqueueAdmittedAsync(async () => { work(); return 0; }, CancellationToken.None),
         });
 
         // Two gates: the unkeyed "fast" queue (unchanged — every route from Phases 1-4 keeps resolving it by

@@ -52,5 +52,28 @@ public sealed class InferenceQueue : IDisposable
     /// <summary>Current number of requests admitted (running + queued-and-waiting) — for observability/logging.</summary>
     public int PendingCount => Volatile.Read(ref _pending);
 
+    /// <summary>Runs <paramref name="work"/> under a concurrency slot without the depth bound. A caller that is already admitted, such as a scheduler's device round, has to
+    /// wait its turn rather than be refused: a refusal there would fail requests that were admitted. Such callers are bounded by their own admission, not by this queue.</summary>
+    public async Task<T> EnqueueAdmittedAsync<T>(Func<Task<T>> work, CancellationToken ct)
+    {
+        Interlocked.Increment(ref _pending);
+        try
+        {
+            await _slots.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                return await work().ConfigureAwait(false);
+            }
+            finally
+            {
+                _slots.Release();
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pending);
+        }
+    }
+
     public void Dispose() => _slots.Dispose();
 }

@@ -273,6 +273,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         }
         finally
         {
+            // Closed first: a submit after the loop stops fails with SchedulerStoppedException instead of waiting for a loop that will never read it.
+            _incoming.Writer.TryComplete();
             FailQueued();
             if (active.Count > 0)
                 await ReleaseThenCompleteAsync(active, static seq => seq.Pending.Completion.TrySetException(new SchedulerStoppedException())).ConfigureAwait(false);
