@@ -654,6 +654,27 @@ public static class ModelCatalog
             },
             new CatalogEntry
             {
+                // Qwen/Qwen-Image-2.1-Turbo: the step-distilled transformer, published by Qwen in diffusers layout (two
+                // safetensors shards). The shards are renamed on the way in so the variant resolver reads "turbo" from
+                // the file name, and ShardSetDiscovery finds the sibling shard from either one. Its text encoder and VAE
+                // are the Comfy-Org builds the base 2.1 entry uses: the Turbo repo's own copies are diffusers-keyed, which
+                // the engine's loaders do not read.
+                Id = "qwen-image-2.1-turbo", Modality = img, DisplayName = "Qwen-Image 2.1 Turbo", Architecture = "Single-stream DiT (Qwen3-VL-8B), 8-step distilled",
+                Status = vp,
+                Assets = new ModelAsset[]
+                {
+                    new() { Repo = "Qwen/Qwen-Image-2.1-Turbo", RepoPath = "transformer/diffusion_pytorch_model-00001-of-00002.safetensors",
+                        TargetSubdir = "diffusion_models", TargetName = "Qwen-Image-2.1-Turbo-00001-of-00002.safetensors", Role = "transformer",
+                        Sha256 = "6cccd922767f01694461bdcf1f34ea7b771f3442e4d5e338ea9aa55277431cc0" },
+                    new() { Repo = "Qwen/Qwen-Image-2.1-Turbo", RepoPath = "transformer/diffusion_pytorch_model-00002-of-00002.safetensors",
+                        TargetSubdir = "diffusion_models", TargetName = "Qwen-Image-2.1-Turbo-00002-of-00002.safetensors", Role = "transformer",
+                        Sha256 = "69f53ebb063d2f606bdaff7e22e0e2144f28d978d73dc75e6e4293fc5982eab5" },
+                    SideModels.Qwen3VL_8B_QwenImage21,
+                    SideModels.QwenImage21Vae,
+                },
+            },
+            new CatalogEntry
+            {
                 Id = "qwen-image", Modality = img, DisplayName = "Qwen-Image", Architecture = "MMDiT (Qwen2.5-VL)", Status = ok,
                 CliDrivable = true, // `hartsy image -m qwen-image` verified end-to-end 2026-07-21 (QuantStack
                 // Q4_K_M GGUF; host-side load/convert of a 20B checkpoint is slow on this box — budget 15 min)

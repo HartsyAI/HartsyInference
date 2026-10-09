@@ -56,6 +56,7 @@ These produce clean visual output on real weights, confirmed end-to-end.
 | **AuraFlow v0.3** | ✅ | Clean on-prompt horse+rider @1024 (`calcuis/aura` fp8). ([details](#auraflow-v03)) |
 | **Qwen-Image** (20B MMDiT) | ✅ | Clean photoreal astronaut-on-horse @1024 (Q4_K GGUF + Qwen2.5-VL fp8 TE). ([details](#qwen-image)) |
 | **Qwen-Image 2.1** (7B single-stream DiT) | ✅ | Clean on-prompt apple @512 text-to-image (bf16 DiT + Qwen3-VL-8B bf16 TE + RGBA VAE). Reference-image editing and LoRA not wired. ([details](#qwen-image-21)) |
+| **Qwen-Image 2.1 Turbo** (7B, 8-step distilled) | 🔧 | Built 2026-10-09 from `Qwen/Qwen-Image-2.1-Turbo` (diffusers layout, two shards). Fixed 8-step sigma schedule, CFG pinned to 1, split MLP re-fused. Not yet run on a GPU. ([details](#qwen-image-21-turbo)) |
 | **Qwen-Image-Edit 2511** (20B, Q5 GGUF) | ✅ | Full edit conditioning e2e (`44.39-local`, 2026-07-10): suit-recolor + background-swap edits verified with subject identity preserved. ([details](#qwen-image-edit-2511)) |
 | **Anima** (Cosmos-Predict2 2B) | ✅ | Clean on-prompt anime @512 on the 3060 (Qwen3-0.6B embeds). ([details](#anima)) |
 | **Lumina-Image 2.0** (2B NextDiT) | ✅ | Clean on-prompt mountain-lake @512 (53s). ([details](#lumina-image-20)) |
@@ -528,6 +529,15 @@ is, plus the interleaved text/reference sequence and per-reference RoPE), and Lo
 support *does* advertise Prompt Images (up to 10) and Init Image for this class; the extension hides both when the
 recipe declares neither `RefEdit` nor `Img2Img`, so the gap shows in the UI rather than as a refusal after
 Generate. `CliDrivable=true`.
+
+### Qwen-Image 2.1 Turbo
+
+**Built, not yet GPU-verified (2026-10-09).** `Qwen/Qwen-Image-2.1-Turbo` is the same 7B single-stream DiT as 2.1, distilled to 8 steps. The catalog id is `qwen-image-2.1-turbo`, which runs the `qwen-image-2.1` recipe and resolves to the Turbo variant from a `turbo` filename token (`QwenImage21Variants`).
+
+- **Checkpoint layout.** The repo ships the transformer as two diffusers shards, not the Comfy single file. The MLP is split (`img_mlp.gate_layer` + `img_mlp.proj`), so `QwenImage21CheckpointConverter` re-fuses it into `img_mlp.gate_up` with gate in the first half. That matches diffusers' `out(silu(gate_layer(x)) * proj(x))`, which was read from the upstream `transformer_qwenimage21.py`. Shard discovery (`ShardSetDiscovery`) finds the sibling from any one shard.
+- **Schedule.** Uses the shipped `sample_sigmas` table (8 values, terminal 0 appended) through `FlowMatchEulerDiscreteScheduler.SetSigmas`. Steps and CFG are pinned to 8 and 1, with a warning when a request differs.
+- **Side models.** Text encoder and VAE are the Comfy-Org builds the base 2.1 entry already downloads. The Turbo repo's own copies are diffusers-keyed, and the engine's loaders read the Comfy names, so they are not used. This assumes the weights match the base release, which is unverified.
+- **Verified so far:** unit tests for the variant token, defaults, the sigma schedule, the MLP fuse order and shard discovery (`QwenImage21TurboTests`). **Not verified:** a real-weight generation or parity check. Status stays 🔧 until a 4090 run confirms output is coherent and matches the Python reference at the same seed.
 
 ### Qwen-Image-Edit 2511
 

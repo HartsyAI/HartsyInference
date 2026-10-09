@@ -12,6 +12,9 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     private float[] _timesteps;
     private int _numInferenceSteps;
 
+    /// <summary>True when the schedule was set with <see cref="SetSigmas"/> rather than derived from a step count.</summary>
+    public bool HasExplicitSigmas { get; private set; }
+
     /// <inheritdoc/>
     public string Name => "flow_match_euler";
 
@@ -46,9 +49,39 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
     public void SetTimesteps(int numInferenceSteps)
     {
         _numInferenceSteps = numInferenceSteps;
+        HasExplicitSigmas = false;
         _sigmas = SigmasFor(numInferenceSteps);
         _timesteps = new float[numInferenceSteps];
         for (int i = 0; i < numInferenceSteps; i++)
+        {
+            _timesteps[i] = _sigmas[i] * 1000.0f;
+        }
+    }
+
+    /// <summary>Configures the scheduler with an explicit sigma schedule instead of one derived from a step count.
+    /// The sigmas are used as given and a terminal 0 is appended, as diffusers does for a <c>sigmas</c> argument. The
+    /// step count is the number of sigmas. Used by step-distilled checkpoints that ship a fixed schedule.</summary>
+    /// <param name="sigmas">Descending sigmas for the denoise steps, excluding the terminal 0.</param>
+    public void SetSigmas(ReadOnlySpan<float> sigmas)
+    {
+        if (sigmas.IsEmpty)
+        {
+            throw new ArgumentException("An explicit sigma schedule needs at least one sigma.", nameof(sigmas));
+        }
+        for (int i = 0; i < sigmas.Length; i++)
+        {
+            if (!(sigmas[i] > 0f) || (i > 0 && sigmas[i] >= sigmas[i - 1]))
+            {
+                throw new ArgumentException($"Explicit sigmas must be positive and strictly descending; sigma {i} is {sigmas[i]}.", nameof(sigmas));
+            }
+        }
+        _numInferenceSteps = sigmas.Length;
+        HasExplicitSigmas = true;
+        _sigmas = new float[sigmas.Length + 1];
+        sigmas.CopyTo(_sigmas);
+        _sigmas[sigmas.Length] = 0.0f;
+        _timesteps = new float[sigmas.Length];
+        for (int i = 0; i < sigmas.Length; i++)
         {
             _timesteps[i] = _sigmas[i] * 1000.0f;
         }

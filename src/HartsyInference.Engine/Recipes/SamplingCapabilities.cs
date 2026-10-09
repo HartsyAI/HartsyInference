@@ -101,7 +101,7 @@ public static class SamplingCapabilities
 
     /// <summary>What the image family <paramref name="familyId"/> accepts, or <see cref="Unknown"/> if unrecognized.</summary>
     public static SamplingSupport ForImage(string familyId)
-        => familyId is not null && Image.TryGetValue(familyId, out SamplingSupport? support) ? support : Unknown;
+        => ImageKey(familyId) is { } key && Image.TryGetValue(key, out SamplingSupport? support) ? support : Unknown;
 
     /// <summary>What the video family <paramref name="familyId"/> accepts, or <see cref="Unknown"/> if unrecognized.</summary>
     public static SamplingSupport ForVideo(string familyId)
@@ -111,7 +111,24 @@ public static class SamplingCapabilities
     /// to tell a deliberate <c>SolverOwned</c> from a family nobody added: both answer <see cref="Unknown"/>-shaped
     /// through <see cref="ForImage"/>, and a missing row silently tells SwarmUI the family takes no sampler at all,
     /// which hides the Sampler and Scheduler dropdowns and refuses any explicit pick.</summary>
-    public static bool HasImageEntry(string familyId) => familyId is not null && Image.ContainsKey(familyId);
+    public static bool HasImageEntry(string familyId) => ImageKey(familyId) is not null;
+
+    /// <summary>The table row an image family id answers to: its own row, or the row of the recipe it resolves to.
+    /// A catalog id can differ from its recipe's name (Qwen-Image 2.1 Turbo is <c>qwen-image-2.1-turbo</c> and runs
+    /// the <c>qwen-image-2.1</c> recipe), and both must share one sampler table.</summary>
+    private static string? ImageKey(string? familyId)
+    {
+        if (familyId is null)
+        {
+            return null;
+        }
+        if (Image.ContainsKey(familyId))
+        {
+            return familyId;
+        }
+        string? recipeName = RecipeRegistry.Resolve(familyId)?.Name;
+        return recipeName is not null && Image.ContainsKey(recipeName) ? recipeName : null;
+    }
 
     /// <summary>Every image family id the table names, so a stale row for a deleted recipe can be caught.</summary>
     public static IEnumerable<string> ImageFamilies => Image.Keys;

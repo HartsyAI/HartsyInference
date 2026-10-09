@@ -12,9 +12,17 @@ stable release will require. Dates are UTC.
 
 - **Added: a DeepSeek-V4.1-Flash certification runner, a rented-hardware runbook and a frozen gate set.** `tests/dsv41-certification.sh` runs one lane at a time: `cpu-oracle` (real-weight CPU oracles, full depth with `DSV41_FULL_RUN=1`), `gpu-expert` (the CUDA expert-cache and MoE suites on SM 8.0 or newer) and `gpu-native` (the block-scaled FP4 suites through cuBLASLt on SM 10.0 or 12.0). Each class runs alone. A class is green only when tests ran, none failed, none were skipped and no output line reads SKIPPED, so a test that returns early cannot pass. The multi-GPU, two-node, offload and Vulkan-AMD lanes are BLOCKED until their plan PRs land, and the runner refuses any GPU lane while another compute process holds a device. `docs/Checklists/DSV41_RENTAL_RUNBOOK.md` says what each rented lane can and cannot show, with the setup, the weight transfer and the stop rules. `docs/Checklists/DSV41_CAMPAIGN_FREEZE.md` freezes the gates with their provenance, including the structural-mode amendment made after a failed 1300-token run.
 
-## alpha.319
+## alpha.321
 
 - **Added: an opt-in CPU heterogeneous MoE path (`MoeFeedForward.UseHostExpertRuntime`, default off) with a production `HostExpertCache`, and a `GgufExpertSource.Open` overload that accepts a runtime topology fingerprint.** The default pack fingerprint is unchanged until a caller supplies one. Known costs while the path is on: F32 expert weights are copied into host arrays once per expert (about double the expert memory), and scratch is allocated per call. Not yet wired into `GenericTransformer`.
+
+## alpha.320
+
+- **Added: CPU quantized MoE expert kernels.** `CpuExpertKernels` computes one MoE expert directly on packed Q8_0 or Q4_K expert bytes for 1 to 8 token rows, with an AVX2 path that matches the scalar path bit for bit and no per-call allocation. It reads the `ExpertPackWriter` layout and applies the `ExpertProgram` clamps and activations. It is not yet wired into the executor, and Q5_K and Q6_K are not supported.
+
+## alpha.319
+
+- **Added: Qwen-Image 2.1 Turbo (`qwen-image-2.1-turbo`).** The step-distilled `Qwen/Qwen-Image-2.1-Turbo` runs the existing Qwen-Image 2.1 recipe as a `turbo` variant. It uses the checkpoint's fixed 8-step sigma schedule, with steps pinned to 8 and CFG to 1, and that schedule is kept exactly for every sampler. Its diffusers-layout transformer loads from two shards (`ShardSetDiscovery`), and the split SwiGLU is re-fused into `img_mlp.gate_up`. The text encoder and VAE are shared with base 2.1. Not yet verified on a GPU.
 
 ## alpha.318
 
