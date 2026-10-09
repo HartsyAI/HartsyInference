@@ -139,4 +139,23 @@ public sealed class GgufExpertPackTests : IDisposable
 
         Assert.Throws<InvalidDataException>(() => GgufExpertPack.Verify(other, pack));
     }
+
+    [Fact]
+    public void ExplicitFingerprint_IsRefusedUnlessItMatches()
+    {
+        string gguf = WriteCheckpoint("explicit.gguf", fused: false);
+        string pack = Path.Combine(_root, "pack-explicit");
+        const string topology = "sparse-v1:0123456789abcdef";
+        GgufExpertPack.Write(gguf, pack, DType.Q8_0, topology);
+
+        Assert.Throws<InvalidDataException>(() => ExpertPackReader.Open(pack, "sparse-v1:fedcba9876543210"));
+        Assert.Throws<InvalidDataException>(() => GgufExpertPack.Verify(gguf, pack, "sparse-v1:fedcba9876543210"));
+        Assert.Throws<InvalidDataException>(() => GgufExpertPack.Verify(gguf, pack));
+
+        using (ExpertPackReader reader = ExpertPackReader.Open(pack, topology))
+            Assert.Equal(topology, reader.TopologyFingerprint);
+        ExpertPackVerification verification = GgufExpertPack.Verify(gguf, pack, topology);
+        Assert.Equal(2 * Experts, verification.Checked);
+        Assert.Empty(verification.Failures);
+    }
 }

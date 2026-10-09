@@ -18,6 +18,10 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.325
+
+- **Added: the expert pack's topology fingerprint can be set explicitly.** `hartsy moe pack --topology-fingerprint` and `GgufExpertPack.Write` take the runtime topology fingerprint, and `hartsy moe verify --expect-fingerprint` and `GgufExpertPack.Verify` check for it. A pack built with one fingerprint is refused by a reader that expects another. Without the option, the provisional GGUF-geometry fingerprint is unchanged.
+
 ## alpha.324
 
 - **Added: tests for the opt-in CPU expert runtime and packed expert kernels, and the first real-weight run of the packed path.** `MoeHostRuntimeTests` now covers a reload that must serve the new weights, and a single-token step where most experts get zero rows. `PackedExpertHostRunnerTests` adds a companion-tensor refusal, checked with a recipe that carries a scale. `PackedExpertRealWeightTests` is gated by `HARTSY_REQUIRE_REAL_WEIGHTS` and reads a real pack (`HARTSY_GRANITE_PACK`, `HARTSY_GRANITE_GGUF`): four experts from granite-3.0-1b-a400m (Q8_0 pack) match the F32 reference at 0.39% to 1.05% relative error. No runtime change.

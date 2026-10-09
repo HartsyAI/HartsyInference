@@ -21,6 +21,11 @@ public sealed class MoeVerifyCommand : Command<MoeVerifyCommand.Settings>
         [CommandArgument(1, "<pack>")]
         [Description("Pack directory to verify.")]
         public string Pack { get; init; } = "";
+
+        /// <summary>Topology fingerprint the pack must have been built for.</summary>
+        [CommandOption("--expect-fingerprint")]
+        [Description("Runtime topology fingerprint the pack must match. Omit to expect the GGUF-geometry fingerprint.")]
+        public string? ExpectFingerprint { get; init; }
     }
 
     /// <inheritdoc/>
@@ -28,7 +33,7 @@ public sealed class MoeVerifyCommand : Command<MoeVerifyCommand.Settings>
     {
         try
         {
-            ExpertPackVerification result = GgufExpertPack.Verify(settings.Gguf, settings.Pack);
+            ExpertPackVerification result = GgufExpertPack.Verify(settings.Gguf, settings.Pack, settings.ExpectFingerprint);
             AnsiConsole.MarkupLine(
                 $"Checked {result.Checked} experts: relative RMSE {result.RelativeRmse:G4}, max abs error {result.MaxAbsError:G4}.");
             if (result.Failures.Count == 0)
