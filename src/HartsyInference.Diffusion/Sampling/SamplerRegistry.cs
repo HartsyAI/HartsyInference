@@ -102,10 +102,11 @@ public static class SamplerRegistry
 
     /// <summary>The sigmas <paramref name="sampler"/> integrates: <paramref name="schedule"/> applied to the family's
     /// <paramref name="baseSigmas"/>, with ComfyUI's discard-penultimate rule for the samplers that use it.</summary>
-    /// <remarks>The rule needs a <c>steps + 1</c> family grid: <paramref name="familyGrid"/> rebuilds it the way ComfyUI
+    /// <remarks><para>The rule needs a <c>steps + 1</c> family grid: <paramref name="familyGrid"/> rebuilds it the way ComfyUI
     /// does when it starts at the same sigma, and otherwise it is interpolated piecewise-linearly in step fraction from
     /// the family's own grid, keeping both endpoints. It is skipped when the latent was already noised at the family's
-    /// <c>sigma[startStep]</c> (img2img), since moving interior sigmas would desynchronise the two.</remarks>
+    /// <c>sigma[startStep]</c> (img2img), since moving interior sigmas would desynchronise the two.
+    /// </para>
     /// <para><paramref name="explicitSchedule"/> marks <paramref name="baseSigmas"/> as a checkpoint's own shipped grid
     /// (a distilled schedule). Such a grid is integrated exactly as given: the discard rule would interpolate it onto a
     /// different grid, so it is skipped for every sampler.</para></remarks>
