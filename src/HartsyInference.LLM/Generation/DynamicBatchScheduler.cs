@@ -149,6 +149,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         FailQueued();
     }
 
+    /// <summary>Takes requests again after <see cref="CancelQueued"/>. For an unload that gave up waiting on the decoding sequences: its model stays resident and serving,
+    /// so its queue must reopen. The requests <see cref="CancelQueued"/> failed stay failed.</summary>
+    public void ResumeAdmission() => Interlocked.Exchange(ref _draining, 0);
+
     /// <summary>Test-only fault injection: when set, invoked once per decode round with that round's feeder count; a non-null return is thrown instead of running the round, so fault-isolation behavior can be tested deterministically without reproducing a real backend crash. Null in production.</summary>
     internal Func<int, Exception?>? TestFaultInjector { get; set; }
 

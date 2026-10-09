@@ -69,6 +69,9 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal TextService(InferenceEngine engine) => _engine = engine;
 
+    /// <summary>How long an unload waits for a slot's scheduled requests before it gives up and leaves the model resident. Tests shorten it.</summary>
+    internal TimeSpan UnloadLeaseWait { get; set; } = TimeSpan.FromSeconds(UnloadWaitSeconds);
+
     /// <inheritdoc/>
     public async Task<DeploymentStatus> DeployAsync(DeploymentRequest request, CancellationToken cancel = default)
     {
@@ -1017,7 +1020,7 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <summary>Takes the slot's generation lock so the release cannot race an in-flight request, then frees the model AND the slot's backend — <see cref="UnloadSlot"/> alone deliberately keeps the device context alive for the next load, which is not enough when the host is reclaiming memory.</summary>
-    private static bool UnloadDeviceSlot(TextDeviceSlot slot)
+    private bool UnloadDeviceSlot(TextDeviceSlot slot)
     {
         if (!slot.Lock.Wait(TimeSpan.FromSeconds(UnloadWaitSeconds)))
         {
@@ -1030,9 +1033,11 @@ public sealed class TextService : ITextService, IDisposable
             // Draining: the scheduler takes no more work and fails what is waiting; the requests it is decoding run on to their end below.
             slot.Scheduler?.CancelQueued();
             // Scheduled requests run without the slot lock: let them finish before the model they run on is freed.
-            if (!slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+            if (!slot.WaitForLeases(UnloadLeaseWait))
             {
-                Logs.Warning($"[TextService] Unload timed out waiting on scheduled requests ({UnloadWaitSeconds}s) - "
+                // The model stays resident and keeps serving, so its scheduler takes requests again.
+                slot.Scheduler?.ResumeAdmission();
+                Logs.Warning($"[TextService] Unload timed out waiting on scheduled requests ({UnloadLeaseWait.TotalSeconds:0.#}s) - "
                     + $"'{slot.LoadedPath}' stays resident.");
                 return false;
             }
