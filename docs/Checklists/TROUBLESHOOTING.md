@@ -1148,7 +1148,7 @@ writeup is `docs/Checklists/ROADMAP.md` §3 plus `benchmarks/scoreboards/VULKAN.
 - **Scheduler integration lesson (not current API wiring):** an exception escaping `DynamicBatchScheduler`'s decode round previously
   killed the model's background loop silently — no crash, no log, every future request to that model hung
   forever. Wrap the round to fail only that round's sequences.
-- **Readiness gap:** the current API /ready resolves Engine.BackendDescription; it does not inspect worker/model liveness. The old ModelManager.UnhealthyChatModels/IsLoopAlive prescription described a different serving path. When integrating background scheduling, expose actual health and fail queued/active requests on worker death. Keep /health cheap and use external process supervision.
+- **Readiness gap:** the current API /ready resolves Engine.BackendDescription; it does not inspect worker/model liveness. The retired ModelManager.UnhealthyChatModels/IsLoopAlive prescription (removed with the continuous-batching route) described a different serving path. When integrating background scheduling, expose actual health and fail queued/active requests on worker death. Keep /health cheap and use external process supervision.
 - **`PagedKvCache.Gather` scratch realloc bug:** the size check was "changed at all" instead of "too
   small," reallocating a full GPU tensor every decode round for every sequence → grow-only, page-rounded
   fix.

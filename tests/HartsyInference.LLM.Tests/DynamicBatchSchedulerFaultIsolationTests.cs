@@ -114,7 +114,7 @@ public sealed class DynamicBatchSchedulerFaultIsolationTests
     [Fact]
     public async Task UnrelatedModel_UnaffectedByAnotherModels_RoundFailure()
     {
-        // Two independent schedulers (as ModelManager would hold, one per loaded model) sharing nothing —
+        // Two independent schedulers (as TextService holds, one per loaded model) sharing nothing —
         // proves fault containment is per-scheduler-instance, not some shared static state that could leak
         // a failure from one loaded model into another's traffic.
         TransformerConfig cfg = Cfg();

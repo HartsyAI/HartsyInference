@@ -25,13 +25,13 @@ public sealed class DynamicBatchSchedulerTests
     private static Tensor F1(int a) => Fill(new Tensor(new TensorShape(a), DType.F32));
     private static unsafe Tensor Ones(int n) { Tensor t = new(new TensorShape(n), DType.F32); float* p = (float*)t.DataPointer; for (int i = 0; i < n; i++) p[i] = 1f; return t; }
 
-    private static TransformerConfig Cfg() => new()
+    internal static TransformerConfig Cfg() => new()
     {
         HiddenSize = 16, NumLayers = 2, NumHeads = 4, NumKvHeads = 2, HeadDim = 4,
         IntermediateSize = 32, VocabSize = 32, MaxPositionEmbeddings = 64, AttentionBias = true, QkNorm = false,
     };
 
-    private static Dictionary<string, Tensor> Weights(TransformerConfig c)
+    internal static Dictionary<string, Tensor> Weights(TransformerConfig c)
     {
         int h = c.HiddenSize, qDim = c.QDim, kvDim = c.KvDim;
         Dictionary<string, Tensor> w = new() { ["model.embed_tokens.weight"] = F2(c.VocabSize, h), ["model.norm.weight"] = Ones(h) };
@@ -56,7 +56,7 @@ public sealed class DynamicBatchSchedulerTests
 
     /// <summary>Minimal tokenizer stub: tests drive prompts via <see cref="GenerationRequest.RawTokenIds"/>
     /// (bypassing Encode/chat-template entirely), so only Decode/StopIds need real behavior.</summary>
-    private sealed class StubTokenizer : ILlmTokenizer
+    internal sealed class StubTokenizer : ILlmTokenizer
     {
         public int[] Encode(string text, bool addSpecial) => throw new NotSupportedException();
         public int[] EncodeOrdinary(string text) => throw new NotSupportedException();
@@ -69,7 +69,7 @@ public sealed class DynamicBatchSchedulerTests
         public string? EosToken => null;
     }
 
-    private static GenerationRequest Req(int[] promptIds, int maxTokens, ulong seed) => new()
+    internal static GenerationRequest Req(int[] promptIds, int maxTokens, ulong seed) => new()
     {
         RawTokenIds = promptIds,
         MaxTokens = maxTokens,

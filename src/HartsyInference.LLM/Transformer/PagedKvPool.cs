@@ -72,6 +72,15 @@ public sealed class PagedKvPool : IDisposable
         return a;
     }
 
+    /// <summary>How many pages of <paramref name="pageSize"/> tokens fit in <paramref name="bytesBudget"/> for a model with these per-layer KV head dims, at F32 for K and V. Floors at 8 pages so a tiny budget still admits one short sequence.</summary>
+    public static int PageCountForBudget(int numKvHeads, int[] headDimPerLayer, int pageSize, long bytesBudget)
+    {
+        long bytesPerPage = 0;
+        foreach (int headDim in headDimPerLayer)
+            bytesPerPage += (long)numKvHeads * headDim * pageSize * sizeof(float) * 2; // ×2 for K and V
+        return (int)Math.Max(8, bytesBudget / Math.Max(1, bytesPerPage));
+    }
+
     public Tensor KPage(int layer, int pageIndex) { ThrowIfDisposed(); return _kPages[layer][pageIndex]; }
     public Tensor VPage(int layer, int pageIndex) { ThrowIfDisposed(); return _vPages[layer][pageIndex]; }
 
