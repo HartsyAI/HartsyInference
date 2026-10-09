@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using HartsyInference.Cpu;
 using HartsyInference.Core.Backends;
 using HartsyInference.Engine;
@@ -47,6 +48,8 @@ public sealed class DeepSeekV41CpuServingRealWeightsTests
         using DeepSeekV41TextModel model = HfTextDirectoryLoader.Load(info, backend);
         Assert.Empty(model.Tokenizer.StopIds.Intersect(OracleIds));
         TextGenerationPipeline pipeline = new(model.Generation, model.Tokenizer, model.Template);
+        Stopwatch clock = Stopwatch.StartNew();
+        TimeSpan firstToken = TimeSpan.Zero;
 
         GenerationResult result = pipeline.Generate(new GenerationRequest
         {
@@ -55,9 +58,13 @@ public sealed class DeepSeekV41CpuServingRealWeightsTests
             Sampling = SamplingOptions.GreedyPreset,
             SpeculativeDecode = false,
             GraphDecode = false,
+            OnPrefillCompleted = _ => firstToken = clock.Elapsed,
         });
+        TimeSpan total = clock.Elapsed;
 
         _output.WriteLine($"ids [{string.Join(",", result.TokenIds)}] text '{result.Text.Replace("\n", "\\n")}'");
+        _output.WriteLine($"time to first token {firstToken.TotalSeconds:F1}s, {(total - firstToken).TotalSeconds / (OracleIds.Length - 1):F2}s per decode token, "
+            + $"total {total.TotalSeconds:F1}s, peak RSS {Process.GetCurrentProcess().PeakWorkingSet64 / (1L << 30)} GiB");
         Assert.Equal(OracleIds, result.TokenIds);
         Assert.False(result.StoppedOnStopToken);
     }
