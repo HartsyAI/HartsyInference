@@ -75,7 +75,7 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
     public void GpuDequant_IsBitIdenticalToTheHostReference(int n, int k)
     {
         using CudaBackend? backend = TryOpenBackend();
-        if (backend is null) return;   // tier-lint: guarded
+        if (backend is null) { _output.WriteLine("SKIPPED: no CUDA backend"); return; }   // tier-lint: guarded
         using PackedWeight weight = PackedWeight.Synthetic(n, k, seed: 20260812 + n * 31 + k);
         AssertBitIdentical(backend, weight, $"synthetic [{n}x{k}]");
     }
@@ -86,9 +86,9 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
     public void RealCheckpointWeight_GpuDequant_IsBitIdenticalToTheHostReference(string prefix, int n, int k)
     {
         using CudaBackend? backend = TryOpenBackend();
-        if (backend is null) return;   // tier-lint: guarded
+        if (backend is null) { _output.WriteLine("SKIPPED: no CUDA backend"); return; }   // tier-lint: guarded
         using SafeTensorsLoader? loader = TryOpenCheckpoint();
-        if (loader is null) return;    // tier-lint: guarded
+        if (loader is null) { _output.WriteLine("SKIPPED: no loader"); return; }    // tier-lint: guarded
         using PackedWeight weight = PackedWeight.FromCheckpoint(loader, prefix, n, k);
         AssertBitIdentical(backend, weight, $"real {prefix} [{n}x{k}]");
     }
@@ -99,7 +99,7 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
     public void F16GemmPath_MatchesTheExactHostDequant_WithinF16Rounding(int n, int k)
     {
         using CudaBackend? backend = TryOpenBackend();
-        if (backend is null) return;   // tier-lint: guarded
+        if (backend is null) { _output.WriteLine("SKIPPED: no CUDA backend"); return; }   // tier-lint: guarded
         using PackedWeight weight = PackedWeight.Synthetic(n, k, seed: 4242 + n + k);
 
         float[] exact = Nvfp4HostReference.ExactF32(weight.Packed, weight.BlockScale, weight.GlobalScale);
@@ -127,7 +127,7 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
     public void LinearWeightRows_TakesTheHostFallback_AndMatchesTheReferenceRows()
     {
         using CudaBackend? backend = TryOpenBackend();
-        if (backend is null) return;   // tier-lint: guarded
+        if (backend is null) { _output.WriteLine("SKIPPED: no CUDA backend"); return; }   // tier-lint: guarded
         const int N = 256, K = 256, RowOffset = 64, RowCount = 64;
         using PackedWeight weight = PackedWeight.Synthetic(N, K, seed: 909);
         ushort[] reference = Nvfp4HostReference.Bf16Words(weight.Packed, weight.BlockScale, weight.GlobalScale);
@@ -163,7 +163,7 @@ public sealed unsafe class Nvfp4ResidentCudaParityTests
     public void CachedWeightCast_ServesASecondLinearWithTheSameResidentWeight()
     {
         using CudaBackend? backend = TryOpenBackend();
-        if (backend is null) return;   // tier-lint: guarded
+        if (backend is null) { _output.WriteLine("SKIPPED: no CUDA backend"); return; }   // tier-lint: guarded
         const int N = 256, K = 256;
         using PackedWeight weight = PackedWeight.Synthetic(N, K, seed: 1717);
         ushort[] reference = Nvfp4HostReference.Bf16Words(weight.Packed, weight.BlockScale, weight.GlobalScale);

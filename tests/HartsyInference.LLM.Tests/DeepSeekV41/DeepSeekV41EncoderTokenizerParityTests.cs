@@ -51,7 +51,7 @@ public sealed class DeepSeekV41EncoderTokenizerParityTests
     public void GoldenFixtures_IdsMatchHuggingFace()
     {
         GgufTokenizer? tokenizer = LoadTokenizer();
-        if (tokenizer is null) return;
+        if (tokenizer is null) { _output.WriteLine("SKIPPED: tokenizer did not load"); return; }
         using JsonDocument reference = JsonDocument.Parse(File.ReadAllText(DeepSeekV41ReferenceFiles.ReferenceJson));
         int checkedCases = 0;
         foreach (JsonElement golden in reference.RootElement.GetProperty("golden").EnumerateArray())
@@ -73,7 +73,7 @@ public sealed class DeepSeekV41EncoderTokenizerParityTests
     public void OwnCases_IdsMatchHuggingFace()
     {
         GgufTokenizer? tokenizer = LoadTokenizer();
-        if (tokenizer is null) return;
+        if (tokenizer is null) { _output.WriteLine("SKIPPED: tokenizer did not load"); return; }
         using JsonDocument reference = JsonDocument.Parse(File.ReadAllText(DeepSeekV41ReferenceFiles.ReferenceJson));
         int checkedCases = 0;
         foreach (JsonElement testCase in reference.RootElement.GetProperty("own").EnumerateArray())
