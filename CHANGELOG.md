@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.303
+
+- **Added: heterogeneous expert execution on the CPU side.** `HeterogeneousExpertExecutor` runs a layer's planned experts: GPU assignments through `IExpertDeviceRunner`, CPU assignments through the F32 reference, with the same rows and output layout either way. Tests show the same plan gives identical output under all-CPU, all-GPU and mixed placements, using a reference device. The CUDA device runner and the asynchronous handoff are not built yet; `docs/HETEROGENEOUS_EXECUTION.md` sets the protocol they must meet.
+
 ## alpha.302
 
 - **Added: a continuous-batching route for chat, behind `vram.continuousBatching` (off by default).** When on, a batch-capable model's chat requests go through `DynamicBatchScheduler`, so concurrent requests share one decode round instead of queuing on the slot. The slot lock covers the load only; scheduled requests run without it, and a load or unload waits (up to 120 s) for scheduled requests on the old model. That wait follows the loader's own rule for when a load replaces the model (an exact path match), and a scheduled request completes only after the scheduler has released its sequence, so no teardown is left waiting on the device gate. Requests with a prefix-cache key, an image, or `AlwaysFreeMemory` stay on the pipeline. The knob is read when a model loads, and V4.1 host sequences have no bound until the admission control of PR 18b. Until then, a scheduled sequence that cannot get a KV page fails, and the API answers 500. Default behavior is unchanged. CPU tests: concurrent V4.1 requests on the scheduler match their solo pipeline runs byte for byte on the synthetic fixture, a request completes only after its sequence is released (finished, cancelled, or failed round), a load of a path differing only in case waits for the leases, plus the lease wait and the routing rules. There is no real-generation A/B yet, so the knob stays off.
