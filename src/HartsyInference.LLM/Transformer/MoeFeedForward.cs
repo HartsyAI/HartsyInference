@@ -34,6 +34,10 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
+        // The opt-in runtime caches the layer's weights on first use; a reload must not keep serving the old copies.
+        _hostCache?.Dispose();
+        _hostCache = null;
+        _hostWeights = null;
         _routerW = w[$"{prefix}.mlp.gate.weight"];
         // DeepSeek-V3 / Kimi-K2 router correction bias (added to the selection scores only). Optional: V2-Lite and
         // every softmax-routed MoE lack it. Read once to a host array (it is a tiny [E] vector used per token).
