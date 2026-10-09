@@ -204,6 +204,7 @@ public sealed class TextService : ITextService, IDisposable
         }
         finally
         {
+            // UnloadSlot throws while scheduled requests hold leases. None can here: this method drained them above, and none start while the caller holds the slot lock.
             if (request.AlwaysFreeMemory == true)
                 UnloadSlot(slot);
         }
