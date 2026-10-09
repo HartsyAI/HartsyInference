@@ -59,6 +59,11 @@ public sealed class ModelEntry
     /// <summary>Unix seconds. OpenAI's schema expects a real per-model creation date; this catalog doesn't track one, so it reports the server process's start time instead (same value for every entry, every request) — cosmetic schema-shape compliance, not a real timestamp claim.</summary>
     [JsonPropertyName("created")] public required long Created { get; init; }
     [JsonPropertyName("owned_by")] public string OwnedBy => "hartsyinference";
+
+    /// <summary>What a text model can do beyond chat. Omitted for the other modalities.</summary>
+    [JsonPropertyName("capabilities")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CapabilitiesDto? Capabilities { get; init; }
 }
 
 /// <summary>OpenAI models list envelope.</summary>

@@ -4,6 +4,8 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.ModelAssets.Checkpoints;
+using HartsyInference.ModelAssets.Quant;
 
 namespace HartsyInference.API.Endpoints;
 
@@ -13,12 +15,32 @@ public static class CompatEndpoints
     /// <summary>Server-process start time, reused as every <see cref="ModelEntry.Created"/> value — see that field's doc comment for why this isn't a real per-model timestamp.</summary>
     private static readonly long s_processStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
+    /// <summary>One <c>/v1/models</c> entry. Text models carry their capabilities; the other modalities do not.</summary>
+    internal static ModelEntry ModelEntryFor(CatalogEntry entry) => new()
+    {
+        Id = entry.Id,
+        Created = s_processStartUnixSeconds,
+        Capabilities = entry.Modality == Modality.Text ? TextCapabilities(entry.Variants.Select(v => v.Flavor)) : null,
+    };
+
+    /// <summary>A text model's capabilities from its variants' flavors (a null flavor is GGUF). DSpark speculation is off for every format today: GGUF and MLX have no usable
+    /// draft head, and the safetensors path has one that serving does not run yet. The reason names the case that applies, in the words <c>/admin/packages</c> uses.</summary>
+    internal static CapabilitiesDto TextCapabilities(IEnumerable<QuantFlavor?> flavors)
+    {
+        List<QuantFlavor?> list = [.. flavors];
+        string reason = list.Count == 0 ? TextPackageSpeculation.NoVariantReason
+            : list.Any(f => f is not null && f != QuantFlavor.Mlx) ? TextPackageSpeculation.NotWiredReason
+            : list.Any(f => f == QuantFlavor.Mlx) ? TextPackageSpeculation.MlxReason
+            : TextPackageSpeculation.GgufReason;
+        return new CapabilitiesDto { Speculation = false, SpeculationReason = reason };
+    }
+
     /// <summary>Maps the OpenAI-compat routes.</summary>
     public static void MapCompatEndpoints(this WebApplication app)
     {
         app.MapGet("/v1/models", () => Results.Ok(new ModelListResponse
         {
-            Data = [.. ModelCatalog.All.Select(e => new ModelEntry { Id = e.Id, Created = s_processStartUnixSeconds })],
+            Data = [.. ModelCatalog.All.Select(ModelEntryFor)],
         }));
 
         app.MapGet("/v1/models/{model}", (string model) =>
@@ -26,7 +48,7 @@ public static class CompatEndpoints
             CatalogEntry? entry = ModelCatalog.Find(model);
             return entry is null
                 ? HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound, $"'{model}' is not a known model.", "invalid_request_error")
-                : Results.Ok(new ModelEntry { Id = entry.Id, Created = s_processStartUnixSeconds });
+                : Results.Ok(ModelEntryFor(entry));
         });
 
         app.MapPost("/v1/chat/completions", async (ChatCompletionRequest req, IInferenceEngine engine, InferenceQueue queue, HttpContext ctx, CancellationToken ct) =>
