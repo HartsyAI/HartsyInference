@@ -39,14 +39,16 @@ public sealed class DeepSeekV41DSparkTests
         int decodeToken = meta.GetProperty("decode_token").GetInt32(), startPos = meta.GetProperty("start_pos").GetInt32();
         int[] expectedIds = meta.GetProperty("draft_ids").EnumerateArray().Select(e => e.GetInt32()).ToArray();
         string Dump(string name) => Path.Combine(oracle!, name);
+        // the prompt and the decode step must fit; 64 covers the 6-token oracle
+        int capacity = Math.Max(64, prompt.Length + 8);
 
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(dir);
         using CpuBackend backend = new();
-        DeepSeekV41DSpark dspark = DeepSeekV41DSpark.Load(backend, checkpoint, new DeepSeekV41LoadOptions(MaxTokens: 64, QuantizeLatents: false));
+        DeepSeekV41DSpark dspark = DeepSeekV41DSpark.Load(backend, checkpoint, new DeepSeekV41LoadOptions(MaxTokens: capacity, QuantizeLatents: false));
         int dim = checkpoint.Config.HiddenSize, vocab = checkpoint.Config.VocabSize, targetsWidth = checkpoint.Config.DsparkTargetLayerIds.Count * dim;
         Assert.Equal(prompt.Length, ReadF32(Dump("main_hidden_prefill.f32")).Length / targetsWidth);
 
-        DeepSeekV41DSparkState state = dspark.CreateState(64);
+        DeepSeekV41DSparkState state = dspark.CreateState(capacity);
         dspark.Seed(ReadF32(Dump("main_hidden_prefill.f32")), prompt.Length, state);
         float[] decodeHidden = ReadF32(Dump("main_hidden_decode.f32"));
         List<string> stageFailures = [];

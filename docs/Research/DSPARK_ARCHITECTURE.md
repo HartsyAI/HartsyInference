@@ -37,6 +37,8 @@ Status: CPU reference, synthetic evidence. Greedy drafting only. Not verified on
 - `DeepSeekV41DSparkFixtureTests`: the target taps and the drafts against the upstream run on a synthetic model (`dump_dspark_fixture.py`).
 - `DeepSeekV41DSparkProposerTests`: the proposer's drafts at every decode position, and greedy speculation with the proposer equal to plain greedy decoding, with
   drafted rounds asserted.
+- Real checkpoint past the window (CPU, 2026-10-09, `dump_real_dspark.py --max-prompt-tokens 160`): the three draft stages match upstream at relL2 at most 8e-6 and the
+  draft ids exactly. The chain from the target's own taps gives logits at 5.4e-4, and its decode tap, at 1.24e-3, is the weakest number and is not explained.
 - `DeepSeekV41EngramTapTests`: a tap on a block with Engram is the hc-mean after the Engram step. Removing the step makes the test fail, so the placement is checked. The real DSpark targets (37 to 39) have no Engram, so this is the only check of that placement.
 - `DeepSeekV41SpeculativeScorerTests`: the scorer's rows equal per-token logits, the rollback work is counted in block passes, and greedy speculation matches plain
   decoding across prompt lengths and draft sizes.
