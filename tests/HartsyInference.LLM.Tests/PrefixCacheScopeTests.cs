@@ -1,14 +1,18 @@
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cpu;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.LLM.DeepSeekV41;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Tests.DeepSeekV41;
 using HartsyInference.LLM.Transformer;
+using HartsyInference.ModelAssets.Checkpoints;
 using Xunit;
 
 namespace HartsyInference.LLM.Tests;
 
-/// <summary>Prefix-cache scoping: one tenant's retained prefix is never handed to another, a different model is a different scope, and the parts of a key cannot run
-/// into each other.</summary>
+/// <summary>Prefix-cache scoping: one tenant's retained prefix is never handed to another, a different model is a different scope, the parts of a key cannot run
+/// into each other, and a slot holding the V4.1 host yields no key at all.</summary>
 public sealed class PrefixCacheScopeTests
 {
     [Fact]
@@ -55,5 +59,33 @@ public sealed class PrefixCacheScopeTests
         Assert.Equal(new[] { 1, 2 }, back.TokenIds);
         back.Dispose();
         foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
+    public void A_Slot_Holding_The_V41_Host_Never_Yields_A_Key()
+    {
+        string directory = Directory.CreateTempSubdirectory("prefix-scope-v41-").FullName;
+        try
+        {
+            DeepSeekV41ModelFixtureCheckpoint.Write(directory);
+            DeepSeekV41ModelFixtureCheckpoint.WriteTokenizer(directory);
+            using CpuBackend cpu = new();
+            using DeepSeekV41TextModel host = HfTextDirectoryLoader.Load(HfCheckpointDirectory.TryProbe(directory)!, cpu);
+            TextRequest request = new() { Messages = [], PrefixCacheKey = "chat-1", TenantId = "alice" };
+
+            // A slot holding another model keys the prefix by tenant and loaded path; a request with no prefix key takes no hit anywhere.
+            TextDeviceSlot other = new() { LoadedPath = "/models/plain.gguf" };
+            Assert.True(PrefixCacheScope.TryKey(other, request, out string? key));
+            Assert.Equal(PrefixCacheScope.Key("alice", "/models/plain.gguf", "chat-1"), key);
+            Assert.False(PrefixCacheScope.TryKey(other, request with { PrefixCacheKey = null }, out _));
+
+            TextDeviceSlot v41 = new() { LoadedPath = directory, DeepSeekV41 = host };
+            Assert.False(PrefixCacheScope.TryKey(v41, request, out string? none));
+            Assert.Null(none);
+        }
+        finally
+        {
+            Directory.Delete(directory, recursive: true);
+        }
     }
 }
