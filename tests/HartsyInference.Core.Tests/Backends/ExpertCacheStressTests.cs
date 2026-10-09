@@ -168,8 +168,7 @@ public sealed class ExpertCacheStressTests
         Assert.Equal(1, cache.Stats.PinnedExperts);
     }
 
-    [Fact(Skip = "BUG: ExpertCacheBase.AwaitPending calls RemoveEntry only after AbandonUpload succeeds; if AbandonUpload throws, "
-        + "the failed entry stays resident with Pending cleared and later Acquire calls see it as a ready hit.")]
+    [Fact]
     public void AbandonFailureAfterAwaitFailure_DoesNotLeaveAReadyLookingEntry()
     {
         using FakeExpertCache cache = NewCache(budgetExperts: 8, layers: 1);
