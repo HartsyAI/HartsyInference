@@ -22,32 +22,37 @@ Subsystems with CPU tests in place:
 - Scalar reference path with parity against `MoeFeedForward` on softmax and grouped sigmoid routing (#300).
 - Expert identity with banks; cache keyed by (bank, layer) (#303).
 - Residency queries and no-upload acquisition; allocation-free per call (#304).
+- Expert pack write, read, verify and GGUF packing, with refusals and corruption checks (#305, #316).
+- Placement planner: residency decides placement, every routed pair is counted once, planning changes no state (#306).
+- Heterogeneous executor, CPU side (#313).
+- CUDA F32 expert kernel `expert_f32` (sm_75 PTX) and the lease-validated device runner (#335).
+- CPU quantized expert kernels, Q8_0 and Q4_K, with scalar parity (#341); CPU worker pool (#345).
+- Expert cache stress and failure injection, including upload and await faults (#343).
+- Opt-in CPU expert runtime, with the reload fix (#340).
 
-Pending, not verified in this checkout:
+## This machine (checked 2026-10-09, alpha.322)
 
-- Expert pack (#305): exact payload sizes, round trips, refusals and corruption checks. No `ExpertPack` code or tests
-  exist in this checkout.
-- Placement planner (#306): residency decides placement, every routed pair counted once, planning changes no state. No
-  planner code or tests exist in this checkout.
-
-Do not count #305 or #306 as verified until those changes land on the branch being run.
-
-## Blockers on this machine (fix before renting or on the rig)
-
-- **NVIDIA driver and library mismatch.** `nvidia-smi` reports "Driver/library version mismatch" (NVML library 595.99).
-  No CUDA test can run until the driver matches the library. A reboot or a matching reinstall is the usual fix; this is
-  a system change, so it was not made from here.
-- **Driver and PTX.** The rig loads the shipped PTX from disk; `nvcc` is not in that path. The constraints are the deployment
-  driver's PTX-ISA ceiling and the GPU's exact compute capability (`src/HartsyInference.Cuda/Kernels/README.md`). The
-  committed PTX targets `sm_70`, `sm_75`, `sm_80`, and one `sm_120a` file. 281 CUDA tests failed here with a PTX JIT error
-  ("SM version specified by .target is higher than default SM version"): that points at the driver on this machine, so check
-  the driver's PTX-ISA support against those targets on the rig before the first GPU run.
-- **Host memory.** 39 GB total. With the CPU lane running, 2 GB was free and 9 GB available. Check `free -g` before any
-  large load (see the no-heavy-GPU-runs note).
+- **GPU and CUDA.** RTX 2060 SUPER, Turing (sm_75), 8 GB. The CUDA driver API works: `CudaContext.IsAvailable()` returns
+  true and `RigPreflightTests` passes.
+- **nvidia-smi.** Still prints "Driver/library version mismatch" (NVML library 595.99). That is NVML only, not CUDA. It must be
+  resolved, by a reboot or a matching reinstall, before the rig run so the stop rule below stays meaningful. That is a
+  system change, so it was not made from here.
+- **Expert kernels on this card.** `CudaExpertKernelTests` passes 5 of 5 (`expert_f32` is built for sm_75).
+  `CudaExpertDeviceRunnerTests` fails 3 of 3 with PTX JIT error 218. The cause is that `CudaBackend` construction loads
+  about 80 modules eagerly, some built for sm_80 or sm_120a, and the card cannot load those. Making the load lazy is a
+  larger change and is deferred. Rent sm_80 or newer: the baseline PTX is sm_80.
+- **PTX.** Every shipped PTX file is ISA 9.0 or older. 28 files are ISA 7.0, which the driver loads fine. No file is newer
+  than the 9.0 ceiling in `src/HartsyInference.Cuda/Kernels/build_common.sh`.
+- **Host memory.** 39 GB total. Check `free -g` before any large load (see the no-heavy-GPU-runs note).
+- **VRAM.** 8 GB limits what this card can run. Large-MoE and real-checkpoint validation needs the rented GPU.
 
 ## Rig run order
 
-1. `nvidia-smi` shows the GPU and a driver that matches the library. No mismatch message.
+1. Preflight. `RigPreflightTests` fails unless CUDA is usable, so a GPU suite cannot pass by skipping every test. It logs the
+   device name and compute capability for the run record. A failure here with a cuBLAS reason means the CUDA toolkit is
+   missing, not that the driver is broken; the reason string says which.
+   `dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.RigPreflightTests."`
+   `nvidia-smi` must also show no mismatch message.
 2. Real-weight assets, set before any GPU suite. With `HARTSY_REQUIRE_REAL_WEIGHTS=1` a missing asset fails the test
    instead of logging `SKIPPED`, so a run with missing assets is a failed run, not a green one:
    ```
@@ -56,16 +61,23 @@ Do not count #305 or #306 as verified until those changes land on the branch bei
    export HARTSY_DSV41_SHARD3_FIXTURES=<dir holding manifest.tsv>   # default: ~/dsv41-ref/shard3_fixtures
    ```
    Confirm both paths exist before starting. `CudaExpertM1FixtureTests` is the only suite that reads them.
-3. Expert-cache suites first, one class per invocation, one at a time. xUnit does not run classes in a caller-chosen
-   order, so the category filter cannot put these first. The trailing dot makes each filter match one class exactly:
+3. Expert-cache and expert suites first, one class per invocation, one at a time. xUnit does not run classes in a
+   caller-chosen order, so the category filter cannot put these first. The trailing dot makes each filter match one class
+   exactly:
    ```
    classes="CudaExpertCacheTests CudaExpertM1FixtureTests CudaMoePrimitiveTests"
    classes="$classes CudaMoeTests CudaQuantWorkspaceTests CudaStreamingWeightCacheTests"
-classes="$classes CudaExpertKernelTests CudaExpertDeviceRunnerTests"
+   classes="$classes CudaExpertKernelTests CudaExpertDeviceRunnerTests"
+   set -euo pipefail
    for c in $classes; do
      dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.$c."
    done
    ```
+   `set -euo pipefail` stops the run at the first failing class, so a later pass cannot hide an earlier failure. Every class
+   in the list matches at least one test (checked with `--list-tests`). `CudaExpertKernelTests` (#335) checks `expert_f32`
+   against the reference for every program variant. `CudaExpertDeviceRunnerTests` (#335) runs the lease-validated device
+   runner through `CudaBackend`; it needs sm_80 or newer. On an sm_75 card, skip it: its 3 failures there come from the
+   eager module load, not from a regression.
    `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter does not select
    them; this explicit loop is the only way they run on the rig.
 4. The rest of the GPU category, excluding the classes already run in step 3. Run only from a checkout that includes #307,
@@ -73,7 +85,7 @@ classes="$classes CudaExpertKernelTests CudaExpertDeviceRunnerTests"
    Record failures by test name:
    ```
    filter="Category=GpuIntegration"
-   for c in $classes; do filter="$filter&FullyQualifiedName!~HartsyInference.Cuda.Tests.$c."; done
+   for c in $classes RigPreflightTests; do filter="$filter&FullyQualifiedName!~HartsyInference.Cuda.Tests.$c."; done
    dotnet test tests/HartsyInference.Cuda.Tests --filter "$filter"
    ```
 5. **Deferred: refactor A/B for the cache changes.** Do not run `tests/regression-ab.sh` as evidence for #304 yet. No
@@ -89,13 +101,22 @@ classes="$classes CudaExpertKernelTests CudaExpertDeviceRunnerTests"
 
 ## Not yet possible, and what is missing
 
-- **Packing a real checkpoint.** The pack and verifier are tested on random weights only. There is no command-line entry
-  point yet (`hartsy moe pack|verify`), so verifying a real checkpoint needs a small harness.
-- **GPU execution of the planned split.** The planner decides placement; the GPU and CPU executors that consume the plan
-  are not built. Their kernels need the rig.
+- **Packing a real checkpoint.** `hartsy moe pack|verify` exists (#316) and is tested on synthetic and GGUF fixtures. No
+  real MoE checkpoint has been packed or verified yet.
+- **Production use of the executor.** The planner (#306), the heterogeneous executor (#313), the opt-in CPU runtime (#340)
+  and the CUDA F32 runner (#335) exist. No production model routes experts through them by default. The GPU grouped kernels
+  (M6) are not built, and the packed CPU kernels (#341) are not wired into the executor.
 - **Measurements the plan asks for.** Instrumented now: per-op timing (`OpProfile`) and expert-cache counters (hits, misses,
   uploads, bytes). Not yet instrumented: time to first token, tokens per forward pass, host-to-device and device-to-host
   bandwidth, peer bandwidth, CPU and GPU utilization, KV bytes.
+
+## Known gaps before a run is evidence
+
+- The pack fingerprint is provisional: it hashes GGUF geometry, not the runtime topology.
+- The opt-in CPU path (`MoeFeedForward.UseHostExpertRuntime`) copies expert weights to F32 and allocates per call.
+- Q2_0 has an encoder and a pack codec, but no kernel and no quality validation.
+- Telemetry and residency policies (#342) and the speculation selector (#339) are not wired into the expert cache or the
+  decode loop.
 
 ## Stop rules
 
