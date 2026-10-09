@@ -95,6 +95,9 @@ public static class AdminEndpoints
             Deployments = [.. engine.Text.Deployments.Select(d => CapacityDto.For(d, engine.Text.Capacity(d.DeploymentId)))],
         }));
 
+        // The text model packages under a directory in the models root, discovered from disk; `root` defaults to its llm folder. Nothing is loaded.
+        app.MapGet("/admin/packages", (string? root) => PackageListing.Respond(root));
+
         app.MapGet("/admin/models", (IInferenceEngine engine) =>
             Results.Ok(new { loaded = engine.LoadedPipelineKeys }));
 
