@@ -8,6 +8,12 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.302
+
+- **Added: a continuous-batching route for chat, behind `vram.continuousBatching` (off by default).** When on, a batch-capable model's chat requests go through `DynamicBatchScheduler`, so concurrent requests share one decode round instead of queuing on the slot. The slot lock covers the load only; scheduled requests run without it, and a load or unload waits (up to 120 s) for scheduled requests on the old model. Requests with a prefix-cache key, an image, or `AlwaysFreeMemory` stay on the pipeline. Default behavior is unchanged. CPU tests: concurrent V4.1 requests on the scheduler match their solo pipeline runs byte for byte on the synthetic fixture, plus the lease wait and the routing rules. There is no real-generation A/B yet, so the knob stays off.
+- **Changed: a stopped scheduler fails its requests instead of leaving them pending.** `Dispose` completes queued requests, and the running ones, with `SchedulerStoppedException` (queued requests used to never complete). The API returns 503 for it, not 500. The exception derives from `ObjectDisposedException`.
+- **Removed: `ModelManager`.** Nothing constructed it. Its KV page-count helper is now `PagedKvPool.PageCountForBudget`.
+
 ## alpha.301
 
 - **Added: the DSpark draft head checked on the real checkpoint past the 128-token window (CPU).** `dump_real_dspark.py --max-prompt-tokens N` extends the prompt with seeded random ids and sizes the context to fit. With a 160-token prompt the window wraps: the three draft stages agree with the unmodified upstream at relL2 at most 8e-6, and the draft ids match exactly. The chain from the C# target's own taps reproduces the ids and gives logits at 5.4e-4, but its decode tap is at 1.2e-3, the weakest number, not yet explained. The real-weights tests size their state from the prompt. No change to the model's output.
