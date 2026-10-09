@@ -273,6 +273,7 @@ public sealed class TextService : ITextService, IDisposable
                 [
                     new TextChunk { Kind = TextChunkKind.Result, Text = outcome.Text },
                     new TextChunk { Kind = TextChunkKind.StopReason, Stop = outcome.Stop },
+                    new TextChunk { Kind = TextChunkKind.Usage, Usage = new TextUsage(outcome.PromptTokens, outcome.CompletionTokens) },
                 ];
             },
             cancel);

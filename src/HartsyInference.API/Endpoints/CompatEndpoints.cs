@@ -1,17 +1,30 @@
+using System.Buffers.Binary;
+using System.Text;
 using System.Text.Json;
+using HartsyInference.Core.Exceptions;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Quant;
+// A bare ImageData means the API's own OpenAI DTO (the enclosing namespace wins over any using), so the native type gets another name.
+using NativeImageData = HartsyInference.Engine.Requests.ImageData;
 
 namespace HartsyInference.API.Endpoints;
 
 /// <summary>OpenAI-shaped <c>/v1/chat/completions</c> and <c>/v1/images/generations</c> — thin DTO mappers that call the SAME native handlers <see cref="TextEndpoints"/>/<see cref="ImageEndpoints"/> use, not a parallel implementation. Deliberately narrow: composition-heavy requests (LoRA/ControlNet/regional prompting, JSON-schema response format) don't fit OpenAI's schema and belong on the native routes instead; tool definitions, <c>tool_calls</c> and <c>tool_call_id</c> map both ways.</summary>
 public static class CompatEndpoints
 {
+    /// <summary>Largest decoded image one <c>image_url</c> part may carry. The server sets no request-body limit of its own for chat, and a host can raise Kestrel's.</summary>
+    internal const int MaxImageBytes = 32 * 1024 * 1024;
+
+    /// <summary>Largest total decoded image one chat request may carry across all its parts: four images' worth. A small PNG can declare a large canvas, so without a
+    /// total a request could repeat one until it decoded to gigabytes.</summary>
+    internal const long MaxRequestImageBytes = 4L * MaxImageBytes;
+
     /// <summary>Server-process start time, reused as every <see cref="ModelEntry.Created"/> value — see that field's doc comment for why this isn't a real per-model timestamp.</summary>
     private static readonly long s_processStartUnixSeconds = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
@@ -67,7 +80,15 @@ public static class CompatEndpoints
 
             string model = req.Model; // captured into a definitely-non-null local for the streaming lambda below
             ModelSpec spec = ModelResolver.Resolve(model, modelPathArg: null, Modality.Text);
-            TextRequest textRequest = ToTextRequest(req);
+            TextRequest textRequest;
+            try
+            {
+                textRequest = ToTextRequest(req);
+            }
+            catch (HartsyInferenceException ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
             string id = $"chatcmpl-{Guid.NewGuid():N}";
             long created = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
 
@@ -101,53 +122,23 @@ public static class CompatEndpoints
                 }
             }
 
+            ChatStreamTranslator translator = new(id, created, model, includeUsage: req.StreamOptions?.IncludeUsage == true);
             await SseHelpers.RunTextAsync(ctx, queue, async (writer, jsonOptions) =>
             {
-                writer.TryWrite(RawDataFrame(new ChatCompletionChunk
-                {
-                    Id = id, Created = created, Model = model,
-                    Choices = [new ChatCompletionChunkChoice { Delta = new ChatCompletionDelta { Role = "assistant" } }],
-                }, jsonOptions));
-
-                string finishReason = "stop";
+                writer.TryWrite(RawDataFrame(translator.Start(), jsonOptions));
                 await foreach (TextChunk chunk in engine.Text.StreamAsync(spec, textRequest, ct))
                 {
-                    if (chunk.Kind == TextChunkKind.Chunk && chunk.Text is not null)
-                    {
-                        writer.TryWrite(RawDataFrame(new ChatCompletionChunk
-                        {
-                            Id = id, Created = created, Model = model,
-                            Choices = [new ChatCompletionChunkChoice { Delta = new ChatCompletionDelta { Content = chunk.Text } }],
-                        }, jsonOptions));
-                    }
-                    else if (chunk.Kind == TextChunkKind.NativeToolCall && chunk.ToolCall is { } call)
-                    {
-                        // Emitted as ONE complete delta (full name + arguments already assembled) rather than
-                        // incrementally character-by-character like OpenAI's own servers sometimes do -- the
-                        // native stream hands the whole call over in one chunk, and a single complete delta is
-                        // still spec-valid (most client SDKs just concatenate whatever arrives).
-                        writer.TryWrite(RawDataFrame(new ChatCompletionChunk
-                        {
-                            Id = id, Created = created, Model = model,
-                            Choices = [new ChatCompletionChunkChoice { Delta = new ChatCompletionDelta { ToolCalls = [ToToolCallDto(call, index: 0)] } }],
-                        }, jsonOptions));
-                    }
-                    else if (chunk.Kind == TextChunkKind.Status && chunk.Status is { } status)
+                    if (chunk.Kind == TextChunkKind.Status && chunk.Status is { } status)
                     {
                         // Queue position and prefill progress, as a named frame that OpenAI clients ignore.
                         writer.TryWrite(SseHelpers.Event("hartsy.status", HartsyStatusDto.From(status), jsonOptions));
+                        continue;
                     }
-                    else if (chunk.Kind == TextChunkKind.StopReason && chunk.Stop is { } stop)
-                    {
-                        finishReason = ToFinishReason(stop);
-                    }
+                    foreach (ChatCompletionChunk frame in translator.Handle(chunk))
+                        writer.TryWrite(RawDataFrame(frame, jsonOptions));
                 }
-
-                writer.TryWrite(RawDataFrame(new ChatCompletionChunk
-                {
-                    Id = id, Created = created, Model = model,
-                    Choices = [new ChatCompletionChunkChoice { Delta = new ChatCompletionDelta(), FinishReason = finishReason }],
-                }, jsonOptions));
+                foreach (ChatCompletionChunk frame in translator.End())
+                    writer.TryWrite(RawDataFrame(frame, jsonOptions));
                 writer.TryWrite("data: [DONE]\n\n");
             }, ct);
             return Results.Empty;
@@ -369,9 +360,10 @@ public static class CompatEndpoints
             forceToolId = nameEl.GetString();
         }
 
+        ImageBudget imageBudget = new();
         return new TextRequest
         {
-            Messages = [.. req.Messages.Select(ToTextMessage)],
+            Messages = [.. req.Messages.Select(m => ToTextMessage(m, imageBudget))],
             Temperature = req.Temperature ?? 0.7,
             TopP = req.TopP ?? 0.95,
             TopK = req.TopK,
@@ -402,14 +394,101 @@ public static class CompatEndpoints
     };
 
     /// <summary>One OpenAI message → native <see cref="TextMessage"/>, carrying an assistant turn's <c>tool_calls</c> and a tool turn's <c>tool_call_id</c>/<c>name</c>.</summary>
-    internal static TextMessage ToTextMessage(ChatMessageDto m) => new TextMessage
+    /// <remarks>Array content keeps the order of its text parts, joined into one string, and of its images, in a separate list. A native message holds one text and its
+    /// images apart, so where an image sat between text parts is lost.</remarks>
+    internal static TextMessage ToTextMessage(ChatMessageDto m, ImageBudget? budget = null)
     {
-        Role = ParseRole(m.Role),
-        Content = m.Content ?? "",
-        ToolCalls = m.ToolCalls is { Count: > 0 } ? [.. m.ToolCalls.Select(ToNativeToolCall)] : null,
-        ToolCallId = m.ToolCallId,
-        Name = m.Name,
-    };
+        budget ??= new ImageBudget();
+        List<NativeImageData> images = [];
+        StringBuilder text = new();
+        foreach (ChatContentPart part in m.Content?.Parts ?? Array.Empty<ChatContentPart>())
+        {
+            if (part.Type == "text")
+                text.Append(part.Text ?? throw new HartsyInferenceException("A 'text' content part needs a string 'text'."));
+            else if (part.Type == "image_url")
+            {
+                NativeImageData image = DecodeImageUrl(part.ImageUrl);
+                budget.Take(image);
+                images.Add(image);
+            }
+            else
+                throw new HartsyInferenceException($"Content part type '{part.Type}' is not supported; use 'text' or 'image_url'.");
+        }
+        return new TextMessage
+        {
+            Role = ParseRole(m.Role),
+            Content = m.Content?.Text ?? text.ToString(),
+            Images = images.Count > 0 ? images : null,
+            ToolCalls = m.ToolCalls is { Count: > 0 } ? [.. m.ToolCalls.Select(ToNativeToolCall)] : null,
+            ToolCallId = m.ToolCallId,
+            Name = m.Name,
+            ReasoningContent = m.ReasoningContent,
+        };
+    }
+
+    /// <summary>Decodes a <c>data:</c> image URI's base64 payload. A remote URL is refused, since the server does not fetch images, and so is a payload that decodes
+    /// to more than <see cref="MaxImageBytes"/>, or is a PNG whose header declares more decoded RGB than that.</summary>
+    internal static NativeImageData DecodeImageUrl(string? url)
+    {
+        const string prefix = "data:";
+        if (url is null || !url.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            throw new HartsyInferenceException("Image URLs must be data: URIs; the server does not fetch remote images.");
+        int comma = url.IndexOf(',');
+        if (comma < 0 || !url[..comma].EndsWith(";base64", StringComparison.OrdinalIgnoreCase))
+            throw new HartsyInferenceException("Image data URIs must be base64-encoded: data:<type>;base64,<data>.");
+        // Every 4 base64 characters carry 3 bytes, so the size is known before anything is decoded. A line break in the payload makes this an over-estimate,
+        // so only a payload right at the limit is refused early.
+        long decodedBytes = (long)(url.Length - comma - 1) / 4 * 3;
+        if (decodedBytes > MaxImageBytes)
+            throw new HartsyInferenceException($"Image data decodes to about {decodedBytes} bytes, over the {MaxImageBytes}-byte (32 MiB) limit.");
+        byte[] png;
+        try
+        {
+            png = Convert.FromBase64String(url[(comma + 1)..].Trim());
+        }
+        catch (FormatException ex)
+        {
+            throw new HartsyInferenceException("Image data is not valid base64.", ex);
+        }
+        RefuseOversizedPng(png);
+        try
+        {
+            return ImageDataCodec.Decode(png);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or InvalidDataException)
+        {
+            // The codec's refusals (not a PNG, a corrupt PNG) are the caller's to fix, so they are a 400.
+            throw new HartsyInferenceException($"Image data could not be decoded: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>Refuses a PNG whose header declares more than <see cref="MaxImageBytes"/> of decoded RGB (3 bytes a pixel), before the decoder allocates it: a small
+    /// compressed file can declare a canvas far larger than its size. Bytes without a PNG header are left to the codec, which names the format it reads.</summary>
+    internal static void RefuseOversizedPng(ReadOnlySpan<byte> png)
+    {
+        if (png.Length < 24 || !png[..8].SequenceEqual(PngSignature) || !png.Slice(12, 4).SequenceEqual("IHDR"u8))
+            return;
+        ulong width = BinaryPrimitives.ReadUInt32BigEndian(png[16..]);
+        ulong height = BinaryPrimitives.ReadUInt32BigEndian(png[20..]);
+        if (width * height > (ulong)MaxImageBytes / 3)
+            throw new HartsyInferenceException($"Image is {width}x{height} pixels, which decodes to more than the {MaxImageBytes}-byte (32 MiB) limit. Send a smaller image.");
+    }
+
+    private static ReadOnlySpan<byte> PngSignature => [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    /// <summary>The decoded image bytes a chat request has taken so far. Each image is counted as it decodes, so a request decodes to at most the budget plus one image.</summary>
+    internal sealed class ImageBudget
+    {
+        private long _taken;
+
+        /// <summary>Counts <paramref name="image"/> against the request, or refuses it when the request's images would exceed <see cref="MaxRequestImageBytes"/>.</summary>
+        public void Take(NativeImageData image)
+        {
+            _taken += image.Rgb.Length;
+            if (_taken > MaxRequestImageBytes)
+                throw new HartsyInferenceException($"The images in one request decode to more than {MaxRequestImageBytes / (1024 * 1024)} MiB together. Send fewer or smaller images.");
+        }
+    }
 
     internal static NativeToolCall ToNativeToolCall(ChatToolCallDto call) => new NativeToolCall
     {
@@ -427,7 +506,7 @@ public static class CompatEndpoints
 
     // OpenAI's finish_reason vocabulary has no slot for Cancelled/Error — both collapse to "stop" (best-effort
     // compat) rather than inventing a non-standard value a client SDK won't recognize.
-    private static string ToFinishReason(StopReason stop) => stop switch
+    internal static string ToFinishReason(StopReason stop) => stop switch
     {
         StopReason.Length => "length",
         StopReason.ToolCall => "tool_calls",
