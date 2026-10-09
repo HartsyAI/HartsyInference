@@ -10,7 +10,7 @@ namespace HartsyInference.Core.Moe;
 /// </summary>
 public static class HeterogeneousExpertExecutor
 {
-    /// <summary>Executes the plan.</summary>
+    /// <summary>Executes the plan, with CPU assignments computed by the F32 reference on <paramref name="hostWeights"/>.</summary>
     /// <param name="program">Activation and clamp bounds, shared by both sides.</param>
     /// <param name="plan">The planner's assignments, in the order their rows are laid out.</param>
     /// <param name="gathered"><c>(sum of rows) × H</c> inputs, expert-major.</param>
@@ -24,8 +24,27 @@ public static class HeterogeneousExpertExecutor
     public static void Execute(ExpertProgram program, ReadOnlySpan<ExpertAssignment> plan, ReadOnlySpan<float> gathered, int hidden,
         Span<float> output, Func<ExpertKey, F32ExpertWeights> hostWeights, IExpertDeviceRunner? device)
     {
-        ArgumentNullException.ThrowIfNull(program);
         ArgumentNullException.ThrowIfNull(hostWeights);
+        Execute(program, plan, gathered, hidden, output, new ReferenceHostRunner(hostWeights), device);
+    }
+
+    /// <summary>Executes the plan, with CPU assignments computed by <paramref name="host"/>; the same rules as the F32
+    /// overload apply.</summary>
+    /// <param name="program">Activation and clamp bounds, shared by both sides.</param>
+    /// <param name="plan">The planner's assignments, in the order their rows are laid out.</param>
+    /// <param name="gathered"><c>(sum of rows) × H</c> inputs, expert-major.</param>
+    /// <param name="hidden">Model width H.</param>
+    /// <param name="output"><c>(sum of rows) × H</c> outputs, same layout as <paramref name="gathered"/>.</param>
+    /// <param name="host">Runs CPU assignments, for example on packed weights.</param>
+    /// <param name="device">Runs GPU assignments; required when the plan has any.</param>
+    /// <remarks>If a device run throws, <paramref name="output"/> is left partially written and must be discarded.</remarks>
+    /// <exception cref="ArgumentException">The buffers do not match the plan's rows, or an assignment serves no rows.</exception>
+    /// <exception cref="InvalidOperationException">The plan places experts on the GPU but no device runner was supplied.</exception>
+    public static void Execute(ExpertProgram program, ReadOnlySpan<ExpertAssignment> plan, ReadOnlySpan<float> gathered, int hidden,
+        Span<float> output, IExpertHostRunner host, IExpertDeviceRunner? device)
+    {
+        ArgumentNullException.ThrowIfNull(program);
+        ArgumentNullException.ThrowIfNull(host);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(hidden);
         program.Validated();
 
@@ -48,8 +67,15 @@ public static class HeterogeneousExpertExecutor
             ReadOnlySpan<float> x = gathered.Slice(offset, length);
             Span<float> y = output.Slice(offset, length);
             if (assignment.Placement == ExpertPlacement.Gpu) device!.Run(assignment.Key, x, assignment.Rows, y);
-            else ExpertProgramReference.Apply(program, hostWeights(assignment.Key), x, assignment.Rows, y);
+            else host.Run(program, assignment.Key, x, assignment.Rows, y);
             offset += length;
         }
+    }
+
+    /// <summary>The F32 reference as a host runner, so the delegate overload and the interface overload share one loop.</summary>
+    private sealed class ReferenceHostRunner(Func<ExpertKey, F32ExpertWeights> hostWeights) : IExpertHostRunner
+    {
+        public void Run(ExpertProgram program, ExpertKey key, ReadOnlySpan<float> x, int rows, Span<float> y) =>
+            ExpertProgramReference.Apply(program, hostWeights(key), x, rows, y);
     }
 }
