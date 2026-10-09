@@ -30,7 +30,7 @@ Subsystems with CPU tests in place:
 - Expert cache stress and failure injection, including upload and await faults (#343).
 - Opt-in CPU expert runtime, with the reload fix (#340).
 
-## This machine (checked)
+## This machine (checked 2026-10-09, alpha.322)
 
 - **GPU and CUDA.** RTX 2060 SUPER, Turing (sm_75), 8 GB. The CUDA driver API works: `CudaContext.IsAvailable()` returns
   true and `RigPreflightTests` passes.
@@ -49,7 +49,8 @@ Subsystems with CPU tests in place:
 ## Rig run order
 
 1. Preflight. `RigPreflightTests` fails unless CUDA is usable, so a GPU suite cannot pass by skipping every test. It logs the
-   device name and compute capability for the run record:
+   device name and compute capability for the run record. A failure here with a cuBLAS reason means the CUDA toolkit is
+   missing, not that the driver is broken; the reason string says which.
    `dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.RigPreflightTests."`
    `nvidia-smi` must also show no mismatch message.
 2. Real-weight assets, set before any GPU suite. With `HARTSY_REQUIRE_REAL_WEIGHTS=1` a missing asset fails the test
@@ -75,7 +76,8 @@ Subsystems with CPU tests in place:
    `set -euo pipefail` stops the run at the first failing class, so a later pass cannot hide an earlier failure. Every class
    in the list matches at least one test (checked with `--list-tests`). `CudaExpertKernelTests` (#335) checks `expert_f32`
    against the reference for every program variant. `CudaExpertDeviceRunnerTests` (#335) runs the lease-validated device
-   runner through `CudaBackend`; it needs sm_80 or newer.
+   runner through `CudaBackend`; it needs sm_80 or newer. On an sm_75 card, skip it: its 3 failures there come from the
+   eager module load, not from a regression.
    `CudaMoeTests` and `CudaStreamingWeightCacheTests` carry no `Category` trait, so the category filter does not select
    them; this explicit loop is the only way they run on the rig.
 4. The rest of the GPU category, excluding the classes already run in step 3. Run only from a checkout that includes #307,
@@ -83,7 +85,7 @@ Subsystems with CPU tests in place:
    Record failures by test name:
    ```
    filter="Category=GpuIntegration"
-   for c in $classes; do filter="$filter&FullyQualifiedName!~HartsyInference.Cuda.Tests.$c."; done
+   for c in $classes RigPreflightTests; do filter="$filter&FullyQualifiedName!~HartsyInference.Cuda.Tests.$c."; done
    dotnet test tests/HartsyInference.Cuda.Tests --filter "$filter"
    ```
 5. **Deferred: refactor A/B for the cache changes.** Do not run `tests/regression-ab.sh` as evidence for #304 yet. No
