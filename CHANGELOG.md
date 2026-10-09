@@ -12,6 +12,10 @@ stable release will require. Dates are UTC.
 
 - **Added: a DeepSeek-V4.1-Flash certification runner, a rented-hardware runbook and a frozen gate set.** `tests/dsv41-certification.sh` runs one lane at a time: `cpu-oracle` (real-weight CPU oracles, full depth with `DSV41_FULL_RUN=1`), `gpu-expert` (the CUDA expert-cache and MoE suites on SM 8.0 or newer) and `gpu-native` (the block-scaled FP4 suites through cuBLASLt on SM 10.0 or 12.0). Each class runs alone. A class is green only when tests ran, none failed, none were skipped and no output line reads SKIPPED, so a test that returns early cannot pass. The multi-GPU, two-node, offload and Vulkan-AMD lanes are BLOCKED until their plan PRs land, and the runner refuses any GPU lane while another compute process holds a device. `docs/Checklists/DSV41_RENTAL_RUNBOOK.md` says what each rented lane can and cannot show, with the setup, the weight transfer and the stop rules. `docs/Checklists/DSV41_CAMPAIGN_FREEZE.md` freezes the gates with their provenance, including the structural-mode amendment made after a failed 1300-token run.
 
+## alpha.318
+
+- **Added: a speculative-decoding draft framework (`ISpeculativeDraftProvider`, prompt-lookup and suffix n-gram providers, and a throughput-based `SpeculationSelector` that auto-disables low-acceptance providers).** The prompt-lookup drafter moved out of `TextGenerationPipeline` unchanged; greedy output is unaffected. The selector is not yet wired into the pipeline. See `docs/SPECULATIVE_DECODING.md`.
+
 ## alpha.317
 
 - **Added: a persistent CPU worker pool (`CpuExpertPool`) for expert jobs.** Workers spin briefly, then park, and each job item runs exactly once, with the caller taking part. The thread count honours the CPU thread cap, and `Run` is allocation-free after warm-up.

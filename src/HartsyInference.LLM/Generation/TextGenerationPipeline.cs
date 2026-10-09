@@ -4,6 +4,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
+using HartsyInference.LLM.Generation.Speculation;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -431,13 +432,12 @@ public sealed class TextGenerationPipeline
 
     // Prompt-lookup speculative decoding tuning: small, fixed constants rather than request-level knobs — the
     // technique either pays off on repetitive content or costs nothing (see GenerateSpeculative's doc), so
-    // there's no per-request tradeoff worth exposing yet.
-    private const int SpecNgramSize = 3;
+    // there's no per-request tradeoff worth exposing yet. The drafting itself lives in PromptLookupDraftProvider.
     private const int SpecMaxDraftTokens = 8;
-    private const int SpecMaxLookback = 4096;
+    private static readonly ISpeculativeDraftProvider SpecDraftProvider = new PromptLookupDraftProvider();
 
     /// <summary>Prompt-lookup speculative decoding: greedy-only, draft-model-free, drafting via n-gram match and verifying the whole draft plus one bonus position in one batched forward pass.</summary>
-    /// <remarks>Each round drafts up to <see cref="SpecMaxDraftTokens"/> tokens via <see cref="FindDraftContinuation"/> (n-gram match against the prompt + generated-so-far) and verifies them in ONE batched forward pass, reusing the same prefill-shaped <see cref="GenericTransformer.Forward"/> call with a short token span at an arbitrary <c>posStart</c> against an already-partially-filled cache. The longest correct prefix (verified against this model's own greedy pick, row by row) is accepted; a rejected or never-drafted token still costs exactly one forward call, same as the eager loop, so this is a pure speedup on repetitive content and a no-op tax otherwise. Every accepted token's history-dependent sampler state (repetition penalty) is computed in the same left-to-right order the eager loop uses, so output is byte-identical to plain greedy decode. Rejected draft tokens' KV entries were already physically written by the verification forward pass (unavoidable — verification needs every candidate present in the batch before any is judged), so <see cref="IKvCache.Truncate"/> rolls them back on partial/zero acceptance.
+    /// <remarks>Each round drafts up to <see cref="SpecMaxDraftTokens"/> tokens via <see cref="SpecDraftProvider"/> (n-gram match against the prompt + generated-so-far) and verifies them in ONE batched forward pass, reusing the same prefill-shaped <see cref="GenericTransformer.Forward"/> call with a short token span at an arbitrary <c>posStart</c> against an already-partially-filled cache. The longest correct prefix (verified against this model's own greedy pick, row by row) is accepted; a rejected or never-drafted token still costs exactly one forward call, same as the eager loop, so this is a pure speedup on repetitive content and a no-op tax otherwise. Every accepted token's history-dependent sampler state (repetition penalty) is computed in the same left-to-right order the eager loop uses, so output is byte-identical to plain greedy decode. Rejected draft tokens' KV entries were already physically written by the verification forward pass (unavoidable — verification needs every candidate present in the batch before any is judged), so <see cref="IKvCache.Truncate"/> rolls them back on partial/zero acceptance.
     /// <para>Requires <see cref="SamplingOptions.Greedy"/> (no order-independent way to reproduce a non-greedy multinomial draw out of sequence) and excludes JSON grammar mode (its incremental state walker isn't designed to roll back mid-token) — both enforced by the caller's dispatch gate, not re-checked here.</para></remarks>
     private bool GenerateSpeculative(GenerationRequest request, ISequenceState cache, int[] promptIds, SamplerChain sampler,
         int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
@@ -456,7 +456,7 @@ public sealed class TextGenerationPipeline
 
             int maxDraft = Math.Min(Math.Min(SpecMaxDraftTokens, _model.Capabilities.MaxSpeculativeDepth),
                 request.MaxTokens - generated.Count);
-            int[] draft = FindDraftContinuation(promptIds, generated, SpecNgramSize, maxDraft);
+            int[] draft = SpecDraftProvider.Propose(promptIds, generated, maxDraft);
             int k = draft.Length;
 
             int cachePos = cache.Length;
@@ -500,42 +500,6 @@ public sealed class TextGenerationPipeline
             next = sampler.Next(bonusRow, generated);
         }
         return false;
-    }
-
-    /// <summary>Searches context for a prior occurrence of the last <paramref name="ngramSize"/> tokens and, if found, returns the up-to-<paramref name="maxDraftLen"/> tokens that followed it as a draft continuation guess.</summary>
-    /// <remarks>Deliberately searches OLDEST-match-first rather than nearest-match-first: the nearer a match is to the current position, the less context trails it, so nearest-first pathologically degenerates to single-token drafts on short-period repeats (e.g. a stuck "the the the the..." loop) — the exact case this technique should help most. Oldest-first costs nothing extra since every draft is verified against the real model regardless of which historical match produced it. Returns an empty array whenever no match exists (safe — costs one plain decode step). The search window is capped at <see cref="SpecMaxLookback"/> tokens so a very long generation can't turn this into an O(n²) scan; missing a distant match only forgoes a speedup, it never affects correctness.</remarks>
-    private static int[] FindDraftContinuation(int[] promptIds, List<int> generated, int ngramSize, int maxDraftLen)
-    {
-        int totalLen = promptIds.Length + generated.Count;
-        if (maxDraftLen <= 0 || totalLen < ngramSize) return [];
-
-        int searchFloor = Math.Max(0, totalLen - SpecMaxLookback);
-        int windowLen = totalLen - searchFloor;
-        int[] context = new int[windowLen];
-        for (int i = 0; i < windowLen; i++)
-        {
-            int idx = searchFloor + i;
-            context[i] = idx < promptIds.Length ? promptIds[idx] : generated[idx - promptIds.Length];
-        }
-
-        int needleStart = windowLen - ngramSize;
-        for (int start = 0; start < needleStart; start++)
-        {
-            bool match = true;
-            for (int k = 0; k < ngramSize; k++)
-            {
-                if (context[start + k] != context[needleStart + k]) { match = false; break; }
-            }
-            if (!match) continue;
-
-            int matchEnd = start + ngramSize;
-            int draftLen = Math.Min(maxDraftLen, windowLen - matchEnd);
-            if (draftLen <= 0) continue;
-            int[] draft = new int[draftLen];
-            Array.Copy(context, matchEnd, draft, 0, draftLen);
-            return draft;
-        }
-        return [];
     }
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
