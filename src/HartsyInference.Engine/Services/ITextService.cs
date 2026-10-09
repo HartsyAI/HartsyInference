@@ -38,4 +38,9 @@ public interface ITextService
 
     /// <summary>What deployment <paramref name="deploymentId"/>'s device is doing now, or null when there is no such deployment.</summary>
     DeploymentCapacity? Capacity(string deploymentId) => null;
+
+    /// <summary>Frees deployment <paramref name="deploymentId"/>'s model, but only while that deployment still holds its device: one that another deployment replaced is
+    /// reported <see cref="DeploymentUnloadOutcome.AlreadyGone"/>, and its device keeps the model it holds now. Default: not supported, like <see cref="DeployAsync"/>.</summary>
+    DeploymentUnloadOutcome UnloadDeployment(string deploymentId)
+        => throw new NotSupportedException("This text service does not support deployments.");
 }

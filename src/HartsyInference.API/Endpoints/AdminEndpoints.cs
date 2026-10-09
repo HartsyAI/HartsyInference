@@ -1,5 +1,6 @@
 using HartsyInference.API;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,6 +28,72 @@ public static class AdminEndpoints
             }
             return Results.Ok(ModelCatalog.ForModality(parsed));
         });
+
+        // Deployments: a named model loaded onto a device. GET lists them, POST loads one (and waits for the load), DELETE unloads one.
+        app.MapGet("/admin/deployments", (IInferenceEngine engine) => Results.Ok(new DeploymentListResponse
+        {
+            Deployments = [.. engine.Text.Deployments.Select(DeploymentDto.From)],
+        }));
+
+        app.MapPost("/admin/deployments", async (DeployRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.DeploymentId) || string.IsNullOrWhiteSpace(req.Model))
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest,
+                    "Fields 'deployment_id' and 'model' are required.", "invalid_request_error");
+            }
+            // A device no backend knows would load onto a CPU slot without a word, so it is refused before anything loads.
+            if (!string.IsNullOrWhiteSpace(req.Device) && !BackendFactory.IsValidSelector(req.Device.Trim().ToLowerInvariant()))
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest,
+                    $"Unknown device '{req.Device}'. Valid: {string.Join(", ", BackendFactory.ValidSelectors)} " +
+                    "(device backends also accept ':{ordinal}', e.g. cuda:1).", "invalid_request_error");
+            }
+            try
+            {
+                ModelSpec spec = ModelResolver.Resolve(req.Model, modelPathArg: null, Modality.Text);
+                DeploymentStatus status = await engine.Text.DeployAsync(
+                    new DeploymentRequest { DeploymentId = req.DeploymentId, Model = spec, Device = req.Device?.Trim().ToLowerInvariant() }, ct);
+                return Results.Ok(DeploymentDto.From(status));
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        // Unloads by deployment, not by device: a deployment another one replaced frees nothing, so deleting it can never unload its replacement.
+        app.MapDelete("/admin/deployments/{deploymentId}", (string deploymentId, IInferenceEngine engine) =>
+        {
+            DeploymentUnloadOutcome outcome;
+            try
+            {
+                outcome = engine.Text.UnloadDeployment(deploymentId);
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+            return outcome switch
+            {
+                DeploymentUnloadOutcome.Unloaded => Results.Ok(new DeploymentUnloadResponse { DeploymentId = deploymentId, Unloaded = true }),
+                DeploymentUnloadOutcome.AlreadyGone => Results.Ok(new DeploymentUnloadResponse
+                {
+                    DeploymentId = deploymentId,
+                    Unloaded = false,
+                    Reason = "The deployment does not hold its device: it is still loading, another deployment replaced its model, or it was unloaded or never loaded.",
+                }),
+                DeploymentUnloadOutcome.TimedOut => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status409Conflict,
+                    $"Requests on deployment '{deploymentId}' did not finish in time, so its model stays loaded and serving. Retry the unload.", "conflict_error"),
+                _ => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound,
+                    $"'{deploymentId}' is not a known deployment.", "invalid_request_error"),
+            };
+        });
+
+        app.MapGet("/admin/capacity", (IInferenceEngine engine) => Results.Ok(new DeploymentCapacityResponse
+        {
+            Deployments = [.. engine.Text.Deployments.Select(d => CapacityDto.For(d, engine.Text.Capacity(d.DeploymentId)))],
+        }));
 
         app.MapGet("/admin/models", (IInferenceEngine engine) =>
             Results.Ok(new { loaded = engine.LoadedPipelineKeys }));

@@ -62,6 +62,23 @@ public sealed record DeploymentRequest
     public string? Device { get; init; }
 }
 
+/// <summary>How an unload of one deployment ended.</summary>
+public enum DeploymentUnloadOutcome
+{
+    /// <summary>The deployment's model was freed.</summary>
+    Unloaded,
+
+    /// <summary>Nothing was freed: the deployment no longer holds its device (another deployment replaced its model, or it was unloaded or never loaded), so the device
+    /// keeps whatever it holds now.</summary>
+    AlreadyGone,
+
+    /// <summary>Nothing was freed: requests on the device did not finish in time, and the model stays resident and serving.</summary>
+    TimedOut,
+
+    /// <summary>No deployment has this id.</summary>
+    NotFound,
+}
+
 /// <summary>A deployment as the registry reports it.</summary>
 public sealed record DeploymentStatus(string DeploymentId, string Model, string? Device, DeploymentState State, string? Problem);
 
