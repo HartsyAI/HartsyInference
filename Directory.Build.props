@@ -20,9 +20,13 @@
   <PropertyGroup>
     <VersionPrefix>2.0.0</VersionPrefix>
 <<<<<<< HEAD
-    <VersionSuffix>alpha.293</VersionSuffix>
+<<<<<<< HEAD
+    <VersionSuffix>alpha.302</VersionSuffix>
 =======
-    <VersionSuffix>alpha.293</VersionSuffix>
+    <VersionSuffix>alpha.302</VersionSuffix>
+>>>>>>> origin/main
+=======
+    <VersionSuffix>alpha.302</VersionSuffix>
 >>>>>>> origin/main
   </PropertyGroup>
 

@@ -8,9 +8,49 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.293
+## alpha.302
 
 - **Added: heterogeneous expert execution on the CPU side.** `HeterogeneousExpertExecutor` runs a layer's planned experts: GPU assignments through `IExpertDeviceRunner`, CPU assignments through the F32 reference, with the same rows and output layout either way. Tests show the same plan gives identical output under all-CPU, all-GPU and mixed placements, using a reference device. The CUDA device runner and the asynchronous handoff are not built yet; `docs/HETEROGENEOUS_EXECUTION.md` sets the protocol they must meet.
+
+## alpha.301
+
+- **Added: the DSpark draft head checked on the real checkpoint past the 128-token window (CPU).** `dump_real_dspark.py --max-prompt-tokens N` extends the prompt with seeded random ids and sizes the context to fit. With a 160-token prompt the window wraps: the three draft stages agree with the unmodified upstream at relL2 at most 8e-6, and the draft ids match exactly. The chain from the C# target's own taps reproduces the ids and gives logits at 5.4e-4, but its decode tap is at 1.2e-3, the weakest number, not yet explained. The real-weights tests size their state from the prompt. No change to the model's output.
+
+## alpha.300
+
+- **Added: a check that a DSpark draft tap on an Engram block is taken after the Engram step (CPU, synthetic).** `DeepSeekV41EngramTapTests` applies the same Engram module to the embedding stream, with the hash ids the host computes, and requires the tap to equal the hc-mean of that stream and to differ from the mean before the step. Removing the step fails the test. The real DSpark targets have no Engram layer, so this covers a placement the real-weights chain test does not reach. No change to the model's output.
+
+## alpha.299
+
+- **Changed: speculative generation stops at a stop token inside an accepted draft.** `SpeculativeLoop.Generate` takes an optional set of stop tokens. The first one emitted ends the run and is kept, and nothing after it is emitted, even when it sits inside an accepted draft or is the bonus token. Without a set the run is unchanged. Covered by scripted-target tests (a stop inside an accepted draft, a stop as the bonus token, and the no-stop path). Decoding through the engine's pipeline is unchanged; wiring the set through the DeepSeek-V4.1 generation path comes with the serving work.
+
+## alpha.298
+
+- **Added: confidence-scheduled verification for the DeepSeek-V4.1 DSpark proposer (CPU, synthetic evidence).** `ConfidenceScheduler` implements Algorithm 1 of the DSpark paper for one sequence: the head's confidences become survival products, and the walk over drafted positions stops at the first position that does not improve the expected throughput `(1 + Σ a_j) · SPS(1 + l)`. `SpsProfile` holds the engine's steps-per-second table; measuring it is left to the deployment. `DeepSeekV41DSparkProposer` takes an optional scheduler and verifies only the prefix it chooses. On a synthetic objective the walk matches brute force wherever the objective is unimodal, and a jagged profile shows the early stop that the paper's section 5.2 search addresses (not implemented here). Plain decoding is unchanged.
+
+## alpha.297
+
+- **Added: a DSpark draft proposer for DeepSeek-V4.1 speculation (CPU, synthetic evidence).** `DeepSeekV41DSparkProposer` drafts from a sequence that records the target's draft rows. Each call syncs the sequence to the context, rebuilds the draft head's window from the committed rows, and drafts from the last token. The window only ever holds committed positions, so a rejected draft needs no restore. On the synthetic model the proposer's drafts reproduce upstream's at every decode position, including past the 8-token window, and greedy speculation with it reproduces plain greedy decoding token for token. The sequence records the rows the head reads only when asked to. Plain decoding is unchanged.
+
+## alpha.296
+
+- **Added: the DeepSeek-V4.1 DSpark draft head checked against the unmodified upstream on a synthetic model (CPU).** `dump_dspark_fixture.py` runs the upstream draft head on the host fixture's backbone, with seeded random draft weights, through an 11-token prefill and six decode steps, and records the drafts upstream's incremental window produces. The C# head, seeded afresh at each decode position from the committed rows (positions 11 to 16, past the 8-token window), reproduces the drafted ids exactly, with logits and confidences within 1e-3 relative. The target's taps for the three draft layers reproduce upstream's main hidden states at every position, and the same drafts come out when they are fed from the target's own taps. Acceptance rates are not measured on random weights. The embedding and head shared with the target are shape-checked. Plain decoding is unchanged.
+
+## alpha.295
+
+- **Changed: the speculative scorer on the DeepSeek-V4.1 host model no longer replays a context the sequence already holds.** `DeepSeekV41GenerationState.SyncTo` rolls back only past the first token where the sequence and the context differ, and the state keeps the last committed token's hidden row, so a call whose context is already in place runs only its draft through the blocks, and a rejection replays the kept prefix once. The state can also record each committed position's DSpark target rows (opt-in), which a draft reads. Plain decoding and the speculative outputs are unchanged.
+
+## alpha.294
+
+- **Added: speculative decoding on the DeepSeek-V4.1 host model, exact under greedy decoding (CPU, synthetic evidence).** `DeepSeekV41SpeculativeScorer` scores a draft over the model's own sequence state: it rolls back to the part of the context the state already holds, appends the rest of the context and the draft, and reads the logits after the context and after each drafted token. A rollback replays the committed history the way it was built: the first append as one prefill chunk, every later token one at a time. That matters because the reference's chunked prefill and its per-token decode are not arithmetically equivalent on every length (upstream differs from itself on the synthetic fixture), so a single-chunk replay changed the state and the greedy output. On the synthetic V4.1 model the scored rows equal the per-token logits for prompts of 1 to 11 tokens and drafts of 1 to 4, and greedy speculation with the prompt-lookup proposer reproduces plain greedy decoding token for token through the rejections, for prompts of 6, 9 and 11 tokens and draft limits up to 6. Plain decoding is unchanged.
+
+## alpha.293
+
+- **Added: the DeepSeek-V4.1 target exposes the rows its DSpark draft reads, and the draft chained from them matches the upstream oracle.** `DeepSeekV41HostModel.Forward` can write `main_hidden` for the layers in `dspark_target_layer_ids`: the hc-mean of each target block's entry stream, taken after its Engram step and before its sublayers, in upstream's layer order. The tap is off unless a caller passes the output span, so the default path is unchanged. On the real checkpoint (structural mode, the oracle's 6-token prompt and one decode step), the tapped rows agree with upstream at relL2 5.1e-7 (prefill) and 4.8e-6 (decode), and the draft built from the C# target's own taps reproduces the upstream ids exactly, with logits at relL2 2.2e-6 and confidences within 2.3e-5.
+
+## alpha.292
+
+- **Added: the DSpark draft forward for DeepSeek-V4.1-Flash on the CPU host reference.** `DeepSeekV41DSpark` loads the three `mtp` stages (draft attention over the target's sliding window with the block's own latents, a 128-expert feed-forward, hyper-connections) with the Markov and confidence heads, and drafts a block greedily. Against the unmodified upstream `forward_spec` on the real checkpoint (structural mode, one decode step): every stage agrees at relL2 at most 5e-6, the draft ids match exactly. The backbone's rotary moved to a shared helper with no change in output. No change to the generation path.
 
 ## alpha.291
 

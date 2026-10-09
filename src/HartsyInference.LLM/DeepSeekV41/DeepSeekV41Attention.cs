@@ -248,22 +248,8 @@ public sealed class DeepSeekV41Attention
     }
 
     // Rotates the trailing RopeDim slice of every vector in place; the inverse negates sin, which is how the output undoes the query's rotation.
-    private void Rotate(float[] data, long[] shape, int[] positions, int dimOffset, bool inverse)
-    {
-        int half = _rope.HalfDim;
-        float[] cos = new float[positions.Length * half], sin = new float[cos.Length];
-        for (int i = 0; i < positions.Length; i++)
-        {
-            _rope.CosRow(positions[i]).CopyTo(cos.AsSpan(i * half, half));
-            ReadOnlySpan<float> sinRow = _rope.SinRow(positions[i]);
-            for (int j = 0; j < half; j++) sin[i * half + j] = inverse ? -sinRow[j] : sinRow[j];
-        }
-        using Tensor x = DeepSeekV41HostMath.Tensor(data, shape);
-        using Tensor c = DeepSeekV41HostMath.Tensor(cos, 1, positions.Length, half);
-        using Tensor sn = DeepSeekV41HostMath.Tensor(sin, 1, positions.Length, half);
-        _backend.ApplyRopeInterleaved(x, c, sn, _s.RopeDim, dimOffset);
-        x.AsReadOnlySpan<float>().CopyTo(data);
-    }
+    private void Rotate(float[] data, long[] shape, int[] positions, int dimOffset, bool inverse) =>
+        DeepSeekV41Rotary.Rotate(_backend, _rope, _s.RopeDim, data, shape, positions, dimOffset, inverse);
 
     private void RoundTrip(float[] data, int width, LatentEncoding encoding)
     {
