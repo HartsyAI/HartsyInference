@@ -330,6 +330,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         SweepCancelled();
         while (true)
         {
+            // Shutdown stops admission. The waiters not yet admitted are failed by FailQueued in the loop's finally, not prefilled after shutdown began.
+            if (_shutdown.IsCancellationRequested) return;
             PendingRequest? head;
             lock (_waitingGate) head = _waiting.Count > 0 ? _waiting.Peek() : null;
             if (head is null) return;

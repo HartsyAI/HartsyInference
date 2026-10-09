@@ -39,6 +39,8 @@ public static class HartsyInferenceServiceExtensions
         {
             // A device round belongs to a request the scheduler already admitted, so the depth bound must not refuse it (see EnqueueAdmittedAsync).
             GpuRoundGate = work => fastQueue.EnqueueAdmittedAsync(async () => { work(); return 0; }, CancellationToken.None),
+            // A whole pipeline request is HTTP-level work, so it keeps the bound: a full queue refuses it with 429, as before the continuous-batching route.
+            PipelineGate = work => fastQueue.EnqueueAsync(async () => { work(); return 0; }, CancellationToken.None),
         });
 
         // Two gates: the unkeyed "fast" queue (unchanged — every route from Phases 1-4 keeps resolving it by
