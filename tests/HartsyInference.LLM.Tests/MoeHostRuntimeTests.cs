@@ -83,6 +83,49 @@ public sealed class MoeHostRuntimeTests
         Assert.Throws<NotSupportedException>(() => runtime.Forward(backend, Input(seed: 2), Tokens));
     }
 
+    [Fact]
+    public void Reload_ServesTheNewWeights_NotTheCachedOnes()
+    {
+        using CpuBackend backend = new();
+        MoeConfig moe = Config(sharedExpert: false);
+        Dictionary<string, Tensor> first = SyntheticWeights(moe, seed: 3);
+        Dictionary<string, Tensor> second = SyntheticWeights(moe, seed: 19);
+        Tensor x = Input(seed: 11);
+
+        MoeFeedForward runtime = new(moe, Hidden, lowVram: false) { UseHostExpertRuntime = true };
+        runtime.LoadWeights(first, Prefix);
+        _ = runtime.Forward(backend, x, Tokens);
+
+        // The first run cached the first layer's weights; a reload must drop them.
+        runtime.LoadWeights(second, Prefix);
+        MoeFeedForward direct = new(moe, Hidden, lowVram: false);
+        direct.LoadWeights(second, Prefix);
+        float maxAbs = MaxAbsDiff(direct.Forward(backend, x, Tokens), runtime.Forward(backend, x, Tokens));
+        _output.WriteLine($"reload max abs error {maxAbs:E3}");
+        Assert.True(maxAbs <= 1e-5f, $"After reload the runtime served stale weights (max abs error {maxAbs}).");
+    }
+
+    [Fact]
+    public void SingleToken_LeavesMostExpertsWithZeroPairs_AndStillMatchesTheDirectPath()
+    {
+        using CpuBackend backend = new();
+        MoeConfig moe = Config(sharedExpert: false);
+        Dictionary<string, Tensor> weights = SyntheticWeights(moe, seed: 5);
+        Tensor x = Random(new Random(23), 1, Hidden);
+
+        MoeFeedForward direct = new(moe, Hidden, lowVram: false);
+        direct.LoadWeights(weights, Prefix);
+        MoeFeedForward runtime = new(moe, Hidden, lowVram: false) { UseHostExpertRuntime = true };
+        runtime.LoadWeights(weights, Prefix);
+
+        float maxAbs = MaxAbsDiff(direct.Forward(backend, x, 1), runtime.Forward(backend, x, 1));
+        Assert.True(maxAbs <= 1e-5f, $"max abs error {maxAbs} exceeds 1e-5.");
+        // One token picks TopK experts; the plan lists only those, never an expert with zero rows.
+        ExpertAssignment[] plan = runtime.LastPlanForTest();
+        Assert.Equal(TopK, plan.Length);
+        Assert.All(plan, assignment => Assert.True(assignment.Rows > 0));
+    }
+
     private static MoeConfig Config(bool sharedExpert) => new()
     {
         NumExperts = Experts,
