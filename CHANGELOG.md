@@ -16,7 +16,7 @@ stable release will require. Dates are UTC.
 
 ## alpha.323
 
-- **Added: the heterogeneous executor runs its CPU share on packed Q8_0 and Q4_K weights.** `IExpertHostRunner` is the CPU side of a planned layer. `HeterogeneousExpertExecutor` gets an overload that takes one; the existing F32 overload now runs through the same loop, so its behavior and signature are unchanged. `PackedExpertHostRunner` (Cpu) reads each expert's packed projections in place through `CpuExpertKernels`, with no F32 copy. A mixed plan, with its CPU experts packed and one GPU expert on the reference device, matches the all-F32 reference within the kernel tolerances for both formats. Refuses an expert whose dtype is not the runner's, and a dtype without a packed kernel.
+- **Added: the heterogeneous executor runs its CPU share on packed Q8_0 and Q4_K weights.** `IExpertHostRunner` is the CPU side of a planned layer. `HeterogeneousExpertExecutor` gets an overload that takes one; the existing F32 overload now runs through the same loop, so its behavior and signature are unchanged. `PackedExpertHostRunner` (Cpu) reads each expert's packed projections in place through `CpuExpertKernels`, with no F32 copy. A mixed plan, with its CPU experts packed and one GPU expert on the reference device, matches the all-F32 reference within the kernel tolerances for both formats. Splits more than eight rows into kernel-sized chunks. Refuses an expert whose dtype is not the runner's, an expert that carries scale or bias tensors, and a dtype without a packed kernel.
 
 ## alpha.322
 
