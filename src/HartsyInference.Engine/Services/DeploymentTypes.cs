@@ -83,5 +83,6 @@ public enum DeploymentUnloadOutcome
 public sealed record DeploymentStatus(string DeploymentId, string Model, string? Device, DeploymentState State, string? Problem);
 
 /// <summary>What a deployment's device is doing now. The KV figures are page counts, and they are null on a model with no KV pool (the V4.1 host keeps its own state).
-/// With no scheduler resident (continuous batching off, or no model loaded), Active, Queued and MaxConcurrent are all 0: 0 means no scheduler, not "unlimited".</summary>
+/// With no scheduler resident (continuous batching off, or no model loaded), Active, Queued and MaxConcurrent are all 0: 0 means no scheduler, not "unlimited".
+/// A deployment that serves no model reports all zeros and null KV counts.</summary>
 public sealed record DeploymentCapacity(DeploymentState State, int Active, int Queued, int MaxConcurrent, int? KvPagesFree, int? KvPagesTotal);

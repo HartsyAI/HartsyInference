@@ -1,4 +1,7 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using Xunit;
 
@@ -124,5 +127,175 @@ public sealed class TextServiceDeploymentTests : IDisposable
 
         Assert.Equal(DeploymentState.Unloaded, text.Capacity("chat")!.State);
         Assert.Equal(DeploymentState.Unloaded, Assert.Single(text.Deployments).State);
+    }
+
+    private static DeploymentRequest DeployNamed(string id, string requested, string path) =>
+        new() { DeploymentId = id, Model = new ModelSpec { Requested = requested, Modality = Modality.Text, LocalPath = path }, Device = "cpu" };
+
+    [Fact]
+    public async Task A_Redeploy_Of_A_Serving_Deployment_Reads_Ready_While_It_Waits_And_Ready_On_The_New_Model_After()
+    {
+        string pathA = TextServiceLeaseTests.WriteCheckpoint(_root, "a");
+        string pathB = TextServiceLeaseTests.WriteCheckpoint(_root, "b");
+        using InferenceEngine engine = new("cpu", 0);
+        TextService text = (TextService)engine.Text;
+        await text.DeployAsync(DeployNamed("chat", "model-a", pathA));
+        TextDeviceSlot slot = text.SlotFor("cpu")!;
+        text.UnloadLeaseWait = TimeSpan.FromSeconds(60);
+
+        // A scheduled request still runs on model a, so the redeploy waits for it before it frees a.
+        slot.EnterLease();
+        Task<DeploymentStatus> redeploy;
+        try
+        {
+            redeploy = text.DeployAsync(DeployNamed("chat", "model-b", pathB));
+            // Nothing is freed yet, so the deployment still reads as serving model a.
+            DeploymentStatus waiting = Assert.Single(text.Deployments);
+            Assert.Equal(("model-a", DeploymentState.Ready), (waiting.Model, waiting.State));
+            await Task.Delay(100);
+            Assert.False(redeploy.IsCompleted, "the redeploy did not wait for the lease");
+            Assert.Equal(DeploymentState.Ready, Assert.Single(text.Deployments).State);
+        }
+        finally
+        {
+            slot.ExitLease();
+        }
+
+        Assert.Equal(DeploymentState.Ready, (await redeploy.WaitAsync(TimeSpan.FromSeconds(60))).State);
+        DeploymentStatus record = Assert.Single(text.Deployments);
+        Assert.Equal(("model-b", DeploymentState.Ready), (record.Model, record.State));
+        Assert.Equal(pathB, slot.LoadedPath);
+    }
+
+    [Fact]
+    public async Task A_Redeploy_That_Times_Out_On_Its_Lease_Fails_And_Leaves_The_Serving_Deployment_Ready()
+    {
+        string pathA = TextServiceLeaseTests.WriteCheckpoint(_root, "a");
+        string pathB = TextServiceLeaseTests.WriteCheckpoint(_root, "b");
+        using InferenceEngine engine = new("cpu", 0);
+        TextService text = (TextService)engine.Text;
+        await text.DeployAsync(DeployNamed("chat", "model-a", pathA));
+        TextDeviceSlot slot = text.SlotFor("cpu")!;
+        text.UnloadLeaseWait = TimeSpan.FromMilliseconds(50);
+
+        DeploymentStatus status;
+        slot.EnterLease();
+        try
+        {
+            status = await text.DeployAsync(DeployNamed("chat", "model-b", pathB)).WaitAsync(TimeSpan.FromSeconds(60));
+        }
+        finally
+        {
+            slot.ExitLease();
+        }
+
+        // The redeploy freed nothing: its own status reports the failure, and the record still describes the model that serves.
+        Assert.Equal(DeploymentState.Failed, status.State);
+        Assert.Contains("did not finish", status.Problem);
+        DeploymentStatus record = Assert.Single(text.Deployments);
+        Assert.Equal(("model-a", DeploymentState.Ready), (record.Model, record.State));
+        Assert.Equal(pathA, slot.LoadedPath);
+        Assert.Equal(DeploymentState.Ready, text.Capacity("chat")!.State);
+    }
+
+    [Fact]
+    public async Task A_Cancelled_Redeploy_Of_A_Serving_Deployment_Leaves_It_Ready()
+    {
+        string pathA = TextServiceLeaseTests.WriteCheckpoint(_root, "a");
+        string pathB = TextServiceLeaseTests.WriteCheckpoint(_root, "b");
+        using InferenceEngine engine = new("cpu", 0);
+        TextService text = (TextService)engine.Text;
+        await text.DeployAsync(DeployNamed("chat", "model-a", pathA));
+        TextDeviceSlot slot = text.SlotFor("cpu")!;
+
+        // Something else holds the device, so the redeploy waits for it and is cancelled there.
+        await slot.Lock.WaitAsync();
+        try
+        {
+            using CancellationTokenSource cancel = new();
+            Task<DeploymentStatus> waiting = text.DeployAsync(DeployNamed("chat", "model-b", pathB), cancel.Token);
+            Assert.Equal(DeploymentState.Ready, Assert.Single(text.Deployments).State);
+            cancel.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting).WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            slot.Lock.Release();
+        }
+
+        DeploymentStatus record = Assert.Single(text.Deployments);
+        Assert.Equal(("model-a", DeploymentState.Ready), (record.Model, record.State));
+        Assert.Equal(pathA, slot.LoadedPath);
+    }
+
+    [Fact]
+    public async Task A_Redeploy_That_Frees_The_Model_And_Then_Fails_Reads_Failed_With_The_Model_Gone()
+    {
+        string pathA = TextServiceLeaseTests.WriteCheckpoint(_root, "a");
+        // Passes every check before the free, and fails only when the load reads it.
+        string broken = Path.Combine(_root, "broken.gguf");
+        await File.WriteAllTextAsync(broken, "not a model");
+        using InferenceEngine engine = new("cpu", 0);
+        TextService text = (TextService)engine.Text;
+        await text.DeployAsync(DeployNamed("chat", "model-a", pathA));
+        TextDeviceSlot slot = text.SlotFor("cpu")!;
+
+        DeploymentStatus status = await text.DeployAsync(DeployNamed("chat", "model-broken", broken));
+
+        Assert.Equal(DeploymentState.Failed, status.State);
+        DeploymentStatus record = Assert.Single(text.Deployments);
+        Assert.Equal(("model-broken", DeploymentState.Failed), (record.Model, record.State));
+        // The free happened, so the old model is gone and the record must not claim it still serves.
+        Assert.Null(slot.LoadedPath);
+    }
+
+    [Fact]
+    public async Task Capacity_Of_A_Replaced_Deployment_Reports_No_Figures()
+    {
+        string pathA = TextServiceLeaseTests.WriteCheckpoint(_root, "a");
+        string pathB = TextServiceLeaseTests.WriteCheckpoint(_root, "b");
+        bool overridden = KnobStore.HasOverride(EngineKnobs.ContinuousBatching);
+        bool previous = EngineKnobs.ContinuousBatching.Value;
+        KnobStore.Set(EngineKnobs.ContinuousBatching, true);
+        try
+        {
+            using InferenceEngine engine = new("cpu", 0);
+            TextService text = (TextService)engine.Text;
+            await text.DeployAsync(DeployNamed("a", "model-a", pathA));
+            await text.DeployAsync(DeployNamed("b", "model-b", pathB));
+            // A scheduled request on model b gives the device a scheduler. Deployment a must not report it.
+            await text.GenerateAsync(TextServiceLeaseTests.Spec(pathB), TextServiceLeaseTests.Request());
+            Assert.True(text.Capacity("b")!.MaxConcurrent > 0);
+
+            DeploymentCapacity replaced = text.Capacity("a")!;
+            Assert.Equal((DeploymentState.Unloaded, 0, 0, 0), (replaced.State, replaced.Active, replaced.Queued, replaced.MaxConcurrent));
+            Assert.Null(replaced.KvPagesFree);
+            Assert.Null(replaced.KvPagesTotal);
+        }
+        finally
+        {
+            if (overridden)
+                KnobStore.Set(EngineKnobs.ContinuousBatching, previous);
+            else
+                KnobStore.Clear(EngineKnobs.ContinuousBatching);
+        }
+    }
+
+    [Fact]
+    public async Task A_Redeploy_That_Keeps_The_Loaded_Model_Reads_Ready_Under_The_New_Name()
+    {
+        string path = TextServiceLeaseTests.WriteCheckpoint(_root, "model");
+        using InferenceEngine engine = new("cpu", 0);
+        TextService text = (TextService)engine.Text;
+        await text.DeployAsync(DeployNamed("chat", "model-a", path));
+        TextDeviceSlot slot = text.SlotFor("cpu")!;
+
+        // The same checkpoint is already loaded, so nothing is freed: the record completes its pending load in place.
+        DeploymentStatus status = await text.DeployAsync(DeployNamed("chat", "model-a-renamed", path));
+
+        Assert.Equal(DeploymentState.Ready, status.State);
+        DeploymentStatus record = Assert.Single(text.Deployments);
+        Assert.Equal(("model-a-renamed", DeploymentState.Ready), (record.Model, record.State));
+        Assert.Equal(path, slot.LoadedPath);
     }
 }

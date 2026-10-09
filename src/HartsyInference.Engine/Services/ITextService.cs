@@ -28,7 +28,8 @@ public interface ITextService
     /// in tests, any other implementation outside this repo) keeps compiling unchanged.</summary>
     Task TrimMemoryPool(string? device = null) => Task.CompletedTask;
 
-    /// <summary>Loads <paramref name="request"/>'s model onto its device as a named deployment, without generating anything. Replaces whatever the device held. Default: not supported, so
+    /// <summary>Loads <paramref name="request"/>'s model onto its device as a named deployment, without generating anything. Replaces whatever the device held. A load that fails before it
+    /// frees the model its deployment serves returns the failure here, while <see cref="Deployments"/> and <see cref="Capacity"/> still describe that model. Default: not supported, so
     /// an existing <see cref="ITextService"/> (fakes in tests, other implementations) keeps compiling unchanged.</summary>
     Task<DeploymentStatus> DeployAsync(DeploymentRequest request, CancellationToken cancel = default)
         => throw new NotSupportedException("This text service does not support deployments.");
@@ -36,7 +37,8 @@ public interface ITextService
     /// <summary>Every deployment this service knows, in the order they were first deployed.</summary>
     IReadOnlyList<DeploymentStatus> Deployments => [];
 
-    /// <summary>What deployment <paramref name="deploymentId"/>'s device is doing now, or null when there is no such deployment.</summary>
+    /// <summary>What deployment <paramref name="deploymentId"/>'s device is doing now, or null when there is no such deployment. A deployment that serves no model (replaced,
+    /// unloaded or failed) reports zero figures: its device may hold another deployment's model by now.</summary>
     DeploymentCapacity? Capacity(string deploymentId) => null;
 
     /// <summary>Frees deployment <paramref name="deploymentId"/>'s model, but only while that deployment still holds its device: one that another deployment replaced is
