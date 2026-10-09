@@ -19,17 +19,21 @@ public sealed class DeepSeekV41EngramTapTests
         Random random = new(11);
         float[] Values(int count, float scale) => Enumerable.Range(0, count).Select(_ => (float)((random.NextDouble() * 2 - 1) * scale)).ToArray();
 
-        // non-zero weights of useful size, so the step moves the stream visibly; the table rows are fp16 4.0 everywhere
-        void Gather(ReadOnlySpan<long> rows, Span<ushort> dest) => dest.Fill((ushort)0x4400);
+        // non-zero weights of useful size, so the step moves the stream visibly. Each table row depends on its id, so a wrong hash id changes the lookup too.
+        void Gather(ReadOnlySpan<long> rows, Span<ushort> dest)
+        {
+            int stride = dest.Length / rows.Length;
+            for (int k = 0; k < dest.Length; k++)
+                dest[k] = BitConverter.HalfToUInt16Bits((Half)(0.5f * (1 + rows[k / stride] % 7)));
+        }
         const int slot = 1;
         DeepSeekV41EngramModule engram = new(dim, hc, columns, headDim, 1e-6f, Values(dim * (hc + 1) * columns * headDim, 1f),
             Values(hc * dim, 2f), Values(hc * dim, 2f), Gather);
         DeepSeekV41Block[] blocks = [DeepSeekV41HostModelTests.BuildBlock(cpu, 0, engram, slot), DeepSeekV41HostModelTests.BuildBlock(cpu, 1)];
 
-        float[] embed = DeepSeekV41DSparkFixture.TargetEmbedAndHead().Embed;
+        (float[] embed, float[] head) = DeepSeekV41DSparkFixture.TargetEmbedAndHead();
         int vocab = embed.Length / dim;
-        DeepSeekV41HostModel model = new(dim, hc, vocab, 1e-6f, embed, blocks, Enumerable.Repeat(1f, dim).ToArray(),
-            DeepSeekV41DSparkFixture.TargetEmbedAndHead().Head, mainHiddenLayers: new[] { 0 });
+        DeepSeekV41HostModel model = new(dim, hc, vocab, 1e-6f, embed, blocks, Enumerable.Repeat(1f, dim).ToArray(), head, mainHiddenLayers: new[] { 0 });
         int[] ids = DeepSeekV41DSparkFixture.Ids[..6];
         float[] tap = new float[ids.Length * model.MainHiddenWidth];
         model.Forward(ids, model.CreateState(DeepSeekV41DSparkFixture.MaxTokens), new float[ids.Length * dim], tap);
