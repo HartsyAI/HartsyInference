@@ -6,7 +6,8 @@ namespace HartsyInference.LLM.DeepSeekV41;
 /// window from the committed rows before the context's last token, and drafts from that token. The window therefore only ever holds committed positions, so a
 /// rejection needs no window restore: the next call rebuilds it.</summary>
 /// <remarks>The drafts are greedy, so the block carries no probabilities. The window is rebuilt on every call, one window of latents per stage, which is small
-/// beside the target's own forward. The state must record the rows this head reads, and the head's window is only as good as those rows.</remarks>
+/// beside the target's own forward. The state must record the rows this head reads, and the head's window is only as good as those rows.
+/// A call returns at most the head's block size, so it can return fewer tokens than asked for.</remarks>
 internal sealed class DeepSeekV41DSparkProposer : IDraftProposer
 {
     private readonly DeepSeekV41DSpark _draft;
@@ -35,7 +36,8 @@ internal sealed class DeepSeekV41DSparkProposer : IDraftProposer
         float[] committed = new float[anchor * width];
         for (int p = 0; p < anchor; p++) _state.MainRow(p).CopyTo(committed.AsSpan(p * width, width));
         DeepSeekV41DSparkState window = _draft.CreateState(_state.Capacity);
-        _draft.Seed(committed, anchor, window);
+        // the first round after a one-token prompt has no committed rows before the anchor, so the window starts empty
+        if (anchor > 0) _draft.Seed(committed, anchor, window);
         DeepSeekV41DSparkDraft draft = _draft.Draft(context[anchor], _state.MainRow(anchor), anchor, window);
 
         // Ids[0] is the anchor itself; the rest are the drafted tokens

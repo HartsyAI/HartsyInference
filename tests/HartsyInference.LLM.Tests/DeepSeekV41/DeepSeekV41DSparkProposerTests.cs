@@ -72,6 +72,22 @@ public sealed class DeepSeekV41DSparkProposerTests
     }
 
     [Fact]
+    public void A_Single_Token_Context_Drafts_From_An_Empty_Window()
+    {
+        // the first round after a one-token prompt: nothing is committed before the anchor, so the head's window is seeded with no rows
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
+        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
+        DeepSeekV41GenerationState state = new(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true);
+        DeepSeekV41DSparkProposer proposer = new(dspark, state);
+
+        DraftBlock block = proposer.Propose(DeepSeekV41DSparkFixture.Ids.AsSpan(0, 1), BlockDraft);
+
+        Assert.Equal(BlockDraft, block.Tokens.Length);
+        Assert.Equal(1, state.Length);
+    }
+
+    [Fact]
     public void Asking_For_No_Tokens_Leaves_The_State_Alone()
     {
         using CpuBackend cpu = new();
