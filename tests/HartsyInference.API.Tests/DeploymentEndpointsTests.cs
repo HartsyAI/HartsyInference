@@ -97,6 +97,23 @@ public sealed class DeploymentEndpointsTests : IClassFixture<WebApplicationFacto
         Assert.Equal("the load failed", body.GetProperty("problem").GetString());
     }
 
+    [Fact]
+    public async Task Post_Answers_400_For_A_Device_No_Backend_Knows_Without_Loading_Anything()
+    {
+        bool deployed = false;
+        ScriptedDeploymentsText text = new()
+        {
+            Deploy = request => { deployed = true; return new DeploymentStatus(request.DeploymentId, request.Model.Requested, request.Device, DeploymentState.Ready, null); },
+        };
+        using WebApplicationFactory<Program> app = WithText(text);
+        using HttpClient client = app.CreateClient();
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync("/admin/deployments", new { deployment_id = "chat", model = "llm-a", device = "tpu" });
+
+        Assert.Equal(400, (int)response.StatusCode);
+        Assert.False(deployed); // refused up front, not loaded onto a CPU slot
+    }
+
     [Theory]
     [InlineData("argument", 400)]
     [InlineData("engine", 400)]

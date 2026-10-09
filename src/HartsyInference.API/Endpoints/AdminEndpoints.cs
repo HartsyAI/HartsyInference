@@ -42,6 +42,13 @@ public static class AdminEndpoints
                 return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest,
                     "Fields 'deployment_id' and 'model' are required.", "invalid_request_error");
             }
+            // A device no backend knows would load onto a CPU slot without a word, so it is refused before anything loads.
+            if (!string.IsNullOrWhiteSpace(req.Device) && !BackendFactory.IsValidSelector(req.Device.Trim().ToLowerInvariant()))
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest,
+                    $"Unknown device '{req.Device}'. Valid: {string.Join(", ", BackendFactory.ValidSelectors)} " +
+                    "(device backends also accept ':{ordinal}', e.g. cuda:1).", "invalid_request_error");
+            }
             try
             {
                 ModelSpec spec = ModelResolver.Resolve(req.Model, modelPathArg: null, Modality.Text);
