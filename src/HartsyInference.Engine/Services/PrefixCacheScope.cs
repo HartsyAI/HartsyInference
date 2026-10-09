@@ -21,6 +21,7 @@ public static class PrefixCacheScope
             key = null;
             return false;
         }
+        // The model part is the loaded path as a raw string: a path differing only in case is another scope, which costs an extra miss but never gives a wrong hit.
         key = Key(request.TenantId ?? TenantContext.Local, slot.LoadedPath ?? "", prefixKey);
         return true;
     }
