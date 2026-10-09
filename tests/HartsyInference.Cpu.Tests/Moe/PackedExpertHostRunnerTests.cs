@@ -1,6 +1,7 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Core.Tensors.Quant;
 using HartsyInference.Cpu.Moe;
 using HartsyInference.ModelAssets.Gguf;
 using Xunit;
@@ -128,6 +129,36 @@ public sealed class PackedExpertHostRunnerTests
         finally
         {
             foreach (Tensor tensor in owned) tensor.Dispose();
+        }
+    }
+
+    [Fact]
+    public void RefusesAnExpertThatCarriesCompanionTensors()
+    {
+        ExpertKey key = new(0, 0, 0);
+        Tensor gate = Quantize(Random(Intermediate * Hidden, 21, 0.1f), DType.Q8_0, Intermediate, Hidden, out _);
+        Tensor up = Quantize(Random(Intermediate * Hidden, 22, 0.1f), DType.Q8_0, Intermediate, Hidden, out _);
+        Tensor down = Quantize(Random(Hidden * Intermediate, 23, 0.1f), DType.Q8_0, Hidden, Intermediate, out _);
+        Tensor scale = F32(new float[Intermediate * (Hidden / 32)], Intermediate, Hidden / 32);
+        try
+        {
+            // A recipe with a scale tensor: the packed kernel does not read companions, so the runner must refuse.
+            QuantRecipe recipe = new()
+            {
+                Encoding = QuantEncoding.Mxfp4E8M0, Geometry = new BlockGeometry(1, 32), ScaleDType = DType.F32,
+                LogicalRows = Intermediate, LogicalCols = Hidden, Scale = scale,
+            };
+            ExpertWeights weights = new(key, new ExpertMatrix(gate, recipe), new ExpertMatrix(down), new ExpertMatrix(up));
+            PackedExpertHostRunner runner = new(DType.Q8_0, Hidden, Intermediate, _ => weights);
+            float[] x = Random(Hidden, 24, 1f);
+            Assert.Throws<InvalidOperationException>(() => runner.Run(ExpertProgram.Swiglu, key, x, 1, new float[Hidden]));
+        }
+        finally
+        {
+            gate.Dispose();
+            up.Dispose();
+            down.Dispose();
+            scale.Dispose();
         }
     }
 
