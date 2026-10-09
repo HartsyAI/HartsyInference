@@ -167,6 +167,38 @@ public sealed class DynamicBatchSchedulerTests
     }
 
     [Fact]
+    public async Task SubmitAfterTheLoopStops_IsRefusedNotLeftWaiting()
+    {
+        // The gate admits the admission call and refuses every later one. The refused decode round fails its sequence, and the refused release that follows
+        // stops the loop. A submit after that must be refused, not left to wait on a loop that will never read it.
+        int gateCalls = 0;
+        Task Gate(Action work)
+        {
+            if (Interlocked.Increment(ref gateCalls) > 1) throw new InvalidOperationException("device gate refused the round");
+            work();
+            return Task.CompletedTask;
+        }
+
+        TransformerConfig cfg = Cfg();
+        Dictionary<string, Tensor> w = Weights(cfg);
+        using CpuBackend backend = new();
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model");
+        StubTokenizer tokenizer = new();
+        using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
+        using DynamicBatchScheduler scheduler = new(model, tokenizer, backend, pool, gpuGate: Gate);
+
+        Task<GenerationResult> first = scheduler.SubmitAsync(Req([1, 2], 8, seed: 0), onToken: null, CancellationToken.None);
+        await Assert.ThrowsAsync<InvalidOperationException>(() => first);
+
+        Task<GenerationResult> second = scheduler.SubmitAsync(Req([3, 4], 8, seed: 0), onToken: null, CancellationToken.None);
+        Task finished = await Task.WhenAny(second, Task.Delay(TimeSpan.FromSeconds(10)));
+        Assert.Same(second, finished); // refused, not left waiting for a loop that has stopped
+        await Assert.ThrowsAsync<SchedulerStoppedException>(() => second);
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
     public async Task RequestsSubmittedAfterLoopIsRunning_AreAdmitted()
     {
         TransformerConfig cfg = Cfg();
@@ -230,10 +262,11 @@ public sealed class DynamicBatchSchedulerTests
 
         // This one alone fits (prompt=4 tokens, maxTokens small) — reference for "should still succeed".
         Task<GenerationResult> fits = scheduler.SubmitAsync(Req([1, 2, 3, 4], 2, seed: 0), null, CancellationToken.None);
-        // This one's prompt alone (10 tokens) cannot possibly fit in an 8-token pool -> must fail admission.
+        // This one's prompt alone (10 tokens) cannot possibly fit in an 8-token pool, so it can never be admitted: it is refused up front
+        // (ArgumentException, which the API maps to 400), rather than waiting for pages that will never be free.
         Task<GenerationResult> tooBig = scheduler.SubmitAsync(Req([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 2, seed: 0), null, CancellationToken.None);
 
-        await Assert.ThrowsAsync<KvPoolExhaustedException>(() => tooBig);
+        await Assert.ThrowsAsync<ArgumentException>(() => tooBig);
         GenerationResult fitsResult = await fits;
         Assert.Equal(2, fitsResult.TokenIds.Count);
         foreach (Tensor t in w.Values) t.Dispose();

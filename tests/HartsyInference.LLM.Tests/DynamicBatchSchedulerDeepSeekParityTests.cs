@@ -46,4 +46,25 @@ public sealed class DynamicBatchSchedulerDeepSeekParityTests
         // The prefill hook fires once the prompt is in the cache, as it does on the pipeline; the caller reads the prompt length from it.
         Assert.Equal(prompts[0].Length, prefilled);
     }
+
+    [Fact]
+    public async Task A_Pool_Less_Model_Serves_Every_Request_When_Only_A_Few_Decode_At_Once()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel host = DeepSeekV41HostModelTests.BuildModel(cpu);
+        DeepSeekV41GenerationModel model = new(host, maxTokens: 64, outputBackend: cpu);
+        DynamicBatchSchedulerTests.StubTokenizer tokenizer = new();
+        int[][] prompts = [[1, 2, 3], [4], [5, 6, 7, 8, 9], [2, 3]];
+        const int maxTokens = 6;
+        string[] reference = [.. prompts.Select(p => string.Join(",",
+            new TextGenerationPipeline(model, tokenizer).Generate(DynamicBatchSchedulerTests.Req(p, maxTokens, seed: 0)).TokenIds))];
+
+        // No pool bounds this model, so maxActiveSequences is the only limit: two decode at once and the rest wait their turn in order.
+        using DynamicBatchScheduler scheduler = new(model, tokenizer, pool: null, maxActiveSequences: 2);
+        Task<GenerationResult>[] tasks = [.. prompts.Select(p => scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req(p, maxTokens, seed: 0), null, CancellationToken.None))];
+        GenerationResult[] results = await Task.WhenAll(tasks).WaitAsync(TimeSpan.FromSeconds(120));
+
+        for (int i = 0; i < prompts.Length; i++)
+            Assert.Equal(reference[i], string.Join(",", results[i].TokenIds));
+    }
 }
