@@ -110,4 +110,57 @@ public sealed class DeepSeekV41DSparkProposerTests
         DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
         Assert.Throws<ArgumentException>(() => new DeepSeekV41DSparkProposer(dspark, new DeepSeekV41GenerationState(model, DeepSeekV41DSparkFixture.MaxTokens)));
     }
+
+    [Fact]
+    public void A_Scheduler_That_Verifies_Nothing_Keeps_Plain_Decoding_Exact()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
+        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
+        int[] prompt = DeepSeekV41DSparkFixture.Ids[..9];
+        const int count = 12;
+        List<int> plain = DeepSeekV41DSparkFixture.PlainGreedy(model, prompt, count);
+
+        // one token costs 1000 steps a second and anything longer almost nothing, so the scheduler never verifies a drafted token
+        DeepSeekV41GenerationState state = new(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true);
+        ConfidenceScheduler scheduler = new(new SpsProfile([1000, 1, 1, 1, 1, 1]), BlockDraft);
+        CountingProposer proposer = new(new DeepSeekV41DSparkProposer(dspark, state, scheduler));
+        List<int> speculative = [.. prompt];
+        int produced = SpeculativeLoop.Generate(new DeepSeekV41SpeculativeScorer(model, state), proposer, SamplerChain.FromOptions(new SamplingOptions { Greedy = true }),
+            SpeculativeTestSupport.Uniform(1), speculative, count, BlockDraft, model.VocabSize);
+
+        Assert.Equal(count, produced);
+        Assert.Equal(0, proposer.Drafted);
+        Assert.Equal(plain, speculative);
+    }
+
+    [Fact]
+    public void A_Scheduler_Built_For_A_Different_Block_Is_Refused()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
+        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
+        ConfidenceScheduler wrongBlock = new(new SpsProfile([100, 100, 100, 100, 100, 100, 100, 100]), BlockDraft + 2);
+        Assert.Throws<ArgumentException>(() => new DeepSeekV41DSparkProposer(dspark,
+            new DeepSeekV41GenerationState(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true), wrongBlock));
+    }
+
+    [Fact]
+    public void A_Flat_Profile_Keeps_The_Whole_Block_Of_The_Unscheduled_Proposer()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
+        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
+        int[] context = DeepSeekV41DSparkFixture.Ids[..11];
+
+        DeepSeekV41GenerationState plainState = new(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true);
+        DraftBlock unscheduled = new DeepSeekV41DSparkProposer(dspark, plainState).Propose(context, BlockDraft);
+
+        DeepSeekV41GenerationState flatState = new(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true);
+        ConfidenceScheduler scheduler = new(new SpsProfile([100, 100, 100, 100, 100, 100]), BlockDraft);
+        DraftBlock scheduled = new DeepSeekV41DSparkProposer(dspark, flatState, scheduler).Propose(context, BlockDraft);
+
+        Assert.Equal(unscheduled.Tokens, scheduled.Tokens);
+        Assert.Equal(BlockDraft, scheduled.Tokens.Length);
+    }
 }

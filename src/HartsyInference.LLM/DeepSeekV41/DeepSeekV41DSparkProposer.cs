@@ -12,17 +12,22 @@ internal sealed class DeepSeekV41DSparkProposer : IDraftProposer
 {
     private readonly DeepSeekV41DSpark _draft;
     private readonly DeepSeekV41GenerationState _state;
+    private readonly ConfidenceScheduler? _scheduler;
 
     /// <param name="draft">The draft head; its input rows are the target's taps for its target layers.</param>
     /// <param name="state">The sequence the target runs on, created with <c>recordMainRows</c> so it keeps those taps. The scorer must share it.</param>
-    public DeepSeekV41DSparkProposer(DeepSeekV41DSpark draft, DeepSeekV41GenerationState state)
+    /// <param name="scheduler">Chooses how many drafted tokens to verify from the head's confidences. Null verifies the whole block up to <c>maxTokens</c>.</param>
+    public DeepSeekV41DSparkProposer(DeepSeekV41DSpark draft, DeepSeekV41GenerationState state, ConfidenceScheduler? scheduler = null)
     {
         ArgumentNullException.ThrowIfNull(draft);
         ArgumentNullException.ThrowIfNull(state);
         if (state.MainWidth != draft.InputWidth)
             throw new ArgumentException($"The state records {state.MainWidth} target values per position; the draft head reads {draft.InputWidth}.", nameof(state));
+        if (scheduler is not null && scheduler.MaxDraft != draft.BlockSize)
+            throw new ArgumentException($"The scheduler is built for drafts of {scheduler.MaxDraft}; the draft head drafts {draft.BlockSize}.", nameof(scheduler));
         _draft = draft;
         _state = state;
+        _scheduler = scheduler;
     }
 
     /// <inheritdoc />
@@ -40,8 +45,10 @@ internal sealed class DeepSeekV41DSparkProposer : IDraftProposer
         if (anchor > 0) _draft.Seed(committed, anchor, window);
         DeepSeekV41DSparkDraft draft = _draft.Draft(context[anchor], _state.MainRow(anchor), anchor, window);
 
-        // Ids[0] is the anchor itself; the rest are the drafted tokens
+        // Ids[0] is the anchor itself; the rest are the drafted tokens, with one confidence each
         int count = Math.Min(maxTokens, draft.Ids.Length - 1);
+        if (_scheduler is not null) count = _scheduler.Choose(draft.Confidence, count);
+        // an empty block is intended when the scheduler verifies nothing: the loop then decodes the context's next token alone
         return new DraftBlock(draft.Ids.AsSpan(1, count).ToArray(), null);
     }
 }

@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.298
+
+- **Added: confidence-scheduled verification for the DeepSeek-V4.1 DSpark proposer (CPU, synthetic evidence).** `ConfidenceScheduler` implements Algorithm 1 of the DSpark paper for one sequence: the head's confidences become survival products, and the walk over drafted positions stops at the first position that does not improve the expected throughput `(1 + Σ a_j) · SPS(1 + l)`. `SpsProfile` holds the engine's steps-per-second table; measuring it is left to the deployment. `DeepSeekV41DSparkProposer` takes an optional scheduler and verifies only the prefix it chooses. On a synthetic objective the walk matches brute force wherever the objective is unimodal, and a jagged profile shows the early stop that the paper's section 5.2 search addresses (not implemented here). Plain decoding is unchanged.
+
 ## alpha.297
 
 - **Added: a DSpark draft proposer for DeepSeek-V4.1 speculation (CPU, synthetic evidence).** `DeepSeekV41DSparkProposer` drafts from a sequence that records the target's draft rows. Each call syncs the sequence to the context, rebuilds the draft head's window from the committed rows, and drafts from the last token. The window only ever holds committed positions, so a rejected draft needs no restore. On the synthetic model the proposer's drafts reproduce upstream's at every decode position, including past the 8-token window, and greedy speculation with it reproduces plain greedy decoding token for token. The sequence records the rows the head reads only when asked to. Plain decoding is unchanged.

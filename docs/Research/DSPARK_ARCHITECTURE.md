@@ -17,6 +17,9 @@ Status: CPU reference, synthetic evidence. Greedy drafting only. Not verified on
   each drafted position.
 - **Proposer** (`DeepSeekV41DSparkProposer`). Syncs to the context, copies the committed target rows before the anchor into a fresh head window, drafts the anchor,
   and returns the drafted ids with no probabilities.
+- **Scheduler** (`ConfidenceScheduler`, `SpsProfile`). Algorithm 1 of the paper for one sequence. The head's confidences are logits, and each position's survival
+  is the product of their sigmoids. The walk over drafted positions stops at the first position that does not improve `(1 + Σ a_j) · SPS(1 + l)`. The proposer
+  verifies the prefix the scheduler chooses, when it has one.
 
 ## Invariants
 
@@ -39,7 +42,8 @@ Status: CPU reference, synthetic evidence. Greedy drafting only. Not verified on
 
 ## Not yet
 
-- Acceptance statistics and the confidence scheduler with its fitter (`SpsProfile`, Algorithm 1). A confidence field on the draft block comes with it.
+- Acceptance statistics; sequential temperature scaling and its offline fitter; the section 5.2 global search for jagged SPS curves (the early stop is exact only
+  for unimodal objectives); measuring `SpsProfile` on the deployment; admission across requests (batching).
 - EOS and stop truncation of an accepted draft.
 - In-place truncation. A rollback still replays the kept history, which costs one decode per token after the prompt.
 - The Engram tap placement on a target layer that has Engram. The synthetic model has none on a tap, and the real DSpark targets (37 to 39) have none either.
