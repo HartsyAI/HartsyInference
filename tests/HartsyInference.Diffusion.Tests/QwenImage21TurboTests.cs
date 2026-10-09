@@ -147,13 +147,27 @@ public sealed unsafe class QwenImage21TurboTests : IDisposable
     [Theory]
     [InlineData("euler")]
     [InlineData("dpmpp_2m")]
-    public void ExplicitSchedule_IsKeptByEverySamplerWithoutAFamilyGrid(string sampler)
+    [InlineData("dpm_2")]
+    [InlineData("dpm_2_ancestral")]
+    [InlineData("uni_pc")]
+    [InlineData("uni_pc_bh2")]
+    public void ExplicitSchedule_IsKeptByEverySampler(string sampler)
     {
-        // With no family grid there is nothing to rebuild from, so the shipped sigmas (terminal 0 appended) must
-        // come back unchanged for every sampler. A rebuild would silently replace them with the base shift grid.
+        // The shipped sigmas (terminal 0 appended) must come back unchanged for every sampler. The discard-penultimate
+        // samplers (dpm_2, uni_pc, ...) would otherwise interpolate them onto a different grid.
         float[] shipped = [.. QwenImage21Variants.TurboSigmas, 0.0f];
-        float[] built = SamplerRegistry.BuildSigmas(sampler, null, shipped, false, null);
+        float[] built = SamplerRegistry.BuildSigmas(sampler, null, shipped, false, null, explicitSchedule: true);
         Assert.Equal(shipped, built);
+    }
+
+    [Fact]
+    public void ExplicitSchedule_ControlShowsTheDiscardRuleOtherwiseChangesTheGrid()
+    {
+        // The negative control for the test above: without the explicit flag, a discard-penultimate sampler does
+        // rebuild the grid, so the flag is what protects Turbo's sigmas and the test has teeth.
+        float[] shipped = [.. QwenImage21Variants.TurboSigmas, 0.0f];
+        float[] rebuilt = SamplerRegistry.BuildSigmas("dpm_2", null, shipped, false, null, explicitSchedule: false);
+        Assert.NotEqual(shipped, rebuilt);
     }
 
     [Fact]
