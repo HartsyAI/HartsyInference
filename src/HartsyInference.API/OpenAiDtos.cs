@@ -59,6 +59,11 @@ public sealed class ModelEntry
     /// <summary>Unix seconds. OpenAI's schema expects a real per-model creation date; this catalog doesn't track one, so it reports the server process's start time instead (same value for every entry, every request) — cosmetic schema-shape compliance, not a real timestamp claim.</summary>
     [JsonPropertyName("created")] public required long Created { get; init; }
     [JsonPropertyName("owned_by")] public string OwnedBy => "hartsyinference";
+
+    /// <summary>What a text model can do beyond chat. Omitted for the other modalities.</summary>
+    [JsonPropertyName("capabilities")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public CapabilitiesDto? Capabilities { get; init; }
 }
 
 /// <summary>OpenAI models list envelope.</summary>
@@ -80,8 +85,11 @@ public sealed class ChatMessageDto
 {
     [JsonPropertyName("role")] public string Role { get; set; } = "user";
 
-    /// <summary>Null when this message carries only <see cref="ToolCalls"/> (OpenAI sets content null on an assistant turn whose <c>finish_reason</c> is <c>tool_calls</c>).</summary>
-    [JsonPropertyName("content")] public string? Content { get; set; } = "";
+    /// <summary>Null when this message carries only <see cref="ToolCalls"/> (OpenAI sets content null on an assistant turn whose <c>finish_reason</c> is <c>tool_calls</c>). A plain string, or an array of content parts (<c>text</c>, <c>image_url</c>) on input.</summary>
+    [JsonPropertyName("content")] public ChatMessageContent? Content { get; set; } = "";
+
+    /// <summary>The model's reasoning for an assistant turn, sent back in a conversation (OpenAI-style <c>reasoning_content</c>).</summary>
+    [JsonPropertyName("reasoning_content")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ReasoningContent { get; set; }
 
     /// <summary>Populated on an assistant message that invoked one or more tools.</summary>
     [JsonPropertyName("tool_calls")] public List<ChatToolCallDto>? ToolCalls { get; set; }
@@ -140,6 +148,21 @@ public sealed class ChatCompletionRequest
     [JsonPropertyName("response_format")] public ResponseFormatDto? ResponseFormat { get; set; }
     [JsonPropertyName("seed")] public ulong? Seed { get; set; }
 
+    /// <summary>OpenAI <c>stream_options</c>. <c>include_usage</c> asks a streamed reply to end with a usage frame before <c>[DONE]</c>.</summary>
+    [JsonPropertyName("stream_options")] public ChatStreamOptionsDto? StreamOptions { get; set; }
+
+    /// <summary>OpenAI-style <c>reasoning_effort</c>: a name (<c>low</c>, <c>high</c>, <c>max</c>) or an integer in [1, 100]. <c>medium</c> is not defined by the engine and is refused.</summary>
+    [JsonPropertyName("reasoning_effort")] public JsonElement? ReasoningEffort { get; set; }
+
+    /// <summary>OpenAI-style <c>thinking</c>: <c>{"type": "enabled"}</c> or <c>{"type": "disabled"}</c> selects the model's reasoning mode.</summary>
+    [JsonPropertyName("thinking")] public ChatThinkingDto? Thinking { get; set; }
+
+    /// <summary>The caller's own user identifier. It is carried on the native request and not used by the engine yet; it does not choose the tenant.</summary>
+    [JsonPropertyName("user")] public string? User { get; set; }
+
+    /// <summary>OpenAI-style queue priority: <c>low</c>, <c>normal</c> or <c>high</c>. It matters only when the server is busy.</summary>
+    [JsonPropertyName("priority")] public string? Priority { get; set; }
+
     /// <summary>Tools the model may call. Passed through to the native <c>TextRequest.Tools</c> unmodified (name/description/JSON-schema). What exists natively is plumbing: the schemas render into the prompt through the chat template, the <c>&lt;tool_call&gt;</c> sentinel grammar is armed, and an <c>ITextStreamFilter</c> seam can emit parsed calls. The parsers themselves live in the separate Tools package; without one installed no call is parsed.</summary>
     [JsonPropertyName("tools")] public List<ChatToolDto>? Tools { get; set; }
 
@@ -186,6 +209,9 @@ public sealed class ChatCompletionChunk
     [JsonPropertyName("created")] public required long Created { get; init; }
     [JsonPropertyName("model")] public required string Model { get; init; }
     [JsonPropertyName("choices")] public required IReadOnlyList<ChatCompletionChunkChoice> Choices { get; init; }
+
+    /// <summary>Set only on the final usage frame of a stream that asked for <c>stream_options.include_usage</c>; that frame's <c>choices</c> is empty.</summary>
+    [JsonPropertyName("usage")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ChatUsage? Usage { get; init; }
 }
 
 public sealed class ChatCompletionChunkChoice
@@ -197,9 +223,10 @@ public sealed class ChatCompletionChunkChoice
 
 public sealed class ChatCompletionDelta
 {
-    [JsonPropertyName("role")] public string? Role { get; init; }
-    [JsonPropertyName("content")] public string? Content { get; init; }
-    [JsonPropertyName("tool_calls")] public List<ChatToolCallDto>? ToolCalls { get; init; }
+    [JsonPropertyName("role")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Role { get; init; }
+    [JsonPropertyName("content")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? Content { get; init; }
+    [JsonPropertyName("reasoning_content")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public string? ReasoningContent { get; init; }
+    [JsonPropertyName("tool_calls")] [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public List<ChatToolCallDeltaDto>? ToolCalls { get; init; }
 }
 
 /// <summary>OpenAI text-to-speech request. <c>voice</c> is passed straight through as the engine's built-in voice name (e.g. a Kokoro voice pack) rather than mapped from OpenAI's fixed voice enum (alloy/echo/fable/onyx/nova/shimmer) — those names don't correspond to anything this engine ships, so pass a real voice name from the target model's own catalog instead. <c>response_format</c> only accepts <c>"wav"</c> (the default, also used when omitted): <c>AudioResult.Data</c> is always a pre-encoded WAV container — there's no mp3/opus/aac encoder to produce anything else, so an unsupported format is rejected with a clear 400 rather than silently returning WAV bytes mislabeled as something else.</summary>

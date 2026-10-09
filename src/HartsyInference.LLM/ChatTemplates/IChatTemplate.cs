@@ -16,4 +16,9 @@ public interface IChatTemplate
     int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking,
         IReadOnlyList<ToolSpec>? tools)
         => Encode(tokenizer, messages, addGenerationPrompt, enableThinking);
+
+    /// <summary>Encodes like the overload above and also takes a <paramref name="reasoningEffort"/> in [1, 100] for templates that have one (DeepSeek-V4.1 thinking mode); null uses the template's default. Templates without an effort slot ignore it (this default).</summary>
+    int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt, bool? enableThinking,
+        IReadOnlyList<ToolSpec>? tools, int? reasoningEffort)
+        => Encode(tokenizer, messages, addGenerationPrompt, enableThinking, tools);
 }

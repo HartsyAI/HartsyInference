@@ -137,6 +137,22 @@ public sealed class DeepSeekV41TextLoaderTests : IDisposable
     }
 
     [Fact]
+    public async Task TextService_Stream_Ends_With_Its_Token_Usage_After_The_Stop_Reason()
+    {
+        WriteFixtureCheckpoint();
+        using InferenceEngine engine = new("cpu", 0);
+
+        List<TextChunk> chunks = [];
+        await foreach (TextChunk chunk in engine.Text.StreamAsync(Spec(), Request()))
+            chunks.Add(chunk);
+
+        // The chat route's stream_options.include_usage frame is built from this last chunk.
+        Assert.Equal(TextChunkKind.StopReason, chunks[^2].Kind);
+        Assert.Equal(TextChunkKind.Usage, chunks[^1].Kind);
+        Assert.True(chunks[^1].Usage is { PromptTokens: > 0, CompletionTokens: >= 1 and <= 3 }, $"usage: {chunks[^1].Usage}");
+    }
+
+    [Fact]
     public async Task TextService_Refuses_A_Request_Longer_Than_The_Loaded_Sequence_Limit()
     {
         WriteFixtureCheckpoint();

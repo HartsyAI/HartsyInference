@@ -49,11 +49,281 @@ public sealed class TextService : ITextService, IDisposable
 
     private static long _requestCounter;
 
+    /// <summary>The deployments this service has loaded or tried to load, in first-deployed order. Guarded by <see cref="_deploymentsGate"/>.</summary>
+    private readonly List<DeploymentRecord> _deployedList = [];
+    private readonly object _deploymentsGate = new();
+
+    /// <summary>One deployment's state. The state moves only along <see cref="DeploymentStateMachine"/>'s transitions, under <see cref="_deploymentsGate"/>.</summary>
+    private sealed class DeploymentRecord(string deploymentId, ModelSpec spec, string deviceKey)
+    {
+        public string DeploymentId { get; } = deploymentId;
+        public ModelSpec Spec { get; set; } = spec;
+        public string DeviceKey { get; set; } = deviceKey;
+        public DeploymentState State { get; set; } = DeploymentState.Unloaded;
+        public string? Problem { get; set; }
+
+        /// <summary>Counts the loads started under this id. A load completes the record only while it is still the latest (see <see cref="CompleteLoaded"/>).</summary>
+        public int Attempt { get; set; }
+
+        /// <summary>The load a deploy asked for while the record still serves the model it had. The record keeps describing that model until the load frees it (see
+        /// <see cref="RetireDeploymentsOn"/>), so a load that fails before then leaves the device, and the record, as they were. Null when no such load is pending.</summary>
+        public PendingLoad? Pending { get; set; }
+
+        /// <summary>True while this record's own load runs under the device lock, so the free that load performs moves the record on to Loading. The flag is per record, not
+        /// per attempt: two loads of one id on different devices can overlap, so a free that finds it clear retires the record like any other free, and the load that completes
+        /// it then takes it from Unloaded to Ready (see <see cref="CompleteLoaded"/>).</summary>
+        public bool Committing { get; set; }
+    }
+
+    /// <summary>A load that a deploy asked for and has not yet started, against a record that served another model; see <see cref="DeploymentRecord.Pending"/>.</summary>
+    private sealed record PendingLoad(ModelSpec Spec, string DeviceKey);
+
     private readonly InferenceEngine _engine;
     private readonly ConcurrentDictionary<string, TextDeviceSlot> _slots = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal TextService(InferenceEngine engine) => _engine = engine;
+
+    /// <summary>How long an unload waits for a slot's scheduled requests before it gives up and leaves the model resident. Tests shorten it.</summary>
+    internal TimeSpan UnloadLeaseWait { get; set; } = TimeSpan.FromSeconds(UnloadWaitSeconds);
+
+    /// <inheritdoc/>
+    public async Task<DeploymentStatus> DeployAsync(DeploymentRequest request, CancellationToken cancel = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.DeploymentId);
+        string deviceKey = NormalizeDeviceKey(request.Device);
+        DeploymentRecord record = BeginDeployment(request.DeploymentId, request.Model, deviceKey, out int attempt);
+        TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
+        bool holdsDevice = false;
+        string? failure = null;
+        try
+        {
+            // Inside the try, so a deploy cancelled while it waits for the device is recorded as Failed rather than left Loading.
+            await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
+            holdsDevice = true;
+            // A later deploy of this id began while this one waited for the device: that one owns the record, so this one loads nothing; the status it returns is the record as the later deploy left it.
+            bool latest;
+            lock (_deploymentsGate)
+            {
+                latest = record.Attempt == attempt;
+                if (latest) BeginLoading(record);
+            }
+            if (latest)
+            {
+                // A load that replaces the device's model waits for scheduled requests on it first, as a request does (see PrepareSlot).
+                // The wait blocks, so it runs on the pool rather than on this async method's thread; the timeout is the one tests can shorten.
+                if (slot.HasLeases && ReplacesLoadedModel(slot, request.Model.LocalPath)
+                    && !await Task.Run(() => slot.WaitForLeases(UnloadLeaseWait), cancel).ConfigureAwait(false))
+                {
+                    throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadLeaseWait.TotalSeconds:0}s; retry the deployment.");
+                }
+                // The free of the model this load replaces happens inside LoadInto. Committing lets that free move this record on to Loading for this load.
+                lock (_deploymentsGate) record.Committing = true;
+                try
+                {
+                    await Task.Run(() =>
+                    {
+                        using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
+                        LoadInto(slot, deviceKey, request.Model, new TextRequest { Messages = [] });
+                    }, cancel).ConfigureAwait(false);
+                }
+                finally
+                {
+                    lock (_deploymentsGate) record.Committing = false;
+                }
+                lock (_deploymentsGate)
+                {
+                    // One deployment holds a device, so the others on it end now that this model is in place. A load that replaced their model already
+                    // recorded them in UnloadSlot; this covers one that kept it. This record is not one of them: it is the one completed here.
+                    RetireDeploymentsOn(slot, except: record);
+                    CompleteLoaded(record, attempt);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            failure = "the deployment was cancelled before its model loaded";
+            lock (_deploymentsGate) FailLoad(record, attempt, failure);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[TextService] Deployment '{request.DeploymentId}' did not load: {ex.Message}", ex);
+            failure = ex.Message;
+            lock (_deploymentsGate) FailLoad(record, attempt, failure);
+        }
+        finally
+        {
+            if (holdsDevice)
+                slot.Lock.Release();
+        }
+        lock (_deploymentsGate)
+        {
+            // A failed load reports its own failure, even when the record still describes the model it kept serving.
+            if (failure is not null && record.Attempt == attempt)
+                return new DeploymentStatus(request.DeploymentId, request.Model.Requested, deviceKey, DeploymentState.Failed, failure);
+            return Snapshot(record);
+        }
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>A plain read of the records. Unloading is recorded where the model is freed (<see cref="UnloadSlot"/>), so this and <see cref="Capacity"/> report the
+    /// same state.</remarks>
+    public IReadOnlyList<DeploymentStatus> Deployments
+    {
+        get
+        {
+            lock (_deploymentsGate) return [.. _deployedList.Select(Snapshot)];
+        }
+    }
+
+    /// <inheritdoc/>
+    public DeploymentCapacity? Capacity(string deploymentId)
+    {
+        DeploymentState state;
+        string deviceKey;
+        lock (_deploymentsGate)
+        {
+            DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+            if (record is null) return null;
+            state = record.State;
+            deviceKey = record.DeviceKey;
+        }
+        // A deployment that serves no model reports no figures: its device's scheduler belongs to whichever model the device holds now, which may be another deployment's.
+        if (state is not (DeploymentState.Ready or DeploymentState.Degraded or DeploymentState.Draining))
+            return new DeploymentCapacity(state, 0, 0, 0, null, null);
+        _slots.TryGetValue(deviceKey, out TextDeviceSlot? slot);
+        DynamicBatchScheduler? scheduler = slot?.Scheduler;
+        PagedKvPool? pool = slot?.SchedulerPool;
+        return new DeploymentCapacity(state, scheduler?.ActiveCount ?? 0, scheduler?.QueuedCount ?? 0, scheduler?.MaxActive ?? 0, pool?.FreePageCount, pool?.MaxPages);
+    }
+
+    /// <summary>Records a deployment's load of <paramref name="spec"/> under <paramref name="deploymentId"/>, and returns the record it completes and, in
+    /// <paramref name="attempt"/>, the number of this load under its id. A record that serves a model keeps describing it, and keeps its state, until the load frees that
+    /// model (see <see cref="RetireDeploymentsOn"/>): the load is pending until then. Any other record is retired and recorded as Loading, as before.</summary>
+    private DeploymentRecord BeginDeployment(string deploymentId, ModelSpec spec, string deviceKey, out int attempt)
+    {
+        lock (_deploymentsGate)
+        {
+            DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+            if (record is null)
+            {
+                record = new DeploymentRecord(deploymentId, spec, deviceKey);
+                _deployedList.Add(record);
+            }
+            attempt = ++record.Attempt;
+            if (record.State is DeploymentState.Ready or DeploymentState.Degraded)
+            {
+                // A later load of this id replaces this pending one. Until a load frees the model, the record still describes the model that serves.
+                record.Pending = new PendingLoad(spec, deviceKey);
+                return record;
+            }
+            Retire(record);
+            record.Pending = null;
+            record.Spec = spec;
+            record.DeviceKey = deviceKey;
+            record.Problem = null;
+            Transition(record, DeploymentState.Loading);
+            return record;
+        }
+    }
+
+    /// <summary>Starts a pending load whose record was freed while the load waited for the device: the model it asked for is loading now. Caller holds
+    /// <see cref="_deploymentsGate"/>.</summary>
+    private static void BeginLoading(DeploymentRecord record)
+    {
+        if (record.State != DeploymentState.Unloaded || record.Pending is null) return;
+        CommitPending(record);
+        Transition(record, DeploymentState.Loading);
+    }
+
+    /// <summary>Makes a pending load the record's own: the record now describes the model and device that load asked for. Caller holds <see cref="_deploymentsGate"/>.</summary>
+    private static void CommitPending(DeploymentRecord record)
+    {
+        if (record.Pending is not { } pending) return;
+        record.Spec = pending.Spec;
+        record.DeviceKey = pending.DeviceKey;
+        record.Pending = null;
+        record.Problem = null;
+    }
+
+    /// <summary>Ends load <paramref name="attempt"/> as loaded. Only the latest load under the id completes the record. A load that kept the model already on the device
+    /// completes its pending record here; a load that freed a model completed the record already, when it freed the model (see <see cref="RetireDeploymentsOn"/>).
+    /// Caller holds <see cref="_deploymentsGate"/>.</summary>
+    private static void CompleteLoaded(DeploymentRecord record, int attempt)
+    {
+        if (record.Attempt != attempt) return;
+        CommitPending(record);
+        // Unloaded is reachable when a free on the record's old device retired it while this load ran on another device: the model is loaded now, so it moves on to Ready.
+        if (record.State == DeploymentState.Unloaded) Transition(record, DeploymentState.Loading);
+        if (record.State is DeploymentState.Loading or DeploymentState.Degraded)
+            Transition(record, DeploymentState.Ready);
+    }
+
+    /// <summary>Ends load <paramref name="attempt"/> as failed. Only the latest load under the id can fail the record. A load that failed before it freed the model its record
+    /// serves changes nothing: that model still serves, and the caller's status carries the failure. Caller holds <see cref="_deploymentsGate"/>.</summary>
+    private static void FailLoad(DeploymentRecord record, int attempt, string problem)
+    {
+        if (record.Attempt != attempt) return;
+        if (record.State is DeploymentState.Ready or DeploymentState.Degraded)
+        {
+            record.Pending = null;
+            return;
+        }
+        // Unloaded -> Loading -> Failed: the state machine has no direct Unloaded -> Failed, and a load that failed still has to be recorded as Failed. A record freed while
+        // this load waited names the model that failed, as a failed load always has.
+        if (record.State == DeploymentState.Unloaded)
+        {
+            CommitPending(record);
+            Transition(record, DeploymentState.Loading);
+        }
+        record.Pending = null;
+        if (record.State == DeploymentState.Loading) Transition(record, DeploymentState.Failed);
+        record.Problem = problem;
+    }
+
+    /// <summary>Records that <paramref name="slot"/>'s model is gone: each Ready or Degraded deployment on it becomes Unloaded, except <paramref name="except"/>. A load
+    /// that frees the model its own record serves moves that record on to Loading, for the load it is making. A Loading one is a deploy in flight, which completes its
+    /// own record.</summary>
+    private void RetireDeploymentsOn(TextDeviceSlot slot, DeploymentRecord? except = null)
+    {
+        lock (_deploymentsGate)
+        {
+            foreach (DeploymentRecord record in _deployedList)
+            {
+                if (ReferenceEquals(record, except) || record.State is not (DeploymentState.Ready or DeploymentState.Degraded)
+                    || !_slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? held) || !ReferenceEquals(held, slot))
+                {
+                    continue;
+                }
+                Retire(record);
+                if (record.Committing && record.Pending is not null)
+                {
+                    CommitPending(record);
+                    Transition(record, DeploymentState.Loading);
+                }
+            }
+        }
+    }
+
+    /// <summary>Moves a deployment along the allowed transitions to <see cref="DeploymentState.Unloaded"/>; a degraded one drains first.</summary>
+    private static void Retire(DeploymentRecord record)
+    {
+        while (record.State != DeploymentState.Unloaded)
+            Transition(record, record.State == DeploymentState.Degraded ? DeploymentState.Draining : DeploymentState.Unloaded);
+    }
+
+    /// <summary>Moves a deployment to <paramref name="to"/>, refusing a transition the state machine does not allow.</summary>
+    private static void Transition(DeploymentRecord record, DeploymentState to)
+    {
+        if (!DeploymentStateMachine.CanTransition(record.State, to))
+            throw new InvalidOperationException($"Deployment '{record.DeploymentId}' cannot go from {record.State} to {to}.");
+        record.State = to;
+    }
+
+    private static DeploymentStatus Snapshot(DeploymentRecord record) =>
+        new(record.DeploymentId, record.Spec.Requested, record.DeviceKey, record.State, record.Problem);
 
     /// <inheritdoc/>
     public async Task<TextResult> GenerateAsync(ModelSpec spec, TextRequest request, CancellationToken cancel = default)
@@ -92,6 +362,7 @@ public sealed class TextService : ITextService, IDisposable
                 [
                     new TextChunk { Kind = TextChunkKind.Result, Text = outcome.Text },
                     new TextChunk { Kind = TextChunkKind.StopReason, Stop = outcome.Stop },
+                    new TextChunk { Kind = TextChunkKind.Usage, Usage = new TextUsage(outcome.PromptTokens, outcome.CompletionTokens) },
                 ];
             },
             cancel);
@@ -134,6 +405,8 @@ public sealed class TextService : ITextService, IDisposable
 
     private async Task<GenOutcome> RunAsync(ModelSpec spec, TextRequest request, Action<TextChunk>? sink, CancellationToken cancel)
     {
+        // The tenant comes from the caller's identity when the request names none, so per-tenant state is keyed the same way for every route.
+        request = request with { TenantId = TenantContext.Resolve(request.TenantId) };
         long diagnosticId = _engine.StartDiagnostics();
         string deviceKey = NormalizeDeviceKey(request.Device);
         TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
@@ -280,8 +553,9 @@ public sealed class TextService : ITextService, IDisposable
         // request on the same busy key finds nothing and falls back to this same uncached path, and checked back
         // IN from `finally` below whatever the outcome; success, a filter stop, or a genuine exception all leave
         // `reuse` in a state TextGenerationPipeline.Generate already decided is safe to store (see its doc).
-        RetainedSequence? reuse = request.PrefixCacheKey is { Length: > 0 } cacheKey && slot.SsmPipeline is null
-            ? (slot.PrefixCache ??= NewPrefixCacheStore()).Checkout(cacheKey) ?? new RetainedSequence()
+        // Scoped by tenant and by the model the device holds, so one tenant's prefix never serves another's (see PrefixCacheScope.TryKey).
+        RetainedSequence? reuse = PrefixCacheScope.TryKey(slot, request, out string? scopedKey)
+            ? (slot.PrefixCache ??= NewPrefixCacheStore()).Checkout(scopedKey) ?? new RetainedSequence()
             : null;
         GenerationResult result;
         try
@@ -297,7 +571,7 @@ public sealed class TextService : ITextService, IDisposable
         {
             if (reuse is not null)
             {
-                slot.PrefixCache!.CheckIn(request.PrefixCacheKey!, reuse);
+                slot.PrefixCache!.CheckIn(scopedKey!, reuse);
             }
         }
         return run.Finish(result);
@@ -870,8 +1144,52 @@ public sealed class TextService : ITextService, IDisposable
         return freed;
     }
 
+    /// <inheritdoc/>
+    public DeploymentUnloadOutcome UnloadDeployment(string deploymentId)
+    {
+        string deviceKey;
+        lock (_deploymentsGate)
+        {
+            DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+            if (record is null) return DeploymentUnloadOutcome.NotFound;
+            deviceKey = record.DeviceKey;
+        }
+        if (!_slots.TryGetValue(deviceKey, out TextDeviceSlot? slot))
+            return DeploymentUnloadOutcome.AlreadyGone;
+        if (!slot.Lock.Wait(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+        {
+            Logs.Warning($"[TextService] Unloading deployment '{deploymentId}' timed out waiting on an in-flight generation ({UnloadWaitSeconds}s); its model stays resident.");
+            return DeploymentUnloadOutcome.TimedOut;
+        }
+        try
+        {
+            // Checked under the slot lock, so no load can replace the model between this check and the free.
+            if (!HoldsDevice(deploymentId, slot))
+                return DeploymentUnloadOutcome.AlreadyGone;
+            // HoldsDevice already required a loaded model, so the slot has something to free: `freed` is not needed here.
+            return TryFreeHeldSlot(slot, out _) ? DeploymentUnloadOutcome.Unloaded : DeploymentUnloadOutcome.TimedOut;
+        }
+        finally
+        {
+            slot.Lock.Release();
+        }
+    }
+
+    /// <summary>Whether deployment <paramref name="deploymentId"/> still holds <paramref name="slot"/>: it is Ready or Degraded, it is on that slot, and the slot holds the
+    /// model it loaded. Caller holds the slot's lock.</summary>
+    private bool HoldsDevice(string deploymentId, TextDeviceSlot slot)
+    {
+        lock (_deploymentsGate)
+        {
+            DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+            return record is { State: DeploymentState.Ready or DeploymentState.Degraded }
+                && _slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? held) && ReferenceEquals(held, slot)
+                && string.Equals(slot.LoadedPath, record.Spec.LocalPath, StringComparison.Ordinal);
+        }
+    }
+
     /// <summary>Takes the slot's generation lock so the release cannot race an in-flight request, then frees the model AND the slot's backend — <see cref="UnloadSlot"/> alone deliberately keeps the device context alive for the next load, which is not enough when the host is reclaiming memory.</summary>
-    private static bool UnloadDeviceSlot(TextDeviceSlot slot)
+    private bool UnloadDeviceSlot(TextDeviceSlot slot)
     {
         if (!slot.Lock.Wait(TimeSpan.FromSeconds(UnloadWaitSeconds)))
         {
@@ -881,37 +1199,49 @@ public sealed class TextService : ITextService, IDisposable
         }
         try
         {
-            // Scheduled requests run without the slot lock: let them finish before the model they run on is freed.
-            if (!slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
-            {
-                Logs.Warning($"[TextService] Unload timed out waiting on scheduled requests ({UnloadWaitSeconds}s) - "
-                    + $"'{slot.LoadedPath}' stays resident.");
-                return false;
-            }
-            bool freed = UnloadSlot(slot);
-            if (slot.ExtraStageBackends is not null)
-            {
-                foreach (IBackend stage in slot.ExtraStageBackends)
-                {
-                    try { stage.Dispose(); }
-                    catch (Exception ex) { Logs.Debug($"[TextService] Stage backend dispose on unload failed: {ex.Message}"); }
-                }
-                slot.ExtraStageBackends = null;
-                freed = true;
-            }
-            if (slot.Backend is not null)
-            {
-                try { slot.Backend.Dispose(); }
-                catch (Exception ex) { Logs.Debug($"[TextService] Backend dispose on unload failed: {ex.Message}"); }
-                slot.Backend = null;
-                freed = true;
-            }
-            return freed;
+            return TryFreeHeldSlot(slot, out bool freed) && freed;
         }
         finally
         {
             slot.Lock.Release();
         }
+    }
+
+    /// <summary>Frees the model and backend of <paramref name="slot"/>, whose lock the caller holds. Returns false when the scheduled requests on it did not finish in
+    /// time: the model then stays resident and its scheduler takes requests again. <paramref name="freed"/> says whether anything was resident to free.</summary>
+    private bool TryFreeHeldSlot(TextDeviceSlot slot, out bool freed)
+    {
+        freed = false;
+        // Draining: the scheduler takes no more work and fails what is waiting; the requests it is decoding run on to their end below.
+        slot.Scheduler?.CancelQueued();
+        // Scheduled requests run without the slot lock: let them finish before the model they run on is freed.
+        if (!slot.WaitForLeases(UnloadLeaseWait))
+        {
+            // The model stays resident and keeps serving, so its scheduler takes requests again.
+            slot.Scheduler?.ResumeAdmission();
+            Logs.Warning($"[TextService] Unload timed out waiting on scheduled requests ({UnloadLeaseWait.TotalSeconds:0.#}s) - "
+                + $"'{slot.LoadedPath}' stays resident.");
+            return false;
+        }
+        freed = UnloadSlot(slot);
+        if (slot.ExtraStageBackends is not null)
+        {
+            foreach (IBackend stage in slot.ExtraStageBackends)
+            {
+                try { stage.Dispose(); }
+                catch (Exception ex) { Logs.Debug($"[TextService] Stage backend dispose on unload failed: {ex.Message}"); }
+            }
+            slot.ExtraStageBackends = null;
+            freed = true;
+        }
+        if (slot.Backend is not null)
+        {
+            try { slot.Backend.Dispose(); }
+            catch (Exception ex) { Logs.Debug($"[TextService] Backend dispose on unload failed: {ex.Message}"); }
+            slot.Backend = null;
+            freed = true;
+        }
+        return true;
     }
 
     /// <inheritdoc/>
@@ -997,8 +1327,8 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
-    private static bool UnloadSlot(TextDeviceSlot slot)
+    /// <summary>Frees the slot's loaded model, keeping its backend/device alive, and records the deployments it served as Unloaded. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
+    private bool UnloadSlot(TextDeviceSlot slot)
     {
         // A scheduled request runs on the scheduler without the slot lock. Every caller that frees a model drains those first
         // (see PrepareSlot, UnloadDeviceSlot and RunPipeline), so one still running here is a bug, not a wait.
@@ -1058,6 +1388,9 @@ public sealed class TextService : ITextService, IDisposable
         slot.LoggedSettingMismatches.Clear();
         bool hadModel = slot.LoadedPath is not null;
         slot.LoadedPath = null;
+        // Every path that frees a model comes here (an unload, a reload, AlwaysFreeMemory), so the deployments it served are recorded once, here.
+        if (hadModel)
+            RetireDeploymentsOn(slot);
         // A GGUF load leaves multi-GB dequantized host buffers (and the closed mmap's pages) reachable only via
         // finalizers; without forcing a collection here, free host RAM shrinks monotonically across sequential
         // model loads until the process restarts. Ported verbatim from the provider — measured, not defensive.
@@ -1284,6 +1617,7 @@ public sealed class TextService : ITextService, IDisposable
             GraphDecode = request.GraphDecode,
             SpeculativeDecode = request.SpeculativeDecode,
             EnableThinking = request.EnableThinking,
+            ReasoningEffort = request.ReasoningEffort,
             PrefixCacheCapacityHint = request.PrefixCacheCapacityHint,
         };
         if (rawCompletion)

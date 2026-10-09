@@ -72,7 +72,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [MemberData(nameof(RouteCases))]
     public void MoeRoute_MatchesCpu(string name, MoeRouteArgs args, int experts, bool useBias)
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         const int Tokens = 37;
         float[] logits = Random(Tokens * experts, experts * 7 + 1, 3f);
         float[] bias = Random(experts, experts + 2, 0.4f);
@@ -95,7 +95,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [Fact]
     public void MoeRoute_ExactTies_TakeTheLowestIndexLikeCpu()
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         float[] logits = new float[5 * 40];
         MoeRouteArgs flat = new(40, 6, MoeRouteScoring.Softmax, Renormalize: true);
         float[] bias = new float[40];
@@ -120,7 +120,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [Fact]
     public void MoeBuildDispatch_IsByteIdenticalToCpu_IncludingEmptyExpertsAndDroppedPairs()
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         foreach ((int tokens, int experts, int k) in new[] { (1, 1, 1), (7, 5, 2), (4096, 64, 6), (300, 300, 3) })
         {
             Random rng = new(tokens + experts);
@@ -157,7 +157,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [InlineData(true)]
     public void MoeCombine_IsBitIdenticalToCpu(bool accumulate)
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         const int Tokens = 129, K = 6, H = 300, Rows = Tokens * K;
         Random rng = new(5);
         int[] slots = Enumerable.Range(0, Tokens * K).Select(i => i % 11 == 0 ? -1 : rng.Next(0, Rows)).ToArray();
@@ -180,21 +180,21 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [Fact]
     public void MoeCombine_SkipsSlotsBeyondTheExpertRowsInsteadOfReadingOutOfBounds()
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         using Tensor rows = F32(new float[] { 1, 2, 10, 20 }, 2, 2);
         using Tensor slots = I32(new[] { 1, 2, 999999, 0 }, 2, 2);
         using Tensor weights = F32(new float[] { 2, 3, 4, 5 }, 2, 2);
-        using Tensor output = EmptyF32(2, 2);
+        using Tensor result = EmptyF32(2, 2);
         using CudaBackend cuda = new(0, PtxDir());
-        cuda.MoeCombine(output, rows, slots, weights, 2, accumulate: false);
-        Assert.Equal(new float[] { 20, 40, 5, 10 }, ReadF32(output));
+        cuda.MoeCombine(result, rows, slots, weights, 2, accumulate: false);
+        Assert.Equal(new float[] { 20, 40, 5, 10 }, ReadF32(result));
     }
 
     [Trait("Category", "GpuIntegration")]
     [Fact]
     public void Route_Dispatch_Combine_Chain_Stays_On_Device_And_Matches_Cpu()
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         const int Tokens = 200, E = 32, K = 4, H = 96;
         MoeRouteArgs args = new(E, K, MoeRouteScoring.SqrtSoftplus, Renormalize: true, RenormEpsilon: 1e-20f, Scale: 1.5f);
         float[] logits = Random(Tokens * E, 41, 2f), bias = Random(E, 42, 0.3f), x = Random(Tokens * H, 43);
@@ -232,7 +232,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [InlineData(4, 9, 1, true, false)]
     public void TopKLastDim_MatchesCpu_Exactly(int rows, int n, int k, bool sortByIndex, bool heavyTies)
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         Random rng = new(n + k);
         float[] data = new float[rows * n];
         for (int i = 0; i < data.Length; i++)
@@ -253,7 +253,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [Fact]
     public void TopKLastDim_HandlesNanNegativeZeroAndInfinities_LikeCpu()
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         float nan = float.NaN, inf = float.PositiveInfinity;
         float[] row = { 1f, nan, -0f, 0f, -inf, inf, 2f, nan, 0f, -0f, 2f, -inf };
         float[] data = row.Concat(row.Reverse()).ToArray();
@@ -274,7 +274,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [Fact]
     public void TopKLastDim_Rejects_K_Beyond_The_Kernel_Limit()
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         using CudaBackend cuda = new(0, PtxDir());
         using Tensor input = EmptyF32(1, 4096), values = EmptyF32(1, 2049), indices = EmptyI32(1, 2049);
         Assert.Throws<NotSupportedException>(() => cuda.TopKLastDim(values, indices, input, 2049));
@@ -293,7 +293,7 @@ public sealed class CudaMoePrimitiveTests(ITestOutputHelper output)
     [Fact]
     public void Softplus_MatchesCpu_IncludingInPlace()
     {
-        if (!CudaContext.IsAvailable()) return;
+        if (!CudaContext.IsAvailable()) { output.WriteLine("SKIPPED: no CUDA device"); return; }
         float[] x = Random(10007, 9, 40f).Concat(new[] { 0f, 20f, 20.001f, -100f, 88f }).ToArray();
         float[] Run(IBackend be, bool inPlace)
         {

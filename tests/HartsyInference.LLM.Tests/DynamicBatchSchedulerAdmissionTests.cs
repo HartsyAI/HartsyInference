@@ -147,6 +147,42 @@ public sealed class DynamicBatchSchedulerAdmissionTests
     }
 
     [Fact]
+    public async Task A_Head_Failed_By_CancelQueued_Mid_Admission_Is_Not_Prefilled()
+    {
+        // The loop peeks the waiting head, then CancelQueued fails it in that window. The loop must not prefill it: its caller already has a 503.
+        TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();
+        Dictionary<string, Tensor> w = DynamicBatchSchedulerTests.Weights(cfg);
+        try
+        {
+            using CpuBackend backend = new();
+            using GenericTransformer model = new(cfg);
+            model.LoadWeights(w, "model");
+            using ManualResetEventSlim entered = new(false);
+            using ManualResetEventSlim release = new(false);
+            DynamicBatchSchedulerShutdownTests.HeldPrefillModel held = new(new GenericTransformerModel(model, backend), entered, release);
+            using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
+            using DynamicBatchScheduler scheduler = new(held, new DynamicBatchSchedulerReleaseTests.NoStopTokenizer(), pool, maxActiveSequences: 1);
+
+            Task<GenerationResult> admitted = scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([1, 2, 3], 4, seed: 0), null, CancellationToken.None);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(30)), "the first prefill never started");
+            entered.Reset(); // from here on, any prefill sets it again
+
+            Task<GenerationResult> waiting = scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([4, 5], 4, seed: 0), null, CancellationToken.None);
+            // Once the first sequence has finished, the loop peeks the waiting head and reaches the seam: fail the queue there, as an unload would.
+            scheduler.BeforeRemoveHeadForTests = () => scheduler.CancelQueued();
+
+            release.Set();
+            await Assert.ThrowsAsync<SchedulerStoppedException>(() => waiting).WaitAsync(TimeSpan.FromSeconds(60));
+            await admitted.WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.False(entered.IsSet, "the failed head was prefilled anyway");
+        }
+        finally
+        {
+            foreach (Tensor t in w.Values) t.Dispose();
+        }
+    }
+
+    [Fact]
     public async Task A_Cancelled_Waiter_Behind_The_Head_Gives_Up_Its_Place_Before_The_Head_Is_Admitted()
     {
         TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();

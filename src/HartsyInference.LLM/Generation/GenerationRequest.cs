@@ -28,6 +28,10 @@ public sealed record GenerationRequest
     /// admitted at once is never told. Called on the scheduler's loop, after it releases its queue lock. Not called on the pipeline.</summary>
     public Action<int>? OnQueued { get; init; }
 
+    /// <summary>Reasoning effort in [1, 100] for a template that takes one (DeepSeek-V4.1 thinking mode); null uses the template's default. Templates without one ignore it.</summary>
+    public int? ReasoningEffort { get; init; }
+
+
     /// <summary>Pre-tokenized prompt ids; when set, templating and tokenization are skipped entirely.</summary>
     public IReadOnlyList<int>? RawTokenIds { get; init; }
 

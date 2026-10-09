@@ -13,6 +13,7 @@ git preserves removed history.
 | Which models have been run on Vulkan | [Checklists/VULKAN_STATUS.md](Checklists/VULKAN_STATUS.md) |
 | Cross-cutting open work | [Checklists/ROADMAP.md](Checklists/ROADMAP.md) |
 | Real-weight numerical evidence | [Checklists/PARITY_VERIFICATION.md](Checklists/PARITY_VERIFICATION.md) |
+| DeepSeek-V4.1-Flash rented-GPU runbook and frozen gates | [Checklists/DSV41_RENTAL_RUNBOOK.md](Checklists/DSV41_RENTAL_RUNBOOK.md), [Checklists/DSV41_CAMPAIGN_FREEZE.md](Checklists/DSV41_CAMPAIGN_FREEZE.md) |
 | Debugging traps | [Checklists/TROUBLESHOOTING.md](Checklists/TROUBLESHOOTING.md) |
 | Upstream constants, formats, methods, unresolved research | [Research/](Research/) |
 | Multi-GPU configuration | [MULTI_GPU.md](MULTI_GPU.md) |

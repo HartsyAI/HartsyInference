@@ -34,7 +34,7 @@ public sealed class DeepSeekV41TokenizerParityTests
     public void StressCorpus_IdsMatchHuggingFace()
     {
         GgufTokenizer? tokenizer = Load();
-        if (tokenizer is null) return;
+        if (tokenizer is null) { _output.WriteLine("SKIPPED: tokenizer did not load"); return; }
         using JsonDocument doc = JsonDocument.Parse(File.ReadAllText(DeepSeekV41ReferenceFiles.ReferenceJson));
         int index = 0;
         foreach (JsonElement entry in doc.RootElement.GetProperty("stress").EnumerateArray())
@@ -51,7 +51,7 @@ public sealed class DeepSeekV41TokenizerParityTests
     public void SpecialIds_AreResolved()
     {
         GgufTokenizer? tokenizer = Load();
-        if (tokenizer is null) return;
+        if (tokenizer is null) { _output.WriteLine("SKIPPED: tokenizer did not load"); return; }
         Assert.Equal(0, tokenizer.BosId);
         Assert.Equal(1, tokenizer.EosId);
         Assert.Equal(129264, tokenizer.SpecialId("<｜deepseek_image｜>"));
