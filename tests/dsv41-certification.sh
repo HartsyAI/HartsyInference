@@ -20,8 +20,7 @@ set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date -u +%Y-%m-%dT%H%M%SZ)"
-LANE="${1:-}"
-[ $# -gt 0 ] && shift
+LANE=""
 DRY_RUN=0
 OUT=""
 while [ $# -gt 0 ]; do
@@ -32,7 +31,11 @@ while [ $# -gt 0 ]; do
             OUT="$2"
             shift
             ;;
-        *) echo "unknown argument: $1" >&2; exit 64 ;;
+        --*) echo "unknown argument: $1" >&2; exit 64 ;;
+        *)
+            [ -z "${LANE}" ] || { echo "one lane per run, got '${LANE}' and '$1'" >&2; exit 64; }
+            LANE="$1"
+            ;;
     esac
     shift
 done
@@ -65,9 +68,10 @@ GPU_NATIVE_CLASSES=(
     "HartsyInference.Cuda.Tests CudaQuantDerivativeDequantTests"
     "HartsyInference.Cuda.Tests CudaExl3DequantTests"
 )
-# MOE_RIG_READINESS.md step 4: the rest of the GpuIntegration category, excluding the expert-cache classes above.
+# MOE_RIG_READINESS.md step 4: the rest of the GpuIntegration category. It excludes the expert-cache classes above and the
+# native FP4 classes, which belong to the gpu-native lane and would otherwise run on cards they do not apply to.
 GPU_EXPERT_REST_FILTER="Category=GpuIntegration"
-for pair in "${GPU_EXPERT_CLASSES[@]}"; do
+for pair in "${GPU_EXPERT_CLASSES[@]}" "${GPU_NATIVE_CLASSES[@]}"; do
     GPU_EXPERT_REST_FILTER="${GPU_EXPERT_REST_FILTER}&FullyQualifiedName!~.${pair#* }."
 done
 
@@ -100,7 +104,7 @@ check_cuda() { # "min VALUE" or "set \"V1 V2 ...\"": the rule every GPU must mee
     if ! command -v nvidia-smi >/dev/null 2>&1; then problem "nvidia-smi not found"; return; fi
     local caps cc holders
     caps=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d ' ')
-    if [ -z "${caps}" ]; then problem "nvidia-smi reports no GPU"; return; fi
+    if [ -z "${caps}" ]; then problem "nvidia-smi did not report compute capability: no GPU, or a driver too old to query it"; return; fi
     # GPU suites run alone (AGENTS.md): a process already holding a device would contend with the run and skew it.
     holders=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c . || true)
     [ "${holders:-0}" -eq 0 ] || problem "${holders} compute process(es) already hold a GPU; stop them first, GPU suites run one at a time"
@@ -206,15 +210,10 @@ run_class() { # name, dotnet args...
     # Detailed logging shows each test's output, so a SKIPPED line a test writes and then returns from is visible.
     dotnet test "$@" --logger "console;verbosity=detailed" >"${log}" 2>&1
     local rc=$?
-    local line total failed skipped
-    line=$(grep -E '^(Passed|Failed)!' "${log}" | tail -n 1)
-    total=$(sed -nE 's/.*Total: *([0-9]+).*/\1/p' <<<"${line}")
-    failed=$(sed -nE 's/.*Failed: *([0-9]+).*/\1/p' <<<"${line}")
-    skipped=$(sed -nE 's/.*Skipped: *([0-9]+).*/\1/p' <<<"${line}")
-    total=${total:-0}
-    failed=${failed:-0}
-    skipped=${skipped:-0}
-    if [ -z "${line}" ]; then record FAIL "${name}" "no test summary (exit ${rc}); see logs/${name}.log"
+    # Sum every summary line, one per target framework, so no framework's failures are missed.
+    local runs total failed skipped
+    read -r runs total failed skipped < <(awk '/^(Passed|Failed)!/ { n++; for (i = 1; i < NF; i++) { if ($i == "Total:") t += $(i + 1); else if ($i == "Failed:") f += $(i + 1); else if ($i == "Skipped:") s += $(i + 1) } } END { printf "%d %d %d %d\n", n + 0, t + 0, f + 0, s + 0 }' "${log}")
+    if [ "${runs}" -eq 0 ]; then record FAIL "${name}" "no test summary (exit ${rc}); see logs/${name}.log"
     elif [ "${rc}" -ne 0 ] || [ "${failed}" -ne 0 ]; then record FAIL "${name}" "${failed} failed of ${total} (exit ${rc})"
     elif [ "${skipped}" -ne 0 ]; then record FAIL "${name}" "${skipped} skipped of ${total}: a skip is not a pass"
     elif grep -q "SKIPPED" "${log}"; then record FAIL "${name}" "a test wrote SKIPPED and returned without running; see logs/${name}.log"
