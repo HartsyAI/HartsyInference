@@ -110,6 +110,11 @@ public static class CompatEndpoints
                             Choices = [new ChatCompletionChunkChoice { Delta = new ChatCompletionDelta { ToolCalls = [ToToolCallDto(call, index: 0)] } }],
                         }, jsonOptions));
                     }
+                    else if (chunk.Kind == TextChunkKind.Status && chunk.Status is { } status)
+                    {
+                        // Queue position and prefill progress, as a named frame that OpenAI clients ignore.
+                        writer.TryWrite(SseHelpers.Event("hartsy.status", HartsyStatusDto.From(status), jsonOptions));
+                    }
                     else if (chunk.Kind == TextChunkKind.StopReason && chunk.Stop is { } stop)
                     {
                         finishReason = ToFinishReason(stop);

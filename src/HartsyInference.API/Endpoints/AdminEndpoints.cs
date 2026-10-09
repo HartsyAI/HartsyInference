@@ -1,5 +1,6 @@
 using HartsyInference.API;
 using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Services;
 using Microsoft.Extensions.DependencyInjection;
@@ -27,6 +28,48 @@ public static class AdminEndpoints
             }
             return Results.Ok(ModelCatalog.ForModality(parsed));
         });
+
+        // Deployments: a named model loaded onto a device. GET lists them, POST loads one (and waits for the load), DELETE unloads one.
+        app.MapGet("/admin/deployments", (IInferenceEngine engine) => Results.Ok(new DeploymentListResponse
+        {
+            Deployments = [.. engine.Text.Deployments.Select(DeploymentDto.From)],
+        }));
+
+        app.MapPost("/admin/deployments", async (DeployRequest req, IInferenceEngine engine, CancellationToken ct) =>
+        {
+            if (string.IsNullOrWhiteSpace(req.DeploymentId) || string.IsNullOrWhiteSpace(req.Model))
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status400BadRequest,
+                    "Fields 'deployment_id' and 'model' are required.", "invalid_request_error");
+            }
+            try
+            {
+                ModelSpec spec = ModelResolver.Resolve(req.Model, modelPathArg: null, Modality.Text);
+                DeploymentStatus status = await engine.Text.DeployAsync(
+                    new DeploymentRequest { DeploymentId = req.DeploymentId, Model = spec, Device = req.Device }, ct);
+                return Results.Ok(DeploymentDto.From(status));
+            }
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+        });
+
+        app.MapDelete("/admin/deployments/{deploymentId}", (string deploymentId, IInferenceEngine engine) =>
+        {
+            DeploymentStatus? status = engine.Text.Deployments.FirstOrDefault(d => d.DeploymentId == deploymentId);
+            if (status is null)
+            {
+                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound,
+                    $"'{deploymentId}' is not a known deployment.", "invalid_request_error");
+            }
+            return Results.Ok(new { deployment_id = deploymentId, unloaded = engine.Text.Unload(status.Device) });
+        });
+
+        app.MapGet("/admin/capacity", (IInferenceEngine engine) => Results.Ok(new
+        {
+            deployments = engine.Text.Deployments.Select(d => CapacityDto.For(d, engine.Text.Capacity(d.DeploymentId))).ToList(),
+        }));
 
         app.MapGet("/admin/models", (IInferenceEngine engine) =>
             Results.Ok(new { loaded = engine.LoadedPipelineKeys }));
