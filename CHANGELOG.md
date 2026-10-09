@@ -17,6 +17,14 @@ stable release will require. Dates are UTC.
 - **Added: a pack-local Q2_0 expert codec** (64-weight blocks, fp16 scale, 2-bit codes, 2.25 bits per weight) that expert packs can store and verify; it is not a GGUF type. Its measured error on random data is high (relative RMSE about 0.32 to 0.38), which is expected for a four-level grid at this width; it is not quality-validated on a real model, and no CPU or GPU kernel decodes it yet.
 - **Fixed: block-scaled checkpoint weights (MXFP4 and FP8 block) now widen through their recipe** when quantized offline, instead of being refused or read as raw values.
 
+## alpha.315
+
+- **Added: seeded stress tests for the expert cache** covering eviction churn, upload and await failure injection, cancellation mid-batch, repeated reuse, teardown with leases held, and a random operation sequence that checks the budget bound after every step. **Fixed: a failed upload's await path could leave the entry looking ready if the abandon step itself threw.** `ExpertCacheBase.AwaitPending` now always removes the entry, and the original failure is still the one reported.
+
+## alpha.314
+
+- **Added: expert residency components (not yet wired into the expert cache): a fixed-capacity routing telemetry recorder, three deterministic residency policies (segmented LRU, LFU, decayed LFU with hysteresis), a versioned binary routing-trace format with a seeded Zipf generator, and a slot-cache replay harness that reports hit rates.** See `docs/EXPERT_CACHE.md`.
+
 ## alpha.310
 
 - **Added: the CUDA expert device runner (`CudaExpertDeviceRunner`), synchronous and one expert per call.** It implements
