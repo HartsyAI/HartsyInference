@@ -27,6 +27,8 @@ Start with `cpu-oracle` for new real-weight evidence. Use `gpu-expert` to confir
   means driver 580.x or newer. The "PTX ISA version trap" in [TROUBLESHOOTING.md](TROUBLESHOOTING.md) has the details.
   Check the image with `nvidia-smi` before anything else.
 - **Compute capability.** The baseline kernels target SM 8.0 and newer. The block-scaled FP4 suites need SM 10.0 or 12.0.
+- **Free VRAM.** The expert-cache positive control needs about 1.6 GB free on the card. Below that it writes SKIPPED and the
+  lane goes red. That is deliberate, but it means a small card cannot certify the lane.
 - **Software.** .NET 10 SDK, git, and Python 3 for the oracle environment.
 - **Secrets.** A Hugging Face token never goes into the repository or into chat. Export it for the session, only while
   downloading.
