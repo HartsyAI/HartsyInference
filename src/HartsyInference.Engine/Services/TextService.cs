@@ -937,6 +937,7 @@ public sealed class TextService : ITextService, IDisposable
             // Best-effort and non-blocking: a slot mid-generation is skipped rather than waited on, since this is
             // background hygiene (pool slack an idle point returns to the driver), never something a live request
             // should queue behind.
+            // A lease is taken only while the slot lock is held, so none can start between these two checks; that is what makes them race-free.
             if (slot.HasLeases || !await slot.Lock.WaitAsync(0).ConfigureAwait(false))
             {
                 continue;
