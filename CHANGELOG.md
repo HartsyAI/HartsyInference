@@ -14,6 +14,10 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the certification runner reads the .NET 10 SDK's test summary.** `run_class` matched only the classic `Passed!`/`Failed!` line, so a class that passed on this SDK was recorded as `no test summary`. The summary is now parsed by `tests/dsv41-certification-summary.awk`, which reads the `Test Run Successful.` / `Test Run Failed.` block and its totals. `tests/dsv41-certification-summary-test.sh` checks both formats.
 
+## alpha.323
+
+- **Added: the heterogeneous executor runs its CPU share on packed Q8_0 and Q4_K weights.** `IExpertHostRunner` is the CPU side of a planned layer. `HeterogeneousExpertExecutor` gets an overload that takes one; the existing F32 overload now runs through the same loop, so its behavior and signature are unchanged. `PackedExpertHostRunner` (Cpu) reads each expert's packed projections in place through `CpuExpertKernels`, with no F32 copy. A mixed plan, with its CPU experts packed and one GPU expert on the reference device, matches the all-F32 reference within the kernel tolerances for both formats. Refuses an expert whose dtype is not the runner's, and a dtype without a packed kernel.
+
 ## alpha.322
 
 - **Added: a rig preflight test, and a GPU rig checklist that matches the merged code.** `RigPreflightTests` fails unless CUDA is usable, so the first step of the rig run cannot pass by skipping every test. Its filter had matched nothing before, because the class did not exist. `docs/Checklists/MOE_RIG_READINESS.md` drops the pack, planner and CLI from the "not yet" list, adds the expert kernel and device runner suites to the expert run, and records what this card confirms: `CudaExpertKernelTests` passes 5 of 5 on sm_75, and `CudaExpertDeviceRunnerTests` needs sm_80 or newer because `CudaBackend` eagerly loads sm_80 modules. Every class in the run list matches at least one test. Nothing in the runtime changes.

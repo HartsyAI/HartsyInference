@@ -105,7 +105,8 @@ Subsystems with CPU tests in place:
   real MoE checkpoint has been packed or verified yet.
 - **Production use of the executor.** The planner (#306), the heterogeneous executor (#313), the opt-in CPU runtime (#340)
   and the CUDA F32 runner (#335) exist. No production model routes experts through them by default. The GPU grouped kernels
-  (M6) are not built, and the packed CPU kernels (#341) are not wired into the executor.
+  (M6) are not built, and the packed CPU kernels (#341) run the executor's CPU share through `PackedExpertHostRunner` (#349). Nothing
+  routes production experts through it yet.
 - **Measurements the plan asks for.** Instrumented now: per-op timing (`OpProfile`) and expert-cache counters (hits, misses,
   uploads, bytes). Not yet instrumented: time to first token, tokens per forward pass, host-to-device and device-to-host
   bandwidth, peer bandwidth, CPU and GPU utilization, KV bytes.
