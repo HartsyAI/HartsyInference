@@ -37,6 +37,7 @@ Status: CPU reference, synthetic evidence. Greedy drafting only. Not verified on
 - `DeepSeekV41DSparkFixtureTests`: the target taps and the drafts against the upstream run on a synthetic model (`dump_dspark_fixture.py`).
 - `DeepSeekV41DSparkProposerTests`: the proposer's drafts at every decode position, and greedy speculation with the proposer equal to plain greedy decoding, with
   drafted rounds asserted.
+- `DeepSeekV41EngramTapTests`: a tap on a block with Engram is the hc-mean after the Engram step. Removing the step makes the test fail, so the placement is checked. The real DSpark targets (37 to 39) have no Engram, so this is the only check of that placement.
 - `DeepSeekV41SpeculativeScorerTests`: the scorer's rows equal per-token logits, the rollback work is counted in block passes, and greedy speculation matches plain
   decoding across prompt lengths and draft sizes.
 
@@ -46,5 +47,4 @@ Status: CPU reference, synthetic evidence. Greedy drafting only. Not verified on
   for unimodal objectives); measuring `SpsProfile` on the deployment; admission across requests (batching).
 - EOS and stop truncation of an accepted draft.
 - In-place truncation. A rollback still replays the kept history, which costs one decode per token after the prompt.
-- The Engram tap placement on a target layer that has Engram. The synthetic model has none on a tap, and the real DSpark targets (37 to 39) have none either.
 - A real-weights proposer round beyond the chain test, GPU paths, and a free-running real-weights agreement row.
