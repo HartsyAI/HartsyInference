@@ -21,6 +21,13 @@ internal static class TextMemoryProfile
     public static MemoryEstimate Estimate(string directory)
     {
         using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(directory);
+        return Estimate(checkpoint);
+    }
+
+    /// <summary>The estimate of an open checkpoint, so a caller that also plans from it opens the headers once.</summary>
+    public static MemoryEstimate Estimate(DeepSeekV41Checkpoint checkpoint)
+    {
+        ArgumentNullException.ThrowIfNull(checkpoint);
         IReadOnlyDictionary<DeepSeekV41WeightClass, long> bytes = checkpoint.Weights.BytesByClass;
         long resident = bytes[DeepSeekV41WeightClass.Dense] + bytes[DeepSeekV41WeightClass.Expert]
             + bytes[DeepSeekV41WeightClass.Engram] + bytes[DeepSeekV41WeightClass.Embed]

@@ -28,7 +28,7 @@ public static class ResidencyPlanner
         ResidencyLedgerSnapshot snapshot = ledger.Snapshot();
         long workingSet = demand.WorkingSet.Values.Sum();
         long mapped = demand.DenseBytes + demand.ExpertBytes;
-        long remaining = ledger.Available(ResidencyAccount.KvCache);
+        long remaining = snapshot.DeviceBytes - snapshot.DeviceReserved;
         long needed = workingSet + demand.HeadroomBytes;
         MemoryFitVerdict verdict = refused.Count > 0 ? MemoryFitVerdict.Infeasible
             : mapped <= remaining ? MemoryFitVerdict.Resident
@@ -36,7 +36,8 @@ public static class ResidencyPlanner
         string reason = verdict switch
         {
             MemoryFitVerdict.Infeasible => $"Needs {ByteFormat.GbF1(needed)} of working memory and headroom against {ByteFormat.GbF1(availableBytes)} free, short by "
-                + $"{ByteFormat.GbF1(needed - availableBytes)} ({string.Join(", ", refused.OrderBy(static entry => entry.Key).Select(static entry => $"{entry.Key} {ByteFormat.GbF1(entry.Value)}"))}).",
+                + $"{ByteFormat.GbF1(needed - availableBytes)}. Only the accounts the ledger refused are listed: "
+                + string.Join(", ", refused.OrderBy(static entry => entry.Key).Select(static entry => $"{entry.Key} {ByteFormat.GbF1(entry.Value)}")) + ".",
             MemoryFitVerdict.Streamed => $"Fits: {ByteFormat.GbF1(needed)} of working memory, but the {ByteFormat.GbF1(mapped)} of mapped weights exceed the "
                 + $"{ByteFormat.GbF1(remaining)} left, so they are read from storage again.",
             _ => $"Fits resident: {ByteFormat.GbF1(needed)} of working memory and {ByteFormat.GbF1(mapped)} of mapped weights within {ByteFormat.GbF1(availableBytes)} free.",

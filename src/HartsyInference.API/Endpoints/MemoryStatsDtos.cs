@@ -7,7 +7,8 @@ namespace HartsyInference.API.Endpoints;
 /// <summary>GET <c>/admin/memory</c>: the free host RAM, and the residency plan of each loaded text model.</summary>
 public sealed record MemoryStatsResponse
 {
-    [JsonPropertyName("host_available_bytes")] public required long HostAvailableBytes { get; init; }
+    /// <summary>Free host RAM in bytes; null when the host does not report it.</summary>
+    [JsonPropertyName("host_available_bytes")] public required long? HostAvailableBytes { get; init; }
 
     [JsonPropertyName("models")] public required IReadOnlyList<LoadedModelMemoryDto> Models { get; init; }
 }

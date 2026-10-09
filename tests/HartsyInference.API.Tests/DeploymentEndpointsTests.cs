@@ -184,7 +184,8 @@ public sealed class DeploymentEndpointsTests : IClassFixture<WebApplicationFacto
 
         Assert.Equal(200, (int)response.StatusCode);
         JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
-        Assert.True(body.GetProperty("host_available_bytes").GetInt64() >= 0);
+        JsonElement host = body.GetProperty("host_available_bytes");
+        Assert.True(host.ValueKind == JsonValueKind.Null || host.GetInt64() >= 0);
         JsonElement model = Assert.Single(body.GetProperty("models").EnumerateArray());
         Assert.Equal("cpu", model.GetProperty("device_key").GetString());
         Assert.Equal("Resident", model.GetProperty("verdict").GetString());

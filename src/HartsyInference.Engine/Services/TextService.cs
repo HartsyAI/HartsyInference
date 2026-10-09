@@ -181,6 +181,7 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <inheritdoc/>
+    /// <remarks>Read without the slot lock. A plan is set at load and cleared at unload, so a read during either sees the earlier state or none; the admin view accepts that.</remarks>
     public IReadOnlyList<LoadedModelResidency> LoadedResidency =>
         [.. _slots.Where(entry => entry.Value.ResidencyPlan is not null && entry.Value.LoadedPath is not null)
             .Select(entry => new LoadedModelResidency(entry.Key, entry.Value.LoadedPath!, entry.Value.ResidencyPlan!))];
@@ -412,6 +413,7 @@ public sealed class TextService : ITextService, IDisposable
 
     private async Task<GenOutcome> RunAsync(ModelSpec spec, TextRequest request, Action<TextChunk>? sink, CancellationToken cancel)
     {
+        RequireValidRawTokenIds(request);
         // The tenant comes from the caller's identity when the request names none, so per-tenant state is keyed the same way for every route.
         request = request with { TenantId = TenantContext.Resolve(request.TenantId) };
         long diagnosticId = _engine.StartDiagnostics();
@@ -796,6 +798,8 @@ public sealed class TextService : ITextService, IDisposable
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
         slot.ResidencyPlan = plan;
+        if (plan?.Verdict == MemoryFitVerdict.Streamed)
+            Logs.Info($"[TextService] DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' is streamed: {plan.Reason}");
         Logs.Info($"[TextService] Loaded DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
     }
 
@@ -1595,6 +1599,14 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>True when the model has no usable chat template (ChatML fallback but the tokenizer never registered the <c>&lt;|im_start|&gt;</c> special token — base/non-instruct checkpoints), so generation must feed the latest user text straight to the tokenizer instead of applying a template that would throw.</summary>
     private static bool NeedsRawCompletion(IChatTemplate template, ILlmTokenizer tokenizer)
         => template is ChatMlTemplate && tokenizer.SpecialId("<|im_start|>") is null;
+
+    /// <summary>Refuses a pre-tokenized request that supplies no ids: an empty list would otherwise reach the pipeline and fail there with a less specific message.</summary>
+    /// <exception cref="HartsyInferenceException"><see cref="TextRequest.RawTokenIds"/> is empty.</exception>
+    internal static void RequireValidRawTokenIds(TextRequest request)
+    {
+        if (request.RawTokenIds is { Count: 0 })
+            throw new HartsyInferenceException("RawTokenIds is empty: a pre-tokenized request needs at least one token id.");
+    }
 
     /// <summary>Builds the engine's <see cref="GenerationRequest"/> from the native request; raw-completion feeds the last user message's plain text through <see cref="GenerationRequest.RawTokenIds"/>.</summary>
     internal static GenerationRequest BuildRequest(TextRequest request, bool rawCompletion, ILlmTokenizer tokenizer)

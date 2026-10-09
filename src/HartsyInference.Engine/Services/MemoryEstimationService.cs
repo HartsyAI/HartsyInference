@@ -6,6 +6,7 @@ using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.LLM.DeepSeekV41;
 
 namespace HartsyInference.Engine.Services;
 
@@ -78,7 +79,8 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
     /// <summary>A language model's fit: its checkpoint's residency plan against free host RAM, read from headers before anything is mapped.</summary>
     private static MemoryFit TextFit(string path, VramPolicy policy)
     {
-        MemoryEstimate estimate = TextMemoryProfile.Estimate(path);
+        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(path);
+        MemoryEstimate estimate = TextMemoryProfile.Estimate(checkpoint);
         long availableBytes = HostMemoryInfo.AvailableBytes() ?? 0;
         if (availableBytes <= 0)
         {
@@ -90,7 +92,7 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
                 Reason = "Host memory is not readable, so the fit is unknown.",
             };
         }
-        ResidencyPlan plan = DeepSeekV41HostPlanner.Plan(path, availableBytes);
+        ResidencyPlan plan = ResidencyPlanner.Plan(DeepSeekV41HostPlanner.Demand(checkpoint), availableBytes);
         return new MemoryFit
         {
             Verdict = plan.Verdict,

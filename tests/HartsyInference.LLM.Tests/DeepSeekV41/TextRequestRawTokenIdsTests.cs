@@ -1,3 +1,6 @@
+using HartsyInference.Core.Exceptions;
+using HartsyInference.Engine;
+using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using HartsyInference.LLM.Generation;
@@ -40,4 +43,35 @@ public sealed class TextRequestRawTokenIdsTests
         Assert.Null(engine.RawTokenIds);
         Assert.NotNull(engine.Messages);
     }
+
+    [Fact]
+    public async Task EmptyRawTokenIds_AreRefusedBeforeAnyModelWork()
+    {
+        using InferenceEngine engine = new("cpu");
+        TextRequest request = new() { Messages = [], RawTokenIds = [], MaxTokens = 4 };
+
+        HartsyInferenceException ex = await Assert.ThrowsAsync<HartsyInferenceException>(() => engine.Text.GenerateAsync(MissingModel(), request));
+
+        Assert.Contains("RawTokenIds", ex.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task EmptyRawTokenIds_EndTheStreamWithAnErrorStop()
+    {
+        using InferenceEngine engine = new("cpu");
+        TextRequest request = new() { Messages = [], RawTokenIds = [], MaxTokens = 4 };
+        List<TextChunk> chunks = [];
+
+        await foreach (TextChunk chunk in engine.Text.StreamAsync(MissingModel(), request))
+            chunks.Add(chunk);
+
+        // The stream pump reports a failure as a terminal error stop, so the refusal arrives as that stop's text.
+        TextChunk terminal = Assert.Single(chunks);
+        Assert.Equal(TextChunkKind.StopReason, terminal.Kind);
+        Assert.Equal(StopReason.Error, terminal.Stop);
+        Assert.Contains("RawTokenIds", terminal.Text, StringComparison.Ordinal);
+    }
+
+    /// <summary>A path that does not exist: a refusal that names RawTokenIds shows the request was rejected before the model was read.</summary>
+    private static ModelSpec MissingModel() => new() { Requested = "missing", Modality = Modality.Text, LocalPath = "/nonexistent/no-such-model" };
 }
