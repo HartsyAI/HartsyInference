@@ -39,6 +39,10 @@ public sealed record TextRequest
     /// <summary>Sets the model's chat-template <c>enable_thinking</c> variable (Qwen3-family reasoning-block toggle); null leaves it undefined so the template falls back to its own default. Ignored by templates without a thinking slot.</summary>
     public bool? EnableThinking { get; init; }
 
+    /// <summary>The tenant this request runs under, for per-tenant state such as the prefix cache. Null takes the current caller's identity (<see cref="TenantContext"/>),
+    /// else <see cref="TenantContext.Local"/>. The API never sets this from client input.</summary>
+    public string? TenantId { get; init; }
+
     /// <summary>Target device key (e.g. "cpu", "cuda:0"); null uses the backend's primary device.</summary>
     /// <remarks>The slot builds its own backend for this key and gates only that ordinal, so an engine built on one card
     /// can serve its LLM on another. On such an engine every generate and stream request must set this, or the model

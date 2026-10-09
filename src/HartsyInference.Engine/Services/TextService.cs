@@ -49,11 +49,155 @@ public sealed class TextService : ITextService, IDisposable
 
     private static long _requestCounter;
 
+    /// <summary>The deployments this service has loaded or tried to load, in first-deployed order. Guarded by <see cref="_deploymentsGate"/>.</summary>
+    private readonly List<DeploymentRecord> _deployedList = [];
+    private readonly object _deploymentsGate = new();
+
+    /// <summary>One deployment's state. The state moves only along <see cref="DeploymentStateMachine"/>'s transitions, under <see cref="_deploymentsGate"/>.</summary>
+    private sealed class DeploymentRecord(string deploymentId, ModelSpec spec, string deviceKey)
+    {
+        public string DeploymentId { get; } = deploymentId;
+        public ModelSpec Spec { get; set; } = spec;
+        public string DeviceKey { get; set; } = deviceKey;
+        public DeploymentState State { get; set; } = DeploymentState.Unloaded;
+        public string? Problem { get; set; }
+    }
+
     private readonly InferenceEngine _engine;
     private readonly ConcurrentDictionary<string, TextDeviceSlot> _slots = new(StringComparer.OrdinalIgnoreCase);
 
     /// <summary>Creates the service bound to its owning engine.</summary>
     internal TextService(InferenceEngine engine) => _engine = engine;
+
+    /// <inheritdoc/>
+    public async Task<DeploymentStatus> DeployAsync(DeploymentRequest request, CancellationToken cancel = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.DeploymentId);
+        string deviceKey = NormalizeDeviceKey(request.Device);
+        DeploymentRecord record = BeginDeployment(request.DeploymentId, request.Model, deviceKey);
+        TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
+        await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
+        try
+        {
+            // A load that replaces the device's model waits for scheduled requests on it first, as a request does (see PrepareSlot).
+            if (slot.HasLeases && !string.Equals(slot.LoadedPath, request.Model.LocalPath, StringComparison.OrdinalIgnoreCase)
+                && !slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+            {
+                throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the deployment.");
+            }
+            await Task.Run(() =>
+            {
+                using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
+                LoadInto(slot, deviceKey, request.Model, new TextRequest { Messages = [] });
+            }, cancel).ConfigureAwait(false);
+            lock (_deploymentsGate) Transition(record, DeploymentState.Ready);
+        }
+        catch (OperationCanceledException)
+        {
+            lock (_deploymentsGate)
+            {
+                record.Problem = "the deployment was cancelled before its model loaded";
+                Transition(record, DeploymentState.Failed);
+            }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Logs.Error($"[TextService] Deployment '{request.DeploymentId}' did not load: {ex.Message}", ex);
+            lock (_deploymentsGate)
+            {
+                record.Problem = ex.Message;
+                Transition(record, DeploymentState.Failed);
+            }
+        }
+        finally
+        {
+            slot.Lock.Release();
+        }
+        lock (_deploymentsGate) return Snapshot(record);
+    }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<DeploymentStatus> Deployments
+    {
+        get
+        {
+            lock (_deploymentsGate)
+            {
+                // A Ready deployment whose device no longer holds its model was unloaded through Unload: record that.
+                foreach (DeploymentRecord record in _deployedList)
+                {
+                    bool held = _slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? slot)
+                        && string.Equals(slot.LoadedPath, record.Spec.LocalPath, StringComparison.OrdinalIgnoreCase);
+                    if (record.State == DeploymentState.Ready && !held) Retire(record);
+                }
+                return [.. _deployedList.Select(Snapshot)];
+            }
+        }
+    }
+
+    /// <inheritdoc/>
+    public DeploymentCapacity? Capacity(string deploymentId)
+    {
+        DeploymentRecord? record;
+        lock (_deploymentsGate) record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+        if (record is null) return null;
+        _slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? slot);
+        DynamicBatchScheduler? scheduler = slot?.Scheduler;
+        PagedKvPool? pool = slot?.SchedulerPool;
+        lock (_deploymentsGate)
+        {
+            return new DeploymentCapacity(record.State, scheduler?.ActiveCount ?? 0, scheduler?.QueuedCount ?? 0, scheduler?.MaxActive ?? 0,
+                pool?.FreePageCount, pool?.MaxPages);
+        }
+    }
+
+    /// <summary>Records a deployment as Loading. The device's other ready deployments are retired, since this load replaces its model, and a previous load of the same id is
+    /// retired first. Returns the record the load then completes.</summary>
+    private DeploymentRecord BeginDeployment(string deploymentId, ModelSpec spec, string deviceKey)
+    {
+        lock (_deploymentsGate)
+        {
+            foreach (DeploymentRecord other in _deployedList.Where(r => r.DeviceKey == deviceKey && r.DeploymentId != deploymentId
+                && (r.State == DeploymentState.Ready || r.State == DeploymentState.Degraded)))
+            {
+                Retire(other);
+            }
+            DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+            if (record is null)
+            {
+                record = new DeploymentRecord(deploymentId, spec, deviceKey);
+                _deployedList.Add(record);
+            }
+            else
+            {
+                Retire(record);
+            }
+            record.Spec = spec;
+            record.DeviceKey = deviceKey;
+            record.Problem = null;
+            Transition(record, DeploymentState.Loading);
+            return record;
+        }
+    }
+
+    /// <summary>Moves a deployment along the allowed transitions to <see cref="DeploymentState.Unloaded"/>; a degraded one drains first.</summary>
+    private static void Retire(DeploymentRecord record)
+    {
+        while (record.State != DeploymentState.Unloaded)
+            Transition(record, record.State == DeploymentState.Degraded ? DeploymentState.Draining : DeploymentState.Unloaded);
+    }
+
+    /// <summary>Moves a deployment to <paramref name="to"/>, refusing a transition the state machine does not allow.</summary>
+    private static void Transition(DeploymentRecord record, DeploymentState to)
+    {
+        if (!DeploymentStateMachine.CanTransition(record.State, to))
+            throw new InvalidOperationException($"Deployment '{record.DeploymentId}' cannot go from {record.State} to {to}.");
+        record.State = to;
+    }
+
+    private static DeploymentStatus Snapshot(DeploymentRecord record) =>
+        new(record.DeploymentId, record.Spec.Requested, record.DeviceKey, record.State, record.Problem);
 
     /// <inheritdoc/>
     public async Task<TextResult> GenerateAsync(ModelSpec spec, TextRequest request, CancellationToken cancel = default)
@@ -134,6 +278,8 @@ public sealed class TextService : ITextService, IDisposable
 
     private async Task<GenOutcome> RunAsync(ModelSpec spec, TextRequest request, Action<TextChunk>? sink, CancellationToken cancel)
     {
+        // The tenant comes from the caller's identity when the request names none, so per-tenant state is keyed the same way for every route.
+        request = request with { TenantId = TenantContext.Resolve(request.TenantId) };
         long diagnosticId = _engine.StartDiagnostics();
         string deviceKey = NormalizeDeviceKey(request.Device);
         TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
@@ -881,6 +1027,8 @@ public sealed class TextService : ITextService, IDisposable
         }
         try
         {
+            // Draining: the scheduler takes no more work and fails what is waiting; the requests it is decoding run on to their end below.
+            slot.Scheduler?.CancelQueued();
             // Scheduled requests run without the slot lock: let them finish before the model they run on is freed.
             if (!slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
             {
