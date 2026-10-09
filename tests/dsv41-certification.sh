@@ -213,7 +213,7 @@ run_class() { # name, dotnet args...
     local rc=$?
     # Sum every summary line, one per target framework, so no framework's failures are missed.
     local runs total failed skipped
-    read -r runs total failed skipped < <(awk '/^(Passed|Failed)!/ { n++; for (i = 1; i < NF; i++) { if ($i == "Total:") t += $(i + 1); else if ($i == "Failed:") f += $(i + 1); else if ($i == "Skipped:") s += $(i + 1) } } END { printf "%d %d %d %d\n", n + 0, t + 0, f + 0, s + 0 }' "${log}")
+    read -r runs total failed skipped < <(awk -f "${REPO_ROOT}/tests/dsv41-certification-summary.awk" "${log}")
     if [ "${runs}" -eq 0 ]; then record FAIL "${name}" "no test summary (exit ${rc}); see logs/${name}.log"
     elif [ "${rc}" -ne 0 ] || [ "${failed}" -ne 0 ]; then record FAIL "${name}" "${failed} failed of ${total} (exit ${rc})"
     elif [ "${skipped}" -ne 0 ]; then record FAIL "${name}" "${skipped} skipped of ${total}: a skip is not a pass"
