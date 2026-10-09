@@ -33,6 +33,35 @@ public sealed class TextServiceDeploymentTests : IDisposable
     }
 
     [Fact]
+    public async Task A_Deploy_Waiting_For_The_Device_Leaves_The_Old_Deployment_Ready_And_Fails_When_Cancelled()
+    {
+        string path = TextServiceLeaseTests.WriteCheckpoint(_root, "model");
+        using InferenceEngine engine = new("cpu", 0);
+        TextService text = (TextService)engine.Text;
+        await text.DeployAsync(Deploy("old", path));
+        TextDeviceSlot slot = text.SlotFor("cpu")!;
+
+        // Something else holds the device, so the new deploy cannot take it.
+        await slot.Lock.WaitAsync();
+        try
+        {
+            using CancellationTokenSource cancel = new();
+            Task<DeploymentStatus> waiting = text.DeployAsync(Deploy("new", path), cancel.Token);
+            // The old deployment still serves while the new one waits, so it still reads Ready.
+            Assert.Equal(DeploymentState.Ready, text.Deployments.Single(d => d.DeploymentId == "old").State);
+            cancel.Cancel();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => waiting).WaitAsync(TimeSpan.FromSeconds(30));
+        }
+        finally
+        {
+            slot.Lock.Release();
+        }
+
+        Assert.Equal(DeploymentState.Ready, text.Deployments.Single(d => d.DeploymentId == "old").State);
+        Assert.Equal(DeploymentState.Failed, text.Deployments.Single(d => d.DeploymentId == "new").State);
+    }
+
+    [Fact]
     public async Task After_An_Unload_Capacity_And_Deployments_Both_Report_Unloaded()
     {
         string path = TextServiceLeaseTests.WriteCheckpoint(_root, "model");

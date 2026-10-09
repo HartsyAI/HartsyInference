@@ -82,9 +82,12 @@ public sealed class TextService : ITextService, IDisposable
         string deviceKey = NormalizeDeviceKey(request.Device);
         DeploymentRecord record = BeginDeployment(request.DeploymentId, request.Model, deviceKey, out int attempt);
         TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
-        await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
+        bool holdsDevice = false;
         try
         {
+            // Inside the try, so a deploy cancelled while it waits for the device is recorded as Failed rather than left Loading.
+            await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
+            holdsDevice = true;
             // A later deploy of this id began while this one waited for the device: that one owns the record, so this one loads nothing.
             if (IsLatest(record, attempt))
             {
@@ -99,7 +102,13 @@ public sealed class TextService : ITextService, IDisposable
                     using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
                     LoadInto(slot, deviceKey, request.Model, new TextRequest { Messages = [] });
                 }, cancel).ConfigureAwait(false);
-                lock (_deploymentsGate) Complete(record, attempt, DeploymentState.Ready, problem: null);
+                lock (_deploymentsGate)
+                {
+                    // One deployment holds a device, so the others on it end now that this model is in place. A load that replaced their model already
+                    // recorded them in UnloadSlot; this covers one that kept it.
+                    RetireDeploymentsOn(slot);
+                    Complete(record, attempt, DeploymentState.Ready, problem: null);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -114,7 +123,8 @@ public sealed class TextService : ITextService, IDisposable
         }
         finally
         {
-            slot.Lock.Release();
+            if (holdsDevice)
+                slot.Lock.Release();
         }
         lock (_deploymentsGate) return Snapshot(record);
     }
@@ -146,17 +156,13 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>Records a deployment as Loading. The device's other ready deployments are retired, since this load replaces its model, and a previous load of the same id is
-    /// retired first. Returns the record the load then completes, and in <paramref name="attempt"/> the number of this load under its id.</summary>
+    /// <summary>Records a deployment as Loading, retiring a previous load of the same id first. The device's other deployments keep serving, and keep their state, until
+    /// this load holds the device and its model is in place (see <see cref="DeployAsync"/>). Returns the record the load then completes, and in
+    /// <paramref name="attempt"/> the number of this load under its id.</summary>
     private DeploymentRecord BeginDeployment(string deploymentId, ModelSpec spec, string deviceKey, out int attempt)
     {
         lock (_deploymentsGate)
         {
-            foreach (DeploymentRecord other in _deployedList.Where(r => r.DeviceKey == deviceKey && r.DeploymentId != deploymentId
-                && (r.State == DeploymentState.Ready || r.State == DeploymentState.Degraded)))
-            {
-                Retire(other);
-            }
             DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
             if (record is null)
             {
