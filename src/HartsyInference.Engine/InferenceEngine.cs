@@ -219,6 +219,14 @@ public sealed class InferenceEngine : IInferenceEngine
 
     private static readonly EngineOptions DefaultOptions = new();
 
+    /// <summary>The server's shared device queue. With continuous batching on, every GPU round of a scheduled LLM request runs through it, so LLM rounds and image work
+    /// never overlap on a device. Unset, rounds run directly, as they do when the engine is used alone (the CLI and the tests).</summary>
+    public Func<Action, Task>? GpuRoundGate { get; set; }
+
+    /// <summary>The server's shared queue for a whole pipeline request, one the scheduler did not admit. Unlike <see cref="GpuRoundGate"/>, this one is bounded: a
+    /// request that finds the queue full is refused with <see cref="QueueFullException"/>, as an HTTP request is.</summary>
+    public Func<Action, Task>? PipelineGate { get; set; }
+
     /// <summary>Replaces the placement and drops loaded pipelines (their weights live on the old devices).
     /// The all-defaults config restores exact single-device behavior.</summary>
     public void SetPlacement(PlacementConfig placement)

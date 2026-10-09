@@ -2,6 +2,7 @@ using HartsyInference.API.Endpoints;
 using HartsyInference.LLM.Generation;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.Extensions.DependencyInjection;
 using Xunit;
 
 namespace HartsyInference.API.Tests;
@@ -15,5 +16,22 @@ public sealed class GenerationErrorsTests
     {
         IResult result = GenerationErrors.Map(new SchedulerStoppedException());
         Assert.Equal(StatusCodes.Status503ServiceUnavailable, Assert.IsAssignableFrom<IStatusCodeHttpResult>(result).StatusCode);
+    }
+
+    [Fact]
+    public async Task A_Full_Scheduler_Queue_Maps_To_429_With_Retry_After()
+    {
+        IResult result = GenerationErrors.Map(new SchedulerQueueFullException(4));
+        // The problem body is written through the app's JSON options, so the context needs them as services.
+        ServiceCollection services = new();
+        services.AddOptions();
+        services.AddLogging();
+        services.Configure<Microsoft.AspNetCore.Http.Json.JsonOptions>(_ => { });
+        DefaultHttpContext ctx = new() { RequestServices = services.BuildServiceProvider() };
+
+        await result.ExecuteAsync(ctx);
+
+        Assert.Equal(StatusCodes.Status429TooManyRequests, ctx.Response.StatusCode);
+        Assert.Equal("1", ctx.Response.Headers["Retry-After"]);
     }
 }

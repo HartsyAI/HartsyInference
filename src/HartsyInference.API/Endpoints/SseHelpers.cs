@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Threading.Channels;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
 using Microsoft.AspNetCore.Http.Json;
 using Microsoft.Extensions.Options;
@@ -11,12 +12,12 @@ internal static class SseHelpers
 {
     /// <summary>Runs <paramref name="produce"/> under <paramref name="queue"/>'s concurrency gate, draining whatever it writes to its <see cref="ChannelWriter{T}"/> straight to the response as <c>text/event-stream</c>. <paramref name="produce"/> receives the app's configured <see cref="JsonSerializerOptions"/> (camelCase, string enums) so <see cref="Event"/> calls match every non-streaming response's wire shape. Checked synchronously for an immediate <see cref="QueueFullException"/> before committing to the SSE response — enqueuing fire-and-forget without this check leaves a full-queue client hanging on events that never arrive instead of getting a proper 429.</summary>
     public static async Task RunAsync(
-        HttpContext ctx, InferenceQueue queue, Func<ChannelWriter<string>, JsonSerializerOptions, Task> produce, CancellationToken ct)
+        HttpContext ctx, InferenceQueue queue, Func<ChannelWriter<string>, JsonSerializerOptions, Task> produce, CancellationToken ct, bool gated = true)
     {
         JsonSerializerOptions jsonOptions = ResolveJsonOptions(ctx);
         Channel<string> events = Channel.CreateUnbounded<string>();
 
-        Task queued = queue.EnqueueAsync(async () =>
+        async Task<bool> Produce()
         {
             try
             {
@@ -31,7 +32,10 @@ internal static class SseHelpers
                 events.Writer.Complete();
             }
             return true;
-        }, ct);
+        }
+
+        // A gated run waits its turn in the queue. An ungated one starts at once: its device work is gated per round by the engine instead.
+        Task queued = gated ? queue.EnqueueAsync(Produce, ct) : Produce();
 
         // An async method that throws before its first await completes the returned task SYNCHRONOUSLY as
         // Faulted — EnqueueAsync does exactly that for QueueFullException (thrown before the first `await
@@ -45,6 +49,7 @@ internal static class SseHelpers
             }
             catch (QueueFullException ex)
             {
+                ctx.Response.Headers["Retry-After"] = "1";
                 await HartsyInferenceServiceExtensions.WriteErrorAsync(ctx, StatusCodes.Status429TooManyRequests, ex.Message, "rate_limit_error");
                 return;
             }
@@ -57,6 +62,11 @@ internal static class SseHelpers
             await ctx.Response.Body.FlushAsync(ct);
         }
     }
+
+    /// <summary>Runs a text stream. Under the queue's gate only when continuous batching is off: with it on, the scheduler admits the request and gates its own GPU rounds, and
+    /// holding the gate for the whole stream would starve those rounds.</summary>
+    public static Task RunTextAsync(HttpContext ctx, InferenceQueue queue, Func<ChannelWriter<string>, JsonSerializerOptions, Task> produce, CancellationToken ct) =>
+        RunAsync(ctx, queue, produce, ct, gated: !EngineKnobs.ContinuousBatching.Value);
 
     /// <summary>Formats one SSE frame: <c>event: &lt;name&gt;\ndata: &lt;json&gt;\n\n</c>, serialized with the app's configured JSON options so streamed payloads match non-streaming response shapes.</summary>
     public static string Event(string name, object data, JsonSerializerOptions options) =>

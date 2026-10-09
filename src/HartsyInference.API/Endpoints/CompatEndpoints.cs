@@ -79,7 +79,7 @@ public static class CompatEndpoints
                 }
             }
 
-            await SseHelpers.RunAsync(ctx, queue, async (writer, jsonOptions) =>
+            await SseHelpers.RunTextAsync(ctx, queue, async (writer, jsonOptions) =>
             {
                 writer.TryWrite(RawDataFrame(new ChatCompletionChunk
                 {
