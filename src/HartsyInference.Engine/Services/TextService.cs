@@ -120,21 +120,13 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <inheritdoc/>
+    /// <remarks>A plain read of the records. Unloading is recorded where the model is freed (<see cref="UnloadSlot"/>), so this and <see cref="Capacity"/> report the
+    /// same state.</remarks>
     public IReadOnlyList<DeploymentStatus> Deployments
     {
         get
         {
-            lock (_deploymentsGate)
-            {
-                // A Ready deployment whose device no longer holds its model was unloaded through Unload: record that.
-                foreach (DeploymentRecord record in _deployedList)
-                {
-                    bool held = _slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? slot)
-                        && string.Equals(slot.LoadedPath, record.Spec.LocalPath, StringComparison.OrdinalIgnoreCase);
-                    if (record.State == DeploymentState.Ready && !held) Retire(record);
-                }
-                return [.. _deployedList.Select(Snapshot)];
-            }
+            lock (_deploymentsGate) return [.. _deployedList.Select(Snapshot)];
         }
     }
 
@@ -197,6 +189,23 @@ public sealed class TextService : ITextService, IDisposable
         if (record.Attempt != attempt || record.State != DeploymentState.Loading) return;
         record.Problem = problem;
         Transition(record, to);
+    }
+
+    /// <summary>Records that <paramref name="slot"/>'s model is gone: each Ready or Degraded deployment on it becomes Unloaded. A Loading one is a deploy in flight, which
+    /// completes its own record.</summary>
+    private void RetireDeploymentsOn(TextDeviceSlot slot)
+    {
+        lock (_deploymentsGate)
+        {
+            foreach (DeploymentRecord record in _deployedList)
+            {
+                if (record.State is (DeploymentState.Ready or DeploymentState.Degraded)
+                    && _slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? held) && ReferenceEquals(held, slot))
+                {
+                    Retire(record);
+                }
+            }
+        }
     }
 
     /// <summary>Moves a deployment along the allowed transitions to <see cref="DeploymentState.Unloaded"/>; a degraded one drains first.</summary>
@@ -1165,8 +1174,8 @@ public sealed class TextService : ITextService, IDisposable
         }
     }
 
-    /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
-    private static bool UnloadSlot(TextDeviceSlot slot)
+    /// <summary>Frees the slot's loaded model, keeping its backend/device alive, and records the deployments it served as Unloaded. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
+    private bool UnloadSlot(TextDeviceSlot slot)
     {
         // A scheduled request runs on the scheduler without the slot lock. Every caller that frees a model drains those first
         // (see PrepareSlot, UnloadDeviceSlot and RunPipeline), so one still running here is a bug, not a wait.
@@ -1226,6 +1235,9 @@ public sealed class TextService : ITextService, IDisposable
         slot.LoggedSettingMismatches.Clear();
         bool hadModel = slot.LoadedPath is not null;
         slot.LoadedPath = null;
+        // Every path that frees a model comes here (an unload, a reload, AlwaysFreeMemory), so the deployments it served are recorded once, here.
+        if (hadModel)
+            RetireDeploymentsOn(slot);
         // A GGUF load leaves multi-GB dequantized host buffers (and the closed mmap's pages) reachable only via
         // finalizers; without forcing a collection here, free host RAM shrinks monotonically across sequential
         // model loads until the process restarts. Ported verbatim from the provider — measured, not defensive.
