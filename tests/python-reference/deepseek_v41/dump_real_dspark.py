@@ -96,6 +96,7 @@ def main():
 
     prompt = [0, 671, 6102, 294, 8760, 344]
     if a.max_prompt_tokens > len(prompt):
+        # seeded random ids, not text: this is a structural check, and the meta records the prompt the tests read back
         extra = torch.randint(0, raw["vocab_size"], (a.max_prompt_tokens - len(prompt),), generator=torch.Generator().manual_seed(20260910))
         prompt += [int(v) for v in extra]
     os.makedirs(a.out, exist_ok=True)
