@@ -39,15 +39,17 @@ public sealed class DeepSeekV41DSparkChainTests
         int[] targetLayers = meta.GetProperty("target_layers").EnumerateArray().Select(e => e.GetInt32()).ToArray();
         int[] expectedIds = meta.GetProperty("draft_ids").EnumerateArray().Select(e => e.GetInt32()).ToArray();
         string Dump(string name) => Path.Combine(oracle!, name);
+        // the prompt and the decode step must fit; 64 covers the 6-token oracle
+        int capacity = Math.Max(64, prompt.Length + 8);
 
         using CpuBackend backend = new();
-        using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(backend, dir, new DeepSeekV41LoadOptions(MaxTokens: 64, QuantizeLatents: false));
+        using DeepSeekV41LoadedModel loaded = DeepSeekV41HostModelLoader.Load(backend, dir, new DeepSeekV41LoadOptions(MaxTokens: capacity, QuantizeLatents: false));
         DeepSeekV41HostModel model = loaded.Model;
         int dim = loaded.Checkpoint.Config.HiddenSize, width = model.MainHiddenWidth;
         Assert.Equal(targetLayers, model.MainHiddenLayers);
         Assert.Equal(targetLayers.Length * dim, width);
 
-        DeepSeekV41SequenceState state = model.CreateState(64);
+        DeepSeekV41SequenceState state = model.CreateState(capacity);
         float[] prefillHidden = new float[prompt.Length * dim], prefillMain = new float[prompt.Length * width];
         model.Forward(prompt, state, prefillHidden, prefillMain);
         float[] refPrefill = ReadF32(Dump("main_hidden_prefill.f32"));
@@ -63,8 +65,8 @@ public sealed class DeepSeekV41DSparkChainTests
         Assert.True(prefillRel <= TapRelL2, $"prefill main_hidden relL2 {prefillRel:E3} > {TapRelL2:E1}");
         Assert.True(decodeRel <= TapRelL2, $"decode main_hidden relL2 {decodeRel:E3} > {TapRelL2:E1}");
 
-        DeepSeekV41DSpark dspark = DeepSeekV41DSpark.Load(backend, loaded.Checkpoint, new DeepSeekV41LoadOptions(MaxTokens: 64, QuantizeLatents: false));
-        DeepSeekV41DSparkState dstate = dspark.CreateState(64);
+        DeepSeekV41DSpark dspark = DeepSeekV41DSpark.Load(backend, loaded.Checkpoint, new DeepSeekV41LoadOptions(MaxTokens: capacity, QuantizeLatents: false));
+        DeepSeekV41DSparkState dstate = dspark.CreateState(capacity);
         dspark.Seed(prefillMain, prompt.Length, dstate);
         DeepSeekV41DSparkDraft draft = dspark.Draft(decodeToken, decodeMain, startPos, dstate);
 

@@ -35,7 +35,11 @@ def main():
     p.add_argument("out")
     p.add_argument("--upstream", default=os.path.expanduser("~/dsv41-ref/upstream"))
     p.add_argument("--threads", type=int, default=8)
+    p.add_argument("--max-prompt-tokens", type=int, default=6,
+                   help="prompt length; above 6 the prompt is extended with seeded random ids (window 128 wraps past 128)")
     a = p.parse_args()
+    if a.max_prompt_tokens < 6:
+        raise SystemExit("--max-prompt-tokens must be at least 6, the fixed prefix")
     torch.set_num_threads(a.threads)
     sys.path.insert(0, os.path.join(a.upstream, "inference"))
     import model as mod
@@ -52,7 +56,8 @@ def main():
     raw = json.load(open(os.path.join(a.checkpoint, "inference", "config.json")))
     known = {f.name for f in dataclasses.fields(mod.ModelArgs)}
     cfg = {k: (tuple(v) if isinstance(v, list) else v) for k, v in raw.items() if k in known}
-    cfg.update(vision_n_layers=0, max_batch_size=1, max_seq_len=128, temperature=0.0)
+    # the context must hold the prompt and the decode step; the window (config) is unchanged at 128
+    cfg.update(vision_n_layers=0, max_batch_size=1, max_seq_len=max(128, a.max_prompt_tokens + 8), temperature=0.0)
     args = mod.ModelArgs(**cfg)
 
     t0 = time.time()
@@ -90,6 +95,10 @@ def main():
         blk.ffn.register_forward_hook(lambda m, i, out, s=s: taps.__setitem__(("ffn", s), out))
 
     prompt = [0, 671, 6102, 294, 8760, 344]
+    if a.max_prompt_tokens > len(prompt):
+        # seeded random ids, not text: this is a structural check, and the meta records the prompt the tests read back
+        extra = torch.randint(0, raw["vocab_size"], (a.max_prompt_tokens - len(prompt),), generator=torch.Generator().manual_seed(20260910))
+        prompt += [int(v) for v in extra]
     os.makedirs(a.out, exist_ok=True)
     with torch.inference_mode():
         _, logits, main_hidden = model(torch.tensor([prompt]), 0)

@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.301
+
+- **Added: the DSpark draft head checked on the real checkpoint past the 128-token window (CPU).** `dump_real_dspark.py --max-prompt-tokens N` extends the prompt with seeded random ids and sizes the context to fit. With a 160-token prompt the window wraps: the three draft stages agree with the unmodified upstream at relL2 at most 8e-6, and the draft ids match exactly. The chain from the C# target's own taps reproduces the ids and gives logits at 5.4e-4, but its decode tap is at 1.2e-3, the weakest number, not yet explained. The real-weights tests size their state from the prompt. No change to the model's output.
+
 ## alpha.300
 
 - **Added: a check that a DSpark draft tap on an Engram block is taken after the Engram step (CPU, synthetic).** `DeepSeekV41EngramTapTests` applies the same Engram module to the embedding stream, with the hash ids the host computes, and requires the tap to equal the hc-mean of that stream and to differ from the mean before the step. Removing the step fails the test. The real DSpark targets have no Engram layer, so this covers a placement the real-weights chain test does not reach. No change to the model's output.
