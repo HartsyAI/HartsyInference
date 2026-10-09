@@ -9,6 +9,10 @@ public sealed record TextRequest
     /// <summary>The conversation so far, oldest first.</summary>
     public required IReadOnlyList<TextMessage> Messages { get; init; }
 
+    /// <summary>Pre-tokenized prompt ids, fed to the model as given: no chat template, no tokenizer and no output parser. Wins over
+    /// <see cref="Messages"/>, which is then not read. Null (the default) renders <see cref="Messages"/> as usual.</summary>
+    public IReadOnlyList<int>? RawTokenIds { get; init; }
+
     /// <summary>System prompt applied ahead of <see cref="Messages"/>; null/empty for none.</summary>
     public string? SystemPrompt { get; init; }
 

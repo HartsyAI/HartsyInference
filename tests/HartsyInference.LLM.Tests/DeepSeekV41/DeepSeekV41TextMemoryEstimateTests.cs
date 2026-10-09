@@ -129,8 +129,9 @@ public sealed class DeepSeekV41TextMemoryEstimateTests : IDisposable
         MemoryFit fit = await engine.MemoryEstimation.AssessAsync(spec, new MemoryEstimateRequest(1, 1));
 
         Assert.Equal(total, estimate.WeightBytesByClass!.Values.Sum());
-        Assert.Equal(MemoryFitVerdict.Unknown, fit.Verdict);
-        Assert.Contains("residency planner", fit.Reason);
+        Assert.NotEqual(MemoryFitVerdict.Unknown, fit.Verdict);
+        Assert.True(fit.CapacityBytes > 0);
+        Assert.Contains("working memory", fit.Reason, StringComparison.Ordinal);
         Assert.NotNull(fit.Estimate);
     }
 

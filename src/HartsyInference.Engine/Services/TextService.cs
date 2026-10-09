@@ -6,10 +6,12 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
+using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Requests;
 using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.LLM.DeepSeekV41;
@@ -177,6 +179,11 @@ public sealed class TextService : ITextService, IDisposable
             lock (_deploymentsGate) return [.. _deployedList.Select(Snapshot)];
         }
     }
+
+    /// <inheritdoc/>
+    public IReadOnlyList<LoadedModelResidency> LoadedResidency =>
+        [.. _slots.Where(entry => entry.Value.ResidencyPlan is not null && entry.Value.LoadedPath is not null)
+            .Select(entry => new LoadedModelResidency(entry.Key, entry.Value.LoadedPath!, entry.Value.ResidencyPlan!))];
 
     /// <inheritdoc/>
     public DeploymentCapacity? Capacity(string deploymentId)
@@ -750,7 +757,9 @@ public sealed class TextService : ITextService, IDisposable
             return;
         UnloadSlot(slot);
         // after the unload, so the memory of a model this load replaces counts as free
-        EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
+        ResidencyPlan? plan = EnsureRamHeadroomForDeepSeekV41(checkpoint.Root);
+        if (plan is not null)
+            ResidencyPlanner.RequireAdmitted(plan);
         if (slot.ExtraStageBackends is not null)
         {
             foreach (IBackend stage in slot.ExtraStageBackends)
@@ -786,27 +795,28 @@ public sealed class TextService : ITextService, IDisposable
         slot.CacheWeightCastsApplied = null;
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
+        slot.ResidencyPlan = plan;
         Logs.Info($"[TextService] Loaded DeepSeek-V4.1 '{Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar))}' on the host reference model (CPU).");
     }
 
     /// <summary>Refuses a V4.1 load that would not fit: the weights stay as mapped checkpoint bytes the kernel can drop and re-read, so what must fit in RAM is the working set (sequence state, prefill activations, small widened tensors and Engram row caches) plus a fixed margin.</summary>
-    private static void EnsureRamHeadroomForDeepSeekV41(string directory)
+    private static ResidencyPlan? EnsureRamHeadroomForDeepSeekV41(string directory) => EnsureRamHeadroomForDeepSeekV41(directory, ReadAvailableMemoryKb());
+
+    /// <summary>The guard with the free host RAM supplied, so a test can judge synthetic memory. Plans from the checkpoint headers only, before any weight is mapped.</summary>
+    /// <param name="availableKb">Free host RAM in KiB; zero or less means unknown, and the plan is not made and the load is not refused.</param>
+    /// <returns>The residency plan, or null when the free memory is unknown.</returns>
+    internal static ResidencyPlan? EnsureRamHeadroomForDeepSeekV41(string directory, long availableKb)
     {
-        long availableKb = ReadAvailableMemoryKb();
         if (availableKb <= 0)
-            return;
-        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(directory);
-        IReadOnlyDictionary<DeepSeekV41WeightClass, long> bytes = checkpoint.Weights.BytesByClass;
-        long denseStored = bytes[DeepSeekV41WeightClass.Dense] + bytes[DeepSeekV41WeightClass.Embed] + bytes[DeepSeekV41WeightClass.Head];
-        double requiredBytes = DeepSeekV41WorkingMemory.AnonymousBytes(checkpoint.Config, denseStored, HfTextDirectoryLoader.LoadOptions) + 4.0 * 1024 * 1024 * 1024;
-        double availableBytes = availableKb * 1024.0;
-        if (availableBytes < requiredBytes)
+            return null;
+        ResidencyPlan plan = DeepSeekV41HostPlanner.Plan(directory, availableKb * 1024);
+        if (plan.Verdict == MemoryFitVerdict.Infeasible)
         {
             throw new HartsyInferenceException(
-                $"Not enough free host RAM to safely load DeepSeek-V4.1 '{directory}': {availableBytes / 1024 / 1024 / 1024:0.0} GB free, "
-                + $"need ~{requiredBytes / 1024 / 1024 / 1024:0.0} GB of working memory (the {denseStored / 1024.0 / 1024 / 1024:0.0} GB of dense weights are read from the checkpoint files and also benefit from free page cache). "
+                $"Not enough free host RAM to safely load DeepSeek-V4.1 '{directory}': {plan.Reason} "
                 + "Free RAM, then retry — loading anyway risks crashing the whole process.");
         }
+        return plan;
     }
 
     private void LoadInto(TextDeviceSlot slot, string deviceKey, ModelSpec spec, TextRequest request)
@@ -1380,6 +1390,7 @@ public sealed class TextService : ITextService, IDisposable
         slot.Model = null;
         slot.DeepSeekV41?.Dispose();
         slot.DeepSeekV41 = null;
+        slot.ResidencyPlan = null;
         slot.SsmPipeline = null;
         slot.SsmModel?.Dispose();
         slot.SsmModel = null;
@@ -1456,24 +1467,7 @@ public sealed class TextService : ITextService, IDisposable
 
     /// <summary>MemAvailable from /proc/meminfo in KiB, or 0 when unavailable (non-Linux).</summary>
     private static long ReadAvailableMemoryKb()
-    {
-        try
-        {
-            foreach (string line in File.ReadLines("/proc/meminfo"))
-            {
-                if (line.StartsWith("MemAvailable:", StringComparison.Ordinal))
-                {
-                    string[] parts = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                    return long.TryParse(parts[1], out long kb) ? kb : 0;
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            Logs.Debug($"[TextService] /proc/meminfo unreadable: {ex.Message}");
-        }
-        return 0;
-    }
+        => (HostMemoryInfo.AvailableBytes() ?? 0) / 1024;
 
     /// <summary>Cheap <c>general.architecture</c> read (metadata only) to route a GGUF to the transformer or SSM loader.</summary>
     private static string PeekArchitecture(string path)
@@ -1603,7 +1597,7 @@ public sealed class TextService : ITextService, IDisposable
         => template is ChatMlTemplate && tokenizer.SpecialId("<|im_start|>") is null;
 
     /// <summary>Builds the engine's <see cref="GenerationRequest"/> from the native request; raw-completion feeds the last user message's plain text through <see cref="GenerationRequest.RawTokenIds"/>.</summary>
-    private static GenerationRequest BuildRequest(TextRequest request, bool rawCompletion, ILlmTokenizer tokenizer)
+    internal static GenerationRequest BuildRequest(TextRequest request, bool rawCompletion, ILlmTokenizer tokenizer)
     {
         SamplingOptions sampling = BuildSampling(request);
         // Base/non-instruct checkpoints have no chat-template slot to teach the <tool_call> convention in, so
@@ -1620,6 +1614,8 @@ public sealed class TextService : ITextService, IDisposable
             ReasoningEffort = request.ReasoningEffort,
             PrefixCacheCapacityHint = request.PrefixCacheCapacityHint,
         };
+        if (request.RawTokenIds is not null)
+            return genRequest with { RawTokenIds = [.. request.RawTokenIds] };
         if (rawCompletion)
         {
             string rawText = LastUserText(request);

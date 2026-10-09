@@ -33,7 +33,7 @@ public sealed class DeepSeekV41Shard3ParityTests
         ?? Path.Combine(TestPaths.ModelsDir, "DeepSeek-V4.1-Flash"), ShardName);
 
     private static string FixtureDir => Environment.GetEnvironmentVariable("HARTSY_DSV41_SHARD3_FIXTURES")
-        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "dsv41-ref", "shard3_fixtures");
+        ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "dsv41-ref", "oracles", "shard3");
 
     private sealed record Window(string Name, string Kind, long RowOffset, int Rows, int Cols, int Batch)
     {

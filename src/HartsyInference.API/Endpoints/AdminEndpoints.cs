@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using HartsyInference.ModelAssets.Quant;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Runtime;
 
 namespace HartsyInference.API.Endpoints;
 
@@ -93,6 +94,13 @@ public static class AdminEndpoints
         app.MapGet("/admin/capacity", (IInferenceEngine engine) => Results.Ok(new DeploymentCapacityResponse
         {
             Deployments = [.. engine.Text.Deployments.Select(d => CapacityDto.For(d, engine.Text.Capacity(d.DeploymentId)))],
+        }));
+
+        // The host memory now, and the residency plan each loaded text model was admitted under: its verdict, the ledger reservations and each component's placement.
+        app.MapGet("/admin/memory", (IInferenceEngine engine) => Results.Ok(new MemoryStatsResponse
+        {
+            HostAvailableBytes = HostMemoryInfo.AvailableBytes() ?? 0,
+            Models = [.. engine.Text.LoadedResidency.Select(LoadedModelMemoryDto.For)],
         }));
 
         // The text model packages under a directory in the models root, discovered from disk; `root` defaults to its llm folder. Nothing is loaded.
