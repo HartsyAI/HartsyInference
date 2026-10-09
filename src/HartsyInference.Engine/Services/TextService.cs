@@ -1528,6 +1528,7 @@ public sealed class TextService : ITextService, IDisposable
             GraphDecode = request.GraphDecode,
             SpeculativeDecode = request.SpeculativeDecode,
             EnableThinking = request.EnableThinking,
+            ReasoningEffort = request.ReasoningEffort,
             PrefixCacheCapacityHint = request.PrefixCacheCapacityHint,
         };
         if (rawCompletion)

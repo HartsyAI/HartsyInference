@@ -151,6 +151,18 @@ public sealed class ChatCompletionRequest
     /// <summary>OpenAI <c>stream_options</c>. <c>include_usage</c> asks a streamed reply to end with a usage frame before <c>[DONE]</c>.</summary>
     [JsonPropertyName("stream_options")] public ChatStreamOptionsDto? StreamOptions { get; set; }
 
+    /// <summary>OpenAI-style <c>reasoning_effort</c>: a name (<c>low</c>, <c>high</c>, <c>max</c>) or an integer in [1, 100]. <c>medium</c> is not defined by the engine and is refused.</summary>
+    [JsonPropertyName("reasoning_effort")] public JsonElement? ReasoningEffort { get; set; }
+
+    /// <summary>OpenAI-style <c>thinking</c>: <c>{"type": "enabled"}</c> or <c>{"type": "disabled"}</c> selects the model's reasoning mode.</summary>
+    [JsonPropertyName("thinking")] public ChatThinkingDto? Thinking { get; set; }
+
+    /// <summary>The caller's own user identifier. It is carried on the native request and not used by the engine yet; it does not choose the tenant.</summary>
+    [JsonPropertyName("user")] public string? User { get; set; }
+
+    /// <summary>OpenAI-style queue priority: <c>low</c>, <c>normal</c> or <c>high</c>. It matters only when the server is busy.</summary>
+    [JsonPropertyName("priority")] public string? Priority { get; set; }
+
     /// <summary>Tools the model may call. Passed through to the native <c>TextRequest.Tools</c> unmodified (name/description/JSON-schema). What exists natively is plumbing: the schemas render into the prompt through the chat template, the <c>&lt;tool_call&gt;</c> sentinel grammar is armed, and an <c>ITextStreamFilter</c> seam can emit parsed calls. The parsers themselves live in the separate Tools package; without one installed no call is parsed.</summary>
     [JsonPropertyName("tools")] public List<ChatToolDto>? Tools { get; set; }
 

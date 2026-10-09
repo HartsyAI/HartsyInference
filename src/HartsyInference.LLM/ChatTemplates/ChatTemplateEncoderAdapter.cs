@@ -28,6 +28,11 @@ public sealed class ChatTemplateEncoderAdapter : IChatTemplate
         bool? enableThinking, IReadOnlyList<ToolSpec>? tools)
         => _encoder.Encode(tokenizer, messages, Options(addGenerationPrompt, enableThinking, tools)).Ids;
 
+    /// <inheritdoc />
+    public int[] Encode(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool addGenerationPrompt,
+        bool? enableThinking, IReadOnlyList<ToolSpec>? tools, int? reasoningEffort)
+        => _encoder.Encode(tokenizer, messages, Options(addGenerationPrompt, enableThinking, tools, reasoningEffort)).Ids;
+
     /// <summary>Builds the parser for completions of the prompt these <paramref name="messages"/> render to (with <paramref name="tools"/> offered, when any).</summary>
     public IOutputParser CreateParser(ILlmTokenizer tokenizer, IReadOnlyList<ChatMessage> messages, bool? enableThinking,
         IReadOnlyList<ToolSpec>? tools = null)
@@ -36,10 +41,11 @@ public sealed class ChatTemplateEncoderAdapter : IChatTemplate
         return _encoder.CreateParser(tokenizer, initial.ToParserState());
     }
 
-    private static EncodeOptions Options(bool addGenerationPrompt, bool? enableThinking, IReadOnlyList<ToolSpec>? tools) => new()
+    private static EncodeOptions Options(bool addGenerationPrompt, bool? enableThinking, IReadOnlyList<ToolSpec>? tools, int? reasoningEffort = null) => new()
     {
         AddGenerationPrompt = addGenerationPrompt,
         Thinking = enableThinking ?? false,
         Tools = tools is { Count: > 0 } ? tools : null,
+        ReasoningEffort = reasoningEffort,
     };
 }

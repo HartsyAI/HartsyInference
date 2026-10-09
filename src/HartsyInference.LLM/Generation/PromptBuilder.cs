@@ -10,13 +10,13 @@ internal static class PromptBuilder
     {
         if (request.RawTokenIds is not null) return [.. request.RawTokenIds];
         if (request.EffectiveMessages() is { } messagesWithSystem)
-            return template.Encode(tokenizer, messagesWithSystem, addGenerationPrompt: true, request.EnableThinking, request.Tools);
+            return template.Encode(tokenizer, messagesWithSystem, addGenerationPrompt: true, request.EnableThinking, request.Tools, request.ReasoningEffort);
         if (request.Prompt is not null)
         {
             List<ChatMessage> messages = new(2);
             if (!string.IsNullOrEmpty(request.SystemPrompt)) messages.Add(ChatMessage.System(request.SystemPrompt));
             messages.Add(ChatMessage.User(request.Prompt));
-            return template.Encode(tokenizer, messages, addGenerationPrompt: true, request.EnableThinking, request.Tools);
+            return template.Encode(tokenizer, messages, addGenerationPrompt: true, request.EnableThinking, request.Tools, request.ReasoningEffort);
         }
         throw new ArgumentException("Request must set RawTokenIds, Messages, or Prompt.", nameof(request));
     }

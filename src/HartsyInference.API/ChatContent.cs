@@ -94,6 +94,12 @@ public sealed class ChatStreamOptionsDto
     [JsonPropertyName("include_usage")] public bool IncludeUsage { get; set; }
 }
 
+/// <summary>OpenAI <c>thinking</c> object: <c>{"type": "enabled"}</c> or <c>{"type": "disabled"}</c>.</summary>
+public sealed class ChatThinkingDto
+{
+    [JsonPropertyName("type")] public string? Type { get; set; }
+}
+
 /// <summary>One streamed fragment of a tool call (OpenAI's <c>delta.tool_calls</c> entry). The first fragment of a call carries its <c>id</c>, <c>type</c> and function
 /// name; later fragments carry only argument text, which the client concatenates.</summary>
 public sealed class ChatToolCallDeltaDto
