@@ -12,6 +12,10 @@ stable release will require. Dates are UTC.
 
 - **Added: a DeepSeek-V4.1-Flash certification runner, a rented-hardware runbook and a frozen gate set.** `tests/dsv41-certification.sh` runs one lane at a time: `cpu-oracle` (real-weight CPU oracles, full depth with `DSV41_FULL_RUN=1`), `gpu-expert` (the CUDA expert-cache and MoE suites on SM 8.0 or newer) and `gpu-native` (the block-scaled FP4 suites through cuBLASLt on SM 10.0 or 12.0). Each class runs alone. A class is green only when tests ran, none failed, none were skipped and no output line reads SKIPPED, so a test that returns early cannot pass. The multi-GPU, two-node, offload and Vulkan-AMD lanes are BLOCKED until their plan PRs land, and the runner refuses any GPU lane while another compute process holds a device. `docs/Checklists/DSV41_RENTAL_RUNBOOK.md` says what each rented lane can and cannot show, with the setup, the weight transfer and the stop rules. `docs/Checklists/DSV41_CAMPAIGN_FREEZE.md` freezes the gates with their provenance, including the structural-mode amendment made after a failed 1300-token run.
 
+## alpha.315
+
+- **Added: seeded stress tests for the expert cache** covering eviction churn, upload and await failure injection, cancellation mid-batch, repeated reuse, teardown with leases held, and a random operation sequence that checks the budget bound after every step. **Fixed: a failed upload's await path could leave the entry looking ready if the abandon step itself threw.** `ExpertCacheBase.AwaitPending` now always removes the entry, and the original failure is still the one reported.
+
 ## alpha.314
 
 - **Added: expert residency components (not yet wired into the expert cache): a fixed-capacity routing telemetry recorder, three deterministic residency policies (segmented LRU, LFU, decayed LFU with hysteresis), a versioned binary routing-trace format with a seeded Zipf generator, and a slot-cache replay harness that reports hit rates.** See `docs/EXPERT_CACHE.md`.
