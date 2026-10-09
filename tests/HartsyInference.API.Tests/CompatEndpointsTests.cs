@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Xunit;
@@ -56,6 +57,38 @@ public sealed class CompatEndpointsTests : IClassFixture<WebApplicationFactory<P
             response_format = new { type },
         });
         Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+    }
+
+    [Theory]
+    [InlineData("""[{"type":"text"}]""")]
+    [InlineData("""[{"type":"text","text":5}]""")]
+    public async Task Chat_TextPartWithoutStringText_Returns400(string content)
+    {
+        using HttpClient client = _factory.CreateClient();
+        using StringContent body = new($$"""{"model":"whatever","messages":[{"role":"user","content":{{content}}}]}""", Encoding.UTF8, "application/json");
+
+        HttpResponseMessage resp = await client.PostAsync("/v1/chat/completions", body);
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        using JsonDocument error = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.Equal("A 'text' content part needs a string 'text'.", error.RootElement.GetProperty("error").GetProperty("message").GetString());
+    }
+
+    [Theory]
+    [InlineData("data:image/png;base64,@@@@", "Image data is not valid base64.")]
+    [InlineData("data:image/jpeg;base64,/9j/4AAQSkZJRgAB", "Image data could not be decoded: Unsupported image format (leading bytes JPEG).")]
+    public async Task Chat_ImageThatCannotBeDecoded_Returns400NotA500(string url, string messageStart)
+    {
+        using HttpClient client = _factory.CreateClient();
+        HttpResponseMessage resp = await client.PostAsJsonAsync("/v1/chat/completions", new
+        {
+            model = "whatever",
+            messages = new[] { new { role = "user", content = new object[] { new { type = "image_url", image_url = new { url } } } } },
+        });
+
+        Assert.Equal(HttpStatusCode.BadRequest, resp.StatusCode);
+        using JsonDocument error = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        Assert.StartsWith(messageStart, error.RootElement.GetProperty("error").GetProperty("message").GetString(), StringComparison.Ordinal);
     }
 
     [Fact]

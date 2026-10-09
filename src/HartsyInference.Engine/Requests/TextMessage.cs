@@ -20,4 +20,7 @@ public sealed record TextMessage
 
     /// <summary>Name of the tool a <see cref="TextRole.Tool"/> turn answers for (OpenAI's <c>name</c>).</summary>
     public string? Name { get; init; }
+
+    /// <summary>The model's reasoning for an assistant turn, carried back in a conversation. The prompt builder does not render it yet.</summary>
+    public string? ReasoningContent { get; init; }
 }
