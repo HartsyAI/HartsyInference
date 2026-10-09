@@ -242,6 +242,8 @@ public static class HartsyInferenceServiceExtensions
                     return;
                 }
                 ctx.Items[ApiKeyIdentityItemKey] = identity;
+                // The request's tenant is the caller's own identity, set here on the server side; the client never names it.
+                TenantContext.Current = identity.Name;
                 Activity.Current?.SetTag("hartsyinference.caller", identity.Name);
                 await next();
             });

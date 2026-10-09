@@ -47,6 +47,12 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// <summary>Queue places to announce after an admission pass, collected under <see cref="_waitingGate"/> and invoked after it; loop-owned and reused.</summary>
     private readonly List<(Action<int> OnQueued, int Place)> _announcements = [];
 
+    /// <summary>1 once <see cref="CancelQueued"/> has stopped admission; the loop and submissions check it.</summary>
+    private int _draining;
+
+    /// <summary>Sequences decoding now, as the loop last left it; read by <see cref="ActiveCount"/> from other threads.</summary>
+    private int _activeCount;
+
     private sealed class PendingRequest
     {
         public required GenerationRequest Request;
@@ -126,6 +132,31 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// <summary>True while the background loop is running; goes false cleanly on <see cref="Dispose"/> or if it faults — callers tracking serving health should treat <c>false</c> after successful construction as "this model's chat traffic is dead and won't recover without reloading the model."</summary>
     public bool IsLoopAlive => !_loopTask.IsCompleted;
 
+    /// <summary>Sequences decoding now (a snapshot the loop refreshes between rounds).</summary>
+    public int ActiveCount => Volatile.Read(ref _activeCount);
+
+    /// <summary>Requests waiting for admission, including those submitted and not yet read by the loop.</summary>
+    public int QueuedCount => Volatile.Read(ref _queued);
+
+    /// <summary>The most sequences this scheduler decodes at once.</summary>
+    public int MaxActive => _maxActive;
+
+    /// <summary>Test seam, null in production: runs in the admission loop after it peeks the head and before it removes it, the window in which
+    /// <see cref="CancelQueued"/> can fail the head.</summary>
+    internal Action? BeforeRemoveHeadForTests { get; set; }
+
+    /// <summary>Stops admission and fails every request still waiting, so a draining model takes no new work and its queue empties at once. Sequences already decoding run on
+    /// to their end; the caller decides how long to wait for them before <see cref="Dispose"/>.</summary>
+    public void CancelQueued()
+    {
+        Interlocked.Exchange(ref _draining, 1);
+        FailQueued();
+    }
+
+    /// <summary>Takes requests again after <see cref="CancelQueued"/>. For an unload that gave up waiting on the decoding sequences: its model stays resident and serving,
+    /// so its queue must reopen. The requests <see cref="CancelQueued"/> failed stay failed.</summary>
+    public void ResumeAdmission() => Interlocked.Exchange(ref _draining, 0);
+
     /// <summary>Test-only fault injection: when set, invoked once per decode round with that round's feeder count; a non-null return is thrown instead of running the round, so fault-isolation behavior can be tested deterministically without reproducing a real backend crash. Null in production.</summary>
     internal Func<int, Exception?>? TestFaultInjector { get; set; }
 
@@ -148,6 +179,11 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     public Task<GenerationResult> SubmitAsync(GenerationRequest request, Action<int>? onToken, CancellationToken ct)
     {
         TaskCompletionSource<GenerationResult> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (Volatile.Read(ref _draining) != 0)
+        {
+            tcs.SetException(new SchedulerStoppedException());
+            return tcs.Task;
+        }
         if (Interlocked.Increment(ref _queued) > _maxQueued)
         {
             Interlocked.Decrement(ref _queued);
@@ -172,6 +208,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             {
                 DrainIncoming();
                 await AdmitWaitingAsync(active).ConfigureAwait(false);
+                Volatile.Write(ref _activeCount, active.Count);
                 // Shutdown requested while this round admitted or waited: no round runs after it, so every
                 // unfinished sequence fails in the finally below instead of producing tokens after Dispose.
                 if (_shutdown.IsCancellationRequested) break;
@@ -209,6 +246,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     }
                     feeders.Add(seq);
                 }
+                Volatile.Write(ref _activeCount, active.Count);
                 if (evicted.Count > 0)
                 {
                     // A sequence's Dispose() may touch real GPU resources (currently a PagedKvCache's gather
@@ -310,8 +348,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     pending.Completion.TrySetCanceled(pending.Ct);
                     continue;
                 }
-                // Read after shutdown was requested: failed, not admitted, since the loop is about to stop.
-                if (_shutdown.IsCancellationRequested)
+                // Read after shutdown was requested, or while draining: failed, not admitted, since the loop is about to stop or take no more work.
+                if (_shutdown.IsCancellationRequested || Volatile.Read(ref _draining) != 0)
                 {
                     Leave();
                     pending.Completion.TrySetException(new SchedulerStoppedException());
@@ -332,6 +370,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         {
             // Shutdown stops admission. The waiters not yet admitted are failed by FailQueued in the loop's finally, not prefilled after shutdown began.
             if (_shutdown.IsCancellationRequested) return;
+            if (Volatile.Read(ref _draining) != 0) return;
             PendingRequest? head;
             lock (_waitingGate) head = _waiting.Count > 0 ? _waiting.Peek() : null;
             if (head is null) return;
@@ -364,7 +403,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             if (active.Count >= _maxActive) return;
             if (_pool is not null && _reservedPages + pages > _pool.MaxPages) return;
 
-            RemoveHead(head);
+            // Test seam: the window between peeking the head and removing it, where a concurrent CancelQueued can fail the head.
+            BeforeRemoveHeadForTests?.Invoke();
+            // CancelQueued or shutdown may have failed this head since it was peeked. Then it is no longer waiting, so nothing is admitted for it.
+            if (!TryRemoveHead(head)) return;
             try
             {
                 ActiveSeq? seq = null;
@@ -449,6 +491,19 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             _waiting.Dequeue();
         }
         Leave();
+    }
+
+    /// <summary>Takes <paramref name="head"/> off the waiting queue only while it is still the head. False means it is no longer waiting: <see cref="CancelQueued"/> or
+    /// shutdown failed and dequeued it since it was peeked, so it must not be admitted.</summary>
+    private bool TryRemoveHead(PendingRequest head)
+    {
+        lock (_waitingGate)
+        {
+            if (_waiting.Count == 0 || !ReferenceEquals(_waiting.Peek(), head)) return false;
+            _waiting.Dequeue();
+        }
+        Leave();
+        return true;
     }
 
     /// <summary>Returns a sequence's page reservation when it leaves the active set.</summary>
