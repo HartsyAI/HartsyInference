@@ -34,9 +34,11 @@ public static class GgufExpertPack
     /// <param name="expectedFingerprint">
     /// The topology fingerprint the pack must have been built for, or null to expect the provisional GGUF-geometry fingerprint.
     /// </param>
+    /// <exception cref="ArgumentException">The supplied fingerprint is empty.</exception>
     /// <exception cref="InvalidDataException">The pack is incomplete, or built for another fingerprint or checkpoint geometry.</exception>
     public static ExpertPackVerification Verify(string ggufPath, string packDirectory, string? expectedFingerprint = null)
     {
+        if (expectedFingerprint is not null) ArgumentException.ThrowIfNullOrWhiteSpace(expectedFingerprint);
         using GgufExpertSource source = GgufExpertSource.Open(ggufPath);
         string fingerprint = expectedFingerprint ?? source.TopologyFingerprint;
         using ExpertPackReader reader = ExpertPackReader.Open(packDirectory, fingerprint, verifyChecksums: true);
