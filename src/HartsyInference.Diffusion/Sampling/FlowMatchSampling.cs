@@ -63,7 +63,11 @@ public static class FlowMatchSampling
         ArgumentNullException.ThrowIfNull(scheduler);
         float shift = scheduler.Shift;
         SamplerOptions options = new() { PercentToSigma = percent => SamplerOptions.FlowPercentToSigma(percent, shift) };
-        return Resolve(selection, scheduler.Sigmas(), seed, family, startsFromNoisedInit, options, scheduler.SigmasFor);
+        // An explicit schedule (a distilled checkpoint's shipped sigmas) is the grid to integrate. Rebuilding one from the
+        // shift would replace it with the base family grid, and the discard rule would interpolate it, so both are
+        // withheld in that case.
+        Func<int, float[]>? familyGrid = scheduler.HasExplicitSigmas ? null : scheduler.SigmasFor;
+        return Resolve(selection, scheduler.Sigmas(), seed, family, startsFromNoisedInit, options, familyGrid, scheduler.HasExplicitSigmas);
     }
 
     /// <summary>Same resolution over a RAW sigma array, for the families that build their schedule inline instead of
@@ -80,7 +84,8 @@ public static class FlowMatchSampling
     /// <see cref="FlowMatchEulerDiscreteScheduler.Sigmas"/> satisfies.</para></summary>
     /// <param name="options">Family facts for samplers that need them; null derives them from the sigma array.</param>
     public static ISampler Resolve(string? selection, float[] baseSigmas, int seed, string family,
-        bool startsFromNoisedInit = false, SamplerOptions? options = null, Func<int, float[]>? familyGrid = null)
+        bool startsFromNoisedInit = false, SamplerOptions? options = null, Func<int, float[]>? familyGrid = null,
+        bool explicitSchedule = false)
     {
         ArgumentNullException.ThrowIfNull(baseSigmas);
         (string samplerName, string? scheduleName) = SamplerRegistry.SplitCompound(selection);
@@ -103,7 +108,7 @@ public static class FlowMatchSampling
             throw new NotSupportedException(
                 $"Sigma schedule '{scheduleName}' is not available. Schedules: {string.Join(", ", SigmaSchedule.Names)}.");
         }
-        float[] sigmas = SamplerRegistry.BuildSigmas(samplerName, scheduleName, baseSigmas, startsFromNoisedInit, familyGrid);
+        float[] sigmas = SamplerRegistry.BuildSigmas(samplerName, scheduleName, baseSigmas, startsFromNoisedInit, familyGrid, explicitSchedule);
         ISampler sampler = SamplerRegistry.Create(samplerName, sigmas, seed, options);
         if (IsNonDefault(selection))
         {
