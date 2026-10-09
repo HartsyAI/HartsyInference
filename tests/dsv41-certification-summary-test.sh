@@ -45,6 +45,22 @@ Total tests: 2
      Passed: 2
  Total time: 1.0000 Seconds
 "
+check sdk-two-blocks "2 7 1 0" "Test Run Successful.
+Total tests: 5
+     Passed: 5
+ Total time: 2.1925 Hours
+Test Run Failed.
+Total tests: 2
+     Failed: 1
+     Passed: 1
+ Total time: 1.0000 Seconds
+"
+check sdk-unclosed-block-ignored "1 3 0 0" "Test Run Successful.
+Total tests: 3
+     Passed: 3
+some test output
+Failed: 9
+"
 check no-summary "0 0 0 0" "Starting test execution, please wait...
 "
 
