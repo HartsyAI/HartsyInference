@@ -24,6 +24,8 @@ Status: CPU reference, synthetic evidence. Greedy drafting only. Not verified on
   restore: the next call rebuilds the window from the committed rows.
 - **The rebuilt window equals upstream's incremental window.** At every decode position from 11 to 16, with a window of 8, a fresh `Seed` of the committed rows
   before the position reproduces upstream's draft. That covers the wrap.
+- **Position 0 has no upstream draft.** Upstream's `forward_spec` at start position 0 is its prefill seed and returns nothing. The proposer drafts there from an
+  empty window, so a one-token prompt gets a draft upstream would not produce. That changes acceptance only; verification corrects every draft.
 - **Rollback replays the history's own call structure.** The prompt is one prefill chunk and every later token is a single-token step. The reference's chunked
   prefill and per-token decode are not arithmetically equivalent, so a rollback replays the chunk and then the single tokens, not one chunk.
 
