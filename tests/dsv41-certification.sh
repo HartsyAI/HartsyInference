@@ -100,8 +100,17 @@ check_cuda() { # "min VALUE" or "set \"V1 V2 ...\"": the rule every GPU must mee
     caps=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | tr -d ' ')
     if [ -z "${caps}" ]; then problem "nvidia-smi did not report compute capability: no GPU, or a driver too old to query it"; return; fi
     # GPU suites run alone (AGENTS.md): a process already holding a device would contend with the run and skew it.
-    holders=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | grep -c . || true)
-    [ "${holders:-0}" -eq 0 ] || problem "${holders} compute process(es) already hold a GPU; stop them first, GPU suites run one at a time"
+    # A listing line starts with the PID ("1475, name"). Anything else printed with a non-zero exit is a failed query, which
+    # fails closed; an empty listing is an idle GPU whatever its exit code.
+    local apps apps_rc
+    apps=$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader 2>&1)
+    apps_rc=$?
+    holders=$(grep -cE '^[0-9]' <<<"${apps}" || true)
+    if [ "${holders:-0}" -gt 0 ]; then
+        problem "${holders} compute process(es) already hold a GPU; stop them first, GPU suites run one at a time"
+    elif [ "${apps_rc}" -ne 0 ] && [ -n "${apps}" ]; then
+        problem "could not list compute processes, so the GPU cannot be shown idle: ${apps%%$'\n'*}"
+    fi
     # Every GPU must qualify: the tests may land on any device, and a mixed box cannot vouch for one card.
     for cc in ${caps}; do
         case "$1" in
@@ -219,7 +228,6 @@ for pair in "${CLASSES[@]}"; do
     set -- ${pair}
     run_class "$2" "tests/$1" --filter "$(filter_for "$2")"
 done
-
 
 if [ "${FAILED}" -eq 0 ]; then
     echo "GREEN ${LANE}: every class passed with nothing skipped. Summary: ${SUMMARY}"
