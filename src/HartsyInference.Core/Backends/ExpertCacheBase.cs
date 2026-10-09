@@ -1,4 +1,6 @@
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Exceptions;
+using HartsyInference.Core.Moe.Residency;
 
 namespace HartsyInference.Core.Backends;
 
@@ -18,6 +20,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
     private readonly HashSet<ExpertKey> _scratchSeen = [];
     private readonly List<ExpertKey> _scratchResident = [];
     private readonly List<ExpertKey> _scratchAbsent = [];
+    private readonly List<ExpertKey> _scratchPolicyKeys = [];
     private readonly Dictionary<ExpertLayerKey, ExpertBank> _banks = [];
     private readonly Dictionary<ExpertKey, ExpertCacheEntry> _entries = [];
     private readonly Dictionary<ExpertLayerKey, long> _layerFrequency = [];
@@ -28,6 +31,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
     private long _residentBytes;
     private long _protectedBytes;
     private ExpertLayerKey? _currentLayer;
+    private IAdaptiveResidencyPolicy? _residencyPolicy;
     private bool _disposed;
     private long _hits, _inFlightHits, _misses, _prefetches, _evictions, _bytesUploaded;
 
@@ -103,6 +107,25 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
         }
     }
 
+    /// <summary>
+    /// Attaches an adaptive residency policy that chooses eviction victims among the evictable residents. Opt-in: without a policy
+    /// the cache keeps its built-in order. Must be called once, before the first expert is requested or registered as resident.
+    /// The policy is driven under the cache lock; the cache reports routed accesses (<see cref="Acquire"/>, <see cref="AcquireResident"/>),
+    /// inserts and evictions, and falls back to the built-in order whenever the policy names no valid victim.
+    /// </summary>
+    public void AttachResidencyPolicy(IAdaptiveResidencyPolicy policy)
+    {
+        ArgumentNullException.ThrowIfNull(policy);
+        lock (_gate)
+        {
+            ThrowIfDisposed();
+            if (_residencyPolicy is not null) throw new InvalidOperationException("A residency policy is already attached.");
+            if (_tick != 0 || _entries.Count != 0)
+                throw new InvalidOperationException("A residency policy must be attached before the cache is used.");
+            _residencyPolicy = policy;
+        }
+    }
+
     /// <inheritdoc/>
     public ExpertLease Acquire(ReadOnlySpan<ExpertKey> keys)
     {
@@ -118,6 +141,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
             if (unique.Count > 0) _currentLayer = unique[0].LayerKey;
             foreach (ExpertKey key in unique)
             {
+                _residencyPolicy?.NoteAccess(key);
                 if (_entries.TryGetValue(key, out ExpertCacheEntry? entry))
                 {
                     hits++;
@@ -180,6 +204,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
             int inFlight = 0;
             foreach (ExpertKey key in _scratchUnique)
             {
+                _residencyPolicy?.NoteAccess(key);
                 if (_entries.TryGetValue(key, out ExpertCacheEntry? entry))
                 {
                     _scratchResident.Add(key);
@@ -292,11 +317,18 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
             ThrowIfDisposed();
             long before = _residentBytes;
             if (before <= targetResidentBytes) return 0;
-            foreach (ExpertCacheEntry victim in Candidates(requested: null, protectedLayers: null))
+            if (_residencyPolicy is null)
             {
-                if (_residentBytes <= targetResidentBytes) break;
-                EvictEntry(victim);
+                foreach (ExpertCacheEntry victim in Candidates(requested: null, protectedLayers: null))
+                {
+                    if (_residentBytes <= targetResidentBytes) break;
+                    EvictEntry(victim);
+                }
+                return before - _residentBytes;
             }
+            List<ExpertCacheEntry> chosen = [];
+            ChoosePolicyVictims(before - targetResidentBytes, requested: null, protectedLayers: null, chosen);
+            foreach (ExpertCacheEntry victim in chosen) EvictEntry(victim);
             return before - _residentBytes;
         }
     }
@@ -466,11 +498,18 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
         if (over <= 0) return true;
         List<ExpertCacheEntry> victims = [];
         long freed = 0;
-        foreach (ExpertCacheEntry candidate in Candidates(requested, protectedLayers))
+        if (_residencyPolicy is null)
         {
-            victims.Add(candidate);
-            freed += candidate.Bytes;
-            if (freed >= over) break;
+            foreach (ExpertCacheEntry candidate in Candidates(requested, protectedLayers))
+            {
+                victims.Add(candidate);
+                freed += candidate.Bytes;
+                if (freed >= over) break;
+            }
+        }
+        else
+        {
+            freed = ChoosePolicyVictims(over, requested, protectedLayers, victims);
         }
         if (freed < over)
         {
@@ -483,6 +522,47 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
         return true;
     }
 
+    /// <summary>
+    /// Picks victims one at a time until <paramref name="over"/> bytes are covered. Each pick asks the policy among the evictable
+    /// residents that are not in flight; a pick the policy does not name, or names outside that set, falls back to the built-in order.
+    /// Returns the bytes covered. Caller holds the gate.
+    /// </summary>
+    private long ChoosePolicyVictims(
+        long over, HashSet<ExpertKey>? requested, HashSet<ExpertLayerKey>? protectedLayers, List<ExpertCacheEntry> chosen)
+    {
+        List<ExpertCacheEntry> remaining = Candidates(requested, protectedLayers).ToList();
+        long freed = 0;
+        while (freed < over && remaining.Count > 0)
+        {
+            ExpertCacheEntry victim = PickPolicyVictim(remaining);
+            remaining.Remove(victim);
+            chosen.Add(victim);
+            freed += victim.Bytes;
+        }
+        return freed;
+    }
+
+    /// <summary>Asks the policy for one victim among <paramref name="remaining"/>; never returns an entry outside that list.</summary>
+    private ExpertCacheEntry PickPolicyVictim(List<ExpertCacheEntry> remaining)
+    {
+        ExpertCacheEntry fallback = remaining[0];
+        _scratchPolicyKeys.Clear();
+        foreach (ExpertCacheEntry candidate in remaining)
+        {
+            if (candidate.Pending is null) _scratchPolicyKeys.Add(candidate.Key);
+        }
+        if (_scratchPolicyKeys.Count == 0) return fallback;
+
+        ExpertKey named = _residencyPolicy!.ChooseVictim(CollectionsMarshal.AsSpan(_scratchPolicyKeys));
+        foreach (ExpertCacheEntry candidate in remaining)
+        {
+            if (candidate.Key != named) continue;
+            if (candidate.PinCount == 0 && candidate.Pending is null) return candidate;
+            break;
+        }
+        return fallback;
+    }
+
     private void UploadMissing(List<ExpertWeights> missing, bool prefetch)
     {
         List<ExpertCacheEntry> created = [];
@@ -493,6 +573,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
                 object? pending = BeginUpload(weights);
                 ExpertCacheEntry entry = new(weights, pending) { LastTick = ++_tick };
                 _entries[weights.Key] = entry;
+                _residencyPolicy?.NoteInsert(weights.Key);
                 _residentBytes += weights.Bytes;
                 created.Add(entry);
             }
@@ -527,6 +608,7 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
         entry.Fences.Clear();
         Evict(entry.Weights);
         _entries.Remove(entry.Key);
+        _residencyPolicy?.NoteEvict(entry.Key);
         _residentBytes -= entry.Bytes;
         if (entry.Protected) _protectedBytes -= entry.Bytes;
         if (countEviction) _evictions++;
