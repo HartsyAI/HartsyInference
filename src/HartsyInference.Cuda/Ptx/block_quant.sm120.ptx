@@ -102,6 +102,7 @@ $L__BB0_10:
 {
 	.reg .pred 	%p<34>;
 	.reg .b16 	%rs<23>;
+	.reg .b8 	%e2m1b0;
 	.reg .b32 	%r<48>;
 	.reg .b32 	%f<94>;
 	.reg .b64 	%rd<75>;
@@ -336,13 +337,15 @@ $L__BB1_21:
 	mul.f32 	%f71, %f91, %f1;
 	mul.f32 	%f72, %f91, %f2;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs11, %f71, %f72;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f71, %f72;
+	cvt.u16.u8 	%rs11, %e2m1b0;
 	// end inline asm
 	and.b16  	%rs19, %rs11, 255;
 	mul.f32 	%f73, %f91, %f3;
 	mul.f32 	%f74, %f91, %f4;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs12, %f73, %f74;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f73, %f74;
+	cvt.u16.u8 	%rs12, %e2m1b0;
 	// end inline asm
 	shl.b16 	%rs20, %rs12, 8;
 	or.b16  	%rs21, %rs20, %rs19;
@@ -350,7 +353,8 @@ $L__BB1_21:
 	mul.f32 	%f75, %f91, %f5;
 	mul.f32 	%f76, %f91, %f6;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs13, %f75, %f76;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f75, %f76;
+	cvt.u16.u8 	%rs13, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd43, %rs13;
 	shl.b64 	%rd44, %rd43, 16;
@@ -359,7 +363,8 @@ $L__BB1_21:
 	mul.f32 	%f77, %f91, %f7;
 	mul.f32 	%f78, %f91, %f8;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs14, %f77, %f78;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f77, %f78;
+	cvt.u16.u8 	%rs14, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd47, %rs14;
 	shl.b64 	%rd48, %rd47, 24;
@@ -368,7 +373,8 @@ $L__BB1_21:
 	mul.f32 	%f79, %f91, %f9;
 	mul.f32 	%f80, %f91, %f10;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs15, %f79, %f80;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f79, %f80;
+	cvt.u16.u8 	%rs15, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd51, %rs15;
 	shl.b64 	%rd52, %rd51, 32;
@@ -377,7 +383,8 @@ $L__BB1_21:
 	mul.f32 	%f81, %f91, %f11;
 	mul.f32 	%f82, %f91, %f12;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs16, %f81, %f82;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f81, %f82;
+	cvt.u16.u8 	%rs16, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd55, %rs16;
 	shl.b64 	%rd56, %rd55, 40;
@@ -386,7 +393,8 @@ $L__BB1_21:
 	mul.f32 	%f83, %f91, %f13;
 	mul.f32 	%f84, %f91, %f14;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs17, %f83, %f84;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f83, %f84;
+	cvt.u16.u8 	%rs17, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd59, %rs17;
 	shl.b64 	%rd60, %rd59, 48;
@@ -395,7 +403,8 @@ $L__BB1_21:
 	mul.f32 	%f85, %f91, %f15;
 	mul.f32 	%f86, %f91, %f16;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs18, %f85, %f86;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f85, %f86;
+	cvt.u16.u8 	%rs18, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd63, %rs18;
 	shl.b64 	%rd64, %rd63, 56;
@@ -421,6 +430,7 @@ $L__BB1_22:
 {
 	.reg .pred 	%p<162>;
 	.reg .b16 	%rs<151>;
+	.reg .b8 	%e2m1b0;
 	.reg .b32 	%r<784>;
 	.reg .b32 	%f<94>;
 	.reg .b64 	%rd<74>;
@@ -1727,13 +1737,15 @@ $L__BB2_245:
 	mul.f32 	%f71, %f91, %f1;
 	mul.f32 	%f72, %f91, %f2;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs139, %f71, %f72;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f71, %f72;
+	cvt.u16.u8 	%rs139, %e2m1b0;
 	// end inline asm
 	and.b16  	%rs147, %rs139, 255;
 	mul.f32 	%f73, %f91, %f3;
 	mul.f32 	%f74, %f91, %f4;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs140, %f73, %f74;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f73, %f74;
+	cvt.u16.u8 	%rs140, %e2m1b0;
 	// end inline asm
 	shl.b16 	%rs148, %rs140, 8;
 	or.b16  	%rs149, %rs148, %rs147;
@@ -1741,7 +1753,8 @@ $L__BB2_245:
 	mul.f32 	%f75, %f91, %f5;
 	mul.f32 	%f76, %f91, %f6;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs141, %f75, %f76;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f75, %f76;
+	cvt.u16.u8 	%rs141, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd43, %rs141;
 	shl.b64 	%rd44, %rd43, 16;
@@ -1750,7 +1763,8 @@ $L__BB2_245:
 	mul.f32 	%f77, %f91, %f7;
 	mul.f32 	%f78, %f91, %f8;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs142, %f77, %f78;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f77, %f78;
+	cvt.u16.u8 	%rs142, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd47, %rs142;
 	shl.b64 	%rd48, %rd47, 24;
@@ -1759,7 +1773,8 @@ $L__BB2_245:
 	mul.f32 	%f79, %f91, %f9;
 	mul.f32 	%f80, %f91, %f10;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs143, %f79, %f80;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f79, %f80;
+	cvt.u16.u8 	%rs143, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd51, %rs143;
 	shl.b64 	%rd52, %rd51, 32;
@@ -1768,7 +1783,8 @@ $L__BB2_245:
 	mul.f32 	%f81, %f91, %f11;
 	mul.f32 	%f82, %f91, %f12;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs144, %f81, %f82;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f81, %f82;
+	cvt.u16.u8 	%rs144, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd55, %rs144;
 	shl.b64 	%rd56, %rd55, 40;
@@ -1777,7 +1793,8 @@ $L__BB2_245:
 	mul.f32 	%f83, %f91, %f13;
 	mul.f32 	%f84, %f91, %f14;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs145, %f83, %f84;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f83, %f84;
+	cvt.u16.u8 	%rs145, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd59, %rs145;
 	shl.b64 	%rd60, %rd59, 48;
@@ -1786,7 +1803,8 @@ $L__BB2_245:
 	mul.f32 	%f85, %f91, %f15;
 	mul.f32 	%f86, %f91, %f16;
 	// begin inline asm
-	cvt.rn.satfinite.e2m1x2.f32 %rs146, %f85, %f86;
+	cvt.rn.satfinite.e2m1x2.f32 %e2m1b0, %f85, %f86;
+	cvt.u16.u8 	%rs146, %e2m1b0;
 	// end inline asm
 	cvt.u64.u16 	%rd63, %rs146;
 	shl.b64 	%rd64, %rd63, 56;
