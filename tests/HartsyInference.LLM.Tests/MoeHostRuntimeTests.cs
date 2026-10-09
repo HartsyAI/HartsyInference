@@ -94,13 +94,16 @@ public sealed class MoeHostRuntimeTests
 
         MoeFeedForward runtime = new(moe, Hidden, lowVram: false) { UseHostExpertRuntime = true };
         runtime.LoadWeights(first, Prefix);
-        _ = runtime.Forward(backend, x, Tokens);
+        float[] beforeReload = runtime.Forward(backend, x, Tokens).AsReadOnlySpan<float>().ToArray();
 
         // The first run cached the first layer's weights; a reload must drop them.
         runtime.LoadWeights(second, Prefix);
         MoeFeedForward direct = new(moe, Hidden, lowVram: false);
         direct.LoadWeights(second, Prefix);
-        float maxAbs = MaxAbsDiff(direct.Forward(backend, x, Tokens), runtime.Forward(backend, x, Tokens));
+        Tensor afterReload = runtime.Forward(backend, x, Tokens);
+        // The two weight sets must produce different outputs, or the check below could not tell stale weights from new ones.
+        Assert.NotEqual(beforeReload, afterReload.AsReadOnlySpan<float>().ToArray());
+        float maxAbs = MaxAbsDiff(direct.Forward(backend, x, Tokens), afterReload);
         _output.WriteLine($"reload max abs error {maxAbs:E3}");
         Assert.True(maxAbs <= 1e-5f, $"After reload the runtime served stale weights (max abs error {maxAbs}).");
     }
