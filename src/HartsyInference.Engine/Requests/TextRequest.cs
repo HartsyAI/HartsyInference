@@ -43,6 +43,15 @@ public sealed record TextRequest
     /// else <see cref="TenantContext.Local"/>. The API never sets this from client input.</summary>
     public string? TenantId { get; init; }
 
+    /// <summary>Reasoning effort in [1, 100] for a template that takes one (DeepSeek-V4.1 thinking mode); null uses the template's default (75). Templates without an effort slot ignore it.</summary>
+    public int? ReasoningEffort { get; init; }
+
+    /// <summary>The caller's own user identifier (OpenAI's <c>user</c>), carried on the request; the engine does not use it yet. It does not choose the tenant: the tenant comes from the API key, so a client cannot claim another tenant's cache.</summary>
+    public string? User { get; init; }
+
+    /// <summary>Queue priority when the server is busy: a higher priority is admitted first, and equal priorities keep arrival order. Null is <see cref="RequestPriority.Normal"/>.</summary>
+    public RequestPriority? Priority { get; init; }
+
     /// <summary>Target device key (e.g. "cpu", "cuda:0"); null uses the backend's primary device.</summary>
     /// <remarks>The slot builds its own backend for this key and gates only that ordinal, so an engine built on one card
     /// can serve its LLM on another. On such an engine every generate and stream request must set this, or the model

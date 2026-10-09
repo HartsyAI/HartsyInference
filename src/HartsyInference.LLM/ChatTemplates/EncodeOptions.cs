@@ -1,3 +1,5 @@
+using System.Globalization;
+
 namespace HartsyInference.LLM.ChatTemplates;
 
 /// <summary>Per-call settings for an <see cref="IConversationEncoder"/>.</summary>
@@ -24,12 +26,23 @@ public sealed record EncodeOptions
     /// <summary>Patch grids of the images referenced by <see cref="ImageBlock"/>s, indexed by <see cref="ImageBlock.ImageIndex"/>.</summary>
     public IReadOnlyList<ImageGrid>? Images { get; init; }
 
-    /// <summary>Maps the named efforts "low"/"high"/"max" to 50/75/100.</summary>
-    public static int ParseReasoningEffort(string name) => name switch
+    /// <summary>Parses a reasoning effort: a named effort ("low"/"high"/"max", which are 50/75/100) or an integer in [1, <see cref="MaxReasoningEffort"/>]
+    /// written in plain digits. The CLI and the chat API both read effort through it, so they accept and refuse the same values.</summary>
+    /// <exception cref="ArgumentException">Any other name, or an integer outside the range, including one too large for an <see cref="int"/>.</exception>
+    public static int ParseReasoningEffort(string value)
     {
-        "low" => 50,
-        "high" => 75,
-        "max" => 100,
-        _ => throw new ArgumentException($"Unknown reasoning effort '{name}'; use low, high, max or an integer in [1,100]."),
-    };
+        ArgumentNullException.ThrowIfNull(value);
+        switch (value)
+        {
+            case "low": return 50;
+            case "high": return 75;
+            case "max": return 100;
+        }
+        if (value.Length == 0 || value.AsSpan().ContainsAnyExceptInRange('0', '9'))
+            throw new ArgumentException($"Unknown reasoning effort '{value}'; use low, high, max or an integer in [1, {MaxReasoningEffort}].");
+        // Digits only: an integer, perhaps one too large for an int, which is out of range all the same.
+        if (int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out int effort) && effort is >= 1 and <= MaxReasoningEffort)
+            return effort;
+        throw new ArgumentException($"Reasoning effort {value} is out of range; use an integer in [1, {MaxReasoningEffort}], or low, high or max.");
+    }
 }

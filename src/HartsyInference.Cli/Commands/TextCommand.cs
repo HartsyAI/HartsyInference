@@ -92,6 +92,11 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("Disable chat-template reasoning/\"thinking\" mode.")]
         public bool NoThinking { get; init; }
 
+        /// <summary>Reasoning effort for models that take one (DeepSeek-V4.1 thinking mode): <c>low</c>, <c>high</c>, <c>max</c>, or an integer in [1, 100]. Unset uses the template default.</summary>
+        [CommandOption("--reasoning-effort")]
+        [Description("Reasoning effort for models that take one (DeepSeek-V4.1 thinking): low, high, max, or an integer in [1, 100].")]
+        public string? ReasoningEffort { get; init; }
+
         /// <summary>Keep weights compressed at their on-disk quant instead of dequantizing to full precision.</summary>
         [CommandOption("--low-vram-quant")]
         [Description("Keep weights compressed at their on-disk quant to reduce VRAM use.")]
@@ -168,6 +173,8 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             parameters.Put("thinking", thinking ? "true" : "false");
         else if (settings.NoThinking)
             parameters.Put("thinking", "false");
+        if (settings.ReasoningEffort is { Length: > 0 } effort)
+            parameters.Put("reasoning-effort", effort);
         parameters.Put("low-vram-quant", settings.LowVramQuant ? "true" : "false");
         parameters.Put("always-free-memory", settings.AlwaysFreeMemory ? "true" : "false");
 

@@ -6,6 +6,7 @@ using HartsyInference.Diffusion.Models.Denoisers;
 using HartsyInference.Engine.Audio;
 using HartsyInference.Engine.Recipes.Video;
 using HartsyInference.Engine.Services;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.Vision.Codec;
 using HartsyInference.Core.MemoryManagement;
 
@@ -141,6 +142,7 @@ public static class GenerationDispatch
             Greedy = temperature <= 0f,
             GraphDecode = parameters.GetBool("graph-decode", false) ? true : null,
             EnableThinking = parameters.GetStringOrNull("thinking") is { Length: > 0 } thinking ? bool.Parse(thinking) : null,
+            ReasoningEffort = ParseReasoningEffort(parameters.GetStringOrNull("reasoning-effort")),
             // TextService.LoadInto only checks LowVramQuant for non-empty (a bool-shaped toggle, not an actual
             // target quant selector), so any non-empty sentinel works here — see its doc comment.
             LowVramQuant = parameters.GetBool("low-vram-quant", false) ? "on" : null,
@@ -224,6 +226,10 @@ public static class GenerationDispatch
         AudioResult result = await engine.Speech.SynthesizeAsync(spec, request, cancel).ConfigureAwait(false);
         return AudioArtifact(result, "speech");
     }
+
+    /// <summary>The <c>--reasoning-effort</c> value, read by <see cref="EncodeOptions.ParseReasoningEffort"/> as the chat API reads it: an integer in [1, 100], or a
+    /// name the engine defines (<c>low</c>, <c>high</c>, <c>max</c>). Null when unset; <see cref="ArgumentException"/> for anything else.</summary>
+    internal static int? ParseReasoningEffort(string? value) => value is { Length: > 0 } text ? EncodeOptions.ParseReasoningEffort(text) : null;
 
     /// <summary>Parses <c>--emotion</c>'s comma-separated weights; null when unset, <see cref="ArgumentException"/> unless exactly 8 numbers.</summary>
     internal static double[]? ParseEmotionVector(string? csv)

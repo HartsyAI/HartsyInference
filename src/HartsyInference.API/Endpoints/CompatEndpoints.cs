@@ -8,6 +8,7 @@ using HartsyInference.Engine.Features;
 using HartsyInference.Engine.Registry;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
+using HartsyInference.LLM.ChatTemplates;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Quant;
 // A bare ImageData means the API's own OpenAI DTO (the enclosing namespace wins over any using), so the native type gets another name.
@@ -85,7 +86,7 @@ public static class CompatEndpoints
             {
                 textRequest = ToTextRequest(req);
             }
-            catch (HartsyInferenceException ex)
+            catch (Exception ex) when (ex is HartsyInferenceException or ArgumentException)
             {
                 return GenerationErrors.Map(ex);
             }
@@ -371,6 +372,10 @@ public static class CompatEndpoints
             RepetitionPenalty = req.RepetitionPenalty,
             MaxTokens = req.MaxTokens ?? 4096,
             Seed = req.Seed.HasValue ? (long)req.Seed.Value : -1,
+            ReasoningEffort = ParseReasoningEffort(req.ReasoningEffort),
+            EnableThinking = ParseThinking(req.Thinking),
+            User = req.User,
+            Priority = ParsePriority(req.Priority),
             Greedy = req.Temperature is 0f,
             Tools = (!toolsSuppressed && req.Tools is { Count: > 0 })
                 ? [.. req.Tools.Select(t => new ToolDefinition
@@ -489,6 +494,36 @@ public static class CompatEndpoints
                 throw new HartsyInferenceException($"The images in one request decode to more than {MaxRequestImageBytes / (1024 * 1024)} MiB together. Send fewer or smaller images.");
         }
     }
+
+    /// <summary>OpenAI <c>reasoning_effort</c>: a name the engine defines (<c>low</c>, <c>high</c>, <c>max</c>) or an integer in [1, 100]. A string or a number is read
+    /// by <see cref="EncodeOptions.ParseReasoningEffort"/>, the parser the CLI uses; anything else is the caller's error.</summary>
+    internal static int? ParseReasoningEffort(JsonElement? value) => value?.ValueKind switch
+    {
+        null or JsonValueKind.Null => null,
+        JsonValueKind.String => EncodeOptions.ParseReasoningEffort(value.Value.GetString()!),
+        // The number as written: only plain digits are an integer effort, so 1.5 and 1e2 are refused.
+        JsonValueKind.Number => EncodeOptions.ParseReasoningEffort(value.Value.GetRawText()),
+        _ => throw new ArgumentException($"reasoning_effort must be a name (low, high, max) or an integer in [1, {EncodeOptions.MaxReasoningEffort}]."),
+    };
+
+    /// <summary>OpenAI <c>thinking</c>: <c>enabled</c> or <c>disabled</c>. Unset leaves the template's default.</summary>
+    internal static bool? ParseThinking(ChatThinkingDto? thinking) => thinking?.Type switch
+    {
+        null => null,
+        "enabled" => true,
+        "disabled" => false,
+        _ => throw new ArgumentException($"thinking.type must be 'enabled' or 'disabled', not '{thinking!.Type}'."),
+    };
+
+    /// <summary>OpenAI-style <c>priority</c>: <c>low</c>, <c>normal</c> or <c>high</c>. Unset is normal.</summary>
+    internal static RequestPriority? ParsePriority(string? priority) => priority switch
+    {
+        null => null,
+        "low" => RequestPriority.Low,
+        "normal" => RequestPriority.Normal,
+        "high" => RequestPriority.High,
+        _ => throw new ArgumentException($"priority must be 'low', 'normal' or 'high', not '{priority}'."),
+    };
 
     internal static NativeToolCall ToNativeToolCall(ChatToolCallDto call) => new NativeToolCall
     {
