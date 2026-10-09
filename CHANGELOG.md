@@ -8,7 +8,7 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
-## alpha.303
+## alpha.304
 
 - **Changed: the V4.1 host reference runs each routed expert once per batch of tokens, not once per token.** `DeepSeekV41MoeExecutor.Run`
   gathers the tokens routed to an expert and runs them together, so a stored-form expert is decoded once per call instead of once per token.
