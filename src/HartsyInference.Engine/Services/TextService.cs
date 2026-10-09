@@ -93,10 +93,11 @@ public sealed class TextService : ITextService, IDisposable
             if (IsLatest(record, attempt))
             {
                 // A load that replaces the device's model waits for scheduled requests on it first, as a request does (see PrepareSlot).
+                // The wait blocks, so it runs on the pool rather than on this async method's thread; the timeout is the one tests can shorten.
                 if (slot.HasLeases && ReplacesLoadedModel(slot, request.Model.LocalPath)
-                    && !slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+                    && !await Task.Run(() => slot.WaitForLeases(UnloadLeaseWait), cancel).ConfigureAwait(false))
                 {
-                    throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the deployment.");
+                    throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadLeaseWait.TotalSeconds:0}s; retry the deployment.");
                 }
                 await Task.Run(() =>
                 {
