@@ -98,4 +98,35 @@ public sealed class DynamicBatchSchedulerAdmissionTests
         Assert.Equal([1, 2], places);
         foreach (Tensor t in w.Values) t.Dispose();
     }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_Budget_No_Sequence_Can_Hold_Is_Refused_With_ArgumentException_And_Reserves_Nothing(bool pooled)
+    {
+        TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();
+        Dictionary<string, Tensor> w = DynamicBatchSchedulerTests.Weights(cfg);
+        try
+        {
+            using CpuBackend backend = new();
+            using GenericTransformer model = new(cfg);
+            model.LoadWeights(w, "model");
+            using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 4);
+            using DynamicBatchScheduler scheduler = new(model, new DynamicBatchSchedulerTests.StubTokenizer(), backend, pooled ? pool : null);
+
+            // An int page count wrapped negative for this budget and passed both page checks, so the request was admitted and failed deep in admission (a 500).
+            ArgumentException refused = await Assert.ThrowsAsync<ArgumentException>(
+                () => scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([1, 2, 3], int.MaxValue, seed: 0), null, CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(30));
+            Assert.Equal(nameof(GenerationRequest), refused.ParamName);
+
+            // Nothing was reserved: a request that needs the whole pool, (3 + 12 + 1) / 4 = 4 pages, is still admitted.
+            GenerationResult whole = await scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([1, 2, 3], 12, seed: 0), null, CancellationToken.None)
+                .WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.InRange(whole.TokenIds.Count, 0, 12);
+        }
+        finally
+        {
+            foreach (Tensor t in w.Values) t.Dispose();
+        }
+    }
 }

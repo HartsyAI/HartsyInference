@@ -331,7 +331,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 continue;
             }
 
-            int pages;
+            long pages;
             try
             {
                 head.PromptIds ??= BuildPromptIds(head.Request);
@@ -343,12 +343,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 head.Completion.TrySetException(ex);
                 continue;
             }
-            if (_pool is not null && pages > _pool.MaxPages)
+            if (Refusal(head.PromptIds.Length, head.Request.MaxTokens, pages) is { } refusal)
             {
                 RemoveHead(head);
-                head.Completion.TrySetException(new ArgumentException(
-                    $"The request needs {pages} KV pages of {_pool.PageSize} tokens, but the pool holds {_pool.MaxPages}; shorten the prompt or max_tokens.",
-                    nameof(GenerationRequest)));
+                head.Completion.TrySetException(refusal);
                 continue;
             }
             if (active.Count >= _maxActive) return;
@@ -361,8 +359,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 // Recomputed fresh for EACH admitted request: active.Count grows as this loop admits earlier requests, so a request admitted after them is non-solo.
                 bool solo = active.Count == 0;
                 await RunGpuWork(() => seq = AdmitAndPrefill(head, solo)).ConfigureAwait(false);
-                seq!.ReservedPages = pages;
-                _reservedPages += pages;
+                // At most MaxPages here (Refusal), so the count fits an int.
+                seq!.ReservedPages = (int)pages;
+                _reservedPages += (int)pages;
                 active.Add(seq);
             }
             catch (Exception ex)
@@ -390,8 +389,28 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// <summary>One fewer request waiting: called wherever a submitted request leaves the queue.</summary>
     private void Leave() => Interlocked.Decrement(ref _queued);
 
-    /// <summary>The pages a sequence of this many prompt tokens and generation budget can grow to, at <paramref name="pageSize"/> tokens a page.</summary>
-    private static int PagesFor(int promptTokens, int maxTokens, int pageSize) => (promptTokens + maxTokens + 1 + pageSize - 1) / pageSize;
+    /// <summary>The pages a sequence of this many prompt tokens and generation budget can grow to, at <paramref name="pageSize"/> tokens a page. Long arithmetic, so a huge
+    /// budget gives a huge count instead of wrapping to a small or negative one that would pass the pool checks.</summary>
+    private static long PagesFor(int promptTokens, int maxTokens, int pageSize) => ((long)promptTokens + maxTokens + 1 + pageSize - 1) / pageSize;
+
+    /// <summary>Why a request can never be admitted, or null when it can wait its turn: a negative budget, a sequence longer than any state can hold, or on a pooled model a
+    /// page count that is not positive or exceeds the whole pool. Each is the caller's to fix, so it is an <see cref="ArgumentException"/>, which the API answers with 400.</summary>
+    private ArgumentException? Refusal(int promptTokens, int maxTokens, long pages)
+    {
+        if (maxTokens < 0)
+            return new ArgumentException($"max_tokens must not be negative (got {maxTokens}).", nameof(GenerationRequest));
+        if ((long)promptTokens + maxTokens + 1 > int.MaxValue)
+        {
+            return new ArgumentException(
+                $"The prompt ({promptTokens} tokens) plus max_tokens ({maxTokens}) is longer than a sequence can hold; lower max_tokens.", nameof(GenerationRequest));
+        }
+        if (_pool is not null && (pages <= 0 || pages > _pool.MaxPages))
+        {
+            return new ArgumentException(
+                $"The request needs {pages} KV pages of {_pool.PageSize} tokens, but the pool holds {_pool.MaxPages}; shorten the prompt or max_tokens.", nameof(GenerationRequest));
+        }
+        return null;
+    }
 
     private async Task WaitForWorkOrShutdown()
     {
