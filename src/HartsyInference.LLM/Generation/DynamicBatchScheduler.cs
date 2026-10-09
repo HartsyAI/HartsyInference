@@ -141,6 +141,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// <summary>The most sequences this scheduler decodes at once.</summary>
     public int MaxActive => _maxActive;
 
+    /// <summary>Test seam, null in production: runs in the admission loop after it peeks the head and before it removes it, the window in which
+    /// <see cref="CancelQueued"/> can fail the head.</summary>
+    internal Action? BeforeRemoveHeadForTests { get; set; }
+
     /// <summary>Stops admission and fails every request still waiting, so a draining model takes no new work and its queue empties at once. Sequences already decoding run on
     /// to their end; the caller decides how long to wait for them before <see cref="Dispose"/>.</summary>
     public void CancelQueued()
@@ -399,7 +403,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             if (active.Count >= _maxActive) return;
             if (_pool is not null && _reservedPages + pages > _pool.MaxPages) return;
 
-            RemoveHead(head);
+            // Test seam: the window between peeking the head and removing it, where a concurrent CancelQueued can fail the head.
+            BeforeRemoveHeadForTests?.Invoke();
+            // CancelQueued or shutdown may have failed this head since it was peeked. Then it is no longer waiting, so nothing is admitted for it.
+            if (!TryRemoveHead(head)) return;
             try
             {
                 ActiveSeq? seq = null;
@@ -484,6 +491,19 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             _waiting.Dequeue();
         }
         Leave();
+    }
+
+    /// <summary>Takes <paramref name="head"/> off the waiting queue only while it is still the head. False means it is no longer waiting: <see cref="CancelQueued"/> or
+    /// shutdown failed and dequeued it since it was peeked, so it must not be admitted.</summary>
+    private bool TryRemoveHead(PendingRequest head)
+    {
+        lock (_waitingGate)
+        {
+            if (_waiting.Count == 0 || !ReferenceEquals(_waiting.Peek(), head)) return false;
+            _waiting.Dequeue();
+        }
+        Leave();
+        return true;
     }
 
     /// <summary>Returns a sequence's page reservation when it leaves the active set.</summary>
