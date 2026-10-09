@@ -78,6 +78,7 @@ public sealed class TextService : ITextService, IDisposable
     /// <inheritdoc/>
     public async Task<DeploymentStatus> DeployAsync(DeploymentRequest request, CancellationToken cancel = default)
     {
+        ArgumentNullException.ThrowIfNull(request);
         ArgumentException.ThrowIfNullOrWhiteSpace(request.DeploymentId);
         string deviceKey = NormalizeDeviceKey(request.Device);
         DeploymentRecord record = BeginDeployment(request.DeploymentId, request.Model, deviceKey, out int attempt);
@@ -88,7 +89,7 @@ public sealed class TextService : ITextService, IDisposable
             // Inside the try, so a deploy cancelled while it waits for the device is recorded as Failed rather than left Loading.
             await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
             holdsDevice = true;
-            // A later deploy of this id began while this one waited for the device: that one owns the record, so this one loads nothing.
+            // A later deploy of this id began while this one waited for the device: that one owns the record, so this one loads nothing; the status it returns is the record as the later deploy left it.
             if (IsLatest(record, attempt))
             {
                 // A load that replaces the device's model waits for scheduled requests on it first, as a request does (see PrepareSlot).
