@@ -46,7 +46,8 @@ public static class HealthEndpoints
 
     /// <summary>The readiness of one model for <c>/ready?model=</c>: 200 only when a deployment of it is Ready. A model with no deployment is 503 with
     /// <c>not_deployed</c>, and a deployment that is not ready says which state it is in. With none Ready, the latest Loading one answers, else the latest of any state
-    /// (latest in the listing's order), so a stale Unloaded or Failed record never hides a load in progress.</summary>
+    /// (latest in the listing's order), so a stale Unloaded or Failed record never hides a load in progress. A deployment matches when the requested string equals its
+    /// deployment id or its model name, exactly; an alias, or a path that resolves to the same model, does not match.</summary>
     internal static IResult ReadyFor(string model, ITextService text)
     {
         List<DeploymentStatus> matches = [.. text.Deployments.Where(d => d.DeploymentId == model || d.Model == model)];
