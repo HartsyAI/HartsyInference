@@ -1,3 +1,4 @@
+using System.Linq;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
@@ -36,12 +37,24 @@ public sealed class PackedExpertHostRunner : IExpertHostRunner
     }
 
     /// <inheritdoc/>
-    /// <exception cref="InvalidOperationException">The resolved expert's projections are not this runner's dtype.</exception>
-    public unsafe void Run(ExpertProgram program, ExpertKey key, ReadOnlySpan<float> x, int rows, Span<float> y)
+    /// <remarks>Runs in chunks of at most <see cref="CpuExpertKernels.MaxRows"/> rows, the kernel's limit.</remarks>
+    /// <exception cref="InvalidOperationException">The resolved expert's projections are not this runner's dtype, or the
+    /// expert carries companion tensors, which this runner does not read.</exception>
+    public void Run(ExpertProgram program, ExpertKey key, ReadOnlySpan<float> x, int rows, Span<float> y)
     {
         ExpertWeights weights = _resolve(key);
-        CpuExpertKernels.Apply(program, _dtype, _hidden, _intermediate,
-            PackedBytes(weights.W1, key), PackedBytes(weights.W3, key), PackedBytes(weights.W2, key), x, rows, y);
+        if (weights.W1.Companions.Any() || weights.W2.Companions.Any() || weights.W3.Companions.Any())
+            throw new InvalidOperationException($"{key} carries scale or bias tensors this runner does not read; use the F32 reference.");
+        ReadOnlySpan<byte> gate = PackedBytes(weights.W1, key);
+        ReadOnlySpan<byte> up = PackedBytes(weights.W3, key);
+        ReadOnlySpan<byte> down = PackedBytes(weights.W2, key);
+        int hidden = _hidden;
+        for (int first = 0; first < rows; first += CpuExpertKernels.MaxRows)
+        {
+            int count = Math.Min(CpuExpertKernels.MaxRows, rows - first);
+            CpuExpertKernels.Apply(program, _dtype, _hidden, _intermediate, gate, up, down,
+                x.Slice(first * hidden, count * hidden), count, y.Slice(first * hidden, count * hidden));
+        }
         // The spans point into native memory the tensors own; the weights must not be collected before the kernel returns.
         GC.KeepAlive(weights);
     }

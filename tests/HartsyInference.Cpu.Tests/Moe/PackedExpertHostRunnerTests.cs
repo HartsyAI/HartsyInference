@@ -96,6 +96,42 @@ public sealed class PackedExpertHostRunnerTests
     }
 
     [Fact]
+    public void MoreRowsThanTheKernelAcceptsAreRunInChunks()
+    {
+        const int count = 11;
+        ExpertKey key = new(0, 0, 0);
+        List<Tensor> owned = [];
+        try
+        {
+            Tensor gate = Quantize(Random(Intermediate * Hidden, 11, 0.1f), DType.Q8_0, Intermediate, Hidden, out float[] gateDeq);
+            Tensor up = Quantize(Random(Intermediate * Hidden, 12, 0.1f), DType.Q8_0, Intermediate, Hidden, out float[] upDeq);
+            Tensor down = Quantize(Random(Hidden * Intermediate, 13, 0.1f), DType.Q8_0, Hidden, Intermediate, out float[] downDeq);
+            owned.AddRange([gate, up, down]);
+            ExpertWeights weights = new(key, new ExpertMatrix(gate), new ExpertMatrix(down), new ExpertMatrix(up));
+            F32ExpertWeights reference = new(Hidden, Intermediate, gateDeq, upDeq, downDeq);
+            float[] x = Random(count * Hidden, 14, 1f);
+            float[] expected = new float[count * Hidden];
+            ExpertProgramReference.Apply(ExpertProgram.Swiglu, reference, x, count, expected);
+            float[] actual = new float[count * Hidden];
+            PackedExpertHostRunner runner = new(DType.Q8_0, Hidden, Intermediate, _ => weights);
+            runner.Run(ExpertProgram.Swiglu, key, x, count, actual);
+
+            float maxAbs = 0f;
+            float maxRef = 0f;
+            for (int i = 0; i < expected.Length; i++)
+            {
+                maxAbs = MathF.Max(maxAbs, MathF.Abs(actual[i] - expected[i]));
+                maxRef = MathF.Max(maxRef, MathF.Abs(expected[i]));
+            }
+            Assert.True(maxAbs / maxRef <= 2e-2f, $"Eleven rows: relative error {maxAbs / maxRef:E4} exceeds 2e-2.");
+        }
+        finally
+        {
+            foreach (Tensor tensor in owned) tensor.Dispose();
+        }
+    }
+
+    [Fact]
     public void RefusesADtypeWithoutAPackedKernel()
     {
         Assert.Throws<NotSupportedException>(() => new PackedExpertHostRunner(DType.F32, Hidden, Intermediate, _ => null!));
