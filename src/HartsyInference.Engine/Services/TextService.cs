@@ -463,8 +463,9 @@ public sealed class TextService : ITextService, IDisposable
         // request on the same busy key finds nothing and falls back to this same uncached path, and checked back
         // IN from `finally` below whatever the outcome; success, a filter stop, or a genuine exception all leave
         // `reuse` in a state TextGenerationPipeline.Generate already decided is safe to store (see its doc).
-        RetainedSequence? reuse = request.PrefixCacheKey is { Length: > 0 } cacheKey && slot.SsmPipeline is null
-            ? (slot.PrefixCache ??= NewPrefixCacheStore()).Checkout(cacheKey) ?? new RetainedSequence()
+        // Scoped by tenant and by the model the device holds, so one tenant's prefix never serves another's (see PrefixCacheScope.TryKey).
+        RetainedSequence? reuse = PrefixCacheScope.TryKey(slot, request, out string? scopedKey)
+            ? (slot.PrefixCache ??= NewPrefixCacheStore()).Checkout(scopedKey) ?? new RetainedSequence()
             : null;
         GenerationResult result;
         try
@@ -480,7 +481,7 @@ public sealed class TextService : ITextService, IDisposable
         {
             if (reuse is not null)
             {
-                slot.PrefixCache!.CheckIn(request.PrefixCacheKey!, reuse);
+                slot.PrefixCache!.CheckIn(scopedKey!, reuse);
             }
         }
         return run.Finish(result);
