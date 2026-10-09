@@ -9,6 +9,7 @@ namespace HartsyInference.LLM.Tests;
 
 /// <summary>Slot leases through <see cref="TextService"/> on the small V4.1 fixture checkpoint (CPU): a load that replaces a model waits for the scheduled requests
 /// still running on it, decided by the same rule the loader reloads by. A test holds a lease the way a running scheduled request does.</summary>
+[Collection(TextServiceSlotsCollection.Name)]
 public sealed class TextServiceLeaseTests : IDisposable
 {
     private readonly string _root = Directory.CreateTempSubdirectory("text-lease-").FullName;
