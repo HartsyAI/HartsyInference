@@ -68,6 +68,13 @@ public sealed class FlowMatchEulerDiscreteScheduler : IScheduler
         {
             throw new ArgumentException("An explicit sigma schedule needs at least one sigma.", nameof(sigmas));
         }
+        for (int i = 0; i < sigmas.Length; i++)
+        {
+            if (!(sigmas[i] > 0f) || (i > 0 && sigmas[i] >= sigmas[i - 1]))
+            {
+                throw new ArgumentException($"Explicit sigmas must be positive and strictly descending; sigma {i} is {sigmas[i]}.", nameof(sigmas));
+            }
+        }
         _numInferenceSteps = sigmas.Length;
         HasExplicitSigmas = true;
         _sigmas = new float[sigmas.Length + 1];

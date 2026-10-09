@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Diffusion.Sampling;
 using HartsyInference.Diffusion.Schedulers;
 using HartsyInference.Engine.Recipes;
 using HartsyInference.Engine.Recipes.Image;
@@ -121,6 +122,38 @@ public sealed unsafe class QwenImage21TurboTests : IDisposable
         Assert.Equal(10f, p[11]);        // proj row 1
         Assert.True(converted.Transformer.ContainsKey("transformer_blocks.0.img_mlp.out.weight"));
         _owned.Add(fused);
+    }
+
+    [Fact]
+    public void SplitMlp_LeftoverSplitTensorIsAnError()
+    {
+        Dictionary<string, Tensor> source = new()
+        {
+            ["transformer_blocks.0.img_mlp.gate_layer.weight"] = Make(2, 3, 1f),
+            ["transformer_blocks.0.img_mlp.proj.weight"] = Make(2, 3, 2f),
+            ["transformer_blocks.0.img_mlp.gate_layer.bias"] = Make(1, 2, 0f),
+        };
+        Assert.Throws<InvalidOperationException>(() => QwenImage21CheckpointConverter.Convert(source));
+    }
+
+    [Fact]
+    public void SetSigmas_RejectsNonDescendingOrNonPositive()
+    {
+        FlowMatchEulerDiscreteScheduler scheduler = new(shift: 1.0f);
+        Assert.Throws<ArgumentException>(() => scheduler.SetSigmas([0.5f, 0.75f]));
+        Assert.Throws<ArgumentException>(() => scheduler.SetSigmas([1.0f, 0.0f]));
+    }
+
+    [Theory]
+    [InlineData("euler")]
+    [InlineData("dpmpp_2m")]
+    public void ExplicitSchedule_IsKeptByEverySamplerWithoutAFamilyGrid(string sampler)
+    {
+        // With no family grid there is nothing to rebuild from, so the shipped sigmas (terminal 0 appended) must
+        // come back unchanged for every sampler. A rebuild would silently replace them with the base shift grid.
+        float[] shipped = [.. QwenImage21Variants.TurboSigmas, 0.0f];
+        float[] built = SamplerRegistry.BuildSigmas(sampler, null, shipped, false, null);
+        Assert.Equal(shipped, built);
     }
 
     [Fact]

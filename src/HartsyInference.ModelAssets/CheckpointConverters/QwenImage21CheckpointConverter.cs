@@ -78,6 +78,16 @@ public sealed class QwenImage21CheckpointConverter
             transformer.Remove(gateKey);
             transformer.Remove(projKey);
         }
+
+        // Anything left in split form (a bias, or a companion that was not folded) would load partially and fail as
+        // noise, so refuse it here by name.
+        foreach (string key in transformer.Keys)
+        {
+            if (key.Contains(".img_mlp.gate_layer.", StringComparison.Ordinal) || key.Contains(".img_mlp.proj.", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"'{key}' is an unfused split-MLP tensor this converter does not handle (only .weight is fused).");
+            }
+        }
     }
 
     /// <summary>True when a key set is Qwen-Image 2.1 — ComfyUI's rule from <c>model_detection.py</c>: the five

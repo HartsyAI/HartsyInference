@@ -45,15 +45,15 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
         {
             // The Turbo checkpoint is distilled to one fixed schedule and is guidance-free. Any other step count or
             // CFG is outside what it was trained for, so both are pinned rather than honoured, the way Krea 2 Turbo
-            // pins its CFG.
+            // pins its CFG. Warn only on a value the request actually set: an unset request takes the Turbo defaults.
             explicitSigmas = [.. QwenImage21Variants.TurboSigmas];
-            if (steps != explicitSigmas.Length)
+            if (request.Steps is { } requestedSteps && requestedSteps != explicitSigmas.Length)
             {
-                Logs.Warning($"[QwenImage21] Turbo runs its fixed {explicitSigmas.Length}-step schedule; requested {steps} steps is ignored.");
+                Logs.Warning($"[QwenImage21] Turbo runs its fixed {explicitSigmas.Length}-step schedule; requested {requestedSteps} steps is ignored.");
             }
-            if (cfg != 1.0f)
+            if (request.CfgScale is { } requestedCfg && requestedCfg != 1.0f)
             {
-                Logs.Warning($"[QwenImage21] Turbo is guidance-free; requested CFG {cfg} is ignored and CFG 1 is used.");
+                Logs.Warning($"[QwenImage21] Turbo is guidance-free; requested CFG {requestedCfg} is ignored and CFG 1 is used.");
             }
             steps = explicitSigmas.Length;
             cfg = 1.0f;

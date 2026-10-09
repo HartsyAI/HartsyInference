@@ -7,6 +7,9 @@ namespace HartsyInference.ModelAssets.Checkpoints;
 /// shard path and the rest sit beside it, so no index file has to be present.</summary>
 public static class ShardSetDiscovery
 {
+    /// <summary>Largest shard count accepted. A real checkpoint is tens of shards; this bounds the probe on a crafted name.</summary>
+    private const int MaxShards = 1000;
+
     private static readonly Regex ShardName = new(@"^(?<stem>.+)-(?<index>\d{5})-of-(?<total>\d{5})\.safetensors$",
         RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
 
@@ -25,6 +28,10 @@ public static class ShardSetDiscovery
         string directory = Path.GetDirectoryName(path) ?? string.Empty;
         string stem = match.Groups["stem"].Value;
         int total = int.Parse(match.Groups["total"].Value, System.Globalization.CultureInfo.InvariantCulture);
+        if (total < 1 || total > MaxShards)
+        {
+            throw new InvalidDataException($"'{Path.GetFileName(path)}' declares {total} shards; expected 1 to {MaxShards}.");
+        }
         string[] shards = new string[total];
         for (int i = 0; i < total; i++)
         {
