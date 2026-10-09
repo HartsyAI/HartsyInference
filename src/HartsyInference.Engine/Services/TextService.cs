@@ -143,17 +143,19 @@ public sealed class TextService : ITextService, IDisposable
     /// <inheritdoc/>
     public DeploymentCapacity? Capacity(string deploymentId)
     {
-        DeploymentRecord? record;
-        lock (_deploymentsGate) record = _deployedList.Find(r => r.DeploymentId == deploymentId);
-        if (record is null) return null;
-        _slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? slot);
-        DynamicBatchScheduler? scheduler = slot?.Scheduler;
-        PagedKvPool? pool = slot?.SchedulerPool;
+        DeploymentState state;
+        string deviceKey;
         lock (_deploymentsGate)
         {
-            return new DeploymentCapacity(record.State, scheduler?.ActiveCount ?? 0, scheduler?.QueuedCount ?? 0, scheduler?.MaxActive ?? 0,
-                pool?.FreePageCount, pool?.MaxPages);
+            DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+            if (record is null) return null;
+            state = record.State;
+            deviceKey = record.DeviceKey;
         }
+        _slots.TryGetValue(deviceKey, out TextDeviceSlot? slot);
+        DynamicBatchScheduler? scheduler = slot?.Scheduler;
+        PagedKvPool? pool = slot?.SchedulerPool;
+        return new DeploymentCapacity(state, scheduler?.ActiveCount ?? 0, scheduler?.QueuedCount ?? 0, scheduler?.MaxActive ?? 0, pool?.FreePageCount, pool?.MaxPages);
     }
 
     /// <summary>Records a deployment as Loading, retiring a previous load of the same id first. The device's other deployments keep serving, and keep their state, until

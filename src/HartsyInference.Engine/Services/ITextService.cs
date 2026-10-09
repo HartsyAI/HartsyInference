@@ -38,5 +38,4 @@ public interface ITextService
 
     /// <summary>What deployment <paramref name="deploymentId"/>'s device is doing now, or null when there is no such deployment.</summary>
     DeploymentCapacity? Capacity(string deploymentId) => null;
-
 }
