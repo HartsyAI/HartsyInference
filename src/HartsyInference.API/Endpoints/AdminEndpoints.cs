@@ -53,7 +53,7 @@ public static class AdminEndpoints
             {
                 ModelSpec spec = ModelResolver.Resolve(req.Model, modelPathArg: null, Modality.Text);
                 DeploymentStatus status = await engine.Text.DeployAsync(
-                    new DeploymentRequest { DeploymentId = req.DeploymentId, Model = spec, Device = req.Device }, ct);
+                    new DeploymentRequest { DeploymentId = req.DeploymentId, Model = spec, Device = req.Device?.Trim().ToLowerInvariant() }, ct);
                 return Results.Ok(DeploymentDto.From(status));
             }
             catch (Exception ex)
@@ -81,7 +81,7 @@ public static class AdminEndpoints
                 {
                     DeploymentId = deploymentId,
                     Unloaded = false,
-                    Reason = "The deployment no longer holds its device: another deployment replaced its model, or it was unloaded or never loaded.",
+                    Reason = "The deployment does not hold its device: it is still loading, another deployment replaced its model, or it was unloaded or never loaded.",
                 }),
                 DeploymentUnloadOutcome.TimedOut => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status409Conflict,
                     $"Requests on deployment '{deploymentId}' did not finish in time, so its model stays loaded and serving. Retry the unload.", "conflict_error"),
