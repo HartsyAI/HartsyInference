@@ -42,6 +42,20 @@ public sealed class DeploymentListResponse
     [JsonPropertyName("deployments")] public required IReadOnlyList<DeploymentDto> Deployments { get; init; }
 }
 
+/// <summary>The answer to <c>DELETE /admin/deployments/{id}</c> when nothing went wrong: whether the deployment's model was freed, and why not when it was not.</summary>
+public sealed class DeploymentUnloadResponse
+{
+    [JsonPropertyName("deployment_id")] public required string DeploymentId { get; init; }
+    [JsonPropertyName("unloaded")] public bool Unloaded { get; init; }
+    [JsonPropertyName("reason")] public string? Reason { get; init; }
+}
+
+/// <summary>The <c>/admin/capacity</c> listing.</summary>
+public sealed class DeploymentCapacityResponse
+{
+    [JsonPropertyName("deployments")] public required IReadOnlyList<CapacityDto> Deployments { get; init; }
+}
+
 /// <summary>One deployment's capacity as <c>/admin/capacity</c> reports it. The KV figures are pages, and null on a model with no KV pool.</summary>
 public sealed class CapacityDto
 {

@@ -55,15 +55,32 @@ public static class AdminEndpoints
             }
         });
 
+        // Unloads by deployment, not by device: a deployment another one replaced frees nothing, so deleting it can never unload its replacement.
         app.MapDelete("/admin/deployments/{deploymentId}", (string deploymentId, IInferenceEngine engine) =>
         {
-            DeploymentStatus? status = engine.Text.Deployments.FirstOrDefault(d => d.DeploymentId == deploymentId);
-            if (status is null)
+            DeploymentUnloadOutcome outcome;
+            try
             {
-                return HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound,
-                    $"'{deploymentId}' is not a known deployment.", "invalid_request_error");
+                outcome = engine.Text.UnloadDeployment(deploymentId);
             }
-            return Results.Ok(new { deployment_id = deploymentId, unloaded = engine.Text.Unload(status.Device) });
+            catch (Exception ex)
+            {
+                return GenerationErrors.Map(ex);
+            }
+            return outcome switch
+            {
+                DeploymentUnloadOutcome.Unloaded => Results.Ok(new DeploymentUnloadResponse { DeploymentId = deploymentId, Unloaded = true }),
+                DeploymentUnloadOutcome.AlreadyGone => Results.Ok(new DeploymentUnloadResponse
+                {
+                    DeploymentId = deploymentId,
+                    Unloaded = false,
+                    Reason = "The deployment no longer holds its device: another deployment replaced its model, or it was unloaded or never loaded.",
+                }),
+                DeploymentUnloadOutcome.TimedOut => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status409Conflict,
+                    $"Requests on deployment '{deploymentId}' did not finish in time, so its model stays loaded and serving. Retry the unload.", "conflict_error"),
+                _ => HartsyInferenceServiceExtensions.Problem(StatusCodes.Status404NotFound,
+                    $"'{deploymentId}' is not a known deployment.", "invalid_request_error"),
+            };
         });
 
         app.MapGet("/admin/capacity", (IInferenceEngine engine) => Results.Ok(new
