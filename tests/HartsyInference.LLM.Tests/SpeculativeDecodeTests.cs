@@ -1,6 +1,7 @@
 using HartsyInference.Cpu;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.Generation;
+using HartsyInference.LLM.Generation.Speculation;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
 using HartsyInference.ModelAssets.Tokenizers;
@@ -182,5 +183,97 @@ public sealed class SpeculativeDecodeTests
 
         Assert.Equal(string.Join(",", a.TokenIds), string.Join(",", b.TokenIds));
         foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Theory]
+    [InlineData(3, 40, 0xA5A5u)]
+    [InlineData(9, 50, 0xF00Du)]
+    public void ForcedPromptLookupSelector_IsBitIdenticalToTheDefaultPath(int promptLen, int maxTokens, uint seed)
+    {
+        // A selector holding only prompt lookup must pick the same drafts as the built-in default, so the tokens match
+        // both the plain reference and the selector-less speculative path.
+        (int[] prompt, TransformerConfig cfg, Dictionary<string, Tensor> w) = Setup(promptLen, seed);
+        using CpuBackend backend = new();
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model");
+        StubTokenizer tokenizer = new();
+        SamplingOptions sampling = SamplingOptions.Default with { Greedy = true };
+
+        TextGenerationPipeline plainPipeline = new(model, tokenizer, backend);
+        GenerationResult reference = plainPipeline.Generate(Req(prompt, maxTokens, sampling, specDecode: false));
+
+        TextGenerationPipeline defaultPipeline = new(model, tokenizer, backend);
+        GenerationResult defaultPath = defaultPipeline.Generate(Req(prompt, maxTokens, sampling, specDecode: true));
+
+        TextGenerationPipeline selectorPipeline = new(model, tokenizer, backend)
+        {
+            DraftSelector = new SpeculationSelector([new PromptLookupDraftProvider()]),
+        };
+        GenerationResult selected = selectorPipeline.Generate(Req(prompt, maxTokens, sampling, specDecode: true));
+
+        string referenceText = string.Join(",", reference.TokenIds);
+        Assert.Equal(referenceText, string.Join(",", defaultPath.TokenIds));
+        Assert.Equal(referenceText, string.Join(",", selected.TokenIds));
+        Assert.Equal(reference.StoppedOnStopToken, selected.StoppedOnStopToken);
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    [Fact]
+    public void AutoDisabledProvider_StopsProposing_AndOutputStaysCorrect()
+    {
+        // The fake proposes a token the greedy model never emits, so every drafted round is rejected at row 0.
+        // After DisableAfterRounds (default 8) losing rounds the selector disables it, and the rest of the
+        // generation decodes without drafting, still token-for-token equal to the plain reference.
+        (int[] prompt, TransformerConfig cfg, Dictionary<string, Tensor> w) = Setup(4, 0xD15Au);
+        using CpuBackend backend = new();
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(w, "model");
+        StubTokenizer tokenizer = new();
+        SamplingOptions sampling = SamplingOptions.Default with { Greedy = true };
+
+        TextGenerationPipeline plainPipeline = new(model, tokenizer, backend);
+        GenerationResult reference = plainPipeline.Generate(Req(prompt, 60, sampling, specDecode: false));
+        Assert.True(reference.TokenIds.Count >= 10, "The reference must run long enough for the selector to reach its disable streak.");
+
+        int wrongToken = -1;
+        for (int candidate = 0; candidate < cfg.VocabSize - 1 && wrongToken < 0; candidate++)
+        {
+            if (!reference.TokenIds.Contains(candidate)) wrongToken = candidate;
+        }
+        Assert.True(wrongToken >= 0, "The fixture needs a vocabulary id the reference never emits.");
+
+        FixedDraftProvider wrong = new("always-wrong", wrongToken);
+        SpeculationSelector selector = new([wrong]);
+        TextGenerationPipeline selectorPipeline = new(model, tokenizer, backend) { DraftSelector = selector };
+        GenerationResult actual = selectorPipeline.Generate(Req(prompt, 60, sampling, specDecode: true));
+
+        Assert.Equal(string.Join(",", reference.TokenIds), string.Join(",", actual.TokenIds));
+        Assert.True(selector.IsDisabled(wrong));
+        Assert.Equal(8, wrong.ProposeCalls);
+        foreach (Tensor t in w.Values) t.Dispose();
+    }
+
+    /// <summary>Proposes the same token every round. The token is chosen by the test, so the target never accepts it.</summary>
+    private sealed class FixedDraftProvider : ISpeculativeDraftProvider
+    {
+        private readonly int _token;
+
+        public FixedDraftProvider(string name, int token)
+        {
+            Name = name;
+            _token = token;
+        }
+
+        public string Name { get; }
+
+        public int ProposeCalls { get; private set; }
+
+        public int[] Propose(int[] promptIds, IReadOnlyList<int> generated, int maxDraftLen)
+        {
+            ProposeCalls++;
+            int[] draft = new int[Math.Max(0, maxDraftLen)];
+            Array.Fill(draft, _token);
+            return draft;
+        }
     }
 }

@@ -4,6 +4,7 @@ using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
 using HartsyInference.LLM.ChatTemplates;
+using System.Diagnostics;
 using HartsyInference.LLM.Generation.Speculation;
 using HartsyInference.LLM.Sampling;
 using HartsyInference.LLM.Transformer;
@@ -434,16 +435,22 @@ public sealed class TextGenerationPipeline
     // technique either pays off on repetitive content or costs nothing (see GenerateSpeculative's doc), so
     // there's no per-request tradeoff worth exposing yet. The drafting itself lives in PromptLookupDraftProvider.
     private const int SpecMaxDraftTokens = 8;
-    private static readonly ISpeculativeDraftProvider SpecDraftProvider = new PromptLookupDraftProvider();
+    private static readonly ISpeculativeDraftProvider DefaultSpecDraftProvider = new PromptLookupDraftProvider();
+
+    /// <summary>Chooses the draft provider for each speculative round and whether speculation stays enabled. When null,
+    /// speculative decoding drafts with prompt lookup exactly as before. The selector keeps measurements across calls,
+    /// so it belongs to one pipeline and must not be shared by concurrent <c>Generate</c> calls.</summary>
+    public SpeculationSelector? DraftSelector { get; set; }
 
     /// <summary>Prompt-lookup speculative decoding: greedy-only, draft-model-free, drafting via n-gram match and verifying the whole draft plus one bonus position in one batched forward pass.</summary>
-    /// <remarks>Each round drafts up to <see cref="SpecMaxDraftTokens"/> tokens via <see cref="SpecDraftProvider"/> (n-gram match against the prompt + generated-so-far) and verifies them in ONE batched forward pass, reusing the same prefill-shaped <see cref="GenericTransformer.Forward"/> call with a short token span at an arbitrary <c>posStart</c> against an already-partially-filled cache. The longest correct prefix (verified against this model's own greedy pick, row by row) is accepted; a rejected or never-drafted token still costs exactly one forward call, same as the eager loop, so this is a pure speedup on repetitive content and a no-op tax otherwise. Every accepted token's history-dependent sampler state (repetition penalty) is computed in the same left-to-right order the eager loop uses, so output is byte-identical to plain greedy decode. Rejected draft tokens' KV entries were already physically written by the verification forward pass (unavoidable — verification needs every candidate present in the batch before any is judged), so <see cref="IKvCache.Truncate"/> rolls them back on partial/zero acceptance.
+    /// <remarks>Each round drafts up to <see cref="SpecMaxDraftTokens"/> tokens via <see cref="DraftSelector"/> when one is set, otherwise via <see cref="DefaultSpecDraftProvider"/> (n-gram match against the prompt + generated-so-far) and verifies them in ONE batched forward pass, reusing the same prefill-shaped <see cref="GenericTransformer.Forward"/> call with a short token span at an arbitrary <c>posStart</c> against an already-partially-filled cache. The longest correct prefix (verified against this model's own greedy pick, row by row) is accepted; a rejected or never-drafted token still costs exactly one forward call, same as the eager loop, so this is a pure speedup on repetitive content and a no-op tax otherwise. Every accepted token's history-dependent sampler state (repetition penalty) is computed in the same left-to-right order the eager loop uses, so output is byte-identical to plain greedy decode. Rejected draft tokens' KV entries were already physically written by the verification forward pass (unavoidable — verification needs every candidate present in the batch before any is judged), so <see cref="IKvCache.Truncate"/> rolls them back on partial/zero acceptance.
     /// <para>Requires <see cref="SamplingOptions.Greedy"/> (no order-independent way to reproduce a non-greedy multinomial draw out of sequence) and excludes JSON grammar mode (its incremental state walker isn't designed to roll back mid-token) — both enforced by the caller's dispatch gate, not re-checked here.</para></remarks>
     private bool GenerateSpeculative(GenerationRequest request, ISequenceState cache, int[] promptIds, SamplerChain sampler,
         int firstToken, List<int> generated, HashSet<int> stops, Action<int>? onToken, CancellationToken ct)
     {
         int vocab = _model!.Info.VocabSize;
         int next = firstToken;
+        SpeculationSelector? selector = DraftSelector;
 
         while (generated.Count < request.MaxTokens)
         {
@@ -456,7 +463,11 @@ public sealed class TextGenerationPipeline
 
             int maxDraft = Math.Min(Math.Min(SpecMaxDraftTokens, _model.Capabilities.MaxSpeculativeDepth),
                 request.MaxTokens - generated.Count);
-            int[] draft = SpecDraftProvider.Propose(promptIds, generated, maxDraft);
+            // A null provider means the selector disabled speculation: the round then verifies zero drafted tokens,
+            // which is the plain one-token decode step and emits the same token.
+            ISpeculativeDraftProvider? provider = selector is null ? DefaultSpecDraftProvider : selector.Select();
+            long roundStart = selector is null ? 0 : Stopwatch.GetTimestamp();
+            int[] draft = provider is null ? [] : provider.Propose(promptIds, generated, maxDraft);
             int k = draft.Length;
 
             int cachePos = cache.Length;
@@ -484,22 +495,33 @@ public sealed class TextGenerationPipeline
             if (mismatchNext is not null)
             {
                 cache.Truncate(cachePos + 1 + accepted);
+                RecordRound(provider, k, accepted, accepted + 1, roundStart);
                 next = mismatchNext.Value;
                 continue;
             }
             if (sawStop)
             {
                 cache.Truncate(cachePos + 1 + accepted);
+                RecordRound(provider, k, accepted, accepted, roundStart);
                 return true;
             }
 
             // Full draft accepted (k == 0 degenerates to this trivially): cache already holds exactly
             // cachePos + k + 1 entries, matching what was verified — no truncation needed. Row k is a free
             // bonus prediction (already computed by this same forward pass, no extra GPU call).
+            RecordRound(provider, k, k, k + 1, roundStart);
             Span<float> bonusRow = RowAt(logits, k, vocab);
             next = sampler.Next(bonusRow, generated);
         }
         return false;
+
+        // Feeds one measured round back to the selector. The caller's clock is read here; the selector never reads one.
+        void RecordRound(ISpeculativeDraftProvider? roundProvider, int proposed, int accepted, int emitted, long startTimestamp)
+        {
+            if (selector is null || roundProvider is null) return;
+            double elapsedMs = Stopwatch.GetElapsedTime(startTimestamp).TotalMilliseconds;
+            selector.Record(roundProvider, new SpeculationRound(proposed, accepted, emitted, elapsedMs));
+        }
     }
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
