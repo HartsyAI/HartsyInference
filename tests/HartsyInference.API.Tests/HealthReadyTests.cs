@@ -62,6 +62,24 @@ public sealed class HealthReadyTests
 
         Assert.Equal(StatusCodes.Status200OK, StatusOf(HealthEndpoints.ReadyFor("llm-a", text)));
     }
+
+    [Fact]
+    public void A_Newer_Loading_Deployment_Is_Reported_Over_A_Stale_Unloaded_One()
+    {
+        DeploymentsOnlyText text = new(
+        [
+            new DeploymentStatus("chat-old", "llm-a", "cpu", DeploymentState.Unloaded, null),
+            new DeploymentStatus("chat-new", "llm-a", "cpu", DeploymentState.Loading, null),
+        ]);
+
+        IResult result = HealthEndpoints.ReadyFor("llm-a", text);
+
+        // Both are 503; the stale record used to answer, hiding the load in progress.
+        Assert.Equal(StatusCodes.Status503ServiceUnavailable, StatusOf(result));
+        JsonElement body = JsonSerializer.SerializeToElement(Assert.IsAssignableFrom<IValueHttpResult>(result).Value);
+        Assert.Equal("chat-new", body.GetProperty("deployment_id").GetString());
+        Assert.Equal("loading", body.GetProperty("state").GetString());
+    }
 }
 
 /// <summary>The frame a streamed reply sends for a queued request: a named <c>hartsy.status</c> event, whose data is the status in snake_case.</summary>

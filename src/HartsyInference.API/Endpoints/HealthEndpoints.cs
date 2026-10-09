@@ -45,11 +45,13 @@ public static class HealthEndpoints
     }
 
     /// <summary>The readiness of one model for <c>/ready?model=</c>: 200 only when a deployment of it is Ready. A model with no deployment is 503 with
-    /// <c>not_deployed</c>, and a deployment that is not ready says which state it is in.</summary>
+    /// <c>not_deployed</c>, and a deployment that is not ready says which state it is in. With none Ready, the latest Loading one answers, else the latest of any state
+    /// (latest in the listing's order), so a stale Unloaded or Failed record never hides a load in progress.</summary>
     internal static IResult ReadyFor(string model, ITextService text)
     {
         List<DeploymentStatus> matches = [.. text.Deployments.Where(d => d.DeploymentId == model || d.Model == model)];
-        DeploymentStatus? pick = matches.Find(d => d.State == DeploymentState.Ready) ?? matches.FirstOrDefault();
+        DeploymentStatus? pick = matches.FindLast(d => d.State == DeploymentState.Ready)
+            ?? matches.FindLast(d => d.State == DeploymentState.Loading) ?? matches.LastOrDefault();
         if (pick is null)
             return Results.Json(new { status = "not_deployed", model }, statusCode: StatusCodes.Status503ServiceUnavailable);
         bool ready = pick.State == DeploymentState.Ready;
