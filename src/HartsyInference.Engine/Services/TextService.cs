@@ -266,10 +266,19 @@ public sealed class TextService : ITextService, IDisposable
     private static void FailLoad(DeploymentRecord record, int attempt, string problem)
     {
         if (record.Attempt != attempt) return;
+        if (record.State is DeploymentState.Ready or DeploymentState.Degraded)
+        {
+            record.Pending = null;
+            return;
+        }
+        // Unloaded -> Loading -> Failed: the state machine has no direct Unloaded -> Failed, and a load that failed still has to be recorded as Failed. A record freed while
+        // this load waited names the model that failed, as a failed load always has.
+        if (record.State == DeploymentState.Unloaded)
+        {
+            CommitPending(record);
+            Transition(record, DeploymentState.Loading);
+        }
         record.Pending = null;
-        if (record.State is DeploymentState.Ready or DeploymentState.Degraded) return;
-        // Unloaded -> Loading -> Failed: the state machine has no direct Unloaded -> Failed, and a load that failed still has to be recorded as Failed.
-        if (record.State == DeploymentState.Unloaded) Transition(record, DeploymentState.Loading);
         if (record.State == DeploymentState.Loading) Transition(record, DeploymentState.Failed);
         record.Problem = problem;
     }
