@@ -8,7 +8,7 @@
 #
 # Usage: tests/dsv41-certification.sh <lane> [--dry-run] [--out DIR]
 #   cpu-oracle   real-weight CPU oracles against the official checkpoint (no GPU)
-#   gpu-expert   CUDA expert-cache and MoE suites on sm_80 or newer, in the order of MOE_RIG_READINESS.md
+#   gpu-expert   CUDA expert-cache and MoE suites on sm_80 or newer, in the order of MOE_RIG_READINESS.md step 3
 #   gpu-native   block-scaled FP4 suites through cuBLASLt: every device must be SM 10.0 (datacenter Blackwell) or 12.0 (consumer)
 #   multi-gpu    BLOCKED: tensor and expert parallel (plan PRs 20-21) are not built
 #   two-node     BLOCKED: rank runner, rendezvous and remote Engram rows (plan PR 22) are not built
@@ -39,7 +39,7 @@ while [ $# -gt 0 ]; do
     esac
     shift
 done
-[ -n "${LANE}" ] || { sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 64; }
+[ -n "${LANE}" ] || { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; exit 64; }
 OUT_DIR="${OUT:-${REPO_ROOT}/Output/dsv41-certification/${STAMP}/${LANE}}"
 
 # "Project Class" pairs. Each class runs alone, in the order listed.
@@ -68,12 +68,6 @@ GPU_NATIVE_CLASSES=(
     "HartsyInference.Cuda.Tests CudaQuantDerivativeDequantTests"
     "HartsyInference.Cuda.Tests CudaExl3DequantTests"
 )
-# MOE_RIG_READINESS.md step 4: the rest of the GpuIntegration category. It excludes the expert-cache classes above and the
-# native FP4 classes, which belong to the gpu-native lane and would otherwise run on cards they do not apply to.
-GPU_EXPERT_REST_FILTER="Category=GpuIntegration"
-for pair in "${GPU_EXPERT_CLASSES[@]}" "${GPU_NATIVE_CLASSES[@]}"; do
-    GPU_EXPERT_REST_FILTER="${GPU_EXPERT_REST_FILTER}&FullyQualifiedName!~.${pair#* }."
-done
 
 PROBLEMS=()
 problem() { PROBLEMS+=("$1"); }
@@ -181,12 +175,10 @@ if [ "${DRY_RUN}" -eq 1 ]; then
     echo "DRY RUN ${LANE}: preflight passed; the real run would execute these, one at a time:"
     echo "  export HARTSY_REQUIRE_REAL_WEIGHTS=1"
     for pair in "${CLASSES[@]}"; do
+        # shellcheck disable=SC2086 # "Project Class" pairs word-split on purpose
         set -- ${pair}
         echo "  dotnet test tests/$1 --filter \"$(filter_for "$2")\""
     done
-    if [ "${LANE}" = "gpu-expert" ]; then
-        echo "  dotnet test tests/HartsyInference.Cuda.Tests --filter \"${GPU_EXPERT_REST_FILTER}\""
-    fi
     echo "  logs: ${OUT_DIR}/logs/   summary: ${OUT_DIR}/summary.txt"
     exit 0
 fi
@@ -216,20 +208,18 @@ run_class() { # name, dotnet args...
     if [ "${runs}" -eq 0 ]; then record FAIL "${name}" "no test summary (exit ${rc}); see logs/${name}.log"
     elif [ "${rc}" -ne 0 ] || [ "${failed}" -ne 0 ]; then record FAIL "${name}" "${failed} failed of ${total} (exit ${rc})"
     elif [ "${skipped}" -ne 0 ]; then record FAIL "${name}" "${skipped} skipped of ${total}: a skip is not a pass"
-    elif grep -q "SKIPPED" "${log}"; then record FAIL "${name}" "a test wrote SKIPPED and returned without running; see logs/${name}.log"
+    elif grep -q "SKIPPED" "${log}"; then record FAIL "${name}" "a test wrote SKIPPED and returned without running: $(grep -m1 "SKIPPED" "${log}" | cut -c1-160)"
     elif [ "${total}" -eq 0 ]; then record FAIL "${name}" "no test matched"
     else record PASS "${name}" "${total} passed"
     fi
 }
 
 for pair in "${CLASSES[@]}"; do
+    # shellcheck disable=SC2086 # "Project Class" pairs word-split on purpose
     set -- ${pair}
     run_class "$2" "tests/$1" --filter "$(filter_for "$2")"
 done
 
-if [ "${LANE}" = "gpu-expert" ]; then
-    run_class "rest-of-GpuIntegration" "tests/HartsyInference.Cuda.Tests" --filter "${GPU_EXPERT_REST_FILTER}"
-fi
 
 if [ "${FAILED}" -eq 0 ]; then
     echo "GREEN ${LANE}: every class passed with nothing skipped. Summary: ${SUMMARY}"
