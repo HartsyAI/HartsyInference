@@ -134,28 +134,65 @@ public sealed class TextService : ITextService, IDisposable
         string deviceKey = NormalizeDeviceKey(request.Device);
         TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
         await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
+        DynamicBatchScheduler? scheduler;
         try
         {
-            return await Task.Run(() => RunCore(slot, deviceKey, spec, request, sink, diagnosticId, cancel), cancel).ConfigureAwait(false);
+            // Loads the model under the lock and, for a request the scheduler takes, leases the scheduler before the lock is released.
+            scheduler = await Task.Run(() => PrepareSlot(slot, deviceKey, spec, request, diagnosticId, cancel), cancel).ConfigureAwait(false);
+            if (scheduler is null)
+            {
+                // The pipeline route generates under the lock, as it always has.
+                return await Task.Run(() => RunPipeline(slot, deviceKey, request, sink, diagnosticId, cancel), cancel).ConfigureAwait(false);
+            }
         }
         finally
         {
             slot.Lock.Release();
         }
+        // The scheduled route runs without the slot lock, so concurrent requests join the same batch.
+        try
+        {
+            return await RunScheduledAsync(scheduler, slot, request, sink, diagnosticId, cancel).ConfigureAwait(false);
+        }
+        finally
+        {
+            slot.ExitLease();
+        }
     }
 
-    private GenOutcome RunCore(TextDeviceSlot slot, string deviceKey, ModelSpec spec, TextRequest request,
-        Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel)
+    /// <summary>Loads the request's model onto <paramref name="slot"/>. Returns the scheduler when the request takes the scheduled route, with a lease on it already taken; null when it takes the pipeline route. Caller holds <see cref="TextDeviceSlot.Lock"/>.</summary>
+    private DynamicBatchScheduler? PrepareSlot(TextDeviceSlot slot, string deviceKey, ModelSpec spec, TextRequest request, long diagnosticId, CancellationToken cancel)
     {
         cancel.ThrowIfCancellationRequested();
+        // A load that replaces the model waits for the scheduled requests running on it. This wait happens before the device gate is taken,
+        // because those requests' rounds need the gate to finish: waiting under it would deadlock.
+        if (slot.HasLeases && ReplacesLoadedModel(slot, spec.LocalPath)
+            && !slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+        {
+            throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the request.");
+        }
         // Gate BY ORDINAL, before the load: the weight upload must not run concurrently with a same-device
         // sibling's generation either, and resolving the ordinal from the key means a layer-split load doesn't
         // have to construct a throwaway backend just to name its device.
         // Device gate INSIDE slot.Lock (gate is always innermost): an LLM slot and an image generation on the
-        // same GPU are two backends on one device — state-isolated, but not yet audited for concurrent execution.
+        // same GPU are two backends on one device, state-isolated but not yet audited for concurrent execution.
         using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
         LoadInto(slot, deviceKey, spec, request);
         _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: slot.Backend);
+        if (slot.Scheduler is null || !ScheduledRouteAllowed(request, LastImage(request) is not null)) return null;
+        slot.EnterLease();
+        return slot.Scheduler;
+    }
+
+    /// <summary>The pipeline route: generates on the slot's pipeline under the device gate. Caller holds <see cref="TextDeviceSlot.Lock"/>. Scheduled requests still running on the slot drain first, because the pipeline must not share the model with them.</summary>
+    private GenOutcome RunPipeline(TextDeviceSlot slot, string deviceKey, TextRequest request, Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel)
+    {
+        cancel.ThrowIfCancellationRequested();
+        if (!slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+        {
+            throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the request.");
+        }
+        using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
         try
         {
             ImageData? image = LastImage(request);
@@ -167,12 +204,98 @@ public sealed class TextService : ITextService, IDisposable
         }
         finally
         {
+            // UnloadSlot throws while scheduled requests hold leases. None can here: this method drained them above, and none start while the caller holds the slot lock.
             if (request.AlwaysFreeMemory == true)
                 UnloadSlot(slot);
         }
     }
 
+    /// <summary>Whether a request may take a slot's scheduler. A prefix-cache request stays on the pipeline, since the scheduler keeps no retained sequences; an image goes to the vision path; and AlwaysFreeMemory unloads the slot after its request, which only the pipeline does.</summary>
+    internal static bool ScheduledRouteAllowed(TextRequest request, bool hasImage) =>
+        request.PrefixCacheKey is not { Length: > 0 } && request.AlwaysFreeMemory != true && !hasImage;
+
+    /// <summary>The continuous-batching scheduler for a model just loaded on <paramref name="slot"/>, or null when the knob is off or the model cannot batch its decode (the pipeline serves it then). Rounds take the device gate on <paramref name="gateOrdinals"/>; a host-backed model passes none, and its rounds run ungated.</summary>
+    private static DynamicBatchScheduler? CreateScheduler(TextDeviceSlot slot, IGenerationModel model, ILlmTokenizer tokenizer,
+        IChatTemplate template, PagedKvPool? pool, IReadOnlyList<int> gateOrdinals)
+    {
+        if (!EngineKnobs.ContinuousBatching.Value || !model.Capabilities.SupportsBatchDecode) return null;
+        int[] ordinals = [.. gateOrdinals.Where(o => o >= 0)];
+        Func<Action, Task>? gate = ordinals.Length == 0 ? null : work => Task.Run(() =>
+        {
+            using IDisposable held = DeviceGate.AcquireAllOrdinals(ordinals, CancellationToken.None);
+            work();
+        });
+        slot.SchedulerPool = pool;
+        return new DynamicBatchScheduler(model, tokenizer, pool, template, gate);
+    }
+
+    /// <summary>The scheduler for a freshly loaded GGUF transformer, drawing from a KV pool sized by the engine's KV budget. Allocates nothing when the knob is off.</summary>
+    private DynamicBatchScheduler? CreateGgufScheduler(TextDeviceSlot slot, string deviceKey, GgufLanguageModel model, IBackend backend)
+    {
+        if (!EngineKnobs.ContinuousBatching.Value) return null;
+        TransformerConfig cfg = model.Config;
+        int[] headDimPerLayer = new int[cfg.NumLayers];
+        for (int i = 0; i < cfg.NumLayers; i++) headDimPerLayer[i] = cfg.HeadDimFor(i);
+        EngineOptions options = _engine.Options;
+        int maxPages = PagedKvPool.PageCountForBudget(cfg.NumKvHeads, headDimPerLayer, options.KvPageSize, options.KvPoolBytesBudget);
+        PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, headDimPerLayer, options.KvPageSize, maxPages);
+        DynamicBatchScheduler? scheduler = CreateScheduler(slot, new GenericTransformerModel(model.Transformer, backend), model.Tokenizer,
+            model.Template, pool, [.. GateOrdinalsFor(deviceKey)]);
+        if (scheduler is null) pool.Dispose();
+        return scheduler;
+    }
+
     private GenOutcome RunText(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel)
+    {
+        using GenerationRequestWiring run = BeginText(slot, request, sink, diagnosticId, cancel, scheduled: false);
+        // Opt-in (null key = today's behavior, unchanged): checked OUT of the slot's store so a second concurrent
+        // request on the same busy key finds nothing and falls back to this same uncached path, and checked back
+        // IN from `finally` below whatever the outcome; success, a filter stop, or a genuine exception all leave
+        // `reuse` in a state TextGenerationPipeline.Generate already decided is safe to store (see its doc).
+        RetainedSequence? reuse = request.PrefixCacheKey is { Length: > 0 } cacheKey && slot.SsmPipeline is null
+            ? (slot.PrefixCache ??= NewPrefixCacheStore()).Checkout(cacheKey) ?? new RetainedSequence()
+            : null;
+        GenerationResult result;
+        try
+        {
+            result = slot.SsmPipeline is not null ? slot.SsmPipeline.Generate(run.Request, run.OnToken, run.Generation)
+                : slot.Pipeline!.Generate(run.Request, reuse, run.OnToken, run.Generation);
+        }
+        catch (OperationCanceledException) when (run.FilterSink is { Stopped: true } && !cancel.IsCancellationRequested)
+        {
+            return run.FilterStopOutcome();
+        }
+        finally
+        {
+            if (reuse is not null)
+            {
+                slot.PrefixCache!.CheckIn(request.PrefixCacheKey!, reuse);
+            }
+        }
+        return run.Finish(result);
+    }
+
+    /// <summary>The scheduler route: the request joins <paramref name="scheduler"/>'s batch and completes with its own result. Parsing, the filter and the stop reason are the pipeline route's. The token callback never throws on this route: it runs inside a decode round shared with other requests, and a throw would fail all of them. The scheduler evicts a cancelled or filter-stopped request on its next round instead.</summary>
+    private async Task<GenOutcome> RunScheduledAsync(DynamicBatchScheduler scheduler, TextDeviceSlot slot, TextRequest request,
+        Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel)
+    {
+        using GenerationRequestWiring run = BeginText(slot, request, sink, diagnosticId, cancel, scheduled: true);
+        GenOutcome outcome;
+        try
+        {
+            GenerationResult result = await scheduler.SubmitAsync(run.Request, run.OnToken, run.Generation).ConfigureAwait(false);
+            outcome = run.Finish(result);
+        }
+        catch (OperationCanceledException) when (run.FilterSink is { Stopped: true } && !cancel.IsCancellationRequested)
+        {
+            outcome = run.FilterStopOutcome();
+        }
+        _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted, outcome.CompletionTokens);
+        return outcome;
+    }
+
+    /// <summary>The wiring both routes share for one text request: the request the engine sees, the callback that feeds token ids to the parser and out as chunks, and the filter that can stop generation early.</summary>
+    private GenerationRequestWiring BeginText(TextDeviceSlot slot, TextRequest request, Action<TextChunk>? sink, long diagnosticId, CancellationToken cancel, bool scheduled)
     {
         ILlmTokenizer tokenizer = slot.SsmModel is not null ? slot.SsmModel.Tokenizer
             : slot.DeepSeekV41 is not null ? slot.DeepSeekV41.Tokenizer
@@ -183,82 +306,81 @@ public sealed class TextService : ITextService, IDisposable
         bool rawCompletion = NeedsRawCompletion(template, tokenizer);
         GenerationRequest genRequest = BuildRequest(request, rawCompletion, tokenizer);
         ITextStreamFilter? filter = _engine.CreateTextStreamFilter(request);
-
-        int promptTokens = 0;
+        // A filter stops generation through its own linked source so the stop maps to ToolCall, not Cancelled.
+        CancellationTokenSource? stopSource = filter is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancel);
+        GenerationRequestWiring run = new() { Request = genRequest, Generation = stopSource?.Token ?? cancel, StopSource = stopSource };
         if (diagnosticId != 0 || filter is not null)
         {
-            genRequest = genRequest with { OnPrefillCompleted = count =>
+            run.Request = genRequest with { OnPrefillCompleted = count =>
             {
-                promptTokens = count;
+                run.PromptTokens = count;
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.PrefillCompleted, count);
             } };
         }
-        // A filter stops generation through its own linked source so the stop maps to ToolCall, not Cancelled.
-        using CancellationTokenSource? stopSource = filter is null ? null : CancellationTokenSource.CreateLinkedTokenSource(cancel);
-        CancellationToken generation = stopSource?.Token ?? cancel;
-        int count = 0;
-        Action<int>? onToken = null;
-        IOutputParser? parser = null;
-        Action<ParsedEvent>? emit = null;
-        TextFilterSink? filterSink = null;
         if (sink is not null || filter is not null)
         {
-            parser = CreateParser(template, tokenizer, genRequest, request, rawCompletion);
+            run.Parser = CreateParser(template, tokenizer, run.Request, request, rawCompletion);
             Action<TextChunk> chunkSink = sink!;
             if (filter is not null)
             {
-                filterSink = new TextFilterSink(filter, sink, stopSource!.Cancel);
-                chunkSink = filterSink.Handle;
+                run.FilterSink = new TextFilterSink(filter, sink, stopSource!.Cancel);
+                chunkSink = run.FilterSink.Handle;
             }
-            emit = new ParsedEventTranslator(chunkSink, Interlocked.Increment(ref _requestCounter)).Handle;
-            onToken = id =>
+            run.Emit = new ParsedEventTranslator(chunkSink, Interlocked.Increment(ref _requestCounter)).Handle;
+            run.OnToken = id =>
             {
-                generation.ThrowIfCancellationRequested();
-                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
-                parser.Push(id, emit);
+                if (run.Generation.IsCancellationRequested)
+                {
+                    // The pipeline stops a cancelled request by throwing here; a scheduled one must not throw (see RunScheduledAsync).
+                    if (!scheduled) run.Generation.ThrowIfCancellationRequested();
+                    return;
+                }
+                _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++run.Count);
+                run.Parser!.Push(id, run.Emit!);
                 // A filter stop takes effect on this token, before the next decode step runs.
-                if (filterSink is { Stopped: true }) generation.ThrowIfCancellationRequested();
+                if (!scheduled && run.FilterSink is { Stopped: true }) run.Generation.ThrowIfCancellationRequested();
             };
         }
         else if (diagnosticId != 0)
         {
-            onToken = _ => _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++count);
+            run.OnToken = _ => _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.TokenGenerated, ++run.Count);
+        }
+        return run;
+    }
+
+    /// <summary>One text request's wiring, shared by the pipeline and scheduler routes (see <see cref="BeginText"/>). Disposes its filter's linked cancellation source.</summary>
+    private sealed class GenerationRequestWiring : IDisposable
+    {
+        public GenerationRequest Request { get; set; } = null!;
+        public CancellationToken Generation { get; init; }
+        public CancellationTokenSource? StopSource { get; init; }
+        public TextFilterSink? FilterSink { get; set; }
+        public IOutputParser? Parser { get; set; }
+        public Action<ParsedEvent>? Emit { get; set; }
+        public Action<int>? OnToken { get; set; }
+        public int PromptTokens { get; set; }
+        public int Count { get; set; }
+
+        /// <summary>The outcome of a completed request: the parser is flushed, then the filter's text and any tool call replace the raw decode when a filter is present.</summary>
+        public GenOutcome Finish(GenerationResult result)
+        {
+            if (Parser is not null) Parser.Finish(Emit!);
+            StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;
+            if (FilterSink is null)
+                return new GenOutcome(result.Text, stop, result.PromptTokens, result.TokenIds.Count);
+            FilterSink.End();
+            return new GenOutcome(FilterSink.Text, FilterSink.ToolCall is null ? stop : StopReason.ToolCall,
+                result.PromptTokens, result.TokenIds.Count, FilterSink.ToolCall);
         }
 
-        // Opt-in (null key = today's behavior, unchanged): checked OUT of the slot's store so a second concurrent
-        // request on the same busy key finds nothing and falls back to this same uncached path, and checked back
-        // IN from `finally` below whatever the outcome — success, a filter stop, or a genuine exception all leave
-        // `reuse` in a state TextGenerationPipeline.Generate already decided is safe to store (see its doc).
-        RetainedSequence? reuse = request.PrefixCacheKey is { Length: > 0 } cacheKey && slot.SsmPipeline is null
-            ? (slot.PrefixCache ??= NewPrefixCacheStore()).Checkout(cacheKey) ?? new RetainedSequence()
-            : null;
-        GenerationResult result;
-        try
+        /// <summary>The outcome of a request the filter stopped: ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.</summary>
+        public GenOutcome FilterStopOutcome()
         {
-            result = slot.SsmPipeline is not null ? slot.SsmPipeline.Generate(genRequest, onToken, generation)
-                : slot.Pipeline!.Generate(genRequest, reuse, onToken, generation);
+            StopReason stop = FilterSink!.ToolCall is null ? StopReason.Stop : StopReason.ToolCall;
+            return new GenOutcome(FilterSink.Text, stop, PromptTokens, Count, FilterSink.ToolCall);
         }
-        catch (OperationCanceledException) when (filterSink is { Stopped: true } && !cancel.IsCancellationRequested)
-        {
-            // ToolCall only when a call was completed; a bare filter stop is a natural end of the turn.
-            StopReason filterStop = filterSink.ToolCall is null ? StopReason.Stop : StopReason.ToolCall;
-            return new GenOutcome(filterSink.Text, filterStop, promptTokens, count, filterSink.ToolCall);
-        }
-        finally
-        {
-            if (reuse is not null)
-            {
-                slot.PrefixCache!.CheckIn(request.PrefixCacheKey!, reuse);
-            }
-        }
-        if (parser is not null) parser.Finish(emit!);
 
-        StopReason stop = result.StoppedOnStopToken ? StopReason.Stop : StopReason.Length;
-        if (filterSink is null)
-            return new GenOutcome(result.Text, stop, result.PromptTokens, result.TokenIds.Count);
-        filterSink.End();
-        return new GenOutcome(filterSink.Text, filterSink.ToolCall is null ? stop : StopReason.ToolCall,
-            result.PromptTokens, result.TokenIds.Count, filterSink.ToolCall);
+        public void Dispose() => StopSource?.Dispose();
     }
 
     /// <summary>The structured parser when the model's template exposes one, else the passthrough that keeps plain-decode streaming.</summary>
@@ -317,7 +439,7 @@ public sealed class TextService : ITextService, IDisposable
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
-        if (slot.DeepSeekV41 is not null && slot.LoadedPath == path)
+        if (KeepsLoadedModel(slot, path, hfDirectory: true))
             return;
         UnloadSlot(slot);
         // after the unload, so the memory of a model this load replaces counts as free
@@ -352,6 +474,8 @@ public sealed class TextService : ITextService, IDisposable
         }
         slot.Backend = backend;
         slot.Pipeline = new TextGenerationPipeline(slot.DeepSeekV41.Generation, slot.DeepSeekV41.Tokenizer, slot.DeepSeekV41.Template);
+        // Host-backed and CPU-only: its rounds run ungated, and its sequence states own their storage (no KV pool).
+        slot.Scheduler = CreateScheduler(slot, slot.DeepSeekV41.Generation, slot.DeepSeekV41.Tokenizer, slot.DeepSeekV41.Template, pool: null, gateOrdinals: []);
         slot.CacheWeightCastsApplied = null;
         slot.PreloadRedundantWeightSplitsApplied = null;
         slot.LoadedPath = path;
@@ -385,12 +509,12 @@ public sealed class TextService : ITextService, IDisposable
             throw new HartsyInferenceException(
                 $"No checkpoint found for model '{spec.Requested}'. Pass a .gguf file via the model spec " +
                 $"(looked under '{RepoPaths.ModelsRoot()}').");
-        if (Directory.Exists(path) && HfCheckpointDirectory.TryProbe(path) is { } hfCheckpoint)
+        if (ProbeHfDirectory(path) is { } hfCheckpoint)
         {
             LoadHfDirectory(slot, deviceKey, hfCheckpoint, path);
             return;
         }
-        if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null) && slot.LoadedPath == path)
+        if (KeepsLoadedModel(slot, path, hfDirectory: false))
         {
             LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
             LogLoadTimeSettingMismatch(slot, deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
@@ -475,11 +599,30 @@ public sealed class TextService : ITextService, IDisposable
         backend.PreloadWeights(slot.Model.Transformer.EnumerateWeights(preloadRedundantSplits));
         slot.PreloadRedundantWeightSplitsApplied = preloadRedundantSplits;
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
+        slot.Scheduler = CreateGgufScheduler(slot, deviceKey, slot.Model, backend);
         slot.LoadedPath = path;
         LoadVisionInto(slot, path);
         Logs.Info($"[TextService] Loaded GGUF model '{Path.GetFileName(path)}' ({slot.Model.Architecture}) on {deviceKey}"
             + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
     }
+
+    /// <summary>Whether a load of <paramref name="path"/> keeps the model <paramref name="slot"/> holds. Every load path reloads by this rule, and the lease wait
+    /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a V4.1 model
+    /// loaded from it; a GGUF keeps any model loaded from it. Paths compare ordinally, since a case-only difference names another file on a case-sensitive filesystem.</summary>
+    private static bool KeepsLoadedModel(TextDeviceSlot slot, string path, bool hfDirectory) =>
+        string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.DeepSeekV41 is not null
+            : slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null);
+
+    /// <summary>Whether loading <paramref name="path"/> onto <paramref name="slot"/> frees the model it holds, decided as <see cref="LoadInto"/> decides it. A missing
+    /// path frees nothing: the load refuses it first.</summary>
+    private static bool ReplacesLoadedModel(TextDeviceSlot slot, string? path) =>
+        !string.IsNullOrEmpty(path) && !KeepsLoadedModel(slot, path, hfDirectory: ProbeHfDirectory(path) is not null);
+
+    /// <summary>The Hugging Face checkpoint at <paramref name="path"/>, or null when it is not such a directory (a GGUF file, say).</summary>
+    private static HfCheckpointInfo? ProbeHfDirectory(string path) => Directory.Exists(path) ? HfCheckpointDirectory.TryProbe(path) : null;
+
+    /// <summary>The slot serving <paramref name="device"/>, or null before anything ran there. For tests that hold a slot's lease as a running scheduled request does.</summary>
+    internal TextDeviceSlot? SlotFor(string? device) => _slots.TryGetValue(NormalizeDeviceKey(device), out TextDeviceSlot? slot) ? slot : null;
 
     /// <summary>Every CUDA ordinal a load+generate on <paramref name="deviceKey"/> can touch: each stage device of a layer-split (request-level composite key or engine-placement <c>ShardDevices</c>), else the single device. Gating only the logits stage left the other stage devices open to same-device siblings; <see cref="DeviceGate.AcquireAllOrdinals"/> acquires ascending, so multi-gate stays deadlock-free.</summary>
     private IEnumerable<int> GateOrdinalsFor(string deviceKey)
@@ -705,6 +848,13 @@ public sealed class TextService : ITextService, IDisposable
         }
         try
         {
+            // Scheduled requests run without the slot lock: let them finish before the model they run on is freed.
+            if (!slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+            {
+                Logs.Warning($"[TextService] Unload timed out waiting on scheduled requests ({UnloadWaitSeconds}s) - "
+                    + $"'{slot.LoadedPath}' stays resident.");
+                return false;
+            }
             bool freed = UnloadSlot(slot);
             if (slot.ExtraStageBackends is not null)
             {
@@ -787,7 +937,8 @@ public sealed class TextService : ITextService, IDisposable
             // Best-effort and non-blocking: a slot mid-generation is skipped rather than waited on, since this is
             // background hygiene (pool slack an idle point returns to the driver), never something a live request
             // should queue behind.
-            if (!await slot.Lock.WaitAsync(0).ConfigureAwait(false))
+            // A lease is taken only while the slot lock is held, so none can start between these two checks; that is what makes them race-free.
+            if (slot.HasLeases || !await slot.Lock.WaitAsync(0).ConfigureAwait(false))
             {
                 continue;
             }
@@ -816,6 +967,15 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>Frees the slot's loaded model, keeping its backend/device alive. Caller holds <c>slot.Lock</c>. Returns whether a model was actually resident.</summary>
     private static bool UnloadSlot(TextDeviceSlot slot)
     {
+        // A scheduled request runs on the scheduler without the slot lock. Every caller that frees a model drains those first
+        // (see PrepareSlot, UnloadDeviceSlot and RunPipeline), so one still running here is a bug, not a wait.
+        if (slot.HasLeases)
+            throw new HartsyInferenceException($"Scheduled requests are still running on '{slot.LoadedPath}'; retry once they finish.");
+        // Stopped before the model it drives is freed: its loop must not touch a freed model.
+        slot.Scheduler?.Dispose();
+        slot.Scheduler = null;
+        slot.SchedulerPool?.Dispose();
+        slot.SchedulerPool = null;
         // Disposed BEFORE FreeAllDeviceMemory below: a retained entry's KV Tensors reference this backend's
         // device allocations directly, and FreeAllDeviceMemory resets the backend's allocator wholesale — a
         // Tensor.Dispose() call after that would free an already-invalidated pointer.

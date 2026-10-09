@@ -60,8 +60,11 @@ public static class DeepSeekV41HostModelLoader
             for (int layer = 0; layer < blocks.Length; layer++)
                 blocks[layer] = BuildBlock(backend, checkpoint, read, cfg, layer, plainRope, compressRope, expertCache, options, stores);
 
+            // a layer-limited load (MaxLayers) keeps only the target layers it has, so MainHiddenWidth can be narrower than the config's list;
+            // a DSpark draft must check that the counts match before it uses the taps. A negative id still fails in the constructor.
             DeepSeekV41HostModel model = new(dim, hc, cfg.VocabSize, normEps, read.Weight("embed.weight", cfg.VocabSize, dim), blocks,
-                read.Vector("norm.weight", dim), read.Weight("head.weight", cfg.VocabSize, dim));
+                read.Vector("norm.weight", dim), read.Weight("head.weight", cfg.VocabSize, dim),
+                mainHiddenLayers: cfg.DsparkTargetLayerIds.Where(layer => layer < blocks.Length).ToArray());
             return new DeepSeekV41LoadedModel(model, checkpoint, ownsCheckpoint, stores, options.MaxTokens);
         }
         catch
@@ -138,7 +141,7 @@ public static class DeepSeekV41HostModelLoader
     };
 
     // Reads canonical keys as F32, checking the logical shape named by the config.
-    private sealed class Reader(DeepSeekV41Checkpoint checkpoint, DeepSeekV41Residency residency)
+    internal sealed class Reader(DeepSeekV41Checkpoint checkpoint, DeepSeekV41Residency residency)
     {
         // Large projections follow the residency choice; the small float tensors always load as F32.
         public DeepSeekV41Weight Weight(string key, long rows, long cols) => residency == DeepSeekV41Residency.Stored
@@ -157,7 +160,7 @@ public static class DeepSeekV41HostModelLoader
     }
 
     // One layer's view of the shared expert cache; a cache key packs (layer, expert) and both directions live here.
-    private sealed class LayerExperts(DeepSeekV41ExpertCache cache, int layer, int experts) : IDeepSeekV41ExpertSource
+    internal sealed class LayerExperts(DeepSeekV41ExpertCache cache, int layer, int experts) : IDeepSeekV41ExpertSource
     {
         public static (int Layer, int Expert) Unpack(int key, int experts) => (key / experts, key % experts);
 

@@ -16,6 +16,7 @@ public sealed class DeepSeekV41HostModel
     private readonly float[] _finalNorm;
     private readonly DeepSeekV41Weight _head;
     private readonly EngramConstants? _engramConstants;
+    private readonly int[] _mainHiddenLayers;
 
     /// <summary>Hidden width.</summary>
     public int Dim => _dim;
@@ -26,6 +27,12 @@ public sealed class DeepSeekV41HostModel
     /// <summary>Number of blocks.</summary>
     public int Layers => _blocks.Length;
 
+    /// <summary>Block indices whose entry stream the DSpark draft reads, ascending in the order upstream concatenates them; empty when none.</summary>
+    public IReadOnlyList<int> MainHiddenLayers => _mainHiddenLayers;
+
+    /// <summary>Width of one main-hidden row: one hidden width per tapped layer.</summary>
+    public int MainHiddenWidth => _mainHiddenLayers.Length * _dim;
+
     /// <param name="dim">Hidden width.</param>
     /// <param name="hc">Residual copies.</param>
     /// <param name="vocab">Vocabulary size.</param>
@@ -35,8 +42,9 @@ public sealed class DeepSeekV41HostModel
     /// <param name="finalNorm">Norm weight after the final collapse, <c>[dim]</c>.</param>
     /// <param name="head">Output projection, <c>[vocab, dim]</c>.</param>
     /// <param name="engramConstants">Hash constants when any block has Engram, else null; null selects the shipped defaults for such a model.</param>
+    /// <param name="mainHiddenLayers">Blocks whose entry stream is captured for the DSpark draft, from the config's <c>dspark_target_layer_ids</c>; null or empty captures nothing.</param>
     public DeepSeekV41HostModel(int dim, int hc, int vocab, float normEps, DeepSeekV41Weight embed, DeepSeekV41Block[] blocks, float[] finalNorm, DeepSeekV41Weight head,
-        EngramConstants? engramConstants = null)
+        EngramConstants? engramConstants = null, IReadOnlyList<int>? mainHiddenLayers = null)
     {
         ArgumentNullException.ThrowIfNull(embed);
         ArgumentNullException.ThrowIfNull(blocks);
@@ -54,6 +62,16 @@ public sealed class DeepSeekV41HostModel
         _finalNorm = finalNorm;
         _head = head;
         _engramConstants = engramConstants;
+        _mainHiddenLayers = NormalizeTapLayers(mainHiddenLayers, blocks.Length);
+    }
+
+    /// <summary>Distinct, ascending block indices; upstream captures each target layer once, in layer order, whatever order the config lists them in.</summary>
+    private static int[] NormalizeTapLayers(IReadOnlyList<int>? layers, int blockCount)
+    {
+        if (layers is null || layers.Count == 0) return [];
+        int[] sorted = layers.Distinct().Order().ToArray();
+        if (sorted[0] < 0 || sorted[^1] >= blockCount) throw new ArgumentOutOfRangeException(nameof(layers), "A DSpark target layer lies outside the loaded blocks.");
+        return sorted;
     }
 
     /// <summary>Host bytes one sequence of <paramref name="maxTokens"/> positions will hold across all layers.</summary>
@@ -82,27 +100,41 @@ public sealed class DeepSeekV41HostModel
     /// <param name="ids">Token ids; the first sits at <c>state.Length</c>.</param>
     /// <param name="state">The sequence's state; advanced by <c>ids.Length</c>.</param>
     /// <param name="hidden">Receives <c>[ids.Length, Dim]</c>.</param>
-    public void Forward(ReadOnlySpan<int> ids, DeepSeekV41SequenceState state, Span<float> hidden)
+    public void Forward(ReadOnlySpan<int> ids, DeepSeekV41SequenceState state, Span<float> hidden) => Forward(ids, state, hidden, default);
+
+    /// <summary>As <c>Forward(ids, state, hidden)</c>, and also writes the DSpark target rows when <paramref name="mainHidden"/> is given.</summary>
+    /// <param name="ids">Token ids; the first sits at <c>state.Length</c>.</param>
+    /// <param name="state">The sequence's state; advanced by <c>ids.Length</c>.</param>
+    /// <param name="hidden">Receives <c>[ids.Length, Dim]</c>.</param>
+    /// <param name="mainHidden">Receives <c>[ids.Length, MainHiddenWidth]</c>: per position, the hc-mean entry stream of each layer in <see cref="MainHiddenLayers"/>, in that order,
+    /// as upstream's <c>main_hidden</c>. Empty when not wanted.</param>
+    public void Forward(ReadOnlySpan<int> ids, DeepSeekV41SequenceState state, Span<float> hidden, Span<float> mainHidden)
     {
         ArgumentNullException.ThrowIfNull(state);
         if (ids.IsEmpty) throw new ArgumentException("Pass at least one token.", nameof(ids));
         if (hidden.Length != (long)ids.Length * _dim) throw new ArgumentException("hidden must hold ids x dim values.", nameof(hidden));
+        if (!mainHidden.IsEmpty)
+        {
+            if (_mainHiddenLayers.Length == 0) throw new InvalidOperationException("This model has no DSpark target layers, so there are no main hidden rows to write.");
+            if (mainHidden.Length != (long)ids.Length * MainHiddenWidth) throw new ArgumentException("mainHidden must hold ids x MainHiddenWidth values.", nameof(mainHidden));
+        }
         if (state.Length + ids.Length > state.Capacity) throw new InvalidOperationException("The sequence state is full.");
         // checked before anything runs, so a bad id late in a multi-token call cannot leave the state half-advanced
         for (int i = 0; i < ids.Length; i++)
             if ((uint)ids[i] >= (uint)_vocab) throw new ArgumentOutOfRangeException(nameof(ids), ids[i], "Token id is outside the vocabulary.");
         if (state.Length > 0 && ids.Length > 1)
         {
-            for (int i = 0; i < ids.Length; i++) Forward(ids.Slice(i, 1), state, hidden.Slice(i * _dim, _dim));
+            for (int i = 0; i < ids.Length; i++)
+                Forward(ids.Slice(i, 1), state, hidden.Slice(i * _dim, _dim), mainHidden.IsEmpty ? default : mainHidden.Slice(i * MainHiddenWidth, MainHiddenWidth));
             return;
         }
-        Chunk(ids, state, hidden);
+        Chunk(ids, state, hidden, mainHidden);
     }
 
     /// <summary>The output logits of one hidden row, <c>[VocabSize]</c>.</summary>
     public float[] Logits(ReadOnlySpan<float> hiddenRow) => _head.Linear(hiddenRow, 1, _dim, _vocab);
 
-    private void Chunk(ReadOnlySpan<int> ids, DeepSeekV41SequenceState state, Span<float> hidden)
+    private void Chunk(ReadOnlySpan<int> ids, DeepSeekV41SequenceState state, Span<float> hidden, Span<float> mainHidden)
     {
         int tokens = ids.Length, startPos = state.Length;
         float[] stream = new float[checked(tokens * _hc * _dim)];
@@ -127,9 +159,22 @@ public sealed class DeepSeekV41HostModel
         // the first block collapses with a one-hot mix, which is just copy zero
         float[] preMix = new float[tokens * _hc], nextPreMix = new float[tokens * _hc];
         for (int t = 0; t < tokens; t++) preMix[t * _hc] = 1f;
+        // the DSpark tap reads each target block's entry stream after its Engram step, so it is taken inside the block
+        float[] tapScratch = mainHidden.IsEmpty ? Array.Empty<float>() : new float[checked(tokens * _dim)];
+        int tap = 0;
         for (int i = 0; i < _blocks.Length; i++)
         {
-            _blocks[i].Forward(stream, tokens, startPos, preMix, nextPreMix, state.Layers[i], state.Shared, hashIds, hashLayers, default, default);
+            if (!mainHidden.IsEmpty && tap < _mainHiddenLayers.Length && _mainHiddenLayers[tap] == i)
+            {
+                _blocks[i].Forward(stream, tokens, startPos, preMix, nextPreMix, state.Layers[i], state.Shared, hashIds, hashLayers, default, default, tapScratch);
+                for (int t = 0; t < tokens; t++)
+                    tapScratch.AsSpan(t * _dim, _dim).CopyTo(mainHidden.Slice(t * MainHiddenWidth + tap * _dim, _dim));
+                tap++;
+            }
+            else
+            {
+                _blocks[i].Forward(stream, tokens, startPos, preMix, nextPreMix, state.Layers[i], state.Shared, hashIds, hashLayers, default, default, default);
+            }
             (preMix, nextPreMix) = (nextPreMix, preMix);
         }
 

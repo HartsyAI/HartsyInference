@@ -23,12 +23,13 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     private readonly ILlmTokenizer _tokenizer;
     private readonly IChatTemplate _template;
     private readonly IBackend _backend;
-    private readonly PagedKvPool _pool;
+    private readonly PagedKvPool? _pool;
     private readonly HashSet<int> _stopIds;
     private readonly Channel<PendingRequest> _incoming;
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _loopTask;
     private readonly Func<Action, Task>? _gpuGate;
+    private int _disposed;
 
     private sealed class PendingRequest
     {
@@ -50,6 +51,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         public int Next;
         public GraphDecodeSession? GraphSession;
 
+        /// <summary>The result the request completes with once this sequence is released; null for a cancelled request.</summary>
+        public GenerationResult? Result;
+
         public void Dispose()
         {
             Cache.Dispose();
@@ -59,14 +63,14 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 
     /// <summary><paramref name="pool"/> is shared across every sequence this scheduler admits (size it for the concurrency you want, not per-request); <paramref name="gpuGate"/>, when supplied, wraps every GPU-touching step through the server's shared backend-exclusivity queue (see class doc "Backend exclusivity") — omit only when nothing else can contend for the same backend instance.</summary>
     public DynamicBatchScheduler(GenericTransformer model, ILlmTokenizer tokenizer, IBackend backend,
-        PagedKvPool pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
+        PagedKvPool? pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
         : this(new GenericTransformerModel(model, backend), tokenizer, pool, template, gpuGate)
     {
     }
 
-    /// <summary>Drives any <see cref="IGenerationModel"/> whose sequence states can be drawn from <paramref name="pool"/>; the scheduler does not own the model.</summary>
+    /// <summary>Drives any <see cref="IGenerationModel"/>; the scheduler does not own the model. <paramref name="pool"/> is the KV pool its sequences draw from, or null for a model whose sequence states own their storage (the V4.1 host model).</summary>
     public DynamicBatchScheduler(IGenerationModel model, ILlmTokenizer tokenizer,
-        PagedKvPool pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
+        PagedKvPool? pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
     {
         _model = model;
         _graphModel = model as IGraphDecodable;
@@ -111,7 +115,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         TaskCompletionSource<GenerationResult> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
         PendingRequest pending = new() { Request = request, OnToken = onToken, Ct = ct, Completion = tcs };
         if (!_incoming.Writer.TryWrite(pending))
-            tcs.SetException(new ObjectDisposedException(nameof(DynamicBatchScheduler)));
+            tcs.SetException(new SchedulerStoppedException());
         return tcs.Task;
     }
 
@@ -123,6 +127,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             while (!_shutdown.IsCancellationRequested)
             {
                 await DrainIncomingAsync(active).ConfigureAwait(false);
+                // Shutdown requested while this round admitted or waited: no round runs after it, so every
+                // unfinished sequence fails in the finally below instead of producing tokens after Dispose.
+                if (_shutdown.IsCancellationRequested) break;
 
                 if (active.Count == 0)
                 {
@@ -139,7 +146,6 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     ActiveSeq seq = active[i];
                     if (seq.Pending.Ct.IsCancellationRequested)
                     {
-                        seq.Pending.Completion.TrySetCanceled(seq.Pending.Ct);
                         evicted.Add(seq);
                         active.RemoveAt(i);
                         continue;
@@ -148,7 +154,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     bool atLimit = seq.Generated.Count >= seq.Pending.Request.MaxTokens;
                     if (stoppedNow || atLimit)
                     {
-                        CompleteSeq(seq, stoppedNow);
+                        seq.Result = BuildResult(seq, stoppedNow);
                         evicted.Add(seq);
                         active.RemoveAt(i);
                         continue;
@@ -163,7 +169,11 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     // eviction this round into ONE gated call so disposal never races concurrent GPU work
                     // from another gated caller (diffusion, another model's scheduler), same rationale as
                     // every other GPU-touching step here.
-                    await RunGpuWork(() => { foreach (ActiveSeq seq in evicted) seq.Dispose(); }).ConfigureAwait(false);
+                    await ReleaseThenCompleteAsync(evicted, static seq =>
+                    {
+                        if (seq.Result is { } result) seq.Pending.Completion.TrySetResult(result);
+                        else seq.Pending.Completion.TrySetCanceled(seq.Pending.Ct);
+                    }).ConfigureAwait(false);
                 }
                 if (feeders.Count == 0) continue;
 
@@ -205,20 +215,31 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     // and previously got the same silent-wedge treatment).
                     Logs.Error($"DynamicBatchScheduler: decode round failed for {feeders.Count} sequence(s), failing them and continuing", ex);
                     foreach (ActiveSeq seq in feeders)
-                    {
-                        seq.Pending.Completion.TrySetException(ex);
                         active.Remove(seq);
-                    }
-                    await RunGpuWork(() => { foreach (ActiveSeq seq in feeders) seq.Dispose(); }).ConfigureAwait(false);
+                    await ReleaseThenCompleteAsync(feeders, seq => seq.Pending.Completion.TrySetException(ex)).ConfigureAwait(false);
                 }
             }
         }
         finally
         {
-            foreach (ActiveSeq seq in active)
-                seq.Pending.Completion.TrySetException(new ObjectDisposedException(nameof(DynamicBatchScheduler)));
+            FailQueued();
             if (active.Count > 0)
-                await RunGpuWork(() => { foreach (ActiveSeq seq in active) seq.Dispose(); }).ConfigureAwait(false);
+                await ReleaseThenCompleteAsync(active, static seq => seq.Pending.Completion.TrySetException(new SchedulerStoppedException())).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Releases <paramref name="seqs"/> in one gated call, then completes each request with <paramref name="complete"/>, even when the release throws. A request
+    /// completes only after its sequence is released, so a caller that frees the model once its requests have completed (TextService's slot lease) never leaves a
+    /// teardown behind that still needs the device gate.</summary>
+    private async Task ReleaseThenCompleteAsync(List<ActiveSeq> seqs, Action<ActiveSeq> complete)
+    {
+        try
+        {
+            await RunGpuWork(() => { foreach (ActiveSeq seq in seqs) seq.Dispose(); }).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (ActiveSeq seq in seqs) complete(seq);
         }
     }
 
@@ -227,6 +248,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         while (_incoming.Reader.TryRead(out PendingRequest? pending))
         {
             if (pending.Ct.IsCancellationRequested) { pending.Completion.TrySetCanceled(pending.Ct); continue; }
+            // Read after shutdown was requested: failed, not admitted, since the loop is about to stop.
+            if (_shutdown.IsCancellationRequested) { pending.Completion.TrySetException(new SchedulerStoppedException()); continue; }
             // Recomputed fresh for EACH dequeued request, not once per drain burst — active.Count grows as
             // this loop admits earlier requests in the same burst, so a request 2nd-or-later in a burst that
             // arrived all at once correctly sees itself as non-solo.
@@ -299,6 +322,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             using (Tensor hidden = _model.Prefill(new PrefillChunk(promptIds, 0), cache))
             using (Tensor logits = _model.ProjectLogits(hidden, promptIds.Length))
                 next = sampler.Next(LastRow(logits, promptIds.Length, vocab), generated);
+
+            // Fired once the prompt is in the cache, as TextGenerationPipeline does: the caller reads the prompt length from it.
+            req.OnPrefillCompleted?.Invoke(promptIds.Length);
 
             GraphDecodeSession? session = null;
             if (graphEligible)
@@ -380,18 +406,14 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         seq.Next = next;
     }
 
-    /// <summary>Builds the final result and completes the request's task; does NOT dispose <paramref name="seq"/> — callers batch every evicted sequence's disposal into one gated <see cref="RunGpuWork"/> call (see <see cref="RunLoopAsync"/>) instead.</summary>
-    private void CompleteSeq(ActiveSeq seq, bool stopped)
+    /// <summary>The final result of a finished sequence. The request completes with it only after the sequence is released (see <see cref="ReleaseThenCompleteAsync"/>).</summary>
+    private GenerationResult BuildResult(ActiveSeq seq, bool stopped) => new()
     {
-        GenerationResult result = new()
-        {
-            TokenIds = seq.Generated,
-            Text = _tokenizer.Decode(seq.Generated),
-            PromptTokens = seq.PromptIds.Length,
-            StoppedOnStopToken = stopped,
-        };
-        seq.Pending.Completion.TrySetResult(result);
-    }
+        TokenIds = seq.Generated,
+        Text = _tokenizer.Decode(seq.Generated),
+        PromptTokens = seq.PromptIds.Length,
+        StoppedOnStopToken = stopped,
+    };
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
 
@@ -401,12 +423,25 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         return new Span<float>(p + (long)(t - 1) * vocab, vocab);
     }
 
-    /// <summary>Stops the background loop and fails every still-active/pending request; does NOT dispose the shared <see cref="PagedKvPool"/> (the caller owns it and may share it across schedulers/sessions).</summary>
+    /// <summary>Stops the background loop and fails every request it has not finished: queued requests fail at once, and active sequences fail when the loop exits. Each fails with <see cref="SchedulerStoppedException"/>, so no caller waits on a loop that will not run. Does NOT dispose the shared <see cref="PagedKvPool"/> (the caller owns it and may share it across schedulers/sessions).</summary>
     public void Dispose()
     {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
         _shutdown.Cancel();
         _incoming.Writer.TryComplete();
+        FailQueued();
         try { _loopTask.Wait(TimeSpan.FromSeconds(5)); } catch { /* best-effort shutdown */ }
-        _shutdown.Dispose();
+        // Only once the loop has stopped: it still reads the token while it runs.
+        if (_loopTask.IsCompleted) _shutdown.Dispose();
+    }
+
+    /// <summary>Completes every request still waiting in <see cref="_incoming"/>: as cancelled when its own token already fired, else with <see cref="SchedulerStoppedException"/>.</summary>
+    private void FailQueued()
+    {
+        while (_incoming.Reader.TryRead(out PendingRequest? pending))
+        {
+            if (pending.Ct.IsCancellationRequested) pending.Completion.TrySetCanceled(pending.Ct);
+            else pending.Completion.TrySetException(new SchedulerStoppedException());
+        }
     }
 }

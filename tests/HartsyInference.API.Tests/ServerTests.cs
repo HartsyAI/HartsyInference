@@ -1,5 +1,6 @@
 using HartsyInference.API;
 using HartsyInference.Engine;
+using HartsyInference.LLM.Transformer;
 using HartsyInference.Vision.Codec;
 using Xunit;
 
@@ -67,7 +68,7 @@ public sealed class ServerTests
 
     /// <summary>Regression test for a real incident: a FIXED page-count KV pool default (1024) comfortably
     /// fit a small model but eagerly pre-allocated ~3.4GB for a model with wider KV heads/more layers,
-    /// OOM-ing on a GPU that had ~4GB free. <see cref="ModelManager.ComputeKvPoolPageCount"/> replaced the
+    /// OOM-ing on a GPU that had ~4GB free. <see cref="PagedKvPool.PageCountForBudget"/> replaced the
     /// fixed count with a byte-budget-aware calculation — this locks in that the resulting page count
     /// actually respects the budget regardless of model shape, and that a larger-KV-dimension model
     /// correctly gets FEWER pages for the same budget (not the same fixed count that caused the OOM).</summary>
@@ -80,7 +81,7 @@ public sealed class ServerTests
         Array.Fill(headDimPerLayer, headDim);
         const int pageSize = 16;
 
-        int pages = ModelManager.ComputeKvPoolPageCount(numKvHeads, headDimPerLayer, pageSize, budget);
+        int pages = PagedKvPool.PageCountForBudget(numKvHeads, headDimPerLayer, pageSize, budget);
 
         long actualBytes = (long)pages * numLayers * numKvHeads * headDim * pageSize * sizeof(float) * 2;
         Assert.True(actualBytes <= budget, $"pool would use {actualBytes} bytes, over the {budget} budget");
@@ -94,8 +95,8 @@ public sealed class ServerTests
         int[] narrowHeadDims = Enumerable.Repeat(64, 24).ToArray();   // small model
         int[] wideHeadDims = Enumerable.Repeat(256, 26).ToArray();    // large-KV-dim model (the OOM case)
 
-        int narrowPages = ModelManager.ComputeKvPoolPageCount(2, narrowHeadDims, 16, budget);
-        int widePages = ModelManager.ComputeKvPoolPageCount(4, wideHeadDims, 16, budget);
+        int narrowPages = PagedKvPool.PageCountForBudget(2, narrowHeadDims, 16, budget);
+        int widePages = PagedKvPool.PageCountForBudget(4, wideHeadDims, 16, budget);
 
         // The whole point of the fix: a fixed page count gave the SAME pages to both, over-allocating VRAM
         // for the wide model. The budget-aware version must give the wide model meaningfully fewer pages.

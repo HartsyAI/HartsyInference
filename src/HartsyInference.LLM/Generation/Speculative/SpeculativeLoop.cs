@@ -9,8 +9,10 @@ public static class SpeculativeLoop
     /// <summary>Appends up to <paramref name="maxNewTokens"/> tokens to <paramref name="tokens"/> and returns how many were appended.</summary>
     /// <param name="sampler">Supplies the target distribution at each position (its repetition penalty and truncation); its own random state is not used.</param>
     /// <param name="uniform">The draws used for acceptance and correction.</param>
+    /// <param name="stopTokens">Tokens that end the run. The first one emitted is kept, and nothing after it is emitted, even inside an accepted draft. The count
+    /// alone does not say whether a stop ended the run: a caller that needs to know checks the last token against this set.</param>
     public static int Generate(ISpeculativeScorer scorer, IDraftProposer proposer, SamplerChain sampler, Func<double> uniform,
-        List<int> tokens, int maxNewTokens, int maxDraft, int vocab)
+        List<int> tokens, int maxNewTokens, int maxDraft, int vocab, IReadOnlySet<int>? stopTokens = null)
     {
         ArgumentNullException.ThrowIfNull(scorer);
         ArgumentNullException.ThrowIfNull(proposer);
@@ -42,9 +44,14 @@ public static class SpeculativeLoop
             }
 
             SpeculativeOutcome outcome = RejectionSampler.Verify(block.Tokens, target, block.Probs, uniform);
-            for (int j = 0; j < outcome.Accepted; j++) tokens.Add(block.Tokens[j]);
-            tokens.Add(outcome.NextToken);
-            produced += outcome.Accepted + 1;
+            // the accepted draft, then the correction or the bonus token
+            for (int j = 0; j <= outcome.Accepted; j++)
+            {
+                int emitted = j < outcome.Accepted ? block.Tokens[j] : outcome.NextToken;
+                tokens.Add(emitted);
+                produced++;
+                if (stopTokens is not null && stopTokens.Contains(emitted)) return produced;
+            }
         }
         return produced;
     }
