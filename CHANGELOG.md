@@ -14,8 +14,6 @@ stable release will require. Dates are UTC.
 
 - **Changed: an unknown device on `POST /admin/deployments` is a 400.** It used to load onto a CPU slot without a word, and a bad device string left a slot under that key. A recognised device that cannot load still answers 200 with `state: failed` and the reason. A test pins the refusal, and that nothing loads.
 
-## alpha.305
-
 ## alpha.307
 
 - **Changed: prefix-cache entries are scoped by tenant and model.** A retained prefix is stored under the request's tenant, the model the device holds, and the caller's prefix key. Each part before the key is length-prefixed, so no two scopes can collide. One tenant's prefix therefore never serves another's, and a different model on the same device is a different scope. The model part is the loaded path as written, so a path differing only in case is another scope too: an extra miss, never a wrong hit. The V4.1 host takes no prefix-cache hits in this version, exact-prompt hits included: the plan allowed those, and turning them on is a follow-up that needs the exact-prompt gate. One rule, `PrefixCacheScope.TryKey`, decides whether a request takes a hit, for both checkout and check-in. Covered by key tests (tenant, model, and ambiguous names), a store test with a live cache, in which alice's entry is never returned to bob, and a `TryKey` test in which a slot holding the loaded V4.1 fixture yields no key. The image-hash part of the key is reserved for vision and is empty for text.
