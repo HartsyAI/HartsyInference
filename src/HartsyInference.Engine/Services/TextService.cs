@@ -217,6 +217,7 @@ public sealed class TextService : ITextService, IDisposable
         };
         // With continuous batching on, the API does not queue text requests itself, so a pipeline request takes the engine's round gate here: the same
         // server-wide queue that image work and the scheduled rounds use.
+        // Blocking is safe: RunAsync runs this method on a thread-pool worker (Task.Run) with no synchronization context for the gate's continuation to need.
         if (EngineKnobs.ContinuousBatching.Value && _engine.GpuRoundGate is { } roundGate)
             roundGate(generate).GetAwaiter().GetResult();
         else
