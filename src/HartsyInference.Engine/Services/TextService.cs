@@ -62,9 +62,19 @@ public sealed class TextService : ITextService, IDisposable
         public DeploymentState State { get; set; } = DeploymentState.Unloaded;
         public string? Problem { get; set; }
 
-        /// <summary>Counts the loads started under this id. A load completes the record only while it is still the latest (see <see cref="Complete"/>).</summary>
+        /// <summary>Counts the loads started under this id. A load completes the record only while it is still the latest (see <see cref="CompleteLoaded"/>).</summary>
         public int Attempt { get; set; }
+
+        /// <summary>The load a deploy asked for while the record still serves the model it had. The record keeps describing that model until the load frees it (see
+        /// <see cref="RetireDeploymentsOn"/>), so a load that fails before then leaves the device, and the record, as they were. Null when no such load is pending.</summary>
+        public PendingLoad? Pending { get; set; }
+
+        /// <summary>True while this record's own load runs under the device lock, so the free that load performs moves the record on to Loading.</summary>
+        public bool Committing { get; set; }
     }
+
+    /// <summary>A load that a deploy asked for and has not yet started, against a record that served another model; see <see cref="DeploymentRecord.Pending"/>.</summary>
+    private sealed record PendingLoad(ModelSpec Spec, string DeviceKey);
 
     private readonly InferenceEngine _engine;
     private readonly ConcurrentDictionary<string, TextDeviceSlot> _slots = new(StringComparer.OrdinalIgnoreCase);
@@ -84,13 +94,20 @@ public sealed class TextService : ITextService, IDisposable
         DeploymentRecord record = BeginDeployment(request.DeploymentId, request.Model, deviceKey, out int attempt);
         TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
         bool holdsDevice = false;
+        string? failure = null;
         try
         {
             // Inside the try, so a deploy cancelled while it waits for the device is recorded as Failed rather than left Loading.
             await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
             holdsDevice = true;
             // A later deploy of this id began while this one waited for the device: that one owns the record, so this one loads nothing; the status it returns is the record as the later deploy left it.
-            if (IsLatest(record, attempt))
+            bool latest;
+            lock (_deploymentsGate)
+            {
+                latest = record.Attempt == attempt;
+                if (latest) BeginLoading(record);
+            }
+            if (latest)
             {
                 // A load that replaces the device's model waits for scheduled requests on it first, as a request does (see PrepareSlot).
                 // The wait blocks, so it runs on the pool rather than on this async method's thread; the timeout is the one tests can shorten.
@@ -99,36 +116,53 @@ public sealed class TextService : ITextService, IDisposable
                 {
                     throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadLeaseWait.TotalSeconds:0}s; retry the deployment.");
                 }
-                await Task.Run(() =>
+                // The free of the model this load replaces happens inside LoadInto. Committing lets that free move this record on to Loading for this load.
+                lock (_deploymentsGate) record.Committing = true;
+                try
                 {
-                    using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
-                    LoadInto(slot, deviceKey, request.Model, new TextRequest { Messages = [] });
-                }, cancel).ConfigureAwait(false);
+                    await Task.Run(() =>
+                    {
+                        using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
+                        LoadInto(slot, deviceKey, request.Model, new TextRequest { Messages = [] });
+                    }, cancel).ConfigureAwait(false);
+                }
+                finally
+                {
+                    lock (_deploymentsGate) record.Committing = false;
+                }
                 lock (_deploymentsGate)
                 {
                     // One deployment holds a device, so the others on it end now that this model is in place. A load that replaced their model already
-                    // recorded them in UnloadSlot; this covers one that kept it.
-                    RetireDeploymentsOn(slot);
-                    Complete(record, attempt, DeploymentState.Ready, problem: null);
+                    // recorded them in UnloadSlot; this covers one that kept it. This record is not one of them: it is the one completed here.
+                    RetireDeploymentsOn(slot, except: record);
+                    CompleteLoaded(record, attempt);
                 }
             }
         }
         catch (OperationCanceledException)
         {
-            lock (_deploymentsGate) Complete(record, attempt, DeploymentState.Failed, "the deployment was cancelled before its model loaded");
+            failure = "the deployment was cancelled before its model loaded";
+            lock (_deploymentsGate) FailLoad(record, attempt, failure);
             throw;
         }
         catch (Exception ex)
         {
             Logs.Error($"[TextService] Deployment '{request.DeploymentId}' did not load: {ex.Message}", ex);
-            lock (_deploymentsGate) Complete(record, attempt, DeploymentState.Failed, ex.Message);
+            failure = ex.Message;
+            lock (_deploymentsGate) FailLoad(record, attempt, failure);
         }
         finally
         {
             if (holdsDevice)
                 slot.Lock.Release();
         }
-        lock (_deploymentsGate) return Snapshot(record);
+        lock (_deploymentsGate)
+        {
+            // A failed load reports its own failure, even when the record still describes the model it kept serving.
+            if (failure is not null && record.Attempt == attempt)
+                return new DeploymentStatus(request.DeploymentId, request.Model.Requested, deviceKey, DeploymentState.Failed, failure);
+            return Snapshot(record);
+        }
     }
 
     /// <inheritdoc/>
@@ -154,15 +188,18 @@ public sealed class TextService : ITextService, IDisposable
             state = record.State;
             deviceKey = record.DeviceKey;
         }
+        // A deployment that serves no model reports no figures: its device's scheduler belongs to whichever model the device holds now, which may be another deployment's.
+        if (state is not (DeploymentState.Ready or DeploymentState.Degraded or DeploymentState.Draining))
+            return new DeploymentCapacity(state, 0, 0, 0, null, null);
         _slots.TryGetValue(deviceKey, out TextDeviceSlot? slot);
         DynamicBatchScheduler? scheduler = slot?.Scheduler;
         PagedKvPool? pool = slot?.SchedulerPool;
         return new DeploymentCapacity(state, scheduler?.ActiveCount ?? 0, scheduler?.QueuedCount ?? 0, scheduler?.MaxActive ?? 0, pool?.FreePageCount, pool?.MaxPages);
     }
 
-    /// <summary>Records a deployment as Loading, retiring a previous load of the same id first. The device's other deployments keep serving, and keep their state, until
-    /// this load holds the device and its model is in place (see <see cref="DeployAsync"/>). Returns the record the load then completes, and in
-    /// <paramref name="attempt"/> the number of this load under its id.</summary>
+    /// <summary>Records a deployment's load of <paramref name="spec"/> under <paramref name="deploymentId"/>, and returns the record it completes and, in
+    /// <paramref name="attempt"/>, the number of this load under its id. A record that serves a model keeps describing it, and keeps its state, until the load frees that
+    /// model (see <see cref="RetireDeploymentsOn"/>): the load is pending until then. Any other record is retired and recorded as Loading, as before.</summary>
     private DeploymentRecord BeginDeployment(string deploymentId, ModelSpec spec, string deviceKey, out int attempt)
     {
         lock (_deploymentsGate)
@@ -173,46 +210,84 @@ public sealed class TextService : ITextService, IDisposable
                 record = new DeploymentRecord(deploymentId, spec, deviceKey);
                 _deployedList.Add(record);
             }
-            else
+            attempt = ++record.Attempt;
+            if (record.State is DeploymentState.Ready or DeploymentState.Degraded)
             {
-                Retire(record);
+                // A later load of this id replaces this pending one. Until a load frees the model, the record still describes the model that serves.
+                record.Pending = new PendingLoad(spec, deviceKey);
+                return record;
             }
+            Retire(record);
+            record.Pending = null;
             record.Spec = spec;
             record.DeviceKey = deviceKey;
             record.Problem = null;
             Transition(record, DeploymentState.Loading);
-            attempt = ++record.Attempt;
             return record;
         }
     }
 
-    /// <summary>Whether load <paramref name="attempt"/> is still the latest one started under <paramref name="record"/>'s id.</summary>
-    private bool IsLatest(DeploymentRecord record, int attempt)
+    /// <summary>Starts a pending load whose record was freed while the load waited for the device: the model it asked for is loading now. Caller holds
+    /// <see cref="_deploymentsGate"/>.</summary>
+    private static void BeginLoading(DeploymentRecord record)
     {
-        lock (_deploymentsGate) return record.Attempt == attempt && record.State == DeploymentState.Loading;
+        if (record.State != DeploymentState.Unloaded || record.Pending is null) return;
+        CommitPending(record);
+        Transition(record, DeploymentState.Loading);
     }
 
-    /// <summary>Ends load <paramref name="attempt"/>: moves the record from Loading to <paramref name="to"/>, but only while that load is still the latest under its id. A
-    /// load that a later deploy of the same id overtook changes nothing, so neither its completion nor its failure can hit a transition the state machine refuses.</summary>
-    private static void Complete(DeploymentRecord record, int attempt, DeploymentState to, string? problem)
+    /// <summary>Makes a pending load the record's own: the record now describes the model and device that load asked for. Caller holds <see cref="_deploymentsGate"/>.</summary>
+    private static void CommitPending(DeploymentRecord record)
     {
-        if (record.Attempt != attempt || record.State != DeploymentState.Loading) return;
+        if (record.Pending is not { } pending) return;
+        record.Spec = pending.Spec;
+        record.DeviceKey = pending.DeviceKey;
+        record.Pending = null;
+        record.Problem = null;
+    }
+
+    /// <summary>Ends load <paramref name="attempt"/> as loaded. Only the latest load under the id completes the record. A load that kept the model already on the device
+    /// completes its pending record here; a load that freed a model completed the record already, when it freed the model (see <see cref="RetireDeploymentsOn"/>).
+    /// Caller holds <see cref="_deploymentsGate"/>.</summary>
+    private static void CompleteLoaded(DeploymentRecord record, int attempt)
+    {
+        if (record.Attempt != attempt) return;
+        CommitPending(record);
+        if (record.State is DeploymentState.Loading or DeploymentState.Degraded)
+            Transition(record, DeploymentState.Ready);
+    }
+
+    /// <summary>Ends load <paramref name="attempt"/> as failed. Only the latest load under the id can fail the record. A load that failed before it freed the model its record
+    /// serves changes nothing: that model still serves, and the caller's status carries the failure. Caller holds <see cref="_deploymentsGate"/>.</summary>
+    private static void FailLoad(DeploymentRecord record, int attempt, string problem)
+    {
+        if (record.Attempt != attempt) return;
+        record.Pending = null;
+        if (record.State is DeploymentState.Ready or DeploymentState.Degraded) return;
+        if (record.State == DeploymentState.Unloaded) Transition(record, DeploymentState.Loading);
+        if (record.State == DeploymentState.Loading) Transition(record, DeploymentState.Failed);
         record.Problem = problem;
-        Transition(record, to);
     }
 
-    /// <summary>Records that <paramref name="slot"/>'s model is gone: each Ready or Degraded deployment on it becomes Unloaded. A Loading one is a deploy in flight, which
-    /// completes its own record.</summary>
-    private void RetireDeploymentsOn(TextDeviceSlot slot)
+    /// <summary>Records that <paramref name="slot"/>'s model is gone: each Ready or Degraded deployment on it becomes Unloaded, except <paramref name="except"/>. A load
+    /// that frees the model its own record serves moves that record on to Loading, for the load it is making. A Loading one is a deploy in flight, which completes its
+    /// own record.</summary>
+    private void RetireDeploymentsOn(TextDeviceSlot slot, DeploymentRecord? except = null)
     {
         lock (_deploymentsGate)
         {
             foreach (DeploymentRecord record in _deployedList)
             {
-                if (record.State is (DeploymentState.Ready or DeploymentState.Degraded)
-                    && _slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? held) && ReferenceEquals(held, slot))
+                if (ReferenceEquals(record, except) || record.State is not (DeploymentState.Ready or DeploymentState.Degraded)
+                    || !_slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? held) || !ReferenceEquals(held, slot))
                 {
-                    Retire(record);
+                    continue;
+                }
+                Retire(record);
+                if (record.Committing && record.Pending is not null)
+                {
+                    CommitPending(record);
+                    Transition(record, DeploymentState.Loading);
                 }
             }
         }

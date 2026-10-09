@@ -18,5 +18,10 @@ public static class TenantContext
 
     /// <summary>The tenant a request runs under: the one it names (library callers only; the API never sets it from input), else the current identity, else <see cref="Local"/>.
     /// A blank name is no name, so it cannot become a tenant of its own.</summary>
-    public static string Resolve(string? requested) => string.IsNullOrWhiteSpace(requested) ? s_current.Value ?? Local : requested;
+    public static string Resolve(string? requested)
+    {
+        if (!string.IsNullOrWhiteSpace(requested)) return requested;
+        string? current = s_current.Value;
+        return string.IsNullOrWhiteSpace(current) ? Local : current;
+    }
 }

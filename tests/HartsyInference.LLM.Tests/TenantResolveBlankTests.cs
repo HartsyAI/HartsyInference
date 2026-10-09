@@ -19,4 +19,19 @@ public sealed class TenantResolveBlankTests
     {
         Assert.Equal("acme", TenantContext.Resolve("acme"));
     }
+
+    [Fact]
+    public void A_Blank_Current_Identity_Resolves_As_No_Tenant()
+    {
+        string? previous = TenantContext.Current;
+        try
+        {
+            TenantContext.Current = "   ";
+            Assert.Equal(TenantContext.Local, TenantContext.Resolve(null));
+        }
+        finally
+        {
+            TenantContext.Current = previous;
+        }
+    }
 }
