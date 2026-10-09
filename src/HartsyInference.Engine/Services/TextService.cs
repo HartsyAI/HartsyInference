@@ -69,7 +69,9 @@ public sealed class TextService : ITextService, IDisposable
         /// <see cref="RetireDeploymentsOn"/>), so a load that fails before then leaves the device, and the record, as they were. Null when no such load is pending.</summary>
         public PendingLoad? Pending { get; set; }
 
-        /// <summary>True while this record's own load runs under the device lock, so the free that load performs moves the record on to Loading.</summary>
+        /// <summary>True while this record's own load runs under the device lock, so the free that load performs moves the record on to Loading. The flag is per record, not
+        /// per attempt: two loads of one id on different devices can overlap, so a free that finds it clear retires the record like any other free, and the load that completes
+        /// it then takes it from Unloaded to Ready (see <see cref="CompleteLoaded"/>).</summary>
         public bool Committing { get; set; }
     }
 
@@ -253,6 +255,8 @@ public sealed class TextService : ITextService, IDisposable
     {
         if (record.Attempt != attempt) return;
         CommitPending(record);
+        // Unloaded is reachable when a free on the record's old device retired it while this load ran on another device: the model is loaded now, so it moves on to Ready.
+        if (record.State == DeploymentState.Unloaded) Transition(record, DeploymentState.Loading);
         if (record.State is DeploymentState.Loading or DeploymentState.Degraded)
             Transition(record, DeploymentState.Ready);
     }
