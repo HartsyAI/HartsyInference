@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.300
+
+- **Added: a check that a DSpark draft tap on an Engram block is taken after the Engram step (CPU, synthetic).** `DeepSeekV41EngramTapTests` applies the same Engram module to the embedding stream, with the hash ids the host computes, and requires the tap to equal the hc-mean of that stream and to differ from the mean before the step. Removing the step fails the test. The real DSpark targets have no Engram layer, so this covers a placement the real-weights chain test does not reach. No change to the model's output.
+
 ## alpha.299
 
 - **Changed: speculative generation stops at a stop token inside an accepted draft.** `SpeculativeLoop.Generate` takes an optional set of stop tokens. The first one emitted ends the run and is kept, and nothing after it is emitted, even when it sits inside an accepted draft or is the bonus token. Without a set the run is unchanged. Covered by scripted-target tests (a stop inside an accepted draft, a stop as the bonus token, and the no-stop path). Decoding through the engine's pipeline is unchanged; wiring the set through the DeepSeek-V4.1 generation path comes with the serving work.

@@ -26,7 +26,7 @@ public sealed class DeepSeekV41HostModelTests
         public DeepSeekV41SwigluWeights GetExpert(int expert) => experts[expert];
     }
 
-    private static DeepSeekV41Block BuildBlock(CpuBackend cpu, int layer, DeepSeekV41EngramModule? engram = null, int engramSlot = 0)
+    internal static DeepSeekV41Block BuildBlock(CpuBackend cpu, int layer, DeepSeekV41EngramModule? engram = null, int engramSlot = 0)
     {
         JsonElement cfg = Fx.GetProperty("config");
         int dim = cfg.GetProperty("dim").GetInt32(), hc = cfg.GetProperty("hc_mult").GetInt32(), inter = cfg.GetProperty("moe_inter_dim").GetInt32();
