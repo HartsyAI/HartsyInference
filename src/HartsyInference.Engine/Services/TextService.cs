@@ -264,6 +264,7 @@ public sealed class TextService : ITextService, IDisposable
         if (record.Attempt != attempt) return;
         record.Pending = null;
         if (record.State is DeploymentState.Ready or DeploymentState.Degraded) return;
+        // Unloaded -> Loading -> Failed: the state machine has no direct Unloaded -> Failed, and a load that failed still has to be recorded as Failed.
         if (record.State == DeploymentState.Unloaded) Transition(record, DeploymentState.Loading);
         if (record.State == DeploymentState.Loading) Transition(record, DeploymentState.Failed);
         record.Problem = problem;

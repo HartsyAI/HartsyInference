@@ -28,7 +28,8 @@ public interface ITextService
     /// in tests, any other implementation outside this repo) keeps compiling unchanged.</summary>
     Task TrimMemoryPool(string? device = null) => Task.CompletedTask;
 
-    /// <summary>Loads <paramref name="request"/>'s model onto its device as a named deployment, without generating anything. Replaces whatever the device held. Default: not supported, so
+    /// <summary>Loads <paramref name="request"/>'s model onto its device as a named deployment, without generating anything. Replaces whatever the device held. A load that fails before it
+    /// frees the model its deployment serves returns the failure here, while <see cref="Deployments"/> and <see cref="Capacity"/> still describe that model. Default: not supported, so
     /// an existing <see cref="ITextService"/> (fakes in tests, other implementations) keeps compiling unchanged.</summary>
     Task<DeploymentStatus> DeployAsync(DeploymentRequest request, CancellationToken cancel = default)
         => throw new NotSupportedException("This text service does not support deployments.");
