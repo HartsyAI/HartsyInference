@@ -8,6 +8,16 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.305
+
+- **Added: the CUDA expert device runner (`CudaExpertDeviceRunner`), synchronous and one expert per call.** It implements
+  `IExpertDeviceRunner` for a layer's plan. It holds the planner's lease and throws, without uploading, for any expert the lease
+  does not pin. It runs gate, up, the `ExpertProgram` activation and clamp, and down on resident F32 weights, then downloads the
+  output. The kernels are `Kernels/moe/expert_f32.cu`, compiled for sm_75 and run through `CudaExpertKernels`. They load on Turing
+  without the backend's sm_80 bundle. The asynchronous handoff and quantized weights are not built.
+  Measured on sm_75: the kernels match `ExpertProgramReference` within 2.4e-7 absolute at H=64, I=32, for Swiglu, GeGlu,
+  SwigluClamped, Relu and ReluSquared (`CudaExpertKernelTests`). The tolerance is 1e-5.
+
 ## alpha.304
 
 - **Changed: the V4.1 host reference runs each routed expert once per batch of tokens, not once per token.** `DeepSeekV41MoeExecutor.Run`

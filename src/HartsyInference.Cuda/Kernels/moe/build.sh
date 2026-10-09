@@ -8,6 +8,11 @@ KERNELS=(
     "moe_dispatch"
 )
 
+# The expert FFN runner's kernels: compiled for sm_75 so they load on Turing and on every later card.
+KERNELS_SM75=(
+    "expert_f32"
+)
+
 # shellcheck source=../build_common.sh
 . "${THIS_DIR}/../build_common.sh"
 build_all "$@"

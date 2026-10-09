@@ -13,12 +13,18 @@ How one layer's routed experts run across the GPU and the CPU. This document cov
 - **Contract.** A placement changes where an expert runs, not which rows it receives or where its output lands. The tests
   check this by running the same plan under all-CPU, all-GPU and mixed placements and requiring identical output. They use a
   reference device, so they verify placement and layout, not device numerics.
+- **Device runner.** `CudaExpertDeviceRunner` implements `IExpertDeviceRunner` for one layer's plan. It holds the planner's lease
+  and checks that the lease pins the key before any device work, so a non-resident expert throws and is never uploaded. It
+  then uploads the input, runs gate, up, the `ExpertProgram` activation and clamp, and down (`CudaExpertKernels`, the sm_75
+  kernels in `Kernels/moe/expert_f32.cu`), downloads the output and synchronizes before `Run` returns. It is synchronous and
+  one expert per call. Grouped launch across experts and quantized device weights are not built.
+  The kernels' error against `ExpertProgramReference` is measured on sm_75 in `CudaExpertKernelTests`; the tolerance is 1e-5 absolute.
 
 ## What is not yet in place
 
-The CUDA device runner is not built. `IExpertDeviceRunner` is synchronous: `Run` returns only when `y` is complete on the
-host. The asynchronous protocol below is the contract the CUDA adapter must meet. It is not implemented or tested yet, and
-the CUDA PR must not claim it is.
+The asynchronous handoff is not implemented. `IExpertDeviceRunner` is synchronous: `CudaExpertDeviceRunner` returns only when
+`y` is complete on the host. The protocol below is the contract a future asynchronous adapter must meet. It is not
+implemented or tested, and no PR may claim it is.
 
 ## Asynchronous handoff protocol (normative for the CUDA adapter)
 
