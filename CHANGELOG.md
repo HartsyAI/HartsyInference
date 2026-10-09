@@ -8,6 +8,25 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.304
+
+- **Changed: the V4.1 host reference runs each routed expert once per batch of tokens, not once per token.** `DeepSeekV41MoeExecutor.Run`
+  gathers the tokens routed to an expert and runs them together, so a stored-form expert is decoded once per call instead of once per token.
+  Every output element is the same sequential dot product, so the results are bit-identical to the token-by-token path
+  (`DeepSeekV41MoeExecutorTests.Batched_Run_Matches_Token_By_Token_Run_Bit_For_Bit`, which crosses the 256-row batch cap).
+
+## alpha.288
+
+- **Added: CPU reference for the DeepSeek-V4.1-Flash vision tower and aligner.** `DeepSeekV41VisionLoader.Load` reads the 266 `vision.*`, `aligner.*` and `image_*` tensors (BF16 in the official shards 1 and 2) as F32 and returns a
+  `DeepSeekV41VisionModel`. `Encode(patches, gridHeight, gridWidth)` runs the tower (patch embedding, 32 pre-norm blocks of full attention with a 2D half-split rotary and a SwiGLU MLP, final RMSNorm) and the aligner (zero-padded 3x3 fold,
+  exact GELU, two projections) on existing backend ops, and `ImageStart`, `ImageEnd` and `ImageNewline` expose the learned span embeddings. `DeepSeekV41VisionConfig` gains `RopeTheta` (default 10000, read from `rope_theta` or
+  `vision_rope_theta`) and the derived widths. Against the unmodified upstream `vision.py` in float32 the stages agree to 1e-6 relative on a small seeded fixture and to 7e-6 on the real weights (aligner output correlation 1.000000, relL2 2.8e-6 on a
+  28x28 patch grid and 1.8e-6 on 17x23). Nothing calls it yet: image preprocessing, the splice into the language model and the GPU path are not built.
+
+## alpha.289
+
+- **Added: `hartsy moe pack` and `hartsy moe verify`, reading GGUF expert tensors.** Packing reads a checkpoint's stacked expert tensors one expert at a time, in separate or fused gate/up form, and writes a quantized pack. Verify reads the pack back, checks each checksum, and compares values with the checkpoint. The pack's fingerprint is provisional until the runtime binds packs to topologies. Tested on synthetic GGUFs only; see `docs/MOE_PACK.md`.
+
 ## alpha.303
 
 - **Added: heterogeneous expert execution on the CPU side.** `HeterogeneousExpertExecutor` runs a layer's planned experts: GPU assignments through `IExpertDeviceRunner`, CPU assignments through the F32 reference, with the same rows and output layout either way. Tests show the same plan gives identical output under all-CPU, all-GPU and mixed placements, using a reference device. The CUDA device runner and the asynchronous handoff are not built yet; `docs/HETEROGENEOUS_EXECUTION.md` sets the protocol they must meet.

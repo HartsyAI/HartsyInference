@@ -32,3 +32,18 @@ crash before `COMPLETE` leaves nothing a reader will open. A completed pack is n
 
 H = I = 256, four experts. Relative RMSE against the F32 source: Q8_0 0.38%, Q4_K 6.1%. Payload against F32: Q8_0 3.76x
 smaller, Q4_K 7.1x smaller. Real checkpoints will differ; the verifier is the gate for any real pack.
+
+## Packing a GGUF checkpoint
+
+`hartsy moe pack <gguf> -o <dir> --dtype Q4_K` reads the checkpoint's stacked expert tensors (`blk.N.ffn_gate_exps`,
+`ffn_up_exps`, `ffn_down_exps`, or the fused `ffn_gate_up_exps`), dequantizes one expert at a time to F32, and quantizes it into
+the pack. Memory stays at about one expert, not one layer.
+
+`hartsy moe verify <gguf> <dir>` reads the pack back, checks every record's checksum, and compares the decoded values with the
+checkpoint. It exits nonzero and lists any expert whose checksum fails.
+
+The pack's topology fingerprint is derived from the GGUF's architecture and expert geometry (layers, expert count, hidden and
+intermediate widths). It is provisional: the runtime does not yet bind packs to its own topology fingerprint, so a pack built
+here is not yet checked against the model's topology at load time.
+
+Measured here on synthetic tensors only; real checkpoints are not yet packed or verified.

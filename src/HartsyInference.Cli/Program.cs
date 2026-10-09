@@ -121,6 +121,16 @@ public static class Program
                     .WithDescription("Print the settings file this process reads and writes.")
                     .WithExample("settings", "path");
             });
+            config.AddBranch("moe", moe =>
+            {
+                moe.SetDescription("Mixture-of-experts expert packs: quantize a checkpoint's experts, and verify a pack against its source.");
+                moe.AddCommand<MoePackCommand>("pack")
+                    .WithDescription("Quantize a GGUF checkpoint's routed experts into a pack directory.")
+                    .WithExample("moe", "pack", "model.gguf", "-o", "packs/model", "--dtype", "Q4_K");
+                moe.AddCommand<MoeVerifyCommand>("verify")
+                    .WithDescription("Check a pack's checksums and values against the GGUF it came from.")
+                    .WithExample("moe", "verify", "model.gguf", "packs/model");
+            });
             config.AddBranch("fx", fx =>
             {
                 fx.SetDescription("Audio effects: stem separation (Demucs) and speech enhancement (Resemble-Enhance).");
