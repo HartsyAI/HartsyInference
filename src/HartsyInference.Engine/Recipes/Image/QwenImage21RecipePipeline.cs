@@ -1,4 +1,5 @@
 using System.Globalization;
+using HartsyInference.Core.Logging;
 using HartsyInference.Core.Memory;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Diffusion.Models.Denoisers;
@@ -21,7 +22,7 @@ namespace HartsyInference.Engine.Recipes.Image;
 /// every disposable it is handed.</summary>
 public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen3Tokenizer tokenizer,
     LlamaStyleEncoder textEncoder, QwenImage21Transformer transformer, Wan22VaeDecoder vae,
-    List<IDisposable> loaders, IDisposable? checkpoint) : IRecipePipeline
+    List<IDisposable> loaders, IDisposable? checkpoint, bool turbo = false) : IRecipePipeline
 {
     private readonly QwenImage21Pipeline _pipeline = pipeline;
     private readonly Qwen3Tokenizer _tokenizer = tokenizer;
@@ -31,6 +32,7 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
     private readonly List<IDisposable> _loaders = loaders;
     private int _disposed;
     private readonly IDisposable? _checkpoint = checkpoint;
+    private readonly bool _turbo = turbo;
 
     /// <inheritdoc/>
     public ImageResult Generate(ImageRequest request, IProgress<StepPreview>? progress, CancellationToken cancel)
@@ -38,6 +40,24 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
         cancel.ThrowIfCancellationRequested();
         int steps = request.Steps ?? QwenImage21Recipe.FamilyDefaults.Steps;
         float cfg = request.CfgScale ?? QwenImage21Recipe.FamilyDefaults.CfgScale;
+        float[]? explicitSigmas = null;
+        if (_turbo)
+        {
+            // The Turbo checkpoint is distilled to one fixed schedule and is guidance-free. Any other step count or
+            // CFG is outside what it was trained for, so both are pinned rather than honoured, the way Krea 2 Turbo
+            // pins its CFG.
+            explicitSigmas = [.. QwenImage21Variants.TurboSigmas];
+            if (steps != explicitSigmas.Length)
+            {
+                Logs.Warning($"[QwenImage21] Turbo runs its fixed {explicitSigmas.Length}-step schedule; requested {steps} steps is ignored.");
+            }
+            if (cfg != 1.0f)
+            {
+                Logs.Warning($"[QwenImage21] Turbo is guidance-free; requested CFG {cfg} is ignored and CFG 1 is used.");
+            }
+            steps = explicitSigmas.Length;
+            cfg = 1.0f;
+        }
         // 16x VAE and no patchify, so the image dims must be a multiple of 16. ComfyUI's own template rounds
         // reference and output sizes to 32; 16 is this pipeline's hard floor and what it snaps to.
         (int reqWidth, int reqHeight) = RecipeRequestMapper.Size(request);
@@ -65,7 +85,8 @@ public sealed class QwenImage21RecipePipeline(QwenImage21Pipeline pipeline, Qwen
             samplerSelection: SamplingParamResolver.ResolveSchedulerName(request),
             onProgress: bridge,
             condWeights: condWeights is null ? null : new WeightedTokenSequence(condIds, condWeights),
-            uncondWeights: uncondWeights is null || uncondIds is null ? null : new WeightedTokenSequence(uncondIds, uncondWeights));
+            uncondWeights: uncondWeights is null || uncondIds is null ? null : new WeightedTokenSequence(uncondIds, uncondWeights),
+            explicitSigmas: explicitSigmas);
 
         byte[] rgb = ImagePostProcessor.TensorToRgbBytes(image);
         // Channel 3 is the model's own alpha, not a matte: Qwen-Image 2.1's VAE decodes RGBA and the prompt wording

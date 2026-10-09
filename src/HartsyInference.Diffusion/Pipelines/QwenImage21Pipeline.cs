@@ -58,9 +58,15 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
         int width, int height, int steps, float cfgScale, long seed, string? seamlessTiling = null,
         long variationSeed = -1, double variationSeedStrength = 0, string? samplerSelection = null,
         Action<GenerationProgress>? onProgress = null,
-        Prompting.WeightedTokenSequence? condWeights = null, Prompting.WeightedTokenSequence? uncondWeights = null)
+        Prompting.WeightedTokenSequence? condWeights = null, Prompting.WeightedTokenSequence? uncondWeights = null,
+        float[]? explicitSigmas = null)
     {
         ThrowIfDisposed();
+        if (explicitSigmas is not null)
+        {
+            // A distilled schedule fixes the step count: the sigma table is the step count.
+            steps = explicitSigmas.Length;
+        }
         RequireMatchingWeights(condTokens, condWeights, nameof(condWeights));
         using IDisposable seamlessScope = BeginSeamlessTiling(seamlessTiling);
         bool useCfg = cfgScale > 1f && uncondTokens is not null;
@@ -121,7 +127,14 @@ public sealed unsafe class QwenImage21Pipeline : DiffusionPipelineBase
             }
 
             FlowMatchEulerDiscreteScheduler scheduler = new FlowMatchEulerDiscreteScheduler(MathF.Exp(SchedulerMu));
-            scheduler.SetTimesteps(steps);
+            if (explicitSigmas is not null)
+            {
+                scheduler.SetSigmas(explicitSigmas);
+            }
+            else
+            {
+                scheduler.SetTimesteps(steps);
+            }
             ISampler sampler = FlowMatchSampling.Resolve(samplerSelection, scheduler, unchecked((int)seed), "Qwen-Image 2.1");
 
             Logs.Info($"[QwenImage21] Denoise {steps} steps, CFG {cfgScale}, {width}x{height} (latent {w}x{h}, "

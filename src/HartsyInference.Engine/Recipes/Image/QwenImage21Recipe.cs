@@ -10,6 +10,7 @@ using HartsyInference.ModelAssets.CheckpointConverters;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.SafeTensors;
 using HartsyInference.ModelAssets.Tokenizers;
+using HartsyInference.Engine.Variants;
 
 namespace HartsyInference.Engine.Recipes.Image;
 
@@ -53,8 +54,11 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
     public Diffusion.Prompting.PromptWeightingMode PromptWeighting => Diffusion.Prompting.PromptWeightingMode.CondScale;
 
     /// <inheritdoc/>
+    /// <remarks>The Turbo build has its own catalog id, <c>qwen-image-2.1-turbo</c>, because the catalog downloads one
+    /// file set per id. It runs this same recipe; the variant is still resolved from the file name.</remarks>
     public bool Matches(string familyId) =>
         string.Equals(familyId, "qwen-image-2.1", StringComparison.OrdinalIgnoreCase)
+        || string.Equals(familyId, "qwen-image-2.1-turbo", StringComparison.OrdinalIgnoreCase)
         || string.Equals(familyId, "qwen-image-21", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>The settings ComfyUI's shipped <c>image_qwen_image_2_1_t2i</c> template starts at: 25 steps, euler,
@@ -62,8 +66,19 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
     /// upstream pipeline uses 40–50 steps; 25 is the template's own default and what the benchmark measures.</summary>
     public static ImageDefaults FamilyDefaults { get; } = new ImageDefaults { Steps = 25, CfgScale = 1.0f, Width = 1024, Height = 1024 };
 
+    /// <summary>Qwen-Image-2.1-Turbo's official settings: 8 steps on its shipped sigma schedule, guidance-free (CFG 1),
+    /// 1024×1024. The steps are fixed by the schedule, so they cannot be raised (see <see cref="QwenImage21RecipePipeline"/>).</summary>
+    public static ImageDefaults TurboDefaults { get; } = new ImageDefaults { Steps = QwenImage21Variants.TurboSigmas.Count, CfgScale = 1.0f, Width = 1024, Height = 1024 };
+
     /// <inheritdoc/>
     public ImageDefaults Defaults => FamilyDefaults;
+
+    /// <inheritdoc/>
+    public ModelVariantCatalog? Variants => QwenImage21Variants.Catalog;
+
+    /// <inheritdoc/>
+    public ImageDefaults DefaultsFor(ResolvedModelVariant? variant) =>
+        variant is not null && variant.Is(QwenImage21Variants.Turbo) ? TurboDefaults : FamilyDefaults;
 
     /// <inheritdoc/>
     /// <remarks>None declared. Component placement would need the encoder and VAE to actually run on
@@ -78,7 +93,10 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
         IDisposable? checkpoint = null;
         try
         {
-            CheckpointSource source = CheckpointSource.Open(context.CheckpointPath);
+            // The Turbo release is sharded (diffusers layout). Any one shard resolves to the whole set on disk.
+            ResolvedModelVariant variant = context.ResolveVariant(QwenImage21Variants.Catalog);
+            bool turbo = variant.Is(QwenImage21Variants.Turbo);
+            CheckpointSource source = CheckpointSource.OpenShards(ShardSetDiscovery.Resolve(context.CheckpointPath));
             checkpoint = source;
             if (!QwenImage21CheckpointConverter.MatchesByKeys([.. source.Weights.Keys]))
             {
@@ -126,8 +144,9 @@ public sealed class QwenImage21Recipe : IArchitectureRecipe
             QwenImage21Pipeline pipeline = new QwenImage21Pipeline(context.Backend, textEncoder, transformer, vae, config);
             Qwen3Tokenizer tokenizer = new Qwen3Tokenizer(maxLength: 1024);
             Logs.Info($"[QwenImage21Recipe] Ready ({config.Depth} blocks, hidden {config.HiddenSize}; "
-                + "Qwen3-VL-8B encoder, no final norm; flow-match Euler at shift 0.69).");
-            return new QwenImage21RecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, loaders, checkpoint);
+                + "Qwen3-VL-8B encoder, no final norm; "
+                + (turbo ? $"Turbo fixed {QwenImage21Variants.TurboSigmas.Count}-step sigma schedule." : "flow-match Euler at shift 0.69.") + ")");
+            return new QwenImage21RecipePipeline(pipeline, tokenizer, textEncoder, transformer, vae, loaders, checkpoint, turbo);
         }
         catch (Exception ex)
         {

@@ -63,7 +63,10 @@ public static class FlowMatchSampling
         ArgumentNullException.ThrowIfNull(scheduler);
         float shift = scheduler.Shift;
         SamplerOptions options = new() { PercentToSigma = percent => SamplerOptions.FlowPercentToSigma(percent, shift) };
-        return Resolve(selection, scheduler.Sigmas(), seed, family, startsFromNoisedInit, options, scheduler.SigmasFor);
+        // An explicit schedule (a distilled checkpoint's shipped sigmas) is the grid to integrate. Rebuilding one from the
+        // shift would replace it with the base family grid, so the family-grid rebuild is withheld in that case.
+        Func<int, float[]>? familyGrid = scheduler.HasExplicitSigmas ? null : scheduler.SigmasFor;
+        return Resolve(selection, scheduler.Sigmas(), seed, family, startsFromNoisedInit, options, familyGrid);
     }
 
     /// <summary>Same resolution over a RAW sigma array, for the families that build their schedule inline instead of
