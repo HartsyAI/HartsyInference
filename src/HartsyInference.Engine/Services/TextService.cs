@@ -166,7 +166,7 @@ public sealed class TextService : ITextService, IDisposable
         cancel.ThrowIfCancellationRequested();
         // A load that replaces the model waits for the scheduled requests running on it. This wait happens before the device gate is taken,
         // because those requests' rounds need the gate to finish: waiting under it would deadlock.
-        if (slot.HasLeases && !string.Equals(slot.LoadedPath, spec.LocalPath, StringComparison.OrdinalIgnoreCase)
+        if (slot.HasLeases && ReplacesLoadedModel(slot, spec.LocalPath)
             && !slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
         {
             throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the request.");
@@ -438,7 +438,7 @@ public sealed class TextService : ITextService, IDisposable
     private void LoadHfDirectory(TextDeviceSlot slot, string deviceKey, HfCheckpointInfo checkpoint, string path)
     {
         HfTextDirectoryLoader.RequireSupported(checkpoint);
-        if (slot.DeepSeekV41 is not null && slot.LoadedPath == path)
+        if (KeepsLoadedModel(slot, path, hfDirectory: true))
             return;
         UnloadSlot(slot);
         // after the unload, so the memory of a model this load replaces counts as free
@@ -508,12 +508,12 @@ public sealed class TextService : ITextService, IDisposable
             throw new HartsyInferenceException(
                 $"No checkpoint found for model '{spec.Requested}'. Pass a .gguf file via the model spec " +
                 $"(looked under '{RepoPaths.ModelsRoot()}').");
-        if (Directory.Exists(path) && HfCheckpointDirectory.TryProbe(path) is { } hfCheckpoint)
+        if (ProbeHfDirectory(path) is { } hfCheckpoint)
         {
             LoadHfDirectory(slot, deviceKey, hfCheckpoint, path);
             return;
         }
-        if ((slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null) && slot.LoadedPath == path)
+        if (KeepsLoadedModel(slot, path, hfDirectory: false))
         {
             LogLoadTimeSettingMismatch(slot, deviceKey, "CacheWeightCasts", request.CacheWeightCasts, slot.CacheWeightCastsApplied);
             LogLoadTimeSettingMismatch(slot, deviceKey, "PreloadRedundantWeightSplits", request.PreloadRedundantWeightSplits, slot.PreloadRedundantWeightSplitsApplied);
@@ -604,6 +604,24 @@ public sealed class TextService : ITextService, IDisposable
         Logs.Info($"[TextService] Loaded GGUF model '{Path.GetFileName(path)}' ({slot.Model.Architecture}) on {deviceKey}"
             + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
     }
+
+    /// <summary>Whether a load of <paramref name="path"/> keeps the model <paramref name="slot"/> holds. Every load path reloads by this rule, and the lease wait
+    /// before a load uses it too (<see cref="ReplacesLoadedModel"/>), so the wait and the reload cannot disagree. A Hugging Face directory keeps only a V4.1 model
+    /// loaded from it; a GGUF keeps any model loaded from it. Paths compare ordinally, since a case-only difference names another file on a case-sensitive filesystem.</summary>
+    private static bool KeepsLoadedModel(TextDeviceSlot slot, string path, bool hfDirectory) =>
+        string.Equals(slot.LoadedPath, path, StringComparison.Ordinal) && (hfDirectory ? slot.DeepSeekV41 is not null
+            : slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null);
+
+    /// <summary>Whether loading <paramref name="path"/> onto <paramref name="slot"/> frees the model it holds, decided as <see cref="LoadInto"/> decides it. A missing
+    /// path frees nothing: the load refuses it first.</summary>
+    private static bool ReplacesLoadedModel(TextDeviceSlot slot, string? path) =>
+        !string.IsNullOrEmpty(path) && !KeepsLoadedModel(slot, path, hfDirectory: ProbeHfDirectory(path) is not null);
+
+    /// <summary>The Hugging Face checkpoint at <paramref name="path"/>, or null when it is not such a directory (a GGUF file, say).</summary>
+    private static HfCheckpointInfo? ProbeHfDirectory(string path) => Directory.Exists(path) ? HfCheckpointDirectory.TryProbe(path) : null;
+
+    /// <summary>The slot serving <paramref name="device"/>, or null before anything ran there. For tests that hold a slot's lease as a running scheduled request does.</summary>
+    internal TextDeviceSlot? SlotFor(string? device) => _slots.TryGetValue(NormalizeDeviceKey(device), out TextDeviceSlot? slot) ? slot : null;
 
     /// <summary>Every CUDA ordinal a load+generate on <paramref name="deviceKey"/> can touch: each stage device of a layer-split (request-level composite key or engine-placement <c>ShardDevices</c>), else the single device. Gating only the logits stage left the other stage devices open to same-device siblings; <see cref="DeviceGate.AcquireAllOrdinals"/> acquires ascending, so multi-gate stays deadlock-free.</summary>
     private IEnumerable<int> GateOrdinalsFor(string deviceKey)
