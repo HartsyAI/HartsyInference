@@ -51,6 +51,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         public int Next;
         public GraphDecodeSession? GraphSession;
 
+        /// <summary>The result the request completes with once this sequence is released; null for a cancelled request.</summary>
+        public GenerationResult? Result;
+
         public void Dispose()
         {
             Cache.Dispose();
@@ -143,7 +146,6 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     ActiveSeq seq = active[i];
                     if (seq.Pending.Ct.IsCancellationRequested)
                     {
-                        seq.Pending.Completion.TrySetCanceled(seq.Pending.Ct);
                         evicted.Add(seq);
                         active.RemoveAt(i);
                         continue;
@@ -152,7 +154,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     bool atLimit = seq.Generated.Count >= seq.Pending.Request.MaxTokens;
                     if (stoppedNow || atLimit)
                     {
-                        CompleteSeq(seq, stoppedNow);
+                        seq.Result = BuildResult(seq, stoppedNow);
                         evicted.Add(seq);
                         active.RemoveAt(i);
                         continue;
@@ -167,7 +169,11 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     // eviction this round into ONE gated call so disposal never races concurrent GPU work
                     // from another gated caller (diffusion, another model's scheduler), same rationale as
                     // every other GPU-touching step here.
-                    await RunGpuWork(() => { foreach (ActiveSeq seq in evicted) seq.Dispose(); }).ConfigureAwait(false);
+                    await ReleaseThenCompleteAsync(evicted, static seq =>
+                    {
+                        if (seq.Result is { } result) seq.Pending.Completion.TrySetResult(result);
+                        else seq.Pending.Completion.TrySetCanceled(seq.Pending.Ct);
+                    }).ConfigureAwait(false);
                 }
                 if (feeders.Count == 0) continue;
 
@@ -209,21 +215,31 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     // and previously got the same silent-wedge treatment).
                     Logs.Error($"DynamicBatchScheduler: decode round failed for {feeders.Count} sequence(s), failing them and continuing", ex);
                     foreach (ActiveSeq seq in feeders)
-                    {
-                        seq.Pending.Completion.TrySetException(ex);
                         active.Remove(seq);
-                    }
-                    await RunGpuWork(() => { foreach (ActiveSeq seq in feeders) seq.Dispose(); }).ConfigureAwait(false);
+                    await ReleaseThenCompleteAsync(feeders, seq => seq.Pending.Completion.TrySetException(ex)).ConfigureAwait(false);
                 }
             }
         }
         finally
         {
             FailQueued();
-            foreach (ActiveSeq seq in active)
-                seq.Pending.Completion.TrySetException(new SchedulerStoppedException());
             if (active.Count > 0)
-                await RunGpuWork(() => { foreach (ActiveSeq seq in active) seq.Dispose(); }).ConfigureAwait(false);
+                await ReleaseThenCompleteAsync(active, static seq => seq.Pending.Completion.TrySetException(new SchedulerStoppedException())).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>Releases <paramref name="seqs"/> in one gated call, then completes each request with <paramref name="complete"/>, even when the release throws. A request
+    /// completes only after its sequence is released, so a caller that frees the model once its requests have completed (TextService's slot lease) never leaves a
+    /// teardown behind that still needs the device gate.</summary>
+    private async Task ReleaseThenCompleteAsync(List<ActiveSeq> seqs, Action<ActiveSeq> complete)
+    {
+        try
+        {
+            await RunGpuWork(() => { foreach (ActiveSeq seq in seqs) seq.Dispose(); }).ConfigureAwait(false);
+        }
+        finally
+        {
+            foreach (ActiveSeq seq in seqs) complete(seq);
         }
     }
 
@@ -390,18 +406,14 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         seq.Next = next;
     }
 
-    /// <summary>Builds the final result and completes the request's task; does NOT dispose <paramref name="seq"/> — callers batch every evicted sequence's disposal into one gated <see cref="RunGpuWork"/> call (see <see cref="RunLoopAsync"/>) instead.</summary>
-    private void CompleteSeq(ActiveSeq seq, bool stopped)
+    /// <summary>The final result of a finished sequence. The request completes with it only after the sequence is released (see <see cref="ReleaseThenCompleteAsync"/>).</summary>
+    private GenerationResult BuildResult(ActiveSeq seq, bool stopped) => new()
     {
-        GenerationResult result = new()
-        {
-            TokenIds = seq.Generated,
-            Text = _tokenizer.Decode(seq.Generated),
-            PromptTokens = seq.PromptIds.Length,
-            StoppedOnStopToken = stopped,
-        };
-        seq.Pending.Completion.TrySetResult(result);
-    }
+        TokenIds = seq.Generated,
+        Text = _tokenizer.Decode(seq.Generated),
+        PromptTokens = seq.PromptIds.Length,
+        StoppedOnStopToken = stopped,
+    };
 
     private int[] BuildPromptIds(GenerationRequest request) => PromptBuilder.BuildPromptIds(request, _tokenizer, _template);
 
