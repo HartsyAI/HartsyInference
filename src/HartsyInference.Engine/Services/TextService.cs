@@ -1054,6 +1054,49 @@ public sealed class TextService : ITextService, IDisposable
         return freed;
     }
 
+    /// <inheritdoc/>
+    public DeploymentUnloadOutcome UnloadDeployment(string deploymentId)
+    {
+        string deviceKey;
+        lock (_deploymentsGate)
+        {
+            DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+            if (record is null) return DeploymentUnloadOutcome.NotFound;
+            deviceKey = record.DeviceKey;
+        }
+        if (!_slots.TryGetValue(deviceKey, out TextDeviceSlot? slot))
+            return DeploymentUnloadOutcome.AlreadyGone;
+        if (!slot.Lock.Wait(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+        {
+            Logs.Warning($"[TextService] Unloading deployment '{deploymentId}' timed out waiting on an in-flight generation ({UnloadWaitSeconds}s); its model stays resident.");
+            return DeploymentUnloadOutcome.TimedOut;
+        }
+        try
+        {
+            // Checked under the slot lock, so no load can replace the model between this check and the free.
+            if (!HoldsDevice(deploymentId, slot))
+                return DeploymentUnloadOutcome.AlreadyGone;
+            return TryFreeHeldSlot(slot, out _) ? DeploymentUnloadOutcome.Unloaded : DeploymentUnloadOutcome.TimedOut;
+        }
+        finally
+        {
+            slot.Lock.Release();
+        }
+    }
+
+    /// <summary>Whether deployment <paramref name="deploymentId"/> still holds <paramref name="slot"/>: it is Ready or Degraded, it is on that slot, and the slot holds the
+    /// model it loaded. Caller holds the slot's lock.</summary>
+    private bool HoldsDevice(string deploymentId, TextDeviceSlot slot)
+    {
+        lock (_deploymentsGate)
+        {
+            DeploymentRecord? record = _deployedList.Find(r => r.DeploymentId == deploymentId);
+            return record is { State: DeploymentState.Ready or DeploymentState.Degraded }
+                && _slots.TryGetValue(record.DeviceKey, out TextDeviceSlot? held) && ReferenceEquals(held, slot)
+                && string.Equals(slot.LoadedPath, record.Spec.LocalPath, StringComparison.Ordinal);
+        }
+    }
+
     /// <summary>Takes the slot's generation lock so the release cannot race an in-flight request, then frees the model AND the slot's backend — <see cref="UnloadSlot"/> alone deliberately keeps the device context alive for the next load, which is not enough when the host is reclaiming memory.</summary>
     private bool UnloadDeviceSlot(TextDeviceSlot slot)
     {
@@ -1065,41 +1108,49 @@ public sealed class TextService : ITextService, IDisposable
         }
         try
         {
-            // Draining: the scheduler takes no more work and fails what is waiting; the requests it is decoding run on to their end below.
-            slot.Scheduler?.CancelQueued();
-            // Scheduled requests run without the slot lock: let them finish before the model they run on is freed.
-            if (!slot.WaitForLeases(UnloadLeaseWait))
-            {
-                // The model stays resident and keeps serving, so its scheduler takes requests again.
-                slot.Scheduler?.ResumeAdmission();
-                Logs.Warning($"[TextService] Unload timed out waiting on scheduled requests ({UnloadLeaseWait.TotalSeconds:0.#}s) - "
-                    + $"'{slot.LoadedPath}' stays resident.");
-                return false;
-            }
-            bool freed = UnloadSlot(slot);
-            if (slot.ExtraStageBackends is not null)
-            {
-                foreach (IBackend stage in slot.ExtraStageBackends)
-                {
-                    try { stage.Dispose(); }
-                    catch (Exception ex) { Logs.Debug($"[TextService] Stage backend dispose on unload failed: {ex.Message}"); }
-                }
-                slot.ExtraStageBackends = null;
-                freed = true;
-            }
-            if (slot.Backend is not null)
-            {
-                try { slot.Backend.Dispose(); }
-                catch (Exception ex) { Logs.Debug($"[TextService] Backend dispose on unload failed: {ex.Message}"); }
-                slot.Backend = null;
-                freed = true;
-            }
-            return freed;
+            return TryFreeHeldSlot(slot, out bool freed) && freed;
         }
         finally
         {
             slot.Lock.Release();
         }
+    }
+
+    /// <summary>Frees the model and backend of <paramref name="slot"/>, whose lock the caller holds. Returns false when the scheduled requests on it did not finish in
+    /// time: the model then stays resident and its scheduler takes requests again. <paramref name="freed"/> says whether anything was resident to free.</summary>
+    private bool TryFreeHeldSlot(TextDeviceSlot slot, out bool freed)
+    {
+        freed = false;
+        // Draining: the scheduler takes no more work and fails what is waiting; the requests it is decoding run on to their end below.
+        slot.Scheduler?.CancelQueued();
+        // Scheduled requests run without the slot lock: let them finish before the model they run on is freed.
+        if (!slot.WaitForLeases(UnloadLeaseWait))
+        {
+            // The model stays resident and keeps serving, so its scheduler takes requests again.
+            slot.Scheduler?.ResumeAdmission();
+            Logs.Warning($"[TextService] Unload timed out waiting on scheduled requests ({UnloadLeaseWait.TotalSeconds:0.#}s) - "
+                + $"'{slot.LoadedPath}' stays resident.");
+            return false;
+        }
+        freed = UnloadSlot(slot);
+        if (slot.ExtraStageBackends is not null)
+        {
+            foreach (IBackend stage in slot.ExtraStageBackends)
+            {
+                try { stage.Dispose(); }
+                catch (Exception ex) { Logs.Debug($"[TextService] Stage backend dispose on unload failed: {ex.Message}"); }
+            }
+            slot.ExtraStageBackends = null;
+            freed = true;
+        }
+        if (slot.Backend is not null)
+        {
+            try { slot.Backend.Dispose(); }
+            catch (Exception ex) { Logs.Debug($"[TextService] Backend dispose on unload failed: {ex.Message}"); }
+            slot.Backend = null;
+            freed = true;
+        }
+        return true;
     }
 
     /// <inheritdoc/>

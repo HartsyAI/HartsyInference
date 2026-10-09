@@ -62,6 +62,41 @@ public sealed class TextServiceDeploymentTests : IDisposable
     }
 
     [Fact]
+    public async Task Unloading_A_Replaced_Deployment_Leaves_The_One_That_Replaced_It_Resident()
+    {
+        string pathA = TextServiceLeaseTests.WriteCheckpoint(_root, "a");
+        string pathB = TextServiceLeaseTests.WriteCheckpoint(_root, "b");
+        using InferenceEngine engine = new("cpu", 0);
+        TextService text = (TextService)engine.Text;
+        text.UnloadLeaseWait = TimeSpan.FromMilliseconds(50);
+        await text.DeployAsync(Deploy("a", pathA));
+        await text.DeployAsync(Deploy("b", pathB));
+        TextDeviceSlot slot = text.SlotFor("cpu")!;
+
+        // b replaced a on the device: unloading a must leave b's model where it is.
+        Assert.Equal(DeploymentUnloadOutcome.AlreadyGone, text.UnloadDeployment("a"));
+        Assert.Equal(pathB, slot.LoadedPath);
+        Assert.Equal(DeploymentState.Ready, text.Deployments.Single(d => d.DeploymentId == "b").State);
+
+        // A scheduled request still running on b: the unload gives up, and b keeps serving.
+        slot.EnterLease();
+        try
+        {
+            Assert.Equal(DeploymentUnloadOutcome.TimedOut, text.UnloadDeployment("b"));
+        }
+        finally
+        {
+            slot.ExitLease();
+        }
+        Assert.Equal(pathB, slot.LoadedPath);
+
+        Assert.Equal(DeploymentUnloadOutcome.Unloaded, text.UnloadDeployment("b"));
+        Assert.Null(slot.LoadedPath);
+        Assert.Equal(DeploymentState.Unloaded, text.Deployments.Single(d => d.DeploymentId == "b").State);
+        Assert.Equal(DeploymentUnloadOutcome.NotFound, text.UnloadDeployment("missing"));
+    }
+
+    [Fact]
     public async Task After_An_Unload_Capacity_And_Deployments_Both_Report_Unloaded()
     {
         string path = TextServiceLeaseTests.WriteCheckpoint(_root, "model");
