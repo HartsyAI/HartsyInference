@@ -61,6 +61,9 @@ public sealed class TextService : ITextService, IDisposable
         public string DeviceKey { get; set; } = deviceKey;
         public DeploymentState State { get; set; } = DeploymentState.Unloaded;
         public string? Problem { get; set; }
+
+        /// <summary>Counts the loads started under this id. A load completes the record only while it is still the latest (see <see cref="Complete"/>).</summary>
+        public int Attempt { get; set; }
     }
 
     private readonly InferenceEngine _engine;
@@ -77,41 +80,37 @@ public sealed class TextService : ITextService, IDisposable
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(request.DeploymentId);
         string deviceKey = NormalizeDeviceKey(request.Device);
-        DeploymentRecord record = BeginDeployment(request.DeploymentId, request.Model, deviceKey);
+        DeploymentRecord record = BeginDeployment(request.DeploymentId, request.Model, deviceKey, out int attempt);
         TextDeviceSlot slot = _slots.GetOrAdd(deviceKey, static _ => new TextDeviceSlot());
         await slot.Lock.WaitAsync(cancel).ConfigureAwait(false);
         try
         {
-            // A load that replaces the device's model waits for scheduled requests on it first, as a request does (see PrepareSlot).
-            if (slot.HasLeases && !string.Equals(slot.LoadedPath, request.Model.LocalPath, StringComparison.OrdinalIgnoreCase)
-                && !slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+            // A later deploy of this id began while this one waited for the device: that one owns the record, so this one loads nothing.
+            if (IsLatest(record, attempt))
             {
-                throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the deployment.");
+                // A load that replaces the device's model waits for scheduled requests on it first, as a request does (see PrepareSlot).
+                if (slot.HasLeases && !string.Equals(slot.LoadedPath, request.Model.LocalPath, StringComparison.OrdinalIgnoreCase)
+                    && !slot.WaitForLeases(TimeSpan.FromSeconds(UnloadWaitSeconds)))
+                {
+                    throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the deployment.");
+                }
+                await Task.Run(() =>
+                {
+                    using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
+                    LoadInto(slot, deviceKey, request.Model, new TextRequest { Messages = [] });
+                }, cancel).ConfigureAwait(false);
+                lock (_deploymentsGate) Complete(record, attempt, DeploymentState.Ready, problem: null);
             }
-            await Task.Run(() =>
-            {
-                using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
-                LoadInto(slot, deviceKey, request.Model, new TextRequest { Messages = [] });
-            }, cancel).ConfigureAwait(false);
-            lock (_deploymentsGate) Transition(record, DeploymentState.Ready);
         }
         catch (OperationCanceledException)
         {
-            lock (_deploymentsGate)
-            {
-                record.Problem = "the deployment was cancelled before its model loaded";
-                Transition(record, DeploymentState.Failed);
-            }
+            lock (_deploymentsGate) Complete(record, attempt, DeploymentState.Failed, "the deployment was cancelled before its model loaded");
             throw;
         }
         catch (Exception ex)
         {
             Logs.Error($"[TextService] Deployment '{request.DeploymentId}' did not load: {ex.Message}", ex);
-            lock (_deploymentsGate)
-            {
-                record.Problem = ex.Message;
-                Transition(record, DeploymentState.Failed);
-            }
+            lock (_deploymentsGate) Complete(record, attempt, DeploymentState.Failed, ex.Message);
         }
         finally
         {
@@ -156,8 +155,8 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <summary>Records a deployment as Loading. The device's other ready deployments are retired, since this load replaces its model, and a previous load of the same id is
-    /// retired first. Returns the record the load then completes.</summary>
-    private DeploymentRecord BeginDeployment(string deploymentId, ModelSpec spec, string deviceKey)
+    /// retired first. Returns the record the load then completes, and in <paramref name="attempt"/> the number of this load under its id.</summary>
+    private DeploymentRecord BeginDeployment(string deploymentId, ModelSpec spec, string deviceKey, out int attempt)
     {
         lock (_deploymentsGate)
         {
@@ -180,8 +179,24 @@ public sealed class TextService : ITextService, IDisposable
             record.DeviceKey = deviceKey;
             record.Problem = null;
             Transition(record, DeploymentState.Loading);
+            attempt = ++record.Attempt;
             return record;
         }
+    }
+
+    /// <summary>Whether load <paramref name="attempt"/> is still the latest one started under <paramref name="record"/>'s id.</summary>
+    private bool IsLatest(DeploymentRecord record, int attempt)
+    {
+        lock (_deploymentsGate) return record.Attempt == attempt && record.State == DeploymentState.Loading;
+    }
+
+    /// <summary>Ends load <paramref name="attempt"/>: moves the record from Loading to <paramref name="to"/>, but only while that load is still the latest under its id. A
+    /// load that a later deploy of the same id overtook changes nothing, so neither its completion nor its failure can hit a transition the state machine refuses.</summary>
+    private static void Complete(DeploymentRecord record, int attempt, DeploymentState to, string? problem)
+    {
+        if (record.Attempt != attempt || record.State != DeploymentState.Loading) return;
+        record.Problem = problem;
+        Transition(record, to);
     }
 
     /// <summary>Moves a deployment along the allowed transitions to <see cref="DeploymentState.Unloaded"/>; a degraded one drains first.</summary>

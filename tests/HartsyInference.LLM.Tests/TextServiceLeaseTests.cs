@@ -18,17 +18,20 @@ public sealed class TextServiceLeaseTests : IDisposable
 
     public void Dispose() => Directory.Delete(_root, recursive: true);
 
-    private string Checkpoint(string name)
+    private string Checkpoint(string name) => WriteCheckpoint(_root, name);
+
+    /// <summary>Writes the V4.1 fixture checkpoint and its tokenizer into a directory <paramref name="name"/> under <paramref name="root"/>, and returns its path.</summary>
+    internal static string WriteCheckpoint(string root, string name)
     {
-        string directory = Directory.CreateDirectory(Path.Combine(_root, name)).FullName;
+        string directory = Directory.CreateDirectory(Path.Combine(root, name)).FullName;
         DeepSeekV41ModelFixtureCheckpoint.Write(directory);
         DeepSeekV41ModelFixtureCheckpoint.WriteTokenizer(directory);
         return directory;
     }
 
-    private static ModelSpec Spec(string path) => new() { Requested = "dsv41-fixture", Modality = Modality.Text, LocalPath = path };
+    internal static ModelSpec Spec(string path) => new() { Requested = "dsv41-fixture", Modality = Modality.Text, LocalPath = path };
 
-    private static TextRequest Request() => new()
+    internal static TextRequest Request() => new()
     {
         Messages = [new TextMessage { Role = TextRole.User, Content = "hi" }],
         MaxTokens = 2,
