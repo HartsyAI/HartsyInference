@@ -1,10 +1,12 @@
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Runtime;
 using HartsyInference.Cuda;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Planning.Memory;
 using HartsyInference.Engine.Recipes;
+using HartsyInference.LLM.DeepSeekV41;
 
 namespace HartsyInference.Engine.Services;
 
@@ -53,16 +55,7 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         IBackend backend = _engine.Backend;
         VramPolicy policy = VramPolicyRegistry.Resolve(backend, request.Vram);
         if (spec.Modality == Modality.Text && TextMemoryProfile.Handles(spec.LocalPath))
-        {
-            // The judge assumes a denoiser; a language model's residency plan (experts, Engram, KV) is PR 14's job.
-            return Task.FromResult(new MemoryFit
-            {
-                Verdict = MemoryFitVerdict.Unknown,
-                Estimate = TextMemoryProfile.Estimate(spec.LocalPath!),
-                EffectiveTier = policy.Tier,
-                Reason = "Text models have no fit verdict yet; the residency planner that judges them arrives with the DeepSeek-V4.1 planner PR.",
-            });
-        }
+            return Task.FromResult(TextFit(spec.LocalPath!, policy));
         long totalBytes = TotalBytes(backend);
         if (totalBytes <= 0)
         {
@@ -81,6 +74,33 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         bool canStream = profile.Capabilities.HasFlag(MemoryCapabilities.BlockStreaming) && backend.StreamingCache is not null;
         return Task.FromResult(MemoryFitJudge.Judge(estimate, policy, canStream, primary,
             primary + PooledShardBytes(placement, profile.Capabilities), OnPrimary(placement, profile.Capabilities)));
+    }
+
+    /// <summary>A language model's fit: its checkpoint's residency plan against free host RAM, read from headers before anything is mapped.</summary>
+    private static MemoryFit TextFit(string path, VramPolicy policy)
+    {
+        using DeepSeekV41Checkpoint checkpoint = DeepSeekV41Checkpoint.Open(path);
+        MemoryEstimate estimate = TextMemoryProfile.Estimate(checkpoint);
+        long availableBytes = HostMemoryInfo.AvailableBytes() ?? 0;
+        if (availableBytes <= 0)
+        {
+            return new MemoryFit
+            {
+                Verdict = MemoryFitVerdict.Unknown,
+                Estimate = estimate,
+                EffectiveTier = policy.Tier,
+                Reason = "Host memory is not readable, so the fit is unknown.",
+            };
+        }
+        ResidencyPlan plan = ResidencyPlanner.Plan(DeepSeekV41HostPlanner.Demand(checkpoint), availableBytes);
+        return new MemoryFit
+        {
+            Verdict = plan.Verdict,
+            Estimate = estimate,
+            CapacityBytes = plan.AvailableBytes,
+            EffectiveTier = policy.Tier,
+            Reason = plan.Reason,
+        };
     }
 
     /// <summary>Total VRAM of <paramref name="backend"/>, cached per backend instance (a SetBackend swap re-reads).</summary>

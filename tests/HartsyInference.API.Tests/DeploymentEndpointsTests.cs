@@ -1,7 +1,9 @@
 using System.Net.Http.Json;
 using System.Text.Json;
+using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
+using HartsyInference.Engine.Placement;
 using HartsyInference.Engine.Requests;
 using HartsyInference.Engine.Services;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -162,6 +164,37 @@ public sealed class DeploymentEndpointsTests : IClassFixture<WebApplicationFacto
         Assert.Equal(JsonValueKind.Null, rows[1].GetProperty("kv_pages_total").ValueKind);
     }
 
+    [Fact]
+    public async Task Memory_ReportsTheResidencyPlanOfEachLoadedModel()
+    {
+        ScriptedDeploymentsText text = new();
+        ResidencyPlan plan = ResidencyPlanner.Plan(new ResidencyDemand
+        {
+            DenseBytes = 100,
+            ExpertBytes = 1000,
+            EngramBytes = 50,
+            HeadroomBytes = 10,
+            WorkingSet = new Dictionary<ResidencyAccount, long> { [ResidencyAccount.KvCache] = 20 },
+        }, availableBytes: 2000);
+        text.Residency.Add(new LoadedModelResidency("cpu", "/models/llm/deepseek-v4.1-flash", plan));
+        using WebApplicationFactory<Program> app = WithText(text);
+        using HttpClient client = app.CreateClient();
+
+        using HttpResponseMessage response = await client.GetAsync("/admin/memory");
+
+        Assert.Equal(200, (int)response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        JsonElement host = body.GetProperty("host_available_bytes");
+        Assert.True(host.ValueKind == JsonValueKind.Null || host.GetInt64() >= 0);
+        JsonElement model = Assert.Single(body.GetProperty("models").EnumerateArray());
+        Assert.Equal("cpu", model.GetProperty("device_key").GetString());
+        Assert.Equal("Resident", model.GetProperty("verdict").GetString());
+        Assert.Equal(2000, model.GetProperty("available_bytes").GetInt64());
+        Assert.Equal(20, model.GetProperty("working_set_bytes").GetInt64());
+        Assert.Equal(1100, model.GetProperty("mapped_bytes").GetInt64());
+        Assert.Equal(3, model.GetProperty("components").GetArrayLength());
+    }
+
     /// <summary>What the real engine answers for a model that resolves to no checkpoint: <c>ModelResolver.Resolve</c> does not throw, and <c>DeployAsync</c> records the
     /// load failure in the deployment, so the route answers 200 with state <c>failed</c> rather than an error status.</summary>
     [Fact]
@@ -190,6 +223,8 @@ public sealed class DeploymentEndpointsTests : IClassFixture<WebApplicationFacto
         public List<string> Unloaded { get; } = [];
         public int DeviceUnloads { get; private set; }
 
+        public List<LoadedModelResidency> Residency { get; } = [];
+        public IReadOnlyList<LoadedModelResidency> LoadedResidency => Residency;
         public IReadOnlyList<DeploymentStatus> Deployments => Listed;
         public DeploymentCapacity? Capacity(string deploymentId) => Capacities.GetValueOrDefault(deploymentId);
         public Task<DeploymentStatus> DeployAsync(DeploymentRequest request, CancellationToken cancel = default) => Task.FromResult(Deploy(request));

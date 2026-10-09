@@ -66,9 +66,13 @@ public static class DeepSeekV41WorkingMemory
         ArgumentNullException.ThrowIfNull(options);
         // widening takes 4 bytes per stored FP8 byte and 2 per BF16 byte; 4x is the safe upper bound used before and still right for the dominant FP8
         long widened = options.Residency == DeepSeekV41Residency.WidenedF32 ? 4 * denseStoredBytes : 0;
-        long window = 3L * (1 << 22) * sizeof(float);                                             // row-window scratch of a few concurrent products
-        long engram = options.EngramBudgetBytes * cfg.EngramLayerIds.Count;
-        return widened + SmallTensorBytes(cfg) + ExpertCacheBytes(cfg, options) + engram + window
+        return widened + SmallTensorBytes(cfg) + ExpertCacheBytes(cfg, options) + EngramCacheBytes(cfg, options) + RowWindowBytes
             + SequenceStateBytes(cfg, options.MaxTokens) + ActivationBytes(cfg, options.MaxTokens);
     }
+
+    /// <summary>Row-window scratch of a few concurrent dequantized products, charged once per load.</summary>
+    public static long RowWindowBytes => 3L * (1 << 22) * sizeof(float);
+
+    /// <summary>The Engram row cache a load with <paramref name="options"/> holds: one budget per Engram layer.</summary>
+    public static long EngramCacheBytes(DeepSeekV41Config cfg, DeepSeekV41LoadOptions options) => options.EngramBudgetBytes * cfg.EngramLayerIds.Count;
 }
