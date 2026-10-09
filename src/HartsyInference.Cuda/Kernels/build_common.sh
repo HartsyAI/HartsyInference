@@ -51,7 +51,8 @@ compile_one() {
         echo "missing source: $src" >&2
         exit 1
     fi
-    if command -v nvcc >/dev/null 2>&1; then
+    # HARTSY_PTX_COMPILER=nvrtc forces the NVRTC route, for hosts whose nvcc emits a PTX ISA newer than the pin.
+    if [[ "${HARTSY_PTX_COMPILER:-auto}" != nvrtc ]] && command -v nvcc >/dev/null 2>&1; then
         echo "[$(date +%H:%M:%S)] nvcc -ptx -arch=sm_${arch} ${kernel}.cu"
         nvcc -ptx -arch="sm_${arch}" "$src" -o "$ptx"
     else

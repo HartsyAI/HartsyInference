@@ -41,7 +41,7 @@ public sealed class ExpertPackWriter : IDisposable
     /// <param name="topologyFingerprint">Fingerprint of the topology these experts belong to.</param>
     /// <param name="hidden">Model width H; the quantized row length of gate and up.</param>
     /// <param name="intermediate">Expert inner width I; the quantized row length of down.</param>
-    /// <param name="dtype">Quant dtype of every projection: Q8_0, Q4_K, Q5_K or Q6_K.</param>
+    /// <param name="dtype">Quant dtype of every projection: Q8_0, Q4_K, Q5_K, Q6_K or Q2_0 (pack-local, see <see cref="Q2_0Codec"/>).</param>
     /// <param name="expectedExperts">The exact experts the pack must hold. Only these can be added, and <see
     /// cref="Finish"/> publishes only when all are present.</param>
     /// <exception cref="ArgumentException">The dtype is not a pack dtype, a dimension is not a multiple of its block
@@ -61,7 +61,7 @@ public sealed class ExpertPackWriter : IDisposable
         if ((long)hidden * intermediate > MaxMatrixElements)
             throw new ArgumentOutOfRangeException(nameof(intermediate), $"A {hidden} x {intermediate} matrix is too large to pack.");
         if (!ExpertPackDTypes.IsPackDType(dtype))
-            throw new ArgumentException($"{dtype.Name} is not a pack dtype; packs store Q8_0, Q4_K, Q5_K or Q6_K.", nameof(dtype));
+            throw new ArgumentException($"{dtype.Name} is not a pack dtype; packs store Q8_0, Q4_K, Q5_K, Q6_K or Q2_0.", nameof(dtype));
         if (hidden % dtype.BlockElementCount != 0 || intermediate % dtype.BlockElementCount != 0)
             throw new ArgumentException(
                     $"Hidden {hidden} and intermediate {intermediate} must be multiples of {dtype.Name}'s block size {dtype.BlockElementCount}.");
@@ -172,6 +172,7 @@ public sealed class ExpertPackWriter : IDisposable
 
     private byte[] Quantize(float[] values, int rows, int cols)
     {
+        if (_dtype == DType.Q2_0) return Q2_0Codec.Encode(values, rows, cols);
         using Tensor source = new(new TensorShape(rows, cols), DType.F32);
         unsafe
         {
