@@ -33,13 +33,18 @@ public static class HartsyInferenceServiceExtensions
         // One long-lived facade for the process, exactly like the CLI's one-per-invocation InferenceEngine —
         // just scoped to app lifetime instead of one command. IInferenceEngine is NOT safely re-entrant per
         // backend, so every call site must go through the InferenceQueue below rather than calling it directly.
-        services.AddSingleton<IInferenceEngine>(_ => new InferenceEngine(options.Backend));
+        // The fast queue is built here so the engine's device rounds can wait in it (see InferenceEngine.GpuRoundGate): LLM rounds and image work share one gate.
+        InferenceQueue fastQueue = new(options.MaxConcurrency, options.MaxQueueDepth);
+        services.AddSingleton<IInferenceEngine>(_ => new InferenceEngine(options.Backend)
+        {
+            GpuRoundGate = work => fastQueue.EnqueueAsync(async () => { work(); return 0; }, CancellationToken.None),
+        });
 
         // Two gates: the unkeyed "fast" queue (unchanged — every route from Phases 1-4 keeps resolving it by
         // type) and a keyed "long-running" one for video generation and opening world sessions, which can each
         // run for minutes. Splitting them means one slow video job can't starve every fast request queued behind
         // it — see HartsyInferenceServerOptions.MaxLongRunningConcurrency.
-        services.AddSingleton(new InferenceQueue(options.MaxConcurrency, options.MaxQueueDepth));
+        services.AddSingleton(fastQueue);
         services.AddKeyedSingleton(QueueKeys.LongRunning,
             new InferenceQueue(options.MaxLongRunningConcurrency, options.MaxLongRunningQueueDepth));
 

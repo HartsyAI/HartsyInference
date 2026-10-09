@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.303
+
+- **Changed: the scheduler admits requests by KV pages, in FIFO order, instead of failing them when the pool is full.** A request reserves its whole prompt-plus-budget footprint at admission, so an admitted sequence never runs out of pages mid-decode. A request that does not fit waits its turn. A request larger than the whole pool is refused with 400. A full waiting queue (64 by default) refuses the next submission with 429 and `Retry-After: 1`. A request that has to wait is told its place in the queue, as a status chunk. A pool-less model (the V4.1 host) decodes at most four sequences at once. With `vram.continuousBatching` on, the API no longer queues text requests itself. Each GPU round of a scheduled request, and each pipeline request, runs through the server's shared queue, so LLM and image work never overlap on a device. A scheduled stream that finds the queue full gets an error event, not a 429; the non-streamed path returns 429. Covered by tests for the queue bound, FIFO waiting under pool pressure (outputs equal to solo runs), the oversized refusal, queue positions, the pool-less cap, and the 429 mapping. Not in this change: the slow-consumer channel and its stop reason, and the status frames on the wire (PR 19d).
+
 ## alpha.304
 
 - **Changed: the V4.1 host reference runs each routed expert once per batch of tokens, not once per token.** `DeepSeekV41MoeExecutor.Run`

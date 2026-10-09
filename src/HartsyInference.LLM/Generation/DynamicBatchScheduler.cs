@@ -30,6 +30,19 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     private readonly Task _loopTask;
     private readonly Func<Action, Task>? _gpuGate;
     private int _disposed;
+    private readonly int _maxQueued;
+    private readonly int _maxActive;
+
+    /// <summary>Requests admitted into the waiting queue and not yet admitted or failed; read and written only under <see cref="_waitingGate"/>
+    /// except by <see cref="SubmitAsync"/>'s bound check, which is an <see cref="Interlocked"/> counter.</summary>
+    private int _queued;
+
+    /// <summary>Submitted requests in arrival order that have not been admitted yet; guarded by <see cref="_waitingGate"/>.</summary>
+    private readonly Queue<PendingRequest> _waiting = new();
+    private readonly object _waitingGate = new();
+
+    /// <summary>Pages reserved by the active sequences (each reserves its whole prompt-plus-budget footprint at admission); loop-owned, and always zero on a model with no pool.</summary>
+    private int _reservedPages;
 
     private sealed class PendingRequest
     {
@@ -37,6 +50,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         public Action<int>? OnToken;
         public required CancellationToken Ct;
         public required TaskCompletionSource<GenerationResult> Completion;
+
+        /// <summary>The prompt's ids, built once when the request first reaches the head of the queue.</summary>
+        public int[]? PromptIds;
     }
 
     /// <summary>One active sequence's per-request state; <see cref="Cache"/> is <see cref="IKvCache"/> rather than concretely <see cref="PagedKvCache"/> so an idle-admitted sequence can use a dedicated <see cref="FixedKvCache"/> instead (see <c>docs/Checklists/LLM_DECODE_PERF_GRIND.md</c>'s "NEW PLAN"). <see cref="GraphSession"/> is non-null only for such a sequence while still eligible for graph replay (see <see cref="RunLoopAsync"/>'s one-way retirement); <see cref="Dispose"/> is intentionally the ONLY way callers free this sequence's resources so a session can never be forgotten at a disposal call site.</summary>
@@ -54,6 +70,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         /// <summary>The result the request completes with once this sequence is released; null for a cancelled request.</summary>
         public GenerationResult? Result;
 
+        /// <summary>Pages this sequence reserved at admission; returned to <see cref="_reservedPages"/> when it leaves the active set.</summary>
+        public int ReservedPages;
+
         public void Dispose()
         {
             Cache.Dispose();
@@ -63,15 +82,21 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 
     /// <summary><paramref name="pool"/> is shared across every sequence this scheduler admits (size it for the concurrency you want, not per-request); <paramref name="gpuGate"/>, when supplied, wraps every GPU-touching step through the server's shared backend-exclusivity queue (see class doc "Backend exclusivity") — omit only when nothing else can contend for the same backend instance.</summary>
     public DynamicBatchScheduler(GenericTransformer model, ILlmTokenizer tokenizer, IBackend backend,
-        PagedKvPool? pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
-        : this(new GenericTransformerModel(model, backend), tokenizer, pool, template, gpuGate)
+        PagedKvPool? pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null,
+        int maxQueued = DefaultMaxQueued, int maxActiveSequences = int.MaxValue)
+        : this(new GenericTransformerModel(model, backend), tokenizer, pool, template, gpuGate, maxQueued, maxActiveSequences)
     {
     }
 
     /// <summary>Drives any <see cref="IGenerationModel"/>; the scheduler does not own the model. <paramref name="pool"/> is the KV pool its sequences draw from, or null for a model whose sequence states own their storage (the V4.1 host model).</summary>
+    /// <param name="maxQueued">Requests that may wait for admission at once; one more is refused with <see cref="SchedulerQueueFullException"/>.</param>
+    /// <param name="maxActiveSequences">Sequences decoding at once. A pooled model is bounded by its pages already; a pool-less model (the V4.1 host) is bounded by this alone.</param>
     public DynamicBatchScheduler(IGenerationModel model, ILlmTokenizer tokenizer,
-        PagedKvPool? pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null)
+        PagedKvPool? pool, IChatTemplate? template = null, Func<Action, Task>? gpuGate = null,
+        int maxQueued = DefaultMaxQueued, int maxActiveSequences = int.MaxValue)
     {
+        _maxQueued = Math.Max(1, maxQueued);
+        _maxActive = Math.Max(1, maxActiveSequences);
         _model = model;
         _graphModel = model as IGraphDecodable;
         _tokenizer = tokenizer;
@@ -110,12 +135,25 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         await _gpuGate(work).ConfigureAwait(false);
     }
 
+    /// <summary>The default number of requests that may wait for admission at once.</summary>
+    public const int DefaultMaxQueued = 64;
+
+    /// <summary>Queues a request for admission. When <c>maxQueued</c> requests already wait, the request fails at once with <see cref="SchedulerQueueFullException"/>, which the API answers with 429.</summary>
     public Task<GenerationResult> SubmitAsync(GenerationRequest request, Action<int>? onToken, CancellationToken ct)
     {
         TaskCompletionSource<GenerationResult> tcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (Interlocked.Increment(ref _queued) > _maxQueued)
+        {
+            Interlocked.Decrement(ref _queued);
+            tcs.SetException(new SchedulerQueueFullException(_maxQueued));
+            return tcs.Task;
+        }
         PendingRequest pending = new() { Request = request, OnToken = onToken, Ct = ct, Completion = tcs };
         if (!_incoming.Writer.TryWrite(pending))
+        {
+            Interlocked.Decrement(ref _queued);
             tcs.SetException(new SchedulerStoppedException());
+        }
         return tcs.Task;
     }
 
@@ -126,7 +164,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         {
             while (!_shutdown.IsCancellationRequested)
             {
-                await DrainIncomingAsync(active).ConfigureAwait(false);
+                DrainIncoming();
+                await AdmitWaitingAsync(active).ConfigureAwait(false);
                 // Shutdown requested while this round admitted or waited: no round runs after it, so every
                 // unfinished sequence fails in the finally below instead of producing tokens after Dispose.
                 if (_shutdown.IsCancellationRequested) break;
@@ -147,6 +186,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     if (seq.Pending.Ct.IsCancellationRequested)
                     {
                         evicted.Add(seq);
+                        Retire(seq);
                         active.RemoveAt(i);
                         continue;
                     }
@@ -156,6 +196,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     {
                         seq.Result = BuildResult(seq, stoppedNow);
                         evicted.Add(seq);
+                        Retire(seq);
                         active.RemoveAt(i);
                         continue;
                     }
@@ -215,7 +256,10 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     // and previously got the same silent-wedge treatment).
                     Logs.Error($"DynamicBatchScheduler: decode round failed for {feeders.Count} sequence(s), failing them and continuing", ex);
                     foreach (ActiveSeq seq in feeders)
+                    {
+                        Retire(seq);
                         active.Remove(seq);
+                    }
                     await ReleaseThenCompleteAsync(feeders, seq => seq.Pending.Completion.TrySetException(ex)).ConfigureAwait(false);
                 }
             }
@@ -243,30 +287,111 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         }
     }
 
-    private async Task DrainIncomingAsync(List<ActiveSeq> active)
+    /// <summary>Moves submitted requests into the waiting queue in arrival order. A request cancelled, or read after shutdown began, leaves here instead; a request that waits is told its place in the queue.</summary>
+    private void DrainIncoming()
     {
-        while (_incoming.Reader.TryRead(out PendingRequest? pending))
+        lock (_waitingGate)
         {
-            if (pending.Ct.IsCancellationRequested) { pending.Completion.TrySetCanceled(pending.Ct); continue; }
-            // Read after shutdown was requested: failed, not admitted, since the loop is about to stop.
-            if (_shutdown.IsCancellationRequested) { pending.Completion.TrySetException(new SchedulerStoppedException()); continue; }
-            // Recomputed fresh for EACH dequeued request, not once per drain burst — active.Count grows as
-            // this loop admits earlier requests in the same burst, so a request 2nd-or-later in a burst that
-            // arrived all at once correctly sees itself as non-solo.
-            bool solo = active.Count == 0;
+            while (_incoming.Reader.TryRead(out PendingRequest? pending))
+            {
+                if (pending.Ct.IsCancellationRequested)
+                {
+                    Leave();
+                    pending.Completion.TrySetCanceled(pending.Ct);
+                    continue;
+                }
+                // Read after shutdown was requested: failed, not admitted, since the loop is about to stop.
+                if (_shutdown.IsCancellationRequested)
+                {
+                    Leave();
+                    pending.Completion.TrySetException(new SchedulerStoppedException());
+                    continue;
+                }
+                _waiting.Enqueue(pending);
+                pending.Request.OnQueued?.Invoke(_waiting.Count);
+            }
+        }
+    }
+
+    /// <summary>Admits waiting requests in arrival order while the head fits. A head that does not fit holds everyone behind it (FIFO). On a pooled model a request fits when its
+    /// whole footprint (prompt plus generation budget, in pages) fits beside the pages already reserved, so an admitted sequence never runs out of pages mid-decode. A request
+    /// larger than the whole pool is refused now, since waiting can never make it fit.</summary>
+    private async Task AdmitWaitingAsync(List<ActiveSeq> active)
+    {
+        while (true)
+        {
+            PendingRequest? head;
+            lock (_waitingGate) head = _waiting.Count > 0 ? _waiting.Peek() : null;
+            if (head is null) return;
+
+            if (head.Ct.IsCancellationRequested)
+            {
+                RemoveHead(head);
+                head.Completion.TrySetCanceled(head.Ct);
+                continue;
+            }
+
+            int pages;
+            try
+            {
+                head.PromptIds ??= BuildPromptIds(head.Request);
+                pages = _pool is null ? 0 : PagesFor(head.PromptIds.Length, head.Request.MaxTokens, _pool.PageSize);
+            }
+            catch (Exception ex)
+            {
+                RemoveHead(head);
+                head.Completion.TrySetException(ex);
+                continue;
+            }
+            if (_pool is not null && pages > _pool.MaxPages)
+            {
+                RemoveHead(head);
+                head.Completion.TrySetException(new ArgumentException(
+                    $"The request needs {pages} KV pages of {_pool.PageSize} tokens, but the pool holds {_pool.MaxPages}; shorten the prompt or max_tokens.",
+                    nameof(GenerationRequest)));
+                continue;
+            }
+            if (active.Count >= _maxActive) return;
+            if (_pool is not null && _reservedPages + pages > _pool.MaxPages) return;
+
+            RemoveHead(head);
             try
             {
                 ActiveSeq? seq = null;
-                await RunGpuWork(() => seq = AdmitAndPrefill(pending, solo)).ConfigureAwait(false);
-                active.Add(seq!);
+                // Recomputed fresh for EACH admitted request: active.Count grows as this loop admits earlier requests, so a request admitted after them is non-solo.
+                bool solo = active.Count == 0;
+                await RunGpuWork(() => seq = AdmitAndPrefill(head, solo)).ConfigureAwait(false);
+                seq!.ReservedPages = pages;
+                _reservedPages += pages;
+                active.Add(seq);
             }
             catch (Exception ex)
             {
                 Logs.Error("DynamicBatchScheduler: admission/prefill failed for one request", ex);
-                pending.Completion.TrySetException(ex);
+                head.Completion.TrySetException(ex);
             }
         }
     }
+
+    /// <summary>Takes <paramref name="head"/> off the waiting queue. Does nothing when shutdown has already completed it and taken it off the queue.</summary>
+    private void RemoveHead(PendingRequest head)
+    {
+        lock (_waitingGate)
+        {
+            if (_waiting.Count == 0 || !ReferenceEquals(_waiting.Peek(), head)) return;
+            _waiting.Dequeue();
+        }
+        Leave();
+    }
+
+    /// <summary>Returns a sequence's page reservation when it leaves the active set.</summary>
+    private void Retire(ActiveSeq seq) => _reservedPages -= seq.ReservedPages;
+
+    /// <summary>One fewer request waiting: called wherever a submitted request leaves the queue.</summary>
+    private void Leave() => Interlocked.Decrement(ref _queued);
+
+    /// <summary>The pages a sequence of this many prompt tokens and generation budget can grow to, at <paramref name="pageSize"/> tokens a page.</summary>
+    private static int PagesFor(int promptTokens, int maxTokens, int pageSize) => (promptTokens + maxTokens + 1 + pageSize - 1) / pageSize;
 
     private async Task WaitForWorkOrShutdown()
     {
@@ -286,7 +411,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     private ActiveSeq AdmitAndPrefill(PendingRequest pending, bool solo)
     {
         GenerationRequest req = pending.Request;
-        int[] promptIds = BuildPromptIds(req);
+        int[] promptIds = pending.PromptIds ??= BuildPromptIds(req);
         if (promptIds.Length == 0) throw new ArgumentException("Request produced zero tokens.");
         HashSet<int> stops = _stopIds;
         if (req.StopTokenIds is not null) { stops = [.. _stopIds]; foreach (int s in req.StopTokenIds) stops.Add(s); }
@@ -435,13 +560,24 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         if (_loopTask.IsCompleted) _shutdown.Dispose();
     }
 
-    /// <summary>Completes every request still waiting in <see cref="_incoming"/>: as cancelled when its own token already fired, else with <see cref="SchedulerStoppedException"/>.</summary>
+    /// <summary>Completes every request still waiting, both submitted and in the admission queue: as cancelled when its own token already fired, else with <see cref="SchedulerStoppedException"/>.</summary>
     private void FailQueued()
     {
         while (_incoming.Reader.TryRead(out PendingRequest? pending))
         {
+            Leave();
             if (pending.Ct.IsCancellationRequested) pending.Completion.TrySetCanceled(pending.Ct);
             else pending.Completion.TrySetException(new SchedulerStoppedException());
+        }
+        lock (_waitingGate)
+        {
+            while (_waiting.Count > 0)
+            {
+                PendingRequest waiting = _waiting.Dequeue();
+                Leave();
+                if (waiting.Ct.IsCancellationRequested) waiting.Completion.TrySetCanceled(waiting.Ct);
+                else waiting.Completion.TrySetException(new SchedulerStoppedException());
+            }
         }
     }
 }

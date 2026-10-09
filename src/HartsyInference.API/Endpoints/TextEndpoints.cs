@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Engine;
 using HartsyInference.Engine.Dispatch;
 using HartsyInference.Engine.Registry;
@@ -29,7 +30,7 @@ public static class TextEndpoints
         app.MapPost("/v1/native/text/stream", async (NativeTextRequest req, IInferenceEngine engine, InferenceQueue queue, HttpContext ctx, CancellationToken ct) =>
         {
             ModelSpec spec = ModelResolver.Resolve(req.Model, req.ModelPath, Modality.Text);
-            await SseHelpers.RunAsync(ctx, queue, async (writer, jsonOptions) =>
+            await SseHelpers.RunTextAsync(ctx, queue, async (writer, jsonOptions) =>
             {
                 // Runs inside the queue's held slot — call the service directly, not GenerateAsync below.
                 await foreach (TextChunk chunk in engine.Text.StreamAsync(spec, req.Request, ct))
@@ -55,5 +56,8 @@ public static class TextEndpoints
     /// <summary>Queue-gated generation, shared with the OpenAI-compat <c>/v1/chat/completions</c> wrapper.</summary>
     internal static Task<TextResult> GenerateAsync(
         IInferenceEngine engine, InferenceQueue queue, ModelSpec spec, TextRequest request, CancellationToken ct) =>
-        queue.EnqueueAsync(() => engine.Text.GenerateAsync(spec, request, ct), ct);
+        // With continuous batching on, the scheduler admits the request and gates its own GPU rounds, so the request does not wait in the queue here.
+        EngineKnobs.ContinuousBatching.Value
+            ? engine.Text.GenerateAsync(spec, request, ct)
+            : queue.EnqueueAsync(() => engine.Text.GenerateAsync(spec, request, ct), ct);
 }

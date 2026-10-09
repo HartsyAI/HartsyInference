@@ -43,6 +43,10 @@ public sealed class TextService : ITextService, IDisposable
     /// <summary>How long <see cref="Unload"/> waits for an in-flight generation before giving up on a slot. Long enough to cover a full completion, bounded so a host's "free memory" call can never hang forever.</summary>
     private const int UnloadWaitSeconds = 120;
 
+    /// <summary>Sequences a pool-less scheduled model (the V4.1 host) decodes at once. Its states own their memory and there are no pages to bound them, so the
+    /// bound is this count.</summary>
+    private const int PoolLessMaxActive = 4;
+
     private static long _requestCounter;
 
     private readonly InferenceEngine _engine;
@@ -192,22 +196,33 @@ public sealed class TextService : ITextService, IDisposable
         {
             throw new HartsyInferenceException($"Scheduled requests on '{slot.LoadedPath}' did not finish within {UnloadWaitSeconds}s; retry the request.");
         }
-        using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
-        try
+        GenOutcome outcome = default;
+        Action generate = () =>
         {
-            ImageData? image = LastImage(request);
-            GenOutcome outcome = image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
-                ? RunVision(slot, request, image, sink, cancel)
-                : RunText(slot, request, sink, diagnosticId, cancel);
-            _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted, outcome.CompletionTokens);
-            return outcome;
-        }
-        finally
-        {
-            // UnloadSlot throws while scheduled requests hold leases. None can here: this method drained them above, and none start while the caller holds the slot lock.
-            if (request.AlwaysFreeMemory == true)
-                UnloadSlot(slot);
-        }
+            // The round gate (when the server sets one) is taken before the device gate, the order scheduled rounds take them in, so the two cannot deadlock.
+            using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
+            try
+            {
+                ImageData? image = LastImage(request);
+                outcome = image is not null && (slot.SpliceVision is not null || slot.MllamaVision is not null)
+                    ? RunVision(slot, request, image, sink, cancel)
+                    : RunText(slot, request, sink, diagnosticId, cancel);
+            }
+            finally
+            {
+                // UnloadSlot throws while scheduled requests hold leases. None can here: this method drained them above, and none start while the caller holds the slot lock.
+                if (request.AlwaysFreeMemory == true)
+                    UnloadSlot(slot);
+            }
+        };
+        // With continuous batching on, the API does not queue text requests itself, so a pipeline request takes the engine's round gate here: the same
+        // server-wide queue that image work and the scheduled rounds use.
+        if (EngineKnobs.ContinuousBatching.Value && _engine.GpuRoundGate is { } roundGate)
+            roundGate(generate).GetAwaiter().GetResult();
+        else
+            generate();
+        _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.RequestCompleted, outcome.CompletionTokens);
+        return outcome;
     }
 
     /// <summary>Whether a request may take a slot's scheduler. A prefix-cache request stays on the pipeline, since the scheduler keeps no retained sequences; an image goes to the vision path; and AlwaysFreeMemory unloads the slot after its request, which only the pipeline does.</summary>
@@ -215,18 +230,30 @@ public sealed class TextService : ITextService, IDisposable
         request.PrefixCacheKey is not { Length: > 0 } && request.AlwaysFreeMemory != true && !hasImage;
 
     /// <summary>The continuous-batching scheduler for a model just loaded on <paramref name="slot"/>, or null when the knob is off or the model cannot batch its decode (the pipeline serves it then). Rounds take the device gate on <paramref name="gateOrdinals"/>; a host-backed model passes none, and its rounds run ungated.</summary>
-    private static DynamicBatchScheduler? CreateScheduler(TextDeviceSlot slot, IGenerationModel model, ILlmTokenizer tokenizer,
+    private DynamicBatchScheduler? CreateScheduler(TextDeviceSlot slot, IGenerationModel model, ILlmTokenizer tokenizer,
         IChatTemplate template, PagedKvPool? pool, IReadOnlyList<int> gateOrdinals)
     {
         if (!EngineKnobs.ContinuousBatching.Value || !model.Capabilities.SupportsBatchDecode) return null;
         int[] ordinals = [.. gateOrdinals.Where(o => o >= 0)];
-        Func<Action, Task>? gate = ordinals.Length == 0 ? null : work => Task.Run(() =>
+        // A device round takes the engine's round gate (the server's shared queue, when one is set) and then the device gate: the order the pipeline
+        // uses too, so the two cannot deadlock. A host-backed round takes neither.
+        Func<Action, Task>? gate = ordinals.Length == 0 ? null : work => RoundGate(() =>
         {
             using IDisposable held = DeviceGate.AcquireAllOrdinals(ordinals, CancellationToken.None);
             work();
         });
         slot.SchedulerPool = pool;
-        return new DynamicBatchScheduler(model, tokenizer, pool, template, gate);
+        // A pool-less model has nothing else to bound its sequences by; a pooled one is bounded by its pages.
+        return new DynamicBatchScheduler(model, tokenizer, pool, template, gate,
+            maxActiveSequences: pool is null ? PoolLessMaxActive : int.MaxValue);
+    }
+
+    /// <summary>Runs one unit of device work through the engine's round gate, or directly when the engine has none.</summary>
+    private Task RoundGate(Action work)
+    {
+        if (_engine.GpuRoundGate is { } gate) return gate(work);
+        work();
+        return Task.CompletedTask;
     }
 
     /// <summary>The scheduler for a freshly loaded GGUF transformer, drawing from a KV pool sized by the engine's KV budget. Allocates nothing when the knob is off.</summary>
@@ -316,6 +343,11 @@ public sealed class TextService : ITextService, IDisposable
                 run.PromptTokens = count;
                 _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.PrefillCompleted, count);
             } };
+        }
+        if (scheduled && sink is { } emitStatus)
+        {
+            // A request that waits behind others says where it stands, as a status chunk.
+            run.Request = run.Request with { OnQueued = position => emitStatus(new TextChunk { Kind = TextChunkKind.Status, Status = new TextStatus("queued", position) }) };
         }
         if (sink is not null || filter is not null)
         {

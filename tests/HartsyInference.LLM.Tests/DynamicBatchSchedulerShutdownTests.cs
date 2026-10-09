@@ -13,7 +13,7 @@ namespace HartsyInference.LLM.Tests;
 public sealed class DynamicBatchSchedulerShutdownTests
 {
     /// <summary>Forwards to a real model, but holds the first prefill until released and signals once it has entered.</summary>
-    private sealed class HeldPrefillModel(IGenerationModel inner, ManualResetEventSlim entered, ManualResetEventSlim release) : IGenerationModel
+    internal sealed class HeldPrefillModel(IGenerationModel inner, ManualResetEventSlim entered, ManualResetEventSlim release) : IGenerationModel
     {
         public GenerationModelInfo Info => inner.Info;
         public GenerationCapabilities Capabilities => inner.Capabilities;

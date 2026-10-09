@@ -230,10 +230,11 @@ public sealed class DynamicBatchSchedulerTests
 
         // This one alone fits (prompt=4 tokens, maxTokens small) — reference for "should still succeed".
         Task<GenerationResult> fits = scheduler.SubmitAsync(Req([1, 2, 3, 4], 2, seed: 0), null, CancellationToken.None);
-        // This one's prompt alone (10 tokens) cannot possibly fit in an 8-token pool -> must fail admission.
+        // This one's prompt alone (10 tokens) cannot possibly fit in an 8-token pool, so it can never be admitted: it is refused up front
+        // (ArgumentException, which the API maps to 400), rather than waiting for pages that will never be free.
         Task<GenerationResult> tooBig = scheduler.SubmitAsync(Req([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 2, seed: 0), null, CancellationToken.None);
 
-        await Assert.ThrowsAsync<KvPoolExhaustedException>(() => tooBig);
+        await Assert.ThrowsAsync<ArgumentException>(() => tooBig);
         GenerationResult fitsResult = await fits;
         Assert.Equal(2, fitsResult.TokenIds.Count);
         foreach (Tensor t in w.Values) t.Dispose();
