@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
@@ -16,8 +17,27 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private Tensor? _shGateW, _shUpW, _shDownW, _shGateScoreW;       // shared expert (optional)
     private float[]? _correctionBias;                // DeepSeek-V3 e_score_correction_bias [E] (selection only)
 
+    // Opt-in heterogeneous runtime state (CPU-only slice). Created on first use; the direct path never touches it.
+    private static readonly ForcedPlacementPolicy CpuOnlyPolicy = new(static _ => ExpertPlacement.Cpu);
+    private HostExpertCache? _hostCache;
+    private F32ExpertWeights?[]? _hostWeights;
+    private ExpertAssignment[]? _lastPlan;
+    private int _lastPlanCount;
+
+    /// <summary>
+    /// Opt-in (default off): routes the routed experts through the heterogeneous runtime. The scheduler plans every expert on
+    /// the CPU, <see cref="HostExpertCache"/> holds the layer's F32 weights without copying them, and
+    /// <see cref="HeterogeneousExpertExecutor"/> runs the F32 reference. The combine is the same weighted scatter-add as the
+    /// direct path. Requires F32 expert weights.
+    /// </summary>
+    public bool UseHostExpertRuntime { get; set; }
+
     public void LoadWeights(IReadOnlyDictionary<string, Tensor> w, string prefix)
     {
+        // The opt-in runtime caches the layer's weights on first use; a reload must not keep serving the old copies.
+        _hostCache?.Dispose();
+        _hostCache = null;
+        _hostWeights = null;
         _routerW = w[$"{prefix}.mlp.gate.weight"];
         // DeepSeek-V3 / Kimi-K2 router correction bias (added to the selection scores only). Optional: V2-Lite and
         // every softmax-routed MoE lack it. Read once to a host array (it is a tiny [E] vector used per token).
@@ -128,6 +148,11 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
 
         // 4. Routed experts: gather → expert SwiGLU → weighted scatter-add.
+        if (UseHostExpertRuntime)
+        {
+            RunRoutedThroughRuntime(backend, x, n, output, expertTokens, expertWeights);
+            return output;
+        }
         for (int ex = 0; ex < e; ex++)
         {
             int ne = expertTokens[ex].Count;
@@ -168,7 +193,7 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
 
     /// <summary>Per-token top-k expert selection + routing weights (softmax, sigmoid, or Kolibri's biased-logit
     /// selection with unbiased sigmoid weights; optional renorm).</summary>
-    private void Route(float[] logits, int n, int e, int topK, List<int>[] expertTokens, List<float>[] expertWeights)
+    internal void Route(float[] logits, int n, int e, int topK, List<int>[] expertTokens, List<float>[] expertWeights)
     {
         float[] selection = new float[e];
         float[] weight = new float[e];
@@ -223,6 +248,113 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
                 expertWeights[ex].Add(wt);
             }
         }
+    }
+
+    /// <summary>Routed experts through the heterogeneous runtime. Plans on the CPU, gathers the routed rows expert-major, runs the
+    /// F32 reference, then combines each expert's rows with the same weighted scatter-add the direct path uses.</summary>
+    private void RunRoutedThroughRuntime(IBackend backend, Tensor x, int n, Tensor output, List<int>[] expertTokens,
+        List<float>[] expertWeights)
+    {
+        int e = _moe.NumExperts;
+        int h = _hidden;
+        HostExpertCache cache = EnsureHostRuntime();
+
+        // The planner counts (token, slot) pairs per expert, so one id per routed pair is enough.
+        int pairs = 0;
+        for (int ex = 0; ex < e; ex++) pairs += expertTokens[ex].Count;
+        int[] ids = new int[pairs];
+        int fill = 0;
+        for (int ex = 0; ex < e; ex++)
+            for (int j = 0; j < expertTokens[ex].Count; j++) ids[fill++] = ex;
+
+        ExpertAssignment[] plan = new ExpertAssignment[e];
+        int[] countScratch = new int[e];
+        bool[] residentScratch = new bool[e];
+        ExpertKey[] keyScratch = new ExpertKey[e];
+        List<ExpertKey> misses = new(e);
+        using ExpertLease lease = new();
+        int distinct = ExpertScheduler.Plan(cache, ids, 0, 0, e, CpuOnlyPolicy, countScratch, residentScratch, keyScratch,
+            plan, misses, lease);
+        _lastPlan = plan;
+        _lastPlanCount = distinct;
+
+        // Expert-major gather: rows of each planned expert are contiguous, in the router's token order.
+        float[] gathered = new float[pairs * h];
+        ReadOnlySpan<float> xs = x.AsReadOnlySpan<float>();
+        int offset = 0;
+        for (int i = 0; i < distinct; i++)
+        {
+            List<int> tokens = expertTokens[plan[i].Key.Expert];
+            for (int j = 0; j < tokens.Count; j++)
+            {
+                xs.Slice(tokens[j] * h, h).CopyTo(gathered.AsSpan(offset, h));
+                offset += h;
+            }
+        }
+
+        float[] expertOut = new float[gathered.Length];
+        ExpertProgram program = _moe.Activation == ActivationKind.GeluTanh ? ExpertProgram.GeGlu : ExpertProgram.Swiglu;
+        HeterogeneousExpertExecutor.Execute(program, plan.AsSpan(0, distinct), gathered, h, expertOut, ResolveHostWeights, device: null);
+
+        // Combine exactly as the direct path: one weighted scatter-add per expert, rows in the router's token order.
+        offset = 0;
+        for (int i = 0; i < distinct; i++)
+        {
+            int ex = plan[i].Key.Expert;
+            int rows = plan[i].Rows;
+            Tensor expOut = new(new TensorShape(1, rows, h), DType.F32);
+            expertOut.AsSpan(offset, rows * h).CopyTo(expOut.AsSpan<float>());
+            backend.ScatterAddWeightedRows(output, expOut, expertTokens[ex].ToArray(), expertWeights[ex].ToArray());
+            expOut.Dispose();
+            offset += rows * h;
+        }
+    }
+
+    /// <summary>Plan of the last routed call through the heterogeneous runtime; for tests.</summary>
+    internal ExpertAssignment[] LastPlanForTest() => _lastPlan is null ? [] : _lastPlan[.._lastPlanCount];
+
+    /// <summary>Builds the host cache once: every expert is registered and made resident. Entries reference the layer's F32 tensors,
+    /// so nothing is copied.</summary>
+    private HostExpertCache EnsureHostRuntime()
+    {
+        if (_hostCache is not null) return _hostCache;
+        int e = _moe.NumExperts;
+        long elements = 0;
+        for (int i = 0; i < e; i++)
+        {
+            RequireF32(_gateW[i]);
+            RequireF32(_upW[i]);
+            RequireF32(_downW[i]);
+            elements += _gateW[i].ElementCount + _upW[i].ElementCount + _downW[i].ElementCount;
+        }
+        ExpertBank bank = new(0, e, ResolveExpert, 0);
+        HostExpertCache cache = new(elements * sizeof(float), [bank]);
+        ExpertKey[] keys = new ExpertKey[e];
+        for (int i = 0; i < e; i++) keys[i] = bank.Key(i);
+        cache.Acquire(keys).Dispose();
+        _hostWeights = new F32ExpertWeights?[e];
+        _hostCache = cache;
+        return cache;
+    }
+
+    private ExpertWeights ResolveExpert(ExpertKey key) =>
+        new(key, new ExpertMatrix(_gateW[key.Expert]), new ExpertMatrix(_downW[key.Expert]), new ExpertMatrix(_upW[key.Expert]));
+
+    private F32ExpertWeights ResolveHostWeights(ExpertKey key)
+    {
+        F32ExpertWeights? weights = _hostWeights![key.Expert];
+        if (weights is null)
+        {
+            weights = new F32ExpertWeights(_hidden, _moe.MoeIntermediateSize, _gateW[key.Expert].AsReadOnlySpan<float>().ToArray(),
+                _upW[key.Expert].AsReadOnlySpan<float>().ToArray(), _downW[key.Expert].AsReadOnlySpan<float>().ToArray()).Validated();
+            _hostWeights[key.Expert] = weights;
+        }
+        return weights;
+    }
+
+    private static void RequireF32(Tensor t)
+    {
+        if (t.DType != DType.F32) throw new NotSupportedException("The host expert runtime needs F32 expert weights; dequantize the layer at load.");
     }
 
     /// <summary>DeepSeek-V3/Kimi-K2 node-limited (group-limited) routing (HF <c>noaux_tc</c>): sigmoid scores + per-expert correction bias form the SELECTION score; experts are partitioned into groups scored by the sum of their top-2 selection scores; only the top <c>ExpertGroupUsedCount</c> groups are eligible; the per-token top-k is taken over the kept groups; the routing WEIGHT is the raw sigmoid score (no bias), optionally renormalized, then scaled by <c>RoutedScalingFactor</c>.</summary>

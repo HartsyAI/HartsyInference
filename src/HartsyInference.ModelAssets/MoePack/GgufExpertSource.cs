@@ -14,8 +14,9 @@ namespace HartsyInference.ModelAssets.MoePack;
 /// The loader reports GGUF's ggml order, fastest dimension first: gate and up <c>[H, I, E]</c>, down <c>[I, H, E]</c>, fused
 /// <c>[H, 2I, E]</c>. Memory is expert-major either way, so an expert's rows are contiguous.
 /// </summary>
-/// <remarks>The fingerprint is provisional: it identifies the GGUF's expert geometry, not the runtime topology, until the
-/// executor binds packs to topologies. A pack is refused by any reader expecting a different fingerprint.</remarks>
+/// <remarks>By default the fingerprint is provisional: it identifies the GGUF's expert geometry, not the runtime topology. A caller
+/// that has the model's topology passes its SparseModelTopology.Fingerprint to <see cref="Open(string, string?)"/> to bind the
+/// pack to that topology. A pack is refused by any reader expecting a different fingerprint.</remarks>
 public sealed partial class GgufExpertSource : IDisposable
 {
     private readonly GgufLoader _loader;
@@ -24,7 +25,7 @@ public sealed partial class GgufExpertSource : IDisposable
     private sealed record LayerTensors(Tensor Gate, Tensor? Up, Tensor Down);
 
     private GgufExpertSource(GgufLoader loader, Dictionary<int, LayerTensors> layers, int experts, int hidden, int intermediate,
-        string architecture)
+        string architecture, string? topologyFingerprint)
     {
         _loader = loader;
         _layers = layers;
@@ -32,7 +33,7 @@ public sealed partial class GgufExpertSource : IDisposable
         Hidden = hidden;
         Intermediate = intermediate;
         Layers = layers.Keys.Order().ToArray();
-        TopologyFingerprint = "gguf-moe:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
+        TopologyFingerprint = topologyFingerprint ?? "gguf-moe:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(
             $"v1;arch={architecture};layers={string.Join(',', Layers)};experts={experts};hidden={hidden};intermediate={intermediate}")))
             .ToLowerInvariant();
     }
@@ -55,10 +56,23 @@ public sealed partial class GgufExpertSource : IDisposable
     [GeneratedRegex(@"^blk\.(\d+)\.ffn_down_exps\.weight$")]
     private static partial Regex DownExpertsName();
 
-    /// <summary>Opens the checkpoint and checks that every MoE layer has consistent expert shapes.</summary>
+    /// <summary>Opens the checkpoint with the provisional GGUF-geometry fingerprint; see <see cref="Open(string, string?)"/>.</summary>
     /// <exception cref="InvalidDataException">The file has no MoE layers, or a layer's expert tensors are missing or mis-shaped.</exception>
-    public static GgufExpertSource Open(string path)
+    public static GgufExpertSource Open(string path) => Open(path, topologyFingerprint: null);
+
+    /// <summary>
+    /// Opens the checkpoint and checks that every MoE layer has consistent expert shapes. When
+    /// <paramref name="topologyFingerprint"/> is given, the pack identity is that runtime topology fingerprint
+    /// (SparseModelTopology.Fingerprint), supplied by the caller that built the model's topology.
+    /// </summary>
+    /// <param name="path">GGUF checkpoint path.</param>
+    /// <param name="topologyFingerprint">Runtime topology fingerprint, or null for the provisional GGUF-geometry identity.</param>
+    /// <exception cref="InvalidDataException">The file has no MoE layers, or a layer's expert tensors are missing or mis-shaped.</exception>
+    /// <exception cref="ArgumentException">The supplied fingerprint is empty.</exception>
+    public static GgufExpertSource Open(string path, string? topologyFingerprint)
     {
+        if (topologyFingerprint is not null && topologyFingerprint.Length == 0)
+            throw new ArgumentException("The topology fingerprint must not be empty.", nameof(topologyFingerprint));
         GgufLoader loader = new();
         try
         {
@@ -100,7 +114,7 @@ public sealed partial class GgufExpertSource : IDisposable
             if (layers.Count == 0) throw new InvalidDataException($"'{path}' has no stacked expert tensors (blk.N.ffn_down_exps.weight).");
 
             string architecture = loader.Metadata.GetString("general.architecture") ?? "unknown";
-            return new GgufExpertSource(loader, layers, experts, hidden, intermediate, architecture);
+            return new GgufExpertSource(loader, layers, experts, hidden, intermediate, architecture, topologyFingerprint);
         }
         catch
         {
