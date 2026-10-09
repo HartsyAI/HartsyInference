@@ -44,6 +44,9 @@ public sealed class DeepSeekV41GenerationState : ISequenceState
     /// <summary>Final normed hidden row of the last committed token, <c>[Dim]</c>; its logits are the next-token distribution. Valid after <see cref="SyncTo"/> or an append.</summary>
     internal ReadOnlySpan<float> LastHidden => _lastHidden;
 
+    /// <summary>Width of the DSpark target rows this state records; 0 when it records none.</summary>
+    internal int MainWidth => _mainWidth;
+
     /// <summary>The DSpark target rows of committed position <paramref name="position"/>, <c>[MainWidth]</c>. Only for a state that records them.</summary>
     internal ReadOnlySpan<float> MainRow(int position)
     {

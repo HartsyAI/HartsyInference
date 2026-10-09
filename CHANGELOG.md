@@ -8,6 +8,10 @@ stable release will require. Dates are UTC.
 
 ## Unreleased
 
+## alpha.297
+
+- **Added: a DSpark draft proposer for DeepSeek-V4.1 speculation (CPU, synthetic evidence).** `DeepSeekV41DSparkProposer` drafts from a sequence that records the target's draft rows. Each call syncs the sequence to the context, rebuilds the draft head's window from the committed rows, and drafts from the last token. The window only ever holds committed positions, so a rejected draft needs no restore. On the synthetic model the proposer's drafts reproduce upstream's at every decode position, including past the 8-token window, and greedy speculation with it reproduces plain greedy decoding token for token. The sequence records the rows the head reads only when asked to. Plain decoding is unchanged.
+
 ## alpha.296
 
 - **Added: the DeepSeek-V4.1 DSpark draft head checked against the unmodified upstream on a synthetic model (CPU).** `dump_dspark_fixture.py` runs the upstream draft head on the host fixture's backbone, with seeded random draft weights, through an 11-token prefill and six decode steps, and records the drafts upstream's incremental window produces. The C# head, seeded afresh at each decode position from the committed rows (positions 11 to 16, past the 8-token window), reproduces the drafted ids exactly, with logits and confidences within 1e-3 relative. The target's taps for the three draft layers reproduce upstream's main hidden states at every position, and the same drafts come out when they are fed from the target's own taps. Acceptance rates are not measured on random weights. The embedding and head shared with the target are shape-checked. Plain decoding is unchanged.
