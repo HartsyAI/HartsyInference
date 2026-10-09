@@ -114,6 +114,12 @@ public readonly record struct DType(string Name, int SizeInBytes, bool IsQuantiz
     /// <summary>OCP MX microscaling 4-bit (E2M1 codewords + shared E8M0 block scale, ggml type id 39). 32 values / 17 bytes per block: 1-byte power-of-two scale + 16 bytes of packed 4-bit codewords.</summary>
     public static readonly DType MXFP4 = new("MXFP4", 0, true, 17, 32);
 
+    // ── Pack-local (no ggml type ID; GGUF writers refuse it) ───────────
+
+    /// <summary>Pack-local 2-bit block quantization, 64 values per block: 2 bytes fp16 scale + 16 bytes of 2-bit codes
+    /// (18 bytes, 2.25 bits per weight). Value = <c>grid[code] * scale</c> with grid <c>{-1, 0, 1, 2}</c>. Used only by expert packs.</summary>
+    public static readonly DType Q2_0 = new("Q2_0", 0, true, 18, 64);
+
     /// <summary>Signed 8-bit integer.</summary>
     public static readonly DType I8 = new("I8", 1, false);
 

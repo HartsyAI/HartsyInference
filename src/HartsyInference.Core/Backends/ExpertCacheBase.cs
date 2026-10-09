@@ -364,12 +364,11 @@ public abstract class ExpertCacheBase : IResidencyAwareExpertCache
         try { AwaitUpload(pending); }
         catch
         {
-            // The copy was never ordered before compute; a later hit must not see this entry as ready.
-            try
-            {
-                AbandonUpload(pending);
-                RemoveEntry(entry, countEviction: false);
-            }
+            // The copy was never ordered before compute; a later hit must not see this entry as ready. Cleanup runs even if
+            // AbandonUpload throws, and the original failure is the one reported.
+            try { AbandonUpload(pending); }
+            catch { /* the original failure is the one to report */ }
+            try { RemoveEntry(entry, countEviction: false); }
             catch { /* the original failure is the one to report */ }
             throw;
         }
