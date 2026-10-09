@@ -23,6 +23,8 @@ internal sealed class DeepSeekV41DSparkProposer : IDraftProposer
         ArgumentNullException.ThrowIfNull(state);
         if (state.MainWidth != draft.InputWidth)
             throw new ArgumentException($"The state records {state.MainWidth} target values per position; the draft head reads {draft.InputWidth}.", nameof(state));
+        if (scheduler is not null && scheduler.MaxDraft != draft.BlockSize)
+            throw new ArgumentException($"The scheduler is built for drafts of {scheduler.MaxDraft}; the draft head drafts {draft.BlockSize}.", nameof(scheduler));
         _draft = draft;
         _state = state;
         _scheduler = scheduler;
@@ -46,6 +48,7 @@ internal sealed class DeepSeekV41DSparkProposer : IDraftProposer
         // Ids[0] is the anchor itself; the rest are the drafted tokens, with one confidence each
         int count = Math.Min(maxTokens, draft.Ids.Length - 1);
         if (_scheduler is not null) count = _scheduler.Choose(draft.Confidence, count);
+        // an empty block is intended when the scheduler verifies nothing: the loop then decodes the context's next token alone
         return new DraftBlock(draft.Ids.AsSpan(1, count).ToArray(), null);
     }
 }

@@ -92,7 +92,8 @@ public sealed class ConfidenceSchedulerTests
     [Fact]
     public void A_Jagged_Profile_Stops_At_The_First_Dip_Where_Brute_Force_Goes_On()
     {
-        // SPS dips at batch 3 and recovers. Θ falls at length 2 and rises again after it, so the walk stops early. The paper's section 5.2 search covers this case.
+        // SPS dips at batch 3 and recovers. Θ is 100, 199.0, 178.2, 394.1, 441.2, 468.4 for lengths 0 to 5: it falls at length 2 and rises again after it, so the walk
+        // stops at length 1 while the maximum is at 5. The paper's section 5.2 search covers this case.
         double[] sps = [100, 100, 60, 100, 90, 80];
         float[] logits = Enumerable.Repeat(4.6f, Block).ToArray();   // sigmoid(4.6) ≈ 0.99 at each position
         double[] survival = Survival(logits);
@@ -115,6 +116,14 @@ public sealed class ConfidenceSchedulerTests
         // one token costs 1000 steps a second, anything larger almost nothing: verifying more never pays
         ConfidenceScheduler scheduler = new(new SpsProfile([1000, 1, 1, 1, 1, 1]), Block);
         Assert.Equal(0, scheduler.Choose([4.6f, 4.6f, 4.6f, 4.6f, 4.6f], Block));
+    }
+
+    [Fact]
+    public void Non_Finite_Confidences_Are_Refused()
+    {
+        ConfidenceScheduler scheduler = new(new SpsProfile([100, 100, 100, 100, 100, 100]), Block);
+        Assert.Throws<ArgumentException>(() => scheduler.Choose([4.6f, float.NaN, 1f], Block));
+        Assert.Throws<ArgumentException>(() => scheduler.Choose([float.PositiveInfinity], Block));
     }
 
     [Fact]

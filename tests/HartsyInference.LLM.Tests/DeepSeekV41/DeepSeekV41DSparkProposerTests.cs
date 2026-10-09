@@ -135,6 +135,17 @@ public sealed class DeepSeekV41DSparkProposerTests
     }
 
     [Fact]
+    public void A_Scheduler_Built_For_A_Different_Block_Is_Refused()
+    {
+        using CpuBackend cpu = new();
+        DeepSeekV41HostModel model = DeepSeekV41HostModelTests.BuildModel(cpu, DeepSeekV41DSparkFixture.TargetLayers);
+        DeepSeekV41DSpark dspark = DeepSeekV41DSparkFixture.BuildDSpark(cpu);
+        ConfidenceScheduler wrongBlock = new(new SpsProfile([100, 100, 100, 100, 100, 100, 100, 100]), BlockDraft + 2);
+        Assert.Throws<ArgumentException>(() => new DeepSeekV41DSparkProposer(dspark,
+            new DeepSeekV41GenerationState(model, DeepSeekV41DSparkFixture.MaxTokens, recordMainRows: true), wrongBlock));
+    }
+
+    [Fact]
     public void A_Flat_Profile_Keeps_The_Whole_Block_Of_The_Unscheduled_Proposer()
     {
         using CpuBackend cpu = new();

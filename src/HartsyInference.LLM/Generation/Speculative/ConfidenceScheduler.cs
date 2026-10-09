@@ -23,6 +23,9 @@ internal sealed class ConfidenceScheduler
         _maxDraft = maxDraft;
     }
 
+    /// <summary>The most positions a draft can have; the proposer checks it against the head's block size.</summary>
+    internal int MaxDraft => _maxDraft;
+
     /// <summary>How many of the first positions to verify, from the head's confidence logits in draft order, capped at <paramref name="maxTokens"/>.</summary>
     public int Choose(ReadOnlySpan<float> confidenceLogits, int maxTokens)
     {
@@ -34,7 +37,9 @@ internal sealed class ConfidenceScheduler
         int chosen = 0;
         for (int j = 1; j <= limit; j++)
         {
-            survival *= Sigmoid(confidenceLogits[j - 1]);   // a_j
+            float logit = confidenceLogits[j - 1];
+            if (!float.IsFinite(logit)) throw new ArgumentException("Confidence logits must be finite.", nameof(confidenceLogits));
+            survival *= Sigmoid(logit);   // a_j
             tau += survival;
             double theta = tau * _profile.StepsPerSecond(1 + j);
             if (theta <= best) break;   // the first position that does not improve Θ ends the walk
