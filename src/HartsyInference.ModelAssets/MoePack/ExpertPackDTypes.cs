@@ -9,7 +9,7 @@ internal static class ExpertPackDTypes
     /// True when a pack can store <paramref name="dtype"/>: exactly the dtypes <see cref="Resolve"/> reads and the quantizer writes.
     /// </summary>
     public static bool IsPackDType(DType dtype) =>
-        dtype == DType.Q8_0 || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K;
+        dtype == DType.Q8_0 || dtype == DType.Q4_K || dtype == DType.Q5_K || dtype == DType.Q6_K || dtype == DType.Q2_0;
 
     /// <summary>Resolves a manifest dtype name to the stored dtype; unknown names are rejected.</summary>
     /// <exception cref="InvalidDataException">The name is not a dtype a pack can hold.</exception>
@@ -19,6 +19,7 @@ internal static class ExpertPackDTypes
         "Q4_K" => DType.Q4_K,
         "Q5_K" => DType.Q5_K,
         "Q6_K" => DType.Q6_K,
+        "Q2_0" => DType.Q2_0,
         _ => throw new InvalidDataException($"Expert pack dtype '{name}' is not supported."),
     };
 }

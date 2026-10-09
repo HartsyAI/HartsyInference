@@ -1,6 +1,8 @@
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
 using HartsyInference.Core.Tensors;
+using HartsyInference.Core.Tensors.Quant;
+using HartsyInference.ModelAssets.BlockScale;
 using HartsyInference.ModelAssets.Checkpoints;
 using HartsyInference.ModelAssets.Gguf;
 using HartsyInference.ModelAssets.SafeTensors;
@@ -383,6 +385,16 @@ public static class CheckpointQuantizer
         if (weight.DType == DType.F32 && weight.Fp8ScaleFactor == 1.0f && weight.QuantInfo is null)
         {
             return weight;
+        }
+        if (weight.QuantInfo?.Recipe is not null)
+        {
+            // Block-scaled (MXFP4 / FP8 block / NVFP4 recipe) weights decode through their recipe. Widening the stored
+            // bytes as their raw dtype, or refusing them as int8, would be silently wrong or a false refusal.
+            QuantRecipe recipe = weight.QuantInfo.Recipe;
+            Tensor blockF32 = new(new TensorShape(recipe.LogicalRows, recipe.LogicalCols), DType.F32);
+            owned.Add(blockF32);
+            WeightDequantizer.ToF32(weight, weight.QuantInfo).AsSpan().CopyTo(blockF32.AsSpan<float>());
+            return blockF32;
         }
         if (weight.QuantInfo is { RowScale: not null } info)
         {

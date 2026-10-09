@@ -66,10 +66,21 @@ public static class ExpertPackVerifier
             throw new ArgumentException($"The source {role} for {key} holds {reference.Length} values; the pack expects {expected}.");
     }
 
+    /// <summary>Decodes a borrowed Q2_0 matrix; the GGUF dequantizer does not know this pack-local format.</summary>
+    private static unsafe Tensor DecodeQ2_0(Tensor quantized)
+    {
+        int rows = checked((int)quantized.Shape[0]), cols = checked((int)quantized.Shape[1]);
+        long byteCount = DType.Q2_0.ComputeByteCount(quantized.ElementCount);
+        float[] values = Q2_0Codec.Decode(new ReadOnlySpan<byte>(quantized.DataPointer, checked((int)byteCount)), rows, cols);
+        Tensor result = new(new TensorShape(rows, cols), DType.F32);
+        values.AsSpan().CopyTo(result.AsSpan<float>());
+        return result;
+    }
+
     private static void Compare(Tensor quantized, float[] reference, ref double maxAbs, ref double errorSquares,
             ref double referenceSquares, ref long values)
     {
-        using Tensor decoded = GgufDequantizer.Dequantize(quantized, DType.F32);
+        using Tensor decoded = quantized.DType == DType.Q2_0 ? DecodeQ2_0(quantized) : GgufDequantizer.Dequantize(quantized, DType.F32);
         ReadOnlySpan<float> actual = decoded.AsSpan<float>();
         for (int i = 0; i < reference.Length; i++)
         {

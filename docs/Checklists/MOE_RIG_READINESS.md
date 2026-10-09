@@ -61,6 +61,7 @@ Do not count #305 or #306 as verified until those changes land on the branch bei
    ```
    classes="CudaExpertCacheTests CudaExpertM1FixtureTests CudaMoePrimitiveTests"
    classes="$classes CudaMoeTests CudaQuantWorkspaceTests CudaStreamingWeightCacheTests"
+classes="$classes CudaExpertKernelTests CudaExpertDeviceRunnerTests"
    for c in $classes; do
      dotnet test tests/HartsyInference.Cuda.Tests --filter "FullyQualifiedName~HartsyInference.Cuda.Tests.$c."
    done
