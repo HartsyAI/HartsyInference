@@ -7,10 +7,18 @@ namespace HartsyInference.ModelAssets.MoePack;
 public static class GgufExpertPack
 {
     /// <summary>Quantizes every expert of <paramref name="ggufPath"/> into a new pack in <paramref name="packDirectory"/>.</summary>
+    /// <param name="ggufPath">GGUF checkpoint to read.</param>
+    /// <param name="packDirectory">Pack directory to create.</param>
+    /// <param name="dtype">Quantized dtype of every projection.</param>
+    /// <param name="topologyFingerprint">
+    /// The runtime topology fingerprint (SparseModelTopology.Fingerprint) to bind the pack to, or null for the provisional
+    /// GGUF-geometry fingerprint. A pack built with one fingerprint is refused by any reader expecting another.
+    /// </param>
     /// <exception cref="InvalidOperationException">The directory already holds a completed pack, or another writer holds it.</exception>
-    public static void Write(string ggufPath, string packDirectory, DType dtype)
+    /// <exception cref="ArgumentException">The supplied fingerprint is empty.</exception>
+    public static void Write(string ggufPath, string packDirectory, DType dtype, string? topologyFingerprint = null)
     {
-        using GgufExpertSource source = GgufExpertSource.Open(ggufPath);
+        using GgufExpertSource source = GgufExpertSource.Open(ggufPath, topologyFingerprint);
         using ExpertPackWriter writer = new(packDirectory, source.TopologyFingerprint, source.Hidden, source.Intermediate, dtype, source.Keys());
         foreach (ExpertKey key in source.Keys())
         {
@@ -21,11 +29,17 @@ public static class GgufExpertPack
     }
 
     /// <summary>Checks a pack's checksums and its values against the checkpoint.</summary>
-    /// <exception cref="InvalidDataException">The pack is incomplete, or built for a different checkpoint geometry.</exception>
-    public static ExpertPackVerification Verify(string ggufPath, string packDirectory)
+    /// <param name="ggufPath">GGUF checkpoint the pack came from.</param>
+    /// <param name="packDirectory">Pack directory to check.</param>
+    /// <param name="expectedFingerprint">
+    /// The topology fingerprint the pack must have been built for, or null to expect the provisional GGUF-geometry fingerprint.
+    /// </param>
+    /// <exception cref="InvalidDataException">The pack is incomplete, or built for another fingerprint or checkpoint geometry.</exception>
+    public static ExpertPackVerification Verify(string ggufPath, string packDirectory, string? expectedFingerprint = null)
     {
         using GgufExpertSource source = GgufExpertSource.Open(ggufPath);
-        using ExpertPackReader reader = ExpertPackReader.Open(packDirectory, source.TopologyFingerprint, verifyChecksums: true);
+        string fingerprint = expectedFingerprint ?? source.TopologyFingerprint;
+        using ExpertPackReader reader = ExpertPackReader.Open(packDirectory, fingerprint, verifyChecksums: true);
         return ExpertPackVerifier.Verify(reader, key => source.Read(key.Layer, key.Expert), reader.Keys);
     }
 }

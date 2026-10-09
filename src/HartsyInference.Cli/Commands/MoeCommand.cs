@@ -26,6 +26,11 @@ public sealed class MoePackCommand : Command<MoePackCommand.Settings>
         [CommandOption("--dtype")]
         [Description("Pack dtype: Q8_0, Q4_K, Q5_K or Q6_K.")]
         public string DType { get; init; } = "Q8_0";
+
+        /// <summary>Runtime topology fingerprint to bind the pack to.</summary>
+        [CommandOption("--topology-fingerprint")]
+        [Description("Runtime topology fingerprint (SparseModelTopology.Fingerprint) to bind the pack to. Omit for the GGUF-geometry fingerprint.")]
+        public string? TopologyFingerprint { get; init; }
     }
 
     /// <inheritdoc/>
@@ -43,7 +48,7 @@ public sealed class MoePackCommand : Command<MoePackCommand.Settings>
         }
         try
         {
-            GgufExpertPack.Write(settings.Gguf, settings.Out, dtype);
+            GgufExpertPack.Write(settings.Gguf, settings.Out, dtype, settings.TopologyFingerprint);
             AnsiConsole.MarkupLine($"[green]Packed[/] {Markup.Escape(settings.Gguf)} into {Markup.Escape(settings.Out)} as {dtype.Name}.");
             return 0;
         }
