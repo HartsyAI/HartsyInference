@@ -109,6 +109,44 @@ public sealed class DynamicBatchSchedulerAdmissionTests
     }
 
     [Fact]
+    public async Task A_Queue_Callback_That_Throws_Costs_Only_Its_Own_Notice()
+    {
+        // The loop must survive a sink that throws, such as one whose client has disconnected. B's callback throws; B and C still complete.
+        TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();
+        Dictionary<string, Tensor> w = DynamicBatchSchedulerTests.Weights(cfg);
+        try
+        {
+            using CpuBackend backend = new();
+            using GenericTransformer model = new(cfg);
+            model.LoadWeights(w, "model");
+            using ManualResetEventSlim entered = new(false);
+            using ManualResetEventSlim release = new(false);
+            DynamicBatchSchedulerShutdownTests.HeldPrefillModel held = new(new GenericTransformerModel(model, backend), entered, release);
+            using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
+            using DynamicBatchScheduler scheduler = new(held, new DynamicBatchSchedulerReleaseTests.NoStopTokenizer(), pool, maxActiveSequences: 1);
+
+            Task<GenerationResult> admitted = scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([1, 2, 3], 4, seed: 0), null, CancellationToken.None);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(30)), "the first prefill never started");
+
+            GenerationRequest second = DynamicBatchSchedulerTests.Req([4, 5], 4, seed: 0) with
+            {
+                OnQueued = _ => throw new InvalidOperationException("the client has gone"),
+            };
+            GenerationRequest third = DynamicBatchSchedulerTests.Req([6, 7], 4, seed: 0) with { OnQueued = _ => { } };
+            Task<GenerationResult> b = scheduler.SubmitAsync(second, null, CancellationToken.None);
+            Task<GenerationResult> c = scheduler.SubmitAsync(third, null, CancellationToken.None);
+
+            release.Set();
+            // Before the fix the throw ended the loop, and B and C failed with SchedulerStoppedException here.
+            await Task.WhenAll(admitted, b, c).WaitAsync(TimeSpan.FromSeconds(60));
+        }
+        finally
+        {
+            foreach (Tensor t in w.Values) t.Dispose();
+        }
+    }
+
+    [Fact]
     public async Task A_Cancelled_Waiter_Behind_The_Head_Gives_Up_Its_Place_Before_The_Head_Is_Admitted()
     {
         TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();

@@ -425,9 +425,19 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 _announcements.Add((onQueued, place));
             }
         }
-        foreach ((Action<int> onQueued, int place) in _announcements)
-            onQueued(place);
-        _announcements.Clear();
+        try
+        {
+            foreach ((Action<int> onQueued, int place) in _announcements)
+            {
+                // A sink that throws (a client that disconnected, say) costs that client its notice, not the loop and every other request.
+                try { onQueued(place); }
+                catch (Exception ex) { Logs.Error("DynamicBatchScheduler: a queued-status callback threw; the request keeps its place", ex); }
+            }
+        }
+        finally
+        {
+            _announcements.Clear();
+        }
     }
 
     /// <summary>Takes <paramref name="head"/> off the waiting queue. Does nothing when shutdown has already completed it and taken it off the queue.</summary>
