@@ -109,7 +109,7 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> Int8MmaSwizzle =
         Bool("numerics.int8MmaSwizzle", true, KnobScope.Runtime, KnobDomain.Numerics, "A/B layout control for the fused int8 mma GEMM: 0 picks the padded kernel (not the feature kill switch).");
 
-    /// <summary>Widens the fused INT8 MMA GEMM admission bound from n<=2k to n<=4k, admitting LTX-2.5's ffn_up shape.</summary>
+    /// <summary>Widens the fused INT8 MMA GEMM admission bound from n&lt;=2k to n&lt;=4k, admitting LTX-2.5's ffn_up shape.</summary>
     public static readonly Knob<bool> Int8MmaWideGate =
         Bool("numerics.int8MmaWideGate", false, KnobScope.Runtime, KnobDomain.Numerics, "Widens the fused INT8 MMA GEMM admission bound from n<=2k to n<=4k, admitting LTX-2.5's ffn_up shape.");
 
