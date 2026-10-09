@@ -44,6 +44,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// <summary>Pages reserved by the active sequences (each reserves its whole prompt-plus-budget footprint at admission); loop-owned, and always zero on a model with no pool.</summary>
     private int _reservedPages;
 
+    /// <summary>Queue places to announce after an admission pass, collected under <see cref="_waitingGate"/> and invoked after it; loop-owned and reused.</summary>
+    private readonly List<(Action<int> OnQueued, int Place)> _announcements = [];
+
     private sealed class PendingRequest
     {
         public required GenerationRequest Request;
@@ -53,6 +56,9 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
 
         /// <summary>The prompt's ids, built once when the request first reaches the head of the queue.</summary>
         public int[]? PromptIds;
+
+        /// <summary>Whether this request has been told its place in the queue; it is told once.</summary>
+        public bool Announced;
     }
 
     /// <summary>One active sequence's per-request state; <see cref="Cache"/> is <see cref="IKvCache"/> rather than concretely <see cref="PagedKvCache"/> so an idle-admitted sequence can use a dedicated <see cref="FixedKvCache"/> instead (see <c>docs/Checklists/LLM_DECODE_PERF_GRIND.md</c>'s "NEW PLAN"). <see cref="GraphSession"/> is non-null only for such a sequence while still eligible for graph replay (see <see cref="RunLoopAsync"/>'s one-way retirement); <see cref="Dispose"/> is intentionally the ONLY way callers free this sequence's resources so a session can never be forgotten at a disposal call site.</summary>
@@ -169,6 +175,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 // Shutdown requested while this round admitted or waited: no round runs after it, so every
                 // unfinished sequence fails in the finally below instead of producing tokens after Dispose.
                 if (_shutdown.IsCancellationRequested) break;
+                AnnounceWaiting();
 
                 if (active.Count == 0)
                 {
@@ -287,7 +294,8 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
         }
     }
 
-    /// <summary>Moves submitted requests into the waiting queue in arrival order. A request cancelled, or read after shutdown began, leaves here instead; a request that waits is told its place in the queue.</summary>
+    /// <summary>Moves submitted requests into the waiting queue in arrival order. A request cancelled, or read after shutdown began, leaves here instead. A request is told its
+    /// place only if the admission pass that follows leaves it waiting (see <see cref="AnnounceWaiting"/>).</summary>
     private void DrainIncoming()
     {
         lock (_waitingGate)
@@ -308,7 +316,6 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                     continue;
                 }
                 _waiting.Enqueue(pending);
-                pending.Request.OnQueued?.Invoke(_waiting.Count);
             }
         }
     }
@@ -397,6 +404,26 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
             Leave();
             pending.Completion.TrySetCanceled(pending.Ct);
         }
+    }
+
+    /// <summary>Tells each request still waiting after an admission pass its place in the queue (1 is next), once. A request admitted in the pass that took it in hears
+    /// nothing. The callbacks run after the lock is released, so a slow one holds up neither submitters nor <see cref="FailQueued"/>.</summary>
+    private void AnnounceWaiting()
+    {
+        lock (_waitingGate)
+        {
+            int place = 0;
+            foreach (PendingRequest pending in _waiting)
+            {
+                place++;
+                if (pending.Announced || pending.Request.OnQueued is not { } onQueued) continue;
+                pending.Announced = true;
+                _announcements.Add((onQueued, place));
+            }
+        }
+        foreach ((Action<int> onQueued, int place) in _announcements)
+            onQueued(place);
+        _announcements.Clear();
     }
 
     /// <summary>Takes <paramref name="head"/> off the waiting queue. Does nothing when shutdown has already completed it and taken it off the queue.</summary>

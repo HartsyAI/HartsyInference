@@ -71,32 +71,41 @@ public sealed class DynamicBatchSchedulerAdmissionTests
     }
 
     [Fact]
-    public async Task A_Waiting_Request_Is_Told_Its_Place_In_The_Queue()
+    public async Task A_Waiting_Request_Is_Told_Its_Place_In_The_Queue_And_One_Admitted_At_Once_Is_Not()
     {
         TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();
         Dictionary<string, Tensor> w = DynamicBatchSchedulerTests.Weights(cfg);
-        using CpuBackend backend = new();
-        using GenericTransformer model = new(cfg);
-        model.LoadWeights(w, "model");
-        using ManualResetEventSlim entered = new(false);
-        using ManualResetEventSlim release = new(false);
-        DynamicBatchSchedulerShutdownTests.HeldPrefillModel held = new(new GenericTransformerModel(model, backend), entered, release);
-        using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
-        using DynamicBatchScheduler scheduler = new(held, new DynamicBatchSchedulerTests.StubTokenizer(), pool);
+        try
+        {
+            using CpuBackend backend = new();
+            using GenericTransformer model = new(cfg);
+            model.LoadWeights(w, "model");
+            using ManualResetEventSlim entered = new(false);
+            using ManualResetEventSlim release = new(false);
+            DynamicBatchSchedulerShutdownTests.HeldPrefillModel held = new(new GenericTransformerModel(model, backend), entered, release);
+            using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
+            // One sequence decodes at a time, so B and C wait behind A. No stop ids, so A cannot end at its first token and leave B nothing to wait for.
+            using DynamicBatchScheduler scheduler = new(held, new DynamicBatchSchedulerReleaseTests.NoStopTokenizer(), pool, maxActiveSequences: 1);
 
-        Task<GenerationResult> admitted = scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([1, 2, 3], 4, seed: 0), null, CancellationToken.None);
-        Assert.True(entered.Wait(TimeSpan.FromSeconds(30)), "the first prefill never started");
+            // A is admitted in the pass that takes it in, so it is never told a place; a negative entry would show it was.
+            List<int> places = [];
+            GenerationRequest first = DynamicBatchSchedulerTests.Req([1, 2, 3], 4, seed: 0) with { OnQueued = place => places.Add(-place) };
+            Task<GenerationResult> admitted = scheduler.SubmitAsync(first, null, CancellationToken.None);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(30)), "the first prefill never started");
 
-        List<int> places = [];
-        GenerationRequest second = DynamicBatchSchedulerTests.Req([4, 5], 4, seed: 0) with { OnQueued = place => places.Add(place) };
-        GenerationRequest third = DynamicBatchSchedulerTests.Req([6, 7], 4, seed: 0) with { OnQueued = place => places.Add(place) };
-        Task<GenerationResult> b = scheduler.SubmitAsync(second, null, CancellationToken.None);
-        Task<GenerationResult> c = scheduler.SubmitAsync(third, null, CancellationToken.None);
+            GenerationRequest second = DynamicBatchSchedulerTests.Req([4, 5], 4, seed: 0) with { OnQueued = place => places.Add(place) };
+            GenerationRequest third = DynamicBatchSchedulerTests.Req([6, 7], 4, seed: 0) with { OnQueued = place => places.Add(place) };
+            Task<GenerationResult> b = scheduler.SubmitAsync(second, null, CancellationToken.None);
+            Task<GenerationResult> c = scheduler.SubmitAsync(third, null, CancellationToken.None);
 
-        release.Set();
-        await Task.WhenAll(admitted, b, c).WaitAsync(TimeSpan.FromSeconds(60));
-        Assert.Equal([1, 2], places);
-        foreach (Tensor t in w.Values) t.Dispose();
+            release.Set();
+            await Task.WhenAll(admitted, b, c).WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.Equal([1, 2], places);
+        }
+        finally
+        {
+            foreach (Tensor t in w.Values) t.Dispose();
+        }
     }
 
     [Fact]

@@ -24,7 +24,8 @@ public sealed record GenerationRequest
     /// <summary>Sets the chat template's <c>enable_thinking</c> variable (Qwen3-family reasoning toggle); null falls back to the template's own default, and templates without a thinking slot (e.g. ChatML) ignore it.</summary>
     public bool? EnableThinking { get; init; }
 
-    /// <summary>Called with this request's place in the scheduler's waiting queue (1 is next) when it has to wait behind other requests. Not called on the pipeline.</summary>
+    /// <summary>Called once with this request's place in the scheduler's waiting queue (1 is next) when an admission pass leaves it waiting behind other requests; a request
+    /// admitted at once is never told. Called on the scheduler's loop, after it releases its queue lock. Not called on the pipeline.</summary>
     public Action<int>? OnQueued { get; init; }
 
     /// <summary>Pre-tokenized prompt ids; when set, templating and tokenization are skipped entirely.</summary>
