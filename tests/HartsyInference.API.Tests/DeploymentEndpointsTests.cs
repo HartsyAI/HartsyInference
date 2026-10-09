@@ -58,6 +58,109 @@ public sealed class DeploymentEndpointsTests : IClassFixture<WebApplicationFacto
         }
     }
 
+    [Fact]
+    public async Task Get_Lists_The_Deployments_With_Lowercase_States()
+    {
+        ScriptedDeploymentsText text = new();
+        text.Listed.Add(new DeploymentStatus("chat", "llm-a", "cpu", DeploymentState.Ready, null));
+        text.Listed.Add(new DeploymentStatus("old", "llm-b", "cpu", DeploymentState.Failed, "no checkpoint"));
+        using WebApplicationFactory<Program> app = WithText(text);
+        using HttpClient client = app.CreateClient();
+
+        using HttpResponseMessage response = await client.GetAsync("/admin/deployments");
+
+        Assert.Equal(200, (int)response.StatusCode);
+        JsonElement[] listed = [.. (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("deployments").EnumerateArray()];
+        Assert.Equal(["chat", "old"], listed.Select(d => d.GetProperty("deployment_id").GetString()));
+        Assert.Equal(["ready", "failed"], listed.Select(d => d.GetProperty("state").GetString()));
+        Assert.Equal("no checkpoint", listed[1].GetProperty("problem").GetString());
+    }
+
+    [Fact]
+    public async Task Post_Answers_400_Without_Its_Fields_And_200_With_The_Status_The_Load_Ended_In()
+    {
+        ScriptedDeploymentsText text = new()
+        {
+            Deploy = request => new DeploymentStatus(request.DeploymentId, request.Model.Requested, request.Device, DeploymentState.Failed, "the load failed"),
+        };
+        using WebApplicationFactory<Program> app = WithText(text);
+        using HttpClient client = app.CreateClient();
+
+        using HttpResponseMessage missing = await client.PostAsJsonAsync("/admin/deployments", new { model = "llm-a" });
+        Assert.Equal(400, (int)missing.StatusCode);
+
+        // A failed load is reported in the status, not as an error.
+        using HttpResponseMessage failed = await client.PostAsJsonAsync("/admin/deployments", new { deployment_id = "chat", model = "llm-a", device = "cpu" });
+        Assert.Equal(200, (int)failed.StatusCode);
+        JsonElement body = await failed.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("failed", body.GetProperty("state").GetString());
+        Assert.Equal("the load failed", body.GetProperty("problem").GetString());
+    }
+
+    [Theory]
+    [InlineData("argument", 400)]
+    [InlineData("engine", 400)]
+    [InlineData("unsupported", 501)]
+    public async Task Post_Maps_A_Thrown_Error_Through_GenerationErrors(string error, int status)
+    {
+        ScriptedDeploymentsText text = new()
+        {
+            Deploy = _ => throw (error switch
+            {
+                "argument" => new ArgumentException("bad deployment request"),
+                "engine" => new HartsyInference.Core.Exceptions.HartsyInferenceException("bad model"),
+                _ => (Exception)new NotSupportedException("no deployments here"),
+            }),
+        };
+        using WebApplicationFactory<Program> app = WithText(text);
+        using HttpClient client = app.CreateClient();
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync("/admin/deployments", new { deployment_id = "chat", model = "llm-a" });
+
+        Assert.Equal(status, (int)response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Capacity_Reports_Each_Deployment_In_Pages()
+    {
+        ScriptedDeploymentsText text = new();
+        text.Listed.Add(new DeploymentStatus("chat", "llm-a", "cuda:0", DeploymentState.Ready, null));
+        text.Listed.Add(new DeploymentStatus("host", "dsv41", "cpu", DeploymentState.Ready, null));
+        text.Capacities["chat"] = new DeploymentCapacity(DeploymentState.Ready, Active: 2, Queued: 1, MaxConcurrent: 64, KvPagesFree: 10, KvPagesTotal: 32);
+        text.Capacities["host"] = new DeploymentCapacity(DeploymentState.Ready, Active: 0, Queued: 0, MaxConcurrent: 4, KvPagesFree: null, KvPagesTotal: null);
+        using WebApplicationFactory<Program> app = WithText(text);
+        using HttpClient client = app.CreateClient();
+
+        using HttpResponseMessage response = await client.GetAsync("/admin/capacity");
+
+        Assert.Equal(200, (int)response.StatusCode);
+        JsonElement[] rows = [.. (await response.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("deployments").EnumerateArray()];
+        Assert.Equal(2, rows.Length);
+        Assert.Equal("chat", rows[0].GetProperty("deployment_id").GetString());
+        Assert.Equal(2, rows[0].GetProperty("active").GetInt32());
+        Assert.Equal(1, rows[0].GetProperty("queued").GetInt32());
+        Assert.Equal(64, rows[0].GetProperty("max_concurrent").GetInt32());
+        Assert.Equal(10, rows[0].GetProperty("kv_pages_free").GetInt32());
+        Assert.Equal(32, rows[0].GetProperty("kv_pages_total").GetInt32());
+        Assert.Equal(JsonValueKind.Null, rows[1].GetProperty("kv_pages_total").ValueKind);
+    }
+
+    /// <summary>What the real engine answers for a model that resolves to no checkpoint: <c>ModelResolver.Resolve</c> does not throw, and <c>DeployAsync</c> records the
+    /// load failure in the deployment, so the route answers 200 with state <c>failed</c> rather than an error status.</summary>
+    [Fact]
+    public async Task Post_Of_An_Unresolvable_Model_On_The_Real_Engine_Is_200_With_State_Failed()
+    {
+        using HttpClient client = _factory.CreateClient();
+
+        using HttpResponseMessage response = await client.PostAsJsonAsync("/admin/deployments",
+            new { deployment_id = "missing", model = "hartsy-no-such-model-0f3a" });
+
+        Assert.Equal(200, (int)response.StatusCode);
+        JsonElement body = await response.Content.ReadFromJsonAsync<JsonElement>();
+        Assert.Equal("failed", body.GetProperty("state").GetString());
+        Assert.Contains("No checkpoint found", body.GetProperty("problem").GetString());
+    }
+
     /// <summary>A text service that answers the deployment calls from a script and records what the routes asked of it.</summary>
     private sealed class ScriptedDeploymentsText : ITextService
     {

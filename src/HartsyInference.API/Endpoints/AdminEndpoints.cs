@@ -83,9 +83,9 @@ public static class AdminEndpoints
             };
         });
 
-        app.MapGet("/admin/capacity", (IInferenceEngine engine) => Results.Ok(new
+        app.MapGet("/admin/capacity", (IInferenceEngine engine) => Results.Ok(new DeploymentCapacityResponse
         {
-            deployments = engine.Text.Deployments.Select(d => CapacityDto.For(d, engine.Text.Capacity(d.DeploymentId))).ToList(),
+            Deployments = [.. engine.Text.Deployments.Select(d => CapacityDto.For(d, engine.Text.Capacity(d.DeploymentId)))],
         }));
 
         app.MapGet("/admin/models", (IInferenceEngine engine) =>
