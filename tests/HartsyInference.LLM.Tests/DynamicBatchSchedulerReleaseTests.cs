@@ -83,7 +83,7 @@ public sealed class DynamicBatchSchedulerReleaseTests
     }
 
     /// <summary>A tokenizer with no stop ids, so a request runs to its budget unless it is cancelled or fails.</summary>
-    private sealed class NoStopTokenizer : ILlmTokenizer
+    internal sealed class NoStopTokenizer : ILlmTokenizer
     {
         public int[] Encode(string text, bool addSpecial) => throw new NotSupportedException();
         public int[] EncodeOrdinary(string text) => throw new NotSupportedException();

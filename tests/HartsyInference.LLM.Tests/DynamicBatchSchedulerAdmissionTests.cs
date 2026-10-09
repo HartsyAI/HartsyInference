@@ -99,6 +99,47 @@ public sealed class DynamicBatchSchedulerAdmissionTests
         foreach (Tensor t in w.Values) t.Dispose();
     }
 
+    [Fact]
+    public async Task A_Cancelled_Waiter_Behind_The_Head_Gives_Up_Its_Place_Before_The_Head_Is_Admitted()
+    {
+        TransformerConfig cfg = DynamicBatchSchedulerTests.Cfg();
+        Dictionary<string, Tensor> w = DynamicBatchSchedulerTests.Weights(cfg);
+        try
+        {
+            using CpuBackend backend = new();
+            using GenericTransformer model = new(cfg);
+            model.LoadWeights(w, "model");
+            using ManualResetEventSlim entered = new(false);
+            using ManualResetEventSlim release = new(false);
+            DynamicBatchSchedulerShutdownTests.HeldPrefillModel held = new(new GenericTransformerModel(model, backend), entered, release);
+            using PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, pageSize: 4, maxPages: 64);
+            using DynamicBatchScheduler scheduler = new(held, new DynamicBatchSchedulerReleaseTests.NoStopTokenizer(), pool, maxQueued: 2, maxActiveSequences: 1);
+
+            Task<GenerationResult> a = scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([1, 2, 3], 4, seed: 0), null, CancellationToken.None);
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(30)), "the first prefill never started");
+            // B, at the head, is admitted only once A ends; whether C is gone by then is read on the loop, inside B's admission.
+            Task<GenerationResult>? c = null;
+            bool cGoneWhenBAdmitted = false;
+            GenerationRequest second = DynamicBatchSchedulerTests.Req([4, 5], 4, seed: 0) with { OnPrefillCompleted = _ => cGoneWhenBAdmitted = c!.IsCompleted };
+            Task<GenerationResult> b = scheduler.SubmitAsync(second, null, CancellationToken.None);
+            // C cancels itself once a pass has left it waiting at place 2, behind B: only a sweep of the whole queue frees its place before B leaves the head.
+            using CancellationTokenSource cancelC = new();
+            GenerationRequest third = DynamicBatchSchedulerTests.Req([6, 7], 4, seed: 0) with { OnQueued = _ => cancelC.Cancel() };
+            c = scheduler.SubmitAsync(third, null, cancelC.Token);
+
+            release.Set();
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => c).WaitAsync(TimeSpan.FromSeconds(30));
+            // C's place in the two-request queue is free again, so one more request is taken.
+            Task<GenerationResult> d = scheduler.SubmitAsync(DynamicBatchSchedulerTests.Req([8], 4, seed: 0), null, CancellationToken.None);
+            await Task.WhenAll(a, b, d).WaitAsync(TimeSpan.FromSeconds(60));
+            Assert.True(cGoneWhenBAdmitted, "the cancelled waiter kept its place until the request ahead of it was admitted");
+        }
+        finally
+        {
+            foreach (Tensor t in w.Values) t.Dispose();
+        }
+    }
+
     [Theory]
     [InlineData(true)]
     [InlineData(false)]

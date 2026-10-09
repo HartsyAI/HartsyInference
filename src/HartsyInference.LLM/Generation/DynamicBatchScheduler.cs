@@ -318,6 +318,7 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
     /// larger than the whole pool is refused now, since waiting can never make it fit.</summary>
     private async Task AdmitWaitingAsync(List<ActiveSeq> active)
     {
+        SweepCancelled();
         while (true)
         {
             PendingRequest? head;
@@ -369,6 +370,32 @@ public sealed class DynamicBatchScheduler : IBatchScheduler, IDisposable
                 Logs.Error("DynamicBatchScheduler: admission/prefill failed for one request", ex);
                 head.Completion.TrySetException(ex);
             }
+        }
+    }
+
+    /// <summary>Takes every cancelled request off the waiting queue, wherever it stands, and completes it as cancelled, so a caller that gave up stops holding a place in
+    /// the bounded queue while the requests ahead of it are still waiting.</summary>
+    private void SweepCancelled()
+    {
+        List<PendingRequest>? cancelled = null;
+        lock (_waitingGate)
+        {
+            bool any = false;
+            foreach (PendingRequest pending in _waiting)
+                any |= pending.Ct.IsCancellationRequested;
+            // One rotation through the queue keeps arrival order for everyone who stays.
+            for (int i = any ? _waiting.Count : 0; i > 0; i--)
+            {
+                PendingRequest pending = _waiting.Dequeue();
+                if (pending.Ct.IsCancellationRequested) (cancelled ??= []).Add(pending);
+                else _waiting.Enqueue(pending);
+            }
+        }
+        if (cancelled is null) return;
+        foreach (PendingRequest pending in cancelled)
+        {
+            Leave();
+            pending.Completion.TrySetCanceled(pending.Ct);
         }
     }
 
