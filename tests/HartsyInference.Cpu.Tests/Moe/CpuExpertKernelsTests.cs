@@ -54,7 +54,7 @@ public sealed unsafe class CpuExpertKernelsTests
 
     [Theory]
     [MemberData(nameof(Cases))]
-    public void AvxPathMatchesScalarBitForBit(string dtypeName, int programKind, int rows)
+    public void AvxPathMatchesScalarToFloatRounding(string dtypeName, int programKind, int rows)
     {
         ExpertDTypes dtypes = ParseDTypes(dtypeName);
         ExpertProgram program = ProgramFor(programKind);
@@ -66,8 +66,10 @@ public sealed unsafe class CpuExpertKernelsTests
         CpuExpertKernels.Apply(program, dtypes, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, simd);
         CpuExpertKernels.ApplyScalar(program, dtypes, Hidden, Intermediate, weights.Gate, weights.Up, weights.Down, x, rows, scalar);
 
-        for (int i = 0; i < simd.Length; i++)
-            Assert.Equal(BitConverter.SingleToInt32Bits(scalar[i]), BitConverter.SingleToInt32Bits(simd[i]));
+        // Both paths take exact integer block sums; only the float fold's order differs (lane-wise, then one sum per row), so they
+        // agree to float rounding. The bound is far below the kernel's quantization tolerance.
+        (float maxAbs, float relative) = Measure(scalar, simd);
+        Assert.True(relative <= 1e-5f, $"{dtypeName} program {programKind} rows {rows}: AVX2 differs from scalar by {relative:E3} (max abs {maxAbs:E3}).");
     }
 
     [Theory]

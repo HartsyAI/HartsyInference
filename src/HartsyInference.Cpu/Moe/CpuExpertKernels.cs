@@ -16,9 +16,9 @@ namespace HartsyInference.Cpu.Moe;
 /// one expert's slice of its stacked expert tensor.</para>
 ///
 /// <para><b>Integer path.</b> Each token's input row is quantized once to int8 in 32-element blocks, each with a float
-/// scale and the plain sum of its codes. A weight row's dot product is then an exact int32 sum per block, folded into
-/// float in a fixed order. The integer sums do not depend on order, so the AVX2 and scalar paths produce identical
-/// bits; the float fold is one shared scalar code path.</para>
+/// scale and the plain sum of its codes. A weight row's dot product is then an exact int32 sum per block, scaled into float.
+/// The scalar path folds the blocks one by one; the AVX2 path accumulates them lane-wise and sums once per row, so the two
+/// agree to float rounding rather than bit for bit. Each path on its own is deterministic.</para>
 ///
 /// <para><b>Allocation.</b> Scratch comes from <see cref="ArrayPool{T}"/>; a steady-state call allocates nothing.</para>
 /// </summary>
@@ -129,21 +129,30 @@ public static unsafe partial class CpuExpertKernels
 
     // The fan-outs live in their own methods: a lambda's captured parameters are allocated on entry to the method that declares
     // them, whichever branch then runs, and the serial path must stay allocation-free. Pointers cross as addresses because a lambda
-    // cannot capture a fixed local.
+    // cannot capture a fixed local. CpuParallel rather than CpuExpertPool: measured on this host, an empty 32-range fan-out costs
+    // about 22 us through CpuParallel and about 750 us through CpuExpertPool, whose every worker must acknowledge every call.
     private static void GateUpParallel(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, nint gate, nint up,
         nint codes, nint scales, nint sums, int rows, nint hiddenAct, bool simd) =>
-        CpuParallel.ForRanges(intermediate, RowsPerRange, 2L * rows * hidden, (start, length) =>
+        CpuParallel.ForRanges(intermediate, RangeLength(intermediate), 2L * rows * hidden, (start, length) =>
             GateUpRows(program, dtypes, hidden, intermediate, (byte*)gate, (byte*)up, (sbyte*)codes, (float*)scales, (int*)sums, rows,
                 (float*)hiddenAct, (int)start, (int)(start + length), simd));
 
     private static void DownParallel(ExpertDTypes dtypes, int hidden, int intermediate, nint down, nint codes, nint scales, nint sums,
         int rows, nint y, bool simd) =>
-        CpuParallel.ForRanges(hidden, RowsPerRange, (long)rows * intermediate, (start, length) =>
+        CpuParallel.ForRanges(hidden, RangeLength(hidden), (long)rows * intermediate, (start, length) =>
             DownRows(dtypes, hidden, intermediate, (byte*)down, (sbyte*)codes, (float*)scales, (int*)sums, rows, (float*)y, (int)start,
                 (int)(start + length), simd));
 
-    /// <summary>Output rows a parallel range covers: enough dot products to outweigh handing the range out.</summary>
-    private const int RowsPerRange = 64;
+    /// <summary>Output rows per range: about two ranges per worker so an uneven split still balances, and never so few rows that
+    /// handing a range out outweighs it.</summary>
+    private static int RangeLength(int outputRows)
+    {
+        int workers = Math.Max(1, CpuParallel.MaxThreads);
+        return Math.Max(MinRowsPerRange, (outputRows + 2 * workers - 1) / (2 * workers));
+    }
+
+    /// <summary>Fewest output rows a parallel job covers: enough dot products to outweigh handing the job out.</summary>
+    private const int MinRowsPerRange = 16;
 
     /// <summary>Gate and up rows <c>[first, end)</c> against the quantized input, activated and clamped into <paramref name="hiddenAct"/>.</summary>
     private static void GateUpRows(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, byte* gate, byte* up,
@@ -215,9 +224,11 @@ public static unsafe partial class CpuExpertKernels
         }
     }
 
-    /// <summary>One weight row against one quantized activation row: the float dot product, folded block by block.</summary>
+    /// <summary>One weight row against one quantized activation row: the float dot product. The AVX2 path (<see cref="DotRowAvx2"/>)
+    /// returns early and accumulates lane-wise; the scalar path below folds block by block.</summary>
     private static float DotRow(DType dtype, byte* row, sbyte* act, float* actScale, int* actSum, int dim, bool simd)
     {
+        if (simd) return DotRowAvx2(dtype, row, act, actScale, actSum, dim);
         float acc = 0f;
         if (dtype == DType.Q8_0)
         {
@@ -227,14 +238,14 @@ public static unsafe partial class CpuExpertKernels
                 byte* block = row + b * Q8BlockBytes;
                 float weightScale = ReadHalf(block);
                 sbyte* w = (sbyte*)(block + 2);
-                int dot = simd ? Q8BlockDotAvx2(w, act + b * QuantBlock) : Q8BlockDotScalar(w, act + b * QuantBlock);
+                int dot = Q8BlockDotScalar(w, act + b * QuantBlock);
                 acc += weightScale * actScale[b] * dot;
             }
             return acc;
         }
 
-        if (dtype == DType.Q6_K) return DotRowQ6K(row, act, actScale, dim, simd);
-        if (dtype == DType.Q5_K) return DotRowQ5K(row, act, actScale, actSum, dim, simd);
+        if (dtype == DType.Q6_K) return DotRowQ6K(row, act, actScale, dim);
+        if (dtype == DType.Q5_K) return DotRowQ5K(row, act, actScale, actSum, dim);
 
         // Q4_K: 256-element super-blocks of eight 32-element sub-blocks, each with a 6-bit scale and minimum.
         int superBlocks = dim / Q4KSuperBlockElems;
@@ -251,7 +262,7 @@ public static unsafe partial class CpuExpertKernels
                 int b = sb * 8 + j;
                 byte* subQuants = quants + (j / 2) * QuantBlock;
                 int shift = (j % 2 == 0) ? 0 : 4;
-                int dot = simd ? Q4SubDotAvx2(subQuants, shift, act + b * QuantBlock) : Q4SubDotScalar(subQuants, shift, act + b * QuantBlock);
+                int dot = Q4SubDotScalar(subQuants, shift, act + b * QuantBlock);
                 float sub = d * sc * dot - dmin * mm * actSum[b];
                 acc += actScale[b] * sub;
             }
@@ -261,7 +272,7 @@ public static unsafe partial class CpuExpertKernels
 
     /// <summary>Q5_K: Q4_K's super-block (scales and minimums packed the same way) with a fifth bit per value in <c>qh</c>.
     /// Value <c>i</c> of sub-block <c>j</c> is the nibble of <c>qs</c> plus 16 when bit <c>j</c> of <c>qh[i]</c> is set.</summary>
-    private static float DotRowQ5K(byte* row, sbyte* act, float* actScale, int* actSum, int dim, bool simd)
+    private static float DotRowQ5K(byte* row, sbyte* act, float* actScale, int* actSum, int dim)
     {
         float acc = 0f;
         int superBlocks = dim / Q4KSuperBlockElems;
@@ -279,8 +290,7 @@ public static unsafe partial class CpuExpertKernels
                 int b = sb * 8 + j;
                 byte* subQuants = qs + (j / 2) * QuantBlock;
                 int shift = (j % 2 == 0) ? 0 : 4;
-                int dot = simd ? Q5SubDotAvx2(subQuants, shift, qh, j, act + b * QuantBlock)
-                    : Q5SubDotScalar(subQuants, shift, qh, j, act + b * QuantBlock);
+                int dot = Q5SubDotScalar(subQuants, shift, qh, j, act + b * QuantBlock);
                 acc += actScale[b] * (d * sc * dot - dmin * mm * actSum[b]);
             }
         }
@@ -290,7 +300,7 @@ public static unsafe partial class CpuExpertKernels
     /// <summary>Q6_K: 256-element super-blocks of two 128-element halves. A value is a low nibble from <c>ql</c> and two high bits
     /// from <c>qh</c>, minus 32, scaled by a signed 8-bit scale per 16 values. A 32-value activation block therefore spans two
     /// scales, and its integer dot is kept as two 16-value sums.</summary>
-    private static float DotRowQ6K(byte* row, sbyte* act, float* actScale, int dim, bool simd)
+    private static float DotRowQ6K(byte* row, sbyte* act, float* actScale, int dim)
     {
         float acc = 0f;
         int superBlocks = dim / Q4KSuperBlockElems;
@@ -308,8 +318,7 @@ public static unsafe partial class CpuExpertKernels
                     int b = sb * 8 + half * 4 + g;
                     sbyte* a = act + b * QuantBlock;
                     int lo, hi;
-                    if (simd) Q6GroupDotAvx2(ql, qh, g, a, out lo, out hi);
-                    else Q6GroupDotScalar(ql, qh, g, a, out lo, out hi);
+                    Q6GroupDotScalar(ql, qh, g, a, out lo, out hi);
                     int scaleBase = half * 8 + 2 * g;
                     acc += actScale[b] * d * (sc[scaleBase] * lo + sc[scaleBase + 1] * hi);
                 }
@@ -318,9 +327,11 @@ public static unsafe partial class CpuExpertKernels
         return acc;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static float ReadHalf(byte* p) => (float)Unsafe.ReadUnaligned<Half>(p);
 
     /// <summary>The 6-bit scale and minimum of sub-block <paramref name="j"/>, unpacked as in the GGUF K-quant codecs.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static void GetScaleMinK4(int j, byte* q, out int sc, out int mm)
     {
         if (j < 4)

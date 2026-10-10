@@ -22,6 +22,22 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.333
+
+- **Faster CPU expert kernels for expert offload.** Qwen3-30B-A3B Q4_K_M offloaded on the RTX 3060 now decodes at 6.7-7.1 tok/s, up from 5.0, with the same 61% of routed rows on the GPU.
+  - The AVX2 row dot products accumulate each weight row in float vectors and sum once per row, instead of a horizontal sum and scalar fold per 32-value block.
+  - Products use `pmaddubsw`, with the sign trick for signed weights (Q6_K after its offset, Q8_0). The 16-bit pairs cannot saturate.
+  - The kernel's small helpers are inlined, which was most of the gain. Q4_K and Q5_K unpack each super-block's eight scales and minimums once, and `ApplyParallel` splits rows into about two ranges per worker.
+  - One real expert row (Q4_K gate/up, Q6_K down, after warm-up):
+
+    | Kernel | Serial | Parallel |
+    |---|---|---|
+    | Before | 1.36 ms | 0.9 ms |
+    | After | 0.77 ms | 0.40 ms |
+
+  - The scalar path is unchanged. AVX2 now agrees with it to float rounding (relative 1e-5) rather than bit for bit, because the fold order differs; `CpuExpertKernelsTests` holds that bound alongside the unchanged reference tolerances.
+  - `CpuExpertPool` was tried for the fan-out and measured at about 750 us per empty 32-job call on this host, against 22 us for `CpuParallel`, so the fan-out stays on `CpuParallel`.
+
 ## alpha.332
 
 - **Fixed: the repetition penalty applies once per distinct token, not once per occurrence.** `RepetitionPenaltyStep` divided a token's logit by the penalty for every time it had been generated, so a token seen n times was suppressed by `penalty^n`. Hugging Face and llama.cpp apply it once per token. At the 1.1 the LLM Assistant extension sends by default, a few thousand tokens of reasoning (Qwen3-30B-A3B reviewing code with thinking on) crushed spaces, punctuation and the identifiers under review. The output turned into misspellings (`_correctioinBiase`, `SigmoideLogItAdd`) and drifted into Chinese (1,908 CJK characters). With the fix the same review has neither, and it finishes on its own.
