@@ -67,6 +67,25 @@ public partial interface IBackend
     void MoeCombineSlots(Tensor output, Tensor slotOut, Tensor topkWeight, Tensor? shared, Tensor? sharedGateLogit, int topk) =>
         throw NotSupportedPrimitive(nameof(MoeCombineSlots));
 
+    /// <summary>True when <see cref="MoeExpertsGrouped"/> and <see cref="MoeCombinePairs"/> run experts stored as <paramref name="expertType"/>.</summary>
+    bool SupportsMoeExpertsGrouped(DType expertType) => false;
+
+    /// <summary>The per-expert GEMMs of a large MoE batch, with the routing already on the device: for every expert <c>e</c> with rows
+    /// <c>offsets[e]..offsets[e+1]</c> of the expert-major order, <c>expertOut[rows] = down[e] . (act(gate[e] . x[perm]) * (up[e] . x[perm]))</c>.
+    /// Nothing is read back; the caller reads <paramref name="offsets"/> from <see cref="MoeBuildDispatch"/> once per layer.</summary>
+    /// <param name="expertOut">F32 <c>[1, rows, hidden]</c>, rows in expert-major order.</param>
+    /// <param name="x">F32 <c>[1, tokens, hidden]</c>.</param>
+    /// <param name="permutedToken">I32 <c>[tokens * topk]</c> from <see cref="MoeBuildDispatch"/>: the token behind each expert-major row.</param>
+    /// <param name="offsets">Host copy of the I32 <c>[E + 1]</c> exclusive scan from <see cref="MoeBuildDispatch"/>.</param>
+    void MoeExpertsGrouped(Tensor expertOut, Tensor x, Tensor permutedToken, ReadOnlySpan<int> offsets, IReadOnlyList<Tensor> gateExperts,
+        IReadOnlyList<Tensor> upExperts, IReadOnlyList<Tensor> downExperts, bool gelu) =>
+        throw NotSupportedPrimitive(nameof(MoeExpertsGrouped));
+
+    /// <summary>Weighted sum of each token's expert-major rows through the pair map of <see cref="MoeBuildDispatch"/>, plus the optional
+    /// shared-expert row: <c>output[t] = sigmoid(sharedGateLogit[t]) * shared[t] + sum_j topkWeight[t,j] * expertOut[pairSlot[t,j]]</c>.</summary>
+    void MoeCombinePairs(Tensor output, Tensor expertOut, Tensor pairSlot, Tensor topkWeight, Tensor? shared, Tensor? sharedGateLogit, int topk) =>
+        throw NotSupportedPrimitive(nameof(MoeCombinePairs));
+
     private NotSupportedException NotSupportedPrimitive(string name) =>
         new NotSupportedException($"{name} is not implemented on the {Device} backend.");
 }

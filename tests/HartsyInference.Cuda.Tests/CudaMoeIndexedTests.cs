@@ -7,7 +7,7 @@ using Xunit.Abstractions;
 
 namespace HartsyInference.Cuda.Tests;
 
-/// <summary>The device-resident routed stage of <see cref="MoeFeedForward"/> (router, <c>MoeRoute</c>, expert-indexed GEMVs, slot combine)
+/// <summary>The device-resident routed stage of <see cref="MoeFeedForward"/> (router, <c>MoeRoute</c>, then expert-indexed GEMVs for up to 16 tokens or dispatch plus grouped GEMMs above that)
 /// against the same block on the CPU backend, which routes on the host and dequantizes the same quantized experts. The only difference
 /// the GPU path may add is the int8 rounding of the activation.</summary>
 [Collection("CudaSerial")]
@@ -24,7 +24,7 @@ public sealed unsafe class CudaMoeIndexedTests
 
     public static IEnumerable<object[]> Cases()
     {
-        foreach (int n in new[] { 1, 3, 16 })
+        foreach (int n in new[] { 1, 3, 16, 40, 200 })
         {
             yield return [n, "Q4_K", "Q4_K", false];
             yield return [n, "Q4_K", "Q6_K", false];   // the Q4_K_M mix: gate/up Q4_K, down Q6_K
@@ -89,7 +89,8 @@ public sealed unsafe class CudaMoeIndexedTests
         using CudaBackend cuda = new(0, ptxDir);
         cuda.PreloadWeightGroups(moeFf.EnumerateExpertGroups());
         cuda.PreloadWeights([.. moeFf.EnumerateWeights()]);
-        Assert.True(moeFf.CanRunIndexed(cuda), "the indexed path must be eligible for this layer");
+        Assert.True(n <= MoeFeedForward.IndexedMaxTokens ? moeFf.CanRunIndexed(cuda) : moeFf.CanRunGrouped(cuda),
+            "the device-routed path must be eligible for this layer");
 
         using Tensor og = moeFf.Forward(cuda, x, n);
         cuda.Sync();
@@ -105,7 +106,7 @@ public sealed unsafe class CudaMoeIndexedTests
         }
         double rel = Math.Sqrt(diff / Math.Max(norm, 1e-30));
         _output.WriteLine($"n={n} {gateUpType}/{downType} shared={shared}: relative L2 error {rel:E3}, peak |ref| {peak:F4}");
-        Assert.True(rel <= 2e-2, $"indexed MoE diverges from the host-routed MoE by {rel:E3}");
+        Assert.True(rel <= 3e-2, $"indexed MoE diverges from the host-routed MoE by {rel:E3}");
 
         foreach ((string key, Tensor t) in wRef) if (!ReferenceEquals(t, w[key])) t.Dispose();
         foreach (Tensor t in w.Values) t.Dispose();

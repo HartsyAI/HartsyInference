@@ -6,7 +6,7 @@ namespace HartsyInference.Cuda;
 // Expert-indexed MoE decode ops: gate/up with the activation fused, down, and the slot combine. The expert id of every routed
 // pair is read from device memory, so a layer's routed stage runs from the router output to the combine without a host read
 // and inside a captured graph.
-public sealed partial class CudaBackend
+public sealed unsafe partial class CudaBackend
 {
     /// <inheritdoc />
     public bool SupportsMoeExpertIndexed(DType expertType)
@@ -197,5 +197,165 @@ public sealed partial class CudaBackend
         GpuTransferHelper.FreeDevice(q.xq);
         GpuTransferHelper.FreeDevice(q.xd);
         GpuTransferHelper.FreeDevice(q.xs);
+    }
+
+    /// <inheritdoc />
+    public bool SupportsMoeExpertsGrouped(DType expertType)
+    {
+        if (_kernels is null || !_kernels.HasMoePrefillKernels || !_kernels.HasMoeKernels) return false;
+        if (!expertType.IsQuantized || !_kernels.GgufDequantTypes.Contains(expertType)) return false;
+        DType gemm = ResolveGemmDtype(DType.F32, expertType);
+        return gemm == DType.BF16 || gemm == DType.F16;
+    }
+
+    /// <inheritdoc />
+    public void MoeExpertsGrouped(Tensor expertOut, Tensor x, Tensor permutedToken, ReadOnlySpan<int> offsets,
+        IReadOnlyList<Tensor> gateExperts, IReadOnlyList<Tensor> upExperts, IReadOnlyList<Tensor> downExperts, bool gelu)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("MoeExpertsGrouped");
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        int experts = gateExperts.Count;
+        if (offsets.Length != experts + 1) throw new ArgumentException("offsets must hold experts + 1 entries.", nameof(offsets));
+        Tensor g0 = gateExperts[0], u0 = upExperts[0], d0 = downExperts[0];
+        DType gemmDtype = ResolveGemmDtype(DType.F32, g0.DType);
+        if (!SupportsMoeExpertsGrouped(g0.DType) || !SupportsMoeExpertsGrouped(d0.DType) || u0.DType != g0.DType
+            || ResolveGemmDtype(DType.F32, d0.DType) != gemmDtype)
+            throw new NotSupportedException($"MoeExpertsGrouped has no path for gate {g0.DType} / down {d0.DType}.");
+        int inter = (int)g0.Shape[0], hidden = (int)g0.Shape[1];
+        int rows = offsets[experts];
+        if (expertOut.ElementCount != (long)rows * hidden) throw new ArgumentException("expertOut must hold one row of hidden per routed pair.", nameof(expertOut));
+        int maxCount = 0;
+        for (int e = 0; e < experts; e++) maxCount = Math.Max(maxCount, offsets[e + 1] - offsets[e]);
+        bool bf16 = gemmDtype == DType.BF16;
+        int gemmType = CublasApi.DataTypeOf(gemmDtype);
+        int elem = gemmDtype.SizeInBytes;
+
+        ulong pX = 0, pPerm = 0, pOut = 0, permX = 0, gateOut = 0, upOut = 0, act = 0, wsGate = 0, wsUp = 0, wsDown = 0;
+        bool cachedOut = false;
+        try
+        {
+            pX = GpuTransferHelper.CopyToDevice(x);
+            pPerm = GpuTransferHelper.CopyToDevice(permutedToken);
+            nuint outBytes = GpuTransferHelper.ByteSize(expertOut);
+            pOut = GpuTransferHelper.AllocateDevice(outBytes);
+            if (rows > 0)
+            {
+                permX = GpuTransferHelper.AllocateDevice((nuint)((long)rows * hidden * elem));
+                gateOut = GpuTransferHelper.AllocateDevice((nuint)((long)maxCount * inter * sizeof(float)));
+                upOut = GpuTransferHelper.AllocateDevice((nuint)((long)maxCount * inter * sizeof(float)));
+                act = GpuTransferHelper.AllocateDevice((nuint)((long)maxCount * inter * elem));
+                long wsBytes = (long)inter * hidden * elem;
+                wsGate = GpuTransferHelper.AllocateDevice((nuint)wsBytes);
+                wsUp = GpuTransferHelper.AllocateDevice((nuint)wsBytes);
+                wsDown = GpuTransferHelper.AllocateDevice((nuint)wsBytes);
+                _kernels!.LaunchMoeGatherRows16(permX, pX, pPerm, rows, hidden, bf16, _stream.Handle);
+
+                float alpha = 1f, beta = 0f;
+                int compute = Compute32F(gemmType);
+                for (int e = 0; e < experts; e++)
+                {
+                    int first = offsets[e], count = offsets[e + 1] - first;
+                    if (count == 0) continue;
+                    ulong pG = GpuTransferHelper.CopyToDevice(gateExperts[e]);
+                    ulong pU = GpuTransferHelper.CopyToDevice(upExperts[e]);
+                    ulong pD = GpuTransferHelper.CopyToDevice(downExperts[e]);
+                    try
+                    {
+                        ulong wG = ExpertWeightCast(gateExperts[e], pG, gemmDtype, wsGate);
+                        ulong wU = ExpertWeightCast(upExperts[e], pU, gemmDtype, wsUp);
+                        ulong wD = ExpertWeightCast(downExperts[e], pD, gemmDtype, wsDown);
+                        ulong a = permX + (ulong)((long)first * hidden * elem);
+                        // Row-major out[count, n] = a[count, k] x w[n, k]^T is column-major out^T[n, count] = w^T x a^T.
+                        CublasApi.cublasGemmEx(_cublasHandle, CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N, inter, count, hidden, &alpha,
+                            wG, gemmType, hidden, a, gemmType, hidden, &beta, gateOut, CublasApi.CUDA_R_32F, inter, compute,
+                            CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        CublasApi.cublasGemmEx(_cublasHandle, CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N, inter, count, hidden, &alpha,
+                            wU, gemmType, hidden, a, gemmType, hidden, &beta, upOut, CublasApi.CUDA_R_32F, inter, compute,
+                            CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                        _kernels.LaunchMoeActMul16(act, gateOut, upOut, (long)count * inter, gelu, bf16, _stream.Handle);
+                        ulong dst = pOut + (ulong)((long)first * hidden * sizeof(float));
+                        CublasApi.cublasGemmEx(_cublasHandle, CublasApi.CUBLAS_OP_T, CublasApi.CUBLAS_OP_N, hidden, count, inter, &alpha,
+                            wD, gemmType, inter, act, gemmType, inter, &beta, dst, CublasApi.CUDA_R_32F, hidden, compute,
+                            CublasApi.CUBLAS_GEMM_DEFAULT).ThrowOnCublasError();
+                    }
+                    finally
+                    {
+                        GpuTransferHelper.FreeDevice(pG);
+                        GpuTransferHelper.FreeDevice(pU);
+                        GpuTransferHelper.FreeDevice(pD);
+                    }
+                }
+            }
+            GpuTransferHelper.CacheActivation(expertOut, pOut, outBytes);
+            cachedOut = true;
+        }
+        finally
+        {
+            if (!cachedOut) GpuTransferHelper.FreeDevice(pOut);
+            foreach (ulong p in new[] { permX, gateOut, upOut, act, wsGate, wsUp, wsDown })
+                if (p != 0) GpuTransferHelper.FreeDevice(p);
+            GpuTransferHelper.FreeDevice(pPerm);
+            GpuTransferHelper.FreeDevice(pX);
+        }
+    }
+
+    /// <summary>The 16-bit form of an expert weight for the GEMM: the cached cast when one exists, a newly cached one while free
+    /// memory stays above the quantized-weight headroom (the budget gate <c>Linear</c> applies), else a transient cast into
+    /// <paramref name="workspace"/>.</summary>
+    private ulong ExpertWeightCast(Tensor weight, ulong deviceWeight, DType gemmDtype, ulong workspace)
+    {
+        if (CacheWeightCasts && GpuTransferHelper.IsWeightCached(weight))
+        {
+            if (GpuTransferHelper.TryGetWeightCast(weight, gemmDtype, out ulong cached)) return cached;
+            nuint castBytes = (nuint)(weight.ElementCount * gemmDtype.SizeInBytes);
+            (long freeBytes, long totalBytes) = CudaMemory.GetMemInfo();
+            long headroom = Math.Max(4L << 30, totalBytes / 3);
+            if (freeBytes <= 0 || freeBytes - (long)castBytes >= headroom)
+            {
+                ulong cast = GpuTransferHelper.AllocateDevice(castBytes);
+                CastOnGpu(cast, deviceWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
+                GpuTransferHelper.CacheWeightCast(weight, gemmDtype, cast, castBytes);
+                return cast;
+            }
+        }
+        CastOnGpu(workspace, deviceWeight, weight.DType, gemmDtype, (int)weight.ElementCount);
+        return workspace;
+    }
+
+    /// <inheritdoc />
+    public void MoeCombinePairs(Tensor output, Tensor expertOut, Tensor pairSlot, Tensor topkWeight, Tensor? shared,
+        Tensor? sharedGateLogit, int topk)
+    {
+        using NvtxRange _nvtx = NvtxRange.Push("MoeCombinePairs");
+        using OpScope _op = EnterOp();
+        EnsureKernels();
+        int hidden = (int)output.Shape[output.Shape.Rank - 1];
+        int tokens = (int)(output.ElementCount / hidden);
+        int expertRows = (int)(expertOut.ElementCount / hidden);
+        ulong pOut = 0, pExp = 0, pSlot = 0, pW = 0, pShared = 0, pGate = 0;
+        bool cached = false;
+        try
+        {
+            pExp = GpuTransferHelper.CopyToDevice(expertOut);
+            pSlot = GpuTransferHelper.CopyToDevice(pairSlot);
+            pW = GpuTransferHelper.CopyToDevice(topkWeight);
+            if (shared is not null) pShared = GpuTransferHelper.CopyToDevice(shared);
+            if (sharedGateLogit is not null) pGate = GpuTransferHelper.CopyToDevice(sharedGateLogit);
+            nuint bytes = GpuTransferHelper.ByteSize(output);
+            pOut = GpuTransferHelper.AllocateDevice(bytes);
+            _kernels!.LaunchMoeCombinePairs(pOut, pExp, pSlot, pW, pShared, pGate, tokens, hidden, topk, expertRows, _stream.Handle);
+            GpuTransferHelper.CacheActivation(output, pOut, bytes);
+            cached = true;
+        }
+        finally
+        {
+            if (!cached) GpuTransferHelper.FreeDevice(pOut);
+            GpuTransferHelper.FreeDevice(pExp);
+            GpuTransferHelper.FreeDevice(pSlot);
+            GpuTransferHelper.FreeDevice(pW);
+            if (pShared != 0) GpuTransferHelper.FreeDevice(pShared);
+            if (pGate != 0) GpuTransferHelper.FreeDevice(pGate);
+        }
     }
 }

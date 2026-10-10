@@ -9,6 +9,8 @@ public sealed partial class CudaKernels
     private CudaModule? _moeIdQ4kModule, _moeIdQ6kModule, _moeIdQ8_0Module, _moeCombineSlotsModule;
     private nint _moeGateUpIdQ4k, _moeDownIdQ4k, _moeGateUpIdQ6k, _moeDownIdQ6k, _moeGateUpIdQ8_0, _moeDownIdQ8_0;
     private nint _moeCombineSlotsF32;
+    private CudaModule? _moePrefillModule;
+    private nint _moeGatherRows16, _moeActMul16, _moeCombinePairsF32;
 
     /// <summary>True when the indexed expert GEMV exists for experts stored as <paramref name="dtype"/>.</summary>
     public bool HasMoeExpertKernel(DType dtype) => dtype switch
@@ -21,6 +23,9 @@ public sealed partial class CudaKernels
 
     /// <summary>True when moe_combine_slots.ptx loaded.</summary>
     public bool HasMoeCombineSlots => _moeCombineSlotsF32 != 0;
+
+    /// <summary>True when moe_prefill.ptx loaded: the gather, activation product and pair combine around the per-expert GEMMs.</summary>
+    public bool HasMoePrefillKernels => _moeGatherRows16 != 0 && _moeActMul16 != 0 && _moeCombinePairsF32 != 0;
 
     private void LoadMoeExpertKernels()
     {
@@ -50,6 +55,14 @@ public sealed partial class CudaKernels
         {
             _moeCombineSlotsModule = LoadOwnedModule(combine);
             _moeCombineSlotsF32 = _moeCombineSlotsModule.GetFunction("moe_combine_slots_f32");
+        }
+        string prefill = Ptx("moe_prefill");
+        if (File.Exists(prefill))
+        {
+            _moePrefillModule = LoadOwnedModule(prefill);
+            _moeGatherRows16 = _moePrefillModule.GetFunction("moe_gather_rows_16");
+            _moeActMul16 = _moePrefillModule.GetFunction("moe_act_mul_16");
+            _moeCombinePairsF32 = _moePrefillModule.GetFunction("moe_combine_pairs_f32");
         }
     }
 
@@ -99,6 +112,42 @@ public sealed partial class CudaKernels
         void** a = stackalloc void*[7];
         a[0] = &oA; a[1] = &sA; a[2] = &wA; a[3] = &shA; a[4] = &gA; a[5] = &hA; a[6] = &kA;
         CudaDriverApi.cuLaunchKernel(_moeCombineSlotsF32, (uint)tokens, ((uint)hidden + 255) / 256, 1, 256, 1, 1, 0, stream, (nint)a, 0)
+            .ThrowOnError();
+    }
+
+    /// <summary>Gathers activation rows into expert-major order as 16-bit values: <c>out[r] = x[perm[r]]</c>, zero where <c>perm[r] &lt; 0</c>.</summary>
+    public unsafe void LaunchMoeGatherRows16(ulong output, ulong x, ulong perm, int rows, int hidden, bool bf16, nint stream)
+    {
+        if (_moeGatherRows16 == 0) throw new InvalidOperationException("moe_prefill.ptx not present in the Ptx folder.");
+        ulong oA = output, xA = x, pA = perm;
+        int rA = rows, hA = hidden, bA = bf16 ? 1 : 0;
+        void** a = stackalloc void*[6];
+        a[0] = &oA; a[1] = &xA; a[2] = &pA; a[3] = &rA; a[4] = &hA; a[5] = &bA;
+        CudaDriverApi.cuLaunchKernel(_moeGatherRows16, (uint)rows, 1, 1, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>16-bit <c>act(gate) * up</c> over <paramref name="count"/> values.</summary>
+    public unsafe void LaunchMoeActMul16(ulong output, ulong gate, ulong up, long count, bool gelu, bool bf16, nint stream)
+    {
+        if (_moeActMul16 == 0) throw new InvalidOperationException("moe_prefill.ptx not present in the Ptx folder.");
+        ulong oA = output, gA = gate, uA = up;
+        long cA = count;
+        int geluA = gelu ? 1 : 0, bA = bf16 ? 1 : 0;
+        void** a = stackalloc void*[6];
+        a[0] = &oA; a[1] = &gA; a[2] = &uA; a[3] = &cA; a[4] = &geluA; a[5] = &bA;
+        CudaDriverApi.cuLaunchKernel(_moeActMul16, (uint)((count + 255) / 256), 1, 1, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
+    }
+
+    /// <summary>Weighted sum of each token's expert-major rows via the pair-slot map, plus the optional shared-expert row.</summary>
+    public unsafe void LaunchMoeCombinePairs(ulong output, ulong expertOut, ulong pairSlot, ulong topkWeight, ulong shared,
+        ulong sharedGateLogit, int tokens, int hidden, int topk, int expertRows, nint stream)
+    {
+        if (_moeCombinePairsF32 == 0) throw new InvalidOperationException("moe_prefill.ptx not present in the Ptx folder.");
+        ulong oA = output, eA = expertOut, sA = pairSlot, wA = topkWeight, shA = shared, gA = sharedGateLogit;
+        int hA = hidden, kA = topk, rA = expertRows;
+        void** a = stackalloc void*[9];
+        a[0] = &oA; a[1] = &eA; a[2] = &sA; a[3] = &wA; a[4] = &shA; a[5] = &gA; a[6] = &hA; a[7] = &kA; a[8] = &rA;
+        CudaDriverApi.cuLaunchKernel(_moeCombinePairsF32, (uint)tokens, ((uint)hidden + 255) / 256, 1, 256, 1, 1, 0, stream, (nint)a, 0)
             .ThrowOnError();
     }
 }
