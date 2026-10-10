@@ -86,11 +86,19 @@ public sealed class GgufLanguageModel : IDisposable
         // directly (ignore_merges). Wrong split → wrong token ids → garbage output.
         string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
         bool llama3Family = pre is "llama-bpe" or "llama3" or "smaug-bpe";
-        bool gpt4o = pre is "gpt-4o" or "o200k";   // o200k_base split (Phi-4, GPT-OSS, GPT-4o)
-        bool singleDigit = pre == "kolibri1";   // llama.cpp LLAMA_VOCAB_PRE_TYPE_QWEN2; matches Kolibri-1's tokenizer.json split
-        string? preRegex = llama3Family ? Llama3PreTokenRegex : gpt4o ? Gpt4oPreTokenRegex : singleDigit ? Qwen2PreTokenRegex : null;
-        return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, preRegex, ignoreMerges: llama3Family);
+        return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, PreTokenRegexFor(pre), ignoreMerges: llama3Family);
     }
+
+    /// <summary>The split regex a GGUF's <c>tokenizer.ggml.pre</c> name selects, or null for the GPT-2 default. <c>qwen2</c> is
+    /// llama.cpp's QWEN2 type, and Qwen2 and Qwen3 GGUFs declare it, so they need the single-digit split. <c>kolibri1</c> names
+    /// the same split for Kolibri-1. Before, only <c>kolibri1</c> was mapped, so Qwen text tokenized as GPT-2 text.</summary>
+    internal static string? PreTokenRegexFor(string pre) => pre switch
+    {
+        "llama-bpe" or "llama3" or "smaug-bpe" => Llama3PreTokenRegex,
+        "gpt-4o" or "o200k" => Gpt4oPreTokenRegex,   // o200k_base split (Phi-4, GPT-OSS, GPT-4o)
+        "qwen2" or "kolibri1" => Qwen2PreTokenRegex,
+        _ => null,
+    };
 
     /// <summary>Compiles the model's own Jinja <c>chat_template</c> when present, but stays tolerant: some models ship templates using constructs the engine doesn't support (Python slicing), so falls back to ChatML (when the tokenizer has <c>&lt;|im_start|&gt;</c>/<c>&lt;|im_end|&gt;</c>) or <see cref="RawCompletionTemplate"/> rather than failing the whole load — a bare <see cref="GenerationRequest.Prompt"/> should never crash regardless of what turn format the model natively wants.</summary>
     internal static IChatTemplate BuildTemplate(GgufMetadata meta, ILlmTokenizer tokenizer)
