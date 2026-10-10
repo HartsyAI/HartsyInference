@@ -140,6 +140,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
         if (state is not FixedKvCache cache)
             throw new ArgumentException("Graph decode captures against a FixedKvCache.", nameof(state));
         TransformerConfig cfg = _transformer.Config;
+        System.Diagnostics.Stopwatch capClock = System.Diagnostics.Stopwatch.StartNew();
 
         // A cold model's first capture fails with CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED when a weight's lazy
         // first-touch upload lands mid-capture; a real single-token forward and head projection against a
@@ -150,9 +151,11 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
             _transformer.ProjectLogits(_backend, warmupHidden, 1).Dispose();
         }
 
+        Logs.Info($"[capture-timing] warmup {capClock.ElapsedMilliseconds} ms");
         // Stragglers uploaded inside the capture bake a memcpy node that replays every token.
         if (_preloadWeights) PreloadDecodeWeights();
 
+        Logs.Info($"[capture-timing] preload {capClock.ElapsedMilliseconds} ms");
         Tensor embedTable = _transformer.EnsureEmbedResidentForGraphDecode(_backend);
         _transformer.EnsurePleResidentForGraphDecode(_backend);
         (Tensor cosTable, Tensor sinTable) = _transformer.EnsureRopeTableForGraphDecode(_backend, cache.MaxSequenceLength);
@@ -170,6 +173,7 @@ public sealed class GenericTransformerModel : IGenerationModel, IGraphDecodable
             graph = _backend.CaptureGraph(() =>
                 _transformer.ForwardGraphDecodeStep(_backend, embedTable, cache, cosTable, sinTable, devicePos,
                     deviceTokenId, history, historyCount, repetitionPenalty, sampler, rng));
+            Logs.Info($"[capture-timing] captured {capClock.ElapsedMilliseconds} ms");
             return new GraphDecodeSession(_backend, graph!, devicePos, deviceTokenId, history, historyCount, pos, rng);
         }
         catch
