@@ -9875,6 +9875,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// so the reduction's full-mask shuffle remains valid. Unsupported inputs fall back to the CPU reference.</remarks>
     public unsafe void FlashAttention(Tensor output, Tensor query, Tensor key, Tensor value, int kvLen, int kvGroup, bool causal, int qOffset, float scale, float softcap = 0f, Tensor? sink = null, int slidingWindow = 0, Tensor? alibiSlopes = null)
     {
+        using NvtxRange _nvtxFa = NvtxRange.Push(NvtxRange.ProfileShapes ? $"FlashAttention tq={query.Shape[2]}" : "FlashAttention");
         ValidateFlashAttentionContract(
             output, query, key, value, kvLen, kvGroup, causal, qOffset, scale, softcap, sink, slidingWindow, alibiSlopes);
         int b = (int)query.Shape[0], hq = (int)query.Shape[1], tq = (int)query.Shape[2], d = (int)query.Shape[3];
@@ -9909,6 +9910,17 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             && CausalMaskFits(tq, kvLen, hq, d, kvGroup)
             && TryCausalPrefillSdpa(output, query, key, value, hq, hkv, tq, kvLen, qOffset, slidingWindow, d, scale))
         {
+            return;
+        }
+
+        // Prefill-shaped causal attention (a block of query rows): the tensor-core FlashAttention-2 kernel. The per-row kernel below
+        // is built for decode and costs hundreds of milliseconds a layer once thousands of query rows share it.
+        if (causal && tq >= Fa2MinQueryRows && sink is null && alibiSlopes is null && softcap == 0f
+            && query.DType == DType.F32 && output.DType == DType.F32 && (key.DType == DType.F32 || f16Kv) && value.DType == key.DType
+            && _kernels is { HasFa2Causal: true } && CudaKernels.Fa2SupportsHeadDim(d) && hq % Math.Max(1, hkv) == 0
+            && EngineKnobs.Fa2Prefill.Value)
+        {
+            FlashAttentionFa2(output, query, key, value, b, hq, hkv, tq, lk, d, kvLen, kvGroup <= 0 ? 1 : kvGroup, qOffset, scale, slidingWindow, f16Kv);
             return;
         }
 

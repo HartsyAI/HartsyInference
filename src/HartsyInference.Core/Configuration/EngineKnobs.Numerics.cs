@@ -197,6 +197,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SandwichFusion =
         Bool("numerics.sandwichFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.");
 
+    /// <summary>Kill-switch for the tensor-core causal FlashAttention-2 kernel used for LLM prefill and draft-verify blocks.</summary>
+    public static readonly Knob<bool> Fa2Prefill =
+        Bool("numerics.fa2Prefill", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs causal LLM attention over a block of 16 or more query rows with the F16 tensor-core FlashAttention-2 kernel (F32 accumulate); =0 returns to the per-row F32 kernel.");
+
     /// <summary>Kill-switch for the device-resident routed-expert stage of MoE decode (router, expert ids and expert GEMVs stay on the device).</summary>
     public static readonly Knob<bool> MoeIndexed =
         Bool("numerics.moeIndexed", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the routed experts of a small MoE batch (decode) entirely on the device with expert-indexed GEMVs; =0 returns to the host-routed per-expert loop.");
