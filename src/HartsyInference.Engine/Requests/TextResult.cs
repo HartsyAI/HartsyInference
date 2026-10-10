@@ -17,4 +17,10 @@ public sealed record TextResult
 
     /// <summary>A native tool call the model emitted; null when it produced plain text.</summary>
     public NativeToolCall? ToolCall { get; init; }
+
+    /// <summary>Prefill wall time in milliseconds (prompt processing up to the first token); 0 when the path did not time it.</summary>
+    public double PrefillMilliseconds { get; init; }
+
+    /// <summary>Decode wall time in milliseconds (first token onward); 0 when the path did not time it.</summary>
+    public double DecodeMilliseconds { get; init; }
 }

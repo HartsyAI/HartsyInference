@@ -101,6 +101,9 @@ public sealed class TextGenerationPipeline
         // between layers and a stopped one commits nothing, so the finally block's cache.Length-vs-promptIds.Length
         // reconciliation would otherwise run against a prompt that never went in.
         bool firstPrefillDone = false;
+        // Wall-clock split for the llama.cpp-style timings the API reports: prefill ends when the first logits row is sampled.
+        System.Diagnostics.Stopwatch clock = System.Diagnostics.Stopwatch.StartNew();
+        double prefillMs = 0;
         try
         {
             bool stopped;
@@ -115,6 +118,7 @@ public sealed class TextGenerationPipeline
                 next = sampler.Next(lastRow, generated);
             }
             firstPrefillDone = true;
+            prefillMs = clock.Elapsed.TotalMilliseconds;
 
             request.OnPrefillCompleted?.Invoke(promptIds.Length);
 
@@ -169,6 +173,7 @@ public sealed class TextGenerationPipeline
             }
 
             committed = true;
+            double decodeMs = clock.Elapsed.TotalMilliseconds - prefillMs;
             return new GenerationResult
             {
                 TokenIds = generated,
@@ -176,6 +181,8 @@ public sealed class TextGenerationPipeline
                 PromptTokens = promptIds.Length,
                 StoppedOnStopToken = stopped,
                 ReusedPromptTokens = reusedLen,
+                PrefillMilliseconds = prefillMs,
+                DecodeMilliseconds = decodeMs,
             };
         }
         catch (OperationCanceledException)

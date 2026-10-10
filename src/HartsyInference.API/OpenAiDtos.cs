@@ -157,6 +157,9 @@ public sealed class ChatCompletionRequest
     /// <summary>OpenAI-style <c>thinking</c>: <c>{"type": "enabled"}</c> or <c>{"type": "disabled"}</c> selects the model's reasoning mode.</summary>
     [JsonPropertyName("thinking")] public ChatThinkingDto? Thinking { get; set; }
 
+    /// <summary>llama.cpp-style chat-template switches; only <c>enable_thinking</c> is read, and only when <c>thinking</c> is absent.</summary>
+    [JsonPropertyName("chat_template_kwargs")] public ChatTemplateKwargsDto? ChatTemplateKwargs { get; set; }
+
     /// <summary>The caller's own user identifier. It is carried on the native request and not used by the engine yet; it does not choose the tenant.</summary>
     [JsonPropertyName("user")] public string? User { get; set; }
 
@@ -185,6 +188,9 @@ public sealed class ChatCompletionResponse
     [JsonPropertyName("model")] public required string Model { get; init; }
     [JsonPropertyName("choices")] public required IReadOnlyList<ChatCompletionChoice> Choices { get; init; }
     [JsonPropertyName("usage")] public required ChatUsage Usage { get; init; }
+
+    /// <summary>llama.cpp-style timings (the names llama-server and Strata's server emit). Present on non-streaming replies.</summary>
+    [JsonPropertyName("timings"), JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] public ChatTimings? Timings { get; init; }
 }
 
 public sealed class ChatCompletionChoice
@@ -199,6 +205,37 @@ public sealed class ChatUsage
     [JsonPropertyName("prompt_tokens")] public required int PromptTokens { get; init; }
     [JsonPropertyName("completion_tokens")] public required int CompletionTokens { get; init; }
     [JsonPropertyName("total_tokens")] public int TotalTokens => PromptTokens + CompletionTokens;
+}
+
+/// <summary>Per-request timings in the llama.cpp names. Prefill covers the prompt up to the first token and decode covers
+/// the tokens after it; speeds are tokens per second. A zero or unset duration reports a zero speed, never infinity.</summary>
+public sealed class ChatTimings
+{
+    [JsonPropertyName("prompt_n")] public required int PromptN { get; init; }
+    [JsonPropertyName("prompt_ms")] public required double PromptMs { get; init; }
+    [JsonPropertyName("prompt_per_second")] public required double PromptPerSecond { get; init; }
+    [JsonPropertyName("predicted_n")] public required int PredictedN { get; init; }
+    [JsonPropertyName("predicted_ms")] public required double PredictedMs { get; init; }
+    [JsonPropertyName("predicted_per_second")] public required double PredictedPerSecond { get; init; }
+
+    /// <summary>Builds the timings from the prefill and decode wall times.</summary>
+    public static ChatTimings From(int promptTokens, double prefillMs, int completionTokens, double decodeMs) => new()
+    {
+        PromptN = promptTokens,
+        PromptMs = prefillMs,
+        PromptPerSecond = PerSecond(promptTokens, prefillMs),
+        PredictedN = completionTokens,
+        PredictedMs = decodeMs,
+        PredictedPerSecond = PerSecond(completionTokens, decodeMs),
+    };
+
+    internal static double PerSecond(int tokens, double ms) => ms > 0 ? tokens * 1000.0 / ms : 0;
+}
+
+/// <summary>The chat-template switches a llama.cpp-style client sends. Only <c>enable_thinking</c> is read; it applies when <c>thinking</c> is absent.</summary>
+public sealed class ChatTemplateKwargsDto
+{
+    [JsonPropertyName("enable_thinking")] public bool? EnableThinking { get; set; }
 }
 
 /// <summary>One SSE chunk for streaming chat completions (<c>chat.completion.chunk</c>), OpenAI wire shape.</summary>
