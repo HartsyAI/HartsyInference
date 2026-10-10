@@ -998,8 +998,19 @@ public sealed class TextService : ITextService, IDisposable
         if (path is null || !PlacementApplies(deviceKey, path) || KeepsLoadedModel(slot, path, hfDirectory: false))
             return GateOrdinalsFor(slot, deviceKey);
         int primary = GateOrdinalFor(deviceKey);
-        // The device count only: a full topology probe opens a context per device, which the plan does once already.
-        return [primary, .. Enumerable.Range(0, CudaContext.GetDeviceCount()).Where(o => o != primary)];
+        int count;
+        try
+        {
+            // The device count only: a full topology probe opens a context per device, which the plan does once already.
+            count = CudaContext.GetDeviceCount();
+        }
+        catch (Exception ex)
+        {
+            // A driver failure surfaces from the planner, with its message, rather than from building the gate.
+            Logs.Debug($"[TextService] Device count unavailable for the load gate: {ex.Message}");
+            return GateOrdinalsFor(slot, deviceKey);
+        }
+        return [primary, .. Enumerable.Range(0, count).Where(o => o != primary)];
     }
 
     /// <summary>Whether the placement planner decides this load: a GGUF on a single CUDA device key, with no layer split or
@@ -1366,16 +1377,10 @@ public sealed class TextService : ITextService, IDisposable
     private static RetainedSequenceStore NewPrefixCacheStore() =>
         new(EngineKnobs.PrefixCacheMaxEntries.Value, EngineKnobs.PrefixCacheMaxBytes.Value);
 
-    /// <summary>Logs once per slot (debug level) when a request explicitly asks for a load-time-only setting
-    /// (<see cref="TextRequest.CacheWeightCasts"/>, <see cref="TextRequest.PreloadRedundantWeightSplits"/>) that
-    /// differs from what is actually in force on an ALREADY-loaded slot — e.g. a non-voice caller loaded this
-    /// device's slot first with the default, so a later voice request's VRAM-saving override is silently a no-op
-    /// without a reload. <paramref name="requested"/> null means the caller didn't ask, so there is nothing to
-    /// compare (no mismatch is possible by leaving it to the slot's existing setting). "Once" via
-    /// <see cref="TextDeviceSlot.LoggedSettingMismatches"/> — otherwise every turn of a long voice call would
-    /// repeat the identical line.</summary>
     /// <summary>Logs once per slot when a request asks for a different placement than the loaded model was given; the
     /// placement is decided at load, so it applies from the next load.</summary>
+    /// <remarks>Only a model the planner placed has a placement to compare against. A model loaded another way (an SSM, an
+    /// explicit split key, a non-GGUF checkpoint) was never planned, so a requested placement is not compared to it.</remarks>
     private static void LogPlacementMismatch(TextDeviceSlot slot, string deviceKey, string? requested)
     {
         if (slot.PlannedPlacement is not { } loaded || string.IsNullOrWhiteSpace(requested)) return;
@@ -1385,6 +1390,14 @@ public sealed class TextService : ITextService, IDisposable
             + $"({loaded.DeviceKey}). Placement is decided at load; unload the model to apply it.");
     }
 
+    /// <summary>Logs once per slot (debug level) when a request explicitly asks for a load-time-only setting
+    /// (<see cref="TextRequest.CacheWeightCasts"/>, <see cref="TextRequest.PreloadRedundantWeightSplits"/>) that
+    /// differs from what is actually in force on an ALREADY-loaded slot — e.g. a non-voice caller loaded this
+    /// device's slot first with the default, so a later voice request's VRAM-saving override is silently a no-op
+    /// without a reload. <paramref name="requested"/> null means the caller didn't ask, so there is nothing to
+    /// compare (no mismatch is possible by leaving it to the slot's existing setting). "Once" via
+    /// <see cref="TextDeviceSlot.LoggedSettingMismatches"/> — otherwise every turn of a long voice call would
+    /// repeat the identical line.</summary>
     private static void LogLoadTimeSettingMismatch(TextDeviceSlot slot, string deviceKey, string settingName, bool? requested, bool? applied)
     {
         if (requested is { } value && applied is { } inForce && value != inForce && slot.LoggedSettingMismatches.Add(settingName))

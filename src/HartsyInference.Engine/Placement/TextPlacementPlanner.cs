@@ -112,7 +112,9 @@ public static class TextPlacementPlanner
         if (mode == TextPlacementMode.Auto && split.Feasible && devices.Count > 1) return split;
 
         TextPlacement offload = Offload(demand, primary, hostFreeBytes);
-        if (mode == TextPlacementMode.Offload || offload.Feasible) return offload;
+        if (mode == TextPlacementMode.Offload) return offload;
+        // Auto fell through to offload: say why the faster placements did not fit, so the reason names what would change it.
+        if (offload.Feasible) return offload with { Reason = $"{offload.Reason} One GPU: {single.Reason} Split: {split.Reason}" };
 
         // Auto and nothing fits: report every account, so the reason names what would have to change.
         return offload with
@@ -132,6 +134,9 @@ public static class TextPlacementPlanner
     }
 
     /// <summary>Every device keeps its own reserve, and the KV cache splits with the layers, so the sum is what must fit.</summary>
+    /// <remarks>Approximate: it checks the total, not each device against the layer ranges <c>LlmSplitPlan</c> will give it, so a
+    /// very uneven pair could pass here and run short on one device. Tightening it to a per-device check belongs with the
+    /// expert-offload execution, where auto can fall through to offload instead.</remarks>
     private static TextPlacement Split(TextPlacementDemand demand, IReadOnlyList<TextPlacementDevice> devices)
     {
         string[] names = [.. devices.Select(static d => d.Device)];
