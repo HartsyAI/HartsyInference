@@ -80,23 +80,30 @@ public sealed class GgufLanguageModel : IDisposable
             return new RwkvWorldTokenizer(tokens, tokenType, bos, eos, extraStops);
         }
 
-        // Pre-tokenizer family decides the regex split + ignore_merges. The GPT-2/Qwen default keeps word
-        // spaces and newline runs; the Llama-3 family (llama-bpe) uses a different split (case-insensitive
-        // contractions, digits in groups of ≤3, newline-aware whitespace) and emits whole in-vocab pre-tokens
-        // directly (ignore_merges). Wrong split → wrong token ids → garbage output.
+        // A wrong split gives wrong token ids, so the pre-tokenizer name fixes both the split and ignore_merges.
         string pre = meta.GetString("tokenizer.ggml.pre") ?? "default";
-        bool llama3Family = pre is "llama-bpe" or "llama3" or "smaug-bpe";
-        return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, PreTokenRegexFor(pre), ignoreMerges: llama3Family);
+        return new GgufTokenizer(tokens, merges, tokenType, bos, eos, extraStops, PreTokenRegexFor(pre),
+            ignoreMerges: PreTokenizerFamilyFor(pre) == PreTokenizerFamily.Llama3);
     }
 
-    /// <summary>The split regex a GGUF's <c>tokenizer.ggml.pre</c> name selects, or null for the GPT-2 default. <c>qwen2</c> is
-    /// llama.cpp's QWEN2 type, and Qwen2 and Qwen3 GGUFs declare it, so they need the single-digit split. <c>kolibri1</c> names
-    /// the same split for Kolibri-1. Before, only <c>kolibri1</c> was mapped, so Qwen text tokenized as GPT-2 text.</summary>
-    internal static string? PreTokenRegexFor(string pre) => pre switch
+    /// <summary>The pre-tokenizer families that choose a split regex.</summary>
+    public enum PreTokenizerFamily { Default, Llama3, Gpt4o, Qwen2 }
+
+    /// <summary>Maps a <c>tokenizer.ggml.pre</c> name to its family. <c>qwen2</c> is llama.cpp's QWEN2 split.</summary>
+    internal static PreTokenizerFamily PreTokenizerFamilyFor(string pre) => pre switch
     {
-        "llama-bpe" or "llama3" or "smaug-bpe" => Llama3PreTokenRegex,
-        "gpt-4o" or "o200k" => Gpt4oPreTokenRegex,   // o200k_base split (Phi-4, GPT-OSS, GPT-4o)
-        "qwen2" or "kolibri1" => Qwen2PreTokenRegex,
+        "llama-bpe" or "llama3" or "smaug-bpe" => PreTokenizerFamily.Llama3,
+        "gpt-4o" or "o200k" => PreTokenizerFamily.Gpt4o,
+        "qwen2" or "kolibri1" => PreTokenizerFamily.Qwen2,
+        _ => PreTokenizerFamily.Default,
+    };
+
+    /// <summary>The split regex for a pre-tokenizer name, or null for the GPT-2 default.</summary>
+    internal static string? PreTokenRegexFor(string pre) => PreTokenizerFamilyFor(pre) switch
+    {
+        PreTokenizerFamily.Llama3 => Llama3PreTokenRegex,
+        PreTokenizerFamily.Gpt4o => Gpt4oPreTokenRegex,
+        PreTokenizerFamily.Qwen2 => Qwen2PreTokenRegex,
         _ => null,
     };
 

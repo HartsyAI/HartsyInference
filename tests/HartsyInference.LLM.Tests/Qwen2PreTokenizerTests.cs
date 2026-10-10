@@ -4,25 +4,25 @@ using Xunit;
 
 namespace HartsyInference.LLM.Tests;
 
-/// <summary>Qwen2 and Qwen3 GGUFs declare <c>tokenizer.ggml.pre = "qwen2"</c>, which must select the single-digit split that
-/// <c>kolibri1</c> uses. Mapping only <c>kolibri1</c> left Qwen prompts on the GPT-2 split, which tokenized them about 7% longer.</summary>
+/// <summary>Qwen2 and Qwen3 GGUFs declare <c>tokenizer.ggml.pre = "qwen2"</c>, which selects the single-digit split.</summary>
 public sealed class Qwen2PreTokenizerTests
 {
     [Theory]
-    [InlineData("qwen2")]
-    [InlineData("kolibri1")]
-    public void QwenNames_SelectTheSingleDigitSplit(string pre) =>
-        Assert.Equal(GgufLanguageModel.Qwen2PreTokenRegex, GgufLanguageModel.PreTokenRegexFor(pre));
-
-    [Theory]
-    [InlineData("default")]
-    [InlineData("llama-bpe")]
-    public void OtherNames_KeepTheirOwnSplit(string pre) =>
-        Assert.NotEqual(GgufLanguageModel.Qwen2PreTokenRegex, GgufLanguageModel.PreTokenRegexFor(pre));
+    [InlineData("default", GgufLanguageModel.PreTokenizerFamily.Default)]
+    [InlineData("llama-bpe", GgufLanguageModel.PreTokenizerFamily.Llama3)]
+    [InlineData("gpt-4o", GgufLanguageModel.PreTokenizerFamily.Gpt4o)]
+    [InlineData("qwen2", GgufLanguageModel.PreTokenizerFamily.Qwen2)]
+    [InlineData("kolibri1", GgufLanguageModel.PreTokenizerFamily.Qwen2)]
+    public void PreName_MapsToItsFamily(string pre, GgufLanguageModel.PreTokenizerFamily family) =>
+        Assert.Equal(family, GgufLanguageModel.PreTokenizerFamilyFor(pre));
 
     [Fact]
-    public void QwenText_SplitsEveryDigitApart() =>
+    public void DefaultFamily_UsesTheGpt2Split() =>
+        Assert.Null(GgufLanguageModel.PreTokenRegexFor("default"));
+
+    [Fact]
+    public void Qwen2Family_SplitsEveryDigitApart() =>
         Assert.Equal(
             ["year", " ", "2", "0", "2", "4", " and", " ", "3", "6", "5"],
-            Regex.Matches("year 2024 and 365", GgufLanguageModel.Qwen2PreTokenRegex).Select(m => m.Value).ToArray());
+            Regex.Matches("year 2024 and 365", GgufLanguageModel.PreTokenRegexFor("qwen2")!).Select(m => m.Value).ToArray());
 }
