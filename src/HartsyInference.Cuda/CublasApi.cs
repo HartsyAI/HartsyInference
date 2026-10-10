@@ -51,6 +51,21 @@ internal static partial class CublasApi
         int batchCount,
         int computeType, int algo);
 
+    /// <summary>One call for many independent GEMMs of different shapes (cuBLAS 12.5+). The scalar and dimension arrays are host arrays with one entry per
+    /// group; the three pointer arrays are DEVICE addresses of arrays holding one matrix pointer per GEMM.</summary>
+    [LibraryImport(LibName)]
+    internal static unsafe partial int cublasGemmGroupedBatchedEx(
+        nint handle,
+        int* transa, int* transb,
+        int* m, int* n, int* k,
+        float* alpha,
+        ulong Aarray, int Atype, int* lda,
+        ulong Barray, int Btype, int* ldb,
+        float* beta,
+        ulong Carray, int Ctype, int* ldc,
+        int groupCount, int* groupSize,
+        int computeType);
+
     // ── Operation Constants ─────────────────────────────────────────────
 
     internal const int CUBLAS_OP_N = 0;

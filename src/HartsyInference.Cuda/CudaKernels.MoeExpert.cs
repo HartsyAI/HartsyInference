@@ -10,7 +10,7 @@ public sealed partial class CudaKernels
     private nint _moeGateUpIdQ4k, _moeDownIdQ4k, _moeGateUpIdQ6k, _moeDownIdQ6k, _moeGateUpIdQ8_0, _moeDownIdQ8_0;
     private nint _moeCombineSlotsF32;
     private CudaModule? _moePrefillModule;
-    private nint _moeGatherRows16, _moeActMul16, _moeCombinePairsF32;
+    private nint _moeGatherRows16, _moeActMul16, _moeActMul16x16, _moeCombinePairsF32;
 
     /// <summary>True when the indexed expert GEMV exists for experts stored as <paramref name="dtype"/>.</summary>
     public bool HasMoeExpertKernel(DType dtype) => dtype switch
@@ -25,7 +25,7 @@ public sealed partial class CudaKernels
     public bool HasMoeCombineSlots => _moeCombineSlotsF32 != 0;
 
     /// <summary>True when moe_prefill.ptx loaded: the gather, activation product and pair combine around the per-expert GEMMs.</summary>
-    public bool HasMoePrefillKernels => _moeGatherRows16 != 0 && _moeActMul16 != 0 && _moeCombinePairsF32 != 0;
+    public bool HasMoePrefillKernels => _moeGatherRows16 != 0 && _moeActMul16 != 0 && _moeActMul16x16 != 0 && _moeCombinePairsF32 != 0;
 
     private void LoadMoeExpertKernels()
     {
@@ -62,6 +62,7 @@ public sealed partial class CudaKernels
             _moePrefillModule = LoadOwnedModule(prefill);
             _moeGatherRows16 = _moePrefillModule.GetFunction("moe_gather_rows_16");
             _moeActMul16 = _moePrefillModule.GetFunction("moe_act_mul_16");
+            _moeActMul16x16 = _moePrefillModule.GetFunction("moe_act_mul_16x16");
             _moeCombinePairsF32 = _moePrefillModule.GetFunction("moe_combine_pairs_f32");
         }
     }
@@ -149,5 +150,17 @@ public sealed partial class CudaKernels
         a[0] = &oA; a[1] = &eA; a[2] = &sA; a[3] = &wA; a[4] = &shA; a[5] = &gA; a[6] = &hA; a[7] = &kA; a[8] = &rA;
         CudaDriverApi.cuLaunchKernel(_moeCombinePairsF32, (uint)tokens, ((uint)hidden + 255) / 256, 1, 256, 1, 1, 0, stream, (nint)a, 0)
             .ThrowOnError();
+    }
+
+    /// <summary>16-bit <c>act(gate) * up</c> where gate and up are 16-bit too.</summary>
+    public unsafe void LaunchMoeActMul16x16(ulong output, ulong gate, ulong up, long count, bool gelu, bool bf16, nint stream)
+    {
+        if (_moeActMul16x16 == 0) throw new InvalidOperationException("moe_prefill.ptx not present in the Ptx folder.");
+        ulong oA = output, gA = gate, uA = up;
+        long cA = count;
+        int geluA = gelu ? 1 : 0, bA = bf16 ? 1 : 0;
+        void** a = stackalloc void*[6];
+        a[0] = &oA; a[1] = &gA; a[2] = &uA; a[3] = &cA; a[4] = &geluA; a[5] = &bA;
+        CudaDriverApi.cuLaunchKernel(_moeActMul16x16, (uint)((count + 255) / 256), 1, 1, 256, 1, 1, 0, stream, (nint)a, 0).ThrowOnError();
     }
 }

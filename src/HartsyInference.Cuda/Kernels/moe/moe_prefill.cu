@@ -47,6 +47,34 @@ extern "C" __global__ void moe_act_mul_16(
     out[i] = moe_pack16(a * up[i], bf16);
 }
 
+// out = 16-bit(act(gate) * up) where gate and up are themselves 16-bit (the grouped GEMM writes 16-bit outputs).
+// Launch: grid = ceil(count / 256), block = 256.
+extern "C" __global__ void moe_act_mul_16x16(
+    unsigned short* __restrict__ out,
+    const unsigned short* __restrict__ gate,
+    const unsigned short* __restrict__ up,
+    long long count, int gelu, int bf16)
+{
+    const long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= count) return;
+    float g, u;
+    if (bf16) {
+        g = __bfloat162float(__ushort_as_bfloat16(gate[i]));
+        u = __bfloat162float(__ushort_as_bfloat16(up[i]));
+    } else {
+        g = __half2float(__ushort_as_half(gate[i]));
+        u = __half2float(__ushort_as_half(up[i]));
+    }
+    float a;
+    if (gelu) {
+        const float c = 0.7978845608028654f;
+        a = 0.5f * g * (1.0f + tanhf(c * (g + 0.044715f * g * g * g)));
+    } else {
+        a = g / (1.0f + expf(-g));
+    }
+    out[i] = moe_pack16(a * u, bf16);
+}
+
 // out[t] = sigmoid(sharedGateLogit[t]) * shared[t] + sum_j topkWeight[t,j] * expertOut[pairSlot[t,j]]   (pair slots outside
 // [0, expertRows) are skipped; shared and sharedGateLogit may be null). Sums in slot order.
 // Launch: grid = (tokens, ceil(hidden / 256)), block = 256.

@@ -1,3 +1,4 @@
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda.Profiling;
 
@@ -251,6 +252,14 @@ public sealed unsafe partial class CudaBackend
                 wsDown = GpuTransferHelper.AllocateDevice((nuint)wsBytes);
                 _kernels!.LaunchMoeGatherRows16(permX, pX, pPerm, rows, hidden, bf16, _stream.Handle);
 
+                if (TryExpertsGroupedBatched(pOut, permX, rows, experts, offsets, hidden, inter, gateExperts, upExperts, downExperts,
+                        gemmDtype, gelu))
+                {
+                    GpuTransferHelper.CacheActivation(expertOut, pOut, outBytes);
+                    cachedOut = true;
+                    return;
+                }
+
                 float alpha = 1f, beta = 0f;
                 int compute = Compute32F(gemmType);
                 for (int e = 0; e < experts; e++)
@@ -356,6 +365,136 @@ public sealed unsafe partial class CudaBackend
             GpuTransferHelper.FreeDevice(pW);
             if (pShared != 0) GpuTransferHelper.FreeDevice(pShared);
             if (pGate != 0) GpuTransferHelper.FreeDevice(pGate);
+        }
+    }
+
+    private bool _groupedGemmBroken;
+
+    /// <summary>The expert GEMMs of a large batch as grouped cuBLAS calls: the layer's expert stack is dequantized once per projection
+    /// (a stacked group is one flat run of quant blocks), then each batch of experts takes one grouped call for gate, one for up and one for
+    /// down instead of a GEMM per expert and projection. Returns false, with nothing launched, when the experts are not a resident stack,
+    /// too few are active to pay for dequantizing them all, memory is short, or cuBLAS refused the grouped call earlier.</summary>
+    private unsafe bool TryExpertsGroupedBatched(ulong pOut, ulong permX, int rows, int experts, ReadOnlySpan<int> offsets, int hidden, int inter,
+        IReadOnlyList<Tensor> gateExperts, IReadOnlyList<Tensor> upExperts, IReadOnlyList<Tensor> downExperts, DType gemmDtype, bool gelu)
+    {
+        if (_groupedGemmBroken || !EngineKnobs.MoeGroupedGemm.Value) return false;
+        int active = 0, maxCount = 0;
+        for (int e = 0; e < experts; e++)
+        {
+            int c = offsets[e + 1] - offsets[e];
+            if (c > 0) active++;
+            maxCount = Math.Max(maxCount, c);
+        }
+        if (active < Math.Max(8, experts / 4)) return false;
+        if (!TryResolveExpertGroup(gateExperts, out ulong gBase, out long gStride)
+            || !TryResolveExpertGroup(upExperts, out ulong uBase, out long uStride)
+            || !TryResolveExpertGroup(downExperts, out ulong dBase, out long dStride)) return false;
+
+        int elem = gemmDtype.SizeInBytes;
+        bool bf16 = gemmDtype == DType.BF16;
+        long matElems = (long)inter * hidden;
+        long matBytes = matElems * elem;
+        long stackBytes = matBytes * experts;
+        if (matElems * experts > int.MaxValue) return false;   // the dequant launch counts elements in an int
+        int rowBudget = Math.Max(maxCount, 16384);
+        long tempBytes = (long)rowBudget * (3L * inter + hidden) * elem;
+        (long freeBytes, _) = CudaMemory.GetMemInfo();
+        if (freeBytes > 0 && freeBytes < 3 * stackBytes + tempBytes + (2L << 30)) return false;
+
+        ulong wsGate = 0, wsUp = 0, wsDown = 0, gateOut = 0, upOut = 0, act = 0, downTmp = 0, ptrDev = 0;
+        try
+        {
+            wsGate = GpuTransferHelper.AllocateDevice((nuint)stackBytes);
+            wsUp = GpuTransferHelper.AllocateDevice((nuint)stackBytes);
+            wsDown = GpuTransferHelper.AllocateDevice((nuint)stackBytes);
+            // The grouped call writes 16-bit outputs only (cuBLAS refuses 16-bit operands with an F32 result), so gate, up and the down
+            // result are 16-bit here and the down rows are widened to the F32 expert-major buffer after each batch.
+            gateOut = GpuTransferHelper.AllocateDevice((nuint)((long)rowBudget * inter * elem));
+            upOut = GpuTransferHelper.AllocateDevice((nuint)((long)rowBudget * inter * elem));
+            act = GpuTransferHelper.AllocateDevice((nuint)((long)rowBudget * inter * elem));
+            downTmp = GpuTransferHelper.AllocateDevice((nuint)((long)rowBudget * hidden * elem));
+            // The stacks are flat runs of quant blocks: one dequant launch per projection covers every expert.
+            CastOnGpu(wsGate, gBase, gateExperts[0].DType, gemmDtype, (int)(matElems * experts));
+            CastOnGpu(wsUp, uBase, upExperts[0].DType, gemmDtype, (int)(matElems * experts));
+            CastOnGpu(wsDown, dBase, downExperts[0].DType, gemmDtype, (int)(matElems * experts));
+
+            int gemmType = CublasApi.DataTypeOf(gemmDtype);
+            int compute = Compute32F(gemmType);
+            ulong[] hostPtrs = new ulong[9 * experts];
+            int[] opT = new int[experts], opN = new int[experts], mArr = new int[experts], nGate = new int[experts], kGate = new int[experts],
+                nDown = new int[experts], kDown = new int[experts], ldK = new int[experts], ldInter = new int[experts], ldH = new int[experts], ones = new int[experts];
+            float[] alphas = new float[experts], betas = new float[experts];
+            ptrDev = GpuTransferHelper.AllocateDevice((nuint)(hostPtrs.Length * sizeof(ulong)));
+
+            int batchFirst = 0;
+            while (batchFirst < experts)
+            {
+                // A batch is the next run of experts whose rows fit the temp budget (an expert is never split).
+                int batchRowStart = offsets[batchFirst], batchEnd = batchFirst, group = 0;
+                while (batchEnd < experts && (offsets[batchEnd + 1] - batchRowStart <= rowBudget || group == 0))
+                {
+                    if (offsets[batchEnd + 1] > offsets[batchEnd]) group++;
+                    batchEnd++;
+                }
+                if (group == 0) { batchFirst = batchEnd; continue; }
+
+                int gi = 0;
+                for (int e = batchFirst; e < batchEnd; e++)
+                {
+                    int c = offsets[e + 1] - offsets[e];
+                    if (c == 0) continue;
+                    long local = offsets[e] - batchRowStart;
+                    ulong x = permX + (ulong)((long)offsets[e] * hidden * elem);
+                    // gate: A = gate weight, B = activations, C = gate output
+                    hostPtrs[0 * group + gi] = wsGate + (ulong)(e * matBytes);
+                    hostPtrs[1 * group + gi] = x;
+                    hostPtrs[2 * group + gi] = gateOut + (ulong)(local * inter * elem);
+                    // up
+                    hostPtrs[3 * group + gi] = wsUp + (ulong)(e * matBytes);
+                    hostPtrs[4 * group + gi] = x;
+                    hostPtrs[5 * group + gi] = upOut + (ulong)(local * inter * elem);
+                    // down: B = the activated product, C = this expert's rows of the expert-major output
+                    hostPtrs[6 * group + gi] = wsDown + (ulong)(e * matBytes);
+                    hostPtrs[7 * group + gi] = act + (ulong)(local * inter * elem);
+                    hostPtrs[8 * group + gi] = downTmp + (ulong)(local * hidden * elem);
+                    opT[gi] = CublasApi.CUBLAS_OP_T; opN[gi] = CublasApi.CUBLAS_OP_N;
+                    mArr[gi] = c; nGate[gi] = inter; kGate[gi] = hidden; nDown[gi] = hidden; kDown[gi] = inter;
+                    ldK[gi] = hidden; ldInter[gi] = inter; ldH[gi] = hidden; ones[gi] = 1; alphas[gi] = 1f; betas[gi] = 0f;
+                    gi++;
+                }
+                fixed (ulong* hp = hostPtrs)
+                    CudaMemory.CopyHostToDeviceAsync(ptrDev, hp, (nuint)(9 * group * sizeof(ulong)), _stream.Handle);
+                ulong At(int slot) => ptrDev + (ulong)(slot * group * sizeof(ulong));
+                int batchRows = offsets[batchEnd] - batchRowStart;
+
+                fixed (int* pT = opT, pN = opN, pM = mArr, pNg = nGate, pKg = kGate, pNd = nDown, pKd = kDown, pLk = ldK, pLi = ldInter, pLh = ldH, pOne = ones)
+                fixed (float* pA = alphas, pB = betas)
+                {
+                    // Row-major out[m, n] = x[m, k] . w[n, k]^T is column-major out^T[n, m] = w^T . x^T, as in the per-expert call.
+                    CublasApi.cublasGemmGroupedBatchedEx(_cublasHandle, pT, pN, pNg, pM, pKg, pA, At(0), gemmType, pLk, At(1), gemmType, pLk, pB,
+                        At(2), gemmType, pLi, group, pOne, compute).ThrowOnCublasError();
+                    CublasApi.cublasGemmGroupedBatchedEx(_cublasHandle, pT, pN, pNg, pM, pKg, pA, At(3), gemmType, pLk, At(4), gemmType, pLk, pB,
+                        At(5), gemmType, pLi, group, pOne, compute).ThrowOnCublasError();
+                    _kernels!.LaunchMoeActMul16x16(act, gateOut, upOut, (long)batchRows * inter, gelu, bf16, _stream.Handle);
+                    CublasApi.cublasGemmGroupedBatchedEx(_cublasHandle, pT, pN, pNd, pM, pKd, pA, At(6), gemmType, pLi, At(7), gemmType, pLi, pB,
+                        At(8), gemmType, pLh, group, pOne, compute).ThrowOnCublasError();
+                    CastOnGpu(pOut + (ulong)((long)batchRowStart * hidden * sizeof(float)), downTmp, gemmDtype, DType.F32, batchRows * hidden);
+                }
+                batchFirst = batchEnd;
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is CudaException or InvalidOperationException or NotSupportedException || ex.GetType().Name.Contains("Cublas"))
+        {
+            // Refused (older cuBLAS, or a type combination without a grouped kernel): remember it and let the per-expert path run.
+            _groupedGemmBroken = true;
+            HartsyInference.Core.Logging.Logs.Warning($"[Cuda] grouped expert GEMM unavailable ({ex.Message}); using one GEMM per expert.");
+            return false;
+        }
+        finally
+        {
+            foreach (ulong p in new[] { wsGate, wsUp, wsDown, gateOut, upOut, act, downTmp, ptrDev })
+                if (p != 0) GpuTransferHelper.FreeDevice(p);
         }
     }
 }

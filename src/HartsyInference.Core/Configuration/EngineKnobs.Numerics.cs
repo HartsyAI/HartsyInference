@@ -197,6 +197,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SandwichFusion =
         Bool("numerics.sandwichFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.");
 
+    /// <summary>Kill-switch for running a large MoE batch's expert GEMMs as grouped cuBLAS calls over a single dequantized weight stack.</summary>
+    public static readonly Knob<bool> MoeGroupedGemm =
+        Bool("numerics.moeGroupedGemm", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs the expert GEMMs of a large MoE batch as three grouped cuBLAS calls per row batch over one dequantized stack of the layer's experts; =0 returns to one GEMM per expert.");
+
     /// <summary>Kill-switch for the grouped-query flash-decoding kernel: one block per KV head reads the cache once for all of its query heads.</summary>
     public static readonly Knob<bool> FlashDecodeGqa =
         Bool("numerics.flashDecodeGqa", true, KnobScope.Runtime, KnobDomain.Numerics, "Decodes one query row per sequence with the grouped-query flash-decoding kernel (the KV cache is streamed once per KV head, not once per query head); =0 returns to the split-K kernel with one block per query head.");
