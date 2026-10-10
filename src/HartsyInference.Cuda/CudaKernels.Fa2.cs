@@ -22,7 +22,8 @@ public sealed partial class CudaKernels
     public static bool DecodeGqaSupports(int d, int group) => (d == 128 || d == 64) && group >= 1 && group <= 16;
 
     /// <summary>Dynamic shared memory of one decode block: the query heads, a K tile (padded rows), a V tile and the probabilities.</summary>
-    private static int DecodeSharedBytes(int d) => (16 * d + 32 * (d + 4) + 32 * d + 8 * 32) * sizeof(float);
+    private static int DecodeSharedBytes(int d, int kvGroup, bool f16Kv) =>
+        (Math.Min(kvGroup, 16) * d + 8 * 32) * sizeof(float) + (32 * (d + 4) + 32 * d) * (f16Kv ? sizeof(ushort) : sizeof(float));
 
     /// <summary>True when flash_attn_causal_f16.ptx loaded and the device has the m16n8k16 F16 tensor-core instruction (sm_80 and later).</summary>
     public bool HasFa2Causal => _fa2D128 != 0 && _fa2D64 != 0 && _kvToF16 != 0 && Sm >= 80;
@@ -112,7 +113,7 @@ public sealed partial class CudaKernels
         void** a = stackalloc void*[18];
         a[0] = &mA; a[1] = &lA; a[2] = &accA; a[3] = &qA; a[4] = &hqA; a[5] = &hkvA; a[6] = &lkA; a[7] = &kvLenA; a[8] = &groupA;
         a[9] = &offA; a[10] = &scaleA; a[11] = &capA; a[12] = &winA; a[13] = &gA; a[14] = &chunkA; a[15] = &posA; a[16] = &kA; a[17] = &vA;
-        CudaDriverApi.cuLaunchKernel(fn, (uint)splits, (uint)hkv, (uint)b, 256, 1, 1, (uint)DecodeSharedBytes(d), stream, (nint)a, 0).ThrowOnError();
+        CudaDriverApi.cuLaunchKernel(fn, (uint)splits, (uint)hkv, (uint)b, 256, 1, 1, (uint)DecodeSharedBytes(d, kvGroup, f16Kv), stream, (nint)a, 0).ThrowOnError();
     }
 
     /// <summary>Fused graph-decode QKV epilogue writing an F16 key/value cache (q stays F32).</summary>

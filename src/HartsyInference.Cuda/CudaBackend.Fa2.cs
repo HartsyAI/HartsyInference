@@ -63,8 +63,8 @@ public sealed partial class CudaBackend
     private void RunFlashDecodeGqa(ulong pOut, ulong pQ, ulong pK, ulong pV, int b, int hq, int hkv, int keyStride, int keySpan, int d, int kvLen,
         int kvGroup, int qOffset, float scale, float softcap, int window, ulong devicePos, bool f16Kv)
     {
-        // One wave: the kernel's ~42 KB of shared memory leaves room for two blocks per SM, so more blocks than that run a half-empty second wave.
-        int target = 2 * _context.MultiprocessorCount;
+        // One wave: shared memory leaves room for four blocks per SM with an F16 cache and two with F32, so more blocks than that run a half-empty second wave.
+        int target = (f16Kv ? 4 : 2) * _context.MultiprocessorCount;
         int splits = Math.Clamp((target + b * hkv - 1) / (b * hkv), 1, Math.Min(64, Math.Max(1, keySpan / 64)));
         int chunk = (keySpan + splits - 1) / splits;
         splits = (keySpan + chunk - 1) / chunk;

@@ -27,16 +27,21 @@
 #define DEC_MAX_GROUP 16
 #define DEC_INF 3.402823466e+38f
 
-__device__ __forceinline__ void dec_load4(const float* p, float4& o) { o = *reinterpret_cast<const float4*>(p); }
+// The raw vector one thread moves per step: four elements of the cache's own type, kept as stored in shared memory.
+template <typename T> struct DecRaw;
+template <> struct DecRaw<float> { using type = float4; };
+template <> struct DecRaw<__half> { using type = uint2; };
 
-__device__ __forceinline__ void dec_load4(const __half* p, float4& o)
+__device__ __forceinline__ float4 dec_f4(const float4& r) { return r; }
+__device__ __forceinline__ float4 dec_f4(const uint2& r)
 {
-    const uint2 raw = *reinterpret_cast<const uint2*>(p);
-    const __half2 a = *reinterpret_cast<const __half2*>(&raw.x);
-    const __half2 b = *reinterpret_cast<const __half2*>(&raw.y);
+    const __half2 a = *reinterpret_cast<const __half2*>(&r.x);
+    const __half2 b = *reinterpret_cast<const __half2*>(&r.y);
     const float2 fa = __half22float2(a), fb = __half22float2(b);
-    o = make_float4(fa.x, fa.y, fb.x, fb.y);
+    return make_float4(fa.x, fa.y, fb.x, fb.y);
 }
+__device__ __forceinline__ float2 dec_ld2(const float* p) { return *reinterpret_cast<const float2*>(p); }
+__device__ __forceinline__ float2 dec_ld2(const __half* p) { return __half22float2(*reinterpret_cast<const __half2*>(p)); }
 
 template <typename KvT, int D>
 __device__ __forceinline__ void fa_decode_gqa(
@@ -45,13 +50,15 @@ __device__ __forceinline__ void fa_decode_gqa(
     int Hq, int Hkv, int Lk, int kvLen, int kvGroup, int qOffset, float scale, float softcap, int window,
     int G, int chunk, const int* __restrict__ dPos)
 {
-    constexpr int KS = D + 4;   // K row stride in floats: float4 reads of 8 consecutive rows hit distinct bank groups
+    constexpr int KS = D + 4;   // K row stride in elements: 8-16 byte reads of consecutive rows hit distinct banks
     constexpr int DL = D / 32;  // output dimensions per lane
-    extern __shared__ __align__(16) float smem[];
-    float* Qs = smem;                          // DEC_MAX_GROUP * D
-    float* Ks = Qs + DEC_MAX_GROUP * D;        // DEC_BK * KS
-    float* Vs = Ks + DEC_BK * KS;              // DEC_BK * D
-    float* Ps = Vs + DEC_BK * D;               // DEC_WARPS * DEC_BK
+    using Raw = typename DecRaw<KvT>::type;
+    extern __shared__ __align__(16) unsigned char smem_raw[];
+    const int group = min(kvGroup, DEC_MAX_GROUP);
+    float* Qs = reinterpret_cast<float*>(smem_raw);              // group * D floats
+    float* Ps = Qs + group * D;                                   // DEC_WARPS * DEC_BK floats
+    KvT* Ks = reinterpret_cast<KvT*>(Ps + DEC_WARPS * DEC_BK);    // DEC_BK * KS, the cache's element type
+    KvT* Vs = Ks + DEC_BK * KS;                                   // DEC_BK * D
 
     const int g = blockIdx.x;
     const int hk = blockIdx.y;
@@ -68,7 +75,6 @@ __device__ __forceinline__ void fa_decode_gqa(
     const int kStart = max(cStart, kMin);
     const int kEnd = min(cEnd, kMax);
 
-    const int group = min(kvGroup, DEC_MAX_GROUP);
     const int firstHead = hk * kvGroup;
     for (int i = tid; i < group * D; i += DEC_THREADS) {
         const int hi = i / D, d = i % D;
@@ -88,18 +94,18 @@ __device__ __forceinline__ void fa_decode_gqa(
 
     // The next tile is fetched into registers while the current one is computed, so the key/value stream is never idle behind the math.
     constexpr int LOADS = DEC_BK * (D / 4) / DEC_THREADS;
-    float4 rk[LOADS], rv[LOADS];
+    Raw rk[LOADS], rv[LOADS];
     auto fetch = [&](int k0) {
         #pragma unroll
         for (int q = 0; q < LOADS; ++q) {
             const int i = tid + q * DEC_THREADS;
             const int row = i / (D / 4), c4 = i % (D / 4);
-            rk[q] = make_float4(0.f, 0.f, 0.f, 0.f);
-            rv[q] = rk[q];
+            rk[q] = Raw{};
+            rv[q] = Raw{};
             if (k0 + row <= kEnd) {
                 const size_t at = kvBase + (size_t)(k0 + row) * D + c4 * 4;
-                dec_load4(K + at, rk[q]);
-                dec_load4(V + at, rv[q]);
+                rk[q] = *reinterpret_cast<const Raw*>(K + at);
+                rv[q] = *reinterpret_cast<const Raw*>(V + at);
             }
         }
     };
@@ -110,8 +116,8 @@ __device__ __forceinline__ void fa_decode_gqa(
         for (int q = 0; q < LOADS; ++q) {
             const int i = tid + q * DEC_THREADS;
             const int row = i / (D / 4), c4 = i % (D / 4);
-            *reinterpret_cast<float4*>(Ks + row * KS + c4 * 4) = rk[q];
-            *reinterpret_cast<float4*>(Vs + row * D + c4 * 4) = rv[q];
+            *reinterpret_cast<Raw*>(Ks + row * KS + c4 * 4) = rk[q];
+            *reinterpret_cast<Raw*>(Vs + row * D + c4 * 4) = rv[q];
         }
         if (k0 + DEC_BK <= kEnd) fetch(k0 + DEC_BK);
         __syncthreads();
@@ -121,11 +127,11 @@ __device__ __forceinline__ void fa_decode_gqa(
             const int hi = warp + j * DEC_WARPS;
             if (hi >= group) continue;
             const float* qh = Qs + hi * D;
-            const float* kr = Ks + lane * KS;
+            const KvT* kr = Ks + lane * KS;
             float s = 0.0f;
             #pragma unroll
             for (int d4 = 0; d4 < D / 4; ++d4) {
-                const float4 kk = *reinterpret_cast<const float4*>(kr + d4 * 4);
+                const float4 kk = dec_f4(*reinterpret_cast<const Raw*>(kr + d4 * 4));
                 const float4 qq = *reinterpret_cast<const float4*>(qh + d4 * 4);
                 s += qq.x * kk.x + qq.y * kk.y + qq.z * kk.z + qq.w * kk.w;
             }
@@ -154,10 +160,10 @@ __device__ __forceinline__ void fa_decode_gqa(
             for (int kk = 0; kk < DEC_BK; ++kk) {
                 const float pk = Ps[warp * DEC_BK + kk];
                 if constexpr (DL == 4) {
-                    const float4 vv = *reinterpret_cast<const float4*>(Vs + kk * D + lane * 4);
+                    const float4 vv = dec_f4(*reinterpret_cast<const Raw*>(Vs + kk * D + lane * 4));
                     acc[j][0] += pk * vv.x; acc[j][1] += pk * vv.y; acc[j][2] += pk * vv.z; acc[j][3] += pk * vv.w;
                 } else {
-                    const float2 vv = *reinterpret_cast<const float2*>(Vs + kk * D + lane * 2);
+                    const float2 vv = dec_ld2(Vs + kk * D + lane * 2);
                     acc[j][0] += pk * vv.x; acc[j][1] += pk * vv.y;
                 }
             }
