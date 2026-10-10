@@ -13,6 +13,7 @@ KERNELS=(
     "flash_attn_decode_gqa"
     "kv_scatter_f16"
     "lm_sample_topk"
+    "lm_norm_q8_fast"
     "mul_mat_vec_q4k_f32"
     "mul_mat_vec_q6k_f32"
     "mul_mat_vec_q8_0_f32"

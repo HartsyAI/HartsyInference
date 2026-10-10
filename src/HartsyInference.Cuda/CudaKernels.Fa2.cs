@@ -3,7 +3,11 @@ namespace HartsyInference.Cuda;
 // Causal grouped-query FlashAttention-2 for LLM prefill (Kernels/lm/flash_attn_causal_f16.cu): F16 tensor cores, F32 accumulation.
 public sealed partial class CudaKernels
 {
-    private CudaModule? _fa2Module, _decodeGqaModule, _kvScatterF16Module;
+    private CudaModule? _fa2Module, _decodeGqaModule, _kvScatterF16Module, _normFastModule;
+    private readonly nint[] _normFast = new nint[6], _addNormFast = new nint[6];   // index log2(K): K = 2, 4, 8, 16, 32 -> 1..5
+
+    /// <summary>Test hook: route the RMSNorm Q8 launchers to the reference kernels even when the fast ones loaded.</summary>
+    internal bool ForceReferenceNorm { get; set; }
     private nint _kvScatterQkvF16, _kvScatterQkNormF16;
 
     /// <summary>True when kv_scatter_f16.ptx loaded: the fused graph-decode scatter kernels for an F16 key/value cache.</summary>
@@ -37,6 +41,16 @@ public sealed partial class CudaKernels
             _kvScatterF16Module = LoadOwnedModule(scatter);
             _kvScatterQkvF16 = _kvScatterF16Module.GetFunction("lm_qkv_rope_scatter_f16kv");
             _kvScatterQkNormF16 = _kvScatterF16Module.GetFunction("lm_qknorm_rope_scatter_f16kv");
+        }
+        string normFast = Ptx("lm_norm_q8_fast");
+        if (File.Exists(normFast))
+        {
+            _normFastModule = LoadOwnedModule(normFast);
+            for (int log = 1; log <= 5; log++)
+            {
+                _normFast[log] = _normFastModule.GetFunction($"lm_rmsnorm_q8_1_fast_k{1 << log}");
+                _addNormFast[log] = _normFastModule.GetFunction($"lm_add_rmsnorm_q8_1_fast_k{1 << log}");
+            }
         }
         string decode = Ptx("flash_attn_decode_gqa");
         if (File.Exists(decode))
@@ -135,5 +149,15 @@ public sealed partial class CudaKernels
         uint grid = (uint)(nq + 2 * nkv);
         uint sharedMem = BlockSize * sizeof(float);
         CudaDriverApi.cuLaunchKernel(_kvScatterQkNormF16, grid, 1, 1, BlockSize, 1, 1, sharedMem, stream, (nint)args, 0).ThrowOnError();
+    }
+
+    /// <summary>The fast-kernel table slot for a row of <paramref name="normDim"/> elements, or 0 when the row is not 256 * 2^j, j in 1..5, or the fast kernels are off.</summary>
+    private int NormFastSlot(int normDim)
+    {
+        if (ForceReferenceNorm || !HartsyInference.Core.Configuration.EngineKnobs.NormFast.Value || normDim % 256 != 0) return 0;
+        int k = normDim / 256;
+        if (k < 2 || k > 32 || (k & (k - 1)) != 0) return 0;
+        int log = System.Numerics.BitOperations.Log2((uint)k);
+        return _normFast[log] != 0 && _addNormFast[log] != 0 ? log : 0;
     }
 }

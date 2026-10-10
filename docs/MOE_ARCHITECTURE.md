@@ -38,6 +38,41 @@ A sparse layer is:
 A layer's shared group, if present, runs for every token; `SharedIsGated` marks a sigmoid-gated shared output
 (Qwen2-MoE). Whether the gate tensor exists is a fact about the checkpoint, so the caller supplies it.
 
+## Device-resident routed stage (CUDA)
+
+A sparse layer's routed experts run on the device without a host round trip when the backend declares the ops and the
+layer is eligible: flat softmax or sigmoid routing (no expert groups, no logit-space bias), and experts stored as one
+quantized type per projection that the backend can read. Everything else keeps the host-routed per-expert loop in
+`MoeFeedForward.Forward`.
+
+**Small batches (at most 16 tokens: decode, speculative verify).**
+`router GEMV → MoeRoute → MoeExpertGateUp → MoeExpertDown → MoeCombineSlots`. The expert ids stay on the device. The
+gate/up kernel reads the expert id of every (token, slot) pair from device memory, dots both projection rows against the
+token's Q8_1-quantized activation with `dp4a` and writes `act(gate) * up` in the same launch; the down kernel does the same
+with the quantized product. The combine folds in the shared expert (sigmoid-gated when the checkpoint has the gate). The
+experts of a projection are one resident allocation, back to back (`PreloadWeightGroups`); the backend resolves the base
+address and stride and refuses a group whose members were re-placed. Nothing in the stage reads the host, so it is
+captured inside the CUDA-graph decode step. `IBackend.SupportsMoeExpertIndexed` reports the quant types (Q4_K, Q6_K and
+Q8_0 today).
+
+**Large batches (prefill).**
+`router GEMV → MoeRoute → MoeBuildDispatch` orders the (token, slot) pairs by expert. The layer reads the `E + 1`
+offsets once and passes them to `MoeExpertsGrouped`, which runs each active expert's gate, up and down GEMMs on its
+contiguous rows. When most experts are active the layer's three stacks are dequantized to BF16 in one launch each (a
+stacked group is one flat run of quant blocks), cached on the layer's first expert while free memory stays above the
+quantized-weight headroom, and every batch of experts takes three `cublasGemmGroupedBatchedEx` calls. cuBLAS accepts 16-bit
+grouped operands only with a 16-bit result, so gate, up and the down rows are BF16 there and the down rows are widened to the
+F32 expert-major buffer. A refused grouped call falls back to one GEMM per expert. `MoeCombinePairs` sums each token's rows
+through the pair map and adds the shared expert.
+
+**Attention** is not part of the MoE contract but decides the end-to-end result for these models. Prefill of 16 or more query
+rows runs `flash_attn_causal_f16` (mma.sync FlashAttention-2, grouped-query, window and offset aware); one decode row per
+sequence runs `flash_attn_decode_gqa`, which reads each KV head's cache once for all of its query heads and writes the split-K
+partials the existing combine merges.
+
+Knobs (all default on): `numerics.moeIndexed`, `numerics.moeGroupedGemm`, `numerics.fa2Prefill`, `numerics.flashDecodeGqa`.
+`vram.kvF16` now works with graph decode.
+
 ## Capabilities
 
 `SparseCapabilities.From(topology)` derives what the runtime may rely on: sparse/shared/dense presence, variable experts

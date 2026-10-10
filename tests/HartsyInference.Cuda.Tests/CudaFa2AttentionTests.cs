@@ -200,4 +200,60 @@ public sealed unsafe class CudaFa2AttentionTests
         foreach (Tensor t in f32.Concat(f16)) t.Dispose();
         _output.WriteLine($"F16 KV scatter matches F32 rounded to half (qkNorm={qkNorm})");
     }
+
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData(512, 1)]
+    [InlineData(1024, 4)]
+    [InlineData(2048, 1)]
+    [InlineData(2048, 7)]
+    [InlineData(4096, 3)]
+    [InlineData(8192, 2)]
+    public void FastRmsNormQ8_IsBitIdenticalToTheSharedMemoryKernels(int dim, int rows)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        Random rng = new(dim + rows);
+        using CudaBackend cuda = new(0, PtxDir());
+        using Tensor weight = Random(rng, dim);
+        using Tensor a = Random(rng, 1, rows, dim), b = Random(rng, 1, rows, dim);
+        for (int i = 0; i < rows * dim; i += 97) ((float*)a.DataPointer)[i] *= 40f;   // a few large values stretch the scales
+
+        (byte[] q, float[] d, float[] sum, float[] main, float[] resid) Run(bool addNorm, bool reference)
+        {
+            cuda.Kernels!.ForceReferenceNorm = reference;
+            using Tensor norm = new(new TensorShape(1, rows, dim), DType.F32);
+            using Tensor resid = new(new TensorShape(1, rows, dim), DType.F32);
+            if (addNorm) cuda.AddRmsNormEmitQ8(resid, norm, a, b, weight, 1e-6f);
+            else cuda.RmsNormEmitQ8(norm, a, weight, 1e-6f);
+            cuda.Sync();
+            ulong xq, xd, xs;
+            int blocks = rows * (dim / 32);
+            byte[] q = new byte[rows * dim];
+            float[] dd = new float[blocks], ss = new float[blocks];
+            // The sidecar of a multi-row call is not registered (decode rows only); read it by position from the op's buffers when present.
+            bool hasSidecar = GpuTransferHelper.TryGetSidecar(norm, dim, out xq, out xd, out xs);
+            if (rows == 1) Assert.True(hasSidecar, "a single-row call must publish its Q8_1 sidecar");
+            if (hasSidecar)
+            {
+                fixed (byte* pq = q) CudaMemory.CopyDeviceToHost(pq, xq, (nuint)q.Length);
+                fixed (float* pd = dd) CudaMemory.CopyDeviceToHost(pd, xd, (nuint)(blocks * sizeof(float)));
+                fixed (float* ps = ss) CudaMemory.CopyDeviceToHost(ps, xs, (nuint)(blocks * sizeof(float)));
+            }
+            float[] n = new float[rows * dim], r = new float[rows * dim];
+            for (int i = 0; i < n.Length; i++) { n[i] = ((float*)norm.DataPointer)[i]; r[i] = addNorm ? ((float*)resid.DataPointer)[i] : 0f; }
+            return (q, dd, ss, n, r);
+        }
+        foreach (bool addNorm in new[] { false, true })
+        {
+            (byte[] q, float[] d, float[] sum, float[] main, float[] resid) reference = Run(addNorm, reference: true);
+            (byte[] q, float[] d, float[] sum, float[] main, float[] resid) fast = Run(addNorm, reference: false);
+            Assert.Equal(reference.main, fast.main);
+            Assert.Equal(reference.resid, fast.resid);
+            Assert.Equal(reference.q, fast.q);
+            Assert.Equal(reference.d, fast.d);
+            Assert.Equal(reference.sum, fast.sum);
+        }
+        cuda.Kernels!.ForceReferenceNorm = false;
+        _output.WriteLine($"fast RMSNorm Q8 == reference bit for bit (dim {dim}, rows {rows})");
+    }
 }

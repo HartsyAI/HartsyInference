@@ -371,7 +371,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         if (!HartsyInference.Core.Configuration.EngineKnobs.MoeIndexed.Value) return false;
         if (UseHostExpertRuntime || _offload is not null) return false;
         if (_indexedShapeOk is null) _indexedShapeOk = IndexedShapeOk();
-        return _indexedShapeOk.Value && backend.SupportsMoeExpertIndexed(_gateW[0].DType) && backend.SupportsMoeExpertIndexed(_downW[0].DType);
+        return _indexedShapeOk.Value && backend.SupportsMoeExpertIndexed(_gateW[0].DType) && backend.SupportsMoeExpertIndexed(_downW[0].DType)
+            && backend.MoeExpertsResident(_gateW, _upW, _downW);
     }
 
     private bool IndexedShapeOk()
@@ -400,7 +401,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         if (!HartsyInference.Core.Configuration.EngineKnobs.MoeIndexed.Value) return false;
         if (UseHostExpertRuntime || _offload is not null) return false;
         if (_groupedShapeOk is null) _groupedShapeOk = GroupedShapeOk();
-        return _groupedShapeOk.Value && backend.SupportsMoeExpertsGrouped(_gateW[0].DType) && backend.SupportsMoeExpertsGrouped(_downW[0].DType);
+        return _groupedShapeOk.Value && backend.SupportsMoeExpertsGrouped(_gateW[0].DType) && backend.SupportsMoeExpertsGrouped(_downW[0].DType)
+            && backend.MoeExpertsResident(_gateW, _upW, _downW);
     }
 
     private bool GroupedShapeOk()

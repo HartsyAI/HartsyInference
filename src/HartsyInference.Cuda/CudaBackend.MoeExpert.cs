@@ -17,6 +17,14 @@ public sealed unsafe partial class CudaBackend
     }
 
     /// <inheritdoc />
+    public bool MoeExpertsResident(IReadOnlyList<Tensor> gateExperts, IReadOnlyList<Tensor> upExperts, IReadOnlyList<Tensor> downExperts)
+    {
+        using OpScope _op = EnterOp();
+        return TryResolveExpertGroup(gateExperts, out _, out _) && TryResolveExpertGroup(upExperts, out _, out _)
+            && TryResolveExpertGroup(downExperts, out _, out _);
+    }
+
+    /// <inheritdoc />
     public void MoeExpertGateUp(Tensor act, Tensor x, IReadOnlyList<Tensor> gateExperts, IReadOnlyList<Tensor> upExperts,
         Tensor topkIdx, int topk, bool gelu)
     {

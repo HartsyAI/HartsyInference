@@ -67,6 +67,10 @@ public partial interface IBackend
     void MoeCombineSlots(Tensor output, Tensor slotOut, Tensor topkWeight, Tensor? shared, Tensor? sharedGateLogit, int topk) =>
         throw NotSupportedPrimitive(nameof(MoeCombineSlots));
 
+    /// <summary>True when the three expert groups are resident on the device as contiguous stacks the expert-indexed and grouped ops can address
+    /// (<see cref="IBackend.PreloadWeightGroups"/> places them so). A layer whose experts are lazily uploaded, offloaded or re-placed keeps the host-routed path.</summary>
+    bool MoeExpertsResident(IReadOnlyList<Tensor> gateExperts, IReadOnlyList<Tensor> upExperts, IReadOnlyList<Tensor> downExperts) => false;
+
     /// <summary>True when <see cref="MoeExpertsGrouped"/> and <see cref="MoeCombinePairs"/> run experts stored as <paramref name="expertType"/>.</summary>
     bool SupportsMoeExpertsGrouped(DType expertType) => false;
 
