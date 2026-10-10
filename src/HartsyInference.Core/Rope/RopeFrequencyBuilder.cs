@@ -97,7 +97,7 @@ public static class RopeFrequencyBuilder
         }
     }
 
-    /// <summary>YaRN NTK-by-parts blend (HF <c>_compute_yarn_parameters</c>, truncate=false), in place; returns mscale.</summary>
+    /// <summary>YaRN NTK-by-parts blend (HF <c>_compute_yarn_parameters</c>), in place; returns mscale.</summary>
     private static double ApplyYarn(double[] invFreq, int dim, double theta, RopeScaling s)
     {
         double factor = s.Factor;
@@ -107,8 +107,15 @@ public static class RopeFrequencyBuilder
         double FindCorrectionDim(double numRotations) =>
             dim * Math.Log(origMaxPos / (numRotations * 2.0 * Math.PI)) / (2.0 * logBase);
 
-        double low = Math.Max(FindCorrectionDim(s.BetaFast), 0.0);
-        double high = Math.Min(FindCorrectionDim(s.BetaSlow), dim - 1);
+        double low = FindCorrectionDim(s.BetaFast);
+        double high = FindCorrectionDim(s.BetaSlow);
+        if (s.TruncateYarnCorrectionRange)
+        {
+            low = Math.Floor(low);
+            high = Math.Ceiling(high);
+        }
+        low = Math.Max(low, 0.0);
+        high = Math.Min(high, dim - 1);
         double rampDenom = high == low ? 0.001 : high - low;
 
         for (int k = 0; k < invFreq.Length; k++)

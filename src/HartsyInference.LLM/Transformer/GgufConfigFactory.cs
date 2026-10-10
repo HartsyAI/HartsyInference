@@ -420,6 +420,7 @@ public static class GgufConfigFactory
                 Type = RopeScalingType.Yarn, Factor = factor, OriginalContextLength = origCtx,
                 BetaFast = betaFast, BetaSlow = betaSlow,
                 AttentionFactor = isDeepseek ? 1.0 : attn,
+                TruncateYarnCorrectionRange = isDeepseek,
             },
             _ => RopeScaling.None,
         };
