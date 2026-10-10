@@ -69,7 +69,7 @@ public sealed class PackedExpertHostRunner : IExpertHostRunner
         for (int first = 0; first < rows; first += CpuExpertKernels.MaxRows)
         {
             int count = Math.Min(CpuExpertKernels.MaxRows, rows - first);
-            CpuExpertKernels.Apply(program, dtypes, _hidden, _intermediate, gate, up, down,
+            CpuExpertKernels.ApplyParallel(program, dtypes, _hidden, _intermediate, gate, up, down,
                 x.Slice(first * hidden, count * hidden), count, y.Slice(first * hidden, count * hidden));
         }
         // The spans point into native memory the tensors own; the weights must not be collected before the kernel returns.

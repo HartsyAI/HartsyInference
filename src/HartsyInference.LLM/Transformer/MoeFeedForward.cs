@@ -1,5 +1,8 @@
+using System.Buffers;
+using System.Runtime.InteropServices;
 using HartsyInference.Core.Backends;
 using HartsyInference.Core.Moe;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.LLM.Transformer;
@@ -24,6 +27,47 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
     private ExpertAssignment[]? _lastPlan;
     private int _lastPlanCount;
 
+    // Expert offload (attached by the engine when the placement planner chose it). Scratch is reused from call to call.
+    private MoeExpertOffload? _offload;
+    private int _offloadLayer = -1;
+    private int[] _offIds = [];
+    private int[] _offCounts = [];
+    private bool[] _offResident = [];
+    private ExpertKey[] _offKeys = [];
+    private ExpertAssignment[] _offPlan = [];
+    private List<ExpertKey> _offMisses = [];
+    private int[] _offHostPlan = [];
+    private int[] _offHostOffset = [];
+    private readonly ExpertLease _offLease = new();
+
+    /// <summary>
+    /// Routes this layer's experts through <paramref name="offload"/>: the experts its device cache holds run on the device as before,
+    /// and the others run on the CPU, or on the device from a copy uploaded for one large batch. Registers the layer's experts with
+    /// the offload's cache. A later <see cref="LoadWeights"/> detaches it, since the cache would hold the old weights.
+    /// </summary>
+    /// <param name="offload">The model's offload.</param>
+    /// <param name="layer">This block's layer index, the bank layer its experts are keyed by.</param>
+    public void AttachOffload(MoeExpertOffload offload, int layer)
+    {
+        ArgumentNullException.ThrowIfNull(offload);
+        ArgumentOutOfRangeException.ThrowIfNegative(layer);
+        int e = _moe.NumExperts;
+        offload.RegisterLayer(layer, e, ResolveExpert);
+        _offIds = new int[e * Math.Max(1, _moe.NumExpertsPerTok)];
+        _offCounts = new int[e];
+        _offResident = new bool[e];
+        _offKeys = new ExpertKey[e];
+        _offPlan = new ExpertAssignment[e];
+        _offMisses = new List<ExpertKey>(e);
+        _offHostPlan = new int[e];
+        _offHostOffset = new int[e];
+        _offloadLayer = layer;
+        _offload = offload;
+    }
+
+    /// <summary>Where this block's routed experts run: the offload attached to it, or null when every expert runs on the device.</summary>
+    public MoeExpertOffload? Offload => _offload;
+
     /// <summary>
     /// Opt-in (default off): routes the routed experts through the heterogeneous runtime. The scheduler plans every expert on
     /// the CPU, <see cref="HostExpertCache"/> holds the layer's F32 weights without copying them, and
@@ -38,6 +82,8 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         _hostCache?.Dispose();
         _hostCache = null;
         _hostWeights = null;
+        _offload = null;
+        _offloadLayer = -1;
         _routerW = w[$"{prefix}.mlp.gate.weight"];
         // DeepSeek-V3 / Kimi-K2 router correction bias (added to the selection scores only). Optional: V2-Lite and
         // every softmax-routed MoE lack it. Read once to a host array (it is a tiny [E] vector used per token).
@@ -158,6 +204,11 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
 
         // 4. Routed experts: gather → expert SwiGLU → weighted scatter-add.
+        if (_offload is not null)
+        {
+            RunRoutedWithOffload(backend, x, n, output, expertTokens, expertWeights);
+            return output;
+        }
         if (UseHostExpertRuntime)
         {
             RunRoutedThroughRuntime(backend, x, n, output, expertTokens, expertWeights);
@@ -179,6 +230,128 @@ public sealed class MoeFeedForward(MoeConfig moe, int hiddenSize, bool lowVram)
         }
         return output;
     }
+
+    /// <summary>Routed experts under expert offload. The plan pins the experts the device cache holds; each runs on the device exactly as
+    /// the direct path runs it, its projections finding the cache's copies. A miss serving a large batch runs the same way from a copy
+    /// uploaded for this call. The remaining misses run on the CPU: their rows are gathered on the device and read back in one copy
+    /// BEFORE any device expert is queued, since a host read waits for the queue; the device experts are then queued and the CPU
+    /// experts computed while they run. Each CPU expert's output is combined with its own weighted scatter-add, as on the direct path:
+    /// the combine kernel requires distinct rows within one call.</summary>
+    private unsafe void RunRoutedWithOffload(IBackend backend, Tensor x, int n, Tensor output, List<int>[] expertTokens,
+        List<float>[] expertWeights)
+    {
+        MoeExpertOffload offload = _offload!;
+        int e = _moe.NumExperts;
+        int h = _hidden;
+        int pairs = 0;
+        for (int ex = 0; ex < e; ex++) pairs += expertTokens[ex].Count;
+        if (_offIds.Length < pairs) _offIds = new int[Math.Max(pairs, _offIds.Length * 2)];
+        int fill = 0;
+        for (int ex = 0; ex < e; ex++)
+            for (int j = 0; j < expertTokens[ex].Count; j++) _offIds[fill++] = ex;
+
+        int distinct = ExpertScheduler.Plan(offload.Cache, _offIds.AsSpan(0, pairs), _offloadLayer, 0, e, offload.Policy, _offCounts,
+            _offResident, _offKeys, _offPlan, _offMisses, _offLease);
+        float[]? hostIn = null, hostOut = null;
+        int[]? hostIndex = null;
+        try
+        {
+            // Host experts: those planned on the CPU that serve too few rows to be worth an upload.
+            int hostExperts = 0, hostRows = 0;
+            for (int i = 0; i < distinct; i++)
+            {
+                if (_offPlan[i].Placement == ExpertPlacement.Cpu && !offload.Streams(_offPlan[i].Rows))
+                {
+                    hostExperts++;
+                    hostRows += _offPlan[i].Rows;
+                }
+            }
+
+            // 1. Gather every host row on the device and read it back once, before the device experts are queued.
+            if (hostExperts > 0)
+            {
+                hostIndex = ArrayPool<int>.Shared.Rent(hostRows);
+                int at = 0;
+                for (int i = 0; i < distinct; i++)
+                {
+                    if (_offPlan[i].Placement != ExpertPlacement.Cpu || offload.Streams(_offPlan[i].Rows)) continue;
+                    foreach (int token in expertTokens[_offPlan[i].Key.Expert]) hostIndex[at++] = token;
+                }
+                using Tensor gathered = new(new TensorShape(1, hostRows, h), DType.F32);
+                backend.GatherRows(gathered, x, hostIndex.AsSpan(0, hostRows));
+                hostIn = ArrayPool<float>.Shared.Rent(hostRows * h);
+                hostOut = ArrayPool<float>.Shared.Rent(hostRows * h);
+                gathered.AsReadOnlySpan<float>().CopyTo(hostIn);   // D2H sync, with nothing else queued yet
+            }
+
+            // 2. Device experts: resident ones, and misses large enough to stream.
+            int inter = _moe.MoeIntermediateSize;
+            for (int i = 0; i < distinct; i++)
+            {
+                ExpertAssignment assignment = _offPlan[i];
+                bool streamed = assignment.Placement == ExpertPlacement.Cpu && offload.Streams(assignment.Rows);
+                if (assignment.Placement != ExpertPlacement.Gpu && !streamed) continue;
+                int ex = assignment.Key.Expert;
+                ReadOnlySpan<int> idx = CollectionsMarshal.AsSpan(expertTokens[ex]);
+                Tensor gatheredRows = new(new TensorShape(1, idx.Length, h), DType.F32);
+                backend.GatherRows(gatheredRows, x, idx);
+                Tensor expOut = SwiGlu(backend, gatheredRows, idx.Length, _gateW[ex], _upW[ex], _downW[ex], inter);
+                gatheredRows.Dispose();
+                backend.ScatterAddWeightedRows(output, expOut, idx, CollectionsMarshal.AsSpan(expertWeights[ex]));
+                expOut.Dispose();
+                offload.Record(assignment.Placement, streamed, assignment.Rows);
+            }
+
+            // 3. Host experts, computed while the device runs, then combined one expert at a time.
+            if (hostExperts > 0)
+            {
+                ExpertProgram program = _moe.Activation == ActivationKind.GeluTanh ? ExpertProgram.GeGlu : ExpertProgram.Swiglu;
+                int[] hostPlan = _offHostPlan;
+                int[] hostOffset = _offHostOffset;
+                int k = 0, rowAt = 0;
+                for (int i = 0; i < distinct; i++)
+                {
+                    if (_offPlan[i].Placement != ExpertPlacement.Cpu || offload.Streams(_offPlan[i].Rows)) continue;
+                    hostPlan[k] = i;
+                    hostOffset[k] = rowAt;
+                    rowAt += _offPlan[i].Rows;
+                    k++;
+                }
+                float[] inBuf = hostIn!, outBuf = hostOut!;
+                ExpertAssignment[] plan = _offPlan;
+                IExpertHostRunner runner = offload.Host;
+                // One expert at a time: the runner spreads each expert's rows across every core, which a layer's three or four
+                // single-row experts at decode could not fill on their own.
+                for (int j = 0; j < hostExperts; j++)
+                {
+                    ExpertAssignment a = plan[hostPlan[j]];
+                    int start = hostOffset[j] * h, length = a.Rows * h;
+                    runner.Run(program, a.Key, inBuf.AsSpan(start, length), a.Rows, outBuf.AsSpan(start, length));
+                }
+                // One host tensor carries every CPU expert's output; each expert's rows are a view of it, combined on their own.
+                using Tensor allOut = new(new TensorShape(hostRows, h), DType.F32);
+                outBuf.AsSpan(0, hostRows * h).CopyTo(allOut.AsSpan<float>());
+                for (int j = 0; j < hostExperts; j++)
+                {
+                    ExpertAssignment a = plan[hostPlan[j]];
+                    int ex = a.Key.Expert;
+                    using Tensor expOut = allOut.SliceRows(hostOffset[j], a.Rows);
+                    backend.ScatterAddWeightedRows(output, expOut, CollectionsMarshal.AsSpan(expertTokens[ex]),
+                        CollectionsMarshal.AsSpan(expertWeights[ex]));
+                    offload.Record(ExpertPlacement.Cpu, streamed: false, a.Rows);
+                }
+            }
+        }
+        finally
+        {
+            _offLease.Dispose();
+            if (hostIndex is not null) ArrayPool<int>.Shared.Return(hostIndex);
+            if (hostIn is not null) ArrayPool<float>.Shared.Return(hostIn);
+            if (hostOut is not null) ArrayPool<float>.Shared.Return(hostOut);
+        }
+        offload.AfterLayer(_offMisses);
+    }
+
 
     /// <summary>Gated FFN over <paramref name="rows"/> tokens: down(act(gate(x)) * up(x)) — SiLU (SwiGLU, the default) or tanh-GELU (GeGLU, Gemma-4's <see cref="MoeConfig.Activation"/>).</summary>
     private Tensor SwiGlu(IBackend backend, Tensor x, int rows, Tensor gateW, Tensor upW, Tensor downW, int inter)

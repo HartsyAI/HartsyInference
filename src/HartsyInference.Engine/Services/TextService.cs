@@ -6,6 +6,8 @@ using HartsyInference.Core.Backends;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Exceptions;
 using HartsyInference.Core.Logging;
+using HartsyInference.Core.MemoryManagement;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Core.Tensors;
 using HartsyInference.Cuda;
@@ -882,9 +884,6 @@ public sealed class TextService : ITextService, IDisposable
             Logs.Info($"[TextService] Placement for '{Path.GetFileName(path)}': {placement.Mode} on {placement.DeviceKey}. {placement.Reason}");
             if (!placement.Feasible)
                 throw new HartsyInferenceException($"Cannot load '{Path.GetFileName(path)}': {placement.Reason}");
-            if (placement.Mode == TextPlacementMode.Offload)
-                throw new HartsyInferenceException(
-                    $"'{Path.GetFileName(path)}' needs expert offload, which this engine version cannot run yet. {placement.Reason}");
             if (placement.Mode == TextPlacementMode.Split)
             {
                 EnsureRamHeadroomFor(path, dequantizesEverything: false);
@@ -952,9 +951,16 @@ public sealed class TextService : ITextService, IDisposable
         // always pass false) to preserve this path's long-standing behavior for every existing caller; a request
         // can opt out via PreloadRedundantWeightSplits — see its doc comment on TextRequest for the measured cost.
         bool preloadRedundantSplits = request.PreloadRedundantWeightSplits ?? true;
-        // Grouped so a MoE model's routed experts land in one device allocation per layer and projection instead of
-        // one per expert, which the driver rounds up (18-62% on Qwen3-30B-A3B's experts).
-        backend.PreloadWeightGroups(slot.Model.Transformer.EnumerateWeightGroups(preloadRedundantSplits));
+        if (placement?.Mode == TextPlacementMode.Offload)
+        {
+            slot.ExpertOffload = AttachExpertOffload(slot, backend, placement, preloadRedundantSplits);
+        }
+        else
+        {
+            // Grouped so a MoE model's routed experts land in one device allocation per layer and projection instead of
+            // one per expert, which the driver rounds up (18-62% on Qwen3-30B-A3B's experts).
+            backend.PreloadWeightGroups(slot.Model.Transformer.EnumerateWeightGroups(preloadRedundantSplits));
+        }
         slot.PreloadRedundantWeightSplitsApplied = preloadRedundantSplits;
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
         slot.PlannedPlacement = placement;
@@ -1096,6 +1102,40 @@ public sealed class TextService : ITextService, IDisposable
                     + "keeps GGUF tensors quantized for CUDA backends, and a CPU backend needs them dequantized "
                     + "to F32. Use a single CPU-only device (no '+') instead of mixing CPU into a shard list.");
             }
+        }
+    }
+
+    /// <summary>Sets up expert offload for the model just loaded on <paramref name="slot"/>: the dense weights are preloaded, a device
+    /// expert cache of the planned budget holds the routed experts it can, seeded evenly across the layers, and the rest run on the
+    /// CPU. Dequantized weight casts are not cached on this backend: a prefill's casts would otherwise grow into the memory the plan
+    /// gave the expert cache.</summary>
+    private static MoeExpertOffload AttachExpertOffload(TextDeviceSlot slot, IBackend backend, TextPlacement placement, bool preloadRedundantSplits)
+    {
+        GenericTransformer transformer = slot.Model!.Transformer;
+        TransformerConfig cfg = transformer.Config;
+        if (backend is not CudaBackend cuda)
+            throw new HartsyInferenceException($"Expert offload needs a CUDA backend; this slot runs on {backend.Capabilities.Name}.");
+        backend.CacheWeightCasts = false;
+        slot.CacheWeightCastsApplied = false;
+        backend.PreloadWeightGroups(transformer.EnumerateWeightGroups(preloadRedundantSplits, includeExperts: false));
+        List<Tensor> experts = [.. transformer.EnumerateExpertWeights()];
+        MoeExpertOffload offload = CudaMoeOffload.Create(cuda, placement.ExpertBudgetBytes, cfg.HiddenSize, cfg.Moe!.MoeIntermediateSize, experts);
+        try
+        {
+            IReadOnlyList<(int Layer, int ExpertCount)> layers = transformer.AttachExpertOffload(offload);
+            long expertBytes = experts.Sum(static t => t.DType.ComputeByteCount(t.ElementCount));
+            int totalExperts = layers.Sum(static l => l.ExpertCount);
+            long perExpert = Math.Max(1, expertBytes / Math.Max(1, totalExperts));
+            int perLayer = (int)Math.Min(cfg.Moe.NumExperts, placement.ExpertBudgetBytes / perExpert / Math.Max(1, layers.Count));
+            offload.Seed(layers, perLayer);
+            Logs.Info($"[TextService] Expert offload: {ByteFormat.GbF1(placement.ExpertBudgetBytes)} cache, seeded {perLayer} of "
+                + $"{cfg.Moe.NumExperts} experts in each of {layers.Count} layers.");
+            return offload;
+        }
+        catch
+        {
+            offload.Dispose();
+            throw;
         }
     }
 
@@ -1377,6 +1417,17 @@ public sealed class TextService : ITextService, IDisposable
     private static RetainedSequenceStore NewPrefixCacheStore() =>
         new(EngineKnobs.PrefixCacheMaxEntries.Value, EngineKnobs.PrefixCacheMaxBytes.Value);
 
+    /// <summary>One line on where a model's routed experts have run under offload, for logs.</summary>
+    internal static string DescribeOffload(MoeExpertOffload offload)
+    {
+        MoeOffloadStats stats = offload.Stats;
+        ExpertCacheStats cache = offload.CacheBase.Stats;
+        return $"{stats.ResidentShare:P1} of routed rows from the GPU cache, {stats.DeviceShare:P1} on the GPU including streamed "
+            + $"({stats.ResidentRows} resident, {stats.StreamedRows} streamed, "
+            + $"{stats.HostRows} on the CPU); {stats.Admitted} experts admitted; cache {ByteFormat.GbF1(cache.ResidentBytes)} of "
+            + $"{ByteFormat.GbF1(cache.BudgetBytes)} ({cache.ResidentExperts} experts).";
+    }
+
     /// <summary>Logs once per slot when a request asks for a different placement than the loaded model was given; the
     /// placement is decided at load, so it applies from the next load.</summary>
     /// <remarks>Only a model the planner placed has a placement to compare against. A model loaded another way (an SSM, an
@@ -1487,6 +1538,14 @@ public sealed class TextService : ITextService, IDisposable
         slot.MllamaVision?.Dispose();
         slot.MllamaVision = null;
         slot.VisionPath = null;
+        // The expert cache frees its experts on the backend's streams, so it goes before the backend's memory does.
+        if (slot.ExpertOffload is not null)
+        {
+            Logs.Info($"[TextService] Expert offload on '{slot.LoadedPath}': {DescribeOffload(slot.ExpertOffload)}");
+            try { slot.ExpertOffload.Dispose(); }
+            catch (Exception ex) { Logs.Debug($"[TextService] Disposing the expert offload failed: {ex.Message}"); }
+            slot.ExpertOffload = null;
+        }
         if (slot.Model is not null || slot.SsmModel is not null || slot.TpTransformer is not null || slot.DeepSeekV41 is not null)
         {
             if (slot.Backend is not null)

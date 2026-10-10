@@ -59,7 +59,7 @@ Qwen-MoE shared-expert path is unit-test-verified against an HF reference (no 14
 | Model | Notes |
 |---|---|
 | **Mixtral 8x7B** (47B) | `llama` arch + experts, interleaved RoPE, renorm; config + mapper + stacked-expert split wired. |
-| **Qwen3-MoE 30B-A3B / 235B** | `qwen3moe`, per-head Q/K norm, no shared expert; wired. |
+| **Qwen3-MoE 30B-A3B / 235B** | `qwen3moe`, per-head Q/K norm, no shared expert. 30B-A3B Q4_K_M runs end to end (2026-10-10): one RTX 4090 at 24.6 tok/s decode (19.6 GB peak), a 3060+4090 split at 20.2 tok/s, and expert offload on the RTX 3060 alone at 4-5 tok/s. Greedy agreement with the 4090 on 10 prompts: offload 4/10 identical, the all-GPU split 4/10, so offload's divergence is within the cross-device spread. No reference-logit comparison yet. |
 | **DeepSeek-V2-Lite** | MLA + DeepSeek-MoE built + `MlaTests` pass; loads but OOMs the 3060 at preload. |
 | **DeepSeek-V3 671B / Kimi-K2 1T** | MLA + MoE + **V3 node-limited routing (sigmoid + e_score bias + group top-k + routed_scaling) + q-LoRA query** all built & **slice-verified** (`MoeTests` group-routing vs HF `noaux_tc`, `MlaTests` q-LoRA block vs host ref). e2e >12 GB. |
 | **GPT-OSS 20B / 120B** | Per-head **attention sinks** built (CPU+CUDA, PTX recompiled) & **slice-verified** (`FlashAttentionTests.Flash_Sink_*`); `gpt-oss` arch/mapper/config wired. MoE + o200k tokenizer reused. MXFP4 tensor-type decode added 2026-07-22 (`DType.MXFP4`/`Codec_MXFP4`) — the load-time crash every public checkpoint hit is fixed. e2e 20B+ still deferred (VRAM, not an engine gap anymore). |

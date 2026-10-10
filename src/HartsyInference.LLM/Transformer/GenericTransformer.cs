@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using HartsyInference.Core.Configuration;
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Moe;
 using HartsyInference.Core.Rope;
 using HartsyInference.Core.Tensors;
 
@@ -252,7 +253,9 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <summary><see cref="EnumerateWeights"/> arranged for <see cref="IBackend.PreloadWeightGroups"/>: each MoE layer's
     /// routed experts as one group per projection, and every other weight as a group of one. The same tensors as
     /// <see cref="EnumerateWeights"/>, each exactly once.</summary>
-    public IEnumerable<IReadOnlyList<Tensor>> EnumerateWeightGroups(bool includeRedundantSplits = true)
+    /// <param name="includeRedundantSplits">Include split originals kept beside fused copies.</param>
+    /// <param name="includeExperts">Include the routed experts; false for expert offload, where a cache owns their residency.</param>
+    public IEnumerable<IReadOnlyList<Tensor>> EnumerateWeightGroups(bool includeRedundantSplits = true, bool includeExperts = true)
     {
         HashSet<Tensor> grouped = new(ReferenceEqualityComparer.Instance);
         foreach (Layer l in _layers)
@@ -260,13 +263,36 @@ public sealed unsafe class GenericTransformer : IDisposable
             foreach (IReadOnlyList<Tensor> group in l.EnumerateExpertGroups())
             {
                 foreach (Tensor t in group) grouped.Add(t);
-                yield return group;
+                if (includeExperts) yield return group;
             }
         }
         foreach (Tensor t in EnumerateWeights(includeRedundantSplits))
         {
             if (!grouped.Contains(t)) yield return [t];
         }
+    }
+
+    /// <summary>Every routed expert projection of every MoE layer.</summary>
+    public IEnumerable<Tensor> EnumerateExpertWeights()
+    {
+        foreach (Layer l in _layers)
+            foreach (IReadOnlyList<Tensor> group in l.EnumerateExpertGroups())
+                foreach (Tensor t in group) yield return t;
+    }
+
+    /// <summary>Routes every MoE layer's experts through <paramref name="offload"/> (see <see cref="MoeFeedForward.AttachOffload"/>).
+    /// Returns each MoE layer with its expert count, for seeding the cache.</summary>
+    public IReadOnlyList<(int Layer, int ExpertCount)> AttachExpertOffload(MoeExpertOffload offload)
+    {
+        ArgumentNullException.ThrowIfNull(offload);
+        List<(int, int)> layers = [];
+        for (int i = 0; i < _layers.Length; i++)
+        {
+            if (_layers[i].Moe is not MoeFeedForward moe) continue;
+            moe.AttachOffload(offload, i);
+            layers.Add((i, _cfg.Moe!.NumExperts));
+        }
+        return layers;
     }
 
     /// <summary><see cref="EnumerateStageWeights"/> arranged for <see cref="IBackend.PreloadWeightGroups"/>: the stage's MoE
@@ -1471,6 +1497,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             cur.Dispose(); projNormed.Dispose();
             return result;
         }
+
+        /// <summary>This layer's MoE block; null on a dense layer.</summary>
+        public MoeFeedForward? Moe => _moe;
 
         /// <summary>This layer's routed experts grouped by projection; none on a dense layer.</summary>
         public IEnumerable<IReadOnlyList<Tensor>> EnumerateExpertGroups() => _moe?.EnumerateExpertGroups() ?? [];

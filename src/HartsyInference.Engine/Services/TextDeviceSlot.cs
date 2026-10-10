@@ -134,6 +134,9 @@ internal sealed class TextDeviceSlot
     /// mismatch log when a later request asks for another.</summary>
     public string? PlacementRequested { get; set; }
 
+    /// <summary>The expert offload serving the loaded model; null unless the planner chose offload. Disposed on unload.</summary>
+    public HartsyInference.Core.Moe.MoeExpertOffload? ExpertOffload { get; set; }
+
     /// <summary>Which load-time settings <see cref="TextService.LoadInto"/> has already logged a mismatch for on
     /// this slot (by setting name) — a request's own value keeps being ignored every subsequent call on an
     /// already-loaded slot, so without this a long voice call would repeat the same debug line every turn. Reset

@@ -1,4 +1,5 @@
 using HartsyInference.Core.Tensors;
+using HartsyInference.Cpu.Moe;
 using HartsyInference.LLM.Generation;
 using HartsyInference.ModelAssets.Gguf;
 
@@ -59,6 +60,7 @@ public static class TextPlacementDemandReader
             if (includeRedundantSplits && IsFusedSource(t.Name)) dense += bytes;
         }
 
+        string? hostReason = ExpertsHostReason(tensors, archValue);
         int layers = (int)(archValue("block_count") ?? 0);
         long heads = archValue("attention.head_count") ?? 1;
         long kvHeads = archValue("attention.head_count_kv") ?? heads;
@@ -66,7 +68,30 @@ public static class TextPlacementDemandReader
         long keyLength = archValue("attention.key_length") ?? (heads > 0 ? hidden / heads : 0);
         long valueLength = archValue("attention.value_length") ?? keyLength;
         long kvPerToken = layers * kvHeads * (keyLength + valueLength) * (kvF16 ? 2 : 4);
-        return new TextPlacementDemand(dense, experts, layers, kvPerToken, contextTokens);
+        return new TextPlacementDemand(dense, experts, layers, kvPerToken, contextTokens)
+        {
+            ExpertsHostRunnable = hostReason is null,
+            ExpertsHostReason = hostReason,
+        };
+    }
+
+    /// <summary>Why the packed CPU kernels cannot run this model's experts in place, or null when they can: every <c>*_exps</c>
+    /// tensor must be a format <see cref="CpuExpertKernels.Supports"/> accepts, and the model and expert widths must fill its blocks.</summary>
+    private static string? ExpertsHostReason(IReadOnlyCollection<TextTensorInfo> tensors, Func<string, long?> archValue)
+    {
+        long hidden = archValue("embedding_length") ?? 0;
+        long inter = archValue("expert_feed_forward_length") ?? archValue("feed_forward_length") ?? 0;
+        foreach (TextTensorInfo t in tensors)
+        {
+            if (!t.Name.Contains("_exps.", StringComparison.Ordinal)) continue;
+            if (!CpuExpertKernels.Supports(t.DType))
+                return $"its experts are stored in {t.DType.Name}, which the CPU expert kernels do not read (Q8_0, Q4_K, Q5_K or Q6_K).";
+            int block = t.DType.BlockElementCount;
+            if (hidden <= 0 || inter <= 0 || hidden % block != 0 || inter % block != 0 || hidden % CpuExpertKernels.QuantBlock != 0
+                || inter % CpuExpertKernels.QuantBlock != 0)
+                return $"its widths ({hidden} and {inter}) do not fill {t.DType.Name} blocks of {block}.";
+        }
+        return null;
     }
 
     /// <summary>Bytes the device holds for one tensor: stored bytes, or F32 when the device cannot read the stored quant.</summary>

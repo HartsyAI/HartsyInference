@@ -103,10 +103,10 @@ Subsystems with CPU tests in place:
 
 - **Packing a real checkpoint.** `hartsy moe pack|verify` exists (#316) and is tested on synthetic and GGUF fixtures. No
   real MoE checkpoint has been packed or verified yet.
-- **Production use of the executor.** The planner (#306), the heterogeneous executor (#313), the opt-in CPU runtime (#340)
-  and the CUDA F32 runner (#335) exist. No production model routes experts through them by default. The GPU grouped kernels
-  (M6) are not built, and the packed CPU kernels (#341) run the executor's CPU share through `PackedExpertHostRunner` (#349). Nothing
-  routes production experts through it yet.
+- **Production use.** Generic GGUF MoE models route experts through `MoeExpertOffload` when the text placement planner
+  chooses offload (alpha.331): `ExpertScheduler.Plan` against a `CudaExpertCache`, resident experts through the device
+  projections, misses through `PackedExpertHostRunner` (Q8_0, Q4_K, Q5_K, Q6_K). The GPU grouped kernels (M6) are not
+  built, and the CUDA F32 runner (#335) is still unused. DeepSeek-V4.1 does not use this path yet.
 - **Measurements the plan asks for.** Instrumented now: per-op timing (`OpProfile`) and expert-cache counters (hits, misses,
   uploads, bytes). Not yet instrumented: time to first token, tokens per forward pass, host-to-device and device-to-host
   bandwidth, peer bandwidth, CPU and GPU utilization, KV bytes.

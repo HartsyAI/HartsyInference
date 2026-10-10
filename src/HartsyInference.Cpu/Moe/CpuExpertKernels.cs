@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Runtime.CompilerServices;
 using HartsyInference.Core.Moe;
+using HartsyInference.Core.Numerics;
 using HartsyInference.Core.Tensors;
 
 namespace HartsyInference.Cpu.Moe;
@@ -55,6 +56,16 @@ public static unsafe partial class CpuExpertKernels
         ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y) =>
         Run(program, dtypes, hidden, intermediate, gate, up, down, x, rows, y, SimdDispatch.IsAvx2Supported);
 
+    /// <summary>The per-projection expert with its rows spread across CPU threads (<see cref="CpuParallel"/>): each gate/up row and
+    /// each down row is an independent dot product, so one expert serving one token can use every core. Bit-identical to
+    /// <see cref="Apply(ExpertProgram, ExpertDTypes, int, int, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{float}, int, Span{float})"/>:
+    /// every output element is the same per-row computation, only on another thread. Allocates the fan-out's closures when it fans
+    /// out; the serial overloads remain allocation-free.</summary>
+    /// <inheritdoc cref="Apply(ExpertProgram, ExpertDTypes, int, int, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{byte}, ReadOnlySpan{float}, int, Span{float})"/>
+    public static void ApplyParallel(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, ReadOnlySpan<byte> gate,
+        ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y) =>
+        Run(program, dtypes, hidden, intermediate, gate, up, down, x, rows, y, SimdDispatch.IsAvx2Supported, parallel: true);
+
     /// <summary>The same computation without SIMD. Public so a test can hold the AVX2 path to it.</summary>
     /// <inheritdoc cref="Apply"/>
     public static void ApplyScalar(ExpertProgram program, DType dtype, int hidden, int intermediate, ReadOnlySpan<byte> gate,
@@ -68,7 +79,7 @@ public static unsafe partial class CpuExpertKernels
         Run(program, dtypes, hidden, intermediate, gate, up, down, x, rows, y, simd: false);
 
     private static void Run(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, ReadOnlySpan<byte> gate,
-        ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y, bool simd)
+        ReadOnlySpan<byte> up, ReadOnlySpan<byte> down, ReadOnlySpan<float> x, int rows, Span<float> y, bool simd, bool parallel = false)
     {
         ArgumentNullException.ThrowIfNull(program);
         program.Validated();
@@ -92,7 +103,7 @@ public static unsafe partial class CpuExpertKernels
             fixed (int* sumsP = sums)
             fixed (float* ap = hiddenAct)
             {
-                Core(program, dtypes, hidden, intermediate, gp, up0, dp, xp, rows, yp, cp, sp, sumsP, ap, simd);
+                Core(program, dtypes, hidden, intermediate, gp, up0, dp, xp, rows, yp, cp, sp, sumsP, ap, simd, parallel);
             }
         }
         finally
@@ -105,16 +116,43 @@ public static unsafe partial class CpuExpertKernels
     }
 
     private static void Core(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, byte* gate, byte* up, byte* down,
-        float* x, int rows, float* y, sbyte* codes, float* scales, int* sums, float* hiddenAct, bool simd)
+        float* x, int rows, float* y, sbyte* codes, float* scales, int* sums, float* hiddenAct, bool simd, bool parallel)
+    {
+        QuantizeRows(x, rows, hidden, codes, scales, sums);
+        if (parallel) GateUpParallel(program, dtypes, hidden, intermediate, (nint)gate, (nint)up, (nint)codes, (nint)scales, (nint)sums, rows, (nint)hiddenAct, simd);
+        else GateUpRows(program, dtypes, hidden, intermediate, gate, up, codes, scales, sums, rows, hiddenAct, 0, intermediate, simd);
+
+        QuantizeRows(hiddenAct, rows, intermediate, codes, scales, sums);
+        if (parallel) DownParallel(dtypes, hidden, intermediate, (nint)down, (nint)codes, (nint)scales, (nint)sums, rows, (nint)y, simd);
+        else DownRows(dtypes, hidden, intermediate, down, codes, scales, sums, rows, y, 0, hidden, simd);
+    }
+
+    // The fan-outs live in their own methods: a lambda's captured parameters are allocated on entry to the method that declares
+    // them, whichever branch then runs, and the serial path must stay allocation-free. Pointers cross as addresses because a lambda
+    // cannot capture a fixed local.
+    private static void GateUpParallel(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, nint gate, nint up,
+        nint codes, nint scales, nint sums, int rows, nint hiddenAct, bool simd) =>
+        CpuParallel.ForRanges(intermediate, RowsPerRange, 2L * rows * hidden, (start, length) =>
+            GateUpRows(program, dtypes, hidden, intermediate, (byte*)gate, (byte*)up, (sbyte*)codes, (float*)scales, (int*)sums, rows,
+                (float*)hiddenAct, (int)start, (int)(start + length), simd));
+
+    private static void DownParallel(ExpertDTypes dtypes, int hidden, int intermediate, nint down, nint codes, nint scales, nint sums,
+        int rows, nint y, bool simd) =>
+        CpuParallel.ForRanges(hidden, RowsPerRange, (long)rows * intermediate, (start, length) =>
+            DownRows(dtypes, hidden, intermediate, (byte*)down, (sbyte*)codes, (float*)scales, (int*)sums, rows, (float*)y, (int)start,
+                (int)(start + length), simd));
+
+    /// <summary>Output rows a parallel range covers: enough dot products to outweigh handing the range out.</summary>
+    private const int RowsPerRange = 64;
+
+    /// <summary>Gate and up rows <c>[first, end)</c> against the quantized input, activated and clamped into <paramref name="hiddenAct"/>.</summary>
+    private static void GateUpRows(ExpertProgram program, ExpertDTypes dtypes, int hidden, int intermediate, byte* gate, byte* up,
+        sbyte* codes, float* scales, int* sums, int rows, float* hiddenAct, int first, int end, bool simd)
     {
         int hiddenBlocks = hidden / QuantBlock;
-        int interBlocks = intermediate / QuantBlock;
         int gateRowBytes = checked((int)dtypes.Gate.ComputeByteCount(hidden));
         int upRowBytes = checked((int)dtypes.Up.ComputeByteCount(hidden));
-        int downRowBytes = checked((int)dtypes.Down.ComputeByteCount(intermediate));
-
-        QuantizeRows(x, rows, hidden, codes, scales, sums);
-        for (int i = 0; i < intermediate; i++)
+        for (int i = first; i < end; i++)
         {
             byte* gateRow = gate + (long)i * gateRowBytes;
             byte* upRow = up + (long)i * upRowBytes;
@@ -126,9 +164,15 @@ public static unsafe partial class CpuExpertKernels
                 hiddenAct[r * intermediate + i] = ExpertProgramReference.Activate(program.Activation, clampedGate) * clampedUp;
             }
         }
+    }
 
-        QuantizeRows(hiddenAct, rows, intermediate, codes, scales, sums);
-        for (int d = 0; d < hidden; d++)
+    /// <summary>Down rows <c>[first, end)</c> against the quantized hidden activation, into <paramref name="y"/>.</summary>
+    private static void DownRows(ExpertDTypes dtypes, int hidden, int intermediate, byte* down, sbyte* codes, float* scales, int* sums,
+        int rows, float* y, int first, int end, bool simd)
+    {
+        int interBlocks = intermediate / QuantBlock;
+        int downRowBytes = checked((int)dtypes.Down.ComputeByteCount(intermediate));
+        for (int d = first; d < end; d++)
         {
             byte* downRow = down + (long)d * downRowBytes;
             for (int r = 0; r < rows; r++)
