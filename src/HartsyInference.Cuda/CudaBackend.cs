@@ -11286,30 +11286,47 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
     /// registered against a model that will never finish constructing — its <see cref="Tensor"/> keys become
     /// unreachable, so nothing can ever <see cref="FreeWeights"/> them and the VRAM is held until the process
     /// exits, starving every other consumer of the card (including separate processes).</remarks>
-    protected override void PreloadExpandedWeights(IEnumerable<Tensor> weights)
+    protected override void PreloadExpandedWeights(IEnumerable<Tensor> weights) => PreloadWithRollback(uploaded =>
     {
-        List<Tensor>? uploaded = null;
+        foreach (Tensor weight in weights)
+        {
+            // Only weights this call actually uploaded are rollback candidates — one already resident from
+            // an earlier phase (or from vram.keepModels) is not ours to free. PreloadWeight reports this
+            // itself so ownership is decided by the same lookup that does the registration.
+            if (GpuTransferHelper.PreloadWeight(weight))
+            {
+                uploaded.Add(weight);
+            }
+        }
+    });
+
+    /// <inheritdoc/>
+    /// <remarks>Each group of two or more new members becomes one persistent allocation (see
+    /// <see cref="GpuTransferHelper.PreloadWeightGroup"/>); a failure rolls back every member this call uploaded, the
+    /// same as a plain preload.</remarks>
+    protected override void PreloadExpandedWeightGroups(IEnumerable<IReadOnlyList<Tensor>> groups) => PreloadWithRollback(uploaded =>
+    {
+        foreach (IReadOnlyList<Tensor> group in groups)
+        {
+            uploaded.AddRange(GpuTransferHelper.PreloadWeightGroup(group));
+        }
+    });
+
+    /// <summary>Runs a preload pass; if it throws, frees every weight it reported as uploaded, then rethrows.</summary>
+    private static void PreloadWithRollback(Action<List<Tensor>> pass)
+    {
+        List<Tensor> uploaded = [];
         try
         {
-            foreach (Tensor weight in weights)
-            {
-                // Only weights this call actually uploaded are rollback candidates — one already resident from
-                // an earlier phase (or from vram.keepModels) is not ours to free. PreloadWeight reports this
-                // itself so ownership is decided by the same lookup that does the registration.
-                if (GpuTransferHelper.PreloadWeight(weight))
-                {
-                    uploaded ??= new List<Tensor>();
-                    uploaded.Add(weight);
-                }
-            }
+            pass(uploaded);
         }
         catch (Exception ex)
         {
             HartsyInference.Core.Logging.Logs.Error(
-                $"[Cuda] PreloadWeights failed after {uploaded?.Count ?? 0} weight(s) — rolling back this batch.", ex);
+                $"[Cuda] PreloadWeights failed after {uploaded.Count} weight(s) — rolling back this batch.", ex);
             try
             {
-                if (uploaded is not null)
+                if (uploaded.Count > 0)
                 {
                     GpuTransferHelper.FreeWeights(uploaded);
                 }

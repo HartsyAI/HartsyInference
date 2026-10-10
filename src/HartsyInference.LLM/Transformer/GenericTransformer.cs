@@ -249,6 +249,26 @@ public sealed unsafe class GenericTransformer : IDisposable
             foreach (Tensor t in l.EnumerateWeights(includeRedundantSplits)) yield return t;
     }
 
+    /// <summary><see cref="EnumerateWeights"/> arranged for <see cref="IBackend.PreloadWeightGroups"/>: each MoE layer's
+    /// routed experts as one group per projection, and every other weight as a group of one. The same tensors as
+    /// <see cref="EnumerateWeights"/>, each exactly once.</summary>
+    public IEnumerable<IReadOnlyList<Tensor>> EnumerateWeightGroups(bool includeRedundantSplits = true)
+    {
+        HashSet<Tensor> grouped = new(ReferenceEqualityComparer.Instance);
+        foreach (Layer l in _layers)
+        {
+            foreach (IReadOnlyList<Tensor> group in l.EnumerateExpertGroups())
+            {
+                foreach (Tensor t in group) grouped.Add(t);
+                yield return group;
+            }
+        }
+        foreach (Tensor t in EnumerateWeights(includeRedundantSplits))
+        {
+            if (!grouped.Contains(t)) yield return [t];
+        }
+    }
+
     /// <summary>The weight subset one pipeline stage needs resident on ITS backend: the layer range's tensors, plus (first stage) the embedding norm and (last stage) the tied/untied head, final norm, and PLE projection. The union over a full contiguous stage tiling equals <see cref="EnumerateWeights"/> exactly — unit-asserted, since a dropped tensor here silently becomes a per-op PCIe re-upload.</summary>
     public IEnumerable<Tensor> EnumerateStageWeights(int startLayer, int endLayer, bool isFirstStage, bool isLastStage,
         bool includeRedundantSplits = true)
@@ -1431,6 +1451,9 @@ public sealed unsafe class GenericTransformer : IDisposable
             cur.Dispose(); projNormed.Dispose();
             return result;
         }
+
+        /// <summary>This layer's routed experts grouped by projection; none on a dense layer.</summary>
+        public IEnumerable<IReadOnlyList<Tensor>> EnumerateExpertGroups() => _moe?.EnumerateExpertGroups() ?? [];
 
         public IEnumerable<Tensor> EnumerateWeights(bool includeRedundantSplits = true)
         {

@@ -100,6 +100,7 @@ internal static unsafe class GpuTransferHelper
             {
                 SynchronousFrees = false;
             }
+            FreeOrphanedWeightGroups();
             SidecarCache.Clear();
             PendingPersistentFrees.Clear();
         }
@@ -361,6 +362,162 @@ internal static unsafe class GpuTransferHelper
         /// activation was bound; this records the same fact at the same moment, and
         /// <see cref="GpuTransferHelper.FreeGraphArena"/> drops the range when the arena goes.</remarks>
         internal readonly HashSet<ulong> ArenaBuffers = new();
+
+        /// <summary>Byte alignment of each member inside a weight-group allocation. 256 matches what the driver hands
+        /// out for a whole allocation, so a member is as aligned as a weight preloaded on its own.</summary>
+        internal const int GroupMemberAlignment = 256;
+
+        /// <summary>One persistent allocation holding a whole weight group, freed once its last member leaves.</summary>
+        private sealed class WeightSlab(ulong basePtr, int members)
+        {
+            public ulong Base { get; } = basePtr;
+            public int Live { get; set; } = members;
+        }
+
+        /// <summary>Member pointers of live weight groups, each mapped to the allocation that contains it. A member's
+        /// pointer is interior to that allocation, so it must never reach a free call of its own.</summary>
+        private readonly Dictionary<ulong, WeightSlab> _slabMembers = new();
+
+        /// <summary>Whether <paramref name="pointer"/> is a member of a weight group rather than an allocation of its own.</summary>
+        internal bool IsWeightGroupMember(ulong pointer) => _slabMembers.ContainsKey(pointer);
+
+        /// <summary>Distinct weight-group allocations still held. Walks every member, so it is for tests and diagnostics, not a
+        /// hot path.</summary>
+        internal int WeightGroupCount => _slabMembers.Values.Distinct().Count();
+
+        /// <summary>Uploads <paramref name="members"/> into ONE persistent allocation and registers each as a resident
+        /// weight at its offset inside it. Returns the tensors this call made resident; members already resident are
+        /// skipped, and a member that is currently an activation is promoted on its own, as <see cref="PreloadWeight"/>
+        /// does. Fewer than two new members take the ordinary per-weight path.</summary>
+        /// <remarks>The members' host bytes are copied in one transfer when they are laid out back to back with no
+        /// padding, which is what the per-expert views over a GGUF's stacked expert tensor are; otherwise one transfer
+        /// per member. Each member is excluded from auto-promotion: its residency is the group's.</remarks>
+        public List<Tensor> PreloadWeightGroup(IReadOnlyList<Tensor> members)
+        {
+            ArgumentNullException.ThrowIfNull(members);
+            List<Tensor> uploaded = [];
+            List<Tensor> pending = new(members.Count);
+            HashSet<Tensor> seen = new(ReferenceEqualityComparer.Instance);
+            foreach (Tensor member in members)
+            {
+                if (!seen.Add(member) || TierOf(member) == GpuResidencyTier.Weight)
+                {
+                    continue;
+                }
+                // Not resident as a weight (checked above), so the per-weight preload uploads or promotes it: this call owns it,
+                // as the static PreloadWeight reports true for the same case.
+                if (TierOf(member) == GpuResidencyTier.Activation || GpuResidencyCache<ulong>.ByteSize(member) == 0)
+                {
+                    PreloadWeight(member);
+                    uploaded.Add(member);
+                    continue;
+                }
+                pending.Add(member);
+            }
+            if (pending.Count < 2)
+            {
+                foreach (Tensor member in pending)
+                {
+                    PreloadWeight(member);
+                    uploaded.Add(member);
+                }
+                return uploaded;
+            }
+
+            long[] offsets = new long[pending.Count];
+            long total = 0;
+            bool contiguous = true;
+            byte* first = (byte*)pending[0].DataPointer;
+            for (int i = 0; i < pending.Count; i++)
+            {
+                total = (total + GroupMemberAlignment - 1) / GroupMemberAlignment * GroupMemberAlignment;
+                offsets[i] = total;
+                contiguous &= (byte*)pending[i].DataPointer == first + total;
+                total += GpuResidencyCache<ulong>.ByteSize(pending[i]);
+            }
+
+            Context?.EnsureCurrent();
+            nint stream = RequireLiveStream("a weight-group upload");
+            ulong basePtr = CudaMemory.AllocatePersistent((nuint)total);
+            try
+            {
+                if (contiguous)
+                {
+                    CudaMemory.CopyHostToDeviceAsync(basePtr, first, (nuint)total, stream);
+                }
+                else
+                {
+                    for (int i = 0; i < pending.Count; i++)
+                    {
+                        Upload(basePtr + (ulong)offsets[i], pending[i], GpuResidencyCache<ulong>.ByteSize(pending[i]));
+                    }
+                }
+            }
+            catch
+            {
+                CudaMemory.Free(basePtr);
+                throw;
+            }
+
+            WeightSlab slab = new(basePtr, pending.Count);
+            int registered = 0;
+            try
+            {
+                for (; registered < pending.Count; registered++)
+                {
+                    ulong pointer = basePtr + (ulong)offsets[registered];
+                    _slabMembers[pointer] = slab;
+                    Weights[pending[registered]] = pointer;
+                    CachedBuffers.Add(pointer);
+                    UploadTracker.GetOrCreateValue(pending[registered]).Blocked = true;
+                }
+            }
+            catch
+            {
+                // Nothing of this group may stay registered: the caller's rollback only knows the members returned to it.
+                for (int i = 0; i <= Math.Min(registered, pending.Count - 1); i++)
+                {
+                    ulong pointer = basePtr + (ulong)offsets[i];
+                    Weights.Remove(pending[i]);
+                    CachedBuffers.Remove(pointer);
+                    _slabMembers.Remove(pointer);
+                }
+                CudaMemory.Free(basePtr);
+                throw;
+            }
+            uploaded.AddRange(pending);
+            return uploaded;
+        }
+
+        /// <summary>A weight-group member is released by giving up its share of the group's allocation, which is freed
+        /// with the last share. Every release path reaches here: freeing weights, the teardown sweep, demotion, a parked
+        /// orphan.</summary>
+        protected override bool TryRetainOnRelease(ulong buffer)
+        {
+            if (!_slabMembers.Remove(buffer, out WeightSlab? slab))
+            {
+                return false;
+            }
+            slab.Live--;
+            if (slab.Live == 0)
+            {
+                Context?.EnsureCurrent();
+                CudaMemory.Free(slab.Base);
+            }
+            return true;
+        }
+
+        /// <summary>Frees the allocation of every weight group whose members left the cache without a release, which
+        /// only an eviction that hands the pointer to its caller can do. Teardown only.</summary>
+        private void FreeOrphanedWeightGroups()
+        {
+            foreach (WeightSlab slab in _slabMembers.Values.Distinct())
+            {
+                Context?.EnsureCurrent();
+                CudaMemory.Free(slab.Base);
+            }
+            _slabMembers.Clear();
+        }
 
         /// <summary>A graph arena owns its allocations wholesale; nothing inside one is freed individually.</summary>
         protected override bool IsExternallyOwned(ulong buffer) =>
@@ -1067,6 +1224,10 @@ internal static unsafe class GpuTransferHelper
         Resolve().StoreWeightCast(weight, want, castPtr, (long)byteSize);
 
 
+    /// <summary>Uploads a group of weights into one device allocation; see <see cref="State.PreloadWeightGroup"/>. Returns
+    /// the members this call made resident, for the caller's rollback.</summary>
+    public static List<Tensor> PreloadWeightGroup(IReadOnlyList<Tensor> members) => Resolve().PreloadWeightGroup(members);
+
     /// <summary>Uploads a weight ahead of first use so no op pays a cache-miss transfer mid-generation. Returns
     /// false when this backend already holds it.</summary>
     /// <remarks>The persistent allocation is the subclass's <c>AllocateWeight</c> override: a resident weight is
@@ -1166,6 +1327,13 @@ internal static unsafe class GpuTransferHelper
     internal static bool TryUnregisterCachedWeight(Tensor weight, out ulong dptr)
     {
         State s = Resolve();
+        // A group member's pointer is interior to the group's allocation; handing it to a caller that frees it would
+        // free memory the other members still use. The streaming cache, the only caller, never owns one.
+        if (s.TryGetCached(weight, out ulong member) && s.IsWeightGroupMember(member))
+        {
+            dptr = 0;
+            return false;
+        }
         if (!s.TryEvictWeight(weight, out ulong evicted))
         {
             dptr = 0;

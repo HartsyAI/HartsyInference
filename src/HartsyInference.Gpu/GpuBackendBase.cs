@@ -151,6 +151,47 @@ public abstract class GpuBackendBase
     /// <summary>Uploads an already-expanded weight set.</summary>
     protected virtual void PreloadExpandedWeights(IEnumerable<Tensor> weights) => Residency.PreloadWeights(weights);
 
+    /// <summary>Uploads weights in groups a backend may place in one device allocation each; see
+    /// <see cref="IBackend.PreloadWeightGroups"/>.</summary>
+    /// <remarks>A group with a low-rank adjunct on any member is preloaded member by member, adjunct factors included:
+    /// the factors are separate tensors of other shapes, so they do not belong in the group's allocation.</remarks>
+    public void PreloadWeightGroups(IEnumerable<IReadOnlyList<Tensor>> groups)
+    {
+        ArgumentNullException.ThrowIfNull(groups);
+        using OpScope _ = EnterOp();
+        PreloadExpandedWeightGroups(ExpandGroups(groups));
+    }
+
+    /// <summary>Uploads already-expanded weight groups. The default preloads every member on its own.</summary>
+    protected virtual void PreloadExpandedWeightGroups(IEnumerable<IReadOnlyList<Tensor>> groups)
+    {
+        foreach (IReadOnlyList<Tensor> group in groups)
+        {
+            PreloadExpandedWeights(group);
+        }
+    }
+
+    private static IEnumerable<IReadOnlyList<Tensor>> ExpandGroups(IEnumerable<IReadOnlyList<Tensor>> groups)
+    {
+        foreach (IReadOnlyList<Tensor> group in groups)
+        {
+            bool hasAdjunct = false;
+            foreach (Tensor member in group)
+            {
+                hasAdjunct |= member.LowRankAdjunct is not null;
+            }
+            if (!hasAdjunct)
+            {
+                yield return group;
+                continue;
+            }
+            foreach (Tensor weight in LowRankAdjunct.ExpandWeights(group))
+            {
+                yield return [weight];
+            }
+        }
+    }
+
     /// <summary>Releases the device copies of these weights, adjunct factors included.</summary>
     public void FreeWeights(IEnumerable<Tensor> weights)
     {

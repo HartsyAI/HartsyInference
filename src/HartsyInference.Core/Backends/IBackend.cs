@@ -3597,6 +3597,21 @@ public partial interface IBackend : IDisposable
     /// <summary>Pre-uploads weights into the weight cache so ops avoid re-uploading; pair with <see cref="FreeWeights"/>.</summary>
     void PreloadWeights(IEnumerable<Tensor> weights) { }
 
+    /// <summary>Pre-uploads weights as groups a backend may place in ONE device allocation each, such as a MoE layer's
+    /// routed experts of one projection; pair with <see cref="FreeWeights"/>, member by member. The members stay ordinary
+    /// weights: every op finds them by tensor as before. The default preloads each member on its own.</summary>
+    /// <remarks>Thousands of small weights allocated one by one waste device memory, because the driver rounds every
+    /// allocation up: 18% to 62% for Qwen3-30B-A3B's experts, enough that an 18.5 GB checkpoint no longer fits 24 GB.
+    /// A group's allocation is returned only when its LAST member is freed, so freeing part of a group returns nothing; use
+    /// groups for weights that live and die together, and keep weights evicted one at a time (an expert cache) out of them.</remarks>
+    void PreloadWeightGroups(IEnumerable<IReadOnlyList<Tensor>> groups)
+    {
+        foreach (IReadOnlyList<Tensor> group in groups)
+        {
+            PreloadWeights(group);
+        }
+    }
+
     /// <summary>Streaming cache overlapping weight uploads with compute; <c>null</c> means fall back to <see cref="PreloadWeights"/>.</summary>
     IStreamingWeightCache? StreamingCache => null;
 

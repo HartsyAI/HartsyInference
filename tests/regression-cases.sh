@@ -26,6 +26,8 @@ krea2	baseline,core,vulkan,vulkanbar	Stable-Diffusion/Krea2/Turbo/krea2_turbo_fp
 zimage	core,vulkanbar	Stable-Diffusion/z-image-turbo.safetensors	image|a lighthouse on a rocky coast at dusk, photograph|-m zimage --steps 8 --width 1024 --height 1024
 qwenimage-q4k	core,vulkanbar	Stable-Diffusion/QwenImage/Qwen_Image-Q4_K_M.gguf	image|a bowl of ramen on a wooden counter, photograph|-m qwen-image --steps 20 --width 1024 --height 1024
 llama32-1b	baseline,core	llm/llama32-1b/llama-3.2-1b-instruct-q8_0.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
+granitemoe-3b	moe	llm/moe-parity/granite-3b-a800m/granite-3.0-3b-a800m-instruct-Q4_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
+qwen3moe-30b-a3b	moe	llm/moe-parity/qwen3-30b-a3b/Qwen3-30B-A3B-Q4_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0 --no-thinking
 llama32-1b-iq4xs	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-IQ4_XS.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 llama32-1b-q3km	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-Q3_K_M.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
 llama32-1b-q2k	quant	llm/llama32-1b/Llama-3.2-1B-Instruct-Q2_K.gguf	text|Write a short story about a robot learning to paint.|--max-tokens 256 --temperature 0
