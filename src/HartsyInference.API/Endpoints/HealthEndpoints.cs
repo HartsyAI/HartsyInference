@@ -11,7 +11,8 @@ public static class HealthEndpoints
     {
         // Deliberately cheap and dependency-free: if it did real checks, a transient backend hiccup would make
         // an orchestrator kill+restart a process that was actually fine. See /ready for the real check.
-        app.MapGet("/health", () => Results.Ok(new { status = "healthy" }));
+        // "ok" is the llama.cpp / OpenAI-compatible convention that Strata's benchmark harness polls for.
+        app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
         // BackendDescription resolves "auto" via a live CUDA device query (cheap: no allocation, no VRAM touched)
         // but never constructs the backend itself — the first real generation request still pays that cost.

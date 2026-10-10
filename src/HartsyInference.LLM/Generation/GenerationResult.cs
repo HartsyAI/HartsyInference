@@ -18,4 +18,10 @@ public sealed record GenerationResult
     /// <summary>Prompt tokens served from a reused KV prefix instead of freshly prefilled (0 when no prefix-cache
     /// entry was supplied, or none of its tokens matched this call's prompt).</summary>
     public int ReusedPromptTokens { get; init; }
+
+    /// <summary>Wall time from the first prefill to the sampled first token, in milliseconds (0 when the run was not timed).</summary>
+    public double PrefillMilliseconds { get; init; }
+
+    /// <summary>Wall time of the decode loop after the first token, in milliseconds (0 when the run was not timed).</summary>
+    public double DecodeMilliseconds { get; init; }
 }
