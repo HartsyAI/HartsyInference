@@ -224,7 +224,8 @@ public static unsafe partial class CpuExpertKernels
         }
     }
 
-    /// <summary>One weight row against one quantized activation row: the float dot product, folded block by block.</summary>
+    /// <summary>One weight row against one quantized activation row: the float dot product. The AVX2 path (<see cref="DotRowAvx2"/>)
+    /// returns early and accumulates lane-wise; the scalar path below folds block by block.</summary>
     private static float DotRow(DType dtype, byte* row, sbyte* act, float* actScale, int* actSum, int dim, bool simd)
     {
         if (simd) return DotRowAvx2(dtype, row, act, actScale, actSum, dim);
@@ -326,19 +327,8 @@ public static unsafe partial class CpuExpertKernels
         return acc;
     }
 
-    /// <summary>A block's fp16 scale as float, through a table of all 65,536 values: the software Half conversion cost more than
-    /// the integer work of a whole sub-block. Exact: the table holds the same conversion.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static float ReadHalf(byte* p) => HalfTable[Unsafe.ReadUnaligned<ushort>(p)];
-
-    private static readonly float[] HalfTable = BuildHalfTable();
-
-    private static float[] BuildHalfTable()
-    {
-        float[] table = new float[65536];
-        for (int bits = 0; bits < table.Length; bits++) table[bits] = (float)BitConverter.UInt16BitsToHalf((ushort)bits);
-        return table;
-    }
+    private static float ReadHalf(byte* p) => (float)Unsafe.ReadUnaligned<Half>(p);
 
     /// <summary>The 6-bit scale and minimum of sub-block <paramref name="j"/>, unpacked as in the GGUF K-quant codecs.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

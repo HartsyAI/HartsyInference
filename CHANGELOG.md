@@ -27,7 +27,7 @@ stable release will require. Dates are UTC.
 - **Faster CPU expert kernels for expert offload.** Qwen3-30B-A3B Q4_K_M offloaded on the RTX 3060 now decodes at 6.7-7.1 tok/s, up from 5.0, with the same 61% of routed rows on the GPU.
   - The AVX2 row dot products accumulate each weight row in float vectors and sum once per row, instead of a horizontal sum and scalar fold per 32-value block.
   - Products use `pmaddubsw`, with the sign trick for signed weights (Q6_K after its offset, Q8_0). The 16-bit pairs cannot saturate.
-  - The kernel's small helpers are inlined, which was most of the gain. Q4_K and Q5_K unpack each super-block's eight scales and minimums once, block fp16 scales go through a lookup table, and `ApplyParallel` splits rows into about two ranges per worker.
+  - The kernel's small helpers are inlined, which was most of the gain. Q4_K and Q5_K unpack each super-block's eight scales and minimums once, and `ApplyParallel` splits rows into about two ranges per worker.
   - One real expert row (Q4_K gate/up, Q6_K down, after warm-up):
 
     | Kernel | Serial | Parallel |
