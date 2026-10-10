@@ -21,15 +21,18 @@ public static class TextPlacementProbe
         bool includeRedundantSplits)
     {
         TextPlacementDemand demand = TextPlacementDemandReader.FromGguf(path, contextTokens, includeRedundantSplits, KvCaches.F16Enabled);
-        IReadOnlyList<GpuTopologyInfo> gpus = CudaTopology.Probe();
         int primary = BackendFactory.ParseOrdinal(deviceKey);
-        List<TextPlacementDevice> devices = [];
-        foreach (GpuTopologyInfo gpu in gpus.Where(g => g.Ordinal == primary))
-            devices.Add(new TextPlacementDevice(BackendFactory.WithOrdinal("cuda", gpu.Ordinal), gpu.FreeMemoryBytes));
-        if (devices.Count == 0)
+        if (CudaTopology.ProbeDevice(primary) is not GpuTopologyInfo first)
             throw new HartsyInferenceException($"CUDA device '{deviceKey}' was not found; no placement can be planned.");
-        foreach (GpuTopologyInfo gpu in gpus.Where(g => g.Ordinal != primary).OrderByDescending(static g => g.FreeMemoryBytes))
+        List<TextPlacementDevice> devices = [new(BackendFactory.WithOrdinal("cuda", primary), first.FreeMemoryBytes)];
+        long? hostFree = HostMemoryInfo.AvailableBytes();
+        // The other devices are probed only when one GPU is not the answer: probing opens a context on each, which a model that
+        // fits its own GPU should not pay for.
+        TextPlacement single = TextPlacementPlanner.Plan(demand, devices, hostFree, mode);
+        if (mode == TextPlacementMode.Gpu || (mode == TextPlacementMode.Auto && single.Feasible && single.Mode == TextPlacementMode.Gpu))
+            return single;
+        foreach (GpuTopologyInfo gpu in CudaTopology.Probe().Where(g => g.Ordinal != primary).OrderByDescending(static g => g.FreeMemoryBytes))
             devices.Add(new TextPlacementDevice(BackendFactory.WithOrdinal("cuda", gpu.Ordinal), gpu.FreeMemoryBytes));
-        return TextPlacementPlanner.Plan(demand, devices, HostMemoryInfo.AvailableBytes(), mode);
+        return TextPlacementPlanner.Plan(demand, devices, hostFree, mode);
     }
 }
