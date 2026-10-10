@@ -91,4 +91,66 @@ public sealed unsafe class CudaFa2AttentionTests
         double tflops = 4.0 * tq * (double)tq * d * hq / 2 / (ms * 1e9);
         _output.WriteLine($"FlashAttention tq={tq} d={d} hq={hq}: {ms:F2} ms per call, {tflops:F1} TFLOP/s causal");
     }
+
+    [Trait("Category", "GpuIntegration")]
+    [Theory]
+    [InlineData(128, 32, 4, 1000, 1200, 0, 0f)]    // Qwen3 / Llama-3 shape
+    [InlineData(128, 16, 16, 300, 300, 0, 0f)]     // MHA (OLMoE)
+    [InlineData(64, 24, 8, 777, 800, 0, 0f)]       // Granite
+    [InlineData(128, 8, 2, 500, 512, 100, 0f)]     // sliding window
+    [InlineData(128, 8, 2, 90, 96, 0, 30f)]        // soft-cap
+    [InlineData(128, 12, 1, 65, 65, 0, 0f)]        // one KV head for 12 query heads
+    public void DecodeGqa_MatchesCpuReference(int d, int hq, int hkv, int kvLen, int keyStride, int window, float softcap)
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        Random rng = new(d + hq * 7 + kvLen);
+        int group = hq / hkv;
+        int qOffset = kvLen - 1;
+        float scale = 1f / MathF.Sqrt(d);
+        using Tensor q = Random(rng, 1, hq, 1, d);
+        using Tensor k = Random(rng, 1, hkv, keyStride, d);
+        using Tensor v = Random(rng, 1, hkv, keyStride, d);
+        using Tensor expected = new(new TensorShape(1, hq, 1, d), DType.F32);
+        AttentionReference.FlashAttention(expected, q, k, v, kvLen, group, true, qOffset, scale, softcap, null, window, null);
+
+        using CudaBackend cuda = new(0, PtxDir());
+        using Tensor actual = new(new TensorShape(1, hq, 1, d), DType.F32);
+        cuda.FlashAttention(actual, q, k, v, kvLen, group, true, qOffset, scale, softcap, null, window, null);
+        cuda.Sync();
+        float* pe = (float*)expected.DataPointer, pa = (float*)actual.DataPointer;
+        double diff = 0, norm = 0;
+        for (long i = 0; i < expected.ElementCount; i++)
+        {
+            double e = pe[i], a = pa[i];
+            diff += (a - e) * (a - e);
+            norm += e * e;
+        }
+        double rel = Math.Sqrt(diff / Math.Max(norm, 1e-30));
+        _output.WriteLine($"decode d={d} hq={hq} hkv={hkv} kvLen={kvLen} win={window} cap={softcap}: relative L2 error {rel:E3}");
+        Assert.True(rel <= 1e-5, $"grouped-query decode diverges from the reference by {rel:E3}");
+    }
+
+    [Trait("Category", "GpuIntegration")]
+    [Fact]
+    public void DecodeGqa_Throughput()
+    {
+        if (!CudaContext.IsAvailable()) { _output.WriteLine("SKIPPED: CUDA unavailable"); return; }
+        const int d = 128, hq = 32, hkv = 4, kvLen = 4096;
+        Random rng = new(9);
+        using Tensor q = Random(rng, 1, hq, 1, d);
+        using Tensor k = Random(rng, 1, hkv, kvLen, d);
+        using Tensor v = Random(rng, 1, hkv, kvLen, d);
+        using CudaBackend cuda = new(0, PtxDir());
+        using Tensor o = new(new TensorShape(1, hq, 1, d), DType.F32);
+        float scale = 1f / MathF.Sqrt(d);
+        cuda.FlashAttention(o, q, k, v, kvLen, hq / hkv, true, kvLen - 1, scale);
+        cuda.Sync();
+        Stopwatch sw = Stopwatch.StartNew();
+        const int reps = 50;
+        for (int i = 0; i < reps; i++) cuda.FlashAttention(o, q, k, v, kvLen, hq / hkv, true, kvLen - 1, scale);
+        cuda.Sync();
+        double us = sw.Elapsed.TotalMilliseconds / reps * 1000;
+        double gb = 2.0 * hkv * kvLen * d * sizeof(float) / 1e9;
+        _output.WriteLine($"decode attention kvLen={kvLen} hq={hq} hkv={hkv}: {us:F1} us per call, {gb / (us * 1e-6):F0} GB/s of F32 KV");
+    }
 }

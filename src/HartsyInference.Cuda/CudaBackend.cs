@@ -9943,6 +9943,7 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             // merge with a combine kernel. Numerically exact vs the monolithic kernel (same per-key scores,
             // online-softmax merge). Sink/ALiBi/soft-cap/sliding-window keep the proven monolithic path.
             int baseBlocks = b * hq * tq;
+            bool gqaDecode = pSink == 0 && pAlibi == 0 && kvLen >= 64 && DecodeGqaEligible(tq, causal, hq, hkv, kvGroup <= 0 ? 1 : kvGroup, d);
             // Soft-cap and sliding-window are handled inside the split kernel (per-logit transform / key-range
             // clamp — see flash_attn_f32_split.cu); only sink and ALiBi still require the monolithic kernel.
             // This matters enormously for low-head-count windowed models: gemma3-1b decodes with FOUR query
@@ -9973,7 +9974,12 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
                 if (g >= 2) splits = g;
             }
 
-            if (splits >= 2)
+            if (gqaDecode)
+            {
+                RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, kvLen, d, kvLen, kvGroup <= 0 ? 1 : kvGroup, qOffset, scale, softcap,
+                    slidingWindow, 0, f16Kv);
+            }
+            else if (splits >= 2)
             {
                 int chunk = (kvLen + splits - 1) / splits;
                 splits = (kvLen + chunk - 1) / chunk;   // exact # of non-empty chunks covering kvLen
@@ -10254,7 +10260,11 @@ public sealed partial class CudaBackend : GpuBackendBase, IBackend
             nuint outBytes = GpuTransferHelper.ByteSize(output);
             pOut = GpuTransferHelper.AllocateDevice(outBytes);
             int grp = kvGroup <= 0 ? 1 : kvGroup;
-            if (splits >= 2)
+            if (DecodeGqaEligible(tq, causal, hq, hkv, grp, d))
+            {
+                RunFlashDecodeGqa(pOut, pQ, pK, pV, b, hq, hkv, lk, lk, d, kvLen, grp, qOffset, scale, softcap, slidingWindow, devicePos, devF16Kv);
+            }
+            else if (splits >= 2)
             {
                 long n = baseBlocks;
                 ulong pM = 0, pL = 0, pAcc = 0;

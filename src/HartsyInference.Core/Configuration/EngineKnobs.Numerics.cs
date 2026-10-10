@@ -197,6 +197,10 @@ public static partial class EngineKnobs
     public static readonly Knob<bool> SandwichFusion =
         Bool("numerics.sandwichFusion", true, KnobScope.Runtime, KnobDomain.Numerics, "Kill-switch for collapsing post-attn norm + residual add + pre-FFN norm into one LLM decode kernel.");
 
+    /// <summary>Kill-switch for the grouped-query flash-decoding kernel: one block per KV head reads the cache once for all of its query heads.</summary>
+    public static readonly Knob<bool> FlashDecodeGqa =
+        Bool("numerics.flashDecodeGqa", true, KnobScope.Runtime, KnobDomain.Numerics, "Decodes one query row per sequence with the grouped-query flash-decoding kernel (the KV cache is streamed once per KV head, not once per query head); =0 returns to the split-K kernel with one block per query head.");
+
     /// <summary>Kill-switch for the tensor-core causal FlashAttention-2 kernel used for LLM prefill and draft-verify blocks.</summary>
     public static readonly Knob<bool> Fa2Prefill =
         Bool("numerics.fa2Prefill", true, KnobScope.Runtime, KnobDomain.Numerics, "Runs causal LLM attention over a block of 16 or more query rows with the F16 tensor-core FlashAttention-2 kernel (F32 accumulate); =0 returns to the per-row F32 kernel.");
