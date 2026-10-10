@@ -130,6 +130,10 @@ internal sealed class TextDeviceSlot
     /// <summary>The placement the planner chose for the loaded model; null when the planner did not decide the load.</summary>
     public HartsyInference.Engine.Placement.TextPlacement? PlannedPlacement { get; set; }
 
+    /// <summary>The placement the request that loaded the model asked for (null for the setting's default), for the once-per-slot
+    /// mismatch log when a later request asks for another.</summary>
+    public string? PlacementRequested { get; set; }
+
     /// <summary>Which load-time settings <see cref="TextService.LoadInto"/> has already logged a mismatch for on
     /// this slot (by setting name) — a request's own value keeps being ignored every subsequent call on an
     /// already-loaded slot, so without this a long voice call would repeat the same debug line every turn. Reset

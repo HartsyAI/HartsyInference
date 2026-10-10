@@ -16,7 +16,9 @@ public readonly record struct TextTensorInfo(string Name, DType DType, long Elem
 /// device cannot read is widened to F32; a separate output head leaves the token embedding on the host; the routed experts
 /// (<c>*_exps</c>) are counted apart from the dense weights; and when the load keeps its fused projection copies (q|k|v and the dense
 /// FFN's gate|up) beside the originals, those tensors are counted twice. It is an estimate for a planning decision, so it rounds
-/// toward needing more.
+/// toward needing more. Known overestimates: the KV cache is sized for full attention on every layer, so a sliding-window or
+/// hybrid model needs less than it reads; and a per-layer array of KV head counts falls back to the query head count. Either can
+/// refuse a forced <c>gpu</c> placement that would have fit.
 /// </remarks>
 public static class TextPlacementDemandReader
 {

@@ -45,6 +45,27 @@ public sealed class MoeWeightGroupTests
         Assert.All(groups.Where(static g => g.Count == 1), g => Assert.Single(g));
     }
 
+    /// <summary>A planned split preloads each stage through <see cref="GenericTransformer.EnumerateStageWeightGroups"/>; across a
+    /// full tiling of stages the groups must hold exactly the model's weights (without the redundant split originals), each once.</summary>
+    [Fact]
+    public void StageGroups_TileToEveryWeightOnce()
+    {
+        MoeConfig moe = new() { NumExperts = 4, NumExpertsPerTok = 2, MoeIntermediateSize = 8 };
+        TransformerConfig cfg = new()
+        {
+            HiddenSize = 16, NumLayers = 3, NumHeads = 4, NumKvHeads = 2, HeadDim = 4,
+            IntermediateSize = 24, VocabSize = 32, MaxPositionEmbeddings = 64, Moe = moe,
+        };
+        using GenericTransformer model = new(cfg);
+        model.LoadWeights(Weights(cfg), "model");
+
+        List<Tensor> flat = [.. model.EnumerateStageWeightGroups(0, 1, isFirstStage: true, isLastStage: false).SelectMany(static g => g),
+            .. model.EnumerateStageWeightGroups(1, 3, isFirstStage: false, isLastStage: true).SelectMany(static g => g)];
+        List<Tensor> expected = [.. model.EnumerateWeights(includeRedundantSplits: false)];
+        Assert.Equal(flat.Count, flat.Distinct(ReferenceEqualityComparer.Instance).Count());
+        Assert.True(expected.ToHashSet(ReferenceEqualityComparer.Instance).SetEquals(flat));
+    }
+
     private static Dictionary<string, Tensor> Weights(TransformerConfig c)
     {
         int h = c.HiddenSize;

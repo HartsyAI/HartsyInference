@@ -85,6 +85,10 @@ public static class TextPlacementPlanner
     /// <summary>Device bytes held back on every device the model uses.</summary>
     public const long ReserveBytes = 1536L << 20;
 
+    /// <summary>Fewest tokens a plan sizes the KV cache for: a loaded model serves later, longer requests than the one that loaded
+    /// it.</summary>
+    public const int MinContextTokens = 8192;
+
     /// <summary>Smallest expert cache worth offloading into: below this nearly every expert runs on the CPU.</summary>
     public const long MinExpertBudgetBytes = 512L << 20;
 
