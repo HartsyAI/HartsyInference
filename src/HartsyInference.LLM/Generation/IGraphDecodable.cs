@@ -10,7 +10,10 @@ internal interface IGraphDecodable
     bool SupportsGraphDecode(IBackend backend);
 
     /// <summary>Warms, makes resident and captures the decode step for <paramref name="state"/>, whose committed length is <paramref name="pos"/>; <paramref name="firstToken"/> is the token already sampled.</summary>
-    GraphDecodeSession CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty);
+    GraphDecodeSession CaptureDecodeGraph(ISequenceState state, int pos, int firstToken, float repetitionPenalty, DeviceSamplerConfig? sampler = null);
+
+    /// <summary>True when the captured step can draw tokens on the device (<paramref name="sampler"/> given to <see cref="CaptureDecodeGraph"/>) on <paramref name="backend"/>.</summary>
+    bool SupportsDeviceSampling(IBackend backend) => false;
 
     /// <summary>Advances <paramref name="state"/> by one token after a replay, which writes KV on the device without moving the host cursor.</summary>
     void CommitReplayedStep(ISequenceState state);

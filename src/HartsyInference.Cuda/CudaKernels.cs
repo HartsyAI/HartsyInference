@@ -1195,6 +1195,7 @@ public sealed partial class CudaKernels : IDisposable
         _mulMatVecQ5KQ8_1 = _mulMatVecQ5KQ8_1Module.GetFunction("mul_mat_vec_q5k_q8_1");
         LoadMoeKernels();
         LoadFa2Kernels();
+        LoadSamplingKernels();
         LoadRecipeDequantKernels();
         LoadAttentionKernels();
         }

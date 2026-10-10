@@ -786,7 +786,8 @@ public sealed unsafe class GenericTransformer : IDisposable
     /// <remarks><paramref name="deviceTokenId"/> is read at the start (this step's input token) and written at the end (the sampled next token) — the SAME buffer, so replaying the captured graph repeatedly chains greedy decode entirely on-device. When <paramref name="repetitionPenalty"/> != 1.0 (and <paramref name="history"/>/<paramref name="historyCount"/> are non-zero device buffers), the current input token is appended to the on-device history and repetition penalty is applied to the logits before argmax — replicating <c>RepetitionPenaltyStep</c>, the only sampler stage that can change greedy's picked token. Caller guarantees <see cref="SupportsGraphDecode"/> and that <paramref name="devicePos"/>/<paramref name="deviceTokenId"/> were refreshed (outside any capture region) for this step.</remarks>
     public void ForwardGraphDecodeStep(IBackend backend, Tensor embedTable, IKvCache cache,
         Tensor cosTable, Tensor sinTable, ulong devicePos, ulong deviceTokenId,
-        ulong history = 0, ulong historyCount = 0, float repetitionPenalty = 1.0f)
+        ulong history = 0, ulong historyCount = 0, float repetitionPenalty = 1.0f,
+        HartsyInference.LLM.Generation.DeviceSamplerConfig? sampler = null, ulong rngState = 0)
     {
         ThrowIfDisposed();
         bool applyRepPenalty = repetitionPenalty != 1.0f && history != 0 && historyCount != 0;
@@ -849,7 +850,8 @@ public sealed unsafe class GenericTransformer : IDisposable
         Tensor logits = ProjectLogits(backend, normed, 1);
         normed.Dispose();
         if (applyRepPenalty) backend.ApplyRepetitionPenaltyStep(logits, history, historyCount, repetitionPenalty);
-        backend.ArgMaxInto(deviceTokenId, logits);
+        if (sampler is { } s && rngState != 0) backend.SampleTopKInto(deviceTokenId, logits, s.TopK, s.Temperature, s.TopP, s.MinP, rngState);
+        else backend.ArgMaxInto(deviceTokenId, logits);
         logits.Dispose();
     }
 
