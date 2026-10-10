@@ -53,6 +53,7 @@ __device__ __forceinline__ float q6k_q8_1_row_partial(
     const int scOff1 = scOff0 + 4;         // (p+2)*2 − p*2
 
     float acc = 0.0f;
+    #pragma unroll 4   // independent loads of several blocks in flight; the adds into acc keep their order
     for (int sb = sbStart; sb < nsb; sb += sbStride) {
         const unsigned char* block = wrow + (size_t)sb * SUPER_BYTES;
         const unsigned char* qh = block + 128;

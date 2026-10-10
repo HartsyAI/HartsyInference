@@ -34,6 +34,7 @@ __device__ __forceinline__ float q8_0_q8_1_row_partial(
     const int li = lane & 3;       // which 8-elem chunk within the block
 
     float acc = 0.0f;
+    #pragma unroll 4   // independent loads of several blocks in flight; the adds into acc keep their order
     for (int b0 = b0Start; b0 < nblk; b0 += b0Stride) {
         const int b = b0 + g;
         if (b < nblk) {
