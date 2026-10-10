@@ -101,37 +101,38 @@ The 4090 is shared with other work.
 
 ## Status
 
-- DeepSeek-V2-Lite output is incoherent on `main`. Root-cause work is in progress on branch
-  `moe/dsv2-lite-mla`. Two suspects are being checked against the reference: the RoPE pairing in MLA, and
-  the default for `norm_topk_prob` when the GGUF does not set it.
-- Timings and `/health` for the harness: draft PR #355 (`api/llama-compatible-timings`).
-- MoE expert placement. Every MoE layer builds `MoeFeedForward` with the `CpuOnlyPolicy` placement
-  (`MoeFeedForward.cs:21`, used at line 276), so routed experts never run on the GPU. Each expert's F32
-  weights are built as host arrays on first use (`ResolveHostWeights`, lines 343-352), and `BuildHostCache`
-  requires F32 tensors (`RequireF32`). The CUDA expert runner (`CudaExpertDeviceRunner`) exists, but nothing
-  in `src/` constructs it. The VRAM mode therefore governs only the non-expert weights. The expert path costs
-  host RAM at the F32 size in the table below, which is 7.1 times the Q4_K size.
-- The load guard (`TextService.EnsureRamHeadroomFor`) counts F32 expansion only for quantized tensors outside
-  `GpuSupportedQuant`. Q4_K is inside that set, so a CUDA load does not count the expert expansion. On the local
-  host (62 GB total, 41 GB available at the check) this matters for DeepSeek-V2-Lite (57.6 GB of F32 experts),
-  Qwen3-30B and Mixtral.
-- Pins. The LLM Assistant extension pins engine alpha.270. That release already contains `MoeFeedForward`, and
-  no commit has touched that file since. Twenty-three LLM-layer commits came after it, mostly DeepSeek V4.1, so
-  loading a MoE GGUF in the extension needs no pin bump. The extension's model list scans `*.gguf` recursively
-  with no architecture filter, so the MoE files already list.
-
-  | Model | Routed experts, F32 | Routed experts, Q4_K | GGUF Q4_K_M file |
-  |---|---:|---:|---:|
-  | Mixtral-8x7B | 180.4 GB | 25.4 GB | 26.4 GB |
-  | Qwen3-30B-A3B | 116.0 GB | 16.3 GB | 18.6 GB |
-  | DeepSeek-V2-Lite | 57.6 GB | 8.1 GB | 10.4 GB |
-  | OLMoE-1B-7B | 25.8 GB | 3.6 GB | 4.2 GB |
-  | Granite-3B-A800M | 12.1 GB | 1.7 GB | 2.1 GB |
-
-  Figures are from the published layer counts and hidden and intermediate sizes, with three projections per
-  expert. The Q4_K column assumes 0.5625 bytes per parameter.
-- llama.cpp and Strata are built on the baseline pod at the pinned revisions. Baseline measurements wait
-  for the model hash check and for the GPU to be free of the MLA runs.
+- Timings and `/health` for the harness: draft PR #355 (`api/llama-compatible-timings`). CI green.
+- DeepSeek-V2-Lite: fixed on draft PR #357 (`moe/dsv2-lite-mla`). MLA's decoupled RoPE pairs adjacent dims, and a
+  `deepseek2` GGUF without `expert_weights_norm` no longer renormalizes its top-k weights. The engine's greedy text,
+  re-tokenized with the HF tokenizer, matches the HF bf16 reference 16/16. llama.cpp v0.6.0 gives a different first
+  token on the same string. That is not settled: `llama-cli` wraps the prompt in its chat template and prints no ids,
+  so parity against llama.cpp needs explicit-id runs through `llama-server`.
+- Smoke test, one request, not a benchmark: Granite-3B Q4_K_M on the A40, commit `915324e8`. Output
+  `The capital of France is Paris.`, prompt 35.6 tok/s, decode 33.4 tok/s, peak VRAM 1.5 GB, host RSS 1.9 GB.
+- Expert placement on CUDA, the default. Each routed expert runs on the device from its quantized tensors
+  (`MoeFeedForward.Forward`, lines 156-169). The Granite-3B run used 1.5 GB of VRAM for a 2.06 GB quantized file, which
+  fits this. The whole quantized model must therefore fit device memory. Generic MoE has no expert offload or
+  streaming; only DeepSeek-V4.1 has an expert cache. Mixtral Q4_K (26.4 GB) fits the 48 GB A40 and not a 24 GB card.
+- The host expert runtime (`RunRoutedThroughRuntime`, F32 expert arrays, `CpuOnlyPolicy`) runs only when
+  `MoeFeedForward.UseHostExpertRuntime` is set. Nothing in `src/` sets it. `CudaExpertDeviceRunner` has no
+  construction site.
+- The CPU device path dequantizes everything to F32 (`GgufLanguageModel.Load`, `dequantizeToF32`). The load guard
+  (`TextService.EnsureRamHeadroomFor`) requires 2.5 times the file on that path, which is less than the F32 size. For
+  DeepSeek-V2-Lite the F32 weights are about 63 GB against 26 GB required, and the local host had 41 GB free. Until the
+  guard counts the F32 size, a CPU load of these models on the 62 GB local host can exhaust memory.
+- The CUDA guard counts only quantized tensors outside `GpuSupportedQuant` (Q2_K through Q8_0). Strata's routed experts
+  use IQ2_XS, IQ3_XXS and IQ4_NL. Those types are not device-supported, so the loader expands them to F32 on the
+  device, which is about 483 GB for Qwen3.8-Flash-Next. That is the blocker for a Strata comparison, not host RAM.
+- Strata cannot run the other models in this matrix. `tools/strata_inspect.py` at `fb58e0db` reports that Strata runs
+  only Qwen3.8-Flash-Next. It refuses Granite-3B (`granitemoe`), OLMoE-1B-7B (`olmoe`), Qwen3-30B-A3B (`qwen3moe`), Mixtral-8x7B (`llama`)
+  and DeepSeek-V2-Lite (`deepseek2`). A Strata comparison needs device kernels for Strata's IQ expert types first.
+  Until then the baseline is llama.cpp alone.
+- Pins. The LLM Assistant extension pins engine alpha.270. That release already contains `MoeFeedForward`, and no
+  commit has touched that file since. Twenty-three LLM-layer commits came after it, mostly DeepSeek V4.1, so loading a
+  MoE GGUF in the extension needs no pin bump. The extension's model list scans `*.gguf` recursively with no
+  architecture filter, so the MoE files already list.
+- The harness engine is commit `915324e8`: E3 timings (`b1e67476`) with both DeepSeek-V2-Lite fixes cherry-picked.
+  llama.cpp and Strata are built on the baseline pod at the pinned revisions. llama.cpp is the baseline for all models.
 
 ## Reproduce
 
