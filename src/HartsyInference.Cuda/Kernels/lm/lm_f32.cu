@@ -1489,14 +1489,10 @@ __global__ void lm_history_append(
 
 // ── Graph-capture decode: on-device repetition penalty ───────────────────────
 // Applies HF-convention repetition penalty (divide positive logits, multiply negative) to
-// logits[history[i]] for every i in [0, *historyCount), SEQUENTIALLY and single-threaded — this
-// exactly replicates RepetitionPenaltyStep.Apply's CPU semantics byte-for-byte, including a token
-// that occurs more than once in history being penalized cumulatively on each occurrence (order-
-// dependent: the second application divides/multiplies the ALREADY-penalized value). A parallel
-// scatter across history entries would race on repeated tokens and diverge from the CPU reference,
-// so single-thread is a correctness choice here, not just simplicity — the loop itself (at most
-// maxSeqLen iterations of one global read + one global write) is microseconds, nowhere near the
-// per-step cost of the transformer forward pass it runs alongside.
+// logits[history[i]] for every i in [0, *historyCount), sequentially and single-threaded. The history
+// is filled by lm_history_append_distinct (lm_history_f32.cu), which keeps each token once, so every
+// distinct token is penalized once, matching RepetitionPenaltyStep on the CPU. (lm_history_append
+// below is no longer launched: it appended repeats, which penalized a token once per occurrence.)
 __global__ void lm_repetition_penalty_f32(
     float* __restrict__ logits,
     const int* __restrict__ history,

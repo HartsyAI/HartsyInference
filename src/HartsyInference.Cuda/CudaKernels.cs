@@ -155,6 +155,7 @@ public sealed partial class CudaKernels : IDisposable
 
     // ── Language-model (decoder LLM) glue Module + handles ───────────────
     private readonly CudaModule _lmF32Module;
+    private readonly CudaModule _lmHistoryModule;
     private readonly nint _lmRepeatKvF32;
     private readonly nint _lmKvAppendF32;
     private readonly nint _lmKvAppendF16;
@@ -1068,7 +1069,9 @@ public sealed partial class CudaKernels : IDisposable
         _lmRopeDecodeSplitHalf = _lmF32Module.GetFunction("lm_rope_decode_splithalf");
         _lmRopeDecodeInterleaved = _lmF32Module.GetFunction("lm_rope_decode_interleaved");
         _lmEmbedGatherDecodeF32 = _lmF32Module.GetFunction("lm_embed_gather_decode_f32");
-        _lmHistoryAppend = _lmF32Module.GetFunction("lm_history_append");
+        // The distinct-history append lives in its own module so the hand-tuned lm_f32 PTX is not rebuilt for it.
+        _lmHistoryModule = LoadOwnedModule(Ptx("lm_history_f32"));
+        _lmHistoryAppend = _lmHistoryModule.GetFunction("lm_history_append_distinct");
         _lmRepetitionPenaltyF32 = _lmF32Module.GetFunction("lm_repetition_penalty_f32");
         _lmKvSliceTimeF32 = _lmF32Module.GetFunction("lm_kv_slice_time_f32");
         _flashAttnF32Module = LoadOwnedModule(Ptx("flash_attn_f32"));

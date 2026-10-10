@@ -1,6 +1,8 @@
 // history_append: appends the device-resident token id into the repetition-penalty history buffer at
-// the current count, then increments the count — a fixed 1-thread launch (matches CudaBackend's
-// LaunchHistoryAppend). Guards against writing past capacity (the count buffer still increments past
+// the current count, then increments the count, ONLY when the token is not already in the history, so the
+// penalty step (which penalizes every listed entry once) penalizes each distinct token once: the Hugging Face
+// and llama.cpp convention, and RepetitionPenaltyStep's on the CPU. A fixed 1-thread launch (matches
+// CudaBackend's LaunchHistoryAppend). Guards against writing past capacity (the count buffer still increments past
 // capacity so a caller can detect overflow; the CPU repetition-penalty reference already ignores
 // out-of-range indices, so an over-capacity history simply stops gaining new penalized entries rather
 // than corrupting memory).
@@ -23,8 +25,13 @@ layout(push_constant) uniform Push {
 void main() {
     if (gl_GlobalInvocationID.x != 0u) return;
     uint idx = count_data[0];
+    uint token = token_data[0];
+    uint seen = min(idx, pc.capacity);
+    for (uint i = 0u; i < seen; ++i) {
+        if (history_data[i] == token) return;
+    }
     if (idx < pc.capacity) {
-        history_data[idx] = token_data[0];
+        history_data[idx] = token;
     }
     count_data[0] = idx + 1u;
 }
