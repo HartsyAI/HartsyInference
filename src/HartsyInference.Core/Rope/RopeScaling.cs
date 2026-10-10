@@ -29,6 +29,9 @@ public sealed record RopeScaling
     /// <summary>YaRN slow-rotation boundary (HF <c>beta_slow</c>, default 1).</summary>
     public double BetaSlow { get; init; } = 1.0;
 
+    /// <summary>YaRN only: floor the low and ceil the high correction bounds (HF DeepSeek-V2 and the official code).</summary>
+    public bool TruncateYarnCorrectionRange { get; init; }
+
     /// <summary>Explicit attention scaling (mscale) baked into cos/sin. <c>NaN</c> = infer per-type (YaRN: 0.1·ln(factor)+1; others: 1).</summary>
     public double AttentionFactor { get; init; } = double.NaN;
 
