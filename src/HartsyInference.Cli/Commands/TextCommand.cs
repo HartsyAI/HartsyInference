@@ -102,6 +102,11 @@ public sealed class TextCommand : Command<TextCommand.Settings>
         [Description("Keep weights compressed at their on-disk quant to reduce VRAM use.")]
         public bool LowVramQuant { get; init; }
 
+        /// <summary>Where the model is placed when this run loads it.</summary>
+        [CommandOption("--placement")]
+        [Description("Model placement for a GGUF on CUDA: auto (one GPU, else split across GPUs, else expert offload), gpu, split or offload.")]
+        public string? Placement { get; init; }
+
         /// <summary>Free the model's device memory after this request completes.</summary>
         [CommandOption("--always-free-memory")]
         [Description("Free the model's device memory after this request completes.")]
@@ -177,6 +182,8 @@ public sealed class TextCommand : Command<TextCommand.Settings>
             parameters.Put("reasoning-effort", effort);
         parameters.Put("low-vram-quant", settings.LowVramQuant ? "true" : "false");
         parameters.Put("always-free-memory", settings.AlwaysFreeMemory ? "true" : "false");
+        if (settings.Placement is { Length: > 0 } placement)
+            parameters.Put("placement", placement);
 
         ModelSpec spec = ModelResolver.Resolve(settings.Model, settings.ModelPath, Modality.Text);
         string label = CommandRunner.ResolveLabel(spec, settings.Model, settings.ModelPath);

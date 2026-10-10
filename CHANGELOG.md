@@ -22,6 +22,20 @@ stable release will require. Dates are UTC.
 
 - **Fixed: the sm_120a block-scaled FP4 quantization module failed to load on Blackwell.** `block_quant.sm120.ptx` wrote each `cvt.rn.satfinite.e2m1x2.f32` result to a 16-bit register, which the instruction does not accept, so every kernel in that module failed the PTX JIT. The packed e2m1 pair now lands in an 8-bit register and is widened with `cvt.u16.u8`; the stored values are unchanged.
 
+## alpha.329
+
+- **Added: a text placement planner decides where a GGUF model runs before anything is uploaded.** For a GGUF on a single CUDA device key, the load reads the checkpoint header and charges each device the model's weights as the load keeps them, its KV cache (sized for the request and at least 8192 tokens), and a 1.5 GB reserve. In `auto`, the default, it picks the first placement that fits:
+  1. Everything on the request's GPU.
+  2. A layer split across every CUDA GPU, the request's first.
+  3. Expert offload on the request's GPU: dense weights and KV on the GPU, an expert cache filling the rest, and the remaining experts on the CPU. MoE models only, with host RAM checked for the experts left on the CPU.
+
+  `TextRequest.Placement`, the `vram.textPlacement` setting and `hartsy text --placement` force `gpu`, `split` or `offload`. A forced mode that does not fit is refused with the reason, instead of running out of memory partway through preload. Offload is planned but not run yet: a load it is chosen for is refused, naming the reason. An explicit multi-device key and a configured split or tensor-parallel layout keep their behavior.
+  - A load the planner decides gates every CUDA device while it loads. Generations afterwards gate the devices the model is on.
+  - `ITextService.LoadedPlacements` and the `placements` list on `GET /admin/memory` report each loaded model's mode, devices and reason.
+  - The text `MemoryFit` for a GGUF uses the same planner: one GPU or a split is `Resident`, offload is `Streamed`, and nothing fitting is `Infeasible`.
+  - Measured on Qwen3-30B-A3B Q4_K_M: `auto` on the RTX 4090 chose one GPU (20.4 GB needed of 22.3 GB free); `auto` on the RTX 3060 chose a split onto the 4090; a forced `gpu` on the 3060 was refused (11.4 GB free, 20.4 GB needed).
+  - Covered by `TextPlacementPlannerTests` (the Auto order, forced modes, offload budget, host RAM, dense models, the per-device reserve, header reading) and `TextPlacementRealHeaderTests` (the Qwen3 header against independently parsed totals).
+
 ## alpha.328
 
 - **Fixed: a MoE model's routed experts take one device allocation per layer and projection, not one each.** Every expert used to be its own CUDA allocation, and the driver rounds each one up: 18% to 62% extra for Qwen3-30B-A3B's expert sizes (measured on the RTX 3060). That pushed the 18.5 GB Q4_K_M checkpoint past 24 GB, so it ran out of memory partway through loading on an RTX 4090. `IBackend.PreloadWeightGroups` now preloads weights in groups, and CUDA places each group of two or more in one persistent allocation, registering each member at its offset. Members are still ordinary resident weights, so every op finds them as before, and the allocation is freed with its last member. The text load path groups each MoE layer's experts by projection (`GenericTransformer.EnumerateWeightGroups`). The checkpoint now loads on the 4090 alone at 19.6 GB peak and decodes at 24.6 tok/s, against 19.8 tok/s split across two GPUs. Vulkan and the CPU keep their per-weight preload. Covered by `CudaWeightGroupPreloadTests` (members bit-identical to individually preloaded copies for Q4_K, Q6_K and Q8_0; freed once with the last member; teardown; no rounding for 512 expert-sized members) and `MoeWeightGroupTests` (groups cover every weight once).

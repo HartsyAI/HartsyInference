@@ -1,4 +1,5 @@
 using HartsyInference.Core.Backends;
+using HartsyInference.Core.Configuration;
 using HartsyInference.Core.MemoryManagement;
 using HartsyInference.Core.Runtime;
 using HartsyInference.Cuda;
@@ -56,6 +57,8 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         VramPolicy policy = VramPolicyRegistry.Resolve(backend, request.Vram);
         if (spec.Modality == Modality.Text && TextMemoryProfile.Handles(spec.LocalPath))
             return Task.FromResult(TextFit(spec.LocalPath!, policy));
+        if (spec.Modality == Modality.Text && GgufPlacementDevice(spec.LocalPath) is string device)
+            return Task.FromResult(GgufTextFit(spec.LocalPath!, device, policy));
         long totalBytes = TotalBytes(backend);
         if (totalBytes <= 0)
         {
@@ -97,6 +100,34 @@ internal sealed class MemoryEstimationService : IMemoryEstimationService
         {
             Verdict = plan.Verdict,
             Estimate = estimate,
+            CapacityBytes = plan.AvailableBytes,
+            EffectiveTier = policy.Tier,
+            Reason = plan.Reason,
+        };
+    }
+
+    /// <summary>The CUDA device a GGUF text model would be planned on: the engine's own ordinal. Null when the checkpoint is not a
+    /// GGUF file or the engine does not run on CUDA, so the generic estimate applies.</summary>
+    private string? GgufPlacementDevice(string? path)
+    {
+        if (path is null || !path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) || !File.Exists(path)) return null;
+        if (BackendFactory.Kind(BackendFactory.Resolve(_engine.BackendSelector)) != "cuda") return null;
+        return BackendFactory.WithOrdinal("cuda", BackendFactory.ParseOrdinal(_engine.BackendSelector));
+    }
+
+    /// <summary>A GGUF language model's fit: the placement planner's answer for the engine's device, with the setting's mode and an
+    /// 8192-token context. One GPU and a split are both full-speed residency; expert offload works but runs part of the model on
+    /// the CPU, so it reads as <see cref="MemoryFitVerdict.Streamed"/>.</summary>
+    private static MemoryFit GgufTextFit(string path, string device, VramPolicy policy)
+    {
+        TextPlacement plan = TextPlacementProbe.PlanGguf(path, device, TextPlacementModes.Parse(EngineKnobs.TextPlacement.Value), 8192,
+            includeRedundantSplits: true);
+        MemoryFitVerdict verdict = !plan.Feasible ? MemoryFitVerdict.Infeasible
+            : plan.Mode == TextPlacementMode.Offload ? MemoryFitVerdict.Streamed
+            : MemoryFitVerdict.Resident;
+        return new MemoryFit
+        {
+            Verdict = verdict,
             CapacityBytes = plan.AvailableBytes,
             EffectiveTier = policy.Tier,
             Reason = plan.Reason,

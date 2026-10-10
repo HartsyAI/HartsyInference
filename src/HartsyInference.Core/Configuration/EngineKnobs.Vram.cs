@@ -100,6 +100,13 @@ public static partial class EngineKnobs
         Bool("vram.keepModels", true, KnobScope.Runtime, KnobDomain.Vram,
             "Weights stay resident on the device between generations.");
 
+    /// <summary>How a text model is placed when the request does not say: <c>auto</c> (the default: one GPU, else a layer split
+    /// across GPUs, else expert offload), <c>gpu</c>, <c>split</c> or <c>offload</c>.</summary>
+    /// <remarks>A string because <c>TextPlacementModes.Parse</c> owns the spelling and refuses a misspelled value.</remarks>
+    public static readonly Knob<string?> TextPlacement =
+        Str("vram.textPlacement", null, KnobScope.Construction, KnobDomain.Vram,
+            "How a text model is placed when the request does not say: auto, gpu, split or offload.");
+
     /// <summary>Streaming/eviction posture when nothing else specifies one: <c>auto</c>, <c>on</c>, or <c>off</c>.</summary>
     /// <remarks>Kept as a string because it is a three-state word, and <c>LowVramMode.Parse</c> owns the spelling
     /// table plus its warn-on-garbage log line.</remarks>

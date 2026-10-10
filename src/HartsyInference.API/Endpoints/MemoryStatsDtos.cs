@@ -11,6 +11,44 @@ public sealed record MemoryStatsResponse
     [JsonPropertyName("host_available_bytes")] public required long? HostAvailableBytes { get; init; }
 
     [JsonPropertyName("models")] public required IReadOnlyList<LoadedModelMemoryDto> Models { get; init; }
+
+    /// <summary>Where each loaded GGUF text model was placed: one GPU, a layer split, or expert offload.</summary>
+    [JsonPropertyName("placements")] public IReadOnlyList<LoadedModelPlacementDto> Placements { get; init; } = [];
+}
+
+/// <summary>One loaded text model's placement, as the planner decided it at load.</summary>
+public sealed record LoadedModelPlacementDto
+{
+    [JsonPropertyName("device_key")] public required string DeviceKey { get; init; }
+
+    [JsonPropertyName("model_path")] public required string ModelPath { get; init; }
+
+    /// <summary><c>gpu</c>, <c>split</c> or <c>offload</c>.</summary>
+    [JsonPropertyName("mode")] public required string Mode { get; init; }
+
+    /// <summary>The devices the model runs on, in stage order.</summary>
+    [JsonPropertyName("devices")] public required IReadOnlyList<string> Devices { get; init; }
+
+    /// <summary>Device bytes the expert cache may hold; zero unless the mode is <c>offload</c>.</summary>
+    [JsonPropertyName("expert_budget_bytes")] public required long ExpertBudgetBytes { get; init; }
+
+    [JsonPropertyName("required_bytes")] public required long RequiredBytes { get; init; }
+
+    [JsonPropertyName("available_bytes")] public required long AvailableBytes { get; init; }
+
+    [JsonPropertyName("reason")] public required string Reason { get; init; }
+
+    internal static LoadedModelPlacementDto For(LoadedModelPlacement loaded) => new()
+    {
+        DeviceKey = loaded.DeviceKey,
+        ModelPath = loaded.ModelPath,
+        Mode = loaded.Placement.Mode.ToString().ToLowerInvariant(),
+        Devices = loaded.Placement.Devices,
+        ExpertBudgetBytes = loaded.Placement.ExpertBudgetBytes,
+        RequiredBytes = loaded.Placement.RequiredBytes,
+        AvailableBytes = loaded.Placement.AvailableBytes,
+        Reason = loaded.Placement.Reason,
+    };
 }
 
 /// <summary>One loaded text model's host residency. Expert-cache and Engram counters are not reported on the CPU host path, and the note says so instead of returning zeros.</summary>

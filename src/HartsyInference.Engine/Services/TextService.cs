@@ -126,7 +126,7 @@ public sealed class TextService : ITextService, IDisposable
                 {
                     await Task.Run(() =>
                     {
-                        using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
+                        using IDisposable gate = DeviceGate.AcquireAllOrdinals(LoadGateOrdinalsFor(slot, deviceKey, request.Model.LocalPath), cancel);
                         LoadInto(slot, deviceKey, request.Model, new TextRequest { Messages = [] });
                     }, cancel).ConfigureAwait(false);
                 }
@@ -185,6 +185,12 @@ public sealed class TextService : ITextService, IDisposable
     public IReadOnlyList<LoadedModelResidency> LoadedResidency =>
         [.. _slots.Where(entry => entry.Value.ResidencyPlan is not null && entry.Value.LoadedPath is not null)
             .Select(entry => new LoadedModelResidency(entry.Key, entry.Value.LoadedPath!, entry.Value.ResidencyPlan!))];
+
+    /// <inheritdoc/>
+    /// <remarks>Read without the slot lock, like <see cref="LoadedResidency"/>.</remarks>
+    public IReadOnlyList<LoadedModelPlacement> LoadedPlacements =>
+        [.. _slots.Where(entry => entry.Value.PlannedPlacement is not null && entry.Value.LoadedPath is not null)
+            .Select(entry => new LoadedModelPlacement(entry.Key, entry.Value.LoadedPath!, entry.Value.PlannedPlacement!))];
 
     /// <inheritdoc/>
     public DeploymentCapacity? Capacity(string deploymentId)
@@ -464,7 +470,7 @@ public sealed class TextService : ITextService, IDisposable
         // have to construct a throwaway backend just to name its device.
         // Device gate INSIDE slot.Lock (gate is always innermost): an LLM slot and an image generation on the
         // same GPU are two backends on one device, state-isolated but not yet audited for concurrent execution.
-        using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
+        using IDisposable gate = DeviceGate.AcquireAllOrdinals(LoadGateOrdinalsFor(slot, deviceKey, spec.LocalPath), cancel);
         LoadInto(slot, deviceKey, spec, request);
         _engine.ReportDiagnostic(diagnosticId, Diagnostics.InferenceDiagnosticKind.ModelReady, backend: slot.Backend);
         if (slot.Scheduler is null || !ScheduledRouteAllowed(request, LastImage(request) is not null)) return null;
@@ -484,7 +490,7 @@ public sealed class TextService : ITextService, IDisposable
         Action generate = () =>
         {
             // The round gate (when the server sets one) is taken before the device gate, the order scheduled rounds take them in, so the two cannot deadlock.
-            using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(deviceKey), cancel);
+            using IDisposable gate = DeviceGate.AcquireAllOrdinals(GateOrdinalsFor(slot, deviceKey), cancel);
             try
             {
                 ImageData? image = LastImage(request);
@@ -552,7 +558,7 @@ public sealed class TextService : ITextService, IDisposable
         int maxPages = PagedKvPool.PageCountForBudget(cfg.NumKvHeads, headDimPerLayer, options.KvPageSize, options.KvPoolBytesBudget);
         PagedKvPool pool = new(cfg.NumLayers, cfg.NumKvHeads, headDimPerLayer, options.KvPageSize, maxPages);
         DynamicBatchScheduler? scheduler = CreateScheduler(slot, new GenericTransformerModel(model.Transformer, backend), model.Tokenizer,
-            model.Template, pool, [.. GateOrdinalsFor(deviceKey)]);
+            model.Template, pool, [.. GateOrdinalsFor(slot, deviceKey)]);
         if (scheduler is null) pool.Dispose();
         return scheduler;
     }
@@ -888,6 +894,10 @@ public sealed class TextService : ITextService, IDisposable
             deviceKey = fallbackDevice;
             buildSelector = fallbackDevice;
         }
+        // A planned split leaves its stage backends on this slot, and its last stage may be another GPU; a single-device load
+        // must not reuse them.
+        if (slot.ExtraStageBackends is not null)
+            DisposeStageBackends(slot);
         IBackend backend = slot.Backend ??= CreateBackendFor(buildSelector);
         ApplyCacheWeightCastsOverride(slot, request, [backend]);
         // A backend that cannot read quantized weights needs them dequantized on the way in. Asking the backend
@@ -909,6 +919,23 @@ public sealed class TextService : ITextService, IDisposable
                 + (slot.VisionPath is not null ? $" + vision '{Path.GetFileName(slot.VisionPath)}'." : "."));
             return;
         }
+        TextPlacement? placement = null;
+        if (PlacementApplies(deviceKey, path))
+        {
+            placement = PlanPlacement(deviceKey, path, request);
+            Logs.Info($"[TextService] Placement for '{Path.GetFileName(path)}': {placement.Mode} on {placement.DeviceKey}. {placement.Reason}");
+            if (!placement.Feasible)
+                throw new HartsyInferenceException($"Cannot load '{Path.GetFileName(path)}': {placement.Reason}");
+            if (placement.Mode == TextPlacementMode.Split)
+            {
+                LoadSharded(slot, placement.DeviceKey, path, request, [.. placement.Devices]);
+                slot.PlannedPlacement = placement;
+                return;
+            }
+            if (placement.Mode == TextPlacementMode.Offload)
+                throw new HartsyInferenceException(
+                    $"'{Path.GetFileName(path)}' needs expert offload, which this engine version cannot run yet. {placement.Reason}");
+        }
         // The engine's on-disk quant is honored as-is; LowVramQuant here is the "keep quant compressed on-device"
         // toggle (any non-empty value enables it) — the loader takes a bool, not a target quant string.
         bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
@@ -925,6 +952,7 @@ public sealed class TextService : ITextService, IDisposable
         backend.PreloadWeightGroups(slot.Model.Transformer.EnumerateWeightGroups(preloadRedundantSplits));
         slot.PreloadRedundantWeightSplitsApplied = preloadRedundantSplits;
         slot.Pipeline = new TextGenerationPipeline(slot.Model.Transformer, slot.Model.Tokenizer, backend, slot.Model.Template);
+        slot.PlannedPlacement = placement;
         slot.Scheduler = CreateGgufScheduler(slot, deviceKey, slot.Model, backend);
         slot.LoadedPath = path;
         LoadVisionInto(slot, path);
@@ -951,6 +979,45 @@ public sealed class TextService : ITextService, IDisposable
     internal TextDeviceSlot? SlotFor(string? device) => _slots.TryGetValue(NormalizeDeviceKey(device), out TextDeviceSlot? slot) ? slot : null;
 
     /// <summary>Every CUDA ordinal a load+generate on <paramref name="deviceKey"/> can touch: each stage device of a layer-split (request-level composite key or engine-placement <c>ShardDevices</c>), else the single device. Gating only the logits stage left the other stage devices open to same-device siblings; <see cref="DeviceGate.AcquireAllOrdinals"/> acquires ascending, so multi-gate stays deadlock-free.</summary>
+    /// <summary>The ordinals a generation on <paramref name="slot"/> gates: the devices its planned placement runs on when the
+    /// planner split it, otherwise those its key names.</summary>
+    private IEnumerable<int> GateOrdinalsFor(TextDeviceSlot slot, string deviceKey) =>
+        slot.PlannedPlacement is { Devices.Count: > 1 } placement
+            ? placement.Devices.Select(GateOrdinalFor)
+            : GateOrdinalsFor(deviceKey);
+
+    /// <summary>The ordinals a load gates. A load the placement planner decides may land on any CUDA device, so it gates them
+    /// all for the load; generations afterwards gate only the devices the model ended up on.</summary>
+    private IEnumerable<int> LoadGateOrdinalsFor(TextDeviceSlot slot, string deviceKey, string? path)
+    {
+        if (path is null || !PlacementApplies(deviceKey, path) || KeepsLoadedModel(slot, path, hfDirectory: false))
+            return GateOrdinalsFor(slot, deviceKey);
+        int primary = GateOrdinalFor(deviceKey);
+        return [primary, .. CudaTopology.Probe().Select(static d => d.Ordinal).Where(o => o != primary)];
+    }
+
+    /// <summary>Whether the placement planner decides this load: a GGUF on a single CUDA device key, with no layer split or
+    /// tensor parallelism configured for it.</summary>
+    private bool PlacementApplies(string deviceKey, string path) =>
+        path.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase) && File.Exists(path)
+        && !deviceKey.Contains('+') && BackendFactory.Kind(deviceKey) == "cuda"
+        && ResolveShardDevices(deviceKey).Length < 2 && _engine.Placement.TensorParallelDegree <= 1;
+
+    /// <summary>Plans where the GGUF at <paramref name="path"/> runs, from its header and the devices' free memory now. The
+    /// request's own device comes first; the other CUDA devices follow, most free memory first.</summary>
+    private static TextPlacement PlanPlacement(string deviceKey, string path, TextRequest request) =>
+        TextPlacementProbe.PlanGguf(path, deviceKey, TextPlacementModes.Parse(request.Placement ?? EngineKnobs.TextPlacement.Value),
+            PlannedContextTokens(request), request.PreloadRedundantWeightSplits ?? true);
+
+    /// <summary>Tokens the plan sizes the KV cache for: this request's prompt (about three characters a token) and output, and
+    /// never less than 8192, since the loaded model serves later, longer requests too.</summary>
+    private static int PlannedContextTokens(TextRequest request)
+    {
+        long chars = (request.SystemPrompt?.Length ?? 0) + request.Messages.Sum(static m => (long)(m.Content?.Length ?? 0));
+        long tokens = chars / 3 + 64 + Math.Max(0, request.MaxTokens);
+        return (int)Math.Clamp(tokens, 8192, 1 << 20);
+    }
+
     private IEnumerable<int> GateOrdinalsFor(string deviceKey)
     {
         string[] shard = ResolveShardDevices(deviceKey);
@@ -1015,27 +1082,33 @@ public sealed class TextService : ITextService, IDisposable
     }
 
     /// <summary>Layer-split load: plans layer ranges across <paramref name="shardDevices"/> (explicit engine ratios win, else free-VRAM proportional), builds one backend per stage (slot-owned), and hands the placement to the pipeline. VRAM pooling — a model larger than any single card runs across them. The vision sidecar loads the same as the unsharded path (<see cref="LoadVisionInto"/>): both VLM generators (<see cref="MllamaGenerator"/>'s per-stage cross-attention-state peer copy, <see cref="MultimodalGenerator"/>'s plain staged embeds handoff) drive <see cref="GenericTransformer.ForwardEmbedsStaged"/> across the full placement rather than the single last-stage backend, so the split is preserved for image questions too. SSM never reaches here (layer-split isn't offered for recurrent architectures).</summary>
-    private void LoadSharded(TextDeviceSlot slot, string deviceKey, string path, TextRequest request, string[] shardDevices)
+    /// <summary>Disposes every backend a slot holds, the last stage's and the others'.</summary>
+    /// <remarks>A previous load left this slot's backends alive (UnloadSlot keeps contexts for a same-config reload), but
+    /// the shard path builds fresh stage backends and a single-device load after a split must not run on the split's last
+    /// stage — anything kept would leak its CUDA context. A previous SHARDED load parks its non-last stages in
+    /// ExtraStageBackends, so those are disposed too.</remarks>
+    private static void DisposeStageBackends(TextDeviceSlot slot)
     {
-        // A previous load left this slot's backends alive (UnloadSlot keeps contexts for a same-config reload),
-        // but the shard path builds fresh stage backends below — anything kept here would leak its CUDA context.
-        // A previous SHARDED load parks its non-last stages in ExtraStageBackends; dispose those too, not just
-        // the last-stage backend, or every sharded model switch leaks one context per stage.
         if (slot.ExtraStageBackends is not null)
         {
             foreach (IBackend stage in slot.ExtraStageBackends)
             {
                 try { stage.Dispose(); }
-                catch (Exception ex) { Logs.Debug($"[TextService] Disposing pre-shard stage backend failed: {ex.Message}"); }
+                catch (Exception ex) { Logs.Debug($"[TextService] Disposing stage backend failed: {ex.Message}"); }
             }
             slot.ExtraStageBackends = null;
         }
         if (slot.Backend is not null)
         {
             try { slot.Backend.Dispose(); }
-            catch (Exception ex) { Logs.Debug($"[TextService] Disposing pre-shard backend failed: {ex.Message}"); }
+            catch (Exception ex) { Logs.Debug($"[TextService] Disposing slot backend failed: {ex.Message}"); }
             slot.Backend = null;
         }
+    }
+
+    private void LoadSharded(TextDeviceSlot slot, string deviceKey, string path, TextRequest request, string[] shardDevices)
+    {
+        DisposeStageBackends(slot);
         bool lowVram = !string.IsNullOrEmpty(request.LowVramQuant);
         slot.Model = GgufLanguageModel.Load(path, lowVram, dequantizeToF32: false);
         int layers = slot.Model.Transformer.Config.NumLayers;
@@ -1400,6 +1473,7 @@ public sealed class TextService : ITextService, IDisposable
         slot.DeepSeekV41?.Dispose();
         slot.DeepSeekV41 = null;
         slot.ResidencyPlan = null;
+        slot.PlannedPlacement = null;
         slot.SsmPipeline = null;
         slot.SsmModel?.Dispose();
         slot.SsmModel = null;

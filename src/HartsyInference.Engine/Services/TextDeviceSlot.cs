@@ -127,6 +127,9 @@ internal sealed class TextDeviceSlot
     /// field). Same read-only-after-creation caveat as <see cref="CacheWeightCastsApplied"/>.</summary>
     public bool? PreloadRedundantWeightSplitsApplied { get; set; }
 
+    /// <summary>The placement the planner chose for the loaded model; null when the planner did not decide the load.</summary>
+    public HartsyInference.Engine.Placement.TextPlacement? PlannedPlacement { get; set; }
+
     /// <summary>Which load-time settings <see cref="TextService.LoadInto"/> has already logged a mismatch for on
     /// this slot (by setting name) — a request's own value keeps being ignored every subsequent call on an
     /// already-loaded slot, so without this a long voice call would repeat the same debug line every turn. Reset

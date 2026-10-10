@@ -78,6 +78,12 @@ public sealed record TextRequest
     /// <summary>Low-VRAM on-the-fly quant to load weights at (e.g. "q8_0"); null loads at full precision.</summary>
     public string? LowVramQuant { get; init; }
 
+    /// <summary>Where the model is placed when this request loads it: <c>auto</c>, <c>gpu</c>, <c>split</c> or <c>offload</c>.
+    /// Null uses the <c>vram.textPlacement</c> setting, which defaults to <c>auto</c>. Applies to a GGUF loaded on a single CUDA
+    /// device key; an explicit multi-device key (<c>cuda:0+cuda:1</c>) is a split already. Takes effect at load, like
+    /// <see cref="LowVramQuant"/>.</summary>
+    public string? Placement { get; init; }
+
     /// <summary>Free the model's device memory after this request completes; null uses the engine default.</summary>
     public bool? AlwaysFreeMemory { get; init; }
 
